@@ -11,10 +11,13 @@ run-state behaviour is covered by ``test_kanban_auto_continuation.py``.
 from __future__ import annotations
 
 import argparse
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
+from agent.iteration_budget import IterationBudget
+from agent.turn_finalizer import finalize_turn
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 
@@ -376,3 +379,154 @@ def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
     assert ns.model == "gpt-5.5-codex", (
         f"model_override lost: args.model={ns.model!r}; worker argv={argv}"
     )
+
+
+def test_budget_finalizer_honors_terminal_kanban_complete(kanban_home, monkeypatch):
+    """A kanban worker can spend its final allowed model turn on
+    ``kanban_complete``. The post-loop budget finalizer must not overwrite that
+    terminal DB state with a synthetic timed_out/gave_up failure just because no
+    follow-up prose turn was available.
+    """
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="complete-at-budget-edge",
+            assignee="coder",
+            max_iterations=1,
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        assert claimed.id == tid
+        claimed_task = kb.get_task(conn, tid)
+        assert claimed_task is not None
+        run_id = claimed_task.current_run_id
+        assert run_id is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="deliverable complete at budget edge",
+            expected_run_id=run_id,
+        )
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    class _BudgetEdgeAgent:
+        max_iterations = 1
+        model = "fake-model"
+        provider = "fake-provider"
+        base_url = "http://fake-provider.invalid"
+        session_id = "budget-edge-session"
+        quiet_mode = True
+        session_input_tokens = 0
+        session_output_tokens = 0
+        session_cache_read_tokens = 0
+        session_cache_write_tokens = 0
+        session_reasoning_tokens = 0
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+        session_estimated_cost_usd = 0.0
+        session_cost_status = "ok"
+        session_cost_source = "test"
+        _tool_guardrail_halt_decision = None
+        _response_was_previewed = False
+        _skill_nudge_interval = 0
+        _iters_since_skill = 0
+        valid_tool_names = {"kanban_complete"}
+        context_compressor = SimpleNamespace(last_prompt_tokens=0)
+
+        def __init__(self):
+            self.iteration_budget = IterationBudget(1)
+            assert self.iteration_budget.consume()
+            self.summary_requested = False
+
+        def _emit_status(self, _msg):
+            pass
+
+        def _safe_print(self, *_args, **_kwargs):
+            pass
+
+        def _handle_max_iterations(self, _messages, _api_call_count):
+            self.summary_requested = True
+            return "budget summary should not be requested after completion"
+
+        def _save_trajectory(self, *_args, **_kwargs):
+            pass
+
+        def _cleanup_task_resources(self, *_args, **_kwargs):
+            pass
+
+        def _drop_trailing_empty_response_scaffolding(self, _messages):
+            pass
+
+        def _persist_session(self, *_args, **_kwargs):
+            pass
+
+        def _file_mutation_verifier_enabled(self):
+            return False
+
+        def _turn_completion_explainer_enabled(self):
+            return False
+
+        def _drain_pending_steer(self):
+            return None
+
+        def clear_interrupt(self):
+            pass
+
+        def _sync_external_memory_for_turn(self, **_kwargs):
+            pass
+
+    agent = _BudgetEdgeAgent()
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[
+            {"role": "user", "content": "finish the task"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_complete",
+                        "function": {
+                            "name": "kanban_complete",
+                            "arguments": (
+                                '{"summary": "deliverable complete at budget edge"}'
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "kanban_complete",
+                "tool_call_id": "call_complete",
+                "content": '{"ok": true}',
+            },
+        ],
+        conversation_history=[],
+        effective_task_id=tid,
+        turn_id="turn-budget-edge",
+        user_message="finish the task",
+        original_user_message="finish the task",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    assert result["completed"] is True
+    assert agent.summary_requested is False
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+    assert task.status == "done"
+    assert run.outcome == "completed"
+    assert "completed" in events
+    assert "blocked" not in events
+    assert "iteration_budget_exhausted" not in events

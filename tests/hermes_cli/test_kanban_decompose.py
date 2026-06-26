@@ -8,7 +8,9 @@ and the assignee-fallback logic.
 from __future__ import annotations
 
 import json as jsonlib
+import os
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,16 +18,69 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_decompose as decomp
+from hermes_cli import kanban_worktrees as kwt
 
 
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    for key in list(os.environ):
+        if key.startswith("HERMES_KANBAN_"):
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = kb.kanban_db_path(board="default")
+    live_db = Path("/home/piet/.hermes/kanban.db").resolve()
+    assert db_path.resolve() != live_db
+    assert home.resolve() in db_path.resolve().parents
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
     kb.init_db()
     return home
+
+
+def _git(repo, *args) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path):
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "tester")
+    (r / "base.txt").write_text("base\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "base")
+    return r
+
+
+def _commit_in(repo_or_wt, relpath, content, msg="change"):
+    p = Path(repo_or_wt) / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    _git(repo_or_wt, "add", "-A")
+    _git(repo_or_wt, "commit", "-m", msg)
+
+
+def _ok_gate(_repo, _files):
+    return True, "stub gate"
+
+
+def _events(conn, task_id, kind):
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
+        "ORDER BY id",
+        (task_id, kind),
+    ).fetchall()
+    return [jsonlib.loads(r["payload"]) if r["payload"] else {} for r in rows]
 
 
 def _fake_aux_response(content: str):
@@ -207,6 +262,74 @@ def test_decompose_with_fanout_creates_children(kanban_home):
     assert c1.status == "todo"
     assert c0.assignee == "researcher"
     assert c1.assignee == "engineer"
+
+
+def test_decompose_children_auto_integrate_root_finalizer(
+    kanban_home, repo, monkeypatch
+):
+    """All green children of a decomposed repo root finalize the root branch."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="ship decomposed feature",
+            assignee="orchestrator",
+            triage=True,
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {
+                    "title": "build part A",
+                    "body": "A",
+                    "assignee": "coder",
+                    "parents": [],
+                },
+                {
+                    "title": "build part B",
+                    "body": "B",
+                    "assignee": "coder",
+                    "parents": [],
+                },
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        child_a, child_b = child_ids
+
+        task_a = kb.claim_task(conn, child_a)
+        ws_a = kwt.provision_for_task(conn, task_a, str(repo))
+        assert ws_a.name == root
+        assert _git(ws_a, "symbolic-ref", "--short", "HEAD") == f"kanban/{root}"
+        _commit_in(ws_a, "child_a.py", "VALUE_A = 1\n", msg="child A")
+        assert kb.complete_task(conn, child_a, result="child A done")
+        assert not (repo / "child_a.py").exists()
+        assert ws_a.exists()
+
+        task_b = kb.claim_task(conn, child_b)
+        ws_b = kwt.provision_for_task(conn, task_b, str(repo))
+        assert ws_b == ws_a
+        _commit_in(ws_b, "child_b.py", "VALUE_B = 2\n", msg="child B")
+        assert kb.complete_task(conn, child_b, result="child B done")
+
+        root_task = kb.get_task(conn, root)
+        child_b_task = kb.get_task(conn, child_b)
+        merged = _events(conn, child_b, "integration_merged")
+        auto_done = _events(conn, root, "decompose_root_auto_completed")
+
+    assert child_b_task.status == "done"
+    assert root_task.status == "done"
+    assert len(merged) == 1
+    assert merged[0]["branch"] == f"kanban/{root}"
+    assert (repo / "child_a.py").read_text() == "VALUE_A = 1\n"
+    assert (repo / "child_b.py").read_text() == "VALUE_B = 2\n"
+    assert len(_git(repo, "log", "--merges", "--oneline").splitlines()) == 1
+    assert not ws_a.exists()
+    assert auto_done and auto_done[-1]["completed_by"] == child_b
 
 
 def test_decompose_string_false_auto_promote_holds_children(kanban_home):

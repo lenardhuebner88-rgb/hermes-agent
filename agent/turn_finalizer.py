@@ -27,6 +27,41 @@ import os
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 
 
+def _accepted_kanban_completion(task_id: str) -> tuple[bool, str | None]:
+    """Return whether the current kanban worker already completed its run.
+
+    A worker can spend its final allowed model turn on ``kanban_complete``.
+    That tool mutates kanban.db immediately, then the agent loop exits with no
+    follow-up prose turn because the iteration budget is exhausted. Treat the
+    accepted DB transition as terminal for this chat turn instead of recording a
+    synthetic budget failure over it.
+    """
+    if not task_id:
+        return False, None
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        _conn = _kb.connect()
+        try:
+            task = _kb.get_task(_conn, task_id)
+            run = _kb.latest_run(_conn, task_id)
+        finally:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return False, None
+
+    if task is None or run is None:
+        return False, None
+    if getattr(run, "outcome", None) != "completed":
+        return False, None
+    if getattr(task, "status", None) == "running":
+        return False, None
+    return True, getattr(run, "summary", None) or getattr(task, "result", None)
+
+
 def finalize_turn(
     agent,
     *,
@@ -50,81 +85,89 @@ def finalize_turn(
     """
     from agent.conversation_loop import logger
 
+    _kanban_completion_accepted = False
     if final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
     ):
-        # Budget exhausted — ask the model for a summary via one extra
-        # API call with tools stripped.  _handle_max_iterations injects a
-        # user message and makes a single toolless request.
-        _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-        agent._emit_status(
-            f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-            "— asking model to summarise"
-        )
-        if not agent.quiet_mode:
-            agent._safe_print(
-                f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                "— requesting summary..."
-            )
-        final_response = agent._handle_max_iterations(messages, api_call_count)
-
-        # If running as a kanban worker, signal the dispatcher that the
-        # worker could not complete (rather than treating it as a
-        # protocol violation).  The agent loop strips tools before calling
-        # _handle_max_iterations, so the model cannot call kanban_block
-        # itself — we must do it on its behalf.
-        #
-        # We route through ``_record_task_failure(outcome="timed_out")``
-        # rather than ``kanban_block`` so this counts toward the
-        # ``consecutive_failures`` counter and the dispatcher's
-        # ``failure_limit`` circuit breaker (#29747 gap 2).  Without this,
-        # a task whose worker keeps exhausting its budget would block
-        # silently each run, get auto-promoted by the operator (or never
-        # surface), and re-block in an endless loop with no signal.
         _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
-        if _kanban_task:
-            try:
-                from hermes_cli import kanban_db as _kb
-                _conn = _kb.connect()
-                try:
-                    _kb._record_task_failure(
-                        _conn,
-                        _kanban_task,
-                        error=(
-                            f"Iteration budget exhausted "
-                            f"({api_call_count}/{agent.max_iterations}) — "
-                            "task could not complete within the allowed "
-                            "iterations"
-                        ),
-                        outcome="timed_out",
-                        release_claim=True,
-                        end_run=True,
-                        event_payload_extra={
-                            "budget_used": api_call_count,
-                            "budget_max": agent.max_iterations,
-                        },
-                    )
-                    logger.info(
-                        "recorded budget-exhausted failure for task %s (%d/%d)",
-                        _kanban_task, api_call_count, agent.max_iterations,
-                    )
-                finally:
-                    try:
-                        _conn.close()
-                    except Exception:
-                        pass
-            except Exception:
-                logger.warning(
-                    "Failed to record budget-exhausted failure for task %s",
-                    _kanban_task,
-                    exc_info=True,
+        _kanban_completion_accepted, _kanban_summary = _accepted_kanban_completion(
+            _kanban_task or ""
+        )
+        if _kanban_completion_accepted:
+            _turn_exit_reason = "kanban_completion_at_iteration_budget_edge"
+            final_response = _kanban_summary or "Kanban task completed."
+        else:
+            # Budget exhausted — ask the model for a summary via one extra
+            # API call with tools stripped.  _handle_max_iterations injects a
+            # user message and makes a single toolless request.
+            _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+            agent._emit_status(
+                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                "— asking model to summarise"
+            )
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                    "— requesting summary..."
                 )
+            final_response = agent._handle_max_iterations(messages, api_call_count)
+
+            # If running as a kanban worker, signal the dispatcher that the
+            # worker could not complete (rather than treating it as a
+            # protocol violation).  The agent loop strips tools before calling
+            # _handle_max_iterations, so the model cannot call kanban_block
+            # itself — we must do it on its behalf.
+            #
+            # We route through ``_record_task_failure(outcome="timed_out")``
+            # rather than ``kanban_block`` so this counts toward the
+            # ``consecutive_failures`` counter and the dispatcher's
+            # ``failure_limit`` circuit breaker (#29747 gap 2).  Without this,
+            # a task whose worker keeps exhausting its budget would block
+            # silently each run, get auto-promoted by the operator (or never
+            # surface), and re-block in an endless loop with no signal.
+            if _kanban_task:
+                try:
+                    from hermes_cli import kanban_db as _kb
+                    _conn = _kb.connect()
+                    try:
+                        _kb._record_task_failure(
+                            _conn,
+                            _kanban_task,
+                            error=(
+                                f"Iteration budget exhausted "
+                                f"({api_call_count}/{agent.max_iterations}) — "
+                                "task could not complete within the allowed "
+                                "iterations"
+                            ),
+                            outcome="timed_out",
+                            release_claim=True,
+                            end_run=True,
+                            event_payload_extra={
+                                "budget_used": api_call_count,
+                                "budget_max": agent.max_iterations,
+                            },
+                        )
+                        logger.info(
+                            "recorded budget-exhausted failure for task %s (%d/%d)",
+                            _kanban_task, api_call_count, agent.max_iterations,
+                        )
+                    finally:
+                        try:
+                            _conn.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.warning(
+                        "Failed to record budget-exhausted failure for task %s",
+                        _kanban_task,
+                        exc_info=True,
+                    )
 
     # Determine if conversation completed successfully
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
+        and (api_call_count < agent.max_iterations or _kanban_completion_accepted)
         and not failed
     )
 

@@ -647,6 +647,11 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
 def chain_root_id(conn: sqlite3.Connection, task_id: str) -> str:
     """Walk ``task_links`` upward to the chain root (deterministic: smallest
     parent id at each level; cycle-safe)."""
+    if _is_decompose_root(conn, task_id):
+        return task_id
+    decompose_root = _direct_decompose_root_for_child(conn, task_id)
+    if decompose_root is not None:
+        return decompose_root
     current = task_id
     seen = {current}
     while True:
@@ -660,6 +665,39 @@ def chain_root_id(conn: sqlite3.Connection, task_id: str) -> str:
             return current
         current = parents[0]
         seen.add(current)
+
+
+def _is_decompose_root(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'decomposed' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _direct_decompose_root_for_child(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> Optional[str]:
+    """Return the decomposed root that waits on *task_id*, if any.
+
+    Decompose links point from every subtask to the root
+    (``task_links.parent_id = subtask``, ``child_id = root``), the opposite
+    direction of ordinary parent→child dependency chains.  Worker-isolation
+    still needs all subtasks to share the root's branch/worktree.
+    """
+    row = conn.execute(
+        "SELECT l.child_id FROM task_links l "
+        "WHERE l.parent_id = ? "
+        "AND EXISTS ("
+        "  SELECT 1 FROM task_events e "
+        "  WHERE e.task_id = l.child_id AND e.kind = 'decomposed'"
+        ") "
+        "ORDER BY l.child_id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["child_id"] if row is not None else None
 
 
 def _chain_member_ids(conn: sqlite3.Connection, root_id: str) -> set[str]:
@@ -677,6 +715,12 @@ def _chain_member_ids(conn: sqlite3.Connection, root_id: str) -> set[str]:
             if child not in ids:
                 ids.add(child)
                 queue.append(child)
+    if _is_decompose_root(conn, root_id):
+        rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (root_id,),
+        ).fetchall()
+        ids.update(r["parent_id"] for r in rows)
     return ids
 
 
@@ -1341,6 +1385,59 @@ def _record_pending_root_finalizer(
                 "branch": branch,
                 "reason": "all children approved; root finalizer pending",
             },
+        )
+
+
+def _auto_complete_decompose_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    completed_task_id: str,
+    outcome: dict,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time())
+    summary = (
+        "auto-completed decomposed root after all children completed and "
+        f"`{outcome.get('branch', chain_branch(root_id))}` integrated"
+    )
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET status = 'done', result = ?, completed_at = ?, "
+            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+            (summary, now, root_id),
+        )
+        if cur.rowcount != 1:
+            return
+        run_id = kb._end_run(
+            conn,
+            root_id,
+            outcome="completed",
+            status="done",
+            summary=summary,
+            metadata={
+                "auto_completed_by": "decompose_root_finalizer",
+                "completed_by": completed_task_id,
+                "integration_action": outcome.get("action"),
+                "merge_commit": outcome.get("merge_commit"),
+            },
+        )
+        payload = {
+            "completed_by": completed_task_id,
+            "integration_action": outcome.get("action"),
+            "branch": outcome.get("branch"),
+            "merge_commit": outcome.get("merge_commit"),
+        }
+        kb._append_event(conn, root_id, "decompose_root_auto_completed", payload)
+        kb._append_event(
+            conn,
+            root_id,
+            "completed",
+            {"result_len": len(summary), "summary": summary},
+            run_id=run_id,
         )
 
 
@@ -2043,11 +2140,14 @@ def maybe_integrate_on_complete(
             "LIMIT 1",
             (like, task_id),
         ).fetchone()
+    auto_complete_root_id = None
     if open_sibling:
         pending_root_id = _pending_root_finalizer_id(
             conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
         )
-        if pending_root_id is not None:
+        if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
+            auto_complete_root_id = pending_root_id
+        elif pending_root_id is not None:
             try:
                 _record_pending_root_finalizer(
                     conn,
@@ -2058,7 +2158,10 @@ def maybe_integrate_on_complete(
                 )
             except Exception:
                 _log.debug("pending-root-finalizer event failed", exc_info=True)
-        return {"action": "deferred", "reason": "chain has open siblings"}
+        else:
+            return {"action": "deferred", "reason": "chain has open siblings"}
+        if auto_complete_root_id is None:
+            return {"action": "deferred", "reason": "chain has open siblings"}
 
     target = frozen_merge_target(conn, root_id)
     branch = chain_branch(root_id)
@@ -2141,6 +2244,20 @@ def maybe_integrate_on_complete(
                     "could not create parked release-gate child for %s",
                     task_id, exc_info=True,
                 )
+        if auto_complete_root_id is not None:
+            try:
+                _auto_complete_decompose_root(
+                    conn,
+                    root_id=auto_complete_root_id,
+                    completed_task_id=task_id,
+                    outcome=outcome,
+                )
+            except Exception:
+                _log.warning(
+                    "could not auto-complete decompose root %s",
+                    auto_complete_root_id,
+                    exc_info=True,
+                )
     elif outcome["action"] == "clean" and outcome.get("already_integrated"):
         try:
             kb.add_comment(
@@ -2151,4 +2268,18 @@ def maybe_integrate_on_complete(
             )
         except Exception:
             _log.debug("already-integrated receipt comment failed", exc_info=True)
+        if auto_complete_root_id is not None:
+            try:
+                _auto_complete_decompose_root(
+                    conn,
+                    root_id=auto_complete_root_id,
+                    completed_task_id=task_id,
+                    outcome=outcome,
+                )
+            except Exception:
+                _log.warning(
+                    "could not auto-complete decompose root %s",
+                    auto_complete_root_id,
+                    exc_info=True,
+                )
     return outcome

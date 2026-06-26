@@ -12982,6 +12982,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    transient_recovered: list[str] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -12991,7 +12992,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # (task_id, pid, claimer, protocol_violation, error_text)
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
+            "SELECT id, worker_pid, claim_lock, started_at, current_run_id, "
+            "transient_retry_count FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
@@ -13015,6 +13017,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             kind, code = _classify_worker_exit(pid)
             rate_limited_exit = False
             recoverable_protocol_miss = False
+            transient_pid_loss = False
             if kind == "clean_exit":
                 evidence = _deliverable_evidence_for_protocol_miss(
                     conn, row["id"],
@@ -13071,14 +13074,39 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 }
             else:
                 protocol_violation = False
-                if kind == "nonzero_exit":
+                retry_count = int(row["transient_retry_count"] or 0)
+                has_active_run = row["current_run_id"] is not None
+                if (
+                    kind == "unknown"
+                    and has_active_run
+                    and retry_count < max(1, int(TRANSIENT_RETRY_LIMIT))
+                ):
+                    transient_pid_loss = True
+                    attempt = retry_count + 1
+                    error_text = (
+                        f"pid {pid} not alive — transient death recovery "
+                        f"attempt {attempt}/{TRANSIENT_RETRY_LIMIT}"
+                    )
+                    event_kind = TRANSIENT_RETRY_EVENT
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "attempt": attempt,
+                        "limit": int(TRANSIENT_RETRY_LIMIT),
+                        "trigger_outcome": "crashed",
+                    }
+                elif kind == "nonzero_exit":
                     error_text = f"pid {pid} exited with code {code}"
+                    event_kind = "crashed"
+                    event_payload = {"pid": pid, "claimer": row["claim_lock"]}
                 elif kind == "signaled":
                     error_text = f"pid {pid} killed by signal {code}"
+                    event_kind = "crashed"
+                    event_payload = {"pid": pid, "claimer": row["claim_lock"]}
                 else:
                     error_text = f"pid {pid} not alive"
-                event_kind = "crashed"
-                event_payload = {"pid": pid, "claimer": row["claim_lock"]}
+                    event_kind = "crashed"
+                    event_payload = {"pid": pid, "claimer": row["claim_lock"]}
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
@@ -13096,6 +13124,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # history doesn't show a phantom crash for a quota wall.
                 _run_outcome = (
                     "rate_limited" if rate_limited_exit
+                    else TRANSIENT_RETRY_OUTCOME if transient_pid_loss
                     else DELIVERABLE_POSTED_NOT_COMPLETED
                     if recoverable_protocol_miss else "crashed"
                 )
@@ -13121,6 +13150,17 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
+                elif transient_pid_loss:
+                    conn.execute(
+                        "UPDATE tasks SET transient_retry_count = ?, "
+                        "last_failure_error = ? WHERE id = ?",
+                        (
+                            int(row["transient_retry_count"] or 0) + 1,
+                            error_text[:500],
+                            row["id"],
+                        ),
+                    )
+                    transient_recovered.append(row["id"])
                 elif recoverable_protocol_miss:
                     conn.execute(
                         "UPDATE tasks SET status = 'blocked', "
@@ -13175,6 +13215,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_transient_recovered = transient_recovered  # type: ignore[attr-defined]
     return crashed
 
 
