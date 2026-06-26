@@ -21878,6 +21878,9 @@ def decision_queue(
         cross = _kdiag.find_descendants_blocked_by_stuck_parent(
             conn, now=now, config=config,
         )
+        root_branch_diags = _kdiag.find_stranded_decompose_root_branches(conn)
+        for task_id, diagnostics in root_branch_diags.items():
+            cross.setdefault(task_id, []).extend(diagnostics)
         for tid, diags in cross.items():
             if tid in seen or not diags:
                 continue
@@ -21886,6 +21889,16 @@ def decision_queue(
                 "SELECT title FROM tasks WHERE id = ?", (tid,),
             ).fetchone()
             data = getattr(d, "data", None) or {}
+            if getattr(d, "kind", None) == "stranded_decompose_root_branch":
+                _add(
+                    "stranded_decompose_root_branch", tid,
+                    title_row["title"] if title_row else tid,
+                    getattr(d, "detail", None) or getattr(d, "title", None)
+                    or "Decompose root branch has unmerged work",
+                    None,
+                    data.get("recovery_hint") or f"hermes kanban show {tid}",
+                )
+                continue
             blockers = data.get("blocked_parents") or []
             primary = blockers[0] if blockers else None
             age = data.get("max_block_age_hours")

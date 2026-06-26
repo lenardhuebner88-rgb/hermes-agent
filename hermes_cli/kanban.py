@@ -2325,6 +2325,9 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             cross = kd.find_descendants_blocked_by_stuck_parent(
                 conn, config=diag_config,
             )
+            root_branch_diags = kd.find_stranded_decompose_root_branches(conn)
+            for tid, dl in root_branch_diags.items():
+                cross.setdefault(tid, []).extend(dl)
             focus = getattr(args, "task", None)
             for tid, dl in cross.items():
                 if focus and tid != focus:
