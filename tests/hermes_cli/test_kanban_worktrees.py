@@ -209,6 +209,21 @@ def test_remove_worktree_unlinks_venv_symlink_leaves_real_venv(repo):
     assert sentinel.read_text() == "home = /usr/bin\n"
 
 
+def test_remove_worktree_keeps_unmerged_branch_ref(repo):
+    """Reaping a clean worktree must not force-delete unmerged work."""
+    info = kwt.ensure_worktree(repo, "t_unmerged_reap")
+    wt = info["path"]
+    branch = info["branch"]
+    _commit_in(wt, "feature.txt", "unmerged\n", msg="unmerged work")
+    unmerged_head = _git(repo, "rev-parse", branch)
+    assert unmerged_head != _git(repo, "rev-parse", "main")
+
+    kwt.remove_worktree(repo, wt, branch)
+
+    assert not wt.exists()
+    assert _git(repo, "rev-parse", branch) == unmerged_head
+
+
 def test_provision_for_task_repo_dir(kanban_home, repo):
     with kb.connect() as conn:
         tid = kb.create_task(
