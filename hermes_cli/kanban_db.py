@@ -4884,6 +4884,81 @@ def _active_lane_entry_for_profile_from_conn(
     except Exception:
         return None
 
+def _profile_home_for_metadata(profile: Optional[str]) -> Optional[str]:
+    if not profile:
+        return None
+    try:
+        from hermes_cli.profiles import resolve_profile_env
+        return resolve_profile_env(profile)
+    except Exception:
+        return None
+
+
+def _subscription_for_spawn_identity(
+    profile: Optional[str],
+    *,
+    worker_runtime: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Optional[str]:
+    """Best-effort subscription label for a run at dispatch time.
+
+    This is the only point that may consult mutable profile/lane config for the
+    run's billing class.  Later cost consumers read the persisted stamp from
+    ``task_runs.metadata`` and use live config only for old unstamped rows.
+    """
+    runtime_l = str(worker_runtime or "").strip().lower()
+    provider_l = str(provider or "").strip().lower()
+    if runtime_l == "claude-cli":
+        return "claude"
+    if provider_l in {"openai-codex", "codex", "chatgpt", "openai-chatgpt"}:
+        return "chatgpt"
+    if provider_l in {"claude", "anthropic"}:
+        return "claude"
+    if provider_l in {"kimi", "moonshot"}:
+        return "kimi"
+    try:
+        return _profile_subscription(profile)
+    except Exception:
+        return None
+
+
+def _run_metadata_subscription(metadata: dict, profile: Optional[str]) -> Optional[str]:
+    subscription = metadata.get("subscription")
+    if isinstance(subscription, str) and subscription.strip():
+        return subscription.strip()
+    # Fallback for old unstamped rows only.
+    try:
+        return _profile_subscription(profile)
+    except Exception:
+        return None
+
+
+def _run_metadata_provider_model(
+    metadata: dict,
+    profile: Optional[str],
+    *,
+    board: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    provider = metadata.get("cost_equivalent_provider") or metadata.get("provider")
+    model = metadata.get("cost_equivalent_model") or metadata.get("model")
+    if isinstance(provider, str) and not provider.strip():
+        provider = None
+    if isinstance(model, str) and not model.strip():
+        model = None
+    if provider or model:
+        return provider, model
+    # Fallback for old unstamped rows only.
+    return _lane_provider_model_for_profile(profile, board=board)
+
+
+def _run_metadata_is_claude_cli(metadata: dict, profile: Optional[str], *, board: Optional[str] = None) -> bool:
+    runtime = metadata.get("worker_runtime")
+    if isinstance(runtime, str) and runtime.strip():
+        return runtime.strip().lower() == "claude-cli"
+    # Fallback for old unstamped rows only.
+    return _run_is_claude_cli(profile, board=board)
+
+
 def _claude_cli_spawn_identity_metadata(
     profile: Optional[str],
     *,
@@ -4891,9 +4966,9 @@ def _claude_cli_spawn_identity_metadata(
     board: Optional[str] = None,
     lane_entry: Optional[dict] = None,
 ) -> Optional[dict[str, Any]]:
-    """Return spawn-time identity metadata for a claude-CLI run.
+    """Return spawn-time identity metadata for a claimed run.
 
-    Active lanes are mutable. Cost backfill may run long after dispatch, so the
+    Active lanes are mutable. Cost consumers may run long after dispatch, so the
     backfill path must not re-read the then-active lane to decide whether a
     historical run was launched through ``claude`` or which model it used. This
     helper mirrors the spawn-time runtime resolution and returns a small,
@@ -4907,14 +4982,22 @@ def _claude_cli_spawn_identity_metadata(
         if lane_entry is None:
             lane_entry = _active_lane_entry_for_profile(profile, board=board)
         lane_runtime = (lane_entry or {}).get("worker_runtime")
+        profile_home = _profile_home_for_metadata(profile)
         if lane_runtime == "claude-cli":
             is_claude_cli = True
         elif lane_runtime is None:
             is_claude_cli = _is_claude_cli_runtime(profile)
         else:
             is_claude_cli = False
-        if not is_claude_cli:
-            return None
+        runtime = "claude-cli" if is_claude_cli else (lane_runtime or "hermes")
+
+        provider: Optional[str] = None
+        if isinstance(lane_entry, dict):
+            lane_provider = lane_entry.get("provider")
+            if isinstance(lane_provider, str) and lane_provider.strip():
+                provider = lane_provider.strip()
+        if not provider and not is_claude_cli:
+            provider = _read_profile_provider(profile_home)
 
         model: Optional[str] = None
         if isinstance(model_override, str) and model_override.strip():
@@ -4925,20 +5008,31 @@ def _claude_cli_spawn_identity_metadata(
                 model = lane_model.strip()
         if not model:
             try:
-                from hermes_cli.profiles import resolve_profile_env
-                model = _claude_profile_model(resolve_profile_env(profile))
+                model = _claude_profile_model(profile_home) if is_claude_cli else None
             except Exception:
                 model = None
 
         metadata: dict[str, Any] = {
-            "worker_runtime": "claude-cli",
-            # The claude CLI uses the subscription account, not a Hermes API
-            # provider. Keep this explicitly null so later lane provider changes
-            # cannot be mistaken for this run's provider.
-            "provider": None,
+            "worker_runtime": runtime,
         }
+        # The claude CLI uses the subscription account, not a Hermes API provider.
+        # Keep this explicitly null so later lane provider changes cannot be
+        # mistaken for this run's provider.
+        metadata["provider"] = None if is_claude_cli else provider
         if model:
             metadata["model"] = model
+        subscription = _subscription_for_spawn_identity(
+            profile,
+            worker_runtime=runtime,
+            provider=provider,
+        )
+        if subscription:
+            metadata["subscription"] = subscription
+            metadata["billing_mode"] = "subscription_included"
+            metadata["cost_source"] = "dispatch_subscription_stamp"
+        elif provider:
+            metadata["billing_mode"] = "metered"
+            metadata["cost_source"] = "dispatch_metered_stamp"
         return metadata
     except Exception:
         return None
@@ -5067,7 +5161,7 @@ def backfill_run_costs(
 
             # K17: claude-CLI branch — no state.db session exists; read the
             # final result JSON from the per-task worker log instead.
-            if _metadata_marks_claude_cli(metadata) or _run_is_claude_cli(profile, board=board):
+            if _run_metadata_is_claude_cli(metadata or {}, profile, board=board):
                 task_id = row["task_id"]
                 newer = conn.execute(
                     "SELECT profile, metadata FROM task_runs WHERE task_id = ? AND id > ?",
@@ -5080,7 +5174,7 @@ def backfill_run_costs(
                         newer_meta = json.loads(newer_row["metadata"]) if newer_row["metadata"] else None
                     except (TypeError, ValueError):
                         newer_meta = None
-                    if _metadata_marks_claude_cli(newer_meta) or _run_is_claude_cli(newer_row["profile"], board=board):
+                    if _run_metadata_is_claude_cli(newer_meta or {}, newer_row["profile"], board=board):
                         newer_cli = True
                         break
                 if newer_cli:
@@ -5143,10 +5237,7 @@ def backfill_run_costs(
             if b_in is None and b_out is None and b_cost is None:
                 continue
             stamped: Optional[dict] = None
-            try:
-                sub = _profile_subscription(profile)
-            except Exception:
-                sub = None
+            sub = _run_metadata_subscription(metadata or {}, profile)
             if sub:
                 # K16 runs before K_sessions for metadata.worker_session_id rows.
                 # If we only stamp cost_usd=0.0, K_sessions' ``cost_usd IS NULL``
@@ -5173,10 +5264,18 @@ def backfill_run_costs(
                 stamped = dict(metadata or {})
                 stamped.setdefault("billing_mode", "subscription_included")
                 stamped.setdefault("subscription", sub)
+                stamped["cost_source"] = _normalize_cost_status(
+                    usage.get("cost_source") or usage.get("cost_status"),
+                    actual_cost_usd=usage.get("actual_cost_usd"),
+                    estimated_cost_usd=usage.get("estimated_cost_usd"),
+                ) or "session_usage"
                 if equivalent is not None:
                     stamped.setdefault("cost_usd_equivalent", equivalent)
                 if usage.get("model"):
-                    stamped.setdefault("model", str(usage.get("model")))
+                    stamped["model"] = str(usage.get("model"))
+                actual_provider = usage.get("billing_provider") or usage.get("provider")
+                if actual_provider:
+                    stamped["provider"] = str(actual_provider)
             with write_txn(conn):
                 if stamped is not None:
                     conn.execute(
@@ -5280,8 +5379,6 @@ def repair_cost_equivalent_for_frozen_runs(
     for row in rows:
         try:
             profile = row["profile"]
-            if _run_is_claude_cli(profile, board=board):
-                continue
             raw_meta = row["metadata"]
             try:
                 metadata = json.loads(raw_meta) if raw_meta else {}
@@ -5289,9 +5386,11 @@ def repair_cost_equivalent_for_frozen_runs(
                 metadata = {}
             if not isinstance(metadata, dict):
                 metadata = {}
+            if _run_metadata_is_claude_cli(metadata, profile, board=board):
+                continue
             if metadata.get("cost_usd_equivalent") is not None:
                 continue
-            provider, model = _lane_provider_model_for_profile(profile, board=board)
+            provider, model = _run_metadata_provider_model(metadata, profile, board=board)
             equivalent = _equiv_from_tokens(
                 provider,
                 model,
@@ -6279,10 +6378,7 @@ def backfill_run_costs_from_sessions(
 
             if matched:
                 stamp_in, stamp_out = in_sum, out_sum
-                try:
-                    sub = _profile_subscription(profile)
-                except Exception:
-                    sub = None
+                sub = _run_metadata_subscription(metadata, profile)
                 if sub:
                     # Subscription lane: the quota burn rides the subscription,
                     # so real metered cost_usd is $0 (any actual is a metered
@@ -6335,10 +6431,7 @@ def backfill_run_costs_from_sessions(
                         billing_mode = "metered"
             else:
                 # Tier 3: provable subscription lane → real metered cost is $0.
-                try:
-                    sub = _profile_subscription(profile)
-                except Exception:
-                    sub = None
+                sub = _run_metadata_subscription(metadata, profile)
                 if sub:
                     stamp_cost = 0.0
                     stamp_status = "actual"
@@ -6360,7 +6453,9 @@ def backfill_run_costs_from_sessions(
             if equivalent is not None:
                 new_meta.setdefault("cost_usd_equivalent", equivalent)
             if model_seen:
-                new_meta.setdefault("model", model_seen)
+                new_meta["model"] = model_seen
+            if provider_seen:
+                new_meta["provider"] = provider_seen
             if billing_mode is not None:
                 new_meta.setdefault("billing_mode", billing_mode)
             if subscription is not None:
@@ -7270,19 +7365,26 @@ def claim_review_task(
         if cur.rowcount != 1:
             return None
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, model_override "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         cfg = _review_gate_config()
         run_profile = reviewer_profile or cfg.get("verifier_profile") or (trow["assignee"] if trow else None)
+        lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
+        spawn_metadata = _claude_cli_spawn_identity_metadata(
+            run_profile,
+            model_override=trow["model_override"] if trow else None,
+            lane_entry=lane_entry,
+        )
+        metadata_json = json.dumps(spawn_metadata, sort_keys=True) if spawn_metadata else None
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -7292,6 +7394,7 @@ def claim_review_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                metadata_json,
             ),
         )
         run_id = run_cur.lastrowid
@@ -20714,12 +20817,9 @@ def _neuralwatt_detail_from_meta(meta: dict) -> dict[str, float] | None:
     )
 
 
-# Paid-subscription lanes for the Statistik "Abo-Tokenverbrauch" panel. The
-# bucket is derived from the profile's ACTUAL runtime/provider config, never
-# its name — a name heuristic mis-attributes renamed/repurposed lanes (e.g.
-# ``reviewer`` runs on the Kimi sub, not Claude; ``verifier``/``admin`` run on
-# the Codex sub). Cached because profile configs change rarely and the
-# dashboard process restarts on deploy.
+# Paid-subscription fallback for old unstamped rows in the Statistik
+# "Abo-Tokenverbrauch" panel. New runs carry ``metadata.subscription`` from
+# claim time so lane/provider flips cannot reclassify history.
 _PROFILE_SUBSCRIPTION_CACHE: dict[str, Optional[str]] = {}
 
 
@@ -20794,9 +20894,10 @@ def subscription_token_totals(
     """Token totals for a paid-subscription lane since ``since_epoch``.
 
     Caller-neutral helper for rolling Abo limits (e.g. Kimi 5h/7d): it reads
-    closed ``task_runs`` only, uses ``_profile_subscription`` for attribution
-    instead of profile-name heuristics, and returns a small aggregate that does
-    not alter ``runs_costs``' dashboard-facing response shape. The lower bound
+    closed ``task_runs`` only, uses the persisted ``metadata.subscription`` for
+    attribution (falling back to ``_profile_subscription`` only for old
+    unstamped rows), and returns a small aggregate that does not alter
+    ``runs_costs``' dashboard-facing response shape. The lower bound
     is inclusive, matching the dispatcher budget queries (``started_at >= ?``).
     NULL token columns count as zero so partially stamped rows remain
     fail-soft.
@@ -20815,20 +20916,23 @@ def subscription_token_totals(
         return totals
 
     for row in conn.execute(
-        "SELECT profile, COUNT(*) AS runs, "
-        "COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS input_tokens, "
-        "COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens "
+        "SELECT profile, metadata, input_tokens, output_tokens "
         "FROM task_runs "
-        "WHERE ended_at IS NOT NULL AND started_at >= ? AND profile IS NOT NULL "
-        "GROUP BY profile",
+        "WHERE ended_at IS NOT NULL AND started_at >= ? AND profile IS NOT NULL",
         (since,),
     ).fetchall():
         profile = (row["profile"] or "").strip()
-        if _profile_subscription(profile) != sub:
+        try:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if _run_metadata_subscription(metadata, profile) != sub:
             continue
         in_tok = int(row["input_tokens"] or 0)
         out_tok = int(row["output_tokens"] or 0)
-        totals["runs"] += int(row["runs"] or 0)
+        totals["runs"] += 1
         totals["input_tokens"] += in_tok
         totals["output_tokens"] += out_tok
         totals["total_tokens"] += in_tok + out_tok
@@ -20878,24 +20982,29 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         """
         SELECT
             tr.profile AS profile,
+            tr.metadata AS metadata,
             COALESCE(t.created_by, '') AS created_by,
             COALESCE(t.title, '') AS title,
             COALESCE(t.epic_id, '') AS epic_id,
             DATE(tr.ended_at, 'unixepoch', 'localtime') AS day,
-            COUNT(*) AS runs,
-            COALESCE(SUM(COALESCE(tr.input_tokens, 0)), 0) AS input_tokens,
-            COALESCE(SUM(COALESCE(tr.output_tokens, 0)), 0) AS output_tokens
+            COALESCE(tr.input_tokens, 0) AS input_tokens,
+            COALESCE(tr.output_tokens, 0) AS output_tokens
         FROM task_runs tr
         LEFT JOIN tasks t ON t.id = tr.task_id
         WHERE tr.ended_at IS NOT NULL
           AND tr.ended_at >= ?
           AND tr.profile IS NOT NULL
-        GROUP BY tr.profile, created_by, title, epic_id, day
         """,
         (window_start,),
     ).fetchall():
         profile = (row["profile"] or "").strip()
-        subscription = _profile_subscription(profile)
+        try:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        subscription = _run_metadata_subscription(metadata, profile)
         if not subscription:
             continue
         cls = value_class(
@@ -20904,7 +21013,7 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             epic_id=row["epic_id"],
         )
         day = row["day"] or ""
-        runs = int(row["runs"] or 0)
+        runs = 1
         input_tokens = int(row["input_tokens"] or 0)
         output_tokens = int(row["output_tokens"] or 0)
 

@@ -296,12 +296,21 @@ def _insert_token_run(
     ended_at: int,
     input_tokens: int | None,
     output_tokens: int | None,
+    metadata: dict | None = None,
 ):
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
-        "outcome, input_tokens, output_tokens) "
-        "VALUES (?, ?, 'done', ?, ?, 'completed', ?, ?)",
-        (task_id, profile, started_at, ended_at, input_tokens, output_tokens),
+        "outcome, input_tokens, output_tokens, metadata) "
+        "VALUES (?, ?, 'done', ?, ?, 'completed', ?, ?, ?)",
+        (
+            task_id,
+            profile,
+            started_at,
+            ended_at,
+            input_tokens,
+            output_tokens,
+            json.dumps(metadata) if metadata is not None else None,
+        ),
     )
 
 
@@ -372,6 +381,36 @@ def test_subscription_token_totals_excludes_non_kimi_profiles(
 
         totals = kb.subscription_token_totals(
             conn, subscription="kimi", since_epoch=2000,
+        )
+
+    assert totals["runs"] == 1
+    assert totals["input_tokens"] == 100
+    assert totals["output_tokens"] == 10
+    assert totals["total_tokens"] == 110
+
+
+def test_subscription_token_totals_prefers_run_metadata_over_live_profile(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "kimi")
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="token metadata subscription")
+        with kb.write_txn(conn):
+            _insert_token_run(
+                conn, task_id=task_id, profile="verifier",
+                started_at=3000, ended_at=3010,
+                input_tokens=100, output_tokens=10,
+                metadata={"subscription": "chatgpt"},
+            )
+            _insert_token_run(
+                conn, task_id=task_id, profile="verifier",
+                started_at=3000, ended_at=3010,
+                input_tokens=900, output_tokens=90,
+                metadata={"subscription": "kimi"},
+            )
+
+        totals = kb.subscription_token_totals(
+            conn, subscription="chatgpt", since_epoch=3000,
         )
 
     assert totals["runs"] == 1
@@ -475,6 +514,38 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "total_tokens": 330,
         },
     ]
+
+
+def test_subscription_token_burn_prefers_run_metadata_after_lane_flip(
+    kanban_home, monkeypatch,
+):
+    now = 1_700_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "kimi")
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="metadata burn", assignee="verifier")
+        with kb.write_txn(conn):
+            _insert_token_run(
+                conn,
+                task_id=task_id,
+                profile="verifier",
+                started_at=now - 60,
+                ended_at=now - 30,
+                input_tokens=123,
+                output_tokens=45,
+                metadata={"subscription": "chatgpt"},
+            )
+
+        burn = kb.subscription_token_burn(conn, days=7)
+
+    assert burn["totals"] == {
+        "runs": 1,
+        "input_tokens": 123,
+        "output_tokens": 45,
+        "total_tokens": 168,
+    }
+    assert burn["by_class"][0]["subscription"] == "chatgpt"
+    assert burn["by_lane"][0]["subscription"] == "chatgpt"
 
 
 def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
@@ -1923,6 +1994,83 @@ def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypa
         assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 0
 
 
+def test_claim_stamps_billing_identity_for_metered_lane(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        kb,
+        "_active_lane_entry_for_profile_from_conn",
+        lambda conn, profile: {
+            "worker_runtime": "hermes",
+            "provider": "openrouter",
+            "model": "openai/gpt-5-mini",
+        },
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="metered-claim", assignee="verifier")
+        assert kb.claim_task(conn, tid)
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE task_id = ?",
+            (tid,),
+        ).fetchone()
+        meta = json.loads(row["metadata"])
+        assert meta["worker_runtime"] == "hermes"
+        assert meta["provider"] == "openrouter"
+        assert meta["model"] == "openai/gpt-5-mini"
+        assert meta["billing_mode"] == "metered"
+        assert meta["cost_source"] == "dispatch_metered_stamp"
+
+
+def test_repair_frozen_equivalent_uses_stamped_provider_model_after_lane_flip(
+    kanban_home, monkeypatch,
+):
+    seen = []
+
+    def fake_equivalent(provider, model, in_tok, out_tok, *, cache=None):
+        seen.append((provider, model))
+        if (provider, model) == ("openrouter", "openai/gpt-5-mini"):
+            return 0.0012
+        return None
+
+    monkeypatch.setattr(kb, "_equiv_from_tokens", fake_equivalent)
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="flipped-live-lane",
+            profiles={"verifier": {
+                "worker_runtime": "hermes",
+                "provider": "anthropic",
+                "model": "claude-opus-live-now",
+            }},
+        )
+        kb.activate_lane(conn, lane["id"])
+        tid = kb.create_task(conn, title="stamped-history", assignee="verifier")
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'verifier', 'done', 1000, 1010, 'completed', "
+                "1000, 100, 0.0, ?)",
+                (tid, json.dumps({
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5-mini",
+                    "worker_runtime": "hermes",
+                    "billing_mode": "metered",
+                })),
+            )
+            run_id = cur.lastrowid
+
+        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        meta = json.loads(row["metadata"])
+        assert seen == [("openrouter", "openai/gpt-5-mini")]
+        assert meta["cost_equivalent_provider"] == "openrouter"
+        assert meta["cost_equivalent_model"] == "openai/gpt-5-mini"
+
+
 def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
     kanban_home, monkeypatch,
 ):
@@ -2034,11 +2182,18 @@ def test_s1_metered_match_keeps_cost_and_stamps_model(kanban_home, tmp_path, mon
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="metered", assignee="research")
         run_id = _insert_run_window(
-            conn, tid, profile="research", started_at=1000, ended_at=2000)
+            conn,
+            tid,
+            profile="research",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"provider": "dispatch-provider", "model": "dispatch-model"},
+        )
         _write_session_rows(profile_dir / "state.db", [
             {"id": "S-met", "source": "cli", "started_at": 1500,
              "input_tokens": 400, "output_tokens": 30, "actual_cost_usd": 0.15,
              "estimated_cost_usd": 0.15, "model": "gpt-5.5",
+             "billing_provider": "openrouter",
              "cwd": f"/x/kanban/workspaces/{tid}"},
         ])
         assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
@@ -2048,6 +2203,7 @@ def test_s1_metered_match_keeps_cost_and_stamps_model(kanban_home, tmp_path, mon
         assert row["cost_usd"] == pytest.approx(0.15)
         meta = json.loads(row["metadata"])
         assert meta["model"] == "gpt-5.5"
+        assert meta["provider"] == "openrouter"
         assert "cost_usd_equivalent" not in meta
 
 
@@ -9375,6 +9531,58 @@ def test_claim_review_task_transitions_to_running(kanban_home):
     assert claimed is not None
     assert claimed.status == "running"
     assert claimed.claim_lock is not None
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_billing_mode", "expected_subscription", "expected_cost_source"),
+    [
+        ("openrouter", "openai/gpt-5-mini", "metered", None, "dispatch_metered_stamp"),
+        ("openai-codex", "gpt-5.5", "subscription_included", "chatgpt", "dispatch_subscription_stamp"),
+    ],
+)
+def test_claim_review_task_stamps_billing_identity_from_reviewer_lane(
+    kanban_home,
+    monkeypatch,
+    provider,
+    model,
+    expected_billing_mode,
+    expected_subscription,
+    expected_cost_source,
+):
+    """review -> running verifier runs must be self-describing too."""
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: None)
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name=f"review-{expected_billing_mode}",
+            profiles={"verifier": {
+                "worker_runtime": "hermes",
+                "provider": provider,
+                "model": model,
+            }},
+        )
+        kb.activate_lane(conn, lane["id"])
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+
+        claimed = kb.claim_review_task(conn, t, reviewer_profile="verifier")
+        assert claimed is not None
+        row = conn.execute(
+            "SELECT profile, metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+
+    assert row["profile"] == "verifier"
+    meta = json.loads(row["metadata"])
+    assert meta["worker_runtime"] == "hermes"
+    assert meta["provider"] == provider
+    assert meta["model"] == model
+    assert meta["billing_mode"] == expected_billing_mode
+    assert meta["cost_source"] == expected_cost_source
+    if expected_subscription is None:
+        assert "subscription" not in meta
+    else:
+        assert meta["subscription"] == expected_subscription
 
 
 def test_review_claimed_full_context_retry_uses_retry_profile_caps(kanban_home):
