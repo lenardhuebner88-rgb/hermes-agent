@@ -249,8 +249,9 @@ def test_self_gate_rejects_missing_counter_metric():
 # --------------------------------------------------------------------------- #
 # 4b. COST-AWARENESS-S1: the strategist prioritises $-burn
 # --------------------------------------------------------------------------- #
-def _cost_ctx(profiles):
-    return {"metrics": None, "cost": {"profiles": profiles},
+def _cost_ctx(profiles, *, coverage_pct=100.0):
+    return {"metrics": {"cost_per_task": {"coverage": {"coverage_pct": coverage_pct}}},
+            "cost": {"profiles": profiles},
             "ledger": {"by_class": {}, "total": 0, "entries": []},
             "suppressed": set()}
 
@@ -279,6 +280,14 @@ def test_cost_lever_idle_below_threshold():
         {"profile": "verifier", "cost_usd": 0.24, "cost_usd_equivalent": 0.0},
         {"profile": "coder", "cost_usd": 0.0, "cost_usd_equivalent": 1.0},
     ])
+    assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
+
+
+def test_cost_lever_suppressed_when_cost_coverage_is_low():
+    """Sparse metered coverage is not enough grounding for a cost magnitude lever."""
+    ctx = _cost_ctx([
+        {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
+    ], coverage_pct=6.7)
     assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
 
 
@@ -311,7 +320,8 @@ def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
     ]}
     out_dir = board_home / "specs"
     result = strategist.propose(board=None, out_dir=out_dir,
-                                metrics={"autonomy_pct": 95, "green_gate_streak": 10},
+                                metrics={"autonomy_pct": 95, "green_gate_streak": 10,
+                                         "cost_per_task": {"coverage": {"coverage_pct": 100.0}}},
                                 cost=cost)
     assert result["skipped"] is False
     keys = {item["key"] for item in result["ingested"]}

@@ -451,8 +451,25 @@ def test_cost_metric_all_subscription_recent_is_na_not_minus_100(conn):
     # the old code averaged 0.0 -> pct_change = -100.0; the honest answer is n/a
     assert c["recent_avg_cost_per_task"] is None
     assert c["trend"] == "n/a"
+    assert c["trend_basis"] == "insufficient_metered_data"
     assert c["pct_change"] is None
     assert c["coverage"]["subscription_only"] == 1
+
+
+def test_cost_metric_empty_prior_window_reports_insufficient_trend_basis(conn):
+    """A missing prior metered window makes the trend explicitly data-limited."""
+    now = 100 * DAY
+    _add_task(conn, "M", status="done", completed_at=now - DAY)
+    _add_run(conn, "M", cost_usd=0.30)
+    _add_task(conn, "S", status="done", completed_at=now - 9 * DAY)
+    _add_run(conn, "S", cost_usd=0.0)
+
+    c = vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+        "metrics"]["cost_per_task"]
+
+    assert c["prior_avg_cost_per_task"] is None
+    assert c["trend"] == "n/a"
+    assert c["trend_basis"] == "insufficient_metered_data"
 
 
 def test_coverage_counter_unmoved_by_subscription_stamp(conn):

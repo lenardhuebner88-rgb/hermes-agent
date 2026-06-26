@@ -466,7 +466,27 @@ def _cost_efficiency_lever(lane: str, burn: float, key: str) -> Lever:
     )
 
 
-def _cost_lever(cost: Any, suppressed: set[str]) -> Optional[Lever]:
+def _cost_coverage_pct(metrics: Any) -> Optional[float]:
+    if not isinstance(metrics, dict):
+        return None
+    cost_metric = metrics.get("cost_per_task")
+    if not isinstance(cost_metric, dict):
+        return None
+    coverage = cost_metric.get("coverage")
+    if not isinstance(coverage, dict):
+        return None
+    raw = coverage.get("coverage_pct")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cost_lever(
+    cost: Any, suppressed: set[str], *, metrics: Any = None
+) -> Optional[Lever]:
     """Open ONE cost-efficiency lever for the single costliest lane above the
     threshold (or None when nothing is expensive enough — idle is correct).
 
@@ -475,6 +495,9 @@ def _cost_lever(cost: Any, suppressed: set[str]) -> Optional[Lever]:
     skipped. Suppression-aware via the vetoed-lever set.
     """
     if not isinstance(cost, dict):
+        return None
+    coverage_pct = _cost_coverage_pct(metrics)
+    if coverage_pct is None or coverage_pct < 25.0:
         return None
     best_lane: Optional[str] = None
     best_burn = 0.0
@@ -571,7 +594,7 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
     gaps. Suppressed (recently vetoed) keys are skipped. Empty signal → empty
     list (idle is correct).
     """
-    suppressed = set(context.get("suppressed") or ())
+    suppressed: set[str] = {str(item) for item in (context.get("suppressed") or ())}
     levers: list[Lever] = []
 
     ledger = context.get("ledger") or {}
@@ -617,7 +640,9 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
     # COST-AWARENESS-S1: one lever for the costliest lane above threshold. With
     # cost_effective_usd now real (subscription equivalents stamped), the
     # strategist can finally prioritise $-burn, not just escalations/autonomy.
-    cost_lever = _cost_lever(context.get("cost"), suppressed)
+    cost_lever = _cost_lever(
+        context.get("cost"), suppressed, metrics=context.get("metrics")
+    )
     if cost_lever is not None:
         levers.append(cost_lever)
 

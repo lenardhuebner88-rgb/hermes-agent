@@ -1037,15 +1037,19 @@ def _cost_per_task_metric(
     if recent is None or prior is None:
         trend = "n/a"
         pct_change = None
+        trend_basis = "insufficient_metered_data"
     elif recent > prior:
         trend = "up"
         pct_change = round(100.0 * (recent - prior) / prior, 1) if prior else None
+        trend_basis = "ok"
     elif recent < prior:
         trend = "down"
         pct_change = round(100.0 * (recent - prior) / prior, 1) if prior else None
+        trend_basis = "ok"
     else:
         trend = "flat"
         pct_change = 0.0
+        trend_basis = "ok"
 
     total_done = len(done_rows)
     with_metered = sum(1 for r in done_rows if r["id"] in metered_by_task)
@@ -1064,6 +1068,7 @@ def _cost_per_task_metric(
         "recent_avg_cost_per_task": recent,
         "prior_avg_cost_per_task": prior,
         "trend": trend,
+        "trend_basis": trend_basis,
         "pct_change": pct_change,
         # Explicit coverage so a $0 subscription stamp can never masquerade as
         # either a saving (in the average) or improved coverage (in the count).
