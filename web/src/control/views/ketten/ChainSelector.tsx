@@ -35,7 +35,7 @@ export function ChainSelector({ chains, doneChains, selectedRootId, onSelect, di
           for accessibility. The select is w-full / h-full and opacity-0 so the browser's
           native popup fires on click, while the styled trigger shows through. */}
       <div
-        className="relative min-w-0 flex-1 rounded-[12px] focus-within:ring-1 focus-within:ring-[var(--hc-accent-border)]"
+        className="relative min-w-0 w-full rounded-[12px] focus-within:ring-1 focus-within:ring-[var(--hc-accent-border)] sm:w-auto sm:flex-1"
         style={{ height: 46 }}
       >
         {/* Visual trigger surface */}
