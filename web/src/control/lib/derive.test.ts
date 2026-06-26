@@ -95,7 +95,7 @@ describe('Formatierung', () => {
   });
   it('fmtDur', () => {
     expect(fmtDur(52)).toBe('52s');
-    expect(fmtDur(240)).toBe('4m');
+    expect(fmtDur(240)).toBe('4m 0s');
     expect(fmtDur(8040)).toBe('2h 14m');
   });
   it('fmtMB', () => {
@@ -351,6 +351,26 @@ describe('workerRunaway', () => {
     const r = workerRunaway(w, NOW);
     expect(r.level).toBe('none');
     expect(r.pct).toBe(0);
+  });
+});
+
+// ── A9: fmtDur Rest-Sekunden ──────────────────────────────────────────────────
+describe('fmtDur Rest-Sekunden', () => {
+  it('60–3599s: zeigt Minuten UND Rest-Sekunden', () => {
+    expect(fmtDur(90)).toBe('1m 30s');
+    expect(fmtDur(60)).toBe('1m 0s');
+    expect(fmtDur(3599)).toBe('59m 59s');
+  });
+  it('exakt 240s (4m 0s)', () => {
+    expect(fmtDur(240)).toBe('4m 0s');
+  });
+  it('< 60s bleibt unverändert', () => {
+    expect(fmtDur(52)).toBe('52s');
+    expect(fmtDur(0)).toBe('0s');
+  });
+  it('≥ 3600s: Stunden + Minuten, keine Sekunden', () => {
+    expect(fmtDur(8040)).toBe('2h 14m');
+    expect(fmtDur(3600)).toBe('1h 00m');
   });
 });
 

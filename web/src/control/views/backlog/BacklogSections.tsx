@@ -64,7 +64,7 @@ export function BacklogHeroPanel({
         </p>
         <dl className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:flex sm:flex-wrap lg:justify-end">
           <div className="rounded-md border border-cyan-400/25 bg-cyan-500/[.08] px-3 py-2">
-            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] text-cyan-700">Aktiv</dt>
+            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] text-cyan-300">Aktiv</dt>
             <dd className="hc-mono text-lg font-semibold tabular-nums text-[var(--hc-text)]">{activeTotal}</dd>
           </div>
           <div className="rounded-md border border-[var(--hc-border)] bg-white/[.03] px-3 py-2">

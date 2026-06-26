@@ -19,7 +19,7 @@
   --sb-paper: #f1f2ec;
   --sb-ink:   #15171b;
   --sb-ink2:  #4d525c;
-  --sb-ink3:  #8a8f99;
+  --sb-ink3:  #6b7180;
   --sb-rule:  #d8d8cf;
   --sb-rule2: #c2c2b6;
   /* The one ink accent — used for identity/interaction only, never as a status. */
@@ -49,7 +49,7 @@
 [data-stats-broadsheet] .sb-between { display: flex; align-items: center; justify-content: space-between; }
 [data-stats-broadsheet] .sb-row { display: flex; align-items: center; gap: 8px; }
 [data-stats-broadsheet] .sb-kick {
-  font-family: var(--sb-mono); font-size: 9.5px; letter-spacing: .16em;
+  font-family: var(--sb-mono); font-size: 11px; letter-spacing: .16em;
   text-transform: uppercase; color: var(--sb-ink3);
 }
 [data-stats-broadsheet] .sb-lane-label { display: inline-flex; align-items: center; gap: 7px; min-width: 0; vertical-align: middle; }
@@ -93,7 +93,7 @@
 }
 [data-stats-broadsheet] .sb-skick .sb-ln { flex: 1; height: 1px; background: var(--sb-rule2); }
 [data-stats-broadsheet] .sb-skick .sb-rt {
-  font-family: var(--sb-mono); font-size: 9.5px; letter-spacing: .1em;
+  font-family: var(--sb-mono); font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--sb-ink3);
 }
 
@@ -106,7 +106,7 @@
 [data-stats-broadsheet] .sb-tu:first-child { border-left: 0; padding-left: 0; }
 [data-stats-broadsheet] .sb-tu .sb-n { font-family: var(--sb-disp); font-weight: 700; font-size: 25px; letter-spacing: -.03em; }
 [data-stats-broadsheet] .sb-tu .sb-n small { font-size: 14px; color: var(--sb-ink3); }
-[data-stats-broadsheet] .sb-tu .sb-l { font-size: 10.5px; color: var(--sb-ink3); margin-top: 5px; letter-spacing: .01em; }
+[data-stats-broadsheet] .sb-tu .sb-l { font-size: 11px; color: var(--sb-ink3); margin-top: 5px; letter-spacing: .01em; }
 
 /* ── Engpass lead (the one urgent line, navy/amber/red spine) ──────────────── */
 [data-stats-broadsheet] .sb-lead { border-left: 3px solid var(--sb-red); padding: 3px 0 3px 12px; margin-bottom: 16px; }
@@ -130,9 +130,9 @@
 [data-stats-broadsheet] .sb-ma { background: var(--sb-amber); }
 [data-stats-broadsheet] .sb-mr { background: var(--sb-red); }
 [data-stats-broadsheet] .sb-led-foot { display: flex; justify-content: space-between; margin-top: 6px; }
-[data-stats-broadsheet] .sb-led-foot span { font-family: var(--sb-mono); font-size: 10px; color: var(--sb-ink3); }
+[data-stats-broadsheet] .sb-led-foot span { font-family: var(--sb-mono); font-size: 11px; color: var(--sb-ink3); }
 [data-stats-broadsheet] .sb-tagm {
-  font-family: var(--sb-mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+  font-family: var(--sb-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
   color: var(--sb-ink3); border: 1px solid var(--sb-rule2); border-radius: 3px; padding: 1px 5px; margin-left: 6px;
 }
 
@@ -173,7 +173,7 @@
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 [data-stats-broadsheet] .sb-foot { margin-top: 26px; border-top: 2px solid var(--sb-ink); padding-top: 10px; display: flex; justify-content: space-between; }
-[data-stats-broadsheet] .sb-foot span { font-family: var(--sb-mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--sb-ink3); }
+[data-stats-broadsheet] .sb-foot span { font-family: var(--sb-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--sb-ink3); }
 
 /* ── Subscription burn breakdown (Daylight, mobile-first collapse) ─────────── */
 [data-stats-broadsheet] .sb-subburn { border-top: 2px solid var(--sb-ink); border-bottom: 1px solid var(--sb-rule2); padding: 14px 0 16px; display: grid; gap: 14px; }
@@ -196,7 +196,7 @@
 [data-stats-broadsheet] .sb-ledger-controls { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
 [data-stats-broadsheet] .sb-chipset { display: flex; flex-wrap: wrap; gap: 6px; }
 [data-stats-broadsheet] .sb-chipset button {
-  font-family: var(--sb-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  font-family: var(--sb-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
   border: 1px solid var(--sb-rule2); background: transparent; color: var(--sb-ink2); padding: 5px 8px; min-height: 44px;
 }
 [data-stats-broadsheet] .sb-chipset button.is-active { background: var(--sb-ink); color: var(--sb-paper); border-color: var(--sb-ink); }
@@ -212,7 +212,7 @@
 }
 [data-stats-broadsheet] .sb-ledger-worker-card small { grid-column: 1 / -1; color: var(--sb-ink3); }
 [data-stats-broadsheet] .sb-ledger-usd { color: var(--sb-navy); }
-[data-stats-broadsheet] .sb-ledger-usd small { display: block; font-size: 9px; color: var(--sb-ink3); font-weight: 400; }
+[data-stats-broadsheet] .sb-ledger-usd small { display: block; font-size: 11px; color: var(--sb-ink3); font-weight: 400; }
 [data-stats-broadsheet] .sb-ledger-runners { margin: 0 0 10px; padding: 7px 9px; background: rgba(21, 53, 95, .045); color: var(--sb-ink2); }
 [data-stats-broadsheet] .sb-ledger-runner { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content max-content; gap: 8px; align-items: baseline; padding: 4px 0; font-size: 12px; }
 [data-stats-broadsheet] .sb-ledger-runner span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -224,7 +224,7 @@
     display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, .9fr) 70px 110px 120px;
     gap: 10px; align-items: center;
   }
-  [data-stats-broadsheet] .sb-ledger-head { padding: 8px 0; font-family: var(--sb-mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--sb-ink3); border-bottom: 1px solid var(--sb-rule2); }
+  [data-stats-broadsheet] .sb-ledger-head { padding: 8px 0; font-family: var(--sb-mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--sb-ink3); border-bottom: 1px solid var(--sb-rule2); }
   [data-stats-broadsheet] .sb-ledger-row { width: 100%; padding: 9px 0; border: 0; border-bottom: 1px solid var(--sb-rule); background: transparent; text-align: left; color: var(--sb-ink); }
   [data-stats-broadsheet] .sb-ledger-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   [data-stats-broadsheet] .sb-ledger-row span:nth-child(n+3) { text-align: right; }

@@ -119,6 +119,22 @@ describe("LedgerRow", () => {
     expect(renderToStaticMarkup(<LedgerRow name="x" figure="" status="warn" pct={140} />)).toContain("width:100%");
     expect(renderToStaticMarkup(<LedgerRow name="x" figure="" status="warn" pct={-5} />)).toContain("width:0%");
   });
+
+  it("A2: hides the meter entirely when pct is null (unknown usage)", () => {
+    const html = renderToStaticMarkup(
+      <LedgerRow name="Unknown" figure="—" status="neutral" pct={null} />,
+    );
+    // Meter must not render a filled track — no sb-led-meter element.
+    expect(html).not.toContain("sb-led-meter");
+  });
+
+  it("A2: still renders the meter for a known pct=0", () => {
+    const html = renderToStaticMarkup(
+      <LedgerRow name="Zero" figure="0 %" status="ok" pct={0} />,
+    );
+    expect(html).toContain("sb-led-meter");
+    expect(html).toContain("width:0%");
+  });
 });
 
 describe("TwinStats", () => {

@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   BudgetLedgerSection,
-  ChainCostsLaneTable,
   EffizienzSection,
   ErrorTaxonomySection,
   LedgerWorkerRunners,
@@ -17,7 +16,6 @@ import { broadsheet } from "../lib/broadsheetTokens";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
-  ChainCostsResponse,
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
@@ -300,46 +298,6 @@ function rollupResponse(root: WindowedRollupRoot = rollupRoot()): WindowedRollup
     roots: [root],
   };
 }
-
-describe("ChainCostsLaneTable", () => {
-  it("zeigt Ist-$ und NeuralWatt-kWh-Basis aus realen Backend-Feldern", () => {
-    const costs: ChainCostsResponse = {
-      schema: "kanban-chain-costs-v1",
-      root_id: "t_root",
-      totals: {
-        input_tokens: 2000,
-        output_tokens: 500,
-        cost_usd: 0,
-        actual_cost_usd: 0.15,
-        cost_usd_equivalent: 0.9,
-        api_equivalent_usd: 0.9,
-        cost_effective_usd: 0.9,
-        billing_neuralwatt_kwh: 0.03,
-        billing_neuralwatt_cost_usd: 0.15,
-        run_count: 1,
-      },
-      by_lane: [{
-        profile: "neuralwatt",
-        input_tokens: 2000,
-        output_tokens: 500,
-        cost_usd: 0,
-        actual_cost_usd: 0.15,
-        cost_usd_equivalent: 0.9,
-        api_equivalent_usd: 0.9,
-        cost_effective_usd: 0.9,
-        billing_neuralwatt_kwh: 0.03,
-        billing_neuralwatt_cost_usd: 0.15,
-        run_count: 1,
-      }],
-    };
-
-    const html = renderToStaticMarkup(<ChainCostsLaneTable costs={costs} />);
-
-    expect(html).toContain("$0.15");
-    expect(html).toContain("API-Äquivalent");
-    expect(html).toContain("0.0300 kWh × $5.00/kWh");
-  });
-});
 
 describe("MotherLedgerSection", () => {
   it("zeigt den harten Fehlerzustand nur wenn noch keine Rollup-Daten vorliegen", () => {
@@ -636,6 +594,30 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("600");
     // i18n kicker.
     expect(html).toContain("Zeit-Trend");
+  });
+});
+
+describe("A3: MotherLedger totalUsd Summen-Ehrlichkeit", () => {
+  it("hängt '+ N unbekannt' an, wenn Roots ohne Kostenstempel vorhanden sind", () => {
+    const knownRoot = rollupRoot({ cost_effective_usd: 1.5, cost_usd: 0 });
+    const unknownRoot = rollupRoot({ id: "t_unknown", title: "Unknown A", cost_effective_usd: null, cost_usd: null });
+    windowedRollupMock.state = rollupState({
+      data: { ...rollupResponse(knownRoot), roots: [knownRoot, unknownRoot], completed_roots: 2 },
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    // Known sum $1.50, 1 unknown root → suffix shows "+ 1 unbekannt"
+    expect(html).toContain("$1.50");
+    expect(html).toContain("+ 1 unbekannt");
+  });
+
+  it("zeigt keine unbekannt-Meldung wenn alle Roots Kostenwerte haben", () => {
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).not.toContain("unbekannt");
   });
 });
 

@@ -135,7 +135,9 @@ export function SectionRule({ title, meta, className }: { title: ReactNode; meta
 }
 
 /** The one urgent lead line, spined by a status colour (default crit). The
- *  caller supplies the emphasised phrase via a <b> inside `children`. */
+ *  caller supplies the emphasised phrase via a <b> inside `children`.
+ *  warn/crit tones carry role="alert" + aria-live="polite" so screen-readers
+ *  announce the bottleneck without waiting for focus. */
 export function EngpassLead({
   children,
   tone = "crit",
@@ -145,15 +147,22 @@ export function EngpassLead({
   tone?: "crit" | "warn" | "calm";
   className?: string;
 }) {
+  const isUrgent = tone === "warn" || tone === "crit";
   return (
-    <div className={cn("sb-lead", tone === "warn" && "sb-lead-warn", tone === "calm" && "sb-lead-calm", className)}>
+    <div
+      className={cn("sb-lead", tone === "warn" && "sb-lead-warn", tone === "calm" && "sb-lead-calm", className)}
+      role={isUrgent ? "alert" : undefined}
+      aria-live={isUrgent ? "polite" : undefined}
+    >
       <span>{children}</span>
     </div>
   );
 }
 
 /** A budget-ledger row: name (+ optional tag), leader-dots, status figure, a
- *  thin meter, and an optional two-up footing. */
+ *  thin meter, and an optional two-up footing.
+ *  `pct=null` means the usage is unknown — the meter is hidden entirely rather
+ *  than rendering a misleading 0%-filled track. */
 export function LedgerRow({
   name,
   tag,
@@ -167,7 +176,7 @@ export function LedgerRow({
   tag?: ReactNode;
   figure: ReactNode;
   status: BroadsheetStatus;
-  pct: number;
+  pct: number | null;
   footLeft?: ReactNode;
   footRight?: ReactNode;
 }) {
@@ -181,9 +190,11 @@ export function LedgerRow({
         <span className="sb-led-dots" />
         <span className={cn("sb-led-fig", FIG_CLASS[status])}>{figure}</span>
       </div>
-      <div className="sb-led-meter">
-        <i className={METER_CLASS[status]} style={{ width: `${clampPct(pct)}%` }} />
-      </div>
+      {pct != null ? (
+        <div className="sb-led-meter">
+          <i className={METER_CLASS[status]} style={{ width: `${clampPct(pct)}%` }} />
+        </div>
+      ) : null}
       {footLeft != null || footRight != null ? (
         <div className="sb-led-foot">
           <span>{footLeft}</span>

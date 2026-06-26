@@ -33,7 +33,6 @@ import {
 } from "../hooks/useControlData";
 import type {
   AccountUsageProvider,
-  ChainCostsResponse,
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
@@ -279,7 +278,7 @@ export function BudgetLedgerSection({ providers }: { providers: AccountUsageProv
             tag={r.estimated ? de.stats.budgetEstimated : undefined}
             figure={r.usedPercent == null ? "—" : `${Math.round(r.usedPercent)} %`}
             status={r.status}
-            pct={r.usedPercent ?? 0}
+            pct={r.usedPercent ?? null}
             footLeft={ledgerFoot(r)}
             footRight={r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined}
           />
@@ -365,13 +364,25 @@ export function EffizienzSection({
   );
 }
 
-export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnResponse | null }) {
+export function SubscriptionBurnSection({
+  burn,
+  loading = false,
+  error = null,
+}: {
+  burn: SubscriptionTokenBurnResponse | null;
+  loading?: boolean;
+  error?: string | null;
+}) {
   const detail = useMemo(() => subscriptionBurnBreakdown(burn), [burn]);
   const hasBurn = detail.totals.total_tokens > 0;
   return (
     <>
       <SectionRule title={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
-      {!hasBurn ? (
+      {loading ? (
+        <Verdict tone="calm">{de.stats.burnLoading}</Verdict>
+      ) : error ? (
+        <Verdict tone="warn">{error}</Verdict>
+      ) : !hasBurn ? (
         <Verdict tone="calm">{de.stats.subscriptionBurnEmpty}</Verdict>
       ) : (
         <div className="sb-subburn" data-testid="subscription-burn-breakdown">
@@ -433,97 +444,10 @@ export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnR
   );
 }
 
-// ── Kosten pro Kette ─────────────────────────────────────────────────────────
-// Detailtabelle für API-Antworten aus chain-costs; bleibt als kleine
-// Anzeige-Hilfe für Tests/Diagnose, der Statistik-Tab nutzt das MotherLedger.
+// ── Kosten pro Kette — Helper functions shared by MotherLedgerSection ────────
 
 function fmtUsd(value: number | null | undefined): string {
   return value != null && value > 0 ? `$${value.toFixed(2)}` : "—";
-}
-
-function fmtKwh(value: number | null | undefined): string {
-  return value != null && value > 0 ? value.toFixed(4) : "—";
-}
-
-function blendedRate(kwh: number, cost: number): number | null {
-  return kwh > 0 ? cost / kwh : null;
-}
-
-export function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
-  const { by_lane, totals } = costs;
-  if (by_lane.length === 0) return null;
-  const totalRate = blendedRate(totals.billing_neuralwatt_kwh, totals.billing_neuralwatt_cost_usd);
-  return (
-    <div className="mt-2 space-y-1">
-      <p className="text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
-        {de.ketten.chainCostsLaneTitle}
-      </p>
-      <table className="w-full border-collapse text-xs">
-        <thead>
-          <tr className="border-b border-[var(--hc-border)] text-left text-[10px] text-[var(--hc-text-dim)]">
-            <th className="py-1 pr-2 font-normal">Lane</th>
-            <th className="py-1 pr-2 text-right font-normal">{de.ketten.chainCostsColTokens}</th>
-            <th className="py-1 pr-2 text-right font-normal">{de.ketten.chainCostsColCost}</th>
-            <th className="py-1 text-right font-normal">{de.ketten.chainCostsColRuns}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {by_lane.map((l) => {
-            const apiEquivalent = l.api_equivalent_usd;
-            const rate = blendedRate(l.billing_neuralwatt_kwh, l.billing_neuralwatt_cost_usd);
-            return (
-              <tr key={l.profile} className="border-b border-[var(--hc-border)] last:border-0">
-                <td className="hc-mono py-1 pr-2 text-[var(--hc-text)]">{l.profile}</td>
-                <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
-                  {fmtTokens(l.input_tokens + l.output_tokens)}
-                </td>
-                <td className="py-1 pr-2 text-right tabular-nums">
-                  <div className="hc-mono text-[var(--hc-text)]">{fmtUsd(l.actual_cost_usd)}</div>
-                  {apiEquivalent > 0 ? (
-                    <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                      {de.ketten.chainCostsApiEquivalent} {fmtUsd(apiEquivalent)}
-                    </div>
-                  ) : null}
-                  {l.billing_neuralwatt_kwh > 0 && rate != null ? (
-                    <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                      {de.ketten.chainCostsNeuralwattBasis} {fmtKwh(l.billing_neuralwatt_kwh)} kWh × ${rate.toFixed(2)}/kWh
-                    </div>
-                  ) : null}
-                </td>
-                <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{l.run_count}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-        <tfoot>
-          <tr className="border-t-2 border-[var(--hc-border-strong)] text-xs font-semibold">
-            <td className="py-1 pr-2 text-[var(--hc-text-dim)]">Gesamt</td>
-            <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
-              {fmtTokens(totals.input_tokens + totals.output_tokens)}
-            </td>
-            <td className="py-1 pr-2 text-right tabular-nums">
-              <div className="hc-mono text-[var(--hc-text)]">{fmtUsd(totals.actual_cost_usd)}</div>
-              {totals.api_equivalent_usd > 0 ? (
-                <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                  {de.ketten.chainCostsApiEquivalent} {fmtUsd(totals.api_equivalent_usd)}
-                </div>
-              ) : null}
-              {totals.billing_neuralwatt_kwh > 0 && totalRate != null ? (
-                <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                  {de.ketten.chainCostsNeuralwattBasis} {fmtKwh(totals.billing_neuralwatt_kwh)} kWh × ${totalRate.toFixed(2)}/kWh
-                </div>
-              ) : null}
-            </td>
-            <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{totals.run_count}</td>
-          </tr>
-        </tfoot>
-      </table>
-      {/* Legende: erklärt "gesch." und Abo-Semantik */}
-      <p className="mt-2 text-[10px] leading-snug text-[var(--hc-text-dim)]">
-        {de.ketten.chainCostsCostLegend}
-      </p>
-    </div>
-  );
 }
 
 type MotherLedgerSortKey = "usd" | "tokens" | "runs";
@@ -540,8 +464,12 @@ function rootTokens(root: WindowedRollupRoot): number {
   return root.workers.reduce((sum, worker) => sum + workerTokens(worker), 0);
 }
 
-function rootUsd(root: WindowedRollupRoot): number {
-  return root.cost_effective_usd ?? root.cost_usd ?? 0;
+/** Returns the effective cost for a root, or null when genuinely unknown.
+ *  null means neither cost_effective_usd nor cost_usd carries a real stamp. */
+function rootUsd(root: WindowedRollupRoot): number | null {
+  if (root.cost_effective_usd != null) return root.cost_effective_usd;
+  if (root.cost_usd != null) return root.cost_usd;
+  return null;
 }
 
 function fmtRuntime(seconds: number | null | undefined): string {
@@ -584,7 +512,7 @@ function ledgerDetailTitle(item: {
     `Provider/Model: ${provider ?? "—"}${model ? ` · ${model}` : ""}`,
     `billing_mode: ${billingMode ?? "—"}`,
     `Laufzeit: ${fmtRuntime(item.runtime_seconds)}`,
-    "Neuralwatt: —",
+    `${de.stats.motherLedgerNeuralwatt}`,
   ].join(" · ");
 }
 
@@ -594,7 +522,7 @@ function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSor
       ? rootTokens(b) - rootTokens(a)
       : sortKey === "runs"
         ? rootRuns(b) - rootRuns(a)
-        : rootUsd(b) - rootUsd(a);
+        : (rootUsd(b) ?? 0) - (rootUsd(a) ?? 0);
     return byMetric || (b.completed_at ?? 0) - (a.completed_at ?? 0) || a.id.localeCompare(b.id);
   });
 }
@@ -621,7 +549,7 @@ function useMediaQuery(query: string): boolean {
 export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
   const runners = root.runners.filter((runner) => runner.profile === worker.profile);
   if (runners.length === 0) {
-    return <div className="sb-ledger-runners sb-mono">keine Läuferdaten</div>;
+    return <div className="sb-ledger-runners sb-mono">{de.stats.motherLedgerNoRunners}</div>;
   }
   return (
     <div className="sb-ledger-runners">
@@ -631,7 +559,7 @@ export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
           <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
           <b className="sb-mono">{fmtUsd(runner.cost_effective_usd ?? runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode, runner.provider_model_source)}</b>
-          <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · Neuralwatt —</small>
+          <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · {de.stats.motherLedgerNeuralwatt}</small>
         </div>
       ))}
     </div>
@@ -648,9 +576,12 @@ export function MotherLedgerSection() {
     () => sortedLedgerRoots(rollup.data?.roots ?? [], sortKey),
     [rollup.data, sortKey],
   );
-  const totalUsd = roots.reduce((sum, root) => sum + rootUsd(root), 0);
+  const knownRoots = roots.filter((r) => rootUsd(r) != null);
+  const unknownCount = roots.length - knownRoots.length;
+  const totalUsd = knownRoots.reduce((sum, root) => sum + (rootUsd(root) ?? 0), 0);
+  const totalUsdText = roots.length === 0 ? fmtUsd(0) : `${fmtUsd(knownRoots.length > 0 ? totalUsd : null)}${unknownCount > 0 ? ` + ${unknownCount} unbekannt` : ""}`;
   const showStaleNotice = Boolean((rollup.error || rollup.isStale) && rollup.data);
-  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD inkl. Cache · ${fmtUsd(totalUsd)}${showStaleNotice ? " · Letzte Daten angezeigt" : ""}`;
+  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD inkl. Cache · ${totalUsdText}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
   const toggleWorker = (rootId: string, profile: string) => {
     const key = `${rootId}:${profile}`;
     setOpenKey((prev) => (prev === key ? null : key));
@@ -658,7 +589,7 @@ export function MotherLedgerSection() {
 
   return (
     <>
-      <SectionRule title="MotherLedger" meta={metaText} />
+      <SectionRule title={de.stats.motherLedgerTitle} meta={metaText} />
       <div className="sb-ledger-controls" aria-label="MotherLedger Controls">
         <div className="sb-chipset" aria-label="Fenster">
           <button type="button" className={windowHours === 168 ? "is-active" : ""} onClick={() => setWindowHours(168)}>7T</button>
@@ -671,7 +602,7 @@ export function MotherLedgerSection() {
         </div>
       </div>
       {rollup.loading && !rollup.data ? (
-        <Verdict tone="calm">lädt …</Verdict>
+        <Verdict tone="calm">{de.stats.burnLoading}</Verdict>
       ) : rollup.error && !rollup.data ? (
         <Verdict tone="warn">{de.ketten.chainCostsLoadError}</Verdict>
       ) : roots.length === 0 ? (
@@ -680,12 +611,12 @@ export function MotherLedgerSection() {
         <div className="sb-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
           {showStaleNotice ? (
             <div className="sb-kick" role="status" title={rollup.error ?? undefined}>
-              Letzte Daten angezeigt
+              {de.stats.motherLedgerStaleNotice}
             </div>
           ) : null}
           <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop" aria-hidden={isMobileLedger}>
             <div className="sb-ledger-head" role="row">
-              <span>Mother</span><span>Worker</span><span>Runs</span><span>Tokens</span><span>USD <small>inkl. Cache</small></span>
+              <span>{de.stats.motherLedgerColMother}</span><span>{de.stats.motherLedgerColWorker}</span><span>{de.stats.motherLedgerColRuns}</span><span>{de.stats.motherLedgerColTokens}</span><span>{de.stats.motherLedgerColUsd} <small>{de.stats.motherLedgerColUsdSub}</small></span>
             </div>
             {roots.map((root) => root.workers.map((worker, index) => {
               const key = `${root.id}:${worker.profile}`;
@@ -697,7 +628,7 @@ export function MotherLedgerSection() {
                     <span><LaneLabel profile={worker.profile} /></span>
                     <span className="sb-mono">{worker.run_count}</span>
                     <span className="sb-mono">{fmtTokens(workerTokens(worker))}</span>
-                    <span className="sb-mono sb-ledger-usd"><b>{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b><small>inkl. Cache</small></span>
+                    <span className="sb-mono sb-ledger-usd"><b>{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b><small>{de.stats.motherLedgerUsdSuffix}</small></span>
                   </button>
                   {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
                 </div>
@@ -707,7 +638,7 @@ export function MotherLedgerSection() {
           <div className="sb-ledger-cards" aria-label="MotherLedger Mobile" aria-hidden={!isMobileLedger}>
             {roots.map((root) => (
               <article key={root.id} className="sb-ledger-card">
-                <div className="sb-kick">Mother</div>
+                <div className="sb-kick">{de.stats.motherLedgerColMother}</div>
                 <h3>{root.title ?? root.id}</h3>
                 {root.workers.map((worker) => {
                   const key = `${root.id}:${worker.profile}`;
@@ -717,7 +648,7 @@ export function MotherLedgerSection() {
                       <button type="button" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open}>
                         <span><LaneLabel profile={worker.profile} /></span>
                         <b className="sb-mono">{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b>
-                        <small>Runs {worker.run_count} · {fmtTokens(workerTokens(worker))} Tokens · USD inkl. Cache</small>
+                        <small>Runs {worker.run_count} · {fmtTokens(workerTokens(worker))} {de.stats.motherLedgerColTokens} · {de.stats.motherLedgerColUsd} {de.stats.motherLedgerUsdSuffix}</small>
                       </button>
                       {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
                     </div>
@@ -756,16 +687,11 @@ export function StatistikView() {
   const hasLoadError = Boolean(reliability.error || daily.error);
 
   return (
-    <BroadsheetShell>
-      {hasLoadError ? (
-        <EngpassLead tone="warn">
-          <b>{de.stats.loadError}</b>
-        </EngpassLead>
-      ) : null}
-
-      <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
-
-      {/* Abo-Limits-Cockpit — Provider-Tokenverbrauch stays first-class in /control/statistik. */}
+    <>
+      {/* A7: AccountUsageTile lives OUTSIDE BroadsheetShell so its dark hc-*
+          tokens render in the dashboard context, not on the light paper sheet.
+          This is the PRIMARY live cockpit — bottleneck callout, session+weekly
+          bars, details collapse. */}
       <AccountUsageTile
         usage={accountUsage.data}
         loading={accountUsage.loading && !accountUsage.data}
@@ -773,31 +699,54 @@ export function StatistikView() {
         config={statsConfig.data ?? DEFAULT_STATS_CONFIG}
       />
 
-      <LatencySection
-        p50={summary.data?.cycle_time_p50_seconds ?? null}
-        p90={summary.data?.cycle_time_p90_seconds ?? null}
-      />
+      <BroadsheetShell>
+        {hasLoadError ? (
+          <EngpassLead tone="warn">
+            <b>{de.stats.loadError}</b>
+          </EngpassLead>
+        ) : null}
 
-      <ReliabilitySection profiles={profiles} />
+        <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
 
-      <ErrorTaxonomySection issues={issueGroups} />
+        <LatencySection
+          p50={summary.data?.cycle_time_p50_seconds ?? null}
+          p90={summary.data?.cycle_time_p90_seconds ?? null}
+        />
 
-      {/* ── ST5: Budget-Ledger (Provider-Limits) + Flotten-Effizienz ───────── */}
-      <BudgetLedgerSection providers={providers} />
+        <ReliabilitySection profiles={profiles} />
 
-      <SubscriptionBurnSection burn={subscriptionBurn.data ?? null} />
+        <ErrorTaxonomySection issues={issueGroups} />
 
-      <EffizienzSection
-        profiles={profiles}
-        costs={costProfiles}
-        chainRate={chain.data?.chain_completion_rate ?? null}
-        queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
-      />
+        {/* ── ST5: Budget-Ledger (Provider-Limits) + Flotten-Effizienz ───────── */}
+        {/* A4: BudgetLedgerSection is a broadsheet-styled summary of the same
+            source. Collapsed under a Details element so the primary cockpit
+            (AccountUsageTile above) is unambiguously the operative view; the
+            ledger format stays available for a printed/broadsheet read. */}
+        <details style={{ marginTop: "8px" }}>
+          <summary className="sb-kick sb-accent" style={{ cursor: "pointer", display: "flex", gap: "8px", alignItems: "center", listStyle: "none", minHeight: "44px" }}>
+            {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
+          </summary>
+          <BudgetLedgerSection providers={providers} />
+        </details>
 
-      {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
-      <MotherLedgerSection />
+        <SubscriptionBurnSection
+          burn={subscriptionBurn.data ?? null}
+          loading={subscriptionBurn.loading && !subscriptionBurn.data}
+          error={subscriptionBurn.error}
+        />
 
-      <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
-    </BroadsheetShell>
+        <EffizienzSection
+          profiles={profiles}
+          costs={costProfiles}
+          chainRate={chain.data?.chain_completion_rate ?? null}
+          queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
+        />
+
+        {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
+        <MotherLedgerSection />
+
+        <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
+      </BroadsheetShell>
+    </>
   );
 }

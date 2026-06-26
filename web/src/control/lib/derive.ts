@@ -226,13 +226,14 @@ export function fmtAge(epochSec: number, now: number = nowSec()): string {
   return `${Math.floor(d / 86400)}d`;
 }
 
-/** Dauer aus Sekunden: "2h 14m" / "4m" / "52s". */
+/** Dauer aus Sekunden: "2h 14m" / "4m 30s" / "52s". */
 export function fmtDur(sec: number): string {
   sec = Math.max(0, Math.floor(sec));
   const hh = Math.floor(sec / 3600);
   const mm = Math.floor((sec % 3600) / 60);
+  const ss = sec % 60;
   if (hh > 0) return `${hh}h ${String(mm).padStart(2, '0')}m`;
-  if (mm > 0) return `${mm}m`;
+  if (mm > 0) return `${mm}m ${ss}s`;
   return `${sec}s`;
 }
 
