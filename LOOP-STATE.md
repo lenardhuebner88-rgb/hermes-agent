@@ -41,7 +41,8 @@ Notes:
 
 ### Round 2 - Gap 7: pid_not_alive death recovery
 
-Status: fixed, targeted gate green, pending commit hash.
+Status: fixed, targeted gate green.
+Commit: `1b3cfd33a`
 
 Mining:
 - Source: read-only `sqlite3.connect("file:/home/piet/.hermes/kanban.db?mode=ro", uri=True)`.
@@ -71,10 +72,42 @@ Green proof after fix:
 Notes:
 - Discord notification intentionally skipped by operator override.
 
+### Round 3 - Gap 5: iteration budget edge after kanban_complete
+
+Status: fixed, targeted gates green, pending commit hash.
+
+Mining:
+- Source: read-only `sqlite3.connect("file:/home/piet/.hermes/kanban.db?mode=ro", uri=True)`.
+- Selected cluster: iteration-budget terminal failures.
+- Impact: `timed_out:iteration_budget` 29 runs / 25 tasks; `gave_up:iteration_budget` 13 runs / 12 tasks; `blocked:iteration_budget` 16 runs / 14 tasks; combined 58 occurrences.
+- Excluded: addressed Round 1 decompose-root finalizer cluster, addressed Round 2 `pid_not_alive` cluster, synthetic stress artifacts, and historical OpenClaw secret/runtime clusters.
+
+Test:
+- `tests/hermes_cli/test_kanban_iteration_budget.py::test_budget_finalizer_honors_terminal_kanban_complete`
+- Mock worker/fake DB path through `complete_task(...)` + `finalize_turn(...)`; no LLM run.
+
+Red proof before fix:
+- Command: `scripts/run_tests.sh tests/hermes_cli/test_kanban_iteration_budget.py`
+- Result: failed, 11 passed / 1 failed.
+- Failure: `finalize_turn` requested budget summary and recorded budget-exhausted failure even though `kanban_complete` had already closed the run as `completed`.
+
+Fix:
+- `agent/turn_finalizer.py`
+- Detect an already accepted Kanban completion at the iteration-budget edge by reading the current task and latest run.
+- If latest run outcome is `completed` and the task is no longer `running`, skip `_handle_max_iterations` and `_record_task_failure`, surface the completion summary, and mark the chat turn completed.
+- Preserve the existing failure path for genuine budget exhaustion with no accepted completion.
+
+Green proof after fix:
+- `scripts/run_tests.sh tests/hermes_cli/test_kanban_iteration_budget.py` -> 12 passed.
+- `scripts/run_tests.sh tests/agent/test_turn_finalizer_cleanup_guard.py` -> 5 passed.
+
+Notes:
+- Discord notification intentionally skipped by operator override.
+
 ## Skipped Clusters
 
 None yet.
 
 ## Next Mining
 
-Round 3 must mine fresh impact from read-only `~/.hermes/kanban.db`, excluding addressed Round 1/2 clusters.
+Round 4 must mine fresh impact from read-only `~/.hermes/kanban.db`, excluding addressed Round 1/2/3 clusters.
