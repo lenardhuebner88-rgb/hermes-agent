@@ -15220,6 +15220,18 @@ def read_escalation_ledger(
         if not isinstance(payload, dict):
             payload = {}
         cls = payload.get("class")
+        # REALBUG-DETOX: pre-b2e387669 dumped opaque failures into real-bug via the
+        # default-else branch (forward-fixed to unclassified). Reclassify the historical
+        # default-sourced real-bug rows read-time so by_class/roots_by_class reflect the
+        # true defect signal. Live evidence (2026-06-26): the default-bucket residue is
+        # operational noise — settled-block, retry-/iteration-budget-exhausted,
+        # token-runaway — never a code defect, so ALL default-sourced rows detox
+        # regardless of a stamped error fingerprint. Genuine real-bugs arrive via a
+        # real signal_source (text/outcome), not "default".
+        if cls == HEILER_CLASS_REAL_BUG:
+            ev = payload.get("evidence")
+            if isinstance(ev, dict) and ev.get("signal_source") == "default":
+                cls = HEILER_CLASS_UNCLASSIFIED
         if class_filter is not None and cls not in class_filter:
             continue
         by_class[cls] = by_class.get(cls, 0) + 1

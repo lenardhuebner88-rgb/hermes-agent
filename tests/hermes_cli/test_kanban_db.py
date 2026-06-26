@@ -13288,6 +13288,85 @@ def test_s4_ledger_by_class_counts_distinct_roots_not_raw_events(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# REALBUG-DETOX: default-sourced real-bug rows are reclassified to unclassified
+# at read time so by_class/roots_by_class reflect the true defect signal.
+# ---------------------------------------------------------------------------
+
+def test_realbug_detox_default_sourced_rows_reclassified_read_time(kanban_home):
+    """REALBUG-DETOX: read_escalation_ledger must re-map real-bug events whose
+    evidence.signal_source == 'default' to 'unclassified' at read time, so the
+    by_class rollup reflects the true defect signal and not the default-bucket
+    residue written by the pre-b2e387669 else-branch.
+
+    Three events:
+      (a) real-bug, signal_source='text'  -> stays real-bug
+      (b) real-bug, signal_source='default' -> reclassified to unclassified
+      (c) transient (no evidence)         -> stays transient
+
+    After the rollup: by_class[real-bug]==1, by_class[unclassified]==1,
+    by_class[transient]==1, and event (b)'s task root must NOT appear in
+    roots_by_class[real-bug].
+    """
+    with kb.connect() as conn:
+        # (a) legitimate real-bug: signal came from a text match, not the default
+        task_a = kb.create_task(conn, title="real gate fail", assignee="coder")
+        kb.add_event(conn, task_a, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_REAL_BUG,
+            "evidence": {"signal_source": "text", "matched": "request_changes"},
+        })
+
+        # (b) default-bucket residue: written by the pre-fix else-branch
+        task_b = kb.create_task(conn, title="default bucket", assignee="coder")
+        kb.add_event(conn, task_b, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_REAL_BUG,
+            "evidence": {"signal_source": "default", "matched": "default"},
+        })
+
+        # (c) genuine transient: unrelated class, no evidence key
+        task_c = kb.create_task(conn, title="transient lock", assignee="coder")
+        kb.add_event(conn, task_c, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_TRANSIENT,
+        })
+
+        # (d) default-bucket residue WITH a stamped fingerprint: operational error
+        # text (e.g. "iteration budget exhausted") got an excerpt -> a fingerprint,
+        # but no real-bug signal. Regression-lock: a fingerprint must NOT exempt a
+        # default-sourced row from detox (live evidence: these are operational noise,
+        # not code defects).
+        task_d = kb.create_task(conn, title="default w/ fingerprint", assignee="coder")
+        kb.add_event(conn, task_d, kb.HEILER_CLASSIFICATION_EVENT,
+                     kb._heiler_classification_payload(
+                         heiler_class=kb.HEILER_CLASS_REAL_BUG,
+                         evidence={"signal_source": "default", "matched": "default",
+                                   "excerpt": "Iteration budget exhausted (90/90)"},
+                         source="test", blocked=True,
+                     ))
+
+        ledger = kb.read_escalation_ledger(conn)
+
+    # Raw by_class counts after detox
+    assert ledger["by_class"].get(kb.HEILER_CLASS_REAL_BUG, 0) == 1, (
+        "only the text-sourced event should count as real-bug"
+    )
+    assert ledger["by_class"].get(kb.HEILER_CLASS_UNCLASSIFIED, 0) == 2, (
+        "both default-sourced rows (b: no fingerprint, d: fingerprinted) must "
+        "reclassify to unclassified — a fingerprint does not exempt detox"
+    )
+    assert ledger["by_class"].get(kb.HEILER_CLASS_TRANSIENT, 0) == 1
+
+    # roots_by_class returns counts of distinct roots per class.
+    # task_b (default-sourced) must be counted under unclassified, not real-bug.
+    # Each task is unlinked so it is its own chain root -> 1 distinct root each.
+    assert ledger["roots_by_class"].get(kb.HEILER_CLASS_REAL_BUG, 0) == 1, (
+        "only task_a's root should count under real-bug"
+    )
+    assert ledger["roots_by_class"].get(kb.HEILER_CLASS_UNCLASSIFIED, 0) == 2, (
+        "task_b + task_d roots counted under unclassified, not real-bug"
+    )
+    assert ledger["roots_by_class"].get(kb.HEILER_CLASS_TRANSIENT, 0) == 1
+
+
+# ---------------------------------------------------------------------------
 # REALBUG-RECURRENCE-CLUSTER-S1: the existing _error_fingerprint is stamped into
 # the heiler_classification payload, and read_escalation_ledger groups recurring
 # real-bug escalations by that signature (observability rollup, no gate). The
@@ -13299,7 +13378,7 @@ def _emit_real_bug(conn, task_id, excerpt):
     production helper (so the fingerprint stamping is exercised, not faked)."""
     payload = kb._heiler_classification_payload(
         heiler_class=kb.HEILER_CLASS_REAL_BUG,
-        evidence={"matched": "default", "signal_source": "default",
+        evidence={"matched": "tests failed", "signal_source": "text",
                   "excerpt": excerpt},
         source="test", blocked=True,
     )
