@@ -230,8 +230,11 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/aria-label=\{`Details für PlanSpec \$\{item\.topic\} öffnen`\}/);
   });
 
-  it("keeps the PlanSpec hub at the bottom of the Flow tab", () => {
-    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeGreaterThan(src.indexOf("<DeliveredList"));
+  it("places the PlanSpec hub before the active-chain board (C2: Ingest-Einstiegspunkt nach oben)", () => {
+    // C2: PlanSpecHub ist jetzt VOR den aktiven Ketten (war früher ganz unten).
+    // Damit ist er der erste Schritt für neue Arbeit — nicht der letzte.
+    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeGreaterThan(src.indexOf("<CapacityBanner"));
+    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeLessThan(src.indexOf("<DeliveredList"));
     expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeLessThan(src.indexOf("{detailSheetOpen && selectedId ?"));
   });
 
@@ -295,5 +298,33 @@ describe("FlowView Phase C operator levers (chain-start)", () => {
     expect(src).toMatch(/Review: /);
     // the staged-review pill uses the indigo tone
     expect(src).toMatch(/tone="indigo"/);
+  });
+});
+
+describe("FlowView attention band — real triage/funnel counts (C1 honesty)", () => {
+  it("imports the real count helpers from flowAttention", () => {
+    expect(src).toMatch(/countActionableFailures/);
+    expect(src).toMatch(/countOpenFunnelDrafts/);
+  });
+
+  it("uses the real polling hooks for triage failures and funnel drafts", () => {
+    expect(src).toMatch(/useFlowTriageFailures/);
+    expect(src).toMatch(/useFunnelDrafts/);
+  });
+
+  it("passes real triageCount to summarizeFlowAttention (not hardcoded 0)", () => {
+    // The hardcoded zeros must be gone; the counts come from the hook data.
+    expect(src).not.toMatch(/triageCount: 0,.*intern in TriageStrip/);
+    expect(src).not.toMatch(/funnelCount: 0,.*intern in FunnelFreigaben/);
+    // The real calls use the guard pattern (data !== null ? count(...) : 0).
+    expect(src).toMatch(/triageFailures\.data !== null \? countActionableFailures/);
+    expect(src).toMatch(/funnelDrafts\.data !== null \? countOpenFunnelDrafts/);
+  });
+
+  it("tracks attentionLoading so affirmative quiet is gated until both sources loaded", () => {
+    expect(src).toMatch(/attentionLoading/);
+    expect(src).toMatch(/triageFailures\.data === null \|\| funnelDrafts\.data === null/);
+    // The render gate must suppress quiet-only state while loading.
+    expect(src).toMatch(/!attentionSummary\.quiet \|\| !attentionLoading/);
   });
 });

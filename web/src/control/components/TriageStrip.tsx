@@ -194,8 +194,8 @@ export function TriageStrip() {
                           <RotateCw className="h-3.5 w-3.5" />{t.retry}
                         </button>
                       )}
-                      <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "escalate" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-amber-500/30 px-3 py-1 text-[0.78rem] text-amber-200 hover:bg-amber-500/10">
-                        <Zap className="h-3.5 w-3.5" />{t.escalate}
+                      <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "escalate" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[0.78rem] text-amber-200 hover:brightness-110">
+                        <AlertTriangle className="h-3.5 w-3.5" />{t.escalate}
                       </button>
                       {requeue.requeued ? (
                         <span className="text-[0.72rem] hc-dim">{t.escalateQueuedHint}</span>

@@ -78,7 +78,7 @@ export function EpicCreate({ onCreated }: { onCreated?: () => void }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3.5 py-1.5 text-sm font-medium text-indigo-200 transition hover:bg-indigo-400/20"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3.5 text-sm font-medium text-indigo-200 transition hover:bg-indigo-400/20 sm:min-h-9"
       >
         <Layers className="h-4 w-4" />
         <span className="hidden sm:inline">{de.flow.epicCreate.button}</span>

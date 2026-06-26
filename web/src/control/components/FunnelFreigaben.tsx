@@ -284,10 +284,12 @@ export function FreigabenList({
                     </>
                   ) : (
                     <>
-                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "approve" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
+                      {/* Primäraktion: Freigeben hat explizites Primary-Gewicht */}
+                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "approve" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-3 py-1 text-[0.78rem] font-semibold text-emerald-100 hover:brightness-110">
                         <Rocket className="h-3.5 w-3.5" />{t.approve}
                       </button>
-                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "dismiss" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-red-500/25 px-3 py-1 text-[0.78rem] text-red-200 hover:bg-red-500/10">
+                      {/* Sekundäre Aktionen — optisch zurückgesetzt */}
+                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "dismiss" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-red-500/20 px-3 py-1 text-[0.78rem] text-red-300/80 hover:bg-red-500/10">
                         <Trash2 className="h-3.5 w-3.5" />{t.dismiss}
                       </button>
                     </>
@@ -295,7 +297,7 @@ export function FreigabenList({
                   <button
                     type="button"
                     onClick={() => onEdit(d)}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-md border border-amber-400/25 px-3 py-1 text-[0.78rem] text-amber-100 hover:bg-amber-400/10"
+                    className="inline-flex min-h-9 items-center gap-1 rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft hover:bg-white/5"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                     {t.edit}

@@ -2081,6 +2081,47 @@ export function useStrategistLastRuns() {
   );
 }
 
+// ── Flow attention counts ────────────────────────────────────────────────────
+// These two hooks feed the FlowView hero attention band with real counts.
+// They are lightweight (count only, ~10s interval) and read-only; the
+// components below (TriageStrip, FunnelFreigaben) continue to poll the same
+// endpoints independently for their own rendering — that duplication is
+// intentional (read-only, single operator, low risk).
+
+export interface FlowTriageFailuresResponse {
+  failures: { run_id: number; task_id: string }[];
+}
+
+export interface FlowFunnelDraftsResponse {
+  drafts: { id: string }[];
+}
+
+export function useFlowTriageFailures() {
+  return usePolling<FlowTriageFailuresResponse>(
+    "kanban/flow-triage-failures",
+    async () => {
+      const raw = await fetchJSON<FlowTriageFailuresResponse>(
+        "/api/plugins/kanban/runs/failures?hours=48&limit=20",
+      );
+      return raw;
+    },
+    10000,
+  );
+}
+
+export function useFunnelDrafts() {
+  return usePolling<FlowFunnelDraftsResponse>(
+    "kanban/flow-funnel-drafts",
+    async () => {
+      const raw = await fetchJSON<FlowFunnelDraftsResponse>(
+        "/api/plugins/kanban/funnel/drafts?days=30",
+      );
+      return raw;
+    },
+    10000,
+  );
+}
+
 // ── Disposition-Items (FRD Phase 3b) ────────────────────────────────────────
 export function useDispositionItems() {
   return usePolling<DispositionListResponse>(

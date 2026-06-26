@@ -36,13 +36,17 @@ import {
   type StageAction,
 } from "../lib/fleet";
 import { getFlowSubtaskStatusExplanation } from "../lib/flowStatus";
+import { countActionableFailures, countOpenFunnelDrafts, summarizeFlowAttention } from "../lib/flowAttention";
 import { getHeldFlowDispatchGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
 import {
   useBoard,
+  useDispositionItems,
   useEpicActions,
   useEpics,
   useFlowGate,
   useFlowRelease,
+  useFlowTriageFailures,
+  useFunnelDrafts,
   useKanbanDecisionQueue,
   useHermesBlockedCompletions,
   useHermesRecentResults,
@@ -137,7 +141,7 @@ function recoveryDecisionMeta(kind: string): { label: string; tone: ToneName; do
     case "rate_limited_loop":
       return { label: "Rate-Limit Loop", tone: "red", dot: "error" };
     case "release_gate_parked":
-      return { label: "Release-Gate", tone: "cyan", dot: "warn" };
+      return { label: "Kette bereit", tone: "violet", dot: "idle" };
     case "tree_root_woke":
       return { label: "Root wach", tone: "emerald", dot: "ready" };
     case "decompose_failed":
@@ -427,7 +431,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   <p title={item.path} className="mt-1 line-clamp-1 break-all hc-mono hc-type-label hc-dim">{item.path}</p>
                 </div>
                 <div className="col-span-2 sm:col-span-1 sm:col-start-3">
-                  <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "warn" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
+                  <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "live" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
                 </div>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 overflow-hidden">
@@ -981,7 +985,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                   releaseLevel === level ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
                 )}
               >
-                {level === "merge" ? "Merge" : "Live"}
+                {level === "merge" ? de.flow.plan.releaseLevelMerge : de.flow.plan.releaseLevelLive}
               </button>
             ))}
           </div>
@@ -1024,7 +1028,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                       onChange={(e) => setAssigneeOverrides((prev) => ({ ...prev, [c.id]: e.target.value }))}
                       className="min-h-8 max-w-40 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-[var(--hc-text)]"
                     >
-                      <option value="">Unassigned</option>
+                      <option value="">Nicht zugewiesen</option>
                       {profiles.map((profile) => <option key={profile} value={profile}>{profileLabel[profile] ?? profile}</option>)}
                     </select>
                   ) : null}
@@ -1041,33 +1045,40 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
         </ul>
       ) : null}
 
-      {heldCount > 0 ? (
+      {/* Gate-Levers: sichtbar sobald gate.data geladen (auch wenn heldCount=0),
+          damit der Operator Lane/Tier/Scout nach dem Dispatch noch einsehen kann.
+          Dispatch-Button bleibt deaktiviert wenn kein gehaltenener Subtask vorhanden. */}
+      {gate.data != null || heldCount > 0 ? (
         <div className="mt-2.5">
-          <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={gate.busy || selectedSizing.length !== 2}
-              onClick={mergeSelected}
-              className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
-            >
-              Merge
-            </button>
-            <input
-              value={splitTitle}
-              onChange={(e) => setSplitTitle(e.target.value)}
-              placeholder="Split-Titel"
-              className="min-h-9 min-w-0 flex-1 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-[var(--hc-text)] placeholder:text-[var(--hc-text-dim)]"
-            />
-            <button
-              type="button"
-              disabled={gate.busy || selectedSizing.length !== 1 || !splitTitle.trim()}
-              onClick={splitSelected}
-              className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
-            >
-              Split
-            </button>
-          </div>
-          <p className="mb-2 hc-type-label hc-dim">{de.flow.plan.hintSizing}</p>
+          {heldCount > 0 ? (
+            <>
+              <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={gate.busy || selectedSizing.length !== 2}
+                  onClick={mergeSelected}
+                  className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
+                >
+                  Merge
+                </button>
+                <input
+                  value={splitTitle}
+                  onChange={(e) => setSplitTitle(e.target.value)}
+                  placeholder="Split-Titel"
+                  className="min-h-9 min-w-0 flex-1 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-[var(--hc-text)] placeholder:text-[var(--hc-text-dim)]"
+                />
+                <button
+                  type="button"
+                  disabled={gate.busy || selectedSizing.length !== 1 || !splitTitle.trim()}
+                  onClick={splitSelected}
+                  className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
+                >
+                  Split
+                </button>
+              </div>
+              <p className="mb-2 hc-type-label hc-dim">{de.flow.plan.hintSizing}</p>
+            </>
+          ) : null}
           <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
             {laneOptions.length ? (
               <label className="inline-flex items-center gap-1.5 hc-type-label hc-soft">
@@ -1075,7 +1086,8 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                 <select
                   value={laneAll}
                   onChange={(e) => setLaneAll(e.target.value)}
-                  className="min-h-8 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-[var(--hc-text)]"
+                  disabled={heldCount === 0}
+                  className="min-h-8 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-[var(--hc-text)] disabled:opacity-50"
                 >
                   <option value="">unverändert</option>
                   {laneOptions.map((p) => <option key={p} value={p}>{profileLabel[p] ?? p}</option>)}
@@ -1088,10 +1100,11 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                 <button
                   key={tier}
                   type="button"
+                  disabled={heldCount === 0}
                   aria-pressed={reviewTier === tier}
                   onClick={() => setReviewTier((prev) => (prev === tier ? "" : tier))}
                   className={cn(
-                    "inline-flex min-h-8 items-center rounded-full border px-2.5 hc-type-label transition",
+                    "inline-flex min-h-8 items-center rounded-full border px-2.5 hc-type-label transition disabled:opacity-50",
                     reviewTier === tier
                       ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
                       : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
@@ -1105,27 +1118,34 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
               <input
                 type="checkbox"
                 checked={injectScout}
+                disabled={heldCount === 0}
                 onChange={(e) => setInjectScout(e.target.checked)}
-                className="h-3.5 w-3.5 accent-[var(--hc-accent)]"
+                className="h-3.5 w-3.5 accent-[var(--hc-accent)] disabled:opacity-50"
               />
               Scout-Vorlauf
             </label>
           </div>
           <p className="mb-1 hc-type-label hc-dim">{de.flow.plan.hintReviewTier}</p>
           <p className="mb-1 hc-type-label hc-dim">{de.flow.plan.hintScout}</p>
-          {confirming ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="hc-type-label hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
-              <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount, releaseOptions); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : `${de.flow.plan.releaseConfirmButton} · ${releaseLevel}`}</button>
-              <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft">Abbrechen</button>
-            </div>
-          ) : (
-            <button type="button" disabled={releaseBusy} onClick={() => setConfirming(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs font-medium text-emerald-100 transition hover:brightness-110 disabled:opacity-40">
-              <Play className="h-3.5 w-3.5" />{de.flow.plan.release} · {de.flow.plan.subtasksOf(heldCount)}
-            </button>
-          )}
-          <p className="mt-1.5 flex items-center gap-1.5 hc-type-label hc-dim"><Lock className="h-3 w-3" />{de.flow.plan.heldGate}</p>
-          <p className="mt-1 hc-type-label hc-dim">Kette starten gibt gehaltene Subtasks frei; Queue/Assignee und Dependencies entscheiden den tatsächlichen Start.</p>
+          {heldCount > 0 ? (
+            confirming ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="hc-type-label hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
+                <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount, releaseOptions); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : `${de.flow.plan.releaseConfirmButton} · ${releaseLevel}`}</button>
+                <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft">Abbrechen</button>
+              </div>
+            ) : (
+              <button type="button" disabled={releaseBusy} onClick={() => setConfirming(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs font-medium text-emerald-100 transition hover:brightness-110 disabled:opacity-40">
+                <Play className="h-3.5 w-3.5" />{de.flow.plan.release} · {de.flow.plan.subtasksOf(heldCount)}
+              </button>
+            )
+          ) : null}
+          {heldCount > 0 ? (
+            <>
+              <p className="mt-1.5 flex items-center gap-1.5 hc-type-label hc-dim"><Lock className="h-3 w-3" />{de.flow.plan.heldGate}</p>
+              <p className="mt-1 hc-type-label hc-dim">Kette starten gibt gehaltene Subtasks frei; Queue/Assignee und Dependencies entscheiden den tatsächlichen Start.</p>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -1137,6 +1157,8 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
 }
 
 function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: BoardTask; detail?: TaskDetailResponse; boardTasks: BoardTask[]; snapshotLabel: string }) {
+  // useState muss vor dem frühen return stehen (React-Hooks-Regel: bedingte Hooks verboten).
+  const [chainInsightOpen, setChainInsightOpen] = useState(false);
   const links = detail?.links;
   const parentIds = links?.parents ?? [];
   const childIds = links?.children ?? [];
@@ -1172,39 +1194,59 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
     <div className="mt-4 rounded-lg border border-sky-400/25 bg-sky-500/[.06] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Eyebrow>Ketten-Kontext</Eyebrow>
-        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">Snapshot · read-only</span>
         <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">Snapshot-Alter: {snapshotLabel}</span>
       </div>
-      <p className="mt-1.5 hc-type-label hc-dim">{parallelNote}</p>
+      {/* Zwei handlungsorientierte Sektionen */}
       <div className="mt-2 grid gap-2">
-        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="hc-eyebrow text-sky-100">Gehalten</p>
-          <p className="mt-1 break-words text-[0.75rem] hc-soft">{heldTasks.length ? heldTasks.map(taskLine).join(" · ") : "Keine gehaltenen direkten Nachbarn im Snapshot."}</p>
-        </div>
-        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="hc-eyebrow text-emerald-100">Ready-Nachbar im Snapshot</p>
-          <p className="mt-1 break-words text-[0.75rem] hc-soft">{readyTasks.length ? readyTasks.map(taskLine).join(" · ") : "Kein ready-Nachbar im Snapshot; keine Scheduler-Zusage."}</p>
-        </div>
-        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="hc-eyebrow text-cyan-100">Läuft bereits</p>
-          <p className="mt-1 break-words text-[0.75rem] hc-soft">{runningTasks.length ? runningTasks.map(taskLine).join(" · ") : "Kein direkter Nachbar läuft im Snapshot."}</p>
-        </div>
-        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="hc-eyebrow text-amber-100">Mögliche Vorgänger</p>
-          <p className="mt-1 break-words text-[0.75rem] hc-soft">{predecessorHintLine}</p>
-        </div>
-        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="hc-eyebrow text-amber-100">Mögliche Nachfolger mit Wartestatus</p>
-          <p className="mt-1 break-words text-[0.75rem] hc-soft">{waitingDependents.length ? waitingDependents.map(taskLine).join(" · ") : "Keine möglichen Nachfolger mit Wartestatus im Snapshot."}</p>
-        </div>
+        <section aria-label="Was blockiert?" className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+          <p className="hc-eyebrow text-red-200">Was blockiert?</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">
+            {heldTasks.length
+              ? `Gehalten: ${heldTasks.map(taskLine).join(" · ")}`
+              : possibleActivePredecessors.length
+                ? `Mögliche Vorgänger aktiv: ${possibleActivePredecessors.map(taskLine).join(" · ")}`
+                : "Keine Blockierung im Snapshot erkennbar."}
+          </p>
+          {hasAmbiguousTodo ? <p className="mt-1 break-words hc-type-label text-amber-200">Hinweis: todo ist uneindeutig; es kann Dependency-Warten, manuelles Backlog oder Dispatcher-Queue sein.</p> : null}
+        </section>
+        <section aria-label="Was kommt als nächstes?" className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+          <p className="hc-eyebrow text-emerald-100">Was kommt als nächstes?</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">
+            {runningTasks.length
+              ? `Läuft bereits: ${runningTasks.map(taskLine).join(" · ")}`
+              : readyTasks.length
+                ? `Ready-Nachbar im Snapshot: ${readyTasks.map(taskLine).join(" · ")}`
+                : waitingDependents.length
+                  ? `Mögliche Nachfolger warten: ${waitingDependents.map(taskLine).join(" · ")}`
+                  : "Kein ready-Nachbar im Snapshot; keine Scheduler-Zusage."}
+          </p>
+        </section>
       </div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {parentTasks.map((p) => <StatusPill key={`p-${p.id}`} tone={statusTone(p.status)} label={`Möglicher Vorgänger ${taskStatusLabel[p.status] ?? p.status}`} />)}
-        {childTasks.map((c) => <StatusPill key={`c-${c.id}`} tone={statusTone(c.status)} label={`Möglicher Nachfolger ${taskStatusLabel[c.status] ?? c.status}`} />)}
-      </div>
-      {unknownIds.length ? <p className="mt-2 break-words hc-type-label hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
-      {parentIds.length ? <p className="mt-2 hc-type-label hc-dim">Snapshot-Hinweis: rohe Detail-Links zeigen Nähe, aber keinen sicheren Blockierungsgrund.</p> : null}
-      {hasAmbiguousTodo ? <p className="mt-2 hc-type-label text-amber-200">Hinweis: todo ist uneindeutig; es kann Dependency-Warten, manuelles Backlog oder Dispatcher-Queue sein.</p> : null}
+      {/* Detail-Toggle: technische Daten für Debugging */}
+      <button
+        type="button"
+        aria-expanded={chainInsightOpen}
+        onClick={() => setChainInsightOpen((v) => !v)}
+        className="mt-2 inline-flex items-center gap-1 hc-type-label hc-dim hover:text-[var(--hc-text-soft)]"
+      >
+        {chainInsightOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        Details
+      </button>
+      {chainInsightOpen ? (
+        <div className="mt-2 grid gap-1.5">
+          <p className="hc-type-label hc-dim">{parallelNote}</p>
+          <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+            <p className="hc-eyebrow text-amber-100">Mögliche Vorgänger</p>
+            <p className="mt-1 break-words text-[0.75rem] hc-soft">{predecessorHintLine}</p>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {parentTasks.map((p) => <StatusPill key={`p-${p.id}`} tone={statusTone(p.status)} label={`Möglicher Vorgänger ${taskStatusLabel[p.status] ?? p.status}`} />)}
+            {childTasks.map((c) => <StatusPill key={`c-${c.id}`} tone={statusTone(c.status)} label={`Möglicher Nachfolger ${taskStatusLabel[c.status] ?? c.status}`} />)}
+          </div>
+          {unknownIds.length ? <p className="break-words hc-type-label hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
+          {parentIds.length ? <p className="hc-type-label hc-dim">Snapshot-Hinweis: rohe Detail-Links zeigen Nähe, aber keinen sicheren Blockierungsgrund.</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2065,6 +2107,25 @@ export function FlowView() {
 
   const counts = useMemo(() => flowCounts(filteredTasks), [filteredTasks]);
   const fresh = freshness(board.lastUpdated, 8000, now);
+
+  // C1: Aufmerksamkeits-Aggregation — zählt offene Entscheidungs-Queues
+  // für die Hero-Aufmerksamkeitszeile. Triage/Funnel werden jetzt separat
+  // gepollt (10s, read-only) damit die Zeile echte Zahlen zeigt.
+  // Ehrlichkeits-Regel: solange triage/funnel noch nicht geladen sind (data===null)
+  // bleibt ihr Count auf 0 — die Zeile zeigt dann keine affirmative Entwarnung
+  // (attentionLoading=true → Zeile wird unterdrückt, s. Render unten).
+  const decisionQueue = useKanbanDecisionQueue();
+  const dispositionItems = useDispositionItems();
+  const triageFailures = useFlowTriageFailures();
+  const funnelDrafts = useFunnelDrafts();
+  const attentionLoading = triageFailures.data === null || funnelDrafts.data === null;
+  const attentionSummary = useMemo(() => summarizeFlowAttention({
+    recoveryCount: (decisionQueue.data?.decisions ?? []).filter((d) => !RECOVERY_HIDDEN_KINDS.has(d.kind)).length,
+    triageCount: triageFailures.data !== null ? countActionableFailures(triageFailures.data) : 0,
+    funnelCount: funnelDrafts.data !== null ? countOpenFunnelDrafts(funnelDrafts.data) : 0,
+    dispositionCount: (dispositionItems.data?.items ?? []).length,
+    blockedCount: counts.blocked,
+  }), [decisionQueue.data, dispositionItems.data, triageFailures.data, funnelDrafts.data, counts.blocked]);
   const hasAnyFiltered = filteredTasks.some((t) => t.status !== "archived");
 
   // F4: Queue-Tiefe = ready+todo Tasks über alle (ungefilterten) Tasks.
@@ -2196,6 +2257,45 @@ export function FlowView() {
         </div>
       </Hero>
 
+      {/* C1: Aufmerksamkeitszeile — zeigt welche Queues nicht leer sind.
+           Ehrlichkeit: die grüne Entwarnung erscheint NUR wenn ALLE Daten
+           geladen sind (attentionLoading=false). Solange triage/funnel noch
+           nicht geantwortet haben, wird die Zeile weggelassen statt fälschlich
+           "Nichts wartet auf dich." zu zeigen. Nicht-leere Queues werden immer
+           sofort angezeigt (nur quiet-State ist gated). */}
+      {!loadingFirst && (!attentionSummary.quiet || !attentionLoading) ? (
+        <div
+          data-testid="flow-attention-band"
+          className={cn(
+            "flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border px-3 py-2 text-xs",
+            attentionSummary.quiet
+              ? "border-emerald-500/20 bg-emerald-500/[.06] text-emerald-200"
+              : "border-amber-500/20 bg-amber-500/[.06] text-amber-100",
+          )}
+        >
+          {attentionSummary.quiet ? (
+            <span>{attentionSummary.line}</span>
+          ) : (
+            <>
+              {attentionSummary.segments.map((seg) => (
+                <a
+                  key={seg.anchorId}
+                  href={`#${seg.anchorId}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    document.getElementById(seg.anchorId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
+                  className="inline-flex items-center gap-1 underline-offset-2 hover:underline"
+                >
+                  <span className="font-semibold tabular-nums">{seg.count}</span>
+                  <span>{seg.label}</span>
+                </a>
+              ))}
+            </>
+          )}
+        </div>
+      ) : null}
+
       {board.error ? <ToneCallout tone="red">{de.flow.loadError}<br />{board.error}</ToneCallout> : null}
       {boardSourceErrors.length ? (
         <ToneCallout tone="amber">
@@ -2210,7 +2310,7 @@ export function FlowView() {
         </ToneCallout>
       ) : null}
 
-      <RecoveryStrip />
+      <div id="flow-section-recovery"><RecoveryStrip /></div>
 
       {/* F4: Kapazitäts-/Engpass-Banner — schlanke Leiste, nur wenn Worker
           aktiv oder Tasks warten; amber wenn Engpass (alle belegt + Queue > 0). */}
@@ -2222,18 +2322,22 @@ export function FlowView() {
         />
       ) : null}
 
+      {/* C2: PlanSpecHub nach oben — PlanSpec-Ingest ist der Einstiegspunkt
+          neuer Arbeit; gehört vor die aktiven Ketten, nicht ans Ende. */}
+      <PlanSpecHub onIngested={onCaptured} />
+
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
           nichts, wenn es nichts zu triagieren gibt. */}
-      <TriageStrip />
+      <div id="flow-section-triage"><TriageStrip /></div>
 
       {/* Funnel-Freigaben — fertige Drafts aus dem Wunsch-Trichter, die auf
           den Operator-Klick warten (Freigeben = Build-Task als Ketten-Kind). */}
-      <FunnelFreigaben />
+      <div id="flow-section-funnel"><FunnelFreigaben /></div>
 
       {/* Disposition-Items — offene Follow-ups & Risiken aus abgeschlossenen
           Tasks, die auf eine Operator-Entscheidung warten (Phase 3b). */}
-      <DispositionLifecycle />
+      <div id="flow-section-disposition"><DispositionLifecycle /></div>
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
           Runaway-Wache und vollen Aktionen (alle confirm-gated). Ruht die
@@ -2304,7 +2408,7 @@ export function FlowView() {
               <>
                 {/* Aktive Ketten — die primäre Einheit des Boards */}
                 {chainBoard.active.length ? (
-                  <section>
+                  <section id="flow-section-blocked">
                     <div className="flex flex-wrap items-center gap-2">
                       <Eyebrow>{de.flow.chainsHeading}</Eyebrow>
                       <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{chainBoard.active.length}</span>
@@ -2423,8 +2527,6 @@ export function FlowView() {
           </div>
         </div>
       )}
-
-      <PlanSpecHub onIngested={onCaptured} />
 
       {detailSheetOpen && selectedId ? (
         <FlowDetailSheet taskId={selectedId} taskTitle={selectedTask?.title} onClose={() => setDetailSheetOpen(false)}>

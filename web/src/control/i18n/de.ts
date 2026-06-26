@@ -298,6 +298,8 @@ export const de = {
       releaseConfirmButton: "Kette starten",
       releaseBusy: "Gebe frei …",
       released: (n: number) => `${n} Subtask${n === 1 ? "" : "s"} freigegeben`,
+      releaseLevelMerge: "Merge",
+      releaseLevelLive: "Live",
       // Round D: Erklärungs-Hints für den Kette-starten-Panel
       hintReleaseLevelMerge: "Merge: arbeitet auf eigenem Branch, am Ende zusammengeführt",
       hintReleaseLevelLive: "Live: direkt auf den Hauptstand — kein separater Branch",
