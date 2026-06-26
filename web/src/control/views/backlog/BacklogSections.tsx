@@ -3,7 +3,7 @@ import { Keyboard, LayoutGrid, List } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FoBacklogCard } from "../../components/FoBacklogCard";
 import { StatusPill, ToneCallout } from "../../components/atoms";
-import { Card, Disclosure, Panel, Section, SkeletonCard, Stat, Stagger, StaggerItem } from "../../components/primitives";
+import { Card, Disclosure, Panel, Section, SkeletonCard, Stagger, StaggerItem } from "../../components/primitives";
 import { de } from "../../i18n/de";
 import {
   buildFoCommissionPrompt,
@@ -47,24 +47,31 @@ export function BacklogHeroPanel({
         <>
           <div className="mr-2 text-xs hc-soft">{loading ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
           <CopyButton text={auditPrompt} label={de.backlog.audit} copiedLabel={de.backlog.auditCopied} />
-          <button type="button" onClick={() => onViewMode("queue")} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "queue" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Queue">
+          <button type="button" onClick={() => onViewMode("queue")} aria-label="Queue-Ansicht" aria-pressed={viewMode === "queue"} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "queue" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Queue">
             <List className="h-4 w-4" />
           </button>
-          <button type="button" onClick={() => onViewMode("board")} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "board" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Board">
+          <button type="button" onClick={() => onViewMode("board")} aria-label="Board-Ansicht" aria-pressed={viewMode === "board"} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "board" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Board">
             <LayoutGrid className="h-4 w-4" />
           </button>
         </>
       }
     >
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_120px] md:items-end">
-        <div>
-          {activeTotal > 0 ? (
-            <p className="text-xs hc-soft">{de.backlog.summaryBreakdown(breakdown.now, breakdown.next, breakdown.in_progress, breakdown.blocked, breakdown.later)}</p>
-          ) : (
-            <p className="text-xs hc-soft">{de.backlog.subtitle}</p>
-          )}
-        </div>
-        <Stat label="Aktiv" value={activeTotal} hint={`${doneTotal} done`} accent />
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center" aria-label="Backlog Zusammenfassung">
+        <p className="text-xs leading-relaxed hc-soft">
+          {activeTotal > 0
+            ? de.backlog.summaryBreakdown(breakdown.now, breakdown.next, breakdown.in_progress, breakdown.blocked, breakdown.later)
+            : de.backlog.subtitle}
+        </p>
+        <dl className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:flex sm:flex-wrap lg:justify-end">
+          <div className="rounded-md border border-cyan-400/25 bg-cyan-500/[.08] px-3 py-2">
+            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] text-cyan-700">Aktiv</dt>
+            <dd className="hc-mono text-lg font-semibold tabular-nums text-[var(--hc-text)]">{activeTotal}</dd>
+          </div>
+          <div className="rounded-md border border-[var(--hc-border)] bg-white/[.03] px-3 py-2">
+            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">Erledigt</dt>
+            <dd className="hc-mono text-lg font-semibold tabular-nums text-[var(--hc-text)]">{doneTotal}</dd>
+          </div>
+        </dl>
       </div>
     </Panel>
   );

@@ -106,12 +106,14 @@ function AccountProviderCard({
   const hasExtras = others.length > 0 || provider.details.length > 0;
   return (
     <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-white">{configuredProviderLabel(config, provider.provider) || fallbackProviderLabel(provider.provider)}</p>
           {provider.plan ? <p className="text-xs hc-dim">{provider.plan}</p> : null}
         </div>
-        <StatusPill tone={tone} label={provider.cached ? "Cache" : "Live"} dot="live" />
+        <div className="justify-self-end">
+          <StatusPill tone={tone} label={provider.cached ? "Cache" : "Live"} dot="live" />
+        </div>
       </div>
       <div className="mt-3 space-y-1.5">
         {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}

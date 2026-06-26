@@ -106,6 +106,14 @@ describe("AccountUsageTile", () => {
     expect(html).toContain("281 Runs");
   });
 
+  it("haelt den Cache/Live-Status in einer eigenen Header-Spalte", () => {
+    const html = renderToStaticMarkup(<AccountUsageTile usage={usage} loading={false} error={null} />);
+
+    expect(html).toContain("grid-cols-[minmax(0,1fr)_auto]");
+    expect(html).toContain("min-w-0");
+    expect(html).toContain("justify-self-end");
+  });
+
   it("zeigt ein kompaktes Ladegerüst, bevor usePolling Daten liefert", () => {
     const html = renderToStaticMarkup(<AccountUsageTile usage={null} loading error={null} />);
 

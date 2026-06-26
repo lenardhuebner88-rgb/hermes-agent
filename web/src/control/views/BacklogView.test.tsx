@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FoBacklogQueueTable, FoHealthStrip, ReasonChips } from "./BacklogView";
+import { BacklogHeroPanel } from "./backlog/BacklogSections";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
 import type { CommissionState, DispatchFoState, FoBoardStatus } from "../hooks/useControlData";
 
@@ -121,6 +122,47 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).toContain("Status now");
     expect(html).toContain("Hohes Risiko");
     expect(html).toContain("Kein Owner");
+  });
+
+  it("names the queue/board view-mode buttons for assistive tech", () => {
+    const html = renderToStaticMarkup(
+      <BacklogHeroPanel
+        activeTotal={3}
+        doneTotal={190}
+        breakdown={{ now: 1, next: 1, in_progress: 0, blocked: 1, later: 0 }}
+        loading={false}
+        nowSec={1770000000}
+        auditPrompt="audit"
+        viewMode="queue"
+        onViewMode={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Queue-Ansicht"');
+    expect(html).toContain('aria-label="Board-Ansicht"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('aria-pressed="false"');
+  });
+
+  it("keeps the Backlog hero compact so the queue starts earlier", () => {
+    const html = renderToStaticMarkup(
+      <BacklogHeroPanel
+        activeTotal={3}
+        doneTotal={190}
+        breakdown={{ now: 1, next: 1, in_progress: 0, blocked: 1, later: 0 }}
+        loading={false}
+        nowSec={1770000000}
+        auditPrompt="audit"
+        viewMode="queue"
+        onViewMode={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Backlog Zusammenfassung"');
+    expect(html).toContain("Aktiv");
+    expect(html).toContain("Erledigt");
+    expect(html).toContain("1 jetzt");
+    expect(html).not.toContain("hc-type-display");
   });
 
   // S4 — error-state visibility tests: commission and dispatch failures must be
