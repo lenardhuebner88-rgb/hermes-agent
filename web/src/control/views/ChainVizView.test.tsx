@@ -264,16 +264,22 @@ describe("MotherLedger source contract", () => {
     expect(hooksSrc).toMatch(/runs\/windowed-rollup/);
   });
 
-  it("renders required controls and USD inkl. Cache labels", () => {
+  it("renders required controls and the redesigned Abo/Echt labels", () => {
     expect(statsSrc).toMatch(/7T/);
     expect(statsSrc).toMatch(/24Std/);
-    expect(statsSrc).toMatch(/USD inkl\. Cache/);
+    expect(statsSrc).toMatch(/motherLedgerHeroAbo/);
+    expect(statsSrc).toMatch(/motherLedgerHeroReal/);
+    expect(statsSrc).toMatch(/motherLedgerColAbo/);
+    expect(statsSrc).toMatch(/motherLedgerColReal/);
     expect(statsSrc).toMatch(/sortKey === "tokens"/);
     expect(statsSrc).toMatch(/sortKey === "runs"/);
   });
 
-  it("renders S3 detail labels for actual cost, billing mode, runtime and estimates", () => {
-    expect(statsSrc).toMatch(/USD echt\/metered/);
+  it("renders S3 detail labels for separate Abo/real cost, billing mode, runtime and estimates", () => {
+    expect(statsSrc).toMatch(/cost_usd_equivalent/);
+    expect(statsSrc).toMatch(/cost_usd/);
+    expect(statsSrc).toMatch(/motherLedgerAboMarker/);
+    expect(statsSrc).toMatch(/motherLedgerRealShort/);
     expect(statsSrc).toMatch(/billing_mode/);
     expect(statsSrc).toMatch(/Laufzeit/);
     expect(statsSrc).toMatch(/gesch\./);

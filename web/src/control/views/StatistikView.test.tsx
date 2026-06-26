@@ -321,13 +321,17 @@ describe("MotherLedgerSection", () => {
     const html = renderToStaticMarkup(<MotherLedgerSection />);
 
     expect(html).toContain("Mother A");
-    expect(html).toContain("coder");
+    expect(html).toContain("Kettenkosten — pro Worker");
+    expect(html).toContain("Abo-Wert verbraucht · 7T");
+    expect(html).toContain("Echt ausgegeben · 7T");
     expect(html).toContain("$0.42");
-    expect(html).toContain("Letzte Daten angezeigt");
+    expect(html).toContain("gesch.");
+    expect(html).toContain("echt —");
+    expect(html).toContain("Cache/Backend gerade nicht frisch; zeige letzten erfolgreichen Stand.");
     expect(html).not.toContain("Kosten konnten nicht geladen werden");
   });
 
-  it("zeigt in Läufer-Zeilen den effektiven USD-Wert statt nur metered cost_usd", () => {
+  it("zeigt in Läufer-Zeilen Abo-Wert und echte USD getrennt", () => {
     const worker = rollupWorker();
     const root = rollupRoot({ workers: [worker] });
 
@@ -335,29 +339,35 @@ describe("MotherLedgerSection", () => {
 
     expect(html).toContain("#501");
     expect(html).toContain("$0.42");
-    expect(html).toContain("USD effektiv: $0.42");
-    expect(html).toContain("USD echt/metered: —");
-    expect(html).not.toContain('<b class="sb-mono">—</b>');
+    expect(html).toContain("Abo-Wert (gesch.): $0.42 gesch.");
+    expect(html).toContain("Echt $: —");
+    expect(html).toContain("sb-ledger-abo");
+    expect(html).toContain("sb-ledger-real");
+    expect(html).toContain("<small>gesch.</small>");
   });
 
-  it("marks the mobile MotherLedger cards active at the 390px Statistik viewport", () => {
+  it("marks the unified MotherLedger responsive layout as mobile at the 390px Statistik viewport", () => {
     const html = renderStatistikAtViewport(390);
 
     expect(html).toContain('data-ledger-viewport="mobile"');
-    expect(html).toContain('aria-label="MotherLedger Desktop" aria-hidden="true"');
-    expect(html).toContain('aria-label="MotherLedger Mobile" aria-hidden="false"');
+    expect(html).toContain('class="sb-ledger" data-ledger-viewport="mobile"');
+    expect(html).toContain("Abo-Wert verbraucht · 7T");
+    expect(html).toContain("Echt ausgegeben · 7T");
+    expect(html).toContain("sb-ledger-meter");
     expect(html).toContain("Mother A");
-    expect(html).toContain("coder");
+    expect(html).toContain("echt —");
   });
 
-  it("marks the desktop MotherLedger table active at the 1440px Statistik viewport", () => {
+  it("marks the unified MotherLedger responsive layout as desktop at the 1440px Statistik viewport", () => {
     const html = renderStatistikAtViewport(1440);
 
     expect(html).toContain('data-ledger-viewport="desktop"');
-    expect(html).toContain('aria-label="MotherLedger Desktop" aria-hidden="false"');
-    expect(html).toContain('aria-label="MotherLedger Mobile" aria-hidden="true"');
+    expect(html).toContain('class="sb-ledger" data-ledger-viewport="desktop"');
+    expect(html).toContain("Abo-Wert verbraucht · 7T");
+    expect(html).toContain("Echt ausgegeben · 7T");
+    expect(html).toContain("sb-ledger-meter");
     expect(html).toContain("Mother A");
-    expect(html).toContain("coder");
+    expect(html).toContain("echt —");
   });
 });
 
@@ -597,19 +607,28 @@ describe("SubscriptionBurnSection (S3)", () => {
   });
 });
 
-describe("A3: MotherLedger totalUsd Summen-Ehrlichkeit", () => {
-  it("hängt '+ N unbekannt' an, wenn Roots ohne Kostenstempel vorhanden sind", () => {
-    const knownRoot = rollupRoot({ cost_effective_usd: 1.5, cost_usd: 0 });
-    const unknownRoot = rollupRoot({ id: "t_unknown", title: "Unknown A", cost_effective_usd: null, cost_usd: null });
+describe("A3: MotherLedger Summen-Ehrlichkeit", () => {
+  it("summiert Abo-Wert und zeigt genuinely unknown Roots als unbekannt statt $0.00", () => {
+    const knownRoot = rollupRoot({ cost_effective_usd: 1.5, cost_usd_equivalent: 1.5, cost_usd: 0 });
+    const unknownRoot = rollupRoot({
+      id: "t_unknown",
+      title: "Unknown A",
+      cost_effective_usd: null,
+      cost_usd_equivalent: null,
+      cost_usd: null,
+    });
     windowedRollupMock.state = rollupState({
       data: { ...rollupResponse(knownRoot), roots: [knownRoot, unknownRoot], completed_roots: 2 },
     });
 
     const html = renderToStaticMarkup(<MotherLedgerSection />);
 
-    // Known sum $1.50, 1 unknown root → suffix shows "+ 1 unbekannt"
+    // Known Abo sum $1.50; the unknown root keeps null-cost honesty in its own header.
     expect(html).toContain("$1.50");
-    expect(html).toContain("+ 1 unbekannt");
+    expect(html).toContain("Unknown A");
+    expect(html).toContain("Abo-Wert verbraucht · 7T");
+    expect(html).toContain("Abo-Wert (gesch.): — gesch.");
+    expect(html).toContain("<b class=\"sb-mono\">—</b><small>gesch.</small>");
   });
 
   it("zeigt keine unbekannt-Meldung wenn alle Roots Kostenwerte haben", () => {

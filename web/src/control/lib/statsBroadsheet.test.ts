@@ -5,6 +5,8 @@ import {
   autonomy,
   budgetLedger,
   budgetStatus,
+  chainCost,
+  chainShare,
   costPerDelivery,
   errorTaxonomy,
   gateEffectiveness,
@@ -15,7 +17,14 @@ import {
   nutzerwert,
   reliabilityStatus,
   rosterProfiles,
+  rootRuns,
+  rootTokens,
+  rootUsd,
+  sortedLedgerRoots,
   subscriptionBurnBreakdown,
+  windowCostSummary,
+  workerCost,
+  workerTokens,
 } from "./statsBroadsheet";
 import { formatEffectiveCost } from "./derive";
 import { broadsheet } from "./broadsheetTokens";
@@ -26,6 +35,8 @@ import type {
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
+  WindowedRollupRoot,
+  WindowedRollupWorker,
 } from "./schemas";
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
@@ -59,6 +70,51 @@ function daily(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
     runs_completed: 0,
     runs_failed: 0,
     cycle_time_p50_seconds: null,
+    ...over,
+  };
+}
+
+function rollupWorker(over: Partial<WindowedRollupWorker> = {}): WindowedRollupWorker {
+  return {
+    profile: "coder",
+    provider: "claude-cli",
+    model: "claude-fable-5",
+    provider_model_source: "run_metadata",
+    input_tokens: 0,
+    output_tokens: 0,
+    cost_usd: 0,
+    actual_cost_usd: 0,
+    run_count: 0,
+    cost_usd_equivalent: 0,
+    api_equivalent_usd: 0,
+    cost_effective_usd: 0,
+    billing_neuralwatt_kwh: 0,
+    billing_neuralwatt_cost_usd: 0,
+    unknown_run_count: 0,
+    ...over,
+  };
+}
+
+function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot {
+  return {
+    id: "root-a",
+    title: "Root A",
+    status: "done",
+    assignee: "coder",
+    created_at: 0,
+    started_at: 0,
+    completed_at: 0,
+    ended_at: 0,
+    providers: [],
+    cost_usd: null,
+    cost_usd_equivalent: null,
+    cost_effective_usd: null,
+    unknown_run_count: 0,
+    billing_mode: null,
+    neuralwatt: null,
+    runtime_seconds: null,
+    workers: [],
+    runners: [],
     ...over,
   };
 }
@@ -150,6 +206,48 @@ describe("costPerDelivery", () => {
   it("is null when nothing was measured or no roots were delivered", () => {
     expect(costPerDelivery([daily({ cost_usd: null, done_roots: 3 })])).toBeNull();
     expect(costPerDelivery([daily({ cost_usd: 2, done_roots: 0 })])).toBeNull();
+  });
+});
+
+describe("ledger cost helpers", () => {
+  it("keeps metered and subscription-equivalent money separate at every level", () => {
+    const coder = rollupWorker({ cost_usd: 0, cost_usd_equivalent: 37.5, input_tokens: 1200, output_tokens: 800, run_count: 2 });
+    const verifier = rollupWorker({ profile: "verifier", cost_usd: 0.19, cost_usd_equivalent: 1.25, input_tokens: 10, output_tokens: 15, run_count: 1 });
+    const root = rollupRoot({
+      cost_usd: 0.19,
+      cost_usd_equivalent: 38.75,
+      cost_effective_usd: 38.75,
+      workers: [coder, verifier],
+    });
+
+    expect(windowCostSummary([root, rollupRoot({ cost_usd: null, cost_usd_equivalent: null })])).toEqual({ echtUsd: 0.19, aboUsd: 38.75 });
+    expect(chainCost(root)).toEqual({ echt: 0.19, abo: 38.75, effective: 38.75 });
+    expect(workerCost(coder)).toEqual({ echt: 0, abo: 37.5 });
+    expect(workerCost(verifier)).toEqual({ echt: 0.19, abo: 1.25 });
+    expect(workerTokens(coder)).toBe(2000);
+    expect(rootTokens(root)).toBe(2025);
+    expect(rootRuns(root)).toBe(3);
+  });
+
+  it("preserves unknown root money as null while retaining legacy effective fallback", () => {
+    const unknown = rollupRoot({ cost_usd: null, cost_usd_equivalent: null, cost_effective_usd: null });
+    const meteredOnly = rollupRoot({ cost_usd: 0.42, cost_usd_equivalent: null, cost_effective_usd: null });
+
+    expect(chainCost(unknown)).toEqual({ echt: null, abo: null, effective: null });
+    expect(rootUsd(unknown)).toBeNull();
+    expect(rootUsd(meteredOnly)).toBe(0.42);
+  });
+
+  it("sorts chains by abo value and computes clamped ranking shares", () => {
+    const cheap = rollupRoot({ id: "cheap", cost_usd: 0.3, cost_usd_equivalent: 2, workers: [rollupWorker({ input_tokens: 10 })] });
+    const top = rollupRoot({ id: "top", cost_usd: 0, cost_usd_equivalent: 10, workers: [rollupWorker({ input_tokens: 1 })] });
+    const tie = rollupRoot({ id: "tie", cost_usd: 0.9, cost_usd_equivalent: 2, workers: [rollupWorker({ input_tokens: 5 })] });
+
+    expect(sortedLedgerRoots([cheap, top, tie], "usd").map((root) => root.id)).toEqual(["top", "tie", "cheap"]);
+    expect(sortedLedgerRoots([cheap, top, tie], "tokens").map((root) => root.id)).toEqual(["cheap", "tie", "top"]);
+    expect(chainShare(top, 10)).toBe(1);
+    expect(chainShare(cheap, 10)).toBeCloseTo(0.2, 5);
+    expect(chainShare(top, 0)).toBe(0);
   });
 });
 
