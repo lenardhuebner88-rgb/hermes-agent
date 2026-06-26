@@ -22,6 +22,8 @@ import type {
   SubscriptionBurnClass,
   SubscriptionBurnLane,
   SubscriptionTokenBurnResponse,
+  WindowedRollupRoot,
+  WindowedRollupWorker,
 } from "./schemas";
 
 // ── Phantom filter ──────────────────────────────────────────────────────────
@@ -106,6 +108,87 @@ export function costPerDelivery(series: RunsDailyPoint[]): number | null {
   }
   if (!measured || roots <= 0) return null;
   return cost / roots;
+}
+
+// ── Kettenkosten: window/root/worker money split ─────────────────────────────
+// Real spend and subscription-equivalent value are intentionally separate: the
+// view may highlight both, but must not collapse them back into one effective
+// number. null on roots remains null so unknown stamps are not rendered as $0.
+export interface LedgerMoneySplit {
+  echt: number | null;
+  abo: number | null;
+}
+
+export interface ChainMoneySplit extends LedgerMoneySplit {
+  effective: number | null;
+}
+
+export interface WindowCostSummary {
+  echtUsd: number;
+  aboUsd: number;
+}
+
+export type MotherLedgerSortKey = "usd" | "tokens" | "runs";
+
+export function workerTokens(worker: WindowedRollupWorker): number {
+  return worker.input_tokens + worker.output_tokens;
+}
+
+export function rootRuns(root: WindowedRollupRoot): number {
+  return root.workers.reduce((sum, worker) => sum + worker.run_count, 0);
+}
+
+export function rootTokens(root: WindowedRollupRoot): number {
+  return root.workers.reduce((sum, worker) => sum + workerTokens(worker), 0);
+}
+
+export function windowCostSummary(roots: WindowedRollupRoot[]): WindowCostSummary {
+  return roots.reduce<WindowCostSummary>(
+    (sum, root) => ({
+      echtUsd: sum.echtUsd + (root.cost_usd ?? 0),
+      aboUsd: sum.aboUsd + (root.cost_usd_equivalent ?? 0),
+    }),
+    { echtUsd: 0, aboUsd: 0 },
+  );
+}
+
+export function chainCost(root: WindowedRollupRoot): ChainMoneySplit {
+  return {
+    echt: root.cost_usd,
+    abo: root.cost_usd_equivalent,
+    effective: root.cost_effective_usd,
+  };
+}
+
+export function workerCost(worker: WindowedRollupWorker): LedgerMoneySplit {
+  return {
+    echt: worker.cost_usd,
+    abo: worker.cost_usd_equivalent,
+  };
+}
+
+export function chainShare(root: WindowedRollupRoot, topAbo: number): number {
+  if (topAbo <= 0) return 0;
+  return Math.max(0, Math.min(1, (root.cost_usd_equivalent ?? 0) / topAbo));
+}
+
+export function rootUsd(root: WindowedRollupRoot): number | null {
+  return chainCost(root).effective ?? root.cost_usd ?? null;
+}
+
+export function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSortKey): WindowedRollupRoot[] {
+  const value = (root: WindowedRollupRoot): number => {
+    if (sortKey === "tokens") return rootTokens(root);
+    if (sortKey === "runs") return rootRuns(root);
+    return root.cost_usd_equivalent ?? 0;
+  };
+  return [...roots].sort((a, b) => {
+    const primary = value(b) - value(a);
+    if (primary !== 0) return primary;
+    const meteredTie = (b.cost_usd ?? 0) - (a.cost_usd ?? 0);
+    if (meteredTie !== 0) return meteredTie;
+    return rootTokens(b) - rootTokens(a);
+  });
 }
 
 // ── Supporting KPI: Nutzerwert (delivered user-feature roots) ────────────────

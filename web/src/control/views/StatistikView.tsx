@@ -65,6 +65,8 @@ import {
   acceptanceDelta,
   autonomy,
   budgetLedger,
+  chainCost,
+  chainShare,
   costPerDelivery,
   errorTaxonomy,
   gateEffectiveness,
@@ -72,9 +74,15 @@ import {
   laneBurn,
   leaderboard,
   nutzerwert,
+  rootRuns,
   rosterProfiles,
+  sortedLedgerRoots,
   subscriptionBurnBreakdown,
+  windowCostSummary,
+  workerCost,
+  workerTokens,
   type LedgerEntry,
+  type MotherLedgerSortKey,
 } from "../lib/statsBroadsheet";
 
 const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}`);
@@ -450,28 +458,6 @@ function fmtUsd(value: number | null | undefined): string {
   return value != null && value > 0 ? `$${value.toFixed(2)}` : "—";
 }
 
-type MotherLedgerSortKey = "usd" | "tokens" | "runs";
-
-function workerTokens(worker: WindowedRollupWorker): number {
-  return worker.input_tokens + worker.output_tokens;
-}
-
-function rootRuns(root: WindowedRollupRoot): number {
-  return root.workers.reduce((sum, worker) => sum + worker.run_count, 0);
-}
-
-function rootTokens(root: WindowedRollupRoot): number {
-  return root.workers.reduce((sum, worker) => sum + workerTokens(worker), 0);
-}
-
-/** Returns the effective cost for a root, or null when genuinely unknown.
- *  null means neither cost_effective_usd nor cost_usd carries a real stamp. */
-function rootUsd(root: WindowedRollupRoot): number | null {
-  if (root.cost_effective_usd != null) return root.cost_effective_usd;
-  if (root.cost_usd != null) return root.cost_usd;
-  return null;
-}
-
 function fmtRuntime(seconds: number | null | undefined): string {
   if (seconds == null) return "—";
   if (seconds < 60) return `${seconds}s`;
@@ -483,48 +469,30 @@ function fmtRuntime(seconds: number | null | undefined): string {
   return remMins ? `${hours}h ${remMins}m` : `${hours}h`;
 }
 
-function estimateSuffix(
-  provider: string | null | undefined,
-  billingMode: string | null | undefined,
-  providerModelSource?: string | null,
-): string {
-  if (providerModelSource === "lane_current_fallback") return " (gesch.)";
-  const source = `${provider ?? ""} ${billingMode ?? ""}`.toLowerCase();
-  return source.includes("openrouter") || source.includes("metered") ? " (gesch.)" : "";
+function fmtMaybeUsd(value: number | null | undefined): string {
+  return fmtUsd(value ?? null);
 }
 
 function ledgerDetailTitle(item: {
   cost_usd?: number | null;
+  cost_usd_equivalent?: number | null;
   cost_effective_usd?: number | null;
   provider?: string | null;
   providers?: string[];
   model?: string | null;
-  provider_model_source?: string | null;
   billing_mode?: string | null;
   runtime_seconds?: number | null;
 }): string {
   const provider = item.provider ?? item.providers?.join(", ") ?? null;
   const model = item.model ?? null;
-  const billingMode = item.billing_mode ?? null;
   return [
-    `USD effektiv: ${fmtUsd(item.cost_effective_usd ?? item.cost_usd)}`,
-    `USD echt/metered: ${fmtUsd(item.cost_usd)}${estimateSuffix(provider, billingMode, item.provider_model_source)}`,
+    `${de.stats.motherLedgerColAbo}: ${fmtMaybeUsd(item.cost_usd_equivalent)} ${de.stats.motherLedgerAboMarker}`,
+    `${de.stats.motherLedgerColReal}: ${fmtMaybeUsd(item.cost_usd)}`,
     `Provider/Model: ${provider ?? "—"}${model ? ` · ${model}` : ""}`,
-    `billing_mode: ${billingMode ?? "—"}`,
+    `billing_mode: ${item.billing_mode ?? "—"}`,
     `Laufzeit: ${fmtRuntime(item.runtime_seconds)}`,
     `${de.stats.motherLedgerNeuralwatt}`,
   ].join(" · ");
-}
-
-function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSortKey): WindowedRollupRoot[] {
-  return [...roots].sort((a, b) => {
-    const byMetric = sortKey === "tokens"
-      ? rootTokens(b) - rootTokens(a)
-      : sortKey === "runs"
-        ? rootRuns(b) - rootRuns(a)
-        : (rootUsd(b) ?? 0) - (rootUsd(a) ?? 0);
-    return byMetric || (b.completed_at ?? 0) - (a.completed_at ?? 0) || a.id.localeCompare(b.id);
-  });
 }
 
 function useMediaQuery(query: string): boolean {
@@ -558,7 +526,8 @@ export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot
           <span className="sb-mono">#{runner.id}</span>
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
           <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
-          <b className="sb-mono">{fmtUsd(runner.cost_effective_usd ?? runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode, runner.provider_model_source)}</b>
+          <b className="sb-mono sb-ledger-abo">{fmtMaybeUsd(runner.cost_usd_equivalent)} <small>{de.stats.motherLedgerAboMarker}</small></b>
+          <b className="sb-mono sb-ledger-real">{(runner.cost_usd ?? 0) > 0 ? fmtMaybeUsd(runner.cost_usd) : "—"}</b>
           <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · {de.stats.motherLedgerNeuralwatt}</small>
         </div>
       ))}
@@ -569,22 +538,32 @@ export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot
 export function MotherLedgerSection() {
   const [windowHours, setWindowHours] = useState<24 | 168>(168);
   const [sortKey, setSortKey] = useState<MotherLedgerSortKey>("usd");
-  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [openRootId, setOpenRootId] = useState<string | null>(null);
+  const [openWorkerKey, setOpenWorkerKey] = useState<string | null>(null);
   const isMobileLedger = useMediaQuery("(max-width: 760px)");
   const rollup = useHermesWindowedRollup({ hours: windowHours, limit: 20 });
   const roots = useMemo(
     () => sortedLedgerRoots(rollup.data?.roots ?? [], sortKey),
     [rollup.data, sortKey],
   );
-  const knownRoots = roots.filter((r) => rootUsd(r) != null);
-  const unknownCount = roots.length - knownRoots.length;
-  const totalUsd = knownRoots.reduce((sum, root) => sum + (rootUsd(root) ?? 0), 0);
-  const totalUsdText = roots.length === 0 ? fmtUsd(0) : `${fmtUsd(knownRoots.length > 0 ? totalUsd : null)}${unknownCount > 0 ? ` + ${unknownCount} unbekannt` : ""}`;
+  const windowCost = useMemo(() => windowCostSummary(roots), [roots]);
+  const topAbo = roots.reduce((top, root) => Math.max(top, chainCost(root).abo ?? 0), 0);
   const showStaleNotice = Boolean((rollup.error || rollup.isStale) && rollup.data);
-  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD inkl. Cache · ${totalUsdText}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
+  const windowLabel = windowHours === 168 ? "7T" : "24Std";
+  const ratioText = windowCost.echtUsd > 0
+    ? de.stats.motherLedgerHeroRatio
+        .replace("{real}", fmtUsd(windowCost.echtUsd))
+        .replace("{abo}", fmtUsd(windowCost.aboUsd))
+        .replace("{ratio}", Math.round(windowCost.aboUsd / windowCost.echtUsd).toLocaleString("de-DE"))
+    : de.stats.motherLedgerHeroRatioNoReal.replace("{abo}", fmtUsd(windowCost.aboUsd));
+  const metaText = `${windowLabel}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
+  const toggleRoot = (rootId: string) => {
+    setOpenRootId((prev) => (prev === rootId ? null : rootId));
+    setOpenWorkerKey(null);
+  };
   const toggleWorker = (rootId: string, profile: string) => {
     const key = `${rootId}:${profile}`;
-    setOpenKey((prev) => (prev === key ? null : key));
+    setOpenWorkerKey((prev) => (prev === key ? null : key));
   };
 
   return (
@@ -596,7 +575,7 @@ export function MotherLedgerSection() {
           <button type="button" className={windowHours === 24 ? "is-active" : ""} onClick={() => setWindowHours(24)}>24Std</button>
         </div>
         <div className="sb-chipset" aria-label="Sortierung">
-          <button type="button" className={sortKey === "usd" ? "is-active" : ""} onClick={() => setSortKey("usd")}>USD</button>
+          <button type="button" className={sortKey === "usd" ? "is-active" : ""} onClick={() => setSortKey("usd")}>{de.stats.motherLedgerSortAbo}</button>
           <button type="button" className={sortKey === "tokens" ? "is-active" : ""} onClick={() => setSortKey("tokens")}>Tokens</button>
           <button type="button" className={sortKey === "runs" ? "is-active" : ""} onClick={() => setSortKey("runs")}>Runs</button>
         </div>
@@ -609,53 +588,68 @@ export function MotherLedgerSection() {
         <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
       ) : (
         <div className="sb-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
+          <div className="sb-ledger-hero">
+            <div className="sb-ledger-hero-primary">
+              <span>{de.stats.motherLedgerHeroAbo.replace("{window}", windowLabel)}</span>
+              <b className="sb-mono">{fmtUsd(windowCost.aboUsd)} <small>{de.stats.motherLedgerAboMarker}</small></b>
+              <small>{de.stats.motherLedgerHeroAboSub}</small>
+            </div>
+            <div className="sb-ledger-hero-real">
+              <span>{de.stats.motherLedgerHeroReal.replace("{window}", windowLabel)}</span>
+              <b className="sb-mono">{fmtUsd(windowCost.echtUsd)}</b>
+            </div>
+          </div>
+          <p className="sb-ledger-honesty">{ratioText}</p>
           {showStaleNotice ? (
             <div className="sb-kick" role="status" title={rollup.error ?? undefined}>
               {de.stats.motherLedgerStaleNotice}
             </div>
           ) : null}
-          <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop" aria-hidden={isMobileLedger}>
-            <div className="sb-ledger-head" role="row">
-              <span>{de.stats.motherLedgerColMother}</span><span>{de.stats.motherLedgerColWorker}</span><span>{de.stats.motherLedgerColRuns}</span><span>{de.stats.motherLedgerColTokens}</span><span>{de.stats.motherLedgerColUsd} <small>{de.stats.motherLedgerColUsdSub}</small></span>
-            </div>
-            {roots.map((root) => root.workers.map((worker, index) => {
-              const key = `${root.id}:${worker.profile}`;
-              const open = openKey === key;
+          <div className="sb-ledger-chains" aria-label="Kettenkosten">
+            {roots.map((root) => {
+              const openRoot = openRootId === root.id;
+              const money = chainCost(root);
+              const share = chainShare(root, topAbo);
+              const providerText = root.providers.length ? root.providers.join(", ") : "—";
               return (
-                <div key={key} className="sb-ledger-pair">
-                  <button type="button" className="sb-ledger-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open} title={index === 0 ? ledgerDetailTitle(root) : undefined}>
-                    <span className="sb-ledger-mother">{index === 0 ? (root.title ?? root.id) : ""}</span>
-                    <span><LaneLabel profile={worker.profile} /></span>
-                    <span className="sb-mono">{worker.run_count}</span>
-                    <span className="sb-mono">{fmtTokens(workerTokens(worker))}</span>
-                    <span className="sb-mono sb-ledger-usd"><b>{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b><small>{de.stats.motherLedgerUsdSuffix}</small></span>
+                <article key={root.id} className="sb-ledger-chain" title={ledgerDetailTitle(root)}>
+                  <button type="button" className="sb-ledger-chain-head" onClick={() => toggleRoot(root.id)} aria-expanded={openRoot}>
+                    <span className="sb-ledger-chain-main">
+                      <b>{root.title ?? root.id}</b>
+                      <small className="sb-mono">{root.id} · {fmtRuntime(root.runtime_seconds)} · {rootRuns(root)} Runs · {providerText}</small>
+                    </span>
+                    <span className="sb-ledger-chain-money">
+                      <span className="sb-ledger-abo"><b className="sb-mono">{fmtMaybeUsd(money.abo)}</b><small>{de.stats.motherLedgerAboMarker}</small></span>
+                      <span className={(money.echt ?? 0) > 0 ? "sb-ledger-real is-positive" : "sb-ledger-real"}>{de.stats.motherLedgerRealShort} {(money.echt ?? 0) > 0 ? fmtMaybeUsd(money.echt) : "—"}</span>
+                    </span>
                   </button>
-                  {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
-                </div>
-              );
-            }))}
-          </div>
-          <div className="sb-ledger-cards" aria-label="MotherLedger Mobile" aria-hidden={!isMobileLedger}>
-            {roots.map((root) => (
-              <article key={root.id} className="sb-ledger-card">
-                <div className="sb-kick">{de.stats.motherLedgerColMother}</div>
-                <h3>{root.title ?? root.id}</h3>
-                {root.workers.map((worker) => {
-                  const key = `${root.id}:${worker.profile}`;
-                  const open = openKey === key;
-                  return (
-                    <div key={key} className="sb-ledger-worker-card">
-                      <button type="button" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open}>
-                        <span><LaneLabel profile={worker.profile} /></span>
-                        <b className="sb-mono">{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b>
-                        <small>Runs {worker.run_count} · {fmtTokens(workerTokens(worker))} {de.stats.motherLedgerColTokens} · {de.stats.motherLedgerColUsd} {de.stats.motherLedgerUsdSuffix}</small>
-                      </button>
-                      {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
+                  <div className="sb-ledger-meter" aria-hidden="true"><span style={{ width: `${Math.round(share * 100)}%` }} /></div>
+                  {openRoot ? (
+                    <div className="sb-ledger-workers" role="table" aria-label="Worker-Aufschlüsselung">
+                      <div className="sb-ledger-workers-head" role="row">
+                        <span>{de.stats.motherLedgerColWorker}</span><span>{de.stats.motherLedgerColTokens}</span><span>{de.stats.motherLedgerColAbo}</span><span>{de.stats.motherLedgerColReal}</span>
+                      </div>
+                      {root.workers.map((worker) => {
+                        const key = `${root.id}:${worker.profile}`;
+                        const openWorker = openWorkerKey === key;
+                        const cost = workerCost(worker);
+                        return (
+                          <div key={key} className="sb-ledger-worker-block">
+                            <button type="button" className="sb-ledger-worker-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={openWorker} title={ledgerDetailTitle(worker)}>
+                              <span className="sb-ledger-worker-label"><LaneLabel profile={worker.profile} /><small>{worker.model ?? worker.provider ?? "—"}</small></span>
+                              <span className="sb-mono" data-label={de.stats.motherLedgerColTokens}>{fmtTokens(workerTokens(worker))}</span>
+                              <span className="sb-mono sb-ledger-abo" data-label={de.stats.motherLedgerAboMobile}>{fmtMaybeUsd(cost.abo)}</span>
+                              <span className={(cost.echt ?? 0) > 0 ? "sb-mono sb-ledger-real is-positive" : "sb-mono sb-ledger-real"} data-label={de.stats.motherLedgerRealMobile}>{(cost.echt ?? 0) > 0 ? fmtMaybeUsd(cost.echt) : "—"}</span>
+                            </button>
+                            {openWorker ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-              </article>
-            ))}
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
         </div>
       )}
