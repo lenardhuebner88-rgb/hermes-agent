@@ -206,7 +206,7 @@ export function CommandHome({ density }: { density: Density }) {
 /** The #1 decision, promoted: surface + title + why + the one next action.
  *  (Wrapper ist ein div, nicht ein button — der K3-Inline-Resolve braucht
  *  einen ECHTEN zweiten Button, und button-in-button ist invalides HTML.) */
-function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
+export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
   const surface = SURFACE[item.surface];
   return (
     <div
@@ -223,8 +223,8 @@ function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxItem; onO
             <span className="hc-mono text-[10px] tabular-nums hc-dim">vor {fmtDur(item.ageSeconds)}</span>
           ) : null}
         </div>
-        <p className="mt-1.5 line-clamp-2 text-base font-semibold leading-snug text-white">{item.title}</p>
-        <p className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
+        <p title={item.title} className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug text-white sm:line-clamp-2">{item.title}</p>
+        <p title={item.why} className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
       </button>
       <span className="flex shrink-0 flex-col items-stretch gap-2 sm:mt-0.5 sm:items-end">
         {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}

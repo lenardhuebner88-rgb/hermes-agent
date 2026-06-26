@@ -98,6 +98,9 @@ describe("LanesEditor (routing cards)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
+    expect(html).toContain("Lane-Zustand");
+    expect(html).toContain("api-standard");
+    expect(html).toContain("1 Override");
     // Rollen aus dem Katalog + nicht-technische Hinweise
     expect(html).toContain("Schreibt Code");
     expect(html).toContain("Schwere Spezialfälle");

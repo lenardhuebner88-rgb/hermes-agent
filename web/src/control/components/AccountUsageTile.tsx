@@ -57,7 +57,7 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
   const meterName = `${label}: ${used == null ? "unbekannt" : `${Math.round(used)} % genutzt`}`;
   return (
     <div
-      className="grid grid-cols-[7rem_1fr_auto] items-center gap-2 text-xs"
+      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 text-xs sm:grid-cols-[7rem_minmax(0,1fr)_auto]"
       role="meter"
       aria-label={meterName}
       aria-valuemin={0}
@@ -65,12 +65,14 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
       aria-valuenow={used == null ? undefined : Math.round(used)}
       aria-valuetext={used == null ? "unbekannt" : undefined}
     >
-      <span className="truncate hc-soft">{label}</span>
-      <RateBar rate={used == null ? null : used / 100} color={TONE_HEX[limitTone(used)]} />
-      <span className="whitespace-nowrap tabular-nums text-white">
+      <span className="order-1 min-w-0 truncate hc-soft">{label}</span>
+      <span className="order-2 whitespace-nowrap tabular-nums text-white sm:order-3">
         {used == null ? "?" : `${Math.round(used)} %`}
         {reset ? <span className="hc-dim"> · {reset}</span> : null}
       </span>
+      <div className="order-3 col-span-2 sm:order-2 sm:col-span-1">
+        <RateBar rate={used == null ? null : used / 100} color={TONE_HEX[limitTone(used)]} />
+      </div>
     </div>
   );
 }

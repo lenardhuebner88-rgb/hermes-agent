@@ -59,7 +59,7 @@ import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
 import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./flow/planSpecKanban";
 import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
-import type { Epic, TaskDetailResponse } from "../lib/schemas";
+import type { Epic, KanbanDecision, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
 import { FunnelFreigaben } from "../components/FunnelFreigaben";
@@ -153,6 +153,35 @@ function recoveryDecisionMeta(kind: string): { label: string; tone: ToneName; do
 
 const RECOVERY_HIDDEN_KINDS = new Set(["informational", "noop"]);
 
+export function RecoveryDecisionCard({ row }: { row: KanbanDecision }) {
+  const meta = recoveryDecisionMeta(row.kind);
+  const nextAction = row.operator_escalation?.recommended_human_action || row.suggested_command || "";
+  const nextActionIsCommand = Boolean(!row.operator_escalation?.recommended_human_action && row.suggested_command);
+  return (
+    <li className="rounded-[8px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-[11px] py-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 break-words text-xs font-semibold text-white">{row.title}</span>
+        <StatusPill tone={meta.tone} label={meta.label} dot={meta.dot} />
+      </div>
+      <p className="mt-1 break-words text-xs hc-soft">{row.reason}</p>
+      {nextAction ? (
+        <section className="mt-2 rounded-md border border-amber-400/35 bg-amber-100/55 px-2 py-1.5">
+          <p className="text-[9px] font-semibold uppercase tracking-[.14em] text-amber-700">Nächste Aktion</p>
+          <p className={cn("mt-1 break-words text-xs text-[var(--hc-text)]", nextActionIsCommand && "break-all hc-mono text-[10px] text-cyan-800")}>
+            {nextAction}
+          </p>
+        </section>
+      ) : null}
+      {row.suggested_command && !nextActionIsCommand ? (
+        <p className="mt-1 break-all hc-mono text-[10px] text-cyan-100">{row.suggested_command}</p>
+      ) : null}
+      {row.operator_escalation?.blocked_action_boundary?.length ? (
+        <p className="mt-1 break-words hc-mono text-[10px] hc-dim">Grenze: {row.operator_escalation.blocked_action_boundary.join(", ")}</p>
+      ) : null}
+    </li>
+  );
+}
+
 function RecoveryStrip() {
   const health = useSystemHealth();
   const decisions = useKanbanDecisionQueue();
@@ -189,27 +218,7 @@ function RecoveryStrip() {
       </div>
       {recoveryRows.length ? (
         <ul className="mt-3 grid max-h-72 gap-2 overflow-y-auto pr-1 lg:grid-cols-3">
-          {recoveryRows.map((row) => {
-            const meta = recoveryDecisionMeta(row.kind);
-            return (
-              <li key={`${row.kind}:${row.task_id}`} className="rounded-[8px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-[11px] py-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="min-w-0 break-words text-xs font-semibold text-white">{row.title}</span>
-                  <StatusPill tone={meta.tone} label={meta.label} dot={meta.dot} />
-                </div>
-                <p className="mt-1 break-words text-xs hc-soft">{row.reason}</p>
-                {row.suggested_command ? (
-                  <p className="mt-1 break-all hc-mono text-[10px] text-cyan-100">{row.suggested_command}</p>
-                ) : null}
-                {row.operator_escalation?.recommended_human_action ? (
-                  <p className="mt-1 break-words text-xs text-amber-100">{row.operator_escalation.recommended_human_action}</p>
-                ) : null}
-                {row.operator_escalation?.blocked_action_boundary?.length ? (
-                  <p className="mt-1 break-words hc-mono text-[10px] hc-dim">Grenze: {row.operator_escalation.blocked_action_boundary.join(", ")}</p>
-                ) : null}
-              </li>
-            );
-          })}
+          {recoveryRows.map((row) => <RecoveryDecisionCard key={`${row.kind}:${row.task_id}`} row={row} />)}
         </ul>
       ) : (
         <p className="mt-3 text-sm hc-dim">Keine Recovery-Parks.</p>

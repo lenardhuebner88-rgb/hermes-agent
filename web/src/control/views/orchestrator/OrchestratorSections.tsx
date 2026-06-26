@@ -24,12 +24,21 @@ export function OrchestratorHeroPanel({
   nowSec: number;
   data?: OrchestrationBacklogResponse;
 }) {
+  const updatedAtIso = new Date(nowSec * 1000).toISOString();
   return (
     <Panel
       eyebrow={de.orchestrator.eyebrow}
       title={`${de.orchestrator.title} · ${activeTotal} aktiv`}
       surface="card"
-      actions={<div className="text-left text-xs hc-soft sm:text-right">{loading ? de.orchestrator.loading : de.orchestrator.updatedAt(clockLabel(nowSec))}</div>}
+      actions={
+        loading ? (
+          <div className="text-left text-xs hc-soft sm:text-right">{de.orchestrator.loading}</div>
+        ) : (
+          <time dateTime={updatedAtIso} className="text-left text-xs hc-soft sm:text-right">
+            {de.orchestrator.updatedAt(clockLabel(nowSec))}
+          </time>
+        )
+      }
     >
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_120px] md:items-end">
         <div>
@@ -86,7 +95,9 @@ export function CommissionBanner({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase text-cyan-300">{de.orchestrator.nextTask}</p>
-          <p className="mt-0.5 truncate text-sm font-medium text-white">{nextTitle}</p>
+          <p title={nextTitle} className="mt-0.5 line-clamp-2 text-sm font-medium text-white sm:truncate">
+            {nextTitle}
+          </p>
           <p className="mt-0.5 text-[11px] hc-mono hc-dim">{nextId}</p>
         </div>
         <button

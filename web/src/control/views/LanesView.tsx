@@ -134,6 +134,11 @@ const t = {
   warningsExpand: "Hinweise anzeigen",
   warningsCollapse: "Hinweise ausblenden",
   modelsTitle: "Modelle pro Rolle",
+  laneStatus: "Lane-Zustand",
+  activePreset: "Aktives Preset",
+  selectedPreset: "Ausgewählt",
+  unsaved: "Änderungen offen",
+  saved: "Gespeichert",
   standard: "Standard",
   advanced: "Erweitert",
   permanent: "Dauerhaft",
@@ -815,6 +820,34 @@ export function LanesEditor({
           </div>
         ) : null}
       </FleetPanel>
+
+      <section
+        aria-label={t.laneStatus}
+        className="rounded-md border border-[var(--hc-border)] bg-black/15 px-3 py-2"
+      >
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="hc-eyebrow">{t.laneStatus}</p>
+            <p className="mt-0.5 truncate text-sm font-medium text-white" title={lane.name}>
+              {lane.name} · {lane.active ? t.activePreset : t.selectedPreset}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusPill
+              tone={dirty ? "amber" : lane.active ? "emerald" : "zinc"}
+              label={dirty ? t.unsaved : lane.active ? t.active : t.selectedPreset}
+            />
+            <span className="rounded-full border border-[var(--hc-border)] px-2.5 py-1 text-xs hc-soft">
+              {t.overrideSummary(overrideCount)}
+            </span>
+            {readinessKnown ? (
+              <span className="rounded-full border border-[var(--hc-border)] px-2.5 py-1 text-xs hc-soft">
+                {t.readySummary(readyCount, rows.length)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </section>
 
       {/* Standardansicht: ein Dropdown pro Rolle. */}
       <FleetPanel eyebrow={t.modelsTitle} meta={profilesMeta}>

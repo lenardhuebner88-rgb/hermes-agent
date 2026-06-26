@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { OrchestratorQueueTable } from "./OrchestratorBacklogView";
+import { CommissionBanner, OrchestratorHeroPanel } from "./orchestrator/OrchestratorSections";
 import type { OrchestrationItem } from "../lib/schemas";
 
 const item = (overrides: Partial<OrchestrationItem>): OrchestrationItem => ({
@@ -72,5 +73,31 @@ describe("OrchestratorQueueTable", () => {
     );
 
     expect(html).toContain("Dependency klären: ghost");
+  });
+});
+
+describe("CommissionBanner", () => {
+  it("keeps the full next-task title available when the visible label is clamped", () => {
+    const title = "dispatch_once spawnt zu wenige Worker bei max_spawn + max_in_progress";
+    const html = renderToStaticMarkup(
+      <CommissionBanner nextId="bug-dispatch-once-double-cap" nextTitle={title} prompt="Bitte beauftragen" />,
+    );
+
+    expect(html).toContain(`title="${title}"`);
+    expect(html).toContain("line-clamp-2");
+    expect(html).toContain("sm:truncate");
+  });
+});
+
+describe("OrchestratorHeroPanel", () => {
+  it("marks the updated timestamp as a machine-readable time element", () => {
+    const nowSec = Date.parse("2026-06-25T20:46:00Z") / 1000;
+    const html = renderToStaticMarkup(
+      <OrchestratorHeroPanel activeTotal={8} loading={false} nowSec={nowSec} />,
+    );
+
+    expect(html).toContain("<time");
+    expect(html).toContain('dateTime="2026-06-25T20:46:00.000Z"');
+    expect(html).toContain("Stand");
   });
 });

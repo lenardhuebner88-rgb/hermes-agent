@@ -78,6 +78,9 @@ describe("AccountUsageTile", () => {
     expect(html).toContain('role="meter"');
     expect(html).toContain('aria-label="5-Std-Fenster: 24 % genutzt"');
     expect(html).toContain('aria-label="Diese Woche: 62 % genutzt"');
+    expect(html).toContain("grid-cols-[minmax(0,1fr)_auto]");
+    expect(html).toContain("sm:grid-cols-[7rem_minmax(0,1fr)_auto]");
+    expect(html).toContain("col-span-2 sm:order-2 sm:col-span-1");
 
     // Nebenfenster + Extra-Usage im Details-Collapse
     expect(html).toContain("Details");

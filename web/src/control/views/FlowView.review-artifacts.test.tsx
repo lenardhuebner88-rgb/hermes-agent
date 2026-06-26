@@ -1,9 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { FlowReceiptRail, FlowRunCard } from "./FlowView";
+import { FlowReceiptRail, FlowRunCard, RecoveryDecisionCard } from "./FlowView";
 import type { BoardTask, TaskArtifactLink } from "../lib/types";
 import type { StageAction } from "../lib/fleet";
-import type { TaskDetailResponse } from "../lib/schemas";
+import type { KanbanDecision, TaskDetailResponse } from "../lib/schemas";
 
 const baseTask: BoardTask = {
   id: "t_active_verifier",
@@ -40,6 +40,34 @@ const noop = vi.fn();
 const noopAct = vi.fn<(task: BoardTask, action: StageAction) => undefined>();
 
 describe("FlowView review gate and RESULT artifacts", () => {
+  it("surfaces the next operator action in recovery decision cards", () => {
+    const decision: KanbanDecision = {
+      kind: "operator_escalation",
+      task_id: "t_release_gate",
+      title: "Release-Gate Dashboard build + runtime activation check",
+      reason: "settled block with no operator escalation",
+      age_seconds: 120,
+      suggested_command: "hermes kanban show t_release_gate",
+      operator_escalation: {
+        task: { id: "t_release_gate", title: "Release-Gate", status: "blocked", assignee: "operator" },
+        source: "kanban",
+        signal_key: "release-gate",
+        why_now: "worker loop cannot proceed alone",
+        attempts_already_made: 1,
+        evidence: {},
+        recommended_human_action: "Inspect the task, answer any operator question, and decide whether to unblock or close.",
+        blocked_action_boundary: ["DB schema/data mutation", "destructive delete"],
+      },
+    };
+
+    const html = renderToStaticMarkup(<RecoveryDecisionCard row={decision} />);
+
+    expect(html).toContain("Nächste Aktion");
+    expect(html).toContain("Inspect the task");
+    expect(html).toContain("Release-Gate Dashboard");
+    expect(html).toContain("Grenze:");
+  });
+
   it("active-verifier fixture hides Ausliefern and shows Verifier läuft", () => {
     const html = renderToStaticMarkup(
       <FlowRunCard
