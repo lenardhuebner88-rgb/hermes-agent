@@ -150,10 +150,13 @@ function MoreSheet({ onClose }: { onClose: () => void }) {
     const Icon = item.icon;
     return <Link key={item.path} to={item.path} onClick={onClose} className="flex min-h-11 items-center gap-2.5 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>;
   };
+  // Primäre Tabs außerhalb der 4-Slot-Bottom-Bar (Bibliothek, Stratege) sind auf
+  // Mobile sonst nur per Direkt-URL erreichbar — hier mit ins "Mehr"-Sheet holen.
+  const overflowPrimary = tabs.filter((tab) => !mobileTabs.some((m) => m.id === tab.id));
   return (
     <Overlay onClose={onClose} ariaLabel="Mehr">
       <p className="hc-eyebrow">Ansichten</p>
-      <div className="mt-2 grid gap-0.5">{moreTabs.map(renderItem)}</div>
+      <div className="mt-2 grid gap-0.5">{[...overflowPrimary, ...moreTabs].map(renderItem)}</div>
       <p className="hc-eyebrow mt-4">System</p>
       <div className="mt-2 grid gap-0.5">{secondaryNav.map(renderItem)}</div>
     </Overlay>
