@@ -3656,8 +3656,28 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     auth_path = Path(codex_home).expanduser() / "auth.json"
     if not auth_path.is_file():
         return None
+    # The Codex CLI rewrites this file with a plain truncate+write and no
+    # cross-process lock, so a concurrent read can land on a half-written
+    # (and thus unparseable) file.  Retry a few times before concluding the
+    # file is unreadable — treating a transient partial read as "no CLI
+    # token" would let the credential pool quarantine to DEAD even though a
+    # fresh token is being written right now.
+    payload = None
+    for attempt in range(4):
+        try:
+            payload = json.loads(auth_path.read_text())
+            break
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            if attempt == 3:
+                logger.debug(
+                    "Codex CLI auth.json at %s unreadable after retries: %s",
+                    auth_path, exc,
+                )
+                return None
+            time.sleep(0.05)
     try:
-        payload = json.loads(auth_path.read_text())
+        if not isinstance(payload, dict):
+            return None
         tokens = payload.get("tokens")
         if not isinstance(tokens, dict):
             return None

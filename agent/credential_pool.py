@@ -899,6 +899,36 @@ class CredentialPool:
                 synced = self._sync_codex_entry_from_auth_store(entry)
                 if synced is not entry:
                     entry = synced
+                # The Codex CLI shares this ChatGPT account + OAuth client and
+                # is the primary refresher of the shared token (it keeps
+                # ~/.codex/auth.json current).  If it already holds a token
+                # that is fresh enough to use without an immediate refresh,
+                # adopt that instead of spending (rotating) our own
+                # refresh_token — which would revoke the token the CLI is
+                # using and crash the next Codex CLI request.  This is the half
+                # that makes the two clients coexist rather than ping-pong
+                # revoking each other.
+                try:
+                    cli_tokens = auth_mod._import_codex_cli_tokens()
+                except Exception as cli_exc:
+                    cli_tokens = None
+                    logger.debug("Codex CLI token probe failed: %s", cli_exc)
+                if cli_tokens:
+                    cli_access = str(cli_tokens.get("access_token") or "")
+                    if (
+                        cli_access
+                        and cli_access != (entry.access_token or "")
+                        and not _codex_access_token_is_expiring(
+                            cli_access, CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
+                        )
+                    ):
+                        recovered = auth_mod._recover_codex_tokens_from_cli(
+                            "proactive adopt of fresh Codex CLI token"
+                        )
+                        if recovered:
+                            adopted = self._sync_codex_entry_from_auth_store(entry)
+                            if adopted is not entry:
+                                return adopted
                 refreshed = auth_mod.refresh_codex_oauth_pure(
                     entry.access_token,
                     entry.refresh_token,
@@ -1076,6 +1106,34 @@ class CredentialPool:
                 # remove all singleton-seeded (device_code) entries from the
                 # in-memory pool.  Mirrors the xAI and Nous quarantine paths.
                 if auth_mod._is_terminal_codex_oauth_refresh_error(exc):
+                    # Before quarantining: the Codex CLI shares this ChatGPT
+                    # account and keeps the canonical OAuth token current in
+                    # ~/.codex/auth.json.  When the CLI rotated the shared
+                    # refresh_token our copy is revoked, but the CLI's copy is
+                    # fresh — adopt it instead of going DEAD.  This is the
+                    # reactive twin of the proactive adopt above and mirrors
+                    # the singleton self-heal in auth._refresh_codex_auth_tokens
+                    # and the anthropic claude_code recovery path.  The probe
+                    # is also retried inside _import_codex_cli_tokens so a
+                    # mid-rotation partial read does not look like "no token".
+                    recovered = None
+                    try:
+                        recovered = auth_mod._recover_codex_tokens_from_cli(
+                            f"pool refresh rejected: {getattr(exc, 'code', None) or 'auth_error'}"
+                        )
+                    except Exception as rec_exc:
+                        logger.debug("Codex CLI self-heal attempt failed: %s", rec_exc)
+                    if recovered:
+                        # _recover_codex_tokens_from_cli persisted the fresh
+                        # pair to auth.json; adopt it into the pool entry.
+                        healed = self._sync_codex_entry_from_auth_store(entry)
+                        if healed is not entry:
+                            logger.info(
+                                "Codex pool entry self-healed from ~/.codex/auth.json "
+                                "after refresh rejection (%s)",
+                                getattr(exc, "code", None) or "auth_error",
+                            )
+                            return healed
                     logger.debug(
                         "Codex OAuth refresh token is terminally invalid; clearing local token state"
                     )

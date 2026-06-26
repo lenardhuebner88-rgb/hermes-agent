@@ -2960,6 +2960,11 @@ def test_codex_oauth_terminal_refresh_clears_auth_json_and_removes_pool_entries(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
 
+    # Isolate from the host's real ~/.codex/auth.json so the new pool-path
+    # CLI self-heal does not adopt the live Codex token; this test asserts the
+    # quarantine-when-no-CLI-fallback path.
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
+
     _write_auth_store(tmp_path, _codex_auth_store("old-access-token", "old-refresh-token"))
 
     from agent.credential_pool import PooledCredential, load_pool
@@ -3019,6 +3024,10 @@ def test_codex_oauth_nonterminal_refresh_does_not_quarantine(tmp_path, monkeypat
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
 
+    # Isolate from the host's real ~/.codex/auth.json so the new pool-path
+    # CLI adopt does not short-circuit the transient-failure path under test.
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
+
     _write_auth_store(tmp_path, _codex_auth_store("old-access-token", "old-refresh-token"))
 
     from agent.credential_pool import load_pool
@@ -3045,3 +3054,153 @@ def test_codex_oauth_nonterminal_refresh_does_not_quarantine(tmp_path, monkeypat
     tokens = auth_payload["providers"]["openai-codex"].get("tokens", {})
     assert tokens.get("access_token") == "old-access-token"
     assert tokens.get("refresh_token") == "old-refresh-token"
+
+
+# ---------------------------------------------------------------------------
+# Codex/Hermes shared-token coexistence: adopt & self-heal from ~/.codex
+# ---------------------------------------------------------------------------
+
+
+def test_codex_pool_adopts_fresh_cli_token_instead_of_refreshing(tmp_path, monkeypatch):
+    """Proactive path: when ~/.codex/auth.json holds a fresh, non-expiring
+    token, the pool adopts it instead of spending (rotating) its own
+    refresh_token — which would revoke the token the Codex CLI is using."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+    _write_auth_store(tmp_path, _codex_auth_store("access-OLD", "refresh-OLD"))
+
+    import agent.credential_pool as cp
+    import hermes_cli.auth as auth_mod
+    from agent.credential_pool import load_pool
+
+    monkeypatch.setattr(
+        auth_mod, "_import_codex_cli_tokens",
+        lambda: {"access_token": "access-CLI", "refresh_token": "refresh-CLI"},
+    )
+    # Nothing is "expiring", so select() does not pre-refresh; the explicit
+    # forced _refresh_entry below drives the adopt path deterministically.
+    monkeypatch.setattr(auth_mod, "_codex_access_token_is_expiring", lambda tok, *a, **k: False)
+    monkeypatch.setattr(cp, "_codex_access_token_is_expiring", lambda tok, *a, **k: False)
+
+    def _no_refresh(*_a, **_k):
+        raise AssertionError("must adopt the fresh CLI token, not spend our refresh_token")
+
+    monkeypatch.setattr(auth_mod, "refresh_codex_oauth_pure", _no_refresh)
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    updated = pool._refresh_entry(entry, force=True)
+    assert updated is not None
+    assert updated.access_token == "access-CLI"
+    assert updated.refresh_token == "refresh-CLI"
+
+
+def test_codex_pool_self_heals_from_cli_after_terminal_refresh(tmp_path, monkeypatch):
+    """Reactive path via the live recovery entry point (try_refresh_current ->
+    _refresh_entry): when our refresh_token is revoked (Codex CLI rotated the
+    shared token), adopt the fresh ~/.codex token instead of quarantining to
+    DEAD. The CLI token is absent at the proactive pre-refresh read (rotation
+    in progress) and becomes available right after our refresh is rejected."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+    _write_auth_store(tmp_path, _codex_auth_store("access-STALE", "refresh-REVOKED"))
+
+    import agent.credential_pool as cp
+    import hermes_cli.auth as auth_mod
+    from agent.credential_pool import load_pool
+
+    # Keep tokens non-expiring so select() does not pre-refresh; the explicit
+    # try_refresh_current(force=True) below is the path under test.
+    monkeypatch.setattr(auth_mod, "_codex_access_token_is_expiring", lambda tok, *a, **k: False)
+    monkeypatch.setattr(cp, "_codex_access_token_is_expiring", lambda tok, *a, **k: False)
+
+    cli_seq = {"n": 0}
+
+    def _import_seq():
+        cli_seq["n"] += 1
+        if cli_seq["n"] <= 1:
+            return None  # mid-rotation: proactive read sees nothing usable
+        return {"access_token": "access-FRESH", "refresh_token": "refresh-FRESH"}
+
+    monkeypatch.setattr(auth_mod, "_import_codex_cli_tokens", _import_seq)
+
+    def _revoked(*_a, **_k):
+        # What refresh_codex_oauth_pure actually raises when our refresh_token
+        # was consumed/rotated by the Codex CLI (single-use OAuth tokens).
+        raise auth_mod.AuthError(
+            "Refresh session has been revoked", provider="openai-codex",
+            code="refresh_token_reused", relogin_required=True,
+        )
+
+    monkeypatch.setattr(auth_mod, "refresh_codex_oauth_pure", _revoked)
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None and entry.refresh_token == "refresh-REVOKED"
+
+    healed = pool.try_refresh_current()
+    assert healed is not None, "entry was quarantined instead of self-healing from ~/.codex"
+    assert healed.access_token == "access-FRESH"
+    assert healed.refresh_token == "refresh-FRESH"
+    # Adopt clears error status (None == healthy, mirrors the adopt-from-store path).
+    assert healed.last_status is None
+    assert healed.last_error_code is None
+    assert any(e.source == "device_code" for e in pool.entries())
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    tokens = auth_payload["providers"]["openai-codex"].get("tokens", {})
+    assert tokens.get("access_token") == "access-FRESH"
+
+
+def test_codex_pool_refreshes_when_cli_token_near_expiry(tmp_path, monkeypatch):
+    """A ~/.codex token that passes the import's 0-skew check but is expiring
+    at the pool's refresh skew must NOT be adopted-and-skipped: the pool falls
+    through to a real refresh rather than riding a near-dead token."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+    _write_auth_store(tmp_path, _codex_auth_store("access-OWN", "refresh-OWN"))
+
+    import agent.credential_pool as cp
+    import hermes_cli.auth as auth_mod
+    from agent.credential_pool import load_pool
+
+    monkeypatch.setattr(
+        auth_mod, "_import_codex_cli_tokens",
+        lambda: {"access_token": "access-CLI-NEAR", "refresh_token": "refresh-CLI-NEAR"},
+    )
+
+    def _expiring(tok, skew=0, *a, **k):
+        # access-CLI-NEAR: fresh at the import's 0-skew check, expiring at the
+        # pool's refresh skew. Everything else (our own seed) is non-expiring
+        # so select() does not pre-refresh.
+        if tok == "access-CLI-NEAR":
+            return skew >= 60
+        return False
+
+    monkeypatch.setattr(auth_mod, "_codex_access_token_is_expiring", _expiring)
+    monkeypatch.setattr(cp, "_codex_access_token_is_expiring", _expiring)
+
+    refresh_calls = {"n": 0}
+
+    def _refresh(*_a, **_k):
+        refresh_calls["n"] += 1
+        return {
+            "access_token": "access-REFRESHED",
+            "refresh_token": "refresh-REFRESHED",
+            "last_refresh": "2026-06-27T01:00:00Z",
+        }
+
+    monkeypatch.setattr(auth_mod, "refresh_codex_oauth_pure", _refresh)
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    updated = pool._refresh_entry(entry, force=True)
+    assert refresh_calls["n"] == 1, "near-expiry CLI token must not short-circuit the refresh"
+    assert updated is not None
+    assert updated.access_token == "access-REFRESHED"

@@ -206,3 +206,49 @@ def test_missing_singleton_access_token_reraises_when_codex_cli_half_token(tmp_p
         resolve_codex_runtime_credentials()
 
     assert ei.value.code == "codex_auth_missing_access_token"
+
+
+def test_import_codex_cli_tokens_retries_on_partial_read(tmp_path, monkeypatch):
+    """The Codex CLI rewrites ~/.codex/auth.json without a cross-process lock,
+    so a concurrent read can hit a half-written file and raise JSONDecodeError.
+    The import must retry rather than mistake a transient partial read for
+    'no CLI token' (which would let the pool quarantine to DEAD)."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "auth.json").write_text(json.dumps({
+        "tokens": {"access_token": "access-OK", "refresh_token": "refresh-OK"},
+    }))
+    monkeypatch.setattr(auth, "_codex_access_token_is_expiring", lambda tok, *a, **k: False)
+
+    real_loads = json.loads
+    calls = {"n": 0}
+
+    def _flaky_loads(s, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise json.JSONDecodeError("Expecting value", s if isinstance(s, str) else "", 0)
+        return real_loads(s, *a, **k)
+
+    monkeypatch.setattr(auth.json, "loads", _flaky_loads)
+
+    result = auth._import_codex_cli_tokens()
+    assert result is not None, "transient partial read must be retried, not treated as absent"
+    assert result.get("access_token") == "access-OK"
+    assert calls["n"] >= 2
+
+
+def test_import_codex_cli_tokens_returns_none_when_unreadable_after_retries(tmp_path, monkeypatch):
+    """If the file stays unreadable across all retries, return None (no token)
+    rather than raising — callers treat None as 'no CLI fallback available'."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "auth.json").write_text("{ this is never valid json")
+
+    def _always_fail(s, *a, **k):
+        raise json.JSONDecodeError("Expecting value", s if isinstance(s, str) else "", 0)
+
+    monkeypatch.setattr(auth.json, "loads", _always_fail)
+
+    assert auth._import_codex_cli_tokens() is None
