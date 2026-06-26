@@ -384,6 +384,56 @@ def test_auto_retry_feedback_plaintext_fallback(kanban_home, gate_on):
 # Producer routing
 # ---------------------------------------------------------------------------
 
+
+
+def test_code_worker_cannot_block_for_review_required(kanban_home, gate_on):
+    """Review-required is not a blocker; code lanes must complete into the gate."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl review handoff", assignee="coder")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        ok = kb.block_task(
+            conn,
+            tid,
+            reason="review-required: please verify",
+            expected_run_id=run_id,
+        )
+
+        assert ok is False
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.current_run_id == run_id
+        events = [
+            r[0]
+            for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,)
+            ).fetchall()
+        ]
+        assert "review_required_block_rejected" in events
+        assert "blocked" not in events
+
+        assert kb.complete_task(
+            conn, tid, summary="implementation ready", expected_run_id=run_id, review_gate=True
+        )
+        assert kb.get_task(conn, tid).status == "review"
+
+
+def test_code_worker_can_still_block_real_blocker(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl needs secret", assignee="coder")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        assert kb.block_task(
+            conn,
+            tid,
+            reason="needs credential from operator",
+            expected_run_id=run_id,
+        ) is True
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
 def test_code_completion_with_gate_routes_to_review(kanban_home, gate_on):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="impl X", assignee="coder")

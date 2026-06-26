@@ -10403,6 +10403,68 @@ def _park_integration(
     return True
 
 
+def _is_review_required_block_reason(reason: Optional[str]) -> bool:
+    """True when a worker tries to park finished code for review via block."""
+    if reason is None:
+        return False
+    return str(reason).strip().lower().startswith("review-required")
+
+
+def _reject_code_worker_review_required_block(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: Optional[str],
+    expected_run_id: Optional[int],
+) -> bool:
+    """Reject the legacy code-worker ``block review-required`` dead-end.
+
+    Code-producing workers hand completed work to the review gate by calling
+    ``complete_task(..., review_gate=True)``.  A ``review-required`` block is not
+    a real blocker: it strands the task in ``blocked`` so the verifier/reviewer
+    chain never consumes it.  Keep the guard worker-scoped by requiring the
+    caller's ``expected_run_id``; operator/manual blocks and real blockers remain
+    untouched.
+    """
+    if expected_run_id is None or not _is_review_required_block_reason(reason):
+        return False
+    cfg = _review_gate_config()
+    if not cfg.get("enabled", False):
+        return False
+    row = conn.execute(
+        """
+        SELECT t.assignee, t.current_run_id, r.profile
+          FROM tasks t
+          LEFT JOIN task_runs r ON r.id = t.current_run_id
+         WHERE t.id = ?
+           AND t.current_run_id = ?
+        """,
+        (task_id, int(expected_run_id)),
+    ).fetchone()
+    if not row:
+        return False
+    profile = str(row["profile"] or row["assignee"] or "").strip().lower()
+    if profile not in (cfg.get("code_roles") or frozenset()):
+        return False
+    # Review-originated runs (verifier/reviewer/critic) are allowed to block
+    # REQUEST_CHANGES; the guard is only for code production runs.
+    if _run_originated_from_review(conn, task_id, int(expected_run_id)):
+        return False
+    _append_event(
+        conn,
+        task_id,
+        "review_required_block_rejected",
+        {
+            "reason": reason,
+            "run_id": int(expected_run_id),
+            "profile": profile,
+            "message": "Code workers must call kanban_complete to enter the review gate; review-required is not a blocker.",
+        },
+        run_id=int(expected_run_id),
+    )
+    return True
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -10419,6 +10481,10 @@ def block_task(
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
     with write_txn(conn):
+        if _reject_code_worker_review_required_block(
+            conn, task_id, reason=reason, expected_run_id=expected_run_id
+        ):
+            return False
         if expected_run_id is None:
             cur = conn.execute(
                 """
