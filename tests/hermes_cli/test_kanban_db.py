@@ -8208,14 +8208,14 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     silently lose the second cycle (escalation_count=1, coalesced_repeats=0)."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
-        # NON-gave_up writer: a budget-runaway park writes a raw real-bug
+        # NON-gave_up writer: a budget-runaway park writes a raw unclassified
         # operator_escalation without going through the gave_up branch.
         fresh = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
         assert kb._park_budget_runaway(conn, fresh, token_sum=999, cap=10, runs=3)
-        # re-dispatch, then trip the breaker with the SAME (real-bug) class
+        # re-dispatch, then trip the breaker with the SAME (unclassified) class
         _redispatch(conn, tid)
         assert kb._record_task_failure(
-            conn, tid, "tests failed: assertion", outcome="crashed",
+            conn, tid, "something entirely opaque happened", outcome="unknown",
             failure_limit=1, release_claim=True, end_run=True,
         )
         events = kb.list_events(conn, tid)
@@ -8233,7 +8233,7 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     assert row["kind"] == "operator_escalation"
     # 2 escalation cycles total: the budget-runaway park + the coalesced gave_up
     assert row["escalation_count"] == 2
-    assert row["escalation_classes"] == ["real-bug"]
+    assert row["escalation_classes"] == ["unclassified"]
     # exactly one suppressed repeat, made explicit (was invisibly dropped before)
     assert row["coalesced_repeats"] == 1
 
@@ -12705,8 +12705,8 @@ def test_s4_classify_failure_transient():
 
 
 def test_s4_classify_failure_real_bug_and_default():
-    """Red gate / reviewer findings -> real-bug, and an opaque failure with no
-    transient/spec/flaky signal defaults to real-bug."""
+    """Red gate / reviewer findings -> real-bug, but an opaque failure with no
+    transient/spec/flaky signal defaults to unclassified."""
     cls, _ = kb._classify_failure(error="gate failed: pytest 3 tests failed")
     assert cls == kb.HEILER_CLASS_REAL_BUG
 
@@ -12714,7 +12714,7 @@ def test_s4_classify_failure_real_bug_and_default():
     assert cls == kb.HEILER_CLASS_REAL_BUG
 
     cls, ev = kb._classify_failure(error="something entirely opaque happened")
-    assert cls == kb.HEILER_CLASS_REAL_BUG
+    assert cls == kb.HEILER_CLASS_UNCLASSIFIED
     assert ev["signal_source"] == "default"
 
 
@@ -12755,6 +12755,14 @@ def test_capacity_class_registered():
     assert kb.HEILER_CLASS_CAPACITY in kb.HEILER_CLASSES
     from hermes_cli import vision_metrics as vm
     assert kb.HEILER_CLASS_CAPACITY not in vm._NON_TRANSIENT_HEILER_CLASSES
+
+
+def test_unclassified_class_registered_but_not_non_transient():
+    """The opaque default class is valid, but not a known defect signal."""
+    assert kb.HEILER_CLASS_UNCLASSIFIED == "unclassified"
+    assert kb.HEILER_CLASS_UNCLASSIFIED in kb.HEILER_CLASSES
+    from hermes_cli import vision_metrics as vm
+    assert kb.HEILER_CLASS_UNCLASSIFIED not in vm._NON_TRANSIENT_HEILER_CLASSES
 
 
 def test_s4_classify_crashed_worker_is_transient():

@@ -65,7 +65,8 @@ GATE_LEAKER_ENTRY_MAX = 200
 # Heiler classes that indicate a *real* problem was detected (not a transient
 # blip). A task counted "autonomous" that nonetheless carries one of these is
 # the autonomy metric's skeptic counter: the system saw something real and
-# still never escalated to the operator.
+# still never escalated to the operator. ``unclassified`` stays out here like
+# ``capacity``: it is an opaque/default operational bucket, not a known defect.
 _NON_TRANSIENT_HEILER_CLASSES = (
     kb.HEILER_CLASS_REAL_BUG,
     kb.HEILER_CLASS_BAD_SPEC,
