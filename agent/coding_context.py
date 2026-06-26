@@ -312,8 +312,19 @@ def _resolve_cwd(cwd: Optional[str | Path]) -> Path:
 def _git_root(cwd: Path) -> Optional[Path]:
     current = cwd.resolve()
     for parent in [current, *current.parents]:
-        if (parent / ".git").exists():
-            return parent
+        git_marker = parent / ".git"
+        # A ``.git`` *file* (git-worktree/submodule) always counts. A ``.git``
+        # *dir* counts only if it actually holds a repo (has ``HEAD``) — an empty
+        # ``.git`` dir is not a repository (git itself rejects it). Guards against
+        # a stray ``/tmp/.git`` making every temp-dir path resolve to a bogus
+        # workspace root. Mirrors agent.lsp.workspace._is_git_marker.
+        try:
+            if git_marker.is_file() or (
+                git_marker.is_dir() and (git_marker / "HEAD").exists()
+            ):
+                return parent
+        except OSError:
+            continue
     return None
 
 
