@@ -27,9 +27,10 @@ export function ChainSelector({ chains, doneChains, selectedRootId, onSelect, di
     : null;
 
   return (
-    // B1: min-w-0 on the outer flex container ensures the select can shrink
-    // and the w-full on the inner select fills the full card width on mobile.
-    <div className="flex min-w-0 items-center gap-[14px]">
+    // B1: on mobile the row stacks (flex-col) so the select trigger gets the FULL
+    // card width and the chain name stays readable; the mono-meta drops to its own
+    // line below. From sm: up it's the original side-by-side row.
+    <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-[14px]">
       {/* Trigger — a 46px-tall styled button with a hidden native <select> layered on top
           for accessibility. The select is w-full / h-full and opacity-0 so the browser's
           native popup fires on click, while the styled trigger shows through. */}
