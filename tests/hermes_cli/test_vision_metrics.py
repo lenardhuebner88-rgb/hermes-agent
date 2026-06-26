@@ -125,6 +125,22 @@ def test_autonomy_percent_null_when_no_done(conn):
 # Escalation-rate metric + paired counter
 # ---------------------------------------------------------------------------
 
+def test_escalation_rate_counts_distinct_tasks_not_events(conn):
+    now = 100 * DAY
+    _add_task(conn, "T1", status="blocked")
+    _add_task(conn, "T2", status="blocked")
+
+    # Four escalation events in the window, but only two distinct tasks.
+    _add_event(conn, "T1", kb.OPERATOR_ESCALATION_EVENT, created_at=now - DAY)
+    _add_event(conn, "T1", kb.OPERATOR_ESCALATION_EVENT, created_at=now - DAY + 1)
+    _add_event(conn, "T1", kb.OPERATOR_ESCALATION_EVENT, created_at=now - DAY + 2)
+    _add_event(conn, "T2", kb.OPERATOR_ESCALATION_EVENT, created_at=now - 2 * DAY)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+
+    assert snap["metrics"]["escalation_rate"]["escalations_per_week"] == 2
+
+
 def test_escalation_rate_window_and_silent_blocks_counter(conn):
     now = 100 * DAY
     _add_task(conn, "T1", status="done", completed_at=now - DAY)

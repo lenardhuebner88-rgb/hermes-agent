@@ -804,7 +804,8 @@ def _escalation_rate_metric(
 ) -> dict:
     """Eskalations-Rate (per week) ↔ counter 'silent_blocks'.
 
-    Headline = count of ``operator_escalation`` events inside the window.
+    Headline = count of distinct tasks with ``operator_escalation`` events
+    inside the window.
     Counter = *settled* blocked tasks (the self-healing retry lane is done with
     them) that have NO escalation event — blocks that bypass the operator while
     looking like progress from outside (SILENT-BLOCK-GUARD-S1). Transient blocks
@@ -816,7 +817,7 @@ def _escalation_rate_metric(
     """
     window = window_days * DAY_SECONDS
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM task_events "
+        "SELECT COUNT(DISTINCT task_id) AS n FROM task_events "
         "WHERE kind = ? AND created_at >= ?",
         (kb.OPERATOR_ESCALATION_EVENT, now - window),
     ).fetchone()
