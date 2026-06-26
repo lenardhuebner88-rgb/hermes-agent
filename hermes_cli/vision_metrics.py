@@ -948,8 +948,29 @@ def _classification_coverage_metric(
         round(100.0 * corrected_in_window / classified_in_window, 1)
         if classified_in_window else 0.0
     )
+    # M2: Klassifikations-Qualitaet — Anteil 'unclassified' an den Klassifikationen
+    # im Fenster. Hoch = by_class untrustworthy. Die 24h-coverage oben ist durch den
+    # Auto-Sweep trivial saturiert; dies ist das echte Vertrauenssignal fuer den Strategen.
+    cls_counts: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ? AND created_at >= ?",
+        (kb.HEILER_CLASSIFICATION_EVENT, cutoff),
+    ).fetchall():
+        try:
+            p = json.loads(r["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(p, dict) and p.get("class"):
+            cls_counts[p["class"]] = cls_counts.get(p["class"], 0) + 1
+    classified_total = sum(cls_counts.values())
+    unclassified_share = (
+        round(100.0 * cls_counts.get(kb.HEILER_CLASS_UNCLASSIFIED, 0) / classified_total, 1)
+        if classified_total else None
+    )
     return {
         "coverage_pct": coverage_pct,
+        "unclassified_share": unclassified_share,
+        "classified_total": classified_total,
         "escalations": total,
         "classified_within_24h": covered,
         "window_days": window_days,

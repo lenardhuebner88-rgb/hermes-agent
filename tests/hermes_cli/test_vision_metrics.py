@@ -1476,3 +1476,73 @@ def test_red_cause_leaker_only_does_not_coalesce_as_unknown():
     # genuinely unattributed reds which still coalesce as "unknown".
     records = [_red_leaker_only("2026-06-20"), _red_leaker_only("2026-06-21")]
     assert vm.derive_consecutive_red_cause(records) is None
+
+
+# ---------------------------------------------------------------------------
+# M2: unclassified_share + classified_total in classification_coverage metric
+# ---------------------------------------------------------------------------
+
+def test_classification_coverage_unclassified_share(conn):
+    """M2: _classification_coverage_metric exposes unclassified_share (percent
+    of heiler_classification events in the window whose class is 'unclassified')
+    and classified_total (raw count). This is the real trust signal for the
+    Stratege — the 24h-coverage headline is trivially saturated by the auto-sweep,
+    but a high unclassified_share reveals that by_class is still untrustworthy.
+
+    Fixture: 10 heiler_classification events in the window, 3 unclassified,
+    7 of other classes. Assert: unclassified_share==30.0, classified_total==10,
+    coverage_pct present.
+    """
+    now = 100 * DAY
+    cutoff = now - 7 * DAY
+
+    # Insert tasks (required for FK-less inserts to avoid integrity errors; tasks
+    # table allows unknown ids via deferred FK, so direct insert is fine here).
+    for i in range(10):
+        _add_task(conn, f"U{i}", status="blocked", created_at=now - DAY)
+
+    # 3 unclassified events inside the window
+    for i in range(3):
+        _add_event(conn, f"U{i}", kb.HEILER_CLASSIFICATION_EVENT,
+                   payload={"class": kb.HEILER_CLASS_UNCLASSIFIED},
+                   created_at=now - DAY)
+
+    # 5 real-bug events inside the window
+    for i in range(3, 8):
+        _add_event(conn, f"U{i}", kb.HEILER_CLASSIFICATION_EVENT,
+                   payload={"class": kb.HEILER_CLASS_REAL_BUG},
+                   created_at=now - DAY)
+
+    # 2 transient events inside the window
+    for i in range(8, 10):
+        _add_event(conn, f"U{i}", kb.HEILER_CLASSIFICATION_EVENT,
+                   payload={"class": kb.HEILER_CLASS_TRANSIENT},
+                   created_at=now - DAY)
+
+    # One extra event OUTSIDE the window — must not count
+    _add_task(conn, "OLD", status="blocked", created_at=cutoff - 1)
+    _add_event(conn, "OLD", kb.HEILER_CLASSIFICATION_EVENT,
+               payload={"class": kb.HEILER_CLASS_UNCLASSIFIED},
+               created_at=cutoff - 1)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["unclassified_share"] == 30.0, (
+        f"expected 30.0, got {c['unclassified_share']!r}"
+    )
+    assert c["classified_total"] == 10, (
+        f"expected 10, got {c['classified_total']!r}"
+    )
+    # Existing key must still be present (non-regression)
+    assert "coverage_pct" in c
+
+
+def test_classification_coverage_unclassified_share_null_when_no_events(conn):
+    """M2: unclassified_share is None when there are no heiler_classification
+    events in the window (classified_total == 0), mirroring the coverage_pct
+    null-on-empty contract."""
+    snap = vm.compute_metrics_snapshot(conn, now=100 * DAY, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+    assert c["unclassified_share"] is None
+    assert c["classified_total"] == 0
