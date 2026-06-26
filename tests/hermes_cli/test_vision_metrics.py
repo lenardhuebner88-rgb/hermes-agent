@@ -65,11 +65,11 @@ def _add_event(conn, tid, kind, *, payload=None, created_at=1_000):
 
 
 def _add_run(conn, tid, *, cost_usd=None, started_at=1_000, ended_at=1_000,
-             status="done"):
+             status="done", outcome=None):
     conn.execute(
-        "INSERT INTO task_runs (task_id, status, started_at, ended_at, "
-        "cost_usd) VALUES (?, ?, ?, ?, ?)",
-        (tid, status, started_at, ended_at, cost_usd),
+        "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at, "
+        "cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+        (tid, status, outcome, started_at, ended_at, cost_usd),
     )
     conn.commit()
 
@@ -92,8 +92,9 @@ def test_autonomy_percent_and_counter(conn):
     now = 100 * DAY
     # A: clean autonomous done
     _add_task(conn, "A", consecutive_failures=0, completed_at=now - DAY)
-    # B: done but had failures -> not autonomous
-    _add_task(conn, "B", consecutive_failures=2, completed_at=now - DAY)
+    # B: done but had a failed run -> not autonomous
+    _add_task(conn, "B", consecutive_failures=0, completed_at=now - DAY)
+    _add_run(conn, "B", outcome="timed_out")
     # C: done but operator escalated -> not autonomous
     _add_task(conn, "C", consecutive_failures=0, completed_at=now - DAY)
     _add_event(conn, "C", kb.OPERATOR_ESCALATION_EVENT, created_at=now - DAY)
@@ -112,6 +113,21 @@ def test_autonomy_percent_and_counter(conn):
     assert a["autonomy_pct"] == 50.0
     assert a["counter"]["name"] == "should_have_escalated_but_didnt"
     assert a["counter"]["value"] == 1  # D
+
+
+def test_autonomy_excludes_done_tasks_with_failed_runs(conn):
+    now = 100 * DAY
+    _add_task(conn, "A", completed_at=now - DAY)
+    _add_run(conn, "A", outcome="completed")
+    _add_task(conn, "B", completed_at=now - DAY)
+    _add_run(conn, "B", outcome="gave_up")
+
+    snap = vm.compute_metrics_snapshot(conn, now=now)
+    a = snap["metrics"]["autonomy"]
+
+    assert a["total_done"] == 2
+    assert a["autonomous_done"] == 1
+    assert a["autonomy_pct"] == 50.0
 
 
 def test_autonomy_percent_null_when_no_done(conn):

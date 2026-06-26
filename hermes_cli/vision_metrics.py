@@ -734,6 +734,18 @@ def derive_persistent_red_triage(
 # DB-derived metrics
 # ---------------------------------------------------------------------------
 
+_FAILED_RUN_OUTCOMES = frozenset(
+    {
+        "blocked",
+        "crashed",
+        "gave_up",
+        "iteration_budget_exhausted",
+        "spawn_failed",
+        "timed_out",
+    }
+)
+
+
 def _tasks_with_operator_escalation(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute(
         "SELECT DISTINCT task_id FROM task_events WHERE kind = ?",
@@ -758,27 +770,34 @@ def _tasks_with_nontransient_heiler(conn: sqlite3.Connection) -> set[str]:
     return out
 
 
+def _tasks_with_failed_run(conn: sqlite3.Connection) -> set[str]:
+    placeholders = ",".join("?" * len(_FAILED_RUN_OUTCOMES))
+    rows = conn.execute(
+        f"SELECT DISTINCT task_id FROM task_runs WHERE outcome IN ({placeholders})",
+        tuple(sorted(_FAILED_RUN_OUTCOMES)),
+    ).fetchall()
+    return {r["task_id"] for r in rows}
+
+
 def _autonomy_metric(conn: sqlite3.Connection) -> dict:
     """Autonomie-% ↔ counter 'should_have_escalated_but_didnt'.
 
-    Autonomous = a done task that finished with ``consecutive_failures = 0``
-    AND never raised an ``operator_escalation`` event. The paired counter is
-    the subset of those "autonomous" tasks that nonetheless carry a
-    non-transient ``heiler_classification`` (real-bug / bad-spec / conflict):
-    the system saw a real problem and still didn't escalate.
+    Autonomous = a done task that never raised an ``operator_escalation`` event
+    AND has no failed ``task_runs.outcome``. The paired counter is the subset of
+    those "autonomous" tasks that nonetheless carry a non-transient
+    ``heiler_classification`` (real-bug / bad-spec / conflict): the system saw
+    a real problem and still didn't escalate.
     """
     escalated = _tasks_with_operator_escalation(conn)
     flagged = _tasks_with_nontransient_heiler(conn)
-    rows = conn.execute(
-        "SELECT id, consecutive_failures FROM tasks WHERE status = 'done'"
-    ).fetchall()
+    failed = _tasks_with_failed_run(conn)
+    rows = conn.execute("SELECT id FROM tasks WHERE status = 'done'").fetchall()
     total_done = len(rows)
     autonomous = 0
     should_have = 0
     for r in rows:
         tid = r["id"]
-        cf = r["consecutive_failures"] or 0
-        if cf == 0 and tid not in escalated:
+        if tid not in escalated and tid not in failed:
             autonomous += 1
             if tid in flagged:
                 should_have += 1
