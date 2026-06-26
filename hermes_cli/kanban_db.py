@@ -7365,19 +7365,26 @@ def claim_review_task(
         if cur.rowcount != 1:
             return None
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, model_override "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         cfg = _review_gate_config()
         run_profile = reviewer_profile or cfg.get("verifier_profile") or (trow["assignee"] if trow else None)
+        lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
+        spawn_metadata = _claude_cli_spawn_identity_metadata(
+            run_profile,
+            model_override=trow["model_override"] if trow else None,
+            lane_entry=lane_entry,
+        )
+        metadata_json = json.dumps(spawn_metadata, sort_keys=True) if spawn_metadata else None
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -7387,6 +7394,7 @@ def claim_review_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                metadata_json,
             ),
         )
         run_id = run_cur.lastrowid

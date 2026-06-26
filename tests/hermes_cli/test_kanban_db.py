@@ -9533,6 +9533,58 @@ def test_claim_review_task_transitions_to_running(kanban_home):
     assert claimed.claim_lock is not None
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_billing_mode", "expected_subscription", "expected_cost_source"),
+    [
+        ("openrouter", "openai/gpt-5-mini", "metered", None, "dispatch_metered_stamp"),
+        ("openai-codex", "gpt-5.5", "subscription_included", "chatgpt", "dispatch_subscription_stamp"),
+    ],
+)
+def test_claim_review_task_stamps_billing_identity_from_reviewer_lane(
+    kanban_home,
+    monkeypatch,
+    provider,
+    model,
+    expected_billing_mode,
+    expected_subscription,
+    expected_cost_source,
+):
+    """review -> running verifier runs must be self-describing too."""
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: None)
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name=f"review-{expected_billing_mode}",
+            profiles={"verifier": {
+                "worker_runtime": "hermes",
+                "provider": provider,
+                "model": model,
+            }},
+        )
+        kb.activate_lane(conn, lane["id"])
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+
+        claimed = kb.claim_review_task(conn, t, reviewer_profile="verifier")
+        assert claimed is not None
+        row = conn.execute(
+            "SELECT profile, metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+
+    assert row["profile"] == "verifier"
+    meta = json.loads(row["metadata"])
+    assert meta["worker_runtime"] == "hermes"
+    assert meta["provider"] == provider
+    assert meta["model"] == model
+    assert meta["billing_mode"] == expected_billing_mode
+    assert meta["cost_source"] == expected_cost_source
+    if expected_subscription is None:
+        assert "subscription" not in meta
+    else:
+        assert meta["subscription"] == expected_subscription
+
+
 def test_review_claimed_full_context_retry_uses_retry_profile_caps(kanban_home):
     """review -> running verifier continuations use retry caps with profile='full'."""
     with kb.connect() as conn:
