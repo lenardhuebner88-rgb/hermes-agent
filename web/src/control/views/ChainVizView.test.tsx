@@ -78,7 +78,8 @@ describe("ChainVizView live wiring", () => {
   });
 
   it("falls back to first active chain when no ?root= param is set", () => {
-    expect(src).toMatch(/activeChains\[0\]\.rootId/);
+    // Optional-chained + done-chain fallback (B7): activeChains[0]?.rootId ?? doneChains[0]?.rootId ?? null
+    expect(src).toMatch(/activeChains\[0\]\?\.rootId/);
     expect(src).toMatch(/useSearchParams/);
   });
 
@@ -276,7 +277,8 @@ describe("MotherLedger source contract", () => {
     expect(statsSrc).toMatch(/billing_mode/);
     expect(statsSrc).toMatch(/Laufzeit/);
     expect(statsSrc).toMatch(/gesch\./);
-    expect(statsSrc).toMatch(/Neuralwatt: —/);
+    // A11: hard-coded "Neuralwatt —" extracted to the i18n key de.stats.motherLedgerNeuralwatt
+    expect(statsSrc).toMatch(/motherLedgerNeuralwatt/);
   });
 });
 

@@ -68,4 +68,9 @@ describe("dagLayout", () => {
     expect(statusDot("done")).toBe("ready");
     expect(statusDot("todo")).toBe("idle");
   });
+
+  // B5: scheduled → violet (consistent with Flow; was zinc = looks dead)
+  it("maps scheduled status to violet tone", () => {
+    expect(statusTone("scheduled")).toBe("violet");
+  });
 });

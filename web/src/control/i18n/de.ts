@@ -866,6 +866,8 @@ export const de = {
     eyebrow: "Ketten",
     title: "Task-Ketten",
     subtitle: "Eine laufende Kette als Pipeline — Fortschritt, Status und live Heartbeat.",
+    // B4: DAG-Richtungs-Erklärung (Subtasks oben, Integration unten)
+    subtitleDagHint: "Subtasks oben, Integrations-Task unten.",
     loading: "lädt …",
     loadError: "Kette konnte nicht geladen werden.",
     emptyTitle: "Keine aktive Kette",
@@ -875,6 +877,10 @@ export const de = {
     chooseChain: "Kette wählen",
     noChains: "keine aktiven Ketten",
     focusRoot: "Fokus",
+    // B4: Tooltip für den Fokus-Badge — erklärt die DAG-Richtung
+    focusRootTooltip: "Integrations-Task — wartet auf alle Subtasks",
+    // B8: Run-Inspect für blockierte Knoten
+    viewRunLabel: "Run ansehen",
     nodeTaskId: "Task",
     laneLabel: "Lane",
     runtimeLabel: "Laufzeit",

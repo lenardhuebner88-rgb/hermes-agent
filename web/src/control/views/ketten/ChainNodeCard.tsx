@@ -7,7 +7,7 @@ import type { ChainGraphNode, Worker } from "../../lib/types";
 import type { WorkerActionKey } from "../../components/WorkerCard";
 import { statusDot, statusTone } from "./dagLayout";
 import { de } from "../../i18n/de";
-import { taskStatusLabel } from "../../lib/tones";
+import { taskStatusLabel, profileLabel } from "../../lib/tones";
 
 export interface ChainNodeCardProps {
   node: ChainGraphNode;
@@ -84,14 +84,23 @@ export const ChainNodeCard = memo(
           isRoot && "ring-1 ring-[var(--hc-accent-border)]",
         )}
       >
-        {/* Header: task id (left) · focus marker + status pill (right). */}
+        {/* Header: task id (left, B9b: links to Flow?task=) · focus marker + status pill (right). */}
         <div className="flex min-w-0 items-center justify-between gap-2">
-          <span className="hc-mono min-w-0 flex-1 truncate text-[11px] text-[var(--hc-text-dim)]">
+          {/* B9b: task-id chip links to /control/flow?task=<id>; FlowView reads
+              ?task= and scrolls+selects the task. Plain <a> avoids router-context
+              requirement in server-render tests. */}
+          <a
+            href={`/control/flow?task=${encodeURIComponent(node.id)}`}
+            className="hc-mono min-w-0 flex-1 truncate text-[11px] text-[var(--hc-text-dim)] hover:text-[var(--hc-text-soft)] hover:underline"
+          >
             {de.ketten.nodeTaskId} {node.id}
-          </span>
+          </a>
           <div className="flex shrink-0 items-center gap-2">
             {isRoot ? (
-              <span className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--hc-accent-text)]">
+              <span
+                className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--hc-accent-text)]"
+                title={de.ketten.focusRootTooltip}
+              >
                 {de.ketten.focusRoot}
               </span>
             ) : null}
@@ -199,15 +208,37 @@ export const ChainNodeCard = memo(
           </div>
         ) : null}
 
-        {/* Footer: assignee (left) · cost read-out (right), on a hairline. */}
+        {/* B8: "Run ansehen"-Button für blockierte Knoten mit vorhandenem latest_run.
+            Gibt Operator Einblick in den fehlgeschlagenen Run zur Fehlersuche. */}
+        {!isRunning && node.status === "blocked" && node.latest_run?.id != null && onInspect ? (
+          <div className="mt-3 border-t border-[var(--hc-border)] pt-2.5">
+            <button
+              type="button"
+              onClick={() => onInspect(String(node.latest_run!.id))}
+              className="hc-mono inline-flex items-center gap-1 rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 text-[10px] text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]"
+            >
+              {de.ketten.viewRunLabel}
+            </button>
+          </div>
+        ) : null}
+
+        {/* Footer: assignee + profile chip (left) · cost read-out (right), on a hairline.
+            B6: profile chip shown for ALL nodes (done/blocked/running) — helps Operator
+            trace cost and failure attribution without opening the inspect drawer. */}
         <div className="mt-3 flex min-w-0 items-center justify-between gap-2 border-t border-[var(--hc-border)] pt-2.5">
-          {node.assignee ? (
-            <span className="inline-flex shrink-0 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-1 text-xs font-medium text-[var(--hc-accent-text)]">
-              {node.assignee}
-            </span>
-          ) : (
-            <span aria-hidden />
-          )}
+          <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+            {node.assignee ? (
+              <span className="inline-flex items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-1 text-xs font-medium text-[var(--hc-accent-text)]">
+                {node.assignee}
+              </span>
+            ) : null}
+            {node.latest_run?.profile ? (
+              <span className="hc-mono inline-flex items-center rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-1.5 py-0.5 text-[10px] text-[var(--hc-text-dim)]">
+                {profileLabel[node.latest_run.profile] ?? node.latest_run.profile}
+              </span>
+            ) : null}
+            {!node.assignee && !node.latest_run?.profile ? <span aria-hidden /> : null}
+          </div>
           <NodeCost
             costUsd={node.cost_usd}
             costEffectiveUsd={node.cost_effective_usd}

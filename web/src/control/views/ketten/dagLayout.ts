@@ -57,11 +57,14 @@ export function linearizeNodes(nodes: ChainGraphNode[], edges: ChainGraphEdge[])
   return computeLevels(nodes, edges).flatMap((lvl) => lvl.nodes);
 }
 
-export function statusTone(status: string): "emerald" | "cyan" | "amber" | "red" | "zinc" {
+export function statusTone(status: string): "emerald" | "cyan" | "amber" | "red" | "violet" | "zinc" {
   if (status === "done") return "emerald";
   if (status === "running") return "cyan";
   if (status === "review") return "amber";
   if (status === "blocked") return "red";
+  // B5: scheduled looks like a planned/upcoming chain → violet (same as Flow);
+  // old default "zinc" made geplante Ketten look dead (grey=idle).
+  if (status === "scheduled") return "violet";
   return "zinc";
 }
 

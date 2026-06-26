@@ -250,27 +250,32 @@ export function ChainVizView(_props: { density?: unknown }) {
     return held;
   }, [board.data]);
 
-  const activeChains = useMemo(() => {
-    if (!board.data) return [];
+  const { activeChains, doneChains } = useMemo(() => {
+    if (!board.data) return { activeChains: [], doneChains: [] };
     const allTasks = board.data.columns.flatMap((c) => c.tasks);
-    return buildChains(allTasks).active;
+    const built = buildChains(allTasks);
+    return { activeChains: built.active, doneChains: built.done };
   }, [board.data]);
 
   // URL-param ?root= wins; fall back to user state, then first active chain.
   const requestedRoot = params.get("root")?.trim() || null;
+  const allSelectableChains = useMemo(
+    () => [...activeChains, ...doneChains],
+    [activeChains, doneChains],
+  );
   const focusedRootId = useMemo(() => {
-    if (activeChains.length === 0) return null;
-    // URL param takes precedence if it exists in active chains.
-    if (requestedRoot && activeChains.some((c) => c.rootId === requestedRoot)) {
+    if (activeChains.length === 0 && doneChains.length === 0) return null;
+    // URL param takes precedence if it exists in any chain (active or done).
+    if (requestedRoot && allSelectableChains.some((c) => c.rootId === requestedRoot)) {
       return requestedRoot;
     }
     // User selection via ChainSelector (local state).
-    if (selectedRootId && activeChains.some((c) => c.rootId === selectedRootId)) {
+    if (selectedRootId && allSelectableChains.some((c) => c.rootId === selectedRootId)) {
       return selectedRootId;
     }
-    // Default: first active chain.
-    return activeChains[0].rootId;
-  }, [activeChains, requestedRoot, selectedRootId]);
+    // Default: first active chain (or first done if no active).
+    return activeChains[0]?.rootId ?? doneChains[0]?.rootId ?? null;
+  }, [activeChains, doneChains, allSelectableChains, requestedRoot, selectedRootId]);
 
   // Keep URL in sync when user selects via selector.
   function handleSelect(rootId: string) {
@@ -286,7 +291,7 @@ export function ChainVizView(_props: { density?: unknown }) {
           <h1 className="mt-1 text-2xl font-semibold tracking-normal text-[var(--hc-text)]">
             {de.ketten.title}
           </h1>
-          <p className="mt-1 text-sm text-[var(--hc-text-soft)]">{de.ketten.subtitle}</p>
+          <p className="mt-1 text-sm text-[var(--hc-text-soft)]">{de.ketten.subtitle} {de.ketten.subtitleDagHint}</p>
         </div>
       </header>
 
@@ -294,7 +299,7 @@ export function ChainVizView(_props: { density?: unknown }) {
         <SkeletonCard rows={4} />
       ) : board.error && !board.data ? (
         <Hero eyebrow={de.ketten.eyebrow} tone="red" title={de.ketten.loadError} subtitle={board.error} />
-      ) : activeChains.length === 0 ? (
+      ) : activeChains.length === 0 && doneChains.length === 0 ? (
         <Hero
           eyebrow={de.ketten.eyebrow}
           tone="zinc"
@@ -308,6 +313,7 @@ export function ChainVizView(_props: { density?: unknown }) {
             <div className="mt-2">
               <ChainSelector
                 chains={activeChains}
+                doneChains={doneChains}
                 selectedRootId={focusedRootId}
                 onSelect={handleSelect}
                 disabled={board.loading}

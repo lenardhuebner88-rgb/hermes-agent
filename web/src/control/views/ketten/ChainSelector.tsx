@@ -1,34 +1,40 @@
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
+import { buildChainOptionLabel } from "./chainSelectorUtils";
 import type { ChainModel } from "../../lib/fleet";
 import type { BoardTask } from "../../lib/types";
 
 export interface ChainSelectorProps {
   chains: ChainModel<BoardTask>[];
+  /** Completed chains to show in a separate optgroup (optional). */
+  doneChains?: ChainModel<BoardTask>[];
   selectedRootId: string | null;
   onSelect: (rootId: string) => void;
   disabled?: boolean;
 }
 
-export function ChainSelector({ chains, selectedRootId, onSelect, disabled }: ChainSelectorProps) {
-  const selected = chains.find((c) => c.rootId === selectedRootId);
+export function ChainSelector({ chains, doneChains, selectedRootId, onSelect, disabled }: ChainSelectorProps) {
+  const selected = chains.find((c) => c.rootId === selectedRootId)
+    ?? doneChains?.find((c) => c.rootId === selectedRootId);
 
   // Build the visible trigger label: the selected chain's title or a placeholder.
   const triggerLabel = selected?.root?.title ?? selected?.rootId ?? de.ketten.noChains;
 
-  // Mono-meta line: task-id short · total tasks · done count.
+  // B3: mono-meta line uses "fertig" not "done"
   const metaLine = selected
-    ? `${selected.rootId.slice(0, 12)} · ${selected.total} ${selected.total === 1 ? "Task" : "Tasks"} · ${selected.doneCount} done`
+    ? `${selected.rootId.slice(0, 12)} · ${selected.total} ${selected.total === 1 ? "Task" : "Tasks"} · ${selected.doneCount} fertig`
     : null;
 
   return (
-    <div className="flex items-center gap-[14px]">
+    // B1: min-w-0 on the outer flex container ensures the select can shrink
+    // and the w-full on the inner select fills the full card width on mobile.
+    <div className="flex min-w-0 items-center gap-[14px]">
       {/* Trigger — a 46px-tall styled button with a hidden native <select> layered on top
           for accessibility. The select is w-full / h-full and opacity-0 so the browser's
           native popup fires on click, while the styled trigger shows through. */}
       <div
-        className="relative flex-1 rounded-[12px] focus-within:ring-1 focus-within:ring-[var(--hc-accent-border)]"
+        className="relative min-w-0 flex-1 rounded-[12px] focus-within:ring-1 focus-within:ring-[var(--hc-accent-border)]"
         style={{ height: 46 }}
       >
         {/* Visual trigger surface */}
@@ -46,7 +52,8 @@ export function ChainSelector({ chains, selectedRootId, onSelect, disabled }: Ch
           <ChevronDown className="h-4 w-4 shrink-0 text-[var(--hc-text-dim)]" />
         </div>
 
-        {/* Accessible native select — invisible but interactive */}
+        {/* Accessible native select — invisible but interactive.
+            B1: w-full ensures the native popup shows the full option text on mobile. */}
         <label htmlFor="chain-select" className="sr-only">
           {de.ketten.chooseChain}
         </label>
@@ -54,27 +61,43 @@ export function ChainSelector({ chains, selectedRootId, onSelect, disabled }: Ch
           id="chain-select"
           value={selectedRootId ?? ""}
           onChange={(e) => onSelect(e.target.value)}
-          disabled={disabled || chains.length === 0}
+          disabled={disabled || (chains.length === 0 && (doneChains?.length ?? 0) === 0)}
           className={cn(
             "absolute inset-0 h-full w-full cursor-pointer appearance-none rounded-[12px] opacity-0",
             disabled && "pointer-events-none",
           )}
         >
-          {chains.length === 0 ? (
+          {chains.length === 0 && (doneChains?.length ?? 0) === 0 ? (
             <option value="">{de.ketten.noChains}</option>
           ) : null}
-          {chains.map((chain) => {
-            const title = chain.root?.title ?? chain.rootId;
-            const status = chain.root?.status ?? "todo";
-            return (
+
+          {/* Active chains (no group label when there are no done chains — keeps it clean) */}
+          {chains.length > 0 && (doneChains?.length ?? 0) > 0 ? (
+            <optgroup label="Aktiv">
+              {chains.map((chain) => (
+                <option key={chain.rootId} value={chain.rootId}>
+                  {buildChainOptionLabel(chain)}
+                </option>
+              ))}
+            </optgroup>
+          ) : (
+            chains.map((chain) => (
               <option key={chain.rootId} value={chain.rootId}>
-                {title} · {chain.runningCount > 0 ? `${chain.runningCount} läuft` : ""}
-                {chain.blockedCount > 0 ? `${chain.blockedCount} blockiert` : ""}
-                {chain.runningCount === 0 && chain.blockedCount === 0 ? status : ""}
-                {" · "}{chain.total} Tasks
+                {buildChainOptionLabel(chain)}
               </option>
-            );
-          })}
+            ))
+          )}
+
+          {/* B7: completed chains as a separate optgroup so just-finished chains remain inspectable */}
+          {(doneChains?.length ?? 0) > 0 ? (
+            <optgroup label="Abgeschlossen">
+              {doneChains!.map((chain) => (
+                <option key={chain.rootId} value={chain.rootId}>
+                  {buildChainOptionLabel(chain)}
+                </option>
+              ))}
+            </optgroup>
+          ) : null}
         </select>
       </div>
 
