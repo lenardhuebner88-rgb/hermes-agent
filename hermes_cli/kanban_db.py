@@ -3112,6 +3112,7 @@ HEILER_CLASS_FLAKY = "flaky"
 HEILER_CLASS_REAL_BUG = "real-bug"
 HEILER_CLASS_BAD_SPEC = "bad-spec"
 HEILER_CLASS_CONFLICT = "conflict"
+HEILER_CLASS_UNCLASSIFIED = "unclassified"
 # HEILER-OUTCOME-RECLASSIFY-S1: a worker that exhausts its iteration/continuation
 # budget without a content defect is neither a transient infra blip nor a real
 # bug — it is a capacity signal. Its own class so the Stratege can observe/route
@@ -3125,6 +3126,7 @@ HEILER_CLASSES = (
     HEILER_CLASS_REAL_BUG,
     HEILER_CLASS_BAD_SPEC,
     HEILER_CLASS_CONFLICT,
+    HEILER_CLASS_UNCLASSIFIED,
     HEILER_CLASS_CAPACITY,
 )
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
@@ -13306,9 +13308,8 @@ def _classify_failure(
          signals on purpose, so a crash / budget-exhaustion whose error text
          reveals a genuine defect stays real-bug (triagierbar, AC-2); only a
          *bare* infra/capacity occurrence reclassifies off the default.
-      6. default -> real-bug (a failure that reached this path with no
-         transient / spec / flaky signal is most likely a genuine defect:
-         a red gate or reviewer findings)
+      6. default -> unclassified (an opaque failure that reached this path with
+         no transient / spec / flaky / real-bug signal is not yet a known defect)
     """
     haystack = " ".join(
         part for part in (error, reason, outcome or "", stall_class or "")
@@ -13356,7 +13357,7 @@ def _classify_failure(
             _ev(outcome, "outcome_fallback"),
         )
 
-    return HEILER_CLASS_REAL_BUG, _ev("default", "default")
+    return HEILER_CLASS_UNCLASSIFIED, _ev("default", "default")
 
 
 def _heiler_classification_payload(
