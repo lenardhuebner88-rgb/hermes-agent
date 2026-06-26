@@ -227,6 +227,15 @@ async function mockControlApis(page: Page) {
     } : path.includes("/autoresearch/proposals") ? {
       proposals: [],
       count: 0,
+    } : path.includes("/strategist/") ? {
+      // deckt /strategist/proposals (Liste+count), /last-runs, /run-status ab —
+      // die View liest defensiv, leere Antwort = sauberer Empty-State.
+      proposals: [],
+      count: 0,
+      harvest: null,
+      propose: null,
+      running: false,
+      status: "idle",
     } : path.includes("/family-organizer/backlog") ? {
       items: [],
     } : path.includes("/orchestration/backlog") ? {
@@ -313,6 +322,37 @@ test.describe("Control Smoke (live)", () => {
       await expect(page).toHaveURL(target.url);
     }
     watch.assertClean();
+  });
+
+  test("Mobile: Stratege + Bibliothek sind über das 'Mehr'-Sheet erreichbar", async ({ page }) => {
+    // Regression-Gate für den Reachability-Fix: primäre Tabs außerhalb der
+    // 4-Slot-Bottom-Bar (stratege, bibliothek) lagen auf Mobile weder in
+    // mobileTabs NOCH in moreTabs → nur per Direkt-URL erreichbar. Jetzt holt
+    // das mobile 'Mehr'-Sheet die Overflow-Primärtabs mit ein.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockControlApis(page);
+    const watch = watchPage(page);
+
+    await page.goto("/control");
+    await expect(page.getByText("Hermes Control").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+
+    // Vor dem Öffnen: Stratege ist nirgends sichtbar (nicht in der Bottom-Bar,
+    // Desktop-Nav ist unter lg ausgeblendet) — exakt der Zustand des Bugs.
+    await expect(page.getByRole("link", { name: "Stratege" })).toHaveCount(0);
+
+    // 'Mehr'-Bottom-Sheet öffnen (aria-label="Mehr").
+    await page.getByRole("button", { name: "Mehr" }).click();
+
+    // Fix: die Overflow-Primärtabs erscheinen jetzt als Links im Sheet.
+    const stratege = page.getByRole("link", { name: "Stratege" }).filter({ visible: true }).first();
+    await expect(stratege).toBeVisible();
+    await expect(page.getByRole("link", { name: "Bibliothek" }).filter({ visible: true }).first()).toBeVisible();
+    watch.assertClean();
+
+    // ...und der Klick landet wirklich auf dem Stratege-Tab, der dort rendert.
+    await stratege.click();
+    await expect(page).toHaveURL(/\/control\/stratege$/);
+    await expect(page.getByText("Vorschläge des Strategen").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
   });
 
   test("Flow-Tab: Aktualisieren-Button ist vorhanden und klickbar", async ({ page }) => {
