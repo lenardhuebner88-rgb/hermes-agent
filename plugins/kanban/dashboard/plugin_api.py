@@ -3010,6 +3010,13 @@ def _append_openrouter_extra_model_options(
         )
 
 
+# Last good inventory-sourced model rows. The live inventory occasionally
+# returns empty (provider API blip, mobile network, auth refresh in flight);
+# this snapshot keeps the Lanes dropdown AND the /persist validator stable so a
+# model that was valid moments ago is not suddenly rejected.
+_LANE_INVENTORY_CACHE: list[dict] = []
+
+
 def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
     """Provider-aware model list for Lanes.
 
@@ -3070,6 +3077,26 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
                 )
     except Exception:
         log.exception("lanes: failed to build dynamic model catalog")
+
+    # Resilience: a fresh build that yielded no inventory rows (transient
+    # provider/network failure) must not strip API models the operator just
+    # picked — reuse the last good snapshot; refresh it whenever live succeeds.
+    global _LANE_INVENTORY_CACHE
+    inventory_rows = [dict(r) for r in out if r.get("source") == "inventory"]
+    if inventory_rows:
+        _LANE_INVENTORY_CACHE = inventory_rows
+    elif _LANE_INVENTORY_CACHE:
+        for r in _LANE_INVENTORY_CACHE:
+            _append_lane_model_option(
+                out,
+                seen,
+                model=str(r.get("id") or ""),
+                runtime=str(r.get("runtime") or "hermes"),
+                group=str(r.get("group") or "API-Modelle"),
+                provider=r.get("provider"),
+                label=str(r.get("label") or r.get("id") or ""),
+                source="inventory-cache",
+            )
 
     _append_openrouter_extra_model_options(out, seen)
 
@@ -4158,8 +4185,10 @@ def persist_lane_models_endpoint(
 
         lanes = kanban_db.list_lanes(conn)
         active_id = next((l["id"] for l in lanes if l["active"]), None)
-        if active_id is None:
-            raise HTTPException(status_code=409, detail="no active lane")
+        # No active lane is a valid state (pure config-default routing — see
+        # kanban_db.get_active_lane). The tab must still write the profile
+        # configs; we simply skip the active-lane mirror below instead of
+        # refusing the whole save with a 409.
 
         written: list[str] = []
         failed: list[dict[str, str]] = []
@@ -4208,7 +4237,7 @@ def persist_lane_models_endpoint(
                 "fallback_providers": existing.get("fallback_providers") or [],
             }
 
-        if lane_profiles:
+        if lane_profiles and active_id is not None:
             active_lane = next(l for l in lanes if l["id"] == active_id)
             merged_profiles = dict(active_lane.get("profiles") or {})
             merged_profiles.update(lane_profiles)

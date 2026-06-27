@@ -395,3 +395,74 @@ def test_persist_creates_missing_config_yaml(kanban_home, client):
     assert cfg_path.exists()
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert cfg["model"]["default"] == "gpt-5.5"
+
+
+def test_persist_succeeds_with_no_active_lane(kanban_home, client):
+    """No active lane is a valid state (pure config-default routing). Persist must
+    still write the profile config instead of returning 409 — otherwise the Lanes
+    tab cannot steer providers whenever no lane override happens to be active.
+
+    Regression: deleting the (formerly active) lane left the tab unable to save.
+    """
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    # Seed-on-first-contact, then turn every lane off → no active lane.
+    with kb.connect() as conn:
+        kb.list_lanes(conn)
+        conn.execute("UPDATE lanes SET active = 0")
+        conn.commit()
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={"profiles": {"coder": {"worker_runtime": "hermes", "provider": "openai-codex", "model": "gpt-5.5"}}},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["written"] == ["coder"]
+    assert data["failed"] == []
+    assert data["active_id"] is None
+
+    cfg = yaml.safe_load((kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["model"]["default"] == "gpt-5.5"
+    assert cfg["model"]["provider"] == "openai-codex"
+    assert cfg["worker_runtime"] == "hermes"
+
+
+def test_lane_model_catalog_reuses_last_good_inventory_on_failure(plugin_module, monkeypatch):
+    """A transient inventory failure must not drop API models from the catalog.
+
+    The dropdown and the /persist validator share ``_lane_model_catalog``; if a
+    provider API blip empties the live inventory, a model that was valid moments
+    ago would be 400-rejected. The last good inventory snapshot must be reused.
+    """
+    from hermes_cli import inventory
+
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", lambda _o, _s: None)
+    plugin_module._LANE_INVENTORY_CACHE = []
+
+    good_payload = {
+        "providers": [
+            {
+                "slug": "neuralwatt",
+                "authenticated": True,
+                "configured": True,
+                "models": ["kimi-k2.7-code", "qwen3.5-397b-fast"],
+            },
+        ],
+    }
+    monkeypatch.setattr(inventory, "load_picker_context", lambda *a, **k: object())
+    monkeypatch.setattr(inventory, "build_models_payload", lambda *a, **k: good_payload)
+    first = {row["id"] for row in plugin_module._lane_model_catalog([])}
+    assert "kimi-k2.7-code" in first  # sanity: live inventory populates the catalog
+
+    def boom(*a, **k):
+        raise RuntimeError("provider API down")
+
+    monkeypatch.setattr(inventory, "build_models_payload", boom)
+    second = {row["id"] for row in plugin_module._lane_model_catalog([])}
+    assert "kimi-k2.7-code" in second  # resilient: cached inventory reused
+    assert "qwen3.5-397b-fast" in second
