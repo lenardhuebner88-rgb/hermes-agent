@@ -3,11 +3,11 @@ from __future__ import annotations
 import subprocess
 
 
-def _make_task(kb, *, assignee: str):
+def _make_task(kb, *, assignee: str, body=None, scope_contract=None):
     return kb.Task(
         id="t_spawn_tools",
         title="spawn tools",
-        body=None,
+        body=body,
         assignee=assignee,
         status="running",
         priority=0,
@@ -21,6 +21,7 @@ def _make_task(kb, *, assignee: str):
         claim_expires=None,
         tenant=None,
         current_run_id=7,
+        scope_contract=scope_contract,
     )
 
 
@@ -87,6 +88,94 @@ agent:
     pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
     for required in ("terminal", "web", "file", "skills", "code_execution", "delegation"):
         assert required in pinned
+
+
+def test_default_spawn_intersects_structured_scope_contract_with_profile_toolsets(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - file
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    pid = kb._default_spawn(
+        _make_task(kb, assignee="coder", scope_contract={"allowed_tools": ["kanban"]}),
+        str(workspace),
+    )
+
+    assert pid == 4242
+    assert captured["cmd"][captured["cmd"].index("--toolsets") + 1] == "kanban"
+
+
+def test_default_spawn_does_not_parse_scope_contract_from_body_text(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - file
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    pid = kb._default_spawn(
+        _make_task(kb, assignee="coder", body='scope_contract.allowed_tools=["kanban"]'),
+        str(workspace),
+    )
+
+    assert pid == 4242
+    pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
+    assert pinned == ["terminal", "file", "kanban"]
 
 
 def test_resolve_worker_cli_toolsets_uses_profile_home_not_parent_config(monkeypatch, tmp_path):

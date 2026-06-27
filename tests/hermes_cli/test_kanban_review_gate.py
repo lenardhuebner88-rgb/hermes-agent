@@ -731,6 +731,54 @@ def test_verifier_completion_goes_done(kanban_home, gate_on):
         assert kb.get_task(conn, tid).status == "done"
 
 
+def test_review_originated_request_changes_completion_does_not_go_done(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None and claimed.status == "running"
+
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="needs fixes",
+            metadata={"verdict": "REQUEST_CHANGES"},
+            review_gate=True,
+        )
+
+        assert kb.get_task(conn, tid).status == "blocked"
+        row = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["verdict"] == "REQUEST_CHANGES"
+
+
+def test_non_review_originated_approved_metadata_cannot_fake_review_completion(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="APPROVED",
+            metadata={"verdict": "APPROVED"},
+            review_gate=True,
+        )
+
+        assert kb.get_task(conn, tid).status == "review"
+        row = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["verdict"] is None
+
+
 # ---------------------------------------------------------------------------
 # Dependency gating
 # ---------------------------------------------------------------------------
