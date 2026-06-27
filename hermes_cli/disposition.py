@@ -38,6 +38,7 @@ tolerant and will still return a (possibly empty) result without raising.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,20 @@ DISPOSITION_KEY = "disposition"
 
 #: Marker keys that indicate the LLM could not complete the assessment.
 _REFUSAL_KEYS: frozenset[str] = frozenset({"__llm_refusal__", "__truncated__"})
+
+#: Mandatory fields a *versioned* completion bundle must carry. These are the
+#: fields a reviewer needs to land/judge a worker's deliverable: a schema marker,
+#: the gate result, acceptance-criteria coverage, and the residual-risk line.
+#: ``gates`` must be a dict carrying an int ``exit_code``; the rest are non-empty.
+#: Ordering matters for :func:`render_completion_metadata` — the scalar fields
+#: come first (cheap to keep) so they survive truncation even when ``gates`` is
+#: large.
+MANDATORY_BUNDLE_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "residual_risk",
+    "AC",
+    "gates",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +294,143 @@ def validate_disposition(metadata: Any) -> tuple[bool, list[str]]:  # noqa: ANN4
             # Does NOT set ok = False
 
     return ok, missing
+
+
+# ---------------------------------------------------------------------------
+# Completion-bundle validation + render guarantee (PlanSpec C landing)
+#
+# A worker's completion ``metadata`` may carry a *versioned bundle*: the small
+# set of fields a reviewer needs to land/judge the deliverable. When a worker
+# opts in by emitting ``schema_version`` the bundle MUST be complete, so the
+# kanban_complete entry points can reject an incomplete submission IN-FLIGHT —
+# surfacing the missing fields back to the worker for a retry instead of letting
+# the half-filled completion land and a downstream gate auto-block the task.
+# ---------------------------------------------------------------------------
+
+
+def _is_intish(value: Any) -> bool:  # noqa: ANN401
+    """True for an int (NOT bool) or a base-10 integer string like ``"0"``."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        try:
+            int(value.strip())
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _nonempty(value: Any) -> bool:  # noqa: ANN401
+    """True when ``value`` carries content (non-blank str / non-empty container).
+
+    ``residual_risk="none"`` is a legitimate non-empty value (it asserts "no
+    residual risk"), so this checks for *presence of content*, not truthiness —
+    an explicit ``0`` or ``False`` also counts as content.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return True
+
+
+def validate_completion_bundle(metadata: Any) -> list[str]:  # noqa: ANN401
+    """Return the list of missing/invalid mandatory completion-bundle fields.
+
+    OPT-IN: a completion is only treated as a *versioned bundle* when its
+    metadata is a ``dict`` carrying a ``schema_version`` key. Legacy/unversioned
+    completions (no ``schema_version``) are exempt and always return ``[]`` so
+    existing worker flows stay byte-identical — the guardrail activates only for
+    workers that declare they are emitting the structured bundle.
+
+    Mandatory fields (only checked when opted in):
+      * ``schema_version``  — integer ``>= 1`` (the bundle marker itself)
+      * ``gates.exit_code`` — ``gates`` is a dict carrying an int ``exit_code``
+      * ``AC``              — non-empty (acceptance-criteria coverage)
+      * ``residual_risk``   — non-empty (one-line residual-risk statement)
+
+    Returns ``[]`` when the bundle is complete OR not opted in. The returned
+    labels are human-readable so the kanban_complete tool can echo them straight
+    back to the worker (``"add these and call kanban_complete again"``).
+    """
+    if not isinstance(metadata, dict):
+        return []
+    if "schema_version" not in metadata:
+        return []  # not a versioned bundle — exempt (legacy / back-compat)
+
+    missing: list[str] = []
+
+    version = metadata.get("schema_version")
+    if not _is_intish(version) or int(str(version).strip()) < 1:
+        missing.append("schema_version (int >= 1)")
+
+    gates = metadata.get("gates")
+    if not isinstance(gates, dict):
+        missing.append("gates.exit_code (object with an int exit_code)")
+    elif "exit_code" not in gates or not _is_intish(gates.get("exit_code")):
+        missing.append("gates.exit_code (int)")
+
+    if not _nonempty(metadata.get("AC")):
+        missing.append("AC (non-empty acceptance-criteria coverage)")
+
+    if not _nonempty(metadata.get("residual_risk")):
+        missing.append("residual_risk (non-empty one-line statement)")
+
+    return missing
+
+
+def _cap_text(s: str, limit: int) -> str:
+    """Truncate ``s`` to ``limit`` chars with the same visible ellipsis the
+    worker-context renderer (:func:`hermes_cli.kanban_db._cap`) uses, so output
+    framing stays identical whichever path renders the field."""
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+
+
+def render_completion_metadata(metadata: Any, limit: int) -> str:  # noqa: ANN401
+    """Serialize completion ``metadata`` to a context string capped at ``limit``
+    chars, GUARANTEEING the mandatory bundle fields survive truncation.
+
+    Behaviour:
+
+    * Non-dict metadata → ``json.dumps`` capped like any plain field.
+    * Dict that fits within ``limit`` → byte-identical to the prior
+      ``json.dumps(..., sort_keys=True)`` output (no change for the common case).
+    * Dict that exceeds ``limit`` → the mandatory bundle fields
+      (:data:`MANDATORY_BUNDLE_KEYS`) are re-ordered to the FRONT so the cut
+      never drops them; only the trailing non-essential fields are truncated.
+      If the mandatory fields ALONE exceed ``limit`` they are still rendered in
+      full (the guarantee wins over the cap — a required field is never dropped).
+
+    This closes the 4 KB-truncation hole: a large ``disposition`` / ``decisions``
+    / ``changed_files`` array can no longer push ``schema_version`` /
+    ``residual_risk`` / ``AC`` / ``gates.exit_code`` past the per-field cap, which
+    previously fell off the tail because ``sort_keys`` buries them after the
+    lowercase d-keys.
+    """
+    if not isinstance(metadata, dict):
+        return _cap_text(json.dumps(metadata, ensure_ascii=False, sort_keys=True), limit)
+
+    full = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    if len(full) <= limit:
+        return full
+
+    mandatory = {k: metadata[k] for k in MANDATORY_BUNDLE_KEYS if k in metadata}
+    if not mandatory:
+        # Nothing to protect — preserve the prior truncation behaviour exactly.
+        return _cap_text(full, limit)
+
+    rest = {k: metadata[k] for k in sorted(metadata) if k not in mandatory}
+    ordered = json.dumps({**mandatory, **rest}, ensure_ascii=False)
+    mand_only = json.dumps(mandatory, ensure_ascii=False)
+    if len(mand_only) >= limit:
+        # Mandatory fields alone blow the cap — keep them whole (never drop a
+        # required field) and shed the non-essential rest entirely.
+        return mand_only
+    return _cap_text(ordered, limit)

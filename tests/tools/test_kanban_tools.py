@@ -1707,7 +1707,7 @@ def test_worker_complete_rejects_stale_run_id(worker_env, monkeypatch):
     # whose PID isn't yet visible on /proc isn't reclaimed. The fixture
     # creates the task moments before this assertion, so the grace
     # period (default 30s) would skip the liveness check. Zero it out
-    # for this test — we WANT immediate reclamation here.
+    # for this test — we WANT the dead-PID liveness check to fire here.
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
 
     conn = kb.connect()
@@ -1717,8 +1717,11 @@ def test_worker_complete_rejects_stale_run_id(worker_env, monkeypatch):
         monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
         monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
         # An unknown dead PID is a bounded transient recovery (post-1bd00640c):
-        # it closes run1 and requeues the task, but is reported on the
-        # ``_last_transient_recovered`` side-channel, NOT the ``crashed`` return.
+        # it closes run1 and requeues the task ``ready``, but is reported on the
+        # ``_last_transient_recovered`` side-channel, NOT the ``crashed`` return
+        # (sibling test_kanban_core_functionality.py twins aligned in 83e37ef9b).
+        # Either way a fresh run2 is claimed; the stale-run-id guard below is
+        # what this test actually exercises.
         assert kb.detect_crashed_workers(conn) == []
         assert kb.detect_crashed_workers._last_transient_recovered == [worker_env]
 
