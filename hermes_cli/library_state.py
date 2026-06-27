@@ -115,6 +115,14 @@ def _clean_optional_text(value: Any, *, max_len: int) -> Optional[str]:
     return text
 
 
+def _int_ts(value: Any, fallback: int = 0) -> int:
+    """Parse a timestamp int safely; corrupt values fall back instead of crashing."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _clean_tags(values: Optional[list[Any]]) -> list[str]:
     if values is None:
         return []
@@ -142,8 +150,8 @@ def _saved_search_response(item: dict[str, Any]) -> dict[str, Any]:
         "query": str(item.get("query") or ""),
         "topic_tags": list(item.get("topic_tags") or []),
         "person_tags": list(item.get("person_tags") or []),
-        "created_at": int(item.get("created_at") or 0),
-        "updated_at": int(item.get("updated_at") or item.get("created_at") or 0),
+        "created_at": _int_ts(item.get("created_at")),
+        "updated_at": _int_ts(item.get("updated_at") or item.get("created_at")),
     }
 
 
@@ -243,8 +251,8 @@ def _topic_response(item: dict[str, Any], *, seeded: bool = False) -> dict[str, 
         "followed": bool(item.get("followed", False)),
         "subscribed": bool(item.get("subscribed", item.get("followed", False))),
         "seeded": bool(item.get("seeded", seeded)),
-        "created_at": int(item.get("created_at") or 0),
-        "updated_at": int(item.get("updated_at") or item.get("created_at") or 0),
+        "created_at": _int_ts(item.get("created_at")),
+        "updated_at": _int_ts(item.get("updated_at") or item.get("created_at")),
     }
 
 

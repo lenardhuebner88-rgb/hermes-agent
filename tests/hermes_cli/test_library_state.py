@@ -95,3 +95,36 @@ def test_unfollow_demo_topic_does_not_persist_when_never_followed(hermes_home):
     assert result["subscribed"] is False
     # Virtual demo topics stay virtual; only an actual follow change persists.
     assert ls._read_state()["topics"] == []
+
+
+def test_corrupt_saved_search_timestamps_are_failsoft(hermes_home):
+    """Ein korruptes library_state.json mit nicht-numerischen Zeitstempeln
+    darf list_saved_searches nicht crashen lassen."""
+    ls.create_saved_search(name="Keep", query="foo")
+    state = ls._read_state()
+    state["saved_searches"][0]["created_at"] = "not-a-number"
+    state["saved_searches"][0]["updated_at"] = "also-bad"
+    ls._write_state(state)
+
+    listing = ls.list_saved_searches()
+    assert len(listing) == 1
+    assert listing[0]["name"] == "Keep"
+    assert listing[0]["created_at"] == 0
+    assert listing[0]["updated_at"] == 0
+
+
+def test_corrupt_topic_timestamps_are_failsoft(hermes_home):
+    """Ein korruptes library_state.json mit nicht-numerischen Topic-Zeitstempeln
+    darf list_topics nicht crashen lassen."""
+    ls._write_state({
+        "version": ls._STATE_VERSION,
+        "saved_searches": [],
+        "topics": [{"id": "ki-modelle", "title": "KI-Modelle", "followed": True,
+                    "created_at": "bad", "updated_at": "worse"}],
+    })
+
+    topics = {t["id"]: t for t in ls.list_topics()}
+    topic = topics["ki-modelle"]
+    assert topic["followed"] is True
+    assert topic["created_at"] == 0
+    assert topic["updated_at"] == 0
