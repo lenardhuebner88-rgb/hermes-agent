@@ -22895,17 +22895,78 @@ _SCOUT_TARGET_BODY_CAP = 4 * 1024        # per-target body excerpt cap (one targ
 _SCOUT_TARGET_BODY_CAP_MULTI = 2 * 1024  # smaller cap when one scout fans out
 
 
+_SCOUT_ALLOWED_PATHS_KEY_RE = re.compile(
+    r"^\s*(?:allowed_paths|allowed_scope_paths|paths_allowlist)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+_SCOUT_FORBIDDEN_PATHS_KEY_RE = re.compile(
+    r"^\s*(?:forbidden_paths|deny_paths|blocked_paths|anti_scope_paths)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+
+
+def _collect_scout_scope_paths(body: str) -> tuple[list[str], list[str]]:
+    """Return explicit allowed/forbidden paths for the scout scope summary.
+
+    Auto-scout bodies include a compact path summary before the target body
+    excerpt. That summary must not derive "Allowed paths" from every absolute
+    path mentioned in the body: live smoke t_b4be6bd5 showed
+    ``forbidden_paths`` such as ``/home/piet/.env`` being relabelled as allowed.
+    Only paths under explicit allowlist keys are promoted to Allowed paths;
+    explicit denylist keys are surfaced separately as Forbidden paths. The full
+    body excerpt still follows and remains the source of truth.
+    """
+    if not body:
+        return [], []
+    try:
+        from hermes_cli.kanban_decompose import _collect_absolute_paths
+    except Exception:
+        return [], []
+
+    def add_unique(dst: list[str], values: list[str]) -> None:
+        seen = set(dst)
+        for value in values:
+            if value not in seen:
+                seen.add(value)
+                dst.append(value)
+
+    allowed: list[str] = []
+    forbidden: list[str] = []
+    mode: str | None = None
+    for raw in body.splitlines():
+        allow_match = _SCOUT_ALLOWED_PATHS_KEY_RE.match(raw)
+        forbid_match = _SCOUT_FORBIDDEN_PATHS_KEY_RE.match(raw)
+        if allow_match:
+            mode = "allow"
+            add_unique(allowed, _collect_absolute_paths(allow_match.group(1)))
+            continue
+        if forbid_match:
+            mode = "forbid"
+            add_unique(forbidden, _collect_absolute_paths(forbid_match.group(1)))
+            continue
+        stripped = raw.strip()
+        if not stripped.startswith("-"):
+            # Keep collecting YAML list items only immediately after a relevant key.
+            if raw and not raw.startswith((" ", "\t")):
+                mode = None
+            continue
+        paths = _collect_absolute_paths(stripped)
+        if not paths or mode is None:
+            continue
+        add_unique(allowed if mode == "allow" else forbidden, paths)
+    return allowed, forbidden
+
+
 def _scout_target_scope_block(task: "Task", *, body_cap: int) -> list[str]:
     """Render one target task's inherited scope for a scout recon body."""
     lines = [f"## Ziel-Task {task.id}: {task.title or '(kein Titel)'}"]
-    try:
-        from hermes_cli.kanban_decompose import _collect_absolute_paths
-        paths = _collect_absolute_paths(task.body or "")
-    except Exception:
-        paths = []
-    if paths:
-        joined = ", ".join(f"`{p}`" for p in paths[:20])
+    allowed_paths, forbidden_paths = _collect_scout_scope_paths(task.body or "")
+    if allowed_paths:
+        joined = ", ".join(f"`{p}`" for p in allowed_paths[:20])
         lines.append(f"Allowed paths (aus Ziel-Body): {joined}")
+    if forbidden_paths:
+        joined = ", ".join(f"`{p}`" for p in forbidden_paths[:20])
+        lines.append(f"Forbidden paths (aus Ziel-Body): {joined}")
     body = (task.body or "").strip()
     if body:
         lines.append(

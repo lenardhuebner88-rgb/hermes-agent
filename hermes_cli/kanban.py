@@ -414,6 +414,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
+    p_create.add_argument("--no-auto-scout", action="store_true",
+                          help="Do not auto-inject a scout predecessor for this "
+                               "new task even when review-gate heuristics classify "
+                               "it as critical. Use for smoke/no-file/non-code "
+                               "cards where a code recon scout would add noise.")
     p_create.add_argument("--no-notify-home", action="store_true",
                           help="Do not subscribe the new task to the configured "
                                "home channels. By default a CLI-created task is "
@@ -1830,7 +1835,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
             kind=getattr(args, "kind", None),
             # P1-S3: a standalone `kanban create` couples a scout to a resolved-critical
             # task (flag/tier-gated, idempotent; held/triage statuses defer inside).
-            auto_scout=True,
+            # Live smoke tasks and other no-file/non-code cards can opt out so they
+            # exercise the intended worker lane directly instead of a code-recon scout.
+            auto_scout=not bool(getattr(args, "no_auto_scout", False)),
         )
         # Subscribe-on-create: route this task's terminal-state notifications
         # to every configured home channel (same target as the dashboard

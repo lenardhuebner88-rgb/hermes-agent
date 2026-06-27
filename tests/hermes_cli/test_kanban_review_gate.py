@@ -1201,6 +1201,34 @@ def test_auto_scout_body_inherits_target_scope(kanban_home):
     assert "/home/piet/.hermes/hermes-agent/gateway/run.py" in body
 
 
+
+def test_auto_scout_body_does_not_promote_forbidden_paths_to_allowed(kanban_home):
+    """Forbidden path lists must never be relabelled as scout Allowed paths.
+
+    Live worker smoke cards put sensitive paths in ``forbidden_paths`` inside a
+    scope_contract. The scout summary used to collect every absolute path in the
+    body and print it under "Allowed paths", which inverted the contract.
+    """
+    body = (
+        "scope_contract:\n"
+        "  allowed_paths:\n"
+        "    - /safe/project/file.py\n"
+        "  forbidden_paths:\n"
+        "    - /home/piet/.env\n"
+        "    - /home/piet/.hermes/config.yaml\n"
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="forbidden path smoke", assignee="coder", body=body)
+        scout_id = kb.ensure_scout_predecessor(conn, tid)
+        scout_body = kb.get_task(conn, scout_id).body or ""
+    allowed_line = next(line for line in scout_body.splitlines() if line.startswith("Allowed paths"))
+    forbidden_line = next(line for line in scout_body.splitlines() if line.startswith("Forbidden paths"))
+    assert "/safe/project/file.py" in allowed_line
+    assert "/home/piet/.env" not in allowed_line
+    assert "/home/piet/.hermes/config.yaml" not in allowed_line
+    assert "/home/piet/.env" in forbidden_line
+    assert "/home/piet/.hermes/config.yaml" in forbidden_line
+
 def test_auto_scout_body_warns_against_broadening(kanban_home):
     """The scout body must explicitly say the target body/operator directives are
     the source of truth and forbid broadening from title/recent work."""
