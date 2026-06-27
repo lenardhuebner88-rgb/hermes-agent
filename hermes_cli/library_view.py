@@ -439,6 +439,10 @@ def _read_research_item(task_id: str) -> Optional[_Item]:
         if not comments:
             return None
         answer = comments[-1].body
+        if not answer:
+            # Consistent with _collect_research_items: a research task without
+            # readable answer has no business appearing in the library.
+            return None
         ts = int(comments[-1].created_at)
         question = (row["body"] or "").strip()
         body = (

@@ -142,6 +142,24 @@ def test_research_adapter_uses_last_comment(kanban_home):
     assert "Frage:" in detail.body_md and "Am 11. Juni 2026." in detail.body_md
 
 
+def test_research_detail_returns_none_for_empty_last_comment(kanban_home):
+    """Detail-Pfad muss leere letzte Kommentare wie _collect_research_items
+    behandeln — sonst liefert er ein Item mit leerem/partial body zurück.
+
+    ``add_comment`` lehnt leere Bodies ab, aber ein direkter DB-Insert (oder
+    zukünftige Änderungen) können sie erzeugen — der Lesesaal soll fail-soft
+    bleiben."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="Frage ohne Antwort?", tenant="research")
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+            (t, "research", "", 1),
+        )
+        conn.commit()
+    assert lv._collect_research_items(with_bodies=True) == []
+    assert lv._get_item(f"research::{t}") is None
+
+
 def test_list_items_search_and_category_filter(kanban_home):
     _write_cron_store(
         kanban_home / "cron", job_id="16dd6ac01fc0", name="Morning Digest",
