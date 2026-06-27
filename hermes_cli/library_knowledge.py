@@ -364,7 +364,7 @@ def _build_skill(slug: str, *, with_body: bool) -> Optional[_KbDoc]:
     if raw is None:
         return None
     meta, body = _split_frontmatter(raw)
-    title = meta.get("name", slug)
+    title = meta.get("name", slug) or slug
     summary = _first_sentence(meta["description"]) if meta.get("description") else _summarize(body, slug)
     try:
         updated = int(target.stat().st_mtime)
@@ -394,7 +394,7 @@ def _build_role(slug: str, *, with_body: bool) -> Optional[_KbDoc]:
     if raw is None:
         return None
     meta, body = _split_frontmatter(raw)
-    title = meta.get("name", slug)
+    title = meta.get("name", slug) or slug
     summary = _first_sentence(meta["description"]) if meta.get("description") else _summarize(body, slug)
     model = meta.get("model")
     tags = ["rolle"] + ([model] if model else [])

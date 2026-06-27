@@ -67,6 +67,16 @@ def kb_home(tmp_path, monkeypatch):
         "# Plain Skill\n\nDas hier ist der erste echte Absatz als Kurzbeschreibung.\n",
         encoding="utf-8",
     )
+    # Skill mit leerem name-Feld → Fallback auf Slug.
+    (skills / "empty-name").mkdir(parents=True)
+    (skills / "empty-name" / "SKILL.md").write_text(
+        "---\n"
+        "name: \"\"\n"
+        "description: Leerer Name muss auf Slug zurückfallen.\n"
+        "---\n\n"
+        "# empty-name\n\nBody.\n",
+        encoding="utf-8",
+    )
 
     agents = tmp_path / ".claude" / "agents"
     agents.mkdir(parents=True)
@@ -77,6 +87,15 @@ def kb_home(tmp_path, monkeypatch):
         "model: sonnet\n"
         "---\n\n"
         "# auditor\n\nLesen, nicht schreiben.\n",
+        encoding="utf-8",
+    )
+    # Rolle mit leerem name-Feld → Fallback auf Slug.
+    (agents / "empty-name.md").write_text(
+        "---\n"
+        "name: \"\"\n"
+        "description: Leerer Name muss auf Slug zurückfallen.\n"
+        "---\n\n"
+        "# empty-name\n\nBody.\n",
         encoding="utf-8",
     )
     return tmp_path
@@ -156,6 +175,20 @@ def test_role_scanned_with_model_tag(kb_home):
     assert auditor["title"] == "auditor"
     assert "rolle" in auditor["tags"]
     assert "sonnet" in auditor["tags"]
+
+
+def test_skill_with_empty_name_falls_back_to_slug(kb_home):
+    out = kn.list_knowledge()
+    skills = next(c for c in out["collections"] if c["id"] == "skills")
+    empty = next(d for d in skills["docs"] if d["id"] == "kb::skill::empty-name")
+    assert empty["title"] == "empty-name"
+
+
+def test_role_with_empty_name_falls_back_to_slug(kb_home):
+    out = kn.list_knowledge()
+    rollen = next(c for c in out["collections"] if c["id"] == "rollen")
+    empty = next(d for d in rollen["docs"] if d["id"] == "kb::role::empty-name")
+    assert empty["title"] == "empty-name"
 
 
 def test_read_static_doc_returns_body(kb_home):
