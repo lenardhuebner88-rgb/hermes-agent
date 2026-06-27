@@ -288,6 +288,15 @@ def set_topic_follow(topic_id: str, followed: bool) -> Optional[dict[str, Any]]:
     if not topic.get("created_at"):
         topic["created_at"] = now
 
+    was_persisted = any(
+        isinstance(raw, dict) and str(raw.get("id") or "") == topic_id
+        for raw in state["topics"]
+    )
+    if not followed and not was_persisted:
+        # Demo topics are virtual seeds; unfollowing a never-followed seed
+        # is a no-op and must not create an empty persisted row.
+        return _topic_response(topic)
+
     persisted: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in state["topics"]:

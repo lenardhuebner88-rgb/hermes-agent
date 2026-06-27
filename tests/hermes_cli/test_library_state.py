@@ -84,3 +84,14 @@ def test_saved_search_validation_rejects_empty_name_or_query(hermes_home):
 
 def test_topic_follow_unknown_topic_returns_none(hermes_home):
     assert ls.set_topic_follow("unknown-topic", True) is None
+
+
+def test_unfollow_demo_topic_does_not_persist_when_never_followed(hermes_home):
+    topics = {t["title"]: t for t in ls.list_topics()}
+    topic_id = topics["KI-Modelle"]["id"]
+    result = ls.set_topic_follow(topic_id, False)
+    assert result is not None
+    assert result["followed"] is False
+    assert result["subscribed"] is False
+    # Virtual demo topics stay virtual; only an actual follow change persists.
+    assert ls._read_state()["topics"] == []
