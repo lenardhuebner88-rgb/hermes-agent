@@ -405,6 +405,25 @@ def test_deliverable_adapter_lists_markdown(kanban_home):
     assert detail is not None and "Fertig." in detail.body_md
 
 
+def test_deliverable_adapter_caps_newest_markdown(kanban_home):
+    """Wenn ein Task mehr als _DELIVERABLE_MAX_PER_TASK Markdown-Dateien hat,
+    müssen die neuesten (mtime) behalten werden — nicht die alphabetisch ersten."""
+    import os
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="Build X")
+        kb.complete_task(conn, t, summary="done")
+    report_dir = kanban_home / "reports" / "by-task" / t
+    report_dir.mkdir(parents=True)
+    for n in range(5):
+        p = report_dir / f"report-{n:02d}.md"
+        p.write_text(f"# Report {n}\nInhalt {n}.", encoding="utf-8")
+        os.utime(p, (1_700_000_000 + n, 1_700_000_000 + n))
+    items = lv._collect_deliverable_items(with_bodies=True)
+    assert len(items) == lv._DELIVERABLE_MAX_PER_TASK
+    names = {i.id.rsplit("::", 1)[1] for i in items}
+    assert {"report-02.md", "report-03.md", "report-04.md"} == names
+
+
 def test_library_deliverable_artifacts_scan(kanban_home, tmp_path):
     vault = tmp_path / "vault"
     deliverables = vault / "03-Agents" / "Hermes" / "deliverables"

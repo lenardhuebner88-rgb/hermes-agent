@@ -493,7 +493,11 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
             if not _TASK_ID_RE.match(task_dir.name):
                 continue
             seen_task_ids.add(task_dir.name)
-            md_files = sorted(task_dir.rglob("*.md"))[:_DELIVERABLE_MAX_PER_TASK]
+            md_files = sorted(
+                task_dir.rglob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:_DELIVERABLE_MAX_PER_TASK]
             for md_file in md_files:
                 try:
                     stat = md_file.stat()
