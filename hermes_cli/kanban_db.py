@@ -1445,12 +1445,11 @@ CREATE TRIGGER IF NOT EXISTS trg_review_gated_done_terminal_authority
 BEFORE UPDATE OF status ON tasks
 WHEN NEW.status = 'done'
   AND COALESCE(OLD.status, '') != 'done'
-  AND COALESCE(NEW.kind, '') = 'code'
-  AND COALESCE(NEW.assignee, '') IN ('coder', 'coder-claude', 'premium')
+  AND kanban_review_gate_should_apply(OLD.id) = 1
 BEGIN
   SELECT CASE
     WHEN kanban_review_done_authorized() != 1 THEN
-      RAISE(ABORT, 'review-gated code task done transition requires terminal review authority')
+      RAISE(ABORT, 'review-gated task done transition requires terminal review authority')
   END;
 END;
 
@@ -1665,6 +1664,13 @@ def _sqlite_connect(
         "kanban_review_done_authorized",
         0,
         lambda: 1 if _REVIEW_DONE_TERMINAL_AUTHORITY.get() else 0,
+    )
+    conn.create_function(
+        "kanban_review_gate_should_apply",
+        1,
+        lambda task_id: 1
+        if _review_gate_should_apply(conn, str(task_id), None)
+        else 0,
     )
     # ``sqlite3.connect(timeout=...)`` normally maps to busy_timeout, but set
     # the PRAGMA explicitly so it is observable and survives future wrapper
@@ -2188,6 +2194,7 @@ def connect(
                 # stale PRAGMA snapshots during gateway startup.
                 conn.executescript(SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
+                _migrate_refresh_review_gate_trigger(conn)
                 # Persist the cross-process stamp LAST: a stamp is only ever
                 # written over a schema that completed the full pass.
                 conn.execute(f"PRAGMA user_version={_SCHEMA_STAMP}")
@@ -2282,6 +2289,26 @@ def _add_column_if_missing(
         if "duplicate column name" in str(exc).lower():
             return False
         raise
+
+
+def _migrate_refresh_review_gate_trigger(conn: sqlite3.Connection) -> None:
+    """Keep the review-gate SQL backstop aligned on existing boards."""
+    conn.executescript(
+        """
+        DROP TRIGGER IF EXISTS trg_review_gated_done_terminal_authority;
+        CREATE TRIGGER trg_review_gated_done_terminal_authority
+        BEFORE UPDATE OF status ON tasks
+        WHEN NEW.status = 'done'
+          AND COALESCE(OLD.status, '') != 'done'
+          AND kanban_review_gate_should_apply(OLD.id) = 1
+        BEGIN
+          SELECT CASE
+            WHEN kanban_review_done_authorized() != 1 THEN
+              RAISE(ABORT, 'review-gated task done transition requires terminal review authority')
+          END;
+        END;
+        """
+    )
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:

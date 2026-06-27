@@ -492,6 +492,114 @@ def test_review_gated_raw_sql_done_update_is_rejected(kanban_home, gate_on):
         assert kb.get_task(conn, tid).status == "running"
 
 
+def test_review_gated_raw_sql_backstop_uses_canonical_kind_agnostic_gate(
+    kanban_home, gate_on
+):
+    """Backstop protects any canonical code-assignee task, not only kind=code."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder", kind="research")
+        kb.claim_task(conn, tid)
+
+        assert kb._review_gate_should_apply(conn, tid, None)
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_review_gated_raw_sql_backstop_uses_configured_code_roles(
+    kanban_home, monkeypatch
+):
+    """Configured code roles are protected without another hardcoded SQL list."""
+    _write_profile(kanban_home, "builder")
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"builder"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="builder", kind="text")
+        kb.claim_task(conn, tid)
+
+        assert kb._review_gate_should_apply(conn, tid, None)
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_review_gated_backstop_migration_refreshes_legacy_trigger(
+    kanban_home, monkeypatch
+):
+    """Legacy boards replace the hardcoded trigger on the next schema pass."""
+    _write_profile(kanban_home, "builder")
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"builder"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_review_gated_done_terminal_authority;
+            CREATE TRIGGER trg_review_gated_done_terminal_authority
+            BEFORE UPDATE OF status ON tasks
+            WHEN NEW.status = 'done'
+              AND COALESCE(OLD.status, '') != 'done'
+              AND COALESCE(NEW.kind, '') = 'code'
+              AND COALESCE(NEW.assignee, '') IN ('coder', 'coder-claude', 'premium')
+            BEGIN
+              SELECT CASE
+                WHEN kanban_review_done_authorized() != 1 THEN
+                  RAISE(ABORT, 'legacy trigger')
+              END;
+            END;
+            """
+        )
+        conn.execute("PRAGMA user_version=0")
+        kb._INITIALIZED_PATHS.discard(str(kb.kanban_db_path().resolve()))
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="builder", kind="text")
+        kb.claim_task(conn, tid)
+
+        assert kb._review_gate_should_apply(conn, tid, None)
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_review_gated_raw_sql_backstop_allows_non_gated_tasks(kanban_home, gate_on):
+    """Direct SQL backstop stays inert when the canonical gate is false."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="research", assignee="scout", kind="code")
+        kb.claim_task(conn, tid)
+
+        assert not kb._review_gate_should_apply(conn, tid, None)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+        assert kb.get_task(conn, tid).status == "done"
+
+
 def test_review_diff_sentinel_uses_pre_run_commit_baseline(
     kanban_home, gate_on, tmp_path
 ):
