@@ -342,6 +342,10 @@ _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
     "hermes_kanban_current_board_override",
     default=None,
 )
+_REVIEW_DONE_TERMINAL_AUTHORITY: ContextVar[bool] = ContextVar(
+    "hermes_kanban_review_done_terminal_authority",
+    default=False,
+)
 
 
 @contextlib.contextmanager
@@ -352,6 +356,23 @@ def scoped_current_board(slug: str):
         yield
     finally:
         _CURRENT_BOARD_OVERRIDE.reset(token)
+
+
+@contextlib.contextmanager
+def _review_done_terminal_authority():
+    """Authorize dispatcher/reaper-owned terminal ``done`` transitions.
+
+    Review-gated code tasks may be parked for review by an in-band worker, but
+    their final ``done`` transition is an out-of-band dispatcher/reaper action.
+    A SQLite trigger calls a per-connection function backed by this context var;
+    raw sqlite connections do not have the function at all and therefore fail
+    closed.
+    """
+    token: Token[bool] = _REVIEW_DONE_TERMINAL_AUTHORITY.set(True)
+    try:
+        yield
+    finally:
+        _REVIEW_DONE_TERMINAL_AUTHORITY.reset(token)
 
 # Slug validator: lowercase alphanumerics, digits, hyphens; 1–64 chars.
 # Strict enough to stop traversal (`..`) and embedded path separators, loose
@@ -1414,8 +1435,24 @@ CREATE TABLE IF NOT EXISTS task_runs (
     --          (null while still running)
     summary             TEXT,
     metadata            TEXT,
-    error               TEXT
+    error               TEXT,
+    -- Git HEAD captured at claim time so review diff sentinels compare
+    -- against the actual pre-run baseline, including commit-then-complete.
+    pre_run_commit_sha  TEXT
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_review_gated_done_terminal_authority
+BEFORE UPDATE OF status ON tasks
+WHEN NEW.status = 'done'
+  AND COALESCE(OLD.status, '') != 'done'
+  AND COALESCE(NEW.kind, '') = 'code'
+  AND COALESCE(NEW.assignee, '') IN ('coder', 'coder-claude', 'premium')
+BEGIN
+  SELECT CASE
+    WHEN kanban_review_done_authorized() != 1 THEN
+      RAISE(ABORT, 'review-gated code task done transition requires terminal review authority')
+  END;
+END;
 
 -- Files attached to a task (PDFs, images, source documents). The blob
 -- lives on disk under ``attachments_root(board)/<task_id>/<stored_name>``;
@@ -1623,6 +1660,11 @@ def _sqlite_connect(
         str(path),
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
+    )
+    conn.create_function(
+        "kanban_review_done_authorized",
+        0,
+        lambda: 1 if _REVIEW_DONE_TERMINAL_AUTHORITY.get() else 0,
     )
     # ``sqlite3.connect(timeout=...)`` normally maps to busy_timeout, but set
     # the PRAGMA explicitly so it is observable and survives future wrapper
@@ -2566,6 +2608,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         run_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
         }
+        if "pre_run_commit_sha" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "pre_run_commit_sha", "pre_run_commit_sha TEXT"
+            )
         if "input_tokens" not in run_cols:
             _add_column_if_missing(
                 conn, "task_runs", "input_tokens", "input_tokens INTEGER"
@@ -7263,11 +7309,16 @@ def claim_task(
         # Look up the current task row so we can populate the run with
         # its assignee / step / runtime cap.
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key, model_override "
+            "SELECT assignee, max_runtime_seconds, current_step_key, model_override, workspace_path "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         run_profile = trow["assignee"] if trow else None
+        pre_run_commit_sha = (
+            _git_head_sha_for_workspace(trow["workspace_path"])
+            if trow and trow["workspace_path"]
+            else None
+        )
         lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
         spawn_metadata = _claude_cli_spawn_identity_metadata(
             run_profile,
@@ -7280,8 +7331,8 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at, metadata
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                started_at, metadata, pre_run_commit_sha
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -7292,6 +7343,7 @@ def claim_task(
                 trow["max_runtime_seconds"] if trow else None,
                 now,
                 json.dumps(spawn_metadata, ensure_ascii=False) if spawn_metadata else None,
+                pre_run_commit_sha,
             ),
         )
         run_id = run_cur.lastrowid
@@ -7365,7 +7417,7 @@ def claim_review_task(
         if cur.rowcount != 1:
             return None
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key, model_override "
+            "SELECT assignee, max_runtime_seconds, current_step_key, model_override, workspace_path "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -8466,6 +8518,32 @@ def _review_gate_should_apply(
     return assignee in cfg["code_roles"]
 
 
+def _git_head_sha_for_workspace(workspace_path: Optional[str]) -> Optional[str]:
+    if not workspace_path:
+        return None
+    try:
+        root = Path(str(workspace_path)).expanduser()
+    except (TypeError, ValueError):
+        return None
+    if not root.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
 # B1 (N-B1): machine-readable diff snapshot captured at the review handoff.
 # Feeds the verifier's caller-grep duty (A2) and any later regression check.
 # Strictly fail-soft: no git workspace, a vanished workspace, or any git error
@@ -8475,19 +8553,18 @@ _DIFF_SNAPSHOT_STAT_CAP = 4000     # max diff_stat characters
 
 
 def _capture_review_diff_snapshot(
-    conn: sqlite3.Connection, task_id: str
+    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int] = None
 ) -> dict:
-    """Best-effort ``{changed_files, diff_stat}`` for *task_id*'s workspace.
+    """Best-effort diff snapshot for *task_id*'s workspace.
 
-    Runs ``git status --porcelain`` + ``git diff --stat`` in the task's
-    ``workspace_path`` (the worktree/dir the worker just used) so the review
-    handoff records WHAT changed. Returns ``{}`` when there is no workspace, it
-    is not a git work tree, or git errors/times out. Never raises — the review
-    handoff must not depend on git being present or healthy.
+    Prefer the pre-run commit SHA persisted when the worker run was claimed and
+    run ``git diff <sha>`` so commit-then-complete changes are visible to the
+    review sentinel. Fall back to the historical status/working-tree snapshot
+    when no baseline exists.
     """
     try:
         row = conn.execute(
-            "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+            "SELECT workspace_path, current_run_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
     except sqlite3.Error:
         return {}
@@ -8496,6 +8573,18 @@ def _capture_review_diff_snapshot(
     ws = row["workspace_path"]
     if not ws or not os.path.isdir(ws):
         return {}
+    run_id = expected_run_id or row["current_run_id"]
+    pre_run_sha = None
+    if run_id is not None:
+        try:
+            run_row = conn.execute(
+                "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?",
+                (int(run_id),),
+            ).fetchone()
+            if run_row:
+                pre_run_sha = (run_row["pre_run_commit_sha"] or "").strip() or None
+        except (sqlite3.Error, TypeError, ValueError):
+            pre_run_sha = None
 
     def _git(*args: str) -> Optional[str]:
         try:
@@ -8519,24 +8608,39 @@ def _capture_review_diff_snapshot(
         return {}
 
     snapshot: dict = {}
+    changed: list = []
+    if pre_run_sha:
+        committed_and_worktree = _git("diff", "--name-only", pre_run_sha)
+        if committed_and_worktree is not None:
+            for entry in committed_and_worktree.splitlines():
+                entry = entry.strip().strip('"')
+                if entry:
+                    changed.append(entry)
+                if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
+                    break
+        stat = _git("diff", "--stat", pre_run_sha)
+        if stat and stat.strip():
+            snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
+        snapshot["diff_base_commit"] = pre_run_sha
+        snapshot["diff_baseline"] = "pre_run_commit_sha"
     porcelain = _git("status", "--porcelain")
     if porcelain:
-        changed: list = []
         for line in porcelain.splitlines():
             # Porcelain v1: "XY <path>" or "XY <old> -> <new>" for renames.
             entry = line[3:] if len(line) > 3 else line.strip()
             if " -> " in entry:
                 entry = entry.split(" -> ", 1)[1]
             entry = entry.strip().strip('"')
-            if entry:
+            if entry and entry not in changed:
                 changed.append(entry)
             if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
                 break
-        if changed:
-            snapshot["changed_files"] = changed
-    stat = _git("diff", "--stat")
-    if stat and stat.strip():
-        snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
+    if changed:
+        snapshot["changed_files"] = changed
+    if "diff_stat" not in snapshot:
+        stat = _git("diff", "--stat")
+        if stat and stat.strip():
+            snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
     return snapshot
 
 
@@ -8563,7 +8667,9 @@ def _submit_for_review(
     """
     # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
     # must not run under the txn). Empty dict when no/non-git workspace.
-    diff_snapshot = _capture_review_diff_snapshot(conn, task_id)
+    diff_snapshot = _capture_review_diff_snapshot(
+        conn, task_id, expected_run_id=expected_run_id
+    )
     if diff_snapshot:
         run_metadata = {**metadata, **diff_snapshot} if isinstance(
             metadata, dict
@@ -9484,12 +9590,13 @@ def complete_task(
     # for an independent verifier instead of moving straight to 'done'.
     # Opt-in (review_gate) + enabled + verifier-exists + not-a-review-run
     # (anti-loop) + code-bearing assignee — otherwise fall through.
-    if review_gate and _review_gate_should_apply(conn, task_id, expected_run_id):
-        return _submit_for_review(
-            conn, task_id,
-            result=result, summary=summary, metadata=metadata,
-            verified_cards=verified_cards, expected_run_id=expected_run_id,
-        )
+    if _review_gate_should_apply(conn, task_id, expected_run_id):
+        if review_gate or expected_run_id is not None:
+            return _submit_for_review(
+                conn, task_id,
+                result=result, summary=summary, metadata=metadata,
+                verified_cards=verified_cards, expected_run_id=expected_run_id,
+            )
 
     # B (staged review gate): an APPROVED completion of an INTERMEDIATE review
     # stage re-parks the task for the next stage (verifier→reviewer→critic)
@@ -9550,37 +9657,38 @@ def complete_task(
         )
 
     with write_txn(conn):
-        if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                """,
-                (result, now, task_id),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                   AND current_run_id = ?
-                """,
-                (result, now, task_id, int(expected_run_id)),
-            )
+        with _review_done_terminal_authority():
+            if expected_run_id is None:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status       = 'done',
+                           result       = ?,
+                           completed_at = ?,
+                           claim_lock   = NULL,
+                           claim_expires= NULL,
+                           worker_pid   = NULL
+                     WHERE id = ?
+                       AND status IN ('running', 'ready', 'blocked')
+                    """,
+                    (result, now, task_id),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status       = 'done',
+                           result       = ?,
+                           completed_at = ?,
+                           claim_lock   = NULL,
+                           claim_expires= NULL,
+                           worker_pid   = NULL
+                     WHERE id = ?
+                       AND status IN ('running', 'ready', 'blocked')
+                       AND current_run_id = ?
+                    """,
+                    (result, now, task_id, int(expected_run_id)),
+                )
         if cur.rowcount != 1:
             return False
         run_id = _end_run(
@@ -13321,21 +13429,22 @@ def repair_deliverable_posted_not_completed(
         "kanban_complete."
     )
     with write_txn(conn):
-        cur = conn.execute(
-            """
-            UPDATE tasks
-               SET status       = 'done',
-                   result       = COALESCE(result, ?),
-                   completed_at = COALESCE(completed_at, ?),
-                   claim_lock   = NULL,
-                   claim_expires= NULL,
-                   worker_pid   = NULL,
-                   current_run_id = NULL
-             WHERE id = ?
-               AND status = 'blocked'
-            """,
-            (summary, now, task_id),
-        )
+        with _review_done_terminal_authority():
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'done',
+                       result       = COALESCE(result, ?),
+                       completed_at = COALESCE(completed_at, ?),
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL,
+                       current_run_id = NULL
+                 WHERE id = ?
+                   AND status = 'blocked'
+                """,
+                (summary, now, task_id),
+            )
         if cur.rowcount != 1:
             return False
         run_id = _synthesize_ended_run(
@@ -14583,19 +14692,20 @@ def _finalize_integration_retry(
         + (f" as {str(merge_commit)[:12]}" if merge_commit else "")
     )
     with write_txn(conn):
-        cur = conn.execute(
-            """
-            UPDATE tasks
-               SET status       = 'done',
-                   result       = ?,
-                   completed_at = ?,
-                   claim_lock   = NULL,
-                   claim_expires= NULL,
-                   worker_pid   = NULL
-             WHERE id = ? AND status = 'blocked'
-            """,
-            (summary_line, int(now), task_id),
-        )
+        with _review_done_terminal_authority():
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'done',
+                       result       = ?,
+                       completed_at = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ? AND status = 'blocked'
+                """,
+                (summary_line, int(now), task_id),
+            )
         if cur.rowcount != 1:
             return False
         _append_event(
@@ -18816,6 +18926,17 @@ _WORKER_LANE_PROVIDER_KEYS = frozenset({
     "HONCHO_API_KEY",
 })
 
+_CLAUDE_CLI_ALWAYS_DENIED_TOOLS = ("WebFetch", "WebSearch")
+_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS = (
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Task",
+    "Agent",
+)
+_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = {"reviewer", "critic"}
+
 
 def _build_worker_env(parent_env) -> dict:
     """Allowlisted copy of ``parent_env`` for spawned kanban workers.
@@ -18835,6 +18956,18 @@ def _build_worker_env(parent_env) -> dict:
     return env
 
 
+def _is_claude_verdict_read_only_lane(
+    profile_arg: str,
+    lane_entry: Optional[dict],
+) -> bool:
+    """Return whether the active runtime map puts this verdict lane on claude-cli."""
+    if not lane_entry:
+        return False
+    if str(lane_entry.get("worker_runtime") or "").strip().lower() != "claude-cli":
+        return False
+    return profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
+
+
 def _spawn_claude_worker(
     task: Task,
     workspace: str,
@@ -18842,6 +18975,7 @@ def _spawn_claude_worker(
     env: dict,
     board: Optional[str] = None,
     lane_model: Optional[str] = None,
+    read_only_verdict_lane: bool = False,
 ) -> Optional[int]:
     """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
 
@@ -18985,17 +19119,21 @@ def _spawn_claude_worker(
         "task (cost + provider)."
     )
 
+    denied_tools = list(_CLAUDE_CLI_ALWAYS_DENIED_TOOLS)
+    if read_only_verdict_lane:
+        denied_tools.extend(_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS)
+
     cmd = [
         _claude_worker_bin(),
         "-p", prompt,
         "--dangerously-skip-permissions",
         # Deny the direct-HTTP tools (S2): with --dangerously-skip-permissions
-        # an --allowedTools list would be a no-op (everything is auto-approved),
-        # but disallowed tools stay hard-denied even in bypass mode. Bash-level
-        # egress (curl -d, scp, nc, ...) is gated by the user-global
-        # guard-dangerous-ops.sh PreToolUse hook, which loads for these
-        # workers too.
-        "--disallowedTools", "WebFetch,WebSearch",
+        # Claude Code 2.1.190 still honored --disallowedTools while a spike
+        # showed --allowedTools was NOT enforced under the same permissions
+        # bypass. Bash-level egress (curl -d, scp, nc, ...) is gated by the
+        # user-global guard-dangerous-ops.sh PreToolUse hook, which loads for
+        # these workers too.
+        "--disallowedTools", ",".join(denied_tools),
         "--output-format", "json",
         # Keep the memsearch memory plugin out of worker sessions (see env
         # comment above). enabledPlugins merges into user settings, so other
@@ -19206,9 +19344,14 @@ def _default_spawn(
     env["HERMES_PROFILE"] = profile_arg
 
     # Lane hot-read (F1): the active lane may pin this profile's runtime and
-    # model for THIS spawn. Fail-soft — a broken lanes table yields None and
-    # the pre-lane behavior below is untouched.
-    lane_entry = _active_lane_entry_for_profile(profile_arg, board=board)
+    # model for THIS spawn. Ordinary worker dispatch stays fail-soft, but
+    # verdict lanes fail closed so a resolver/runtime error cannot silently
+    # bypass their constrained argv/cage.
+    lane_entry = _active_lane_entry_for_profile(
+        profile_arg,
+        board=board,
+        strict=profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES,
+    )
     lane_runtime = (lane_entry or {}).get("worker_runtime")
     lane_provider = (lane_entry or {}).get("provider")
     lane_model = (lane_entry or {}).get("model")
@@ -19225,7 +19368,12 @@ def _default_spawn(
         and _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME"))
     ):
         return _spawn_claude_worker(
-            task, workspace, env=env, board=board, lane_model=lane_model,
+            task,
+            workspace,
+            env=env,
+            board=board,
+            lane_model=lane_model,
+            read_only_verdict_lane=_is_claude_verdict_read_only_lane(profile_arg, lane_entry),
         )
 
     cmd = [
@@ -23290,14 +23438,16 @@ def _active_lane_entry_for_profile(
     profile_arg: str,
     *,
     board: Optional[str] = None,
+    strict: bool = False,
 ) -> Optional[dict]:
     """Hot-read the active lane's entry for ``profile_arg`` at spawn time.
 
     Opens its own short-lived connection (the spawn helpers don't receive the
-    dispatcher's). Fail-soft like _is_claude_cli_profile: ANY error returns
-    None so a broken lanes table can never block dispatching. Returns
-    normalized lane entry or None when the profile is not mapped / no lane is
-    active.
+    dispatcher's). The default remains fail-soft so a broken optional lanes
+    table does not block ordinary dispatching. Verdict lanes pass ``strict`` so
+    resolver/runtime errors fail closed instead of silently falling back to a
+    less constrained argv. Returns normalized lane entry or None when the
+    profile is not mapped / no lane is active.
     """
     try:
         conn = connect(board=board)
@@ -23327,6 +23477,8 @@ def _active_lane_entry_for_profile(
             return None
         return normalized
     except Exception:
+        if strict:
+            raise
         return None
 
 
