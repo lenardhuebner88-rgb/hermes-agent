@@ -16,6 +16,7 @@ skips in this suite.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,7 +33,7 @@ pytestmark = [
 ]
 
 
-def run_hook(command: str) -> dict | None:
+def run_hook(command: str, *, kanban_worker: bool = False) -> dict | None:
     """Feed one Bash PreToolUse payload through the hook.
 
     Returns the parsed deny JSON, or None when the hook allows the command.
@@ -44,6 +45,7 @@ def run_hook(command: str) -> dict | None:
         capture_output=True,
         text=True,
         timeout=30,
+        env={**os.environ, **({"HERMES_KANBAN_TASK": "t_dummy"} if kanban_worker else {})},
     )
     assert proc.returncode == 0, f"hook crashed: {proc.stderr!r}"
     out = proc.stdout.strip()
@@ -62,6 +64,13 @@ def assert_denied(command: str) -> None:
 def assert_allowed(command: str) -> None:
     verdict = run_hook(command)
     assert verdict is None, f"hook denied benign command {command!r}: {verdict}"
+
+
+def assert_worker_denied(command: str) -> None:
+    verdict = run_hook(command, kanban_worker=True)
+    assert verdict is not None, f"hook ALLOWED kanban worker command: {command!r}"
+    decision = verdict["hookSpecificOutput"]["permissionDecision"]
+    assert decision == "deny", f"unexpected decision {decision!r} for {command!r}"
 
 
 # --- exfil channels that MUST be denied ------------------------------------
@@ -102,6 +111,19 @@ LEGACY_DENIED = [
 @pytest.mark.parametrize("command", LEGACY_DENIED, ids=["rm-rf", "curl-pipe-sh", "git-push"])
 def test_legacy_pattern_still_denied(command):
     assert_denied(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "CONFIRMED=1 rm -rf /tmp/hermes-should-not-delete",
+        "pwd && rm -rf /tmp/hermes-should-not-delete",
+        "bash -lc 'rm -rf /tmp/hermes-should-not-delete'",
+    ],
+    ids=["confirmed-env-prefix", "benign-prefix", "shell-wrapper"],
+)
+def test_kanban_worker_write_intent_bypasses_are_denied(command):
+    assert_worker_denied(command)
 
 
 # --- benign daily-driver commands MUST stay allowed -------------------------

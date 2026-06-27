@@ -1740,10 +1740,12 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
 
         force = mtime <= hard_cutoff  # Over 72h — force remove
 
-        if not force:
-            # 24h–72h tier: only remove if no unpushed commits
-            if _worktree_has_unpushed_commits(str(entry), timeout=5):
-                continue  # Has unpushed commits or can't check — skip
+        # Never auto-remove a worktree whose branch has unpushed commits.  The
+        # helper fails safe (True) when the check is unknown, so stale cleanup
+        # can still remove old clean worktrees but cannot destroy committed
+        # agent work merely because it crossed the 72h hard-age threshold.
+        if _worktree_has_unpushed_commits(str(entry), timeout=5):
+            continue
 
         # Safe to remove
         try:

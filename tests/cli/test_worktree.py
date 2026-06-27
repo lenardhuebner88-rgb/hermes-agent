@@ -727,8 +727,8 @@ class TestStaleWorktreePruning:
 
         assert not Path(info["path"]).exists()
 
-    def test_force_prunes_very_old_worktree(self, git_repo):
-        """Worktrees older than 72h should be force-pruned regardless."""
+    def test_keeps_very_old_worktree_with_unpushed_commit(self, git_repo):
+        """Unpushed commits should never be auto-pruned, even after 72h."""
         import time
 
         info = _setup_worktree(str(git_repo))
@@ -746,29 +746,11 @@ class TestStaleWorktreePruning:
         old_time = time.time() - (73 * 3600)
         os.utime(info["path"], (old_time, old_time))
 
-        # Simulate the force-prune tier check
-        hard_cutoff = time.time() - (72 * 3600)
-        mtime = Path(info["path"]).stat().st_mtime
-        assert mtime <= hard_cutoff  # Should qualify for force removal
+        from cli import _prune_stale_worktrees
 
-        # Actually remove it (simulates _prune_stale_worktrees force path)
-        branch_result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=5, cwd=info["path"],
-        )
-        branch = branch_result.stdout.strip()
+        _prune_stale_worktrees(str(git_repo), max_age_hours=24)
 
-        subprocess.run(
-            ["git", "worktree", "remove", info["path"], "--force"],
-            capture_output=True, text=True, timeout=15, cwd=str(git_repo),
-        )
-        if branch:
-            subprocess.run(
-                ["git", "branch", "-D", branch],
-                capture_output=True, text=True, timeout=10, cwd=str(git_repo),
-            )
-
-        assert not Path(info["path"]).exists()
+        assert Path(info["path"]).exists()
 
 
 class TestEdgeCases:

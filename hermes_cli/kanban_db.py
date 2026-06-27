@@ -996,6 +996,9 @@ class Task:
     epic_id: Optional[str] = None
     # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
     kind: Optional[str] = None
+    # Structured task-level scope contract. Only this persisted JSON field is
+    # security-authoritative for worker tool narrowing; body/prompt text is not.
+    scope_contract: Optional[dict[str, object]] = None
     auto_retry_count: int = 0
     integration_retry_count: int = 0
     transient_retry_count: int = 0
@@ -1012,6 +1015,14 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        scope_contract_value: Optional[dict[str, object]] = None
+        if "scope_contract" in keys and row["scope_contract"]:
+            try:
+                parsed_scope = json.loads(row["scope_contract"])
+                if isinstance(parsed_scope, dict):
+                    scope_contract_value = parsed_scope
+            except Exception:
+                scope_contract_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -1107,6 +1118,7 @@ class Task:
             kind=(
                 row["kind"] if "kind" in keys else None
             ),
+            scope_contract=scope_contract_value,
             auto_retry_count=(
                 row["auto_retry_count"] if "auto_retry_count" in keys else 0
             ),
@@ -1342,6 +1354,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Optional coarse work classification stamped by the decomposer or CLI.
     -- NULL = unknown/unspecified.
     kind                 TEXT,
+    -- Structured task-level scope contract JSON. Only this field is a
+    -- security-authoritative worker tool narrowing source; body/prompt text is not.
+    scope_contract       TEXT,
     -- Bounded, opt-in automatic retry count for worker-blocked runs.
     auto_retry_count     INTEGER NOT NULL DEFAULT 0,
     -- Bounded transient re-integration retry count (Heiler lane). Kept
@@ -2482,6 +2497,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     if "kind" not in cols:
         _add_column_if_missing(conn, "tasks", "kind", "kind TEXT")
+    if "scope_contract" not in cols:
+        _add_column_if_missing(conn, "tasks", "scope_contract", "scope_contract TEXT")
     if "auto_retry_count" not in cols:
         _add_column_if_missing(
             conn,
@@ -3611,6 +3628,7 @@ def create_task(
     session_id: Optional[str] = None,
     epic_id: Optional[str] = None,
     kind: Optional[str] = None,
+    scope_contract: Optional[dict[str, object]] = None,
     board: Optional[str] = None,
     model_override: Optional[str] = None,
     freigabe: Optional[str] = None,
@@ -3856,8 +3874,8 @@ def create_task(
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        model_override, freigabe, live_test_depth, review_tier
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        scope_contract, model_override, freigabe, live_test_depth, review_tier
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3883,6 +3901,9 @@ def create_task(
                         session_id,
                         epic_id,
                         kind,
+                        json.dumps(scope_contract, ensure_ascii=False)
+                        if isinstance(scope_contract, dict)
+                        else None,
                         (model_override or "").strip() or None,
                         freigabe,
                         live_test_depth,
@@ -9713,7 +9734,10 @@ def complete_task(
             )
         # B2: only the review lane writes structured verdicts (anti-loop
         # discriminator); ordinary coder completions leave task_runs.verdict
-        # NULL even when metadata carries a free-form verdict key.
+        # NULL even when metadata carries a free-form verdict key.  A final
+        # review completion must also agree with the task status transition:
+        # non-APPROVED verdicts are a blocked review result, never terminal
+        # done, even if the worker called kanban_complete.
         if _run_originated_from_review(conn, task_id, run_id):
             verdict = _extract_review_verdict(
                 result=result,
@@ -9723,6 +9747,27 @@ def complete_task(
             )
             if verdict is not None:
                 _set_run_verdict(conn, run_id, verdict)
+            if verdict and verdict != "APPROVED":
+                block_reason = summary if summary is not None else result
+                block_reason = block_reason or f"review verdict: {verdict}"
+                conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status = 'blocked',
+                           result = ?,
+                           completed_at = NULL
+                     WHERE id = ?
+                    """,
+                    (block_reason, task_id),
+                )
+                _append_event(
+                    conn,
+                    task_id,
+                    "blocked",
+                    {"reason": block_reason, "review_verdict": verdict},
+                    run_id=run_id,
+                )
+                return True
         # Carry the handoff summary in the event payload so gateway
         # notifiers and dashboard WS consumers can render it without a
         # second SQL round-trip. First line only, 400 char cap — the
@@ -18991,7 +19036,12 @@ def _spawn_claude_worker(
     return proc.pid
 
 
-def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
+_WORKER_SCOPE_DENIED_TOOLSET = "__kanban_scope_denied__"
+
+
+def _resolve_worker_cli_toolsets(
+    hermes_home: Optional[str], task: Optional[Task] = None
+) -> Optional[list[str]]:
     """Return the assigned profile's effective CLI toolsets for a worker.
 
     Dispatcher-spawned workers are launched from a long-lived gateway process,
@@ -19012,7 +19062,29 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         token = set_hermes_home_override(hermes_home)
         try:
             cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+            toolset_names = _get_platform_tools(cfg, "cli")
+            toolsets: list[str] = []
+            platform_cfg = cfg.get("platforms")
+            if isinstance(platform_cfg, dict):
+                cli_cfg = platform_cfg.get("cli")
+                if isinstance(cli_cfg, dict):
+                    configured_toolsets = cli_cfg.get("tools")
+                    if isinstance(configured_toolsets, list):
+                        for toolset in configured_toolsets:
+                            name = str(toolset).strip()
+                            if name and name in toolset_names and name not in toolsets:
+                                toolsets.append(name)
+            legacy_platform_cfg = cfg.get("platform_toolsets")
+            if isinstance(legacy_platform_cfg, dict):
+                legacy_cli_tools = legacy_platform_cfg.get("cli")
+                if isinstance(legacy_cli_tools, list):
+                    for toolset in legacy_cli_tools:
+                        name = str(toolset).strip()
+                        if name and name in toolset_names and name not in toolsets:
+                            toolsets.append(name)
+            for toolset in sorted(str(name) for name in toolset_names if str(name).strip()):
+                if toolset not in toolsets:
+                    toolsets.append(toolset)
         finally:
             reset_hermes_home_override(token)
         if Path(hermes_home).name == "reviewer":
@@ -19023,6 +19095,26 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
             # a dispatcher-side backstop that pins reviewer Kanban workers to
             # the lifecycle/verdict surface only.
             return ["kanban"]
+        scope_contract = task.scope_contract if task else None
+        denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
+        if scope_contract is not None and not isinstance(scope_contract, dict):
+            return denied_toolsets
+        if isinstance(scope_contract, dict):
+            if "allowed_tools" not in scope_contract:
+                return denied_toolsets
+            raw_allowed = scope_contract.get("allowed_tools")
+            if not isinstance(raw_allowed, list):
+                return denied_toolsets
+            allowed: set[str] = set()
+            for item in raw_allowed:
+                if not isinstance(item, str):
+                    return denied_toolsets
+                name = item.strip()
+                if not name:
+                    return denied_toolsets
+                allowed.add(name)
+            effective_toolsets = [name for name in toolsets if name in allowed]
+            return effective_toolsets or denied_toolsets
         return toolsets or None
     except Exception as exc:
         _log.debug(
@@ -19222,8 +19314,8 @@ def _default_spawn(
     # Pin the assignee profile's CLI toolsets so worker startup can't fall
     # back to a stale config (upstream feature). --toolsets is a top-level
     # flag, so it goes BEFORE the `chat` subcommand.
-    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
-    if worker_toolsets:
+    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"), task)
+    if worker_toolsets is not None:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.append("chat")
     # Per-task model override (T4 / WI-6 fix). `-m/--model` is BOTH a
