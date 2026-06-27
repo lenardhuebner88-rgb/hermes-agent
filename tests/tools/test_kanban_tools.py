@@ -1716,7 +1716,11 @@ def test_worker_complete_rejects_stale_run_id(worker_env, monkeypatch):
         kb._set_worker_pid(conn, worker_env, 98765)
         monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
         monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
-        assert kb.detect_crashed_workers(conn) == [worker_env]
+        # An unknown dead PID is a bounded transient recovery (post-1bd00640c):
+        # it closes run1 and requeues the task, but is reported on the
+        # ``_last_transient_recovered`` side-channel, NOT the ``crashed`` return.
+        assert kb.detect_crashed_workers(conn) == []
+        assert kb.detect_crashed_workers._last_transient_recovered == [worker_env]
 
         kb.claim_task(conn, worker_env)
         run2 = kb.latest_run(conn, worker_env)
