@@ -18816,6 +18816,17 @@ _WORKER_LANE_PROVIDER_KEYS = frozenset({
     "HONCHO_API_KEY",
 })
 
+_CLAUDE_CLI_ALWAYS_DENIED_TOOLS = ("WebFetch", "WebSearch")
+_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS = (
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Task",
+    "Agent",
+)
+_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = {"reviewer", "critic"}
+
 
 def _build_worker_env(parent_env) -> dict:
     """Allowlisted copy of ``parent_env`` for spawned kanban workers.
@@ -18835,6 +18846,18 @@ def _build_worker_env(parent_env) -> dict:
     return env
 
 
+def _is_claude_verdict_read_only_lane(
+    profile_arg: str,
+    lane_entry: Optional[dict],
+) -> bool:
+    """Return whether the active runtime map puts this verdict lane on claude-cli."""
+    if not lane_entry:
+        return False
+    if str(lane_entry.get("worker_runtime") or "").strip().lower() != "claude-cli":
+        return False
+    return profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
+
+
 def _spawn_claude_worker(
     task: Task,
     workspace: str,
@@ -18842,6 +18865,7 @@ def _spawn_claude_worker(
     env: dict,
     board: Optional[str] = None,
     lane_model: Optional[str] = None,
+    read_only_verdict_lane: bool = False,
 ) -> Optional[int]:
     """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
 
@@ -18985,17 +19009,21 @@ def _spawn_claude_worker(
         "task (cost + provider)."
     )
 
+    denied_tools = list(_CLAUDE_CLI_ALWAYS_DENIED_TOOLS)
+    if read_only_verdict_lane:
+        denied_tools.extend(_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS)
+
     cmd = [
         _claude_worker_bin(),
         "-p", prompt,
         "--dangerously-skip-permissions",
         # Deny the direct-HTTP tools (S2): with --dangerously-skip-permissions
-        # an --allowedTools list would be a no-op (everything is auto-approved),
-        # but disallowed tools stay hard-denied even in bypass mode. Bash-level
-        # egress (curl -d, scp, nc, ...) is gated by the user-global
-        # guard-dangerous-ops.sh PreToolUse hook, which loads for these
-        # workers too.
-        "--disallowedTools", "WebFetch,WebSearch",
+        # Claude Code 2.1.190 still honored --disallowedTools while a spike
+        # showed --allowedTools was NOT enforced under the same permissions
+        # bypass. Bash-level egress (curl -d, scp, nc, ...) is gated by the
+        # user-global guard-dangerous-ops.sh PreToolUse hook, which loads for
+        # these workers too.
+        "--disallowedTools", ",".join(denied_tools),
         "--output-format", "json",
         # Keep the memsearch memory plugin out of worker sessions (see env
         # comment above). enabledPlugins merges into user settings, so other
@@ -19225,7 +19253,12 @@ def _default_spawn(
         and _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME"))
     ):
         return _spawn_claude_worker(
-            task, workspace, env=env, board=board, lane_model=lane_model,
+            task,
+            workspace,
+            env=env,
+            board=board,
+            lane_model=lane_model,
+            read_only_verdict_lane=_is_claude_verdict_read_only_lane(profile_arg, lane_entry),
         )
 
     cmd = [

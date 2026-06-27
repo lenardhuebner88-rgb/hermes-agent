@@ -203,7 +203,7 @@ class TestLaneSpawnResolution:
             (kanban_home / "config.yaml").write_text(profile_config, encoding="utf-8")
         if lane_profiles is not None:
             with kb.connect() as conn:
-                lane = kb.create_lane(conn, name="test-lane", profiles=lane_profiles)
+                lane = kb.create_lane(conn, name=f"test-lane-{assignee}", profiles=lane_profiles)
                 kb.activate_lane(conn, lane["id"])
 
         captured = {}
@@ -225,6 +225,64 @@ class TestLaneSpawnResolution:
         if "--model" not in cmd:
             return None
         return cmd[cmd.index("--model") + 1]
+
+    def _claude_disallowed_tools(self, cmd):
+        assert cmd[0] == "/usr/local/bin/claude-test", f"not the claude path: {cmd[:3]}"
+        assert "--disallowedTools" in cmd, f"--disallowedTools missing: {cmd}"
+        return set(cmd[cmd.index("--disallowedTools") + 1].split(","))
+
+    def test_claude_verdict_lanes_get_read_only_cage(
+        self, kanban_home, tmp_path, monkeypatch,
+    ):
+        lane_profiles = {
+            "reviewer": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+            "critic": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+        }
+
+        reviewer_cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            assignee="reviewer",
+            lane_profiles=lane_profiles,
+        )
+        critic_cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            assignee="critic",
+            lane_profiles=lane_profiles,
+        )
+
+        expected = {
+            "WebFetch", "WebSearch", "Edit", "Write", "MultiEdit",
+            "NotebookEdit", "Task", "Agent",
+        }
+        assert expected <= self._claude_disallowed_tools(reviewer_cmd)
+        assert expected <= self._claude_disallowed_tools(critic_cmd)
+
+    def test_claude_coder_and_premium_lanes_keep_full_tools(
+        self, kanban_home, tmp_path, monkeypatch,
+    ):
+        lane_profiles = {
+            "coder": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+            "premium": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+        }
+
+        coder_cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            assignee="coder",
+            lane_profiles=lane_profiles,
+        )
+        premium_cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            assignee="premium",
+            lane_profiles=lane_profiles,
+        )
+
+        read_only_only = {
+            "Edit", "Write", "MultiEdit", "NotebookEdit", "Task", "Agent",
+        }
+        assert self._claude_disallowed_tools(coder_cmd) == {"WebFetch", "WebSearch"}
+        assert self._claude_disallowed_tools(premium_cmd) == {"WebFetch", "WebSearch"}
+        assert self._claude_disallowed_tools(coder_cmd).isdisjoint(read_only_only)
+        assert self._claude_disallowed_tools(premium_cmd).isdisjoint(read_only_only)
 
     # 1. No lane at all → profile config default (pre-lane behavior).
     def test_no_lane_falls_back_to_profile_claude_model(
