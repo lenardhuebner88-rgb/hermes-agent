@@ -45,17 +45,17 @@ def _init_git_repo(repo: Path) -> None:
 
 def test_init_db_is_idempotent(kanban_home):
     # Second call should not error or drop data.
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(conn, title="persisted")
     kb.init_db()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tasks = kb.list_tasks(conn)
     assert len(tasks) == 1
     assert tasks[0].title == "persisted"
 
 
 def test_task_kind_column_migration_is_idempotent(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb._migrate_add_optional_columns(conn)
         kb._migrate_add_optional_columns(conn)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
@@ -64,7 +64,7 @@ def test_task_kind_column_migration_is_idempotent(kanban_home):
 
 def test_review_tier_column_exists_and_defaults_null(kanban_home):
     """B-T1: additive review_tier column present on every board, default NULL."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "review_tier" in cols
         tid = kb.create_task(conn, title="t", assignee="coder")
@@ -75,7 +75,7 @@ def test_review_tier_column_exists_and_defaults_null(kanban_home):
 
 
 def test_review_tier_column_migration_is_idempotent(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb._migrate_add_optional_columns(conn)
         kb._migrate_add_optional_columns(conn)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
@@ -84,7 +84,7 @@ def test_review_tier_column_migration_is_idempotent(kanban_home):
 
 def test_create_task_persists_and_reads_review_tier(kanban_home):
     """B-T2: create_task accepts review_tier and get_task reads it back; default NULL."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder", review_tier="critical")
         assert kb.get_task(conn, tid).review_tier == "critical"
         tid2 = kb.create_task(conn, title="t2", assignee="coder")
@@ -92,7 +92,7 @@ def test_create_task_persists_and_reads_review_tier(kanban_home):
 
 
 def test_create_task_rejects_unknown_review_tier(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         with pytest.raises(ValueError, match="unknown review_tier"):
             kb.create_task(conn, title="bad tier", assignee="coder", review_tier="bogus")
 
@@ -107,7 +107,7 @@ _PLANSPEC_COLS = [
 
 def test_planspec_columns_exist_after_migration(kanban_home):
     """A1: all four planspec columns must be present after init/migration."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
     for col in _PLANSPEC_COLS:
         assert col in cols, f"column '{col}' missing from tasks after migration"
@@ -115,7 +115,7 @@ def test_planspec_columns_exist_after_migration(kanban_home):
 
 def test_planspec_columns_migration_is_idempotent(kanban_home):
     """A1: running the migration twice must be a no-op (no exception, no duplicate)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb._migrate_add_optional_columns(conn)
         kb._migrate_add_optional_columns(conn)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
@@ -126,7 +126,7 @@ def test_planspec_columns_migration_is_idempotent(kanban_home):
 
 
 def test_create_task_persists_optional_kind(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         code_id = kb.create_task(conn, title="code task", kind="code")
         plain_id = kb.create_task(conn, title="plain task")
         rows = conn.execute(
@@ -139,7 +139,7 @@ def test_create_task_persists_optional_kind(kanban_home):
 
 
 def test_init_creates_expected_tables(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
@@ -150,7 +150,7 @@ def test_init_creates_expected_tables(kanban_home):
 def test_k5a_task_runs_cost_columns_present_and_migrate_idempotently(kanban_home):
     """K5a: task_runs gains input_tokens/output_tokens/cost_usd, and re-running
     the additive migration is a no-op (idempotent, no duplicate-column crash)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
         assert {"input_tokens", "output_tokens", "cost_usd"} <= cols
         # Re-running the migration twice on the live connection must not raise.
@@ -167,7 +167,7 @@ def test_k5a_task_runs_cost_columns_present_and_migrate_idempotently(kanban_home
 def test_k11_decompose_failed_column_present_and_defaults_zero(kanban_home):
     """K11: tasks gains ``decompose_failed`` (additive), defaulting to 0 on a
     fresh task."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "decompose_failed" in cols
         tid = kb.create_task(conn, title="fresh")
@@ -180,7 +180,7 @@ def test_k11_decompose_failed_column_present_and_defaults_zero(kanban_home):
 def test_k11_record_and_reset_decompose_failure(kanban_home):
     """K11: ``record_decompose_failure`` increments and returns the new value;
     ``reset_decompose_failed`` clears it back to 0."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="flaky")
         assert kb.record_decompose_failure(conn, tid) == 1
         assert kb.record_decompose_failure(conn, tid) == 2
@@ -197,14 +197,14 @@ def test_k11_record_and_reset_decompose_failure(kanban_home):
 
 def test_k11_record_decompose_failure_missing_row_returns_zero(kanban_home):
     """K11: a counter bump on a non-existent task is a no-op returning 0."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.record_decompose_failure(conn, "t_ghost") == 0
 
 
 def test_k11_decompose_failed_migration_idempotent(kanban_home):
     """K11: re-running the additive migration is a no-op — no duplicate-column
     crash and the column survives + preserves its value."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="survivor")
         assert kb.record_decompose_failure(conn, tid) == 1
         kb._migrate_add_optional_columns(conn)
@@ -219,7 +219,7 @@ def test_k11_decompose_failed_migration_idempotent(kanban_home):
 
 def test_k5a_end_run_writes_back_tokens_cost_from_metadata(kanban_home):
     """K5a: _end_run persists usage from the in-process metadata dict."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="costed", assignee="worker")
         kb.claim_task(conn, tid)
         ok = kb.complete_task(
@@ -242,7 +242,7 @@ def test_k5a_end_run_writes_back_tokens_cost_from_metadata(kanban_home):
 
 def test_k5a_end_run_leaves_cost_null_without_usage(kanban_home):
     """K5a: a run with no usage metadata writes NULLs, never crashes."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="no-usage", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(conn, tid, result="done")
@@ -323,7 +323,7 @@ def test_subscription_token_totals_since_epoch_includes_lower_boundary(
         "_profile_subscription",
         lambda profile: "kimi" if profile == "reviewer" else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="token window")
         with kb.write_txn(conn):
             _insert_token_run(
@@ -364,7 +364,7 @@ def test_subscription_token_totals_excludes_non_kimi_profiles(
         "critic": None,
     }
     monkeypatch.setattr(kb, "_profile_subscription", subscriptions.get)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="token subscriptions")
         with kb.write_txn(conn):
             for profile, tokens_in, tokens_out in [
@@ -393,7 +393,7 @@ def test_subscription_token_totals_prefers_run_metadata_over_live_profile(
     kanban_home, monkeypatch,
 ):
     monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "kimi")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="token metadata subscription")
         with kb.write_txn(conn):
             _insert_token_run(
@@ -430,7 +430,7 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
         "_profile_subscription",
         {"coder-claude": "claude", "premium": "chatgpt", "critic": None}.get,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         user_task = kb.create_task(conn, title="[FO] Family Organizer export", assignee="coder")
         hardening_task = kb.create_task(conn, title="review gate", assignee="reviewer")
         meta_task = kb.create_task(conn, title="platform cleanup", assignee="coder")
@@ -522,7 +522,7 @@ def test_subscription_token_burn_prefers_run_metadata_after_lane_flip(
     now = 1_700_000_000
     monkeypatch.setattr(kb.time, "time", lambda: now)
     monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "kimi")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="metadata burn", assignee="verifier")
         with kb.write_txn(conn):
             _insert_token_run(
@@ -549,7 +549,7 @@ def test_subscription_token_burn_prefers_run_metadata_after_lane_flip(
 
 
 def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         base = 1_700_000_000
         for i in range(8):
             _insert_profile_outcome_run(
@@ -596,7 +596,7 @@ def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
 
 
 def test_profile_outcome_stats_last_n_is_per_profile_window(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         base = 1_700_001_000
         for i in range(2):
             _insert_profile_outcome_run(
@@ -672,7 +672,7 @@ def test_k5b_backfills_cost_from_state_db_on_session_match(kanban_home):
     _write_state_session(
         kanban_home, sid, input_tokens=900, output_tokens=120, actual_cost=0.044,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="acp-work", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -691,7 +691,7 @@ def test_k5b_uses_estimated_cost_when_actual_is_null(kanban_home):
         kanban_home, sid, input_tokens=1, output_tokens=2,
         actual_cost=None, estimated_cost=0.02,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="acp-work", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -707,7 +707,7 @@ def test_k5b_in_process_metadata_wins_over_backfill(kanban_home):
     _write_state_session(
         kanban_home, sid, input_tokens=700, output_tokens=80, actual_cost=9.99,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="acp-work", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -725,7 +725,7 @@ def test_k5b_no_session_match_is_noop(kanban_home):
     _write_state_session(
         kanban_home, "other-sess", input_tokens=10, output_tokens=5, actual_cost=0.01,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -738,7 +738,7 @@ def test_k5b_no_session_match_is_noop(kanban_home):
 
 def test_k5b_missing_state_db_is_fail_soft(kanban_home):
     """K5b: no state.db on disk → NO-OP, _end_run never raises."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -754,7 +754,7 @@ def test_k5b_state_db_without_sessions_table_is_fail_soft(kanban_home):
     c0.execute("CREATE TABLE other (x)")
     c0.commit()
     c0.close()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -865,7 +865,7 @@ def test_k16_backfill_run_costs_sets_cost_and_counts(kanban_home, tmp_path, monk
         "hermes_cli.profiles.resolve_profile_env",
         lambda name: str(profile_dir),
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="costed", assignee="critic")
         run_id = _insert_ended_run(
             conn, tid, profile="critic",
@@ -909,7 +909,7 @@ def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
         cache_write_tokens=4000,
     )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="sub", assignee="reviewer")
         run_id = _insert_ended_run(
             conn, tid, profile="reviewer", metadata={"worker_session_id": sid},
@@ -951,7 +951,7 @@ def test_k16_backfill_run_costs_skips_run_without_session_id(kanban_home, tmp_pa
         "hermes_cli.profiles.resolve_profile_env",
         lambda name: str(profile_dir),
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="no-sess", assignee="critic")
         run_id = _insert_ended_run(
             conn, tid, profile="critic", metadata={"other": "x"},
@@ -968,7 +968,7 @@ def test_k16_backfill_run_costs_fail_soft_missing_profile_db(kanban_home, monkey
     def _raise(name):
         raise FileNotFoundError(f"Profile '{name}' does not exist.")
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _raise)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="ghost", assignee="ghost")
         run_id = _insert_ended_run(
             conn, tid, profile="ghost",
@@ -1024,7 +1024,7 @@ def test_k17_backfill_claude_cli_run_stamps_tokens_from_log(kanban_home, monkeyp
     with the API-equivalent preserved in metadata. Idempotent on re-run."""
     import json as _json
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cli-costed", assignee="coder-claude")
         run_id = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
         _write_claude_result_log(tid)
@@ -1054,7 +1054,7 @@ def test_k17_backfill_claude_cli_missing_or_garbled_log_fail_soft(kanban_home, m
     """K17: missing log or log without a result line → skipped, no raise,
     run stays NULL (re-scanned next tick)."""
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cli-no-log", assignee="coder-claude")
         run_id = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
         assert kb.backfill_run_costs(conn, limit=50) == 0
@@ -1074,7 +1074,7 @@ def test_k17_backfill_claude_cli_skips_stale_run(kanban_home, monkeypatch):
     """K17: only the task's LATEST run is stamped from the shared per-task
     log — an older run never inherits a newer run's result JSON."""
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cli-retry", assignee="coder-claude")
         old_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
         new_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
@@ -1100,7 +1100,7 @@ def test_k17_backfill_claude_cli_stamps_despite_later_verifier_run(kanban_home, 
     run out of the backfill. Only a newer claude-cli run owns the log's last
     result JSON; non-cli runs (verifier, hermes-runtime) never write one."""
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cli-gated", assignee="coder-claude")
         worker_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
         verifier_run = _insert_ended_run(
@@ -1127,7 +1127,7 @@ def test_k17_backfill_claude_cli_stamps_despite_later_verifier_run(kanban_home, 
 def test_k17_backfill_non_claude_profile_unaffected(kanban_home, monkeypatch):
     """K17 regression: a non-claude-cli run without worker_session_id keeps
     the legacy skip behavior even when a stray log file exists."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="api-lane", assignee="critic")
         run_id = _insert_ended_run(conn, tid, profile="critic", metadata={"other": "x"})
         _write_claude_result_log(tid)
@@ -1219,7 +1219,7 @@ def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
     """batch_task_costs: one query sums cost/tokens per task, folds the
     subscription $-equivalent into cost_effective_usd, and omits tasks with no
     runs (so their board cards render no cost footer)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         ran = kb.create_task(conn, title="ran twice", assignee="coder")
         sub = kb.create_task(conn, title="subscription run", assignee="coder-claude")
         idle = kb.create_task(conn, title="never ran")
@@ -1261,7 +1261,7 @@ def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
 
 
 def test_batch_task_costs_empty_input_returns_empty(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.batch_task_costs(conn, []) == {}
 
 
@@ -1273,7 +1273,7 @@ def test_s1_cwd_match_stamps_real_tokens_and_cost(kanban_home, tmp_path, monkeyp
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cwd-link", assignee="coder")
         run_id = _insert_run_window(
             conn, tid, profile="coder", started_at=1000, ended_at=2000,
@@ -1310,7 +1310,7 @@ def test_s1_window_match_in_own_profile_consumed_once(kanban_home, tmp_path, mon
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="win-a", assignee="coder")
         t2 = kb.create_task(conn, title="win-b", assignee="coder")
         r1 = _insert_run_window(conn, t1, profile="coder", started_at=1000, ended_at=2000)
@@ -1346,7 +1346,7 @@ def test_s1_window_does_not_cross_profiles(kanban_home, tmp_path, monkeypatch):
         return str(tmp_path / "profiles" / name)
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _resolve)
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x-prof", assignee="coder")
         run_id = _insert_run_window(conn, tid, profile="coder", started_at=1000, ended_at=2000)
         # session lives in critic's db, not coder's → must not match
@@ -1369,7 +1369,7 @@ def test_s1_subscription_zero_metered_when_no_session(kanban_home, tmp_path, mon
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="sub-zero", assignee="coder-claude")
         run_id = _insert_run_window(
             conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
@@ -1398,7 +1398,7 @@ def test_s1_subscription_match_stamps_equivalent_not_metered(kanban_home, tmp_pa
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="sub-match", assignee="coder-claude")
         run_id = _insert_run_window(
             conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
@@ -1437,7 +1437,7 @@ def test_s1_subscription_actual_does_not_leak_into_metered(kanban_home, tmp_path
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="sub-actual", assignee="coder-claude")
         run_id = _insert_run_window(
             conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
@@ -1491,7 +1491,7 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
         return None
 
     monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="claude-mismatch", assignee="premium")
         run_id = _insert_run_window(
             conn, tid, profile="premium", started_at=1000, ended_at=2000)
@@ -1542,7 +1542,7 @@ def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path,
         kb, "_lookup_model_price_per_mtok",
         lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-burn", assignee="coder")
         run_id = _insert_run_window(
             conn, tid, profile="coder", started_at=1000, ended_at=2000)
@@ -1582,7 +1582,7 @@ def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypa
         kb, "_lookup_model_price_per_mtok",
         lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-cache", assignee="coder")
         run_id = _insert_run_window(
             conn, tid, profile="coder", started_at=1000, ended_at=2000)
@@ -1617,7 +1617,7 @@ def test_s1b_audited_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, 
         lambda provider, model: (5.0, 25.0, 0.5, 6.25)
         if model == "claude-opus-4-8" else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="s1b-golden", assignee="premium")
         run_id = _insert_run_window(
             conn,
@@ -1671,7 +1671,7 @@ def test_s1b_audited_claude_equivalent_requires_model_label(kanban_home, tmp_pat
         lambda provider, model: (5.0, 25.0, 0.5, 6.25)
         if model == "claude-opus-4-8" else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="s1b-missing-model", assignee="premium")
         run_id = _insert_run_window(
             conn,
@@ -1699,7 +1699,7 @@ def test_s1b_audited_claude_equivalent_requires_model_label(kanban_home, tmp_pat
 
 def test_s1b_audited_claude_equivalent_classifies_non_workers(kanban_home):
     """S1b dry-run includes operator integration and no-evidence classes in its bounded report."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         op_tid = kb.create_task(conn, title="operator", assignee="operator")
         null_tid = kb.create_task(conn, title="no evidence", assignee="premium")
         _insert_run_window(conn, op_tid, profile="operator", started_at=1000, ended_at=2000)
@@ -1718,7 +1718,7 @@ def test_s1c_audited_non_claude_equivalent_dry_run_and_apply(kanban_home, tmp_pa
     """
     profile_dir = tmp_path / "profiles" / "coder"
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="s1c-golden", assignee="coder")
         run_id = _insert_run_window(
             conn,
@@ -1765,7 +1765,7 @@ def test_s1c_audited_non_claude_equivalent_skips_no_model_claude_and_metered(
     """S1c: no model stays null; Claude lanes and metered OpenRouter runs are untouched."""
     profile_dir = tmp_path / "profiles" / "coder"
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         no_model_tid = kb.create_task(conn, title="s1c-no-model", assignee="coder")
         claude_tid = kb.create_task(conn, title="s1c-claude", assignee="premium")
         metered_tid = kb.create_task(conn, title="s1c-openrouter", assignee="coder")
@@ -1836,7 +1836,7 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
     profile_dir = tmp_path / "profiles" / "coder"
     state_db = profile_dir / "state.db"
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         restamp_tid = kb.create_task(conn, title="s1d-restamp", assignee="coder")
         mini_tid = kb.create_task(conn, title="s1d-restamp-mini", assignee="coder")
         csi_tid = kb.create_task(conn, title="s1d-csi", assignee="coder")
@@ -1954,7 +1954,7 @@ def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypa
         lambda provider, model: (5.0, 30.0, 0.5, 6.25)
         if (provider, model) == ("openai", "gpt-5.5") else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
             name="codex-subscription",
@@ -2005,7 +2005,7 @@ def test_claim_stamps_billing_identity_for_metered_lane(kanban_home, monkeypatch
         },
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda profile: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="metered-claim", assignee="verifier")
         assert kb.claim_task(conn, tid)
         row = conn.execute(
@@ -2032,7 +2032,7 @@ def test_repair_frozen_equivalent_uses_stamped_provider_model_after_lane_flip(
         return None
 
     monkeypatch.setattr(kb, "_equiv_from_tokens", fake_equivalent)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
             name="flipped-live-lane",
@@ -2079,7 +2079,7 @@ def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
         lambda provider, model: (5.0, 30.0, 0.5, 6.25)
         if (provider, model) == ("openai", "gpt-5.5") else None,
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
             name="mixed",
@@ -2151,7 +2151,7 @@ def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_pat
                         lambda p: "chatgpt" if p == "coder" else None)
     monkeypatch.setattr(kb, "_lookup_model_price_per_mtok",
                         lambda provider, model: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-noprice", assignee="coder")
         run_id = _insert_run_window(
             conn, tid, profile="coder", started_at=1000, ended_at=2000)
@@ -2179,7 +2179,7 @@ def test_s1_metered_match_keeps_cost_and_stamps_model(kanban_home, tmp_path, mon
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="metered", assignee="research")
         run_id = _insert_run_window(
             conn,
@@ -2216,7 +2216,7 @@ def test_s1_api_billed_lane_without_session_stays_null(kanban_home, tmp_path, mo
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="api-lane", assignee="research")
         run_id = _insert_run_window(
             conn, tid, profile="research", started_at=1000, ended_at=2000)
@@ -2233,7 +2233,7 @@ def test_s1_unlinkable_non_subscription_run_stays_null(kanban_home, tmp_path, mo
         "hermes_cli.profiles.resolve_profile_env",
         lambda name: str(tmp_path / "profiles" / str(name)))
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="never-ran", assignee="x")
         run_id = _insert_run_window(
             conn, tid, profile=None, started_at=5000, ended_at=5000)
@@ -2251,7 +2251,7 @@ def test_s1_does_not_double_count_across_calls(kanban_home, tmp_path, monkeypatc
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="first", assignee="coder")
         r1 = _insert_run_window(conn, t1, profile="coder", started_at=1000, ended_at=2000)
         _write_session_rows(profile_dir / "state.db", [
@@ -2282,7 +2282,7 @@ def test_s1_since_seconds_bounds_scan(kanban_home, tmp_path, monkeypatch):
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
     now = int(time.time())
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t_old = kb.create_task(conn, title="old", assignee="coder-claude")
         t_new = kb.create_task(conn, title="new", assignee="coder-claude")
         _insert_run_window(conn, t_old, profile="coder-claude",
@@ -2302,7 +2302,7 @@ def test_s1_fail_soft_missing_profile_db(kanban_home, monkeypatch):
         raise FileNotFoundError(name)
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _raise)
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="ghost", assignee="ghost")
         _insert_run_window(conn, tid, profile="ghost", started_at=1000, ended_at=2000)
         # No raise; nothing to stamp (real duration, no sub, no session).
@@ -2322,7 +2322,7 @@ def test_s1_reduces_tasks_without_cost_data_metric(kanban_home, tmp_path, monkey
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # three done tasks, all without cost: one cwd-linked, one subscription,
         # one API-billed-no-session (stays blind).
         t_cwd = kb.create_task(conn, title="cwd", assignee="coder")
@@ -2366,7 +2366,7 @@ def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """
     monkeypatch.setenv("HERMES_KANBAN_BUSY_TIMEOUT_MS", "123456")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         row = conn.execute("PRAGMA busy_timeout").fetchone()
 
     assert row[0] == 123456
@@ -2507,7 +2507,7 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_create_task_no_parents_is_ready(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="ship it", assignee="alice")
         t = kb.get_task(conn, tid)
     assert t is not None
@@ -2517,7 +2517,7 @@ def test_create_task_no_parents_is_ready(kanban_home):
 
 
 def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         p = kb.create_task(conn, title="parent")
         c = kb.create_task(conn, title="child", parents=[p])
         assert kb.get_task(conn, c).status == "todo"
@@ -2526,18 +2526,18 @@ def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
 
 
 def test_create_task_unknown_parent_errors(kanban_home):
-    with kb.connect() as conn, pytest.raises(ValueError, match="unknown parent"):
+    with kb.connect_closing() as conn, pytest.raises(ValueError, match="unknown parent"):
         kb.create_task(conn, title="orphan", parents=["t_ghost"])
 
 
 def test_workspace_kind_validation(kanban_home):
-    with kb.connect() as conn, pytest.raises(ValueError, match="workspace_kind"):
+    with kb.connect_closing() as conn, pytest.raises(ValueError, match="workspace_kind"):
         kb.create_task(conn, title="bad ws", workspace_kind="cloud")
 
 
 def test_create_task_persists_worktree_branch_name(kanban_home, tmp_path):
     target = tmp_path / ".worktrees" / "t6-wire"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="ship worktree",
@@ -2555,7 +2555,7 @@ def test_create_task_persists_worktree_branch_name(kanban_home, tmp_path):
 
 
 def test_branch_name_requires_worktree_workspace(kanban_home):
-    with kb.connect() as conn, pytest.raises(ValueError, match="worktree"):
+    with kb.connect_closing() as conn, pytest.raises(ValueError, match="worktree"):
         kb.create_task(
             conn,
             title="bad branch",
@@ -2569,7 +2569,7 @@ def test_branch_name_requires_worktree_workspace(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_link_demotes_ready_child_to_todo_when_parent_not_done(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         b = kb.create_task(conn, title="b")
         assert kb.get_task(conn, b).status == "ready"
@@ -2578,7 +2578,7 @@ def test_link_demotes_ready_child_to_todo_when_parent_not_done(kanban_home):
 
 
 def test_link_keeps_ready_child_when_parent_already_done(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         kb.complete_task(conn, a)
         b = kb.create_task(conn, title="b")
@@ -2588,14 +2588,14 @@ def test_link_keeps_ready_child_when_parent_already_done(kanban_home):
 
 
 def test_link_rejects_self_loop(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         with pytest.raises(ValueError, match="itself"):
             kb.link_tasks(conn, a, a)
 
 
 def test_link_detects_cycle(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         b = kb.create_task(conn, title="b", parents=[a])
         c = kb.create_task(conn, title="c", parents=[b])
@@ -2606,7 +2606,7 @@ def test_link_detects_cycle(kanban_home):
 
 
 def test_recompute_ready_cascades_through_chain(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         b = kb.create_task(conn, title="b", parents=[a])
         c = kb.create_task(conn, title="c", parents=[b])
@@ -2621,7 +2621,7 @@ def test_recompute_ready_cascades_through_chain(kanban_home):
 def test_recompute_ready_promotes_blocked_with_done_parents(kanban_home):
     """blocked tasks with all parents done should be promoted to ready,
     unless the circuit-breaker failure limit has been reached."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -2648,7 +2648,7 @@ def test_recompute_ready_promotes_blocked_with_done_parents(kanban_home):
 
 
 def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         a = kb.create_task(conn, title="a")
         b = kb.create_task(conn, title="b")
         c = kb.create_task(conn, title="c", parents=[a, b])
@@ -2659,7 +2659,7 @@ def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
 
 
 def test_archived_parent_does_not_satisfy_dependency(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -2684,7 +2684,7 @@ def test_archived_parent_does_not_satisfy_dependency(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_claim_once_wins_second_loses(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         first = kb.claim_task(conn, t, claimer="host:1")
         assert first is not None and first.status == "running"
@@ -2694,7 +2694,7 @@ def test_claim_once_wins_second_loses(kanban_home):
 
 def test_claim_uses_env_default_ttl(kanban_home, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_TTL_SECONDS", "3600")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t, claimer="host:1")
         expires = kb.get_task(conn, t).claim_expires
@@ -2703,7 +2703,7 @@ def test_claim_uses_env_default_ttl(kanban_home, monkeypatch):
 
 
 def test_claim_fails_on_non_ready(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         # Move to todo by introducing an unsatisfied parent.
         p = kb.create_task(conn, title="p")
@@ -2713,7 +2713,7 @@ def test_claim_fails_on_non_ready(kanban_home):
 
 
 def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="delayed recheck", assignee="ops")
         assert kb.schedule_task(conn, t, reason="run next week") is True
         task = kb.get_task(conn, t)
@@ -2725,7 +2725,7 @@ def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
 
 
 def test_unblock_scheduled_rechecks_parent_gate(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child", parents=[parent])
         assert kb.get_task(conn, child).status == "todo"
@@ -2744,7 +2744,7 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
     import signal
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2778,7 +2778,7 @@ def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
     progress."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2818,7 +2818,7 @@ def test_stale_claim_with_live_pid_uses_env_ttl_override(
 
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_TTL_SECONDS", "3600")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2850,7 +2850,7 @@ def test_stale_claim_deferred_when_live_worker_survives_termination(
     """
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2901,7 +2901,7 @@ def test_stale_claim_reclaimed_when_termination_succeeds(
     """When the worker is actually killed, the claim is released as before."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2935,7 +2935,7 @@ def test_stale_claim_released_when_worker_not_host_local(
     """
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -2963,7 +2963,7 @@ def test_detect_stale_defers_when_live_worker_survives(kanban_home, monkeypatch)
     """detect_stale_running must also hold the claim when the worker survives."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="wedged", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -3013,7 +3013,7 @@ def test_stale_claim_reclaim_event_records_diagnostic_payload(
     import json
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
@@ -3049,7 +3049,7 @@ def test_detect_crashed_workers_systemic_failure_fast_block(
 
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_ids = []
         for i in range(4):
             tid = kb.create_task(conn, title=f"task-{i}", assignee="a")
@@ -3080,7 +3080,7 @@ def test_detect_crashed_workers_isolated_failure_normal_retry(
 
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_ids = []
         for i in range(2):
             tid = kb.create_task(conn, title=f"iso-{i}", assignee="a")
@@ -3115,7 +3115,7 @@ def test_detect_crashed_workers_skips_freshly_claimed_tasks(
     now = 1_000_000.0
     monkeypatch.setattr(_kb.time, "time", lambda: now)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         host = _kb._claimer_id().split(":", 1)[0]
         tid = kb.create_task(conn, title="grace test", assignee="a")
         conn.execute(
@@ -3146,7 +3146,7 @@ def test_detect_crashed_workers_grace_period_env_override(
 
     now = 2_000_000.0
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         host = _kb._claimer_id().split(":", 1)[0]
         tid = kb.create_task(conn, title="env override test", assignee="a")
         conn.execute(
@@ -3216,7 +3216,7 @@ def test_rate_limit_exit_requeues_without_counting_failure(
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         host = _kb._claimer_id().split(":", 1)[0]
         tid = kb.create_task(conn, title="rl", assignee="a")
 
@@ -3275,7 +3275,7 @@ def test_real_crash_still_counts_and_trips_breaker(kanban_home, monkeypatch):
 
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         host = _kb._claimer_id().split(":", 1)[0]
         tid = kb.create_task(conn, title="crash", assignee="a")
 
@@ -3307,7 +3307,7 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
     now = 5_000_000
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="rl-guard", assignee="a")
         # Seed a rate_limited run that just ended + the stamped error.
         kb.claim_task(conn, tid)
@@ -3345,7 +3345,7 @@ def test_respawn_guard_rate_limit_cooldown_zero_allows_immediately(
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
     now = 6_000_000
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="rl-zero", assignee="a")
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
@@ -3369,7 +3369,7 @@ def test_park_integration_records_parked_outcome_not_completed(kanban_home):
     """C-2: a parked integration is stamped INTEGRATION_PARKED_OUTCOME, NOT
     'completed' — so it falls out of every ``outcome = 'completed'`` filter
     (recent_success guard, success-rate stats) while cost stays attributed."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="park-outcome", assignee="a")
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
@@ -3390,7 +3390,7 @@ def test_respawn_guard_recent_success_fires_without_unblock(kanban_home, monkeyp
     import hermes_cli.kanban_db as _kb
 
     now = 7_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="rs-baseline", assignee="a")
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
@@ -3414,7 +3414,7 @@ def test_respawn_guard_unblock_clears_recent_success(kanban_home, monkeypatch):
     import hermes_cli.kanban_db as _kb
 
     now = 7_100_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="rs-unblock", assignee="a")
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
@@ -3443,7 +3443,7 @@ def test_parked_then_unblocked_task_is_respawnable(kanban_home, monkeypatch):
     import hermes_cli.kanban_db as _kb
 
     now = 7_200_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="park-respawn", assignee="a")
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
@@ -3524,7 +3524,7 @@ def test_max_runtime_uses_current_run_start_after_retry(kanban_home, monkeypatch
     """
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         host = kb._claimer_id().split(":", 1)[0]
         t = kb.create_task(
             conn, title="retry", assignee="a", max_runtime_seconds=10,
@@ -3563,7 +3563,7 @@ def test_max_runtime_uses_current_run_start_after_retry(kanban_home, monkeypatch
 
 
 def test_heartbeat_extends_claim(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         claimer = "host:hb"
         kb.claim_task(conn, t, claimer=claimer, ttl_seconds=60)
@@ -3578,7 +3578,7 @@ def test_heartbeat_extends_claim(kanban_home):
 
 def test_heartbeat_uses_env_default_ttl(kanban_home, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_TTL_SECONDS", "3600")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         claimer = "host:hb"
         kb.claim_task(conn, t, claimer=claimer, ttl_seconds=60)
@@ -3592,11 +3592,11 @@ def test_heartbeat_uses_env_default_ttl(kanban_home, monkeypatch):
 
 def test_concurrent_claims_only_one_wins(kanban_home):
     """Fire N threads claiming the same task; exactly one must win."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="race", assignee="a")
 
     def attempt(i):
-        with kb.connect() as c:
+        with kb.connect_closing() as c:
             return kb.claim_task(c, t, claimer=f"host:{i}")
 
     n_workers = 8
@@ -3612,7 +3612,7 @@ def test_concurrent_claims_only_one_wins(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_complete_records_result(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         assert kb.complete_task(conn, t, result="done and dusted")
         task = kb.get_task(conn, t)
@@ -3622,7 +3622,7 @@ def test_complete_records_result(kanban_home):
 
 
 def test_block_then_unblock(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t)
         assert kb.block_task(conn, t, reason="need input")
@@ -3634,7 +3634,7 @@ def test_block_then_unblock(kanban_home):
 def test_block_task_stores_reviewer_metadata(kanban_home):
     """B-T10: block_task persists structured reviewer_metadata into
     task_runs.metadata (no second migration). Default None = byte-identical."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         kb.claim_task(conn, tid)
         rid = kb._current_run_id(conn, tid)
@@ -3651,7 +3651,7 @@ def test_block_task_stores_reviewer_metadata(kanban_home):
 
 def test_block_task_without_metadata_is_unchanged(kanban_home):
     """Default None reviewer_metadata leaves the run metadata empty (today)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         kb.claim_task(conn, tid)
         rid = kb._current_run_id(conn, tid)
@@ -3664,7 +3664,7 @@ def test_block_task_without_metadata_is_unchanged(kanban_home):
 
 def test_unblock_resets_failure_counters(kanban_home):
     """unblock_task must reset consecutive_failures and last_failure_error."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t)
         assert kb.block_task(conn, t, reason="need input")
@@ -3690,7 +3690,7 @@ def test_recompute_ready_skips_tasks_at_failure_limit(kanban_home):
     budget would cycle forever: block → auto-recover (counter reset)
     → respawn → budget exhausted → block → …
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(conn, title="child", assignee="a",
                                parents=[parent])
@@ -3731,7 +3731,7 @@ def test_recompute_ready_skips_tasks_at_failure_limit(kanban_home):
 def test_recompute_ready_recovers_below_limit(kanban_home):
     """recompute_ready auto-recovers blocked tasks that haven't hit the
     failure limit yet — the counter is preserved across recovery."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="task", assignee="a")
         kb.claim_task(conn, t)
         # One failure, below the default limit of 2.
@@ -3768,7 +3768,7 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
     breaker — sticking a task prematurely (config limit > default) or
     letting a tripped task escape (config limit < default).
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Config allows MORE retries than the default. A task blocked
         # with failures below the configured limit must still recover.
         t = kb.create_task(conn, title="lenient", assignee="a")
@@ -3809,7 +3809,7 @@ def test_recompute_ready_honours_persisted_gave_up_effective_limit(kanban_home):
     """A later recompute without dispatcher config must not reopen a task
     that was parked by a stricter failure_limit in ``_record_task_failure``.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="strict breaker", assignee="a")
         assert kb.claim_task(conn, task_id, claimer="host:1") is not None
 
@@ -3838,7 +3838,7 @@ def test_recompute_ready_honours_persisted_gave_up_effective_limit(kanban_home):
 def test_recompute_ready_per_task_max_retries_overrides_dispatcher(kanban_home):
     """A per-task ``max_retries`` wins over the dispatcher failure_limit,
     matching ``_record_task_failure``'s resolution order."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="per-task", assignee="a")
         # Per-task allows 4 retries; dispatcher config says 2.
         conn.execute(
@@ -3867,7 +3867,7 @@ def test_claim_rejects_when_parents_not_done(kanban_home):
     detect the violation, demote the child back to 'todo', append a
     'claim_rejected' event, and return None. Covers Fix 1 of the RCA.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -3885,7 +3885,7 @@ def test_claim_rejects_when_parents_not_done(kanban_home):
         result = kb.claim_task(conn, child, claimer="host:1")
 
     assert result is None
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, child).status == "todo"
         events = conn.execute(
             "SELECT kind, payload FROM task_events "
@@ -3900,7 +3900,7 @@ def test_claim_rejects_when_parents_not_done(kanban_home):
 
 def test_claim_succeeds_once_parents_done(kanban_home):
     """After parents complete, recompute_ready -> claim_task must succeed."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -3916,7 +3916,7 @@ def test_claim_succeeds_once_parents_done(kanban_home):
 
 def test_create_with_parents_stays_todo_until_parents_done(kanban_home):
     """kanban_create(parents=[...]) must land in 'todo' and only promote on parent done."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -3941,7 +3941,7 @@ def test_unblock_with_pending_parents_goes_to_todo(kanban_home):
     'todo' (not 'ready') on unblock. Otherwise the dispatcher will claim
     it immediately, repeating Bug 2 from the RCA.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
             conn, title="child", assignee="a", parents=[parent],
@@ -3963,7 +3963,7 @@ def test_unblock_with_pending_parents_goes_to_todo(kanban_home):
 
 def test_unblock_without_parents_goes_to_ready(kanban_home):
     """Parent-free unblock still produces 'ready' (behavior preserved)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="lone", assignee="a")
         kb.claim_task(conn, t)
         assert kb.block_task(conn, t, reason="need input")
@@ -3972,7 +3972,7 @@ def test_unblock_without_parents_goes_to_ready(kanban_home):
 
 
 def test_assign_refuses_while_running(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t)
         with pytest.raises(RuntimeError, match="currently running"):
@@ -3980,7 +3980,7 @@ def test_assign_refuses_while_running(kanban_home):
 
 
 def test_assign_reassigns_when_not_running(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         assert kb.assign_task(conn, t, "b")
         assert kb.get_task(conn, t).assignee == "b"
@@ -3988,7 +3988,7 @@ def test_assign_reassigns_when_not_running(kanban_home):
 
 def test_assignee_normalized_to_lowercase_on_create_and_assign(kanban_home):
     """Dashboard/CLI may pass title-cased profile labels; DB + spawn use canonical id."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cased", assignee="Jules")
         assert kb.get_task(conn, tid).assignee == "jules"
         assert kb.assign_task(conn, tid, "Librarian")
@@ -3996,14 +3996,14 @@ def test_assignee_normalized_to_lowercase_on_create_and_assign(kanban_home):
 
 
 def test_list_tasks_assignee_filter_case_insensitive(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="q", assignee="jules")
         found = kb.list_tasks(conn, assignee="Jules")
         assert len(found) == 1 and found[0].id == tid
 
 
 def test_archive_hides_from_default_list(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.complete_task(conn, t)
         assert kb.archive_task(conn, t)
@@ -4012,7 +4012,7 @@ def test_archive_hides_from_default_list(kanban_home):
 
 
 def test_delete_archived_task_removes_related_rows(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent")
         tid = kb.create_task(conn, title="child", parents=[parent], assignee="worker")
         kb.add_comment(conn, tid, "user", "cleanup me")
@@ -4036,14 +4036,14 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
 
 
 def test_delete_archived_task_rejects_non_archived_rows(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="live")
         assert kb.delete_archived_task(conn, tid) is False
         assert kb.get_task(conn, tid) is not None
 
 
 def test_list_tasks_order_by(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Create tasks with different titles and priorities
         t_a = kb.create_task(conn, title="alpha", priority=1)
         t_b = kb.create_task(conn, title="beta", priority=2)
@@ -4075,7 +4075,7 @@ def test_list_tasks_order_by(kanban_home):
             assert "order_by must be one of" in str(e)
 
 def test_delete_task_removes_task_and_cascades(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")
         kb.add_comment(conn, t, "user", "comment")
         kb.add_comment(conn, t, "user", "another")
@@ -4087,12 +4087,12 @@ def test_delete_task_removes_task_and_cascades(kanban_home):
 
 
 def test_delete_task_returns_false_for_missing_task(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert not kb.delete_task(conn, "t_nonexistent")
 
 
 def test_delete_task_cascades_links(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         p = kb.create_task(conn, title="parent")
         c = kb.create_task(conn, title="child", parents=[p])
         child = kb.get_task(conn, c)
@@ -4108,7 +4108,7 @@ def test_delete_task_cascades_links(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_comments_recorded_in_order(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.add_comment(conn, t, "user", "first")
         kb.add_comment(conn, t, "researcher", "second")
@@ -4118,14 +4118,14 @@ def test_comments_recorded_in_order(kanban_home):
 
 
 def test_empty_comment_rejected(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         with pytest.raises(ValueError, match="body is required"):
             kb.add_comment(conn, t, "user", "")
 
 
 def test_events_capture_lifecycle(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t)
         kb.complete_task(conn, t, result="ok")
@@ -4137,7 +4137,7 @@ def test_events_capture_lifecycle(kanban_home):
 
 
 def test_worker_context_includes_parent_results_and_comments(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         p = kb.create_task(conn, title="p")
         kb.complete_task(conn, p, result="PARENT_RESULT_MARKER")
         c = kb.create_task(conn, title="child", parents=[p])
@@ -4154,7 +4154,7 @@ def test_worker_context_includes_parent_results_and_comments(kanban_home):
 def test_worker_context_worker_slim_uses_tighter_caps(kanban_home):
     big_body = "BODY-" + ("x" * 9000)
     big_comment = "COMMENT-" + ("y" * 3000)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="caps", body=big_body, assignee="coder")
         for idx in range(12):
             kb.add_comment(conn, t, "worker", f"{idx}-" + big_comment)
@@ -4196,7 +4196,7 @@ def test_worker_context_reviewer_review_uses_larger_body_cap(kanban_home):
     assert reviewer_cap > default_cap
     body = "BEGIN\n" + ("x" * (default_cap + 100)) + "\nVISIBLE_REVIEW_EVIDENCE"
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         reviewer_task = kb.create_task(
             conn, title="review patch", body=body, assignee="reviewer", kind="review"
         )
@@ -4213,7 +4213,7 @@ def test_worker_context_reviewer_review_continuation_uses_retry_caps(kanban_home
     """The larger reviewer body cap must not apply to continuation retries."""
     retry_cap = kb._CTX_CAP_PROFILES["retry"]["body_bytes"]
     body = "BEGIN\n" + ("x" * (retry_cap + 100)) + "\nHIDDEN_ON_RETRY"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title="review retry", body=body, assignee="reviewer", kind="review"
         )
@@ -4228,7 +4228,7 @@ def test_worker_context_reviewer_review_continuation_uses_retry_caps(kanban_home
 def test_worker_context_worker_slim_retry_uses_retry_profile(kanban_home):
     """Continuation workers on worker_slim use the tighter retry caps."""
     big_body = "BODY-" + ("x" * 3000)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="retry caps", body=big_body, assignee="coder")
         for idx in range(6):
             kb.add_comment(conn, t, "worker", f"comment-{idx}")
@@ -4266,7 +4266,7 @@ def test_worker_context_full_retry_uses_retry_profile_caps(kanban_home):
     profile parameter rather than by task assignee.
     """
     big_body = "BODY-" + ("x" * (kb._CTX_CAP_PROFILES["retry"]["body_bytes"] + 500))
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="retry caps", body=big_body, assignee="verifier")
         for idx in range(kb._CTX_CAP_PROFILES["retry"]["comments"] + 2):
             kb.add_comment(conn, t, "worker", f"comment-{idx}")
@@ -4293,7 +4293,7 @@ def test_worker_context_full_retry_uses_retry_profile_caps(kanban_home):
 
 def test_worker_context_full_without_continuation_keeps_full_profile_caps(kanban_home):
     """Non-continuation full contexts must not be downgraded to retry caps."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="full caps", assignee="verifier")
         for idx in range(kb._CTX_CAP_PROFILES["retry"]["prior_attempts"] + 2):
             _seed_completed_run(conn, t, "verifier", 1_800_000_000 + idx, f"full-summary-{idx}")
@@ -4309,7 +4309,7 @@ def test_worker_context_full_without_continuation_keeps_full_profile_caps(kanban
 
 def test_worker_context_retry_suppresses_recent_work(kanban_home):
     """Continuation workers do not receive cross-task recent-work history."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         previous = kb.create_task(conn, title="previous", assignee="coder")
         _seed_completed_run(conn, previous, "coder", 1_800_000_000, "PRIOR_RECENT_WORK")
 
@@ -4338,7 +4338,7 @@ def _seed_completed_run(conn, task_id, profile, ended_at, summary):
 def test_worker_context_recent_work_tenant_scoped(kanban_home):
     """AC-TENANT-SCOPED: on a multi-tenant board the recent-work section
     must only surface completed runs for the active tenant, not cross-tenant."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Two tenants, same assignee, completed runs in both.
         t_a1 = kb.create_task(conn, title="tenant-A task 1", assignee="coder", tenant="tenantA")
         t_a2 = kb.create_task(conn, title="tenant-A task 2", assignee="coder", tenant="tenantA")
@@ -4364,7 +4364,7 @@ def test_worker_context_recent_work_tenant_scoped(kanban_home):
 def test_worker_context_recent_work_untenanted_stable(kanban_home):
     """AC-UNTENANTED-STABLE: on an untenanted board the recent-work output
     is byte-identical to the pre-fix behavior (no tenant filter applied)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="task-1", assignee="coder")
         t2 = kb.create_task(conn, title="task-2", assignee="coder")
         now = 1_800_000_000
@@ -4389,7 +4389,7 @@ def test_worker_context_recent_work_untenanted_stable(kanban_home):
 
 def test_add_comment_defaults_to_comment_kind(kanban_home):
     """Existing callers (and inline INSERTs) keep the 'comment' kind."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.add_comment(conn, t, "user", "ordinary note")
         comments = kb.list_comments(conn, t)
@@ -4397,7 +4397,7 @@ def test_add_comment_defaults_to_comment_kind(kanban_home):
 
 
 def test_add_comment_directive_kind_persists(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.add_comment(conn, t, "operator", "switch to plan B", kind="directive")
         comments = kb.list_comments(conn, t)
@@ -4405,7 +4405,7 @@ def test_add_comment_directive_kind_persists(kanban_home):
 
 
 def test_add_comment_rejects_unknown_kind(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         with pytest.raises(ValueError, match="kind"):
             kb.add_comment(conn, t, "operator", "body", kind="bogus")
@@ -4414,7 +4414,7 @@ def test_add_comment_rejects_unknown_kind(kanban_home):
 def test_directive_renders_as_priority_block(kanban_home):
     """A directive surfaces in build_worker_context as a distinct ⚠️ block,
     NOT under the 'comment from worker' framing."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", body="ORIGINAL_BODY_INSTRUCTION")
         kb.add_comment(conn, t, "operator", "STOP — do C instead", kind="directive")
         ctx = kb.build_worker_context(conn, t)
@@ -4427,7 +4427,7 @@ def test_directive_renders_as_priority_block(kanban_home):
 def test_directive_kept_separate_from_regular_comment_thread(kanban_home):
     """Directives go in the priority block; ordinary comments stay in the
     '## Comment thread' section under the worker-comment framing."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.add_comment(conn, t, "worker", "REGULAR_WORKER_NOTE")
         kb.add_comment(conn, t, "operator", "DIRECTIVE_PAYLOAD", kind="directive")
@@ -4441,7 +4441,7 @@ def test_directive_kept_separate_from_regular_comment_thread(kanban_home):
 
 
 def test_no_directive_block_without_directives(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         kb.add_comment(conn, t, "worker", "just a note")
         ctx = kb.build_worker_context(conn, t)
@@ -4475,19 +4475,19 @@ def test_dispatch_treats_openclaw_assignee_as_nonspawnable(kanban_home, monkeypa
     assert "nonspawnable" in events
 
 def test_dispatch_dry_run_does_not_claim(kanban_home, all_assignees_spawnable):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="a", assignee="alice")
         t2 = kb.create_task(conn, title="b", assignee="bob")
         res = kb.dispatch_once(conn, dry_run=True)
     assert {s[0] for s in res.spawned} == {t1, t2}
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Dry run must NOT mutate status.
         assert kb.get_task(conn, t1).status == "ready"
         assert kb.get_task(conn, t2).status == "ready"
 
 
 def test_dispatch_skips_unassigned(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="floater")
         res = kb.dispatch_once(conn, dry_run=True)
     assert t in res.skipped_unassigned
@@ -4502,7 +4502,7 @@ def test_dispatch_skips_nonspawnable_into_separate_bucket(kanban_home, monkeypat
     can suppress false-positive "stuck" warnings."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="for-terminal", assignee="orion-cc")
         res = kb.dispatch_once(conn, dry_run=True)
     assert t in res.skipped_nonspawnable
@@ -4516,7 +4516,7 @@ def test_has_spawnable_ready_false_when_only_terminal_lanes(kanban_home, monkeyp
     to silence the stuck-warn while terminals still have queued work."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(conn, title="t1", assignee="orion-cc")
         kb.create_task(conn, title="t2", assignee="orion-research")
         assert kb.has_spawnable_ready(conn) is False
@@ -4530,7 +4530,7 @@ def test_has_spawnable_ready_true_when_real_profile_present(kanban_home, monkeyp
     monkeypatch.setattr(
         profiles, "profile_exists", lambda name: name == "daily"
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(conn, title="terminal-task", assignee="orion-cc")
         kb.create_task(conn, title="hermes-task", assignee="daily")
         assert kb.has_spawnable_ready(conn) is True
@@ -4538,7 +4538,7 @@ def test_has_spawnable_ready_true_when_real_profile_present(kanban_home, monkeyp
 
 def test_has_spawnable_ready_false_on_empty_queue(kanban_home):
     """Empty queue is the trivial false case — no ready tasks at all."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.has_spawnable_ready(conn) is False
 
 
@@ -4548,7 +4548,7 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
     def fake_spawn(task, workspace):
         spawns.append((task.id, task.assignee, workspace))
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         p = kb.create_task(conn, title="p", assignee="alice")
         c = kb.create_task(conn, title="c", assignee="bob", parents=[p])
         # Finish parent outside dispatch; promotion happens inside.
@@ -4559,7 +4559,7 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
     assert spawns[0][0] == c
     assert spawns[0][1] == "bob"
     # c is now running
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, c).status == "running"
 
 
@@ -4567,7 +4567,7 @@ def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawna
     def boom(task, workspace):
         raise RuntimeError("spawn failed")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="boom", assignee="alice")
         kb.dispatch_once(conn, spawn_fn=boom)
         # Must return to ready so the next tick can retry.
@@ -4585,7 +4585,7 @@ def test_dispatch_holds_reviewer_role_execution_mismatch(
     def fake_spawn(task, workspace):
         spawns.append((task.id, task.assignee))
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn,
             title="Review the gate output",
@@ -4614,7 +4614,7 @@ def test_dispatch_role_fit_held_event_is_deduped_across_ticks(
     def fake_spawn(task, workspace):  # noqa: ARG001 - never invoked for a held task
         raise AssertionError("held task must not spawn")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn,
             title="Review the gate output",
@@ -4647,7 +4647,7 @@ def test_dispatch_spawns_verdict_only_reviewer(
     def fake_spawn(task, workspace):
         spawns.append((task.id, task.assignee))
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn,
             title="Verdict over parent evidence",
@@ -4670,7 +4670,7 @@ def test_dispatch_auto_retry_blocked_is_opt_in(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="transient MCP unavailable")
@@ -4692,7 +4692,7 @@ def test_dispatch_auto_retries_blocked_after_backoff_with_feedback_comment(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="transient MCP unavailable")
@@ -4726,7 +4726,7 @@ def test_dispatch_auto_retry_allows_first_request_changes_block(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Verifier found a missing assertion")
@@ -4752,7 +4752,7 @@ def test_dispatch_auto_retry_escalates_repeated_request_changes_on_unchanged_bod
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Verifier found issue one")
@@ -4799,7 +4799,7 @@ def test_dispatch_auto_retry_retries_transient_second_block_even_when_body_uncha
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="research", body="AC v1")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="transient MCP unavailable")
@@ -4829,7 +4829,7 @@ def test_dispatch_auto_retry_allows_request_changes_after_body_changes(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Verifier found issue one")
@@ -4871,7 +4871,7 @@ def test_dispatch_auto_retry_second_attempt_escalates(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="research")
         conn.execute("UPDATE tasks SET auto_retry_count = 1 WHERE id = ?", (t,))
         kb.claim_task(conn, t)
@@ -4900,7 +4900,7 @@ def test_dispatch_auto_retry_stops_after_limit(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="alice")
         conn.execute("UPDATE tasks SET auto_retry_count = 2 WHERE id = ?", (t,))
         kb.claim_task(conn, t)
@@ -4920,7 +4920,7 @@ def test_dispatch_auto_retry_leaves_question_blocks_untouched(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential should I use?")
@@ -4946,7 +4946,7 @@ def test_dispatch_auto_retry_leaves_secret_and_irreversible_blocks_untouched(
         "Need DB ALTER TABLE decision",
         "Freigabe zum Löschen fehlt",
     ]
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_ids = []
         for reason in reasons:
             t = kb.create_task(conn, title=f"blocked {reason}", assignee="alice")
@@ -4972,7 +4972,7 @@ def test_dispatch_auto_retry_respects_failure_breaker(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="crashy")
@@ -4995,7 +4995,7 @@ def test_dispatch_auto_retry_completes_when_result_comment_arrived_after_block(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="research")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="MCP unreachable")
@@ -5018,7 +5018,7 @@ def test_dispatch_auto_retry_result_comment_does_not_wait_for_backoff(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="research")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="MCP unreachable")
@@ -5053,7 +5053,7 @@ def test_silent_block_sweep_escalates_operator_question_block(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="needs op", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential should I use?")
@@ -5076,7 +5076,7 @@ def test_silent_block_sweep_skips_transient_retryable_block(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="transient", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="transient MCP unavailable")
@@ -5092,7 +5092,7 @@ def test_silent_block_sweep_escalates_when_retry_budget_exhausted(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="exhausted", assignee="alice")
         conn.execute(
             "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
@@ -5110,7 +5110,7 @@ def test_silent_block_sweep_escalates_block_without_run(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="parked", assignee="alice")
         # raw flip to blocked, no blocked run (mirrors contract/integration park)
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
@@ -5128,7 +5128,7 @@ def test_silent_block_sweep_escalates_transient_past_grace(
     independent of the auto_retry_blocked config flag."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="transient MCP unavailable")
@@ -5149,7 +5149,7 @@ def test_silent_block_sweep_does_not_re_escalate_existing(
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="already", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which path?")
@@ -5173,7 +5173,7 @@ def test_silent_block_sweep_writes_inline_heiler_classification(
     (AC-2)."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="classify", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential?")
@@ -5199,7 +5199,7 @@ def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
     escalation is already paired."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="classify", assignee="alice")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential?")
@@ -5227,7 +5227,7 @@ def test_silent_block_sweep_carries_real_run_outcome(
     real-bug default)."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="budget", assignee="alice")
         kb.claim_task(conn, t)
         # close the run as budget-exhausted (NOT 'blocked') then flip to blocked,
@@ -5261,7 +5261,7 @@ def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
     block-error IS carried, the classifier just lacked the spec-gap signal."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="vague", assignee="alice")
         conn.execute(
             "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
@@ -5289,7 +5289,7 @@ def test_silent_block_sweep_carves_out_strategist_meta_task(
     created_by=strategist-cron, not real code tasks)."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         meta = kb.create_task(
             conn, title="strategist proposal", assignee="alice",
             created_by=kb.STRATEGIST_CREATED_BY,
@@ -5308,11 +5308,15 @@ def test_silent_block_sweep_carves_out_strategist_meta_task(
 
         res = kb.escalate_silent_blocks_sweep(conn, now=base)
 
+        meta_operator_escalations = _operator_escalations(conn, meta)
+        meta_heiler_events = _heiler_events(conn, meta)
+        real_operator_escalations = _operator_escalations(conn, real)
+
     assert meta not in [e["task_id"] for e in res["escalated"]]
-    assert _operator_escalations(conn, meta) == []
-    assert _heiler_events(conn, meta) == []
+    assert meta_operator_escalations == []
+    assert meta_heiler_events == []
     # the real code task is untouched by the carve-out — still surfaced
-    assert len(_operator_escalations(conn, real)) == 1
+    assert len(real_operator_escalations) == 1
 
 
 def test_dispatch_max_spawn_counts_existing_running_tasks(
@@ -5329,7 +5333,7 @@ def test_dispatch_max_spawn_counts_existing_running_tasks(
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         running_a = kb.create_task(conn, title="running-a", assignee="alice")
         running_b = kb.create_task(conn, title="running-b", assignee="bob")
         ready = kb.create_task(conn, title="ready", assignee="carol")
@@ -5352,7 +5356,7 @@ def test_dispatch_max_spawn_fills_remaining_capacity(
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         running = kb.create_task(conn, title="running", assignee="alice")
         ready_a = kb.create_task(conn, title="ready-a", assignee="bob")
         ready_b = kb.create_task(conn, title="ready-b", assignee="carol")
@@ -5367,7 +5371,7 @@ def test_dispatch_max_spawn_fills_remaining_capacity(
 
 
 def test_dispatch_reclaims_stale_before_spawning(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="alice")
         kb.claim_task(conn, t)
         conn.execute(
@@ -5384,7 +5388,7 @@ def test_dispatch_reclaims_stale_before_spawning(kanban_home):
 
 def test_respawn_guard_none_on_fresh_task(kanban_home):
     """A fresh task with no failures or runs is not guarded."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="fresh", assignee="alice")
         reason = kb.check_respawn_guard(conn, t)
     assert reason is None
@@ -5392,7 +5396,7 @@ def test_respawn_guard_none_on_fresh_task(kanban_home):
 
 def test_respawn_guard_blocker_auth_on_quota_error(kanban_home):
     """'quota' in last_failure_error triggers blocker_auth."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="quota-task", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5404,7 +5408,7 @@ def test_respawn_guard_blocker_auth_on_quota_error(kanban_home):
 
 def test_respawn_guard_blocker_auth_on_auth_error(kanban_home):
     """'unauthorized' in last_failure_error triggers blocker_auth."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="auth-task", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5416,7 +5420,7 @@ def test_respawn_guard_blocker_auth_on_auth_error(kanban_home):
 
 def test_respawn_guard_blocker_auth_on_authentication_error(kanban_home):
     """Full word 'Authentication' triggers blocker_auth (regex covers auth\\w*)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="authn-task", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5428,7 +5432,7 @@ def test_respawn_guard_blocker_auth_on_authentication_error(kanban_home):
 
 def test_respawn_guard_blocker_auth_on_authorization_error(kanban_home):
     """Full word 'authorization' triggers blocker_auth (regex covers auth\\w*)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="authz-task", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5440,7 +5444,7 @@ def test_respawn_guard_blocker_auth_on_authorization_error(kanban_home):
 
 def test_respawn_guard_recent_success(kanban_home):
     """A completed run within the guard window triggers recent_success."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="already-done", assignee="alice")
         now = int(time.time())
         conn.execute(
@@ -5459,7 +5463,7 @@ def test_respawn_guard_newer_timeout_supersedes_recent_success(kanban_home):
     then a newer timeout requeued it to ready; dispatch still emitted
     respawn_guarded/recent_success and left the task idle.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="timeout-after-success", assignee="alice")
         now = int(time.time())
         conn.execute(
@@ -5481,7 +5485,7 @@ def test_respawn_guard_rejected_verdict_allows_fix_run(kanban_home):
     recent_success — the review happened and DEMANDED a fix run. Without this
     the CommandHome inline-resolve (unblock + tick) silently stalls for the
     full success window. An APPROVED verdict keeps the guard."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="rejected-task", assignee="alice")
         now = int(time.time())
         conn.execute(
@@ -5513,7 +5517,7 @@ def test_respawn_guard_rejected_verdict_allows_fix_run(kanban_home):
 
 def test_respawn_guard_stale_success_not_guarded(kanban_home):
     """A completed run outside the guard window does not block re-spawn."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="old-done", assignee="alice")
         old_end = int(time.time()) - kb._RESPAWN_GUARD_SUCCESS_WINDOW - 60
         conn.execute(
@@ -5527,7 +5531,7 @@ def test_respawn_guard_stale_success_not_guarded(kanban_home):
 
 def test_respawn_guard_active_pr_in_comment(kanban_home):
     """A GitHub PR URL in a recent comment triggers active_pr."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="has-pr", assignee="alice")
         kb.add_comment(
             conn, t, "worker",
@@ -5539,7 +5543,7 @@ def test_respawn_guard_active_pr_in_comment(kanban_home):
 
 def test_respawn_guard_old_pr_comment_not_guarded(kanban_home):
     """A GitHub PR URL in a comment older than the PR window does not block."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="old-pr", assignee="alice")
         old_ts = int(time.time()) - kb._RESPAWN_GUARD_PR_WINDOW - 60
         conn.execute(
@@ -5571,7 +5575,7 @@ def test_dispatch_respawn_guard_defers_auth_error_without_auto_block(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="quota-storm", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5593,7 +5597,7 @@ def test_dispatch_respawn_guard_defers_auth_error_without_auto_block(
     assert t not in spawned_ids
     # Status stays ``ready`` so a future tick (or operator action) can
     # retry without manual unblock.
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "ready"
 
 
@@ -5606,7 +5610,7 @@ def test_dispatch_respawn_guard_skips_recent_success(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="recent-winner", assignee="alice")
         now = int(time.time())
         conn.execute(
@@ -5619,7 +5623,7 @@ def test_dispatch_respawn_guard_skips_recent_success(
     assert (t, "recent_success") in res.respawn_guarded
     assert t not in spawned_ids
     assert t not in res.auto_blocked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "ready"  # not blocked, just skipped
 
 
@@ -5632,7 +5636,7 @@ def test_dispatch_respawn_guard_skips_active_pr(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="has-pr", assignee="alice")
         kb.add_comment(
             conn, t, "worker",
@@ -5643,7 +5647,7 @@ def test_dispatch_respawn_guard_skips_active_pr(
     assert (t, "active_pr") in res.respawn_guarded
     assert t not in spawned_ids
     assert t not in res.auto_blocked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "ready"
 
 
@@ -5651,7 +5655,7 @@ def test_dispatch_respawn_guard_dry_run_no_auto_block(
     kanban_home, all_assignees_spawnable
 ):
     """In dry_run mode, blocker_auth tasks are recorded in respawn_guarded (not auto-blocked)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="dry-quota", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
@@ -5661,7 +5665,7 @@ def test_dispatch_respawn_guard_dry_run_no_auto_block(
 
     assert (t, "blocker_auth") in res.respawn_guarded
     assert t not in res.auto_blocked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "ready"  # dry_run: no writes
 
 
@@ -5674,7 +5678,7 @@ def test_dispatch_respawn_guard_allows_clean_task(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="clean-task", assignee="alice")
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
 
@@ -5687,7 +5691,7 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
     kanban_home, all_assignees_spawnable
 ):
     """dispatch_once emits a respawn_guarded task_event so operators can diagnose stuck-ready tasks."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="event-check", assignee="alice")
         now = int(time.time())
         conn.execute(
@@ -5739,7 +5743,7 @@ def test_dispatch_per_task_input_token_guard_parks_over_threshold(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="runaway", assignee="alice")
         # Two runs that sum over the 1000-token cap (700 + 600 = 1300).
         _seed_input_token_run(conn, t, input_tokens=700)
@@ -5753,7 +5757,7 @@ def test_dispatch_per_task_input_token_guard_parks_over_threshold(
     # Bucketed with the summed input tokens.
     assert (t, 1300) in res.budget_runaway_parked
     # Hard-parked to blocked (not left advisory-ready).
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "blocked"
         events = kb.list_events(conn, t)
     kinds = [e.kind for e in events]
@@ -5774,7 +5778,7 @@ def test_dispatch_per_task_input_token_guard_under_threshold_spawns(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="frugal", assignee="alice")
         _seed_input_token_run(conn, t, input_tokens=400)
         res = kb.dispatch_once(
@@ -5783,7 +5787,7 @@ def test_dispatch_per_task_input_token_guard_under_threshold_spawns(
 
     assert t in spawned_ids
     assert not res.budget_runaway_parked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "running"
         kinds = [e.kind for e in kb.list_events(conn, t)]
     assert "budget_runaway_parked" not in kinds
@@ -5799,14 +5803,14 @@ def test_dispatch_per_task_input_token_guard_inert_when_cap_none(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="uncapped", assignee="alice")
         _seed_input_token_run(conn, t, input_tokens=9_000_000)
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)  # no cap kwarg
 
     assert t in spawned_ids
     assert not res.budget_runaway_parked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "running"
 
 
@@ -5819,7 +5823,7 @@ def test_dispatch_per_task_input_token_guard_inert_when_cap_zero(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="zero-cap", assignee="alice")
         _seed_input_token_run(conn, t, input_tokens=9_000_000)
         res = kb.dispatch_once(
@@ -5828,7 +5832,7 @@ def test_dispatch_per_task_input_token_guard_inert_when_cap_zero(
 
     assert t in spawned_ids
     assert not res.budget_runaway_parked
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "running"
 
 
@@ -5837,7 +5841,7 @@ def test_dispatch_per_task_input_token_guard_surfaces_in_decision_queue(
 ):
     """A parked runaway uses the operator_escalation path, so it appears in the
     decision_queue (Sprint 2 4B wired operator_escalation → decision_queue)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="runaway-q", assignee="alice")
         _seed_input_token_run(conn, t, input_tokens=2_500_000)
         kb.dispatch_once(
@@ -5862,7 +5866,7 @@ def test_dispatch_per_task_input_token_guard_skips_null_token_runs(
     def fake_spawn(task, workspace):
         spawned_ids.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="no-usage", assignee="alice")
         _seed_input_token_run(conn, t, input_tokens=None)
         _seed_input_token_run(conn, t, input_tokens=None)
@@ -5888,7 +5892,7 @@ def test_dispatch_nonspawnable_emits_one_diagnostic_event(kanban_home, monkeypat
     from hermes_cli import profiles
 
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="visual check", assignee="ui-verifier")
         kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
         kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
@@ -5906,7 +5910,7 @@ def test_dispatch_nonspawnable_emits_one_diagnostic_event(kanban_home, monkeypat
 # ---------------------------------------------------------------------------
 
 def test_scratch_workspace_created_under_hermes_home(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x")
         task = kb.get_task(conn, t)
         assert task is not None
@@ -5918,7 +5922,7 @@ def test_scratch_workspace_created_under_hermes_home(kanban_home):
 
 def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
     target = tmp_path / "my-vault"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn, title="biz", workspace_kind="dir", workspace_path=str(target)
         )
@@ -5932,7 +5936,7 @@ def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
 def test_worktree_workspace_repo_root_anchor_materializes_linked_worktree(kanban_home, tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn, title="ship", workspace_kind="worktree", workspace_path=str(repo)
         )
@@ -6000,7 +6004,7 @@ def test_worktree_no_path_no_board_default_raises(kanban_home, tmp_path, monkeyp
     decoy_repo = tmp_path / "decoy"
     _init_git_repo(decoy_repo)
     monkeypatch.chdir(decoy_repo)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="ship", workspace_kind="worktree")
         task = kb.get_task(conn, t)
         assert task is not None
@@ -6013,7 +6017,7 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
     _init_git_repo(repo)
     target = repo / ".worktrees" / "custom-task"
     branch = "wt/custom-task"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn,
             title="ship",
@@ -6155,7 +6159,7 @@ def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch
 
 def test_cleanup_workspace_removes_managed_scratch_dir(kanban_home):
     """A scratch workspace under the kanban workspaces root is removed."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="scratchy")
         task = kb.get_task(conn, t)
         assert task is not None
@@ -6179,7 +6183,7 @@ def test_cleanup_workspace_refuses_path_outside_scratch_root(kanban_home, tmp_pa
     (real_source / ".git").mkdir()
     (real_source / "README.md").write_text("important", encoding="utf-8")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="ship")
         # Simulate the bad state directly: workspace_kind='scratch' (default)
         # but workspace_path pointing at the user's real source tree, which is
@@ -6213,7 +6217,7 @@ def test_cleanup_workspace_honors_workspaces_root_env_override(tmp_path, monkeyp
     monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(workspaces_override))
     kb.init_db()
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="ext")
         scratch_dir = workspaces_override / t
         scratch_dir.mkdir()
@@ -6238,7 +6242,7 @@ def test_cleanup_workspace_deferred_while_child_active(kanban_home):
     handoff artifacts. The old cleanup deleted A's scratch dir immediately on
     A's completion, before B ever ran.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child")
         kb.link_tasks(conn, parent, child)  # child depends on parent
@@ -6256,7 +6260,7 @@ def test_cleanup_workspace_deferred_while_child_active(kanban_home):
 
 def test_cleanup_workspace_swept_after_last_child_completes(kanban_home):
     """Once all children are terminal, the deferred parent scratch dir is removed."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child")
         kb.link_tasks(conn, parent, child)
@@ -6290,7 +6294,7 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
     """
     child_dir = tmp_path / "persistent-child"
     child_dir.mkdir()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="scratch parent")
         child = kb.create_task(
             conn, title="dir child", workspace_kind="dir",
@@ -6372,7 +6376,7 @@ def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_tenant_column_filters_listings(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(conn, title="a1", tenant="biz-a")
         kb.create_task(conn, title="b1", tenant="biz-b")
         kb.create_task(conn, title="shared")  # no tenant
@@ -6383,7 +6387,7 @@ def test_tenant_column_filters_listings(kanban_home):
 
 
 def test_list_tasks_filters_workflow_template_and_step(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         ta = kb.create_task(conn, title="alpha")
         tb = kb.create_task(conn, title="beta")
         conn.execute(
@@ -6402,9 +6406,9 @@ def test_list_tasks_filters_workflow_template_and_step(kanban_home):
 
 
 def test_list_runs_state_filter_requires_pair_and_valid_type(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="alice")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         with pytest.raises(ValueError, match="both"):
             kb.list_runs(conn, tid, state_type="status", state_name=None)
         with pytest.raises(ValueError, match="both"):
@@ -6414,7 +6418,7 @@ def test_list_runs_state_filter_requires_pair_and_valid_type(kanban_home):
 
 
 def test_list_runs_filters_by_outcome_value(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="alice")
         kb.complete_task(conn, tid, summary="ok")
         matching = kb.list_runs(conn, tid, state_type="outcome", state_name="completed")
@@ -6424,7 +6428,7 @@ def test_list_runs_filters_by_outcome_value(kanban_home):
 
 
 def test_tenant_propagates_to_events(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="tenant-task", tenant="biz-a")
         events = kb.list_events(conn, t)
     # The "created" event should have tenant in its payload.
@@ -6437,7 +6441,7 @@ def test_tenant_propagates_to_events(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_create_task_stamps_session_id(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="from chat", session_id="acp-sess-123"
         )
@@ -6447,7 +6451,7 @@ def test_create_task_stamps_session_id(kanban_home):
 
 
 def test_create_task_session_id_defaults_to_none(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="cli-created")
         t = kb.get_task(conn, tid)
     assert t is not None
@@ -6455,7 +6459,7 @@ def test_create_task_session_id_defaults_to_none(kanban_home):
 
 
 def test_session_id_filters_listings(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(conn, title="s1-a", session_id="sess-1")
         kb.create_task(conn, title="s1-b", session_id="sess-1")
         kb.create_task(conn, title="s2-a", session_id="sess-2")
@@ -6473,7 +6477,7 @@ def test_session_id_index_exists(kanban_home):
     """The migration creates an index on session_id for cheap per-session
     list queries on busy boards. Without it, a chat-scoped poll would
     full-scan the tasks table."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' "
             "AND tbl_name='tasks'"
@@ -6485,7 +6489,7 @@ def test_session_id_index_exists(kanban_home):
 def test_session_id_compose_with_tenant_filter(kanban_home):
     """A client may want both `tenant=scarf:foo` AND `session=acp-x` —
     the filters must AND, not replace."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         kb.create_task(
             conn, title="match", tenant="scarf:foo", session_id="acp-x"
         )
@@ -6662,12 +6666,12 @@ class TestSharedBoardPaths:
         # Dispatcher creates the board and a task.
         self._set_home(monkeypatch, tmp_path, default_home)
         kb.init_db()
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             task_id = kb.create_task(conn, title="cross-profile")
 
         # Worker switches to the profile HERMES_HOME and reads.
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             task = kb.get_task(conn, task_id)
         assert task is not None
         assert task.title == "cross-profile"
@@ -7029,7 +7033,7 @@ class TestClaudeCliWorkerSpawn:
         the most-recent _CTX_MAX_COMMENTS must be baked into the -p prompt with
         the SAME framing as build_worker_context — AC-A."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             tid = kb.create_task(
                 conn, title="ship the widget",
                 body="implement the widget", assignee="coder",
@@ -7062,7 +7066,7 @@ class TestClaudeCliWorkerSpawn:
         """Zero comments → no block at all; the prompt is byte-identical to the
         pre-change status quo (body flows straight into the work instruction)."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             tid = kb.create_task(
                 conn, title="no comments",
                 body="do the thing", assignee="coder",
@@ -7084,7 +7088,7 @@ class TestClaudeCliWorkerSpawn:
         Hermes-worker path emits (token cap parity)."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
         total = kb._CTX_MAX_COMMENTS + 3
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             tid = kb.create_task(
                 conn, title="comment storm",
                 body="x", assignee="coder",
@@ -7107,7 +7111,7 @@ class TestClaudeCliWorkerSpawn:
         directive lands ABOVE the work instruction and is framed distinctly
         from worker comments (AC-F4-directive)."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             tid = kb.create_task(
                 conn, title="ship the widget",
                 body="implement the widget", assignee="coder",
@@ -7167,7 +7171,7 @@ class TestClaudeCliWorkerSpawn:
 
 def test_latest_summary_returns_none_when_no_runs(kanban_home):
     """A freshly-created task has no runs and therefore no summary."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="fresh", assignee="alice")
         assert kb.latest_summary(conn, t) is None
 
@@ -7177,7 +7181,7 @@ def test_latest_summary_returns_summary_after_complete(kanban_home):
     handoff; ``latest_summary`` must surface it so dashboards/CLI can
     render what the worker actually did."""
     handoff = "shipped 3 files, ran tests, opened PR #42"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="work", assignee="alice")
         kb.complete_task(conn, t, summary=handoff)
         assert kb.latest_summary(conn, t) == handoff
@@ -7188,7 +7192,7 @@ def test_latest_summary_picks_newest_when_multiple_runs(kanban_home):
     newest run's summary wins. We unblock to take the task back to
     ``ready``, then complete a second time and verify the second
     summary surfaces."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="retry", assignee="alice")
         kb.complete_task(conn, t, summary="first attempt")
         # Move back to ready by direct SQL — block_task / unblock_task
@@ -7208,7 +7212,7 @@ def test_latest_summary_picks_newest_when_multiple_runs(kanban_home):
 def test_latest_summary_skips_empty_string(kanban_home):
     """A run with an empty-string summary should not mask an earlier
     populated one — empty strings carry no information."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="t", assignee="alice")
         kb.complete_task(conn, t, summary="real handoff")
         # Inject a later run with empty summary directly. Workers
@@ -7226,7 +7230,7 @@ def test_latest_summaries_batch_omits_tasks_without_summary(kanban_home):
     """``latest_summaries`` is the dashboard's N+1 escape hatch — it
     must return only entries for tasks that actually have a summary,
     keep the per-task latest, and accept an empty input gracefully."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="a", assignee="alice")
         t2 = kb.create_task(conn, title="b", assignee="bob")
         t3 = kb.create_task(conn, title="c", assignee="carol")
@@ -7314,7 +7318,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
     Before the fix, child stayed 'todo' indefinitely after unlink; only the
     next dispatcher tick or a manual 'hermes kanban recompute' would promote it.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # A is done.
         a = kb.create_task(conn, title="parent-done")
         kb.complete_task(conn, a)
@@ -7340,7 +7344,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
 
 def test_archive_task_does_not_satisfy_dependent_children(kanban_home):
     """Archiving a parent does not count as dependency completion."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="obsolete parent")
         child = kb.create_task(conn, title="child", parents=[parent])
 
@@ -7816,7 +7820,7 @@ def test_create_task_code_role_gets_coder_contract(
 
     monkeypatch.setattr(kanban_worktrees, "FO_REPO_PATH", repo)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="[FO] ship chips",
@@ -7844,7 +7848,7 @@ def test_code_task_contract_body_has_no_duplicate_workspace_or_assignee_lines(
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="fix the bug",
@@ -7872,7 +7876,7 @@ def test_code_task_contract_body_has_no_duplicate_workspace_or_assignee_lines(
 
 def test_code_task_contract_body_risk_is_low_for_scratch_workspace(kanban_home):
     """A scratch-workspace task's contract body Risk line must say 'low', not 'medium'."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="analyse scratch results",
@@ -7901,7 +7905,7 @@ def test_create_task_non_code_role_body_unchanged(kanban_home, monkeypatch):
         kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
     )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="read docs",
@@ -7919,7 +7923,7 @@ def test_code_task_missing_contract_blocks_before_claim(kanban_home, monkeypatch
         kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
     )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="ambiguous repo",
@@ -7947,7 +7951,7 @@ def test_code_task_safe_contract_is_auto_enriched_before_pickup(
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="explicit repo",
@@ -8040,7 +8044,7 @@ def test_code_task_contract_allowed_paths_excludes_prose_token():
 def test_3a_code_task_rejects_verdict_only_roles_at_create(
     kanban_home, assignee
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         with pytest.raises(ValueError, match="role_misuse"):
             kb.create_task(
                 conn,
@@ -8060,7 +8064,7 @@ def test_3a_existing_code_task_with_verdict_role_blocks_before_claim(
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="legacy wrong-role code task",
@@ -8094,7 +8098,7 @@ def test_3a_existing_code_task_with_verdict_role_blocks_before_claim(
 def test_3a_verdict_and_research_tasks_still_claim_when_not_code(
     kanban_home, assignee, kind
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title=f"{assignee} lane task",
@@ -8113,7 +8117,7 @@ def test_3a_coder_claude_contract_uses_canonical_lane_reason(
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="reason through chain-critical change",
@@ -8139,7 +8143,7 @@ def test_3a_coder_claude_contract_uses_canonical_lane_reason(
 
 
 def test_complete_task_records_self_verification_event(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="verify self", assignee="worker")
         kb.claim_task(conn, tid)
         assert kb.complete_task(
@@ -8160,7 +8164,7 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="render quarterly report", assignee="coder")
         kb.claim_task(conn, tid)
         kb.add_comment(
@@ -8212,7 +8216,7 @@ def test_protocol_miss_without_deliverable_still_hard_blocks(
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="silent protocol miss", assignee="worker")
         kb.claim_task(conn, tid)
         pid = 424243
@@ -8233,7 +8237,7 @@ def test_protocol_miss_without_deliverable_still_hard_blocks(
 def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
     kanban_home,
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="needs human decision", assignee="coder")
         assert kb.claim_task(conn, tid) is not None
         assert not kb._record_task_failure(
@@ -8307,7 +8311,7 @@ def test_escalation_coalesce_same_class_writes_one_raw_event(kanban_home):
     must NOT append a duplicate raw operator_escalation event — at most one raw
     event per class — yet every cycle still records a gave_up + classification
     so the repetition is never invisibly dropped."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
         kb.claim_task(conn, tid)
         # cycle 1: spawn_failed -> transient class -> first escalation written
@@ -8339,7 +8343,7 @@ def test_escalation_coalesce_new_class_stays_visible(kanban_home):
     """A genuinely NEW failure class on the same root is NOT suppressed: it
     writes its own raw escalation event and stays visible, while same-class
     repeats are still coalesced to one raw event per class."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
         kb.claim_task(conn, tid)
         kb._record_task_failure(
@@ -8372,7 +8376,7 @@ def test_escalation_coalesce_decision_queue_counter(kanban_home):
     """decision_queue surfaces the full escalation count (every cycle, incl. the
     coalesced ones) plus the distinct classes and how many repeats were
     coalesced — so the operator sees N escalations, nothing silently dropped."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
         cycles = [
             ("spawn boom", "spawn_failed"),       # transient
@@ -8406,7 +8410,7 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     explicit in decision_queue. The raw event from the non-gave_up writer shares
     no event with the coalesced gave_up, so a max(raw, gave_up) counter would
     silently lose the second cycle (escalation_count=1, coalesced_repeats=0)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
         # NON-gave_up writer: a budget-runaway park writes a raw unclassified
         # operator_escalation without going through the gave_up branch.
@@ -8440,7 +8444,7 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
 
 def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="wake later", assignee="coder")
         assert kb.schedule_task(conn, tid, reason="timer") is True
         with kb.write_txn(conn):
@@ -8480,7 +8484,7 @@ def test_4a_scheduled_overdue_skips_operator_held_chain(kanban_home):
     # REAL decompose topology (links: parent_id=child, child_id=root), not a
     # hand-rolled link, so the child->root walk is exercised in production shape.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="held root", assignee="orchestrator", triage=True,
         )
@@ -8530,7 +8534,7 @@ def test_4a_scheduled_overdue_skips_ui_real_held_root(kanban_home):
     # The ui-real operator hold (Phase 4 A) shares the scheduled-park mechanism
     # and must be exempt from the stall nudge for the same reason.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="ui-real held root", assignee="coder")
         with kb.write_txn(conn):
             conn.execute(
@@ -8554,7 +8558,7 @@ def test_4a_scheduled_overdue_skips_ui_real_held_root(kanban_home):
 
 def test_4a_decompose_failure_parks_once_and_skips_funnel_root(kanban_home):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         normal = kb.create_task(
             conn, title="normal triage", assignee="coder", triage=True,
         )
@@ -8605,7 +8609,7 @@ def test_4a_decompose_failure_skips_operator_held_chain(kanban_home):
     # decompose topology (links: parent_id=child, child_id=root) so the
     # child->root walk in _is_operator_held is exercised in production shape.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="held root", assignee="orchestrator", triage=True,
         )
@@ -8661,7 +8665,7 @@ def test_4a_decompose_failure_exemption_is_scoped_to_active_hold(kanban_home):
     # freigabe='operator' tag. Guards the asymmetry in _is_operator_held (the
     # direct _held check must be scheduled-gated like the child->root walk).
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="released root", assignee="orchestrator", triage=True,
         )
@@ -8704,7 +8708,7 @@ def test_4a_rate_limited_loop_retries_then_parks(kanban_home):
     # far-future test ``now``, exactly like the §5 integration-retry tests). The
     # backoff rule itself is covered by test_transient_retry_phase_pure_rule.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="quota loop", assignee="coder")
         with kb.write_txn(conn):
             for i in range(3):
@@ -8772,7 +8776,7 @@ def _make_integration_parked(conn, reason_suffix, *, title="parked finalizer"):
 
 
 def test_park_integration_comments_dirty_artifact_recovery(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="artifact policy miss", assignee="coder")
         kb.claim_task(conn, tid)
         task = kb.get_task(conn, tid)
@@ -8827,7 +8831,7 @@ def test_integration_retry_skips_active_operator_escalation(
     kanban_home, monkeypatch,
 ):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(
             conn, "chain worktree has uncommitted changes: foo.py",
         )
@@ -8861,7 +8865,7 @@ def test_integration_retry_transient_park_reintegrates_and_completes(
     kanban_home, monkeypatch,
 ):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(
             conn, "chain worktree has uncommitted changes: foo.py",
         )
@@ -8895,7 +8899,7 @@ def test_integration_retry_non_transient_no_worktree_escalates(
     # park reason here is on a scratch finalizer): no transient retry AND no
     # fixer to route to → escalate byte-identically to the needs_operator path.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(conn, reason_suffix)
         calls = _patch_integrate(monkeypatch, [])  # any call would be a bug
         summary = kb.no_silent_stall_sweep(conn, now=now)
@@ -8918,7 +8922,7 @@ def test_integration_retry_count_separate_from_auto_retry_count(
 ):
     now = 1_900_000_000
     reason = "dirty files in live checkout overlap the branch diff: a.py"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(conn, reason)
         # Re-park (still transient) so the task stays blocked and we can read
         # the counters without it completing.
@@ -8938,7 +8942,7 @@ def test_integration_retry_bounded_escalates_after_two_rounds(
         "live checkout has an operation in progress (rebase): "
         ".git/rebase-merge"
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(conn, reason)
         calls = _patch_integrate(
             monkeypatch, lambda _t: {"action": "parked", "reason": reason},
@@ -8971,7 +8975,7 @@ def test_integration_retry_repark_turned_non_transient_escalates(
     kanban_home, monkeypatch,
 ):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = _make_integration_parked(
             conn, "chain worktree has uncommitted changes: foo.py",
         )
@@ -9021,7 +9025,7 @@ def test_transient_retry_spawn_bounded_then_escalates(kanban_home):
     # escalation. Driven directly (re-claim each round) so the test does not
     # depend on the real-time backoff (that lives in check_respawn_guard).
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="flaky spawn", assignee="coder", max_retries=1)
         phases = []
         for _ in range(kb.TRANSIENT_RETRY_LIMIT + 1):
@@ -9061,7 +9065,7 @@ def test_transient_retry_self_heal_leaves_no_transient_escalation(kanban_home):
     # A spawn blip that self-heals on the next attempt must NOT show up as a
     # transient escalation in the ledger — the whole AC-1 reduction lever.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="blip", assignee="coder")
         assert kb.claim_task(conn, tid) is not None
         phase, _auto = kb._spawn_failure_or_transient_retry(
@@ -9090,7 +9094,7 @@ def test_transient_retry_backoff_guard_defers_then_releases(kanban_home):
     # latest run ended transient_retry is deferred inside the backoff window and
     # respawnable once it elapses.
     real_now = int(time.time())
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder")
         with kb.write_txn(conn):
             conn.execute(
@@ -9120,7 +9124,7 @@ def test_transient_retry_dispatch_end_to_end(
     def boom(task, workspace):
         raise RuntimeError("spawn boom")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="flaky", assignee="alice", max_retries=1)
         for _ in range(kb.TRANSIENT_RETRY_LIMIT + 3):
             kb.dispatch_once(conn, spawn_fn=boom)
@@ -9143,7 +9147,7 @@ def test_scheduled_overdue_failed_nudge_retries_then_escalates(
     now = 1_900_000_000
     bo = kb.TRANSIENT_RETRY_BACKOFF_SECONDS
     monkeypatch.setattr(kb, "unblock_task", lambda conn, task_id: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="overdue", assignee="coder")
         with kb.write_txn(conn):
             conn.execute(
@@ -9210,7 +9214,7 @@ def test_conflict_park_routes_bounded_fixer_not_escalation(
     kanban_home, monkeypatch, reason_suffix,
 ):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid, wt, root = _make_integration_parked_in_worktree(conn, reason_suffix)
         calls = _patch_integrate(monkeypatch, [])  # transient retry would be a bug
         summary = kb.no_silent_stall_sweep(conn, now=now)
@@ -9223,6 +9227,7 @@ def test_conflict_park_routes_bounded_fixer_not_escalation(
         # The fixer subtask itself (payload is already a parsed dict).
         child_id = dispatched[0].payload["child_id"]
         child = kb.get_task(conn, child_id)
+        child_kinds = [e.kind for e in kb.list_events(conn, child_id)]
 
     assert calls == []                                 # no transient retry
     assert task.status == "blocked"                    # parked chain stays blocked
@@ -9243,7 +9248,6 @@ def test_conflict_park_routes_bounded_fixer_not_escalation(
     assert root in child.title
     # Linked back to the stalled chain on both ends.
     assert f"kanban/{root}" in (child.body or "")   # chain branch in context
-    child_kinds = [e.kind for e in kb.list_events(conn, child_id)]
     assert "conflict_fixer_for" in child_kinds
 
 
@@ -9258,7 +9262,7 @@ def test_conflict_park_missing_worktree_escalates_not_fixer(
     of creating another task pinned to a missing cwd.
     """
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         missing_repo = tmp_path / "repo"
         tid, _wt, _root = _make_integration_parked_in_worktree(
             conn,
@@ -9281,7 +9285,7 @@ def test_conflict_park_missing_worktree_escalates_not_fixer(
 
 
 def test_conflict_park_fixer_not_stacked_while_in_flight(kanban_home, monkeypatch):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid, _wt, _root = _make_integration_parked_in_worktree(
             conn, "merge conflict/failure (aborted): foo.py",
         )
@@ -9303,7 +9307,7 @@ def test_conflict_park_fixer_not_stacked_while_in_flight(kanban_home, monkeypatc
 
 def test_conflict_park_fixer_bounded_then_escalates(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "CONFLICT_FIXER_MAX_ATTEMPTS", 2)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid, _wt, _root = _make_integration_parked_in_worktree(
             conn, "merge conflict/failure (aborted): foo.py",
         )
@@ -9343,7 +9347,7 @@ def test_conflict_park_needs_operator_unchanged(kanban_home, monkeypatch):
     # An unknown (needs_operator) park is byte-unchanged: it escalates with NO
     # fixer routed, even when a worktree is present.
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid, _wt, _root = _make_integration_parked_in_worktree(
             conn, "some entirely unrecognized park reason",
         )
@@ -9371,7 +9375,7 @@ def test_4a_funnel_root_skipped_but_funnel_build_child_dispatches(
     def fake_spawn(task, workspace):
         spawned.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="funnel root", assignee="research", created_by="family",
         )
@@ -9402,7 +9406,7 @@ def test_4a_funnel_root_skipped_but_funnel_build_child_dispatches(
 
 
 def test_4a_funnel_build_child_not_blocked_by_root_contract_rule(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn,
             title="approved root",
@@ -9431,7 +9435,7 @@ def test_4a_funnel_build_child_not_blocked_by_root_contract_rule(kanban_home):
 def test_4a_auto_retry_skips_funnel_root_but_not_funnel_child(
     kanban_home,
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn,
             title="blocked funnel root",
@@ -9470,7 +9474,7 @@ def test_4a_auto_retry_skips_funnel_root_but_not_funnel_child(
 
 def test_4a_dispatcher_heartbeat_file_written(kanban_home):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="needs operator", assignee="coder")
         with kb.write_txn(conn):
             kb._append_event(
@@ -9509,7 +9513,7 @@ def test_dispatch_max_in_progress_skips_when_at_limit(kanban_home, all_assignees
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Two running tasks.
         t1 = kb.create_task(conn, title="a", assignee="alice")
         t2 = kb.create_task(conn, title="b", assignee="bob")
@@ -9530,7 +9534,7 @@ def test_dispatch_max_in_progress_spawns_up_to_cap(kanban_home, all_assignees_sp
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # One running task.
         t1 = kb.create_task(conn, title="a", assignee="alice")
         kb.claim_task(conn, t1)
@@ -9550,7 +9554,7 @@ def test_dispatch_max_in_progress_none_is_unlimited(kanban_home, all_assignees_s
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         for title in ["a", "b", "c", "d"]:
             kb.create_task(conn, title=title, assignee="alice")
         kb.dispatch_once(conn, spawn_fn=fake_spawn, max_in_progress=None)
@@ -9568,7 +9572,7 @@ def _set_task_status(conn: sqlite3.Connection, task_id: str, status: str) -> Non
 
 def test_claim_review_task_transitions_to_running(kanban_home):
     """claim_review_task atomically transitions review -> running."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -9595,7 +9599,7 @@ def test_claim_review_task_stamps_billing_identity_from_reviewer_lane(
 ):
     """review -> running verifier runs must be self-describing too."""
     monkeypatch.setattr(kb, "_profile_subscription", lambda profile: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
             name=f"review-{expected_billing_mode}",
@@ -9631,7 +9635,7 @@ def test_claim_review_task_stamps_billing_identity_from_reviewer_lane(
 
 def test_review_claimed_full_context_retry_uses_retry_profile_caps(kanban_home):
     """review -> running verifier continuations use retry caps with profile='full'."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review continuation", assignee="coder")
         _set_task_status(conn, t, "review")
         conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (t,))
@@ -9659,7 +9663,7 @@ def test_claim_review_task_clears_inherited_heartbeat(kanban_home):
     and shows an actively-running review as "Hängt". A fresh run must start
     with a NULL heartbeat (liveness via claim_expires, like any other
     non-self-beating worker)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         # Previous stage's lingering heartbeat.
@@ -9678,7 +9682,7 @@ def test_claim_review_task_clears_inherited_heartbeat(kanban_home):
 
 def test_claim_task_clears_inherited_heartbeat(kanban_home):
     """ready -> running starts the run with a clean heartbeat slate."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="claim me", assignee="alice")
         conn.execute(
             "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
@@ -9695,7 +9699,7 @@ def test_claim_task_clears_inherited_heartbeat(kanban_home):
 
 def test_claim_review_task_fails_on_non_review(kanban_home):
     """claim_review_task returns None if task is not in review status."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="ready task", assignee="alice")
         # Task is in 'ready', not 'review'
         claimed = kb.claim_review_task(conn, t)
@@ -9704,7 +9708,7 @@ def test_claim_review_task_fails_on_non_review(kanban_home):
 
 def test_claim_review_task_fails_when_already_claimed(kanban_home):
     """claim_review_task returns None if the task was already claimed."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         first = kb.claim_review_task(conn, t)
@@ -9715,14 +9719,14 @@ def test_claim_review_task_fails_when_already_claimed(kanban_home):
 
 def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
     """dispatch_once dry-run sees review tasks and reports them as spawned."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
     assert len(res.spawned) == 1
     assert res.spawned[0][0] == t
     # Dry run must NOT mutate status.
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_task(conn, t).status == "review"
 
 
@@ -9740,7 +9744,7 @@ def test_dispatch_review_spawns_as_verifier_profile(
         spawned_tasks.append(task)
         return 42  # fake PID
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
@@ -9770,7 +9774,7 @@ def test_dispatch_review_falls_back_when_verifier_missing(
         spawned_tasks.append(task)
         return 42  # fake PID
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         kb.dispatch_once(conn, spawn_fn=capture_spawn)
@@ -9781,7 +9785,7 @@ def test_dispatch_review_falls_back_when_verifier_missing(
 
 def test_dispatch_review_skips_unassigned(kanban_home):
     """Unassigned review tasks go to skipped_unassigned, not spawned."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review floater")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
@@ -9799,7 +9803,7 @@ def test_dispatch_review_counts_toward_max_spawn(
         spawns.append(task.id)
         return 42
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Create 2 ready tasks + 1 review task, max_spawn=2
         t1 = kb.create_task(conn, title="ready 1", assignee="alice")
         t2 = kb.create_task(conn, title="ready 2", assignee="bob")
@@ -9821,7 +9825,7 @@ def test_dispatch_review_spawns_when_ready_empty(
         spawns.append(task.id)
         return 42
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
@@ -9831,7 +9835,7 @@ def test_dispatch_review_spawns_when_ready_empty(
 
 def test_has_spawnable_review_true(kanban_home):
     """has_spawnable_review returns True when review tasks exist with real profiles."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="default")
         _set_task_status(conn, t, "review")
         # default profile should exist in the test env
@@ -9840,7 +9844,7 @@ def test_has_spawnable_review_true(kanban_home):
 
 def test_has_spawnable_review_false_on_empty(kanban_home):
     """has_spawnable_review returns False when no review tasks exist."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.has_spawnable_review(conn) is False
 
 
@@ -9850,7 +9854,7 @@ def test_has_spawnable_review_false_when_only_terminal_lanes(
     """has_spawnable_review returns False when review tasks are terminal lanes."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review", assignee="orion-cc")
         _set_task_status(conn, t, "review")
         assert kb.has_spawnable_review(conn) is False
@@ -9860,7 +9864,7 @@ def test_dispatch_review_skips_nonspawnable(kanban_home, monkeypatch):
     """Review tasks with non-existent profiles go to skipped_nonspawnable."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review", assignee="orion-cc")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
@@ -9878,7 +9882,7 @@ def test_dispatch_review_spawns_stage_profile_when_assignee_profile_missing(
     from hermes_cli import profiles
     # only the verifier stage profile exists; the coder assignee profile is gone
     monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review", assignee="removed-lane")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
@@ -9891,7 +9895,7 @@ def test_has_spawnable_review_true_via_stage_profile(kanban_home, monkeypatch):
     makes the review task spawnable even when the assignee profile is gone."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review", assignee="removed-lane")
         _set_task_status(conn, t, "review")
         assert kb.has_spawnable_review(conn) is True
@@ -9903,7 +9907,7 @@ def test_blank_assignee_review_spawnability_is_consistent(kanban_home, monkeypat
     health/sweep disagree with dispatch and it sits unspawned-and-unparked."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review", assignee="coder")
         _set_task_status(conn, t, "review")
         conn.execute("UPDATE tasks SET assignee = '' WHERE id = ?", (t,))
@@ -9926,7 +9930,7 @@ def test_dispatch_review_does_not_claim_ready_tasks(
     kanban_home, all_assignees_spawnable,
 ):
     """Review dispatch uses claim_review_task, which only claims review tasks."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="ready task", assignee="alice")
         # claim_review_task should NOT claim a ready task
         claimed = kb.claim_review_task(conn, t)
@@ -9939,7 +9943,7 @@ def test_detect_stale_returns_running_task_with_no_heartbeat(kanban_home, monkey
     """A task running > timeout with zero heartbeats gets reclaimed as stale."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-no-hb", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -9971,7 +9975,7 @@ def test_detect_stale_returns_task_with_stale_heartbeat(kanban_home, monkeypatch
     """A task running > timeout with a heartbeat older than 1h gets reclaimed."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-hb", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10004,7 +10008,7 @@ def test_detect_stale_skips_task_with_recent_heartbeat(kanban_home, monkeypatch)
     """A task running > timeout but with a recent heartbeat is NOT reclaimed."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="alive-hb", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10035,7 +10039,7 @@ def test_detect_stale_skips_recently_started_task(kanban_home, monkeypatch):
     """A task started < timeout ago is NOT reclaimed even with no heartbeat."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="fresh", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10063,7 +10067,7 @@ def test_detect_stale_skips_recently_started_task(kanban_home, monkeypatch):
 def test_detect_stale_skips_when_timeout_zero(kanban_home, monkeypatch):
     """stale_timeout_seconds=0 disables stale detection entirely."""
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="disabled", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10090,7 +10094,7 @@ def test_detect_stale_skips_blocked_tasks(kanban_home, monkeypatch):
     """Blocked tasks are NOT reclaimed by stale detection."""
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked-task", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10129,7 +10133,7 @@ def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
     """
     import hermes_cli.kanban_db as _kb
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-no-counter-tick", assignee="worker")
         kb.claim_task(conn, t)
         kb._set_worker_pid(conn, t, os.getpid())
@@ -10392,7 +10396,7 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
     """
     import logging
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="first scratch")
         t2 = kb.create_task(conn, title="second scratch")
 
@@ -10400,7 +10404,7 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
     assert not kb._scratch_tip_shown()
 
     with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             kb._maybe_emit_scratch_tip(conn, t1, "scratch")
 
     # Sentinel is now set.
@@ -10418,7 +10422,7 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
     )
 
     # An event row was appended on the first task.
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         events = conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
             (t1,),
@@ -10432,7 +10436,7 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
     # Second scratch materialization on the same install stays silent.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             kb._maybe_emit_scratch_tip(conn, t2, "scratch")
     tip_records2 = [
         r for r in caplog.records
@@ -10442,7 +10446,7 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
         f"Tip should not re-fire after sentinel is set; got "
         f"{[r.getMessage() for r in tip_records2]!r}"
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         events2 = conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
             (t2,),
@@ -10457,14 +10461,14 @@ def test_maybe_emit_scratch_tip_skips_non_scratch_workspaces(kanban_home, caplog
     trigger the scratch-cleanup tip."""
     import logging
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t_wt = kb.create_task(conn, title="worktree task")
         t_dir = kb.create_task(conn, title="dir task")
 
     assert not kb._scratch_tip_shown()
 
     with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
-        with kb.connect() as conn:
+        with kb.connect_closing() as conn:
             kb._maybe_emit_scratch_tip(conn, t_wt, "worktree")
             kb._maybe_emit_scratch_tip(conn, t_dir, "dir")
 
@@ -10477,7 +10481,7 @@ def test_maybe_emit_scratch_tip_skips_non_scratch_workspaces(kanban_home, caplog
         if "scratch workspaces are ephemeral" in r.getMessage()
     ]
     assert tip_records == []
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         for tid in (t_wt, t_dir):
             events = conn.execute(
                 "SELECT kind FROM task_events WHERE task_id = ?", (tid,),
@@ -10590,7 +10594,7 @@ def test_write_txn_preserves_original_exception_when_rollback_fails(kanban_home)
         def __getattr__(self, name):
             return getattr(self._real, name)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         wrapper = FailingConnWrapper(conn)
         with pytest.raises(sqlite3.OperationalError) as excinfo:
             with kb.write_txn(wrapper):
@@ -10902,7 +10906,7 @@ def test_dispatch_once_still_reaps_via_extracted_fn(kanban_home):
 # connect_closing(): context manager that actually closes the FD
 # Regression coverage for #33159 (kanban.db FD leak — gateway crashes after
 # ~4 days). sqlite3.Connection's built-in __exit__ commits/rollbacks but
-# does NOT close, so `with kb.connect() as conn:` leaks the FD in
+# does NOT close, so `with kb.connect_closing() as conn:` leaks the FD in
 # long-lived processes (gateway run_slash, dashboard decompose handler).
 # `connect_closing()` is the leak-safe replacement.
 # ---------------------------------------------------------------------------
@@ -10962,7 +10966,7 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
 
 # --- Recovered: superseding-review / needs_revision tests (orig commit 92d8e718a) ---
 def test_superseding_review_rewire_helper_is_explicit_and_audited(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         source = kb.create_task(conn, title="source waiting on old review", assignee="coder")
         old_review = kb.create_task(conn, title="old review", assignee="reviewer")
         new_review = kb.create_task(conn, title="new review", assignee="reviewer")
@@ -10994,7 +10998,7 @@ def test_superseding_review_rewire_helper_is_explicit_and_audited(kanban_home):
 
 
 def test_superseding_review_rewire_is_noop_without_old_edge(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         source = kb.create_task(conn, title="source", assignee="coder")
         old_review = kb.create_task(conn, title="old review", assignee="reviewer")
         new_review = kb.create_task(conn, title="new review", assignee="reviewer")
@@ -11019,7 +11023,7 @@ def test_superseding_review_rewire_is_noop_without_old_edge(kanban_home):
 
 
 def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_blocked(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         source = kb.create_task(conn, title="implement lifecycle", assignee="coder")
         kb.claim_task(conn, source)
         # main renamed active_run() → latest_run(); after claim the latest run is the active one
@@ -11112,7 +11116,7 @@ def test_b1_capture_diff_snapshot_git_workspace(kanban_home, tmp_path):
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_git_repo_with_changes(repo)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="b1", workspace_kind="dir", workspace_path=str(repo)
         )
@@ -11126,7 +11130,7 @@ def test_b1_capture_diff_snapshot_non_git_scratch(kanban_home, tmp_path):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (scratch / "file.txt").write_text("hi", encoding="utf-8")
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="b1", workspace_kind="dir", workspace_path=str(scratch)
         )
@@ -11137,7 +11141,7 @@ def test_b1_capture_diff_snapshot_non_git_scratch(kanban_home, tmp_path):
 def test_b1_capture_diff_snapshot_missing_workspace(kanban_home, tmp_path):
     """workspace_path pointing at a vanished directory → empty, no crash."""
     gone = tmp_path / "gone"
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="b1", workspace_kind="dir", workspace_path=str(gone)
         )
@@ -11147,7 +11151,7 @@ def test_b1_capture_diff_snapshot_missing_workspace(kanban_home, tmp_path):
 
 def test_b1_capture_diff_snapshot_no_workspace(kanban_home):
     """A scratch task with no workspace_path → empty snapshot."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="b1")
         snap = kb._capture_review_diff_snapshot(conn, tid)
     assert snap == {}
@@ -11161,7 +11165,7 @@ def test_b1_submit_for_review_event_and_metadata_carry_snapshot(
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_git_repo_with_changes(repo)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="b1", assignee="coder",
             workspace_kind="dir", workspace_path=str(repo),
@@ -11203,7 +11207,7 @@ def test_b1_submit_for_review_non_git_payload_has_no_snapshot_keys(
     of the new keys — the pre-B1 shape is preserved exactly."""
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="b1", assignee="coder",
             workspace_kind="dir", workspace_path=str(scratch),
@@ -11237,7 +11241,7 @@ def _latest_run_verdict(conn, task_id):
 def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
     """task_runs gains a ``verdict`` column; re-running the additive migration
     is a no-op (idempotent, no duplicate-column crash)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
         assert "verdict" in cols
         kb._migrate_add_optional_columns(conn)
@@ -11248,7 +11252,7 @@ def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
 
 def test_b2_approved_verdict_on_review_complete(kanban_home):
     """A verifier completing a task it reviewed → verdict APPROVED."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11260,7 +11264,7 @@ def test_b2_approved_verdict_on_review_complete(kanban_home):
 
 def test_b2_request_changes_verdict_on_review_block(kanban_home):
     """A verifier blocking a task it reviewed → verdict REQUEST_CHANGES."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11272,7 +11276,7 @@ def test_b2_request_changes_verdict_on_review_block(kanban_home):
 
 def test_b2_review_complete_extracts_needs_revision_verdict(kanban_home):
     """Reviewer verdict strings override the completion default."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11289,7 +11293,7 @@ def test_b2_review_complete_extracts_needs_revision_verdict(kanban_home):
 
 def test_b2_review_complete_extracts_metadata_verdict_synonym(kanban_home):
     """Structured reviewer metadata is normalized before column write."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11307,7 +11311,7 @@ def test_b2_review_complete_extracts_metadata_verdict_synonym(kanban_home):
 
 def test_b2_review_block_extracts_metadata_verdict_synonym(kanban_home):
     """Block path uses the same reviewer verdict normalization."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11324,7 +11328,7 @@ def test_b2_review_block_extracts_metadata_verdict_synonym(kanban_home):
 
 def test_b2_set_run_verdict_requires_existing_run_row(kanban_home):
     """The verdict update is atomic: exactly one task_runs row must change."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb._set_run_verdict(conn, 999_999_999, "APPROVED") is False
 
 
@@ -11335,7 +11339,7 @@ def test_b2_auto_approved_not_overwritten_by_metadata_verdict(kanban_home, monke
         "_review_stages_for_tier",
         lambda tier, cfg: ["verifier", "critic"],
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder", review_tier="critical")
         assert kb._submit_for_review(
             conn,
@@ -11377,7 +11381,7 @@ def test_b2_auto_approved_not_overwritten_by_metadata_verdict(kanban_home, monke
 
 def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
     """An ordinary coder completion leaves task_runs.verdict NULL."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="code", assignee="coder")
         kb.claim_task(conn, t)
         kb.complete_task(conn, t, result="done", summary="done")
@@ -11386,7 +11390,7 @@ def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
 
 def test_b2_non_review_block_leaves_verdict_null(kanban_home):
     """An ordinary block (coder hit a wall) leaves task_runs.verdict NULL."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="code", assignee="coder")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="stuck")
@@ -11397,7 +11401,7 @@ def test_b2_metadata_verdict_field_is_untouched(kanban_home):
     """Back-compat: an existing metadata['verdict'] free-form value is NOT
     promoted into the new column, and stays intact on the run metadata."""
     import json
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="code", assignee="coder")
         kb.claim_task(conn, t)
         kb.complete_task(
@@ -11457,7 +11461,7 @@ def test_fo_backlog_item_closes_only_on_terminal_flow_done(
     item = tmp_path / "0141-shopping-favoriten-chips-aus-historie.md"
     _write_fo_backlog_item(item)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
             title="[FO] Favoriten-Chips",
@@ -11500,7 +11504,7 @@ def test_fo_backlog_close_ignores_unlinked_family_organizer_tasks(
     item = tmp_path / "0141-shopping-favoriten-chips-aus-historie.md"
     _write_fo_backlog_item(item)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
             title="[FO] unrelated",
@@ -11520,7 +11524,7 @@ def test_fo_backlog_close_ignores_unlinked_family_organizer_tasks(
 def test_a1_acceptance_criteria_column_present_and_migrate_idempotently(
     kanban_home,
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "acceptance_criteria" in cols
         kb._migrate_add_optional_columns(conn)
@@ -11577,7 +11581,7 @@ def test_a2_review_context_has_checklist_and_changed_files(kanban_home, tmp_path
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_git_repo_with_changes(repo)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(
             conn, title="widget", assignee="coder",
             workspace_kind="dir", workspace_path=str(repo),
@@ -11609,7 +11613,7 @@ def test_a2_review_context_has_checklist_and_changed_files(kanban_home, tmp_path
 def test_a2_review_context_fallbacks_when_no_acs_no_snapshot(kanban_home):
     """Review run with NULL acceptance_criteria and no diff snapshot → both
     fallback notes render, no crash."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
@@ -11622,7 +11626,7 @@ def test_a2_review_context_fallbacks_when_no_acs_no_snapshot(kanban_home):
 def test_a2_non_review_context_has_no_review_section(kanban_home):
     """Regression: an ordinary worker's context carries NONE of the A2 section,
     preserving the pre-A2 output."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="code", assignee="coder")
         kb.claim_task(conn, t)
         ctx = kb.build_worker_context(conn, t)
@@ -11653,7 +11657,7 @@ def test_verifier_section_analysis_kind_emits_class_header(kanban_home):
     """kind='analysis' surfaces the read-only task-class header in the verifier
     Acceptance checklist block; AC items still render. End-to-end through
     build_worker_context so the header actually reaches the verifier."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, section = _claimed_review_section(
             conn, kind="analysis",
             acceptance=["AC-1: report the bound type + lever"],
@@ -11671,7 +11675,7 @@ def test_verifier_section_analysis_kind_emits_class_header(kanban_home):
 def test_verifier_section_code_kind_has_no_class_header(kanban_home):
     """kind='code' (a build task) must NOT emit the analysis header —
     default-strict is preserved for everything that is not explicit analysis."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         _t, section = _claimed_review_section(
             conn, kind="code",
             acceptance=["AC-1: endpoint returns 200"],
@@ -11686,7 +11690,7 @@ def test_verifier_section_unmarked_identical_to_code_default_strict(kanban_home)
     kind='code' task. The marker only ever ADDS the analysis header; it never
     changes the strict default rendering."""
     acceptance = ["AC-1: endpoint returns 200", "AC-2: row persisted"]
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         _tu, section_unmarked = _claimed_review_section(
             conn, kind=None, acceptance=acceptance,
         )
@@ -11764,7 +11768,7 @@ def _kinds_for(task_id, result):
 
 
 def test_e1_decision_queue_empty_board(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.decision_queue(conn)
     assert result["decisions"] == []
     assert result["count"] == 0
@@ -11772,7 +11776,7 @@ def test_e1_decision_queue_empty_board(kanban_home):
 
 
 def test_e1_decision_queue_sticky_blocked_appears_once(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stuck", assignee="coder")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="needs human eyes")
@@ -11787,7 +11791,7 @@ def test_e1_decision_queue_review_rejection_outranks_sticky(kanban_home):
     """A blocked task whose latest run was a verifier REQUEST_CHANGES is
     classified as review_rejected, not the generic sticky_blocked — appears
     exactly once."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         kb.claim_review_task(conn, t)
@@ -11798,7 +11802,7 @@ def test_e1_decision_queue_review_rejection_outranks_sticky(kanban_home):
 
 
 def test_4b_decision_queue_operator_escalation_outranks_sticky(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="needs operator", assignee="coder")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="needs human eyes")
@@ -11828,7 +11832,7 @@ def test_4b_decision_queue_specific_recovery_classes_beat_generic_escalation(
     kanban_home,
 ):
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parked = kb.create_task(conn, title="merge parked", assignee="coder")
         kb.claim_task(conn, parked)
         kb.block_task(conn, parked, reason="integration parked: merge gate red")
@@ -11860,7 +11864,7 @@ def test_4b_decision_queue_specific_recovery_classes_beat_generic_escalation(
 
 
 def test_4b_decision_queue_skips_funnel_root_but_not_child(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="funnel root", assignee="research", created_by="family",
         )
@@ -11898,7 +11902,7 @@ def test_4b_decision_queue_skips_funnel_root_but_not_child(kanban_home):
 
 
 def test_e1_decision_queue_role_fit_held(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="reviewer probe", assignee="reviewer")
         _set_task_status(conn, t, "ready")
         with kb.write_txn(conn):
@@ -11910,7 +11914,7 @@ def test_e1_decision_queue_role_fit_held(kanban_home):
 
 
 def test_e1_decision_queue_decompose_failed(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="undecomposable", assignee="coder")
         kb.record_decompose_failure(conn, t)
         kb.record_decompose_failure(conn, t)
@@ -11922,7 +11926,7 @@ def test_e1_decision_queue_decompose_failed(kanban_home):
 
 def test_e1_decision_queue_done_task_with_decompose_failed_excluded(kanban_home):
     """A completed task that once failed decompose is not a pending decision."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="done now", assignee="coder")
         kb.record_decompose_failure(conn, t)
         kb.claim_task(conn, t)
@@ -11933,7 +11937,7 @@ def test_e1_decision_queue_done_task_with_decompose_failed_excluded(kanban_home)
 
 def test_e1_decision_queue_failsoft_on_corrupt_event_payload(kanban_home):
     """A blocked task with a non-JSON event payload must not crash the queue."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stuck", assignee="coder")
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="x")
@@ -11953,7 +11957,7 @@ def test_e1_decision_queue_failsoft_on_corrupt_event_payload(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_e3_epic_id_column_and_table_migrate_idempotently(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "epic_id" in cols
         tables = {
@@ -11969,7 +11973,7 @@ def test_e3_epic_id_column_and_table_migrate_idempotently(kanban_home):
 
 
 def test_e3_create_and_list_epic(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="Q3 reliability", body="close the loops")
         assert eid.startswith("e_")
         epics = kb.list_epics(conn)
@@ -11981,7 +11985,7 @@ def test_e3_create_and_list_epic(kanban_home):
 
 
 def test_e3_create_task_with_epic_sets_column(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="epic")
         t = kb.create_task(conn, title="member", assignee="coder", epic_id=eid)
         task = kb.get_task(conn, t)
@@ -11990,13 +11994,13 @@ def test_e3_create_task_with_epic_sets_column(kanban_home):
 
 def test_e3_task_without_epic_is_null(kanban_home):
     """Regression guard: the common path leaves epic_id NULL (pre-E3)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="loner", assignee="coder")
         assert kb.get_task(conn, t).epic_id is None
 
 
 def test_e3_decompose_propagates_epic_to_children(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="epic")
         root = kb.create_task(
             conn, title="root", assignee="orchestrator",
@@ -12016,7 +12020,7 @@ def test_e3_decompose_propagates_epic_to_children(kanban_home):
 
 def test_e3_decompose_without_epic_leaves_children_null(kanban_home):
     """Regression guard: a root with no epic → children stay NULL."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(
             conn, title="root", assignee="orchestrator", triage=True,
         )
@@ -12028,7 +12032,7 @@ def test_e3_decompose_without_epic_leaves_children_null(kanban_home):
 
 
 def test_e3_epic_stats_count_and_cost(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="epic")
         t1 = kb.create_task(conn, title="t1", assignee="coder", epic_id=eid)
         t2 = kb.create_task(conn, title="t2", assignee="coder", epic_id=eid)
@@ -12053,7 +12057,7 @@ def test_e3_epic_stats_count_and_cost(kanban_home):
 
 
 def test_e3_close_epic(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="epic")
         assert kb.close_epic(conn, eid) is True
         assert kb.get_epic(conn, eid)["status"] == "closed"
@@ -12061,12 +12065,12 @@ def test_e3_close_epic(kanban_home):
 
 
 def test_e3_get_missing_epic_returns_none(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         assert kb.get_epic(conn, "e_nope") is None
 
 
 def test_e3_set_task_epic_attach_and_detach(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title="epic")
         t = kb.create_task(conn, title="late member", assignee="coder")
         assert kb.set_task_epic(conn, t, eid) is True
@@ -12085,7 +12089,7 @@ def test_e3_set_task_epic_attach_and_detach(kanban_home):
 
 
 def test_e3_set_task_epic_validates_target(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="member", assignee="coder")
         # Unknown task → False, no crash.
         assert kb.set_task_epic(conn, "t_ghost", None) is False
@@ -12125,7 +12129,7 @@ def _seed_run(conn, task_id, *, profile, tokens=0, cost=None, age_seconds=10):
 def test_c1_caps_off_is_byte_identical(kanban_home, all_assignees_spawnable):
     """Caps unset (the live default) → no hold even with heavy prior usage."""
     spawns = []
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         prior = kb.create_task(conn, title="prior", assignee="alice")
         _seed_run(conn, prior, profile="alice", tokens=10_000_000)
         t = kb.create_task(conn, title="ready", assignee="alice")
@@ -12139,7 +12143,7 @@ def test_c1_token_cap_holds_only_over_budget_profile(
     kanban_home, all_assignees_spawnable
 ):
     spawns = []
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # alice has blown her token budget; bob has not.
         prior = kb.create_task(conn, title="prior", assignee="alice")
         _seed_run(conn, prior, profile="alice", tokens=5000)
@@ -12164,7 +12168,7 @@ def test_c1_token_cap_holds_only_over_budget_profile(
 def test_c1_token_cap_event_deduped_across_ticks(
     kanban_home, all_assignees_spawnable
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         prior = kb.create_task(conn, title="prior", assignee="alice")
         _seed_run(conn, prior, profile="alice", tokens=5000)
         ta = kb.create_task(conn, title="alice task", assignee="alice")
@@ -12179,7 +12183,7 @@ def test_c1_token_cap_event_deduped_across_ticks(
 
 def test_c1_cost_cap_holds_board_wide(kanban_home, all_assignees_spawnable):
     spawns = []
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         prior = kb.create_task(conn, title="prior", assignee="alice")
         _seed_run(conn, prior, profile="alice", cost=2.50)
         ta = kb.create_task(conn, title="alice task", assignee="alice")
@@ -12195,7 +12199,7 @@ def test_c1_cost_cap_holds_board_wide(kanban_home, all_assignees_spawnable):
 
 def test_c1_null_tokens_count_as_zero(kanban_home, all_assignees_spawnable):
     spawns = []
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         prior = kb.create_task(conn, title="prior", assignee="alice")
         # A run with NULL tokens contributes 0 → under any positive cap.
         conn.execute(
@@ -12216,7 +12220,7 @@ def test_c1_null_tokens_count_as_zero(kanban_home, all_assignees_spawnable):
 def test_c1_budget_held_surfaces_in_decision_queue(
     kanban_home, all_assignees_spawnable
 ):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         prior = kb.create_task(conn, title="prior", assignee="alice")
         _seed_run(conn, prior, profile="alice", tokens=5000)
         ta = kb.create_task(conn, title="alice task", assignee="alice")
@@ -12234,7 +12238,7 @@ def test_c1_tree_root_woke_all_children_done(kanban_home):
     """A decompose root that is 'ready' with all children 'done' surfaces
     as tree_root_woke. Reuses the same all-children-done predicate as
     recompute_ready (only 'done' counts; not archived/failed)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="root task", assignee="orchestrator")
         child1 = kb.create_task(conn, title="child A", assignee="coder")
         child2 = kb.create_task(conn, title="child B", assignee="coder")
@@ -12271,7 +12275,7 @@ def test_c1_tree_root_woke_all_children_done(kanban_home):
 
 def test_c1_tree_root_woke_not_emitted_if_child_not_done(kanban_home):
     """Root must NOT appear when even one child is not yet done."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="root task", assignee="orchestrator")
         child1 = kb.create_task(conn, title="child A", assignee="coder")
         child2 = kb.create_task(conn, title="child B", assignee="coder")
@@ -12297,7 +12301,7 @@ def test_c1_tree_root_woke_not_emitted_if_child_not_done(kanban_home):
 def test_c1_tree_root_woke_no_children_excluded(kanban_home):
     """A ready task with NO children must NOT appear as tree_root_woke
     (it was never decomposed)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         leaf = kb.create_task(conn, title="plain ready", assignee="coder")
         _set_task_status(conn, leaf, "ready")
         result = kb.decision_queue(conn)
@@ -12309,7 +12313,7 @@ def test_c1_release_gate_parked_surfaces_in_decision_queue(kanban_home):
     decision queue with a suggested_command from _RELEASE_GATE_COMMANDS."""
     from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task = kb.create_task(conn, title="release gate task", assignee="verifier")
         # Record the release_gate_parked event (status stays blocked/non-terminal)
         _set_task_status(conn, task, "blocked")
@@ -12340,7 +12344,7 @@ def test_c1_release_gate_parked_surfaces_in_decision_queue(kanban_home):
 def test_c1_release_gate_parked_excluded_when_done(kanban_home):
     """A task that carries release_gate_parked but is already done must NOT
     appear in the decision queue."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task = kb.create_task(conn, title="done gate", assignee="verifier")
         with kb.write_txn(conn):
             kb._append_event(conn, task, "release_gate_parked", {"reason": "GO"})
@@ -12363,7 +12367,7 @@ def test_c1_release_gate_suggested_command_carries_full_sequence(kanban_home):
         "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
         "curl -fsS http://127.0.0.1:9119/control >/dev/null",
     ]
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task = kb.create_task(conn, title="gate task", assignee="verifier")
         _set_task_status(conn, task, "blocked")
         with kb.write_txn(conn):
@@ -12388,7 +12392,7 @@ def test_c1_release_gate_suggested_command_falls_back_without_payload_commands(k
     canonical _RELEASE_GATE_COMMANDS sequence (still the full gate, not a bare cd)."""
     from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         task = kb.create_task(conn, title="gate task no cmds", assignee="verifier")
         _set_task_status(conn, task, "blocked")
         with kb.write_txn(conn):
@@ -12420,7 +12424,7 @@ def _insert_bare_run(conn, task_id, *, started_at, ended_at=None, verdict=None):
 def test_set_run_verdict_records_binary_score(kanban_home):
     """APPROVED→1.0 / REQUEST_CHANGES→0.0 landen automatisch in scores;
     erneutes Verdict auf demselben Run erzeugt keine zweite Zeile."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="judged work")
         with kb.write_txn(conn):
             r_ok = _insert_bare_run(conn, t, started_at=1000, ended_at=1300)
@@ -12443,7 +12447,7 @@ def test_set_run_verdict_records_binary_score(kanban_home):
 def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
     """Score-Spiegelung darf einen Abschluss nie brechen (Legacy-DB ohne
     scores-Tabelle): Verdict bleibt gesetzt, kein Raise."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="legacy")
         with kb.write_txn(conn):
             r = _insert_bare_run(conn, t, started_at=1000)
@@ -12458,7 +12462,7 @@ def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
 def test_backfill_verdict_scores_idempotent_with_run_timestamps(kanban_home):
     """Backfill spiegelt historische Verdicts mit Run-Endzeit als created_at,
     überspringt verdictlose Runs und ist wiederholbar (0 beim 2. Lauf)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="history")
         with kb.write_txn(conn):
             r1 = _insert_bare_run(conn, t, started_at=1000, ended_at=1500, verdict="APPROVED")
@@ -12479,7 +12483,7 @@ def test_backfill_verdict_scores_idempotent_with_run_timestamps(kanban_home):
 def test_scores_name_created_query_uses_index(kanban_home):
     """Trend-Queries (name + Zeitfenster) laufen über idx_scores_name_created —
     der Index ist die <200ms@10k-Garantie, deterministischer als Timing."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         plan = " ".join(
             row[3] for row in conn.execute(
                 "EXPLAIN QUERY PLAN SELECT AVG(value) FROM scores "
@@ -12519,7 +12523,7 @@ def test_runs_issues_groups_by_profile_and_signature(kanban_home):
     """Gleicher Fehlertyp + gleiches Profil = ein Issue mit Zähler; blocked
     fällt auf summary zurück; Beispiel-Run ist das jüngste Auftreten."""
     now = int(time.time())
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="flaky")
         with kb.write_txn(conn):
             def run(profile, outcome, started, error=None, summary=None):
@@ -12561,7 +12565,7 @@ def test_runs_issues_groups_by_profile_and_signature(kanban_home):
 def test_heartbeat_worker_persists_note_as_event_payload(kanban_home):
     """Die Activity-Note landet als heartbeat-Event-Payload am Run — das ist
     die Quelle für last_heartbeat_note in /workers/active."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="busy")
         with kb.write_txn(conn):
             run_id = conn.execute(
@@ -12584,7 +12588,7 @@ def test_heartbeat_worker_persists_note_as_event_payload(kanban_home):
 def test_run_duration_percentiles_per_profile_with_min_n(kanban_home):
     """p50/p90 nur aus completed-Runs des Profils; unter min_n ehrlich None."""
     now = int(time.time())
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="timed")
         with kb.write_txn(conn):
             for dur in (100, 200, 300, 400, 1000):
@@ -12617,7 +12621,7 @@ def test_runs_failures_dedupes_per_task_and_filters_recovered(kanban_home):
     """Phase F: jüngster Fehl-Run pro Task; bereits fertige/laufende Tasks
     erscheinen nicht mehr in der Triage."""
     now = int(time.time())
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t_open = kb.create_task(conn, title="kaputt und wartet")
         t_done = kb.create_task(conn, title="kaputt aber erledigt")
         kb.block_task(conn, t_open, reason="worker crashed")
@@ -12671,7 +12675,7 @@ def test_transient_provisioning_timeout_requeues_without_burning_budget(
     monkeypatch.setattr(kwt, "provision_for_task", boom)
     repo = tmp_path / "repo"
     repo.mkdir()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
                              workspace_kind="worktree", workspace_path=str(repo),
                              max_retries=1)
@@ -12696,7 +12700,7 @@ def test_spawn_retry_budget_exhaustion_blocks(
     monkeypatch.setenv("HERMES_SPAWN_RETRY_LIMIT", "2")
     repo = tmp_path / "repo"
     repo.mkdir()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
                              workspace_kind="worktree", workspace_path=str(repo),
                              max_retries=1)
@@ -12717,7 +12721,7 @@ def test_permanent_provisioning_error_blocks_immediately(
     )
     repo = tmp_path / "repo"
     repo.mkdir()
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
                              workspace_kind="worktree", workspace_path=str(repo),
                              max_retries=1)
@@ -12770,7 +12774,7 @@ def test_claude_cli_heartbeat_refreshes_and_emits_honest_note(
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, run_id = _make_running_worker(conn, profile="coder-claude", pid=4242)
         # Worker log present → note carries the honest log detail.
         log_dir = kb.worker_logs_dir()
@@ -12807,7 +12811,7 @@ def test_claude_cli_heartbeat_skips_hermes_runtime_worker(kanban_home, monkeypat
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, _ = _make_running_worker(conn, profile="worker", pid=4243)
         beat = kb.heartbeat_live_claude_cli_workers(conn)
         assert beat == []
@@ -12826,7 +12830,7 @@ def test_claude_cli_heartbeat_skips_dead_pid(kanban_home, monkeypatch):
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, _ = _make_running_worker(conn, profile="coder-claude", pid=4244)
         beat = kb.heartbeat_live_claude_cli_workers(conn)
         assert beat == []
@@ -12840,7 +12844,7 @@ def test_claude_cli_heartbeat_skips_other_host_claim(kanban_home, monkeypatch):
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, _ = _make_running_worker(
             conn, profile="coder-claude", pid=4245,
             claim_lock="someotherhost:9999",
@@ -12858,7 +12862,7 @@ def test_claude_cli_heartbeat_rate_limited(kanban_home, monkeypatch):
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
     now = int(time.time())
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Fresh heartbeat (10s ago) → skipped.
         t_fresh, _ = _make_running_worker(
             conn, profile="coder-claude", pid=4246,
@@ -12884,7 +12888,7 @@ def test_claude_cli_heartbeat_note_failsoft_without_log(kanban_home, monkeypatch
     import hermes_cli.kanban_db as _kb
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, _ = _make_running_worker(conn, profile="coder-claude", pid=4248)
         beat = kb.heartbeat_live_claude_cli_workers(conn)
         assert beat == [t]
@@ -12907,7 +12911,7 @@ def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
     five_hours_ago = int(time.time()) - (5 * 3600)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t, _ = _make_running_worker(
             conn, profile="coder-claude", pid=4249,
             started_at=five_hours_ago, last_heartbeat_at=None,
@@ -12925,7 +12929,7 @@ def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
 
 def test_phase4_tree_root_woke_excludes_plain_dependency_task(kanban_home):
     """Phase4 F: tree_root_woke only reports real decomposed roots, not any dependent ready task."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="Parent")
         child = kb.create_task(conn, title="Plain dependent")
         conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
@@ -13090,7 +13094,7 @@ def test_s4_crashed_reclassify_stays_bounded(kanban_home):
     """AC-2: crashed->transient is a relabel only — repeated crashes of the same
     task still trip the consecutive-failure breaker and escalate (the bounded
     retry limit is untouched), so there is no unbounded retry storm."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="flapping worker", assignee="coder")
         # First crash: below the DEFAULT_FAILURE_LIMIT=2 breaker -> requeued.
         assert kb.claim_task(conn, tid) is not None
@@ -13164,7 +13168,7 @@ def test_s4_classify_failure_missing_spec_bad_spec():
 def test_s4_record_task_failure_writes_heiler_classification(kanban_home):
     """A simulated transient block and a red-gate block each write a
     heiler_classification ledger event with the right class + evidence."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         transient = kb.create_task(conn, title="transient block", assignee="coder")
         assert kb.claim_task(conn, transient) is not None
         kb._record_task_failure(
@@ -13203,7 +13207,7 @@ def test_s4_stall_park_writes_heiler_classification(kanban_home):
     """no_silent_stall_sweep parking a decompose-failed task writes a
     bad-spec heiler_classification event alongside the operator_escalation."""
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(
             conn, title="undecomposable", assignee="coder", triage=True,
         )
@@ -13225,7 +13229,7 @@ def test_s4_read_escalation_ledger_returns_entries_and_rollup(kanban_home):
     """read_escalation_ledger returns the classified entries (newest first),
     a per-class rollup, and honours class/task/limit filters. This is the
     Stratege's (Phase 1.5) input."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         transient = kb.create_task(conn, title="transient", assignee="coder")
         kb.claim_task(conn, transient)
         kb._record_task_failure(
@@ -13280,7 +13284,7 @@ def test_s4_ledger_by_class_counts_distinct_roots_not_raw_events(kanban_home):
     duplicates events, the Stratege's input signal stays honest. The raw event
     count is preserved alongside (both values exposed) so recurrence stays
     visible and the class ranking remains explainable."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # Chain A: leaf_a -> mid_a -> root_a. The K2/F1 convention links a leaf
         # (parent) to the orchestration sink/root (child), so root_a is the sink
         # reached by walking child edges downward.
@@ -13351,7 +13355,7 @@ def test_realbug_detox_default_sourced_rows_reclassified_read_time(kanban_home):
     by_class[transient]==1, and event (b)'s task root must NOT appear in
     roots_by_class[real-bug].
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         # (a) legitimate real-bug: signal came from a text match, not the default
         task_a = kb.create_task(conn, title="real gate fail", assignee="coder")
         kb.add_event(conn, task_a, kb.HEILER_CLASSIFICATION_EVENT, {
@@ -13476,7 +13480,7 @@ def test_s4_ledger_clusters_recurring_real_bugs_by_fingerprint(kanban_home):
     count=2; a distinct error text stays its own cluster. The cluster rollup is
     scoped to real-bug and is additive: by_class / roots_by_class are unchanged
     (AC-2 guardrail)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="bug one a", assignee="coder")
         t2 = kb.create_task(conn, title="bug one b", assignee="coder")
         t3 = kb.create_task(conn, title="bug two", assignee="coder")
@@ -13536,7 +13540,7 @@ def test_s4_ledger_real_bug_clusters_no_false_collision(kanban_home):
     # Sanity: the fixture itself has no two entries sharing a fingerprint.
     assert len({kb._error_fingerprint(e) for e in distinct_errors}) == len(distinct_errors)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         for i, err in enumerate(distinct_errors):
             tid = kb.create_task(conn, title=f"bug {i}", assignee="coder")
             _emit_real_bug(conn, tid, err)
@@ -13554,7 +13558,7 @@ def test_s4_ledger_clusters_recompute_fingerprint_for_unstamped_events(kanban_ho
     fingerprint was stamped: the reader recomputes the signature from
     evidence.excerpt, so two unstamped events with the same normalized error
     still cluster together."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="legacy a", assignee="coder")
         t2 = kb.create_task(conn, title="legacy b", assignee="coder")
         # Raw payloads WITHOUT a stamped fingerprint (pre-S1 shape).
@@ -13619,7 +13623,7 @@ def _raw_escalation(conn, task_id, *, why_now="legacy escalation", evidence=None
 def test_record_task_failure_escalation_carries_escalation_event_id(kanban_home):
     """When the breaker trips, the inline heiler_classification references the
     escalation event it pairs with (the AC-2 documented ledger reference)."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="red gate", assignee="coder")
         assert kb.claim_task(conn, tid) is not None
         kb._record_task_failure(
@@ -13641,7 +13645,7 @@ def test_park_budget_runaway_writes_inline_heiler_classification(kanban_home):
     heiler_classification, referencing the escalation event, tagged with the
     inline budget-runaway source, with a belegter (signal-source) evidence
     reference rather than a guess (AC-2). No sweep poll required."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="runaway loop", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
@@ -13665,7 +13669,7 @@ def test_park_budget_runaway_inline_matches_sweep_and_sweep_skips(kanban_home):
     """The inline class is byte-identical to what the backfill sweep would
     derive from the same persisted payload (defense-in-depth, NOT divergence),
     and the sweep then adds nothing because the escalation is already paired."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="runaway loop", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
@@ -13687,7 +13691,7 @@ def test_classify_escalations_sweep_classifies_unpaired_escalation(kanban_home):
     """A bare escalation from a writer that did NOT classify inline gets exactly
     one backfilled classification from the sweep, referencing the escalation
     event and deriving the class from its evidence."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="legacy escalation", assignee="coder")
         _raw_escalation(conn, tid, why_now="gate failed: tests failed")
         # Pre-sweep: escalation present, no classification.
@@ -13708,7 +13712,7 @@ def test_classify_escalations_sweep_classifies_unpaired_escalation(kanban_home):
 def test_classify_escalations_sweep_is_idempotent(kanban_home):
     """Re-running the sweep adds no second classification for the same
     escalation."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="legacy escalation", assignee="coder")
         _raw_escalation(conn, tid, why_now="merge conflict in api.ts")
         first = kb.classify_escalations_sweep(conn)
@@ -13723,7 +13727,7 @@ def test_classify_escalations_sweep_is_idempotent(kanban_home):
 def test_classify_escalations_sweep_skips_inline_paired(kanban_home):
     """An escalation already paired inline (record_task_failure) is left
     untouched by the sweep — no duplicate classification."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="red gate", assignee="coder")
         assert kb.claim_task(conn, tid) is not None
         kb._record_task_failure(
@@ -13744,7 +13748,7 @@ def test_classify_escalations_sweep_derives_class_from_evidence(kanban_home):
     """The sweep reuses the deterministic classifier over the escalation's own
     persisted evidence — a merge-conflict park is classed 'conflict'."""
     now = 1_900_000_000
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="merge mess", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
@@ -13776,7 +13780,7 @@ def test_record_classification_correction_records_event(kanban_home):
     """An operator correction is stored as a distinct
     heiler_classification_corrected event referencing the escalation, leaving
     the auto by_class ledger untouched."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="runaway loop", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
@@ -13805,7 +13809,7 @@ def test_record_classification_correction_records_event(kanban_home):
 
 
 def test_record_classification_correction_rejects_unknown_class(kanban_home):
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
@@ -13839,7 +13843,7 @@ def _insert_run_cost(conn, task_id, *, profile, input_tokens, output_tokens, cos
 
 def test_chain_cost_breakdown_aggregates_by_lane(kanban_home):
     """chain_cost_breakdown returns totals + per-profile breakdown for a chain."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="chain-root", assignee="orchestrator",
                               triage=True)
         child_ids = kb.decompose_triage_task(
@@ -13860,7 +13864,7 @@ def test_chain_cost_breakdown_aggregates_by_lane(kanban_home):
             # One run on profile "verifier" for task B
             _insert_run_cost(conn, b, profile="verifier", input_tokens=300, output_tokens=50, cost_usd=0.003)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     assert result["root_id"] == root
@@ -13899,7 +13903,7 @@ def test_chain_cost_breakdown_null_cost_robust(kanban_home):
     the aggregate totals — the presence of a NULL-cost run is indicated only by
     a non-zero run_count with zero cost, not a crash.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="null-cost-root", assignee="orchestrator",
                               triage=True)
         child_ids = kb.decompose_triage_task(
@@ -13921,7 +13925,7 @@ def test_chain_cost_breakdown_null_cost_robust(kanban_home):
                 (x,),
             )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     assert result["totals"]["run_count"] == 1
@@ -13937,10 +13941,10 @@ def test_chain_cost_breakdown_null_cost_robust(kanban_home):
 
 def test_chain_cost_breakdown_empty_chain(kanban_home):
     """chain_cost_breakdown for a root with no runs returns zeroed totals."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="empty-chain", assignee="orchestrator")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     assert result["root_id"] == root
@@ -13998,7 +14002,7 @@ def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
 def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
     by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sub-chain", assignee="orchestrator",
                               triage=True)
         child_ids = kb.decompose_triage_task(
@@ -14019,7 +14023,7 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
                 metadata={"cost_usd_equivalent": 0.42},
             )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     lane = next(l for l in result["by_lane"] if l["profile"] == "claude-cli")
@@ -14043,7 +14047,7 @@ def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkey
 
     monkeypatch.setattr(kb, "_lane_provider_model_for_profile", fake_lane_provider_model)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="many runner root", assignee="orchestrator")
         with kb.write_txn(conn):
             for index in range(30):
@@ -14057,7 +14061,7 @@ def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkey
                 )
         kb.complete_task(conn, root, summary="done")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.runs_windowed_rollup(
             conn, since_hours=24, max_roots=5, board="default"
         )
@@ -14084,7 +14088,7 @@ def test_runs_windowed_rollup_exposes_source_and_unknown_counts(kanban_home, mon
         "_lane_provider_model_for_profile",
         lambda profile, *, board=None: (f"{profile}-provider", f"{profile}-model"),
     )
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         metered_root = kb.create_task(conn, title="metered root", assignee="orchestrator")
         zero_root = kb.create_task(conn, title="known zero root", assignee="orchestrator")
         unknown_root = kb.create_task(conn, title="unknown root", assignee="orchestrator")
@@ -14125,7 +14129,7 @@ def test_runs_windowed_rollup_exposes_source_and_unknown_counts(kanban_home, mon
         kb.complete_task(conn, zero_root, summary="done")
         kb.complete_task(conn, unknown_root, summary="done")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.runs_windowed_rollup(conn, since_hours=24, max_roots=10, board="default")
 
     roots = [root for root in result["roots"] if root["id"] in {metered_root, zero_root, unknown_root}]
@@ -14161,7 +14165,7 @@ def test_runs_windowed_rollup_emits_neuralwatt_request_cost_detail(kanban_home, 
         lambda profile, *, board=None: (f"{profile}-provider", f"{profile}-model"),
     )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="neuralwatt detail root", assignee="orchestrator")
         with kb.write_txn(conn):
             _insert_run_cost_with_meta(
@@ -14187,7 +14191,7 @@ def test_runs_windowed_rollup_emits_neuralwatt_request_cost_detail(kanban_home, 
             )
         kb.complete_task(conn, root, summary="done")
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.runs_windowed_rollup(conn, since_hours=24, max_roots=5, board="default")
 
     root_row = next(row for row in result["roots"] if row["id"] == root)
@@ -14211,7 +14215,7 @@ def test_runs_windowed_rollup_emits_neuralwatt_request_cost_detail(kanban_home, 
 
 def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
     """chain_cost_breakdown exposes actual API + NeuralWatt billing fields."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="actual-cost-chain", assignee="orchestrator")
         with kb.write_txn(conn):
             _insert_run_cost_with_meta(
@@ -14237,7 +14241,7 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
                 },
             )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     lanes = {lane["profile"]: lane for lane in result["by_lane"]}
@@ -14258,7 +14262,7 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
 
 def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
     """A run with real cost_usd>0 and no equivalent → cost_effective_usd==cost_usd."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="real-cost-chain", assignee="orchestrator")
         with kb.write_txn(conn):
             _insert_run_cost_with_meta(
@@ -14270,7 +14274,7 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
                 metadata=None,
             )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     lane = result["by_lane"][0]
@@ -14287,7 +14291,7 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
 def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
     """by_lane is sorted descending by cost_effective_usd so subscription lanes
     with cost_usd=0 but positive equivalent rank above zero-cost API lanes."""
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sort-chain", assignee="orchestrator",
                               triage=True)
         child_ids = kb.decompose_triage_task(
@@ -14321,7 +14325,7 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
                 metadata=None,
             )
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         result = kb.chain_cost_breakdown(conn, root)
 
     by_lane = result["by_lane"]
@@ -14334,7 +14338,7 @@ def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanb
     """A task blocked by a stricter dispatcher limit must not escape when a
     later generic recompute call does not pass that dispatcher config.
     """
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="strict dispatcher", assignee="a")
         kb.claim_task(conn, t)
         tripped = kb._record_task_failure(
@@ -14393,7 +14397,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
 
     monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
 
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
         assert "cache_read_tokens" not in cols
         assert "cache_write_tokens" not in cols
@@ -14431,7 +14435,7 @@ def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, m
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="openrouter-estimated", assignee="coder")
         run_id = _insert_run_window(
             conn, tid, profile="coder", started_at=800, ended_at=900,
@@ -14487,7 +14491,7 @@ def test_k17_backfill_claude_cli_uses_spawn_identity_after_lane_switch(
     the run or stamp the wrong model.
     """
     import json as _json
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         claude_lane = kb.create_lane(
             conn,
             name="spawn-claude",
@@ -14542,7 +14546,7 @@ def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lan
     later active-lane model change before claude-cli log backfill.
     """
     import json as _json
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         claude_lane = kb.create_lane(
             conn,
             name="override-claude",
@@ -14591,7 +14595,7 @@ def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
     pre-existing run metadata, including future fallback evidence.
     """
     import json as _json
-    with kb.connect() as conn:
+    with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
             name="claude-max",
