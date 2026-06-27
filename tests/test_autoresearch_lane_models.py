@@ -85,6 +85,16 @@ def test_response_usage_metadata_reads_cost_from_model_extra():
     }
 
 
+def test_response_usage_metadata_reads_energy_from_model_extra_on_dict():
+    # Regression: _energy_from_response must mirror _cost_from_response and
+    # fall back to resp["model_extra"]["energy"] for dict-shaped responses.
+    resp = {"model_extra": {"energy": {"energy_kwh": 0.03}}}
+
+    assert lanes.response_usage_metadata(resp) == {
+        "energy": {"energy_kwh": 0.03},
+    }
+
+
 def test_tool_call_smoke_fails_closed_without_tool_call():
     class FakeCompletions:
         def create(self, **_kwargs):

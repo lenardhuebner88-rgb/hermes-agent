@@ -112,7 +112,13 @@ def _energy_from_response(resp: Any) -> Any:
     if hasattr(resp, "energy"):
         return getattr(resp, "energy")
     if isinstance(resp, dict):
-        return resp.get("energy")
+        energy = resp.get("energy")
+        if energy is not None:
+            return energy
+        extra = resp.get("model_extra")
+        if isinstance(extra, dict):
+            return extra.get("energy")
+        return None
     extra = getattr(resp, "model_extra", None)
     if isinstance(extra, dict):
         return extra.get("energy")
