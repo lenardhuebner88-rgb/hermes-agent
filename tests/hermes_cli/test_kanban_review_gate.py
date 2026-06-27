@@ -17,6 +17,9 @@ Covers the producer side (``complete_task(review_gate=...)`` →
 """
 from __future__ import annotations
 
+import json
+import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -465,7 +468,95 @@ def test_default_review_gate_false_goes_done(kanban_home, gate_on):
         assert kb.get_task(conn, tid).status == "done"
 
 
-def test_non_code_assignee_not_gated(kanban_home, gate_on):
+def test_worker_cannot_bypass_review_gate_with_review_gate_false(kanban_home, gate_on):
+    """A worker-owned code run cannot self-transition to done via review_gate=False."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder", kind="code")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        assert kb.complete_task(conn, tid, summary="done", expected_run_id=run_id)
+
+        assert kb.get_task(conn, tid).status == "review"
+
+
+def test_review_gated_raw_sql_done_update_is_rejected(kanban_home, gate_on):
+    """The DB itself rejects direct done writes for review-gated code tasks."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder", kind="code")
+        kb.claim_task(conn, tid)
+
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_review_diff_sentinel_uses_pre_run_commit_baseline(
+    kanban_home, gate_on, tmp_path
+):
+    """Commit-then-complete changes are visible because the baseline is pre-run SHA."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    target = repo / "sentinel.txt"
+    target.write_text("before\n")
+    subprocess.run(["git", "add", "sentinel.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "before"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="impl",
+            assignee="coder",
+            kind="code",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        target.write_text("after\n")
+        subprocess.run(["git", "add", "sentinel.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "after"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+        assert kb.complete_task(
+            conn, tid, summary="done", review_gate=True, expected_run_id=run_id
+        )
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind=? "
+            "ORDER BY id DESC LIMIT 1",
+            (tid, "submitted_for_review"),
+        ).fetchone()
+        payload = json.loads(ev["payload"])
+
+        assert "sentinel.txt" in payload.get("changed_files", [])
+        assert payload.get("diff_baseline") == "pre_run_commit_sha"
+
+
+def test_verdict_spawn_lane_resolver_error_fails_closed(
+    kanban_home, gate_on, tmp_path, monkeypatch
+):
+    """Reviewer/critic spawn must not fall back to an unconstrained argv."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="review", assignee="reviewer")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("unknown-runtime")
+
+    monkeypatch.setattr(kb, "_active_lane_entry_for_profile", boom)
+
+    with pytest.raises(RuntimeError, match="unknown-runtime"):
+        kb._default_spawn(task, str(tmp_path))
+
+
+def test_non_code_task_not_review_gated(kanban_home, gate_on):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="research", assignee="research")
         kb.claim_task(conn, tid)
