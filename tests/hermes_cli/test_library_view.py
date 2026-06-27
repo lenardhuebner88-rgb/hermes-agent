@@ -477,3 +477,26 @@ def test_library_deliverable_artifacts_scan(kanban_home, tmp_path):
     assert f"deliverable::{t_receipt}::t_foo.md" not in ids
     assert all(not i.id.startswith(f"deliverable::{t_none}::") for i in items)
     assert all(not i.id.startswith(f"deliverable::{t_bad}::") for i in items)
+
+
+def test_deliverable_artifact_read_by_name_scans_all_artifacts(kanban_home, tmp_path):
+    """Detail-Pfad für Artifact-Deliverables darf nicht nach den ersten
+    `_DELIVERABLE_MAX_PER_TASK` Einträgen aufhören — ein Name jenseits der
+    Listen-Cap muss auffindbar sein."""
+    vault = tmp_path / "vault"
+    deliverables = vault / "03-Agents" / "Hermes" / "deliverables"
+    deliverables.mkdir(parents=True)
+
+    artifacts: list[str] = []
+    for n in range(5):
+        target = deliverables / f"cap-{n}.md"
+        target.write_text(f"# Cap {n}\nInhalt {n}.", encoding="utf-8")
+        artifacts.append(str(target))
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="Artifact Beyond Cap")
+        kb.complete_task(conn, t, summary="done", metadata={"artifacts": artifacts})
+
+    detail = lv._get_item(f"deliverable::{t}::cap-4.md")
+    assert detail is not None and detail.body_md is not None
+    assert "Cap 4" in detail.body_md

@@ -685,16 +685,14 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
         artifacts = md.get("artifacts", []) if isinstance(md, dict) else []
         if not isinstance(artifacts, list):
             continue
-        emitted = 0
         for art_path in artifacts:
-            if emitted >= _DELIVERABLE_MAX_PER_TASK or not isinstance(art_path, str):
+            if not isinstance(art_path, str):
                 continue
             p_resolved = _validated_artifact_path(art_path, vault_root=vault_root)
             if p_resolved is None:
                 continue
             if p_resolved in receipt_paths or not p_resolved.is_file():
                 continue
-            emitted += 1
             if p_resolved.name != name:
                 continue
             try:
