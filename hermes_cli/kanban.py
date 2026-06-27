@@ -2589,6 +2589,28 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
+    # Versioned-bundle gate (PlanSpec C landing): mirror the in-process
+    # kanban_complete tool so the claude-CLI worker lane (premium/coder-claude)
+    # gets the same in-flight rejection. When the worker opts into the structured
+    # bundle (metadata carries schema_version) it must be complete; otherwise we
+    # echo the missing fields back and DO NOT complete the task (no state change),
+    # so the worker re-runs `complete` with the fields instead of landing a
+    # half-filled bundle that a downstream gate would auto-block.
+    if metadata is not None:
+        from hermes_cli.disposition import validate_completion_bundle
+
+        bundle_missing = validate_completion_bundle(metadata)
+        if bundle_missing:
+            print(
+                "kanban: completion bundle missing required field(s): "
+                + ", ".join(bundle_missing)
+                + ". Task is still in-flight (no state change). Add the field(s) "
+                "to --metadata and run `complete` again. Required bundle shape: "
+                '{"schema_version": 1, "gates": {"exit_code": 0}, '
+                '"AC": "<how each AC is met>", "residual_risk": "<one line>"}.',
+                file=sys.stderr,
+            )
+            return 2
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:

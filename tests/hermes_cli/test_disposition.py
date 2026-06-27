@@ -409,3 +409,150 @@ def test_parse_coerces_unknown_severity_to_none_currently():
         {"typ": "risk", "disposition": "done", "severity": "BOGUS", "evidence": "x"}]}})
     assert len(result.items) == 1
     assert result.items[0].severity == "none"
+
+
+# ===========================================================================
+# validate_completion_bundle — versioned bundle gate (PlanSpec C landing)
+# ===========================================================================
+
+_COMPLETE_BUNDLE = {
+    "schema_version": 1,
+    "gates": {"exit_code": 0, "command": "scripts/run-affected.sh"},
+    "AC": "AC-1/AC-2/AC-3 covered",
+    "residual_risk": "none",
+}
+
+
+def test_bundle_exempt_when_no_schema_version():
+    """OPT-IN: a legacy completion (no schema_version) is never gated."""
+    assert d.validate_completion_bundle({"residual_risk": "none"}) == []
+    assert d.validate_completion_bundle({"changed_files": ["a.py"]}) == []
+
+
+def test_bundle_exempt_for_non_dict_metadata():
+    assert d.validate_completion_bundle(None) == []
+    assert d.validate_completion_bundle("oops") == []
+    assert d.validate_completion_bundle(42) == []
+
+
+def test_bundle_complete_passes():
+    assert d.validate_completion_bundle(_COMPLETE_BUNDLE) == []
+
+
+def test_bundle_exit_code_zero_is_accepted():
+    """exit_code 0 is falsy but a VALID gate result — must not be flagged."""
+    missing = d.validate_completion_bundle(_COMPLETE_BUNDLE)
+    assert not any("exit_code" in m for m in missing)
+
+
+def test_bundle_opted_in_but_missing_all_other_fields():
+    missing = d.validate_completion_bundle({"schema_version": 1})
+    assert any("gates.exit_code" in m for m in missing)
+    assert any(m.startswith("AC") for m in missing)
+    assert any(m.startswith("residual_risk") for m in missing)
+    # schema_version itself is valid here, so it is NOT in the missing list.
+    assert not any(m.startswith("schema_version") for m in missing)
+
+
+def test_bundle_bad_schema_version_flagged():
+    missing = d.validate_completion_bundle(
+        {"schema_version": 0, "gates": {"exit_code": 0}, "AC": "x", "residual_risk": "y"}
+    )
+    assert any(m.startswith("schema_version") for m in missing)
+
+
+def test_bundle_gates_without_exit_code_flagged():
+    missing = d.validate_completion_bundle(
+        {"schema_version": 1, "gates": {"command": "x"}, "AC": "x", "residual_risk": "y"}
+    )
+    assert any("gates.exit_code" in m for m in missing)
+
+
+def test_bundle_gates_not_a_dict_flagged():
+    missing = d.validate_completion_bundle(
+        {"schema_version": 1, "gates": "exit 0", "AC": "x", "residual_risk": "y"}
+    )
+    assert any("gates.exit_code" in m for m in missing)
+
+
+def test_bundle_blank_ac_and_residual_flagged():
+    missing = d.validate_completion_bundle(
+        {"schema_version": 1, "gates": {"exit_code": 0}, "AC": "  ", "residual_risk": ""}
+    )
+    assert any(m.startswith("AC") for m in missing)
+    assert any(m.startswith("residual_risk") for m in missing)
+
+
+def test_bundle_numeric_string_versions_tolerated():
+    """A worker passing the version/exit_code as strings still validates."""
+    assert d.validate_completion_bundle(
+        {"schema_version": "1", "gates": {"exit_code": "0"}, "AC": "x", "residual_risk": "y"}
+    ) == []
+
+
+# ===========================================================================
+# render_completion_metadata — 4 KB truncation render guarantee
+# ===========================================================================
+
+
+def test_render_fits_is_byte_identical_to_sort_keys_dump():
+    """Common case (metadata fits the cap) must be byte-identical to the prior
+    ``json.dumps(..., sort_keys=True)`` rendering — no behaviour change."""
+    import json
+    meta = {"sources": ["a", "b"], "residual_risk": "none"}
+    assert d.render_completion_metadata(meta, 4096) == json.dumps(
+        meta, ensure_ascii=False, sort_keys=True
+    )
+
+
+def test_render_non_dict_capped_like_plain_field():
+    import json
+    val = ["x"] * 1000
+    out = d.render_completion_metadata(val, 50)
+    assert out.startswith(json.dumps(val, ensure_ascii=False, sort_keys=True)[:50])
+    assert "truncated" in out
+
+
+def test_render_preserves_mandatory_fields_under_truncation():
+    """A huge non-essential field must NOT push the mandatory bundle fields off
+    the tail — they are re-ordered to the front so they always survive the cut."""
+    meta = {
+        "schema_version": 1,
+        "gates": {"exit_code": 0},
+        "AC": "all three ACs covered",
+        "residual_risk": "low — see follow-up",
+        # Large lowercase-key arrays that sort BEFORE gates/residual_risk/
+        # schema_version and would previously eat the whole 4 KB budget.
+        "disposition": {"items": [{"blob": "z" * 60} for _ in range(300)]},
+        "changed_files": ["file_%d.py" % i for i in range(200)],
+    }
+    out = d.render_completion_metadata(meta, 4096)
+    assert len(out) <= 4096 + 64  # cap + ellipsis tail
+    assert '"schema_version"' in out
+    assert '"residual_risk"' in out
+    assert '"AC"' in out
+    assert '"exit_code"' in out
+
+
+def test_render_keeps_mandatory_even_when_alone_over_cap():
+    """If the mandatory fields alone exceed the cap they are still rendered in
+    full — the guarantee wins over the cap (a required field is never dropped)."""
+    meta = {
+        "schema_version": 1,
+        "gates": {"exit_code": 0, "log": "y" * 500},
+        "AC": "x" * 500,
+        "residual_risk": "r" * 500,
+    }
+    out = d.render_completion_metadata(meta, 100)
+    assert '"schema_version"' in out
+    assert '"residual_risk"' in out
+    assert '"exit_code"' in out
+
+
+def test_render_no_mandatory_fields_matches_plain_truncation():
+    """Metadata with no mandatory fields truncates exactly like before."""
+    import json
+    meta = {"notes": "n" * 5000, "extra": list(range(200))}
+    out = d.render_completion_metadata(meta, 200)
+    full = json.dumps(meta, ensure_ascii=False, sort_keys=True)
+    assert out == full[:200] + f"… [truncated, {len(full) - 200} chars omitted]"

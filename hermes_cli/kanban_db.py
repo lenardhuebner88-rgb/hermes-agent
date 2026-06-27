@@ -19745,8 +19745,13 @@ def _render_parent_results_and_role_history(
                 body_lines.append("(no result recorded)")
             if run is not None and run.metadata:
                 try:
-                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
+                    # Render-guarantee (see build_worker_context): mandatory bundle
+                    # fields survive the per-field cap so a child/reviewer always
+                    # sees them regardless of how large the rest of the metadata is.
+                    meta_str = _disposition_mod.render_completion_metadata(
+                        run.metadata, field_bytes
+                    )
+                    body_lines.append(f"_metadata_: `{meta_str}`")
                 except Exception:
                     pass
             return body_lines
@@ -20155,8 +20160,15 @@ def build_worker_context(
                 lines.append(f"_error_: {_cap(run.error, field_bytes)}")
             if run.metadata:
                 try:
-                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
+                    # Render-guarantee: mandatory bundle fields (schema_version,
+                    # gates.exit_code, AC, residual_risk) must survive the
+                    # per-field cap so the reviewer always sees them, even when a
+                    # large disposition/changed_files array would otherwise push
+                    # them off the tail. See disposition.render_completion_metadata.
+                    meta_str = _disposition_mod.render_completion_metadata(
+                        run.metadata, field_bytes
+                    )
+                    lines.append(f"_metadata_: `{meta_str}`")
                 except Exception:
                     pass
             lines.append("")

@@ -612,6 +612,23 @@ def _handle_complete(args: dict, **kw) -> str:
             f"metadata must be an object/dict, got {type(metadata).__name__}"
         )
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    # Versioned-bundle gate (PlanSpec C landing): when the worker opts into the
+    # structured completion bundle (metadata carries schema_version), that bundle
+    # must be complete. Reject IN-FLIGHT and echo the missing fields back so the
+    # worker re-completes within this run — instead of landing a half-filled
+    # bundle that a downstream gate would auto-block (no Reject→Auto-Block loop).
+    from hermes_cli.disposition import validate_completion_bundle
+
+    bundle_missing = validate_completion_bundle(metadata)
+    if bundle_missing:
+        return tool_error(
+            "kanban_complete blocked: the completion bundle is missing required "
+            "field(s): " + ", ".join(bundle_missing) + ". Your task is still "
+            "in-flight (no state change). Add the field(s) to metadata and call "
+            "kanban_complete again. Required bundle shape: "
+            '{"schema_version": 1, "gates": {"exit_code": 0}, '
+            '"AC": "<how each AC is met>", "residual_risk": "<one line>"}.'
+        )
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
