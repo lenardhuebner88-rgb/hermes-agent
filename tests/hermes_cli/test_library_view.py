@@ -305,6 +305,7 @@ def test_receipt_adapter_traversal_and_extension_guards(kanban_home, tmp_path):
     secret.write_text("# nicht im Regal", encoding="utf-8")
     receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
     (receipts / "link.md").symlink_to(secret)
+    (receipts / "inner_link.md").symlink_to(receipts / "echt.md")
     (receipts / "notiz.txt").write_text("kein markdown", encoding="utf-8")
     items = lv._collect_receipt_items(with_bodies=False)
     assert [i.id for i in items] == ["receipt::Hermes::echt.md"]  # Symlink + .txt draußen
@@ -314,8 +315,9 @@ def test_receipt_adapter_traversal_and_extension_guards(kanban_home, tmp_path):
         lv._get_item("receipt::../00-Canon::echt.md")
     with pytest.raises(ValueError):
         lv._get_item("receipt::Hermes::echt.txt")
-    with pytest.raises(ValueError):
-        lv._get_item("receipt::Hermes::link.md")  # Symlink-Ziel liegt außerhalb
+    # Symlinks are rejected by the detail path regardless of where they point.
+    assert lv._get_item("receipt::Hermes::link.md") is None
+    assert lv._get_item("receipt::Hermes::inner_link.md") is None
 
 
 def test_receipt_adapter_cap_and_cache(kanban_home, tmp_path):

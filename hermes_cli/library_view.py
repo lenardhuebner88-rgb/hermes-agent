@@ -885,7 +885,12 @@ def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
     if not _TASK_ID_RE.match(agent) or not _RECEIPT_FILE_RE.match(filename):
         raise ValueError("invalid receipt id")
     receipts_root = (_receipts_root() / agent / "receipts").resolve(strict=False)
-    target = (receipts_root / filename).resolve(strict=False)
+    target = receipts_root / filename
+    # The collector deliberately excludes symlinks; the detail path must match
+    # that policy so a symlinked receipt cannot be read by naming it directly.
+    if target.is_symlink():
+        return None
+    target = target.resolve(strict=False)
     if not str(target).startswith(str(receipts_root) + "/"):
         raise ValueError("path escape")
     if not target.is_file():
