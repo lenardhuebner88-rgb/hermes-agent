@@ -1784,8 +1784,14 @@ def test_run_summary_falls_back_to_result(kanban_home):
 
 
 def test_multiple_attempts_preserved_as_runs(kanban_home):
-    """Crash / retry / complete flow produces one run per attempt, all
-    visible in list_runs in chronological order."""
+    """Reclaim / transient-recovery / complete flow produces one run per
+    attempt, all visible in list_runs in chronological order.
+
+    Post-1bd00640c an *unknown* dead worker PID (no recorded exit) is treated
+    as a bounded transient recovery, so attempt 2's run closes with outcome
+    ``transient_retry`` rather than ``crashed`` — but it is still a distinct
+    run, which is what this test guards. The real-crash run outcome is covered
+    by tests/hermes_cli/test_kanban_death_recovery.py."""
     import hermes_cli.kanban_db as _kb
     conn = kb.connect()
     try:
@@ -1805,7 +1811,8 @@ def test_multiple_attempts_preserved_as_runs(kanban_home):
             )
         kb.release_stale_claims(conn)
 
-        # Attempt 2: claim then crash (simulated: pid dead).
+        # Attempt 2: claim then lose the worker PID (simulated: pid dead).
+        # An unknown dead PID is a transient recovery, not a hard crash.
         kb.claim_task(conn, tid)
         kb._set_worker_pid(conn, tid, 98765)
         original_alive = _kb._pid_alive
@@ -1821,7 +1828,9 @@ def test_multiple_attempts_preserved_as_runs(kanban_home):
 
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 3
-        assert [r.outcome for r in runs] == ["reclaimed", "crashed", "completed"]
+        assert [r.outcome for r in runs] == [
+            "reclaimed", kb.TRANSIENT_RETRY_OUTCOME, "completed",
+        ]
         assert runs[-1].summary == "finally"
         assert kb.get_task(conn, tid).current_run_id is None
     finally:
@@ -1840,7 +1849,11 @@ def test_stale_run_cannot_complete_new_attempt(kanban_home, monkeypatch):
         run1 = kb.latest_run(conn, tid)
         kb._set_worker_pid(conn, tid, 98765)
         monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
-        assert kb.detect_crashed_workers(conn) == [tid]
+        # An unknown dead PID is a bounded transient recovery (post-1bd00640c):
+        # it closes run1 and requeues, but is reported on the
+        # ``_last_transient_recovered`` side-channel, NOT the ``crashed`` return.
+        assert kb.detect_crashed_workers(conn) == []
+        assert kb.detect_crashed_workers._last_transient_recovered == [tid]
 
         kb.claim_task(conn, tid)
         run2 = kb.latest_run(conn, tid)
@@ -1863,7 +1876,9 @@ def test_stale_run_cannot_complete_new_attempt(kanban_home, monkeypatch):
             expected_run_id=run2.id,
         )
         runs = kb.list_runs(conn, tid)
-        assert [r.outcome for r in runs] == ["crashed", "completed"]
+        assert [r.outcome for r in runs] == [
+            kb.TRANSIENT_RETRY_OUTCOME, "completed",
+        ]
         assert runs[-1].summary == "current completion"
     finally:
         conn.close()
@@ -1881,7 +1896,11 @@ def test_stale_run_cannot_block_or_heartbeat_new_attempt(kanban_home, monkeypatc
         run1 = kb.latest_run(conn, tid)
         kb._set_worker_pid(conn, tid, 98765)
         monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
-        assert kb.detect_crashed_workers(conn) == [tid]
+        # An unknown dead PID is a bounded transient recovery (post-1bd00640c):
+        # it closes run1 and requeues, but is reported on the
+        # ``_last_transient_recovered`` side-channel, NOT the ``crashed`` return.
+        assert kb.detect_crashed_workers(conn) == []
+        assert kb.detect_crashed_workers._last_transient_recovered == [tid]
 
         kb.claim_task(conn, tid)
         run2 = kb.latest_run(conn, tid)
@@ -5089,17 +5108,27 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
 
 
 def test_detect_crashed_workers_increments_counter(kanban_home):
-    """A single crash increments the consecutive_failures counter."""
+    """An unknown dead PID increments the transient_retry_count side-channel.
+
+    Post-1bd00640c an *unknown* dead worker PID (no recorded exit) is a bounded
+    transient recovery: it bumps ``transient_retry_count`` and requeues the task
+    ``ready`` WITHOUT counting a hard failure, so it is reported on
+    ``_last_transient_recovered`` and ``consecutive_failures`` stays 0. A real
+    crash (nonzero/signaled exit) bumping ``consecutive_failures`` is covered by
+    test_kanban_death_recovery.py::test_nonzero_dead_pid_still_counts_as_real_crash."""
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="crashy", assignee="worker")
         kb.claim_task(conn, tid)
         kb._set_worker_pid(conn, tid, 99999)  # fake pid — not alive
 
-        kb.detect_crashed_workers(conn)
+        crashed = kb.detect_crashed_workers(conn)
 
+        assert crashed == []
+        assert kb.detect_crashed_workers._last_transient_recovered == [tid]
         task = kb.get_task(conn, tid)
-        assert task.consecutive_failures == 1
+        assert task.transient_retry_count == 1
+        assert task.consecutive_failures == 0
         assert task.status == "ready"
     finally:
         conn.close()
