@@ -19036,6 +19036,9 @@ def _spawn_claude_worker(
     return proc.pid
 
 
+_WORKER_SCOPE_DENIED_TOOLSET = "__kanban_scope_denied__"
+
+
 def _resolve_worker_cli_toolsets(
     hermes_home: Optional[str], task: Optional[Task] = None
 ) -> Optional[list[str]]:
@@ -19093,21 +19096,25 @@ def _resolve_worker_cli_toolsets(
             # the lifecycle/verdict surface only.
             return ["kanban"]
         scope_contract = task.scope_contract if task else None
-        if isinstance(scope_contract, dict) and "allowed_tools" in scope_contract:
+        denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
+        if scope_contract is not None and not isinstance(scope_contract, dict):
+            return denied_toolsets
+        if isinstance(scope_contract, dict):
+            if "allowed_tools" not in scope_contract:
+                return denied_toolsets
             raw_allowed = scope_contract.get("allowed_tools")
             if not isinstance(raw_allowed, list):
-                return []
+                return denied_toolsets
             allowed: set[str] = set()
             for item in raw_allowed:
                 if not isinstance(item, str):
-                    return []
+                    return denied_toolsets
                 name = item.strip()
                 if not name:
-                    return []
+                    return denied_toolsets
                 allowed.add(name)
-            if not allowed.issubset(set(toolsets)):
-                return []
-            return [name for name in toolsets if name in allowed]
+            effective_toolsets = [name for name in toolsets if name in allowed]
+            return effective_toolsets or denied_toolsets
         return toolsets or None
     except Exception as exc:
         _log.debug(
@@ -19308,7 +19315,7 @@ def _default_spawn(
     # back to a stale config (upstream feature). --toolsets is a top-level
     # flag, so it goes BEFORE the `chat` subcommand.
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"), task)
-    if worker_toolsets:
+    if worker_toolsets is not None:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.append("chat")
     # Per-task model override (T4 / WI-6 fix). `-m/--model` is BOTH a

@@ -134,6 +134,142 @@ toolsets:
     assert captured["cmd"][captured["cmd"].index("--toolsets") + 1] == "kanban"
 
 
+def test_default_spawn_ignores_out_of_baseline_scope_entries(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = kb._resolve_worker_cli_toolsets(
+        str(profile),
+        _make_task(
+            kb,
+            assignee="coder",
+            scope_contract={"allowed_tools": ["terminal", "unknown", "file", "kanban"]},
+        ),
+    )
+
+    assert resolved == ["terminal", "kanban"]
+
+
+def test_default_spawn_pins_denied_toolset_for_empty_scope_contract(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    pid = kb._default_spawn(
+        _make_task(kb, assignee="coder", scope_contract={"allowed_tools": []}),
+        str(workspace),
+    )
+
+    assert pid == 4242
+    assert "--toolsets" in captured["cmd"]
+    assert (
+        captured["cmd"][captured["cmd"].index("--toolsets") + 1]
+        == kb._WORKER_SCOPE_DENIED_TOOLSET
+    )
+
+
+def test_resolve_worker_cli_toolsets_fails_closed_for_malformed_scope_contract(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    malformed_contracts = [
+        "allowed_tools: [terminal]",
+        {"allowed_tools": "terminal"},
+        {"allowed_tools": ["terminal", 3]},
+        {"unknown_scope_key": ["terminal"]},
+    ]
+    for contract in malformed_contracts:
+        assert kb._resolve_worker_cli_toolsets(
+            str(profile), _make_task(kb, assignee="coder", scope_contract=contract)
+        ) == [kb._WORKER_SCOPE_DENIED_TOOLSET]
+
+
+def test_resolve_worker_cli_toolsets_fails_closed_when_scope_allows_no_baseline_tools(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - kanban
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    assert kb._resolve_worker_cli_toolsets(
+        str(profile),
+        _make_task(kb, assignee="coder", scope_contract={"allowed_tools": ["web", "unknown"]}),
+    ) == [kb._WORKER_SCOPE_DENIED_TOOLSET]
+
+
 def test_default_spawn_does_not_parse_scope_contract_from_body_text(monkeypatch, tmp_path):
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "coder"
