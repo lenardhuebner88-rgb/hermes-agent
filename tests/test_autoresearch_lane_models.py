@@ -118,6 +118,14 @@ def test_tool_call_smoke_fails_closed_without_tool_call():
     assert "tool_call" in result["models"][0]["error"]
 
 
+def test_tool_call_smoke_fails_closed_with_empty_models():
+    result = lanes.neuralwatt_tool_call_smoke(models=[], api_key="test-key")
+
+    assert result["ok"] is False
+    assert result["models"] == []
+    assert "no models" in result["error"].lower()
+
+
 def test_apply_lane_model_writes_only_requested_aux_slots(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(

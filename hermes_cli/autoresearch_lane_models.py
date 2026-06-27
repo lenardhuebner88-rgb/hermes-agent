@@ -179,6 +179,9 @@ def neuralwatt_tool_call_smoke(
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     """Run an OpenAI-compatible chat.completions tool-call smoke."""
+    models = list(models)
+    if not models:
+        return {"ok": False, "models": [], "error": "no models provided"}
     if client_factory is None:
         from openai import OpenAI
 
