@@ -116,3 +116,106 @@ toolsets:
     assert "web" in resolved
     assert "kanban" in resolved  # recovered worker lifecycle surface
     assert resolved != ["kanban"]
+
+
+def test_non_reviewer_worker_cli_toolsets_are_not_caged(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    for profile_name in ("coder", "researcher", "critic"):
+        profile = root / "profiles" / profile_name
+        profile.mkdir(parents=True)
+        profile.joinpath("config.yaml").write_text(
+            """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+toolsets:
+  - hermes-cli
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+        assert resolved is not None
+        assert "terminal" in resolved
+        assert "web" in resolved
+        assert "kanban" in resolved
+        assert resolved != ["kanban"]
+
+
+def test_reviewer_worker_cli_toolsets_are_verdict_only(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - file
+    - code_execution
+    - delegation
+    - skills
+    - memory
+    - session_search
+toolsets:
+  - hermes-cli
+agent:
+  disabled_toolsets: []
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved == ["kanban"]
+
+
+def test_reviewer_verdict_only_toolsets_keep_completion_without_execution_tools(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - file
+    - code_execution
+    - delegation
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_review")
+
+    from hermes_cli import kanban_db as kb
+    from model_tools import get_tool_definitions
+
+    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+    tools = get_tool_definitions(enabled_toolsets=resolved, quiet_mode=True)
+    names = {tool["function"]["name"] for tool in tools}
+
+    assert "kanban_complete" in names
+    assert "kanban_block" in names
+    assert "kanban_show" in names
+    assert "terminal" not in names
+    assert "read_file" not in names
+    assert "write_file" not in names
+    assert "patch" not in names
+    assert "execute_code" not in names
+    assert "delegate_task" not in names

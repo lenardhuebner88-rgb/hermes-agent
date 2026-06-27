@@ -19211,6 +19211,14 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
             toolsets = sorted(_get_platform_tools(cfg, "cli"))
         finally:
             reset_hermes_home_override(token)
+        if Path(hermes_home).name == "reviewer":
+            # Reviewer workers are a verdict-only lane: they judge submitted
+            # evidence and write a verdict, but must not run commands, inspect
+            # arbitrary files, execute code, or delegate. Profile config can
+            # still drift (for example via ``toolsets: [hermes-cli]``), so keep
+            # a dispatcher-side backstop that pins reviewer Kanban workers to
+            # the lifecycle/verdict surface only.
+            return ["kanban"]
         return toolsets or None
     except Exception as exc:
         _log.debug(
