@@ -248,6 +248,27 @@ def test_silent_outputs_are_filtered_fresh_and_from_warm_cache(kanban_home):
     assert [i.preview for i in mixed] == ["Echter Abend-Report."]
 
 
+def test_silent_cron_detail_path_returns_none(kanban_home):
+    """Der Detail-Pfad muss [SILENT]-Outputs genauso ablehnen wie die Liste —
+    sonst wäre ein direkt erratenes ID ein Umweg um die Redaction-Disziplin."""
+    store = kanban_home / "cron"
+    _write_cron_store(
+        store, job_id="16dd6ac01fc0", name="Evening Kanban Review",
+        filename="2026-06-10_21-00-00.md", response="[SILENT]",
+    )
+    (store / "output" / "16dd6ac01fc0" / "2026-06-11_21-00-00.md").write_text(
+        "## Response\n\nEchter Abend-Report.\n", encoding="utf-8",
+    )
+    items = lv._collect_cron_items(with_bodies=True)
+    assert len(items) == 1
+    assert "Echter Abend-Report." in items[0].body_md
+    assert lv._get_item("cron::main::16dd6ac01fc0::2026-06-10_21-00-00.md") is None
+    # Nicht-silente Ausgabe desselben Jobs bleibt per Detail erreichbar.
+    detail = lv._get_item("cron::main::16dd6ac01fc0::2026-06-11_21-00-00.md")
+    assert detail is not None
+    assert "Echter Abend-Report." in detail.body_md
+
+
 def test_wartung_items_stay_listed(kanban_home):
     """Der SILENT-Filter ist kein Kategorie-Filter: echte wartung-Ausgaben
     bleiben im Lesesaal gelistet (nur das Badge ignoriert sie)."""

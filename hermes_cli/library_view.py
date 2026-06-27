@@ -358,7 +358,7 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
     name = meta.get("name", job_id)
     ts = _output_ts(filename, target.stat().st_mtime)
     profile = store_id.split(":", 1)[1] if ":" in store_id else None
-    return _Item(
+    item = _Item(
         id=f"cron::{store_id}::{job_id}::{filename}",
         category=_categorize_job(job_id, name),
         series_id=f"{store_id}/{job_id}",
@@ -370,6 +370,8 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
         series_meta=meta.get("schedule_display", ""),
         body_md=body,
     )
+    # Consistent with _collect_cron_items: silent self-reports are not readable.
+    return None if _is_silent(item) else item
 
 
 # ---------------------------------------------------------------------------
