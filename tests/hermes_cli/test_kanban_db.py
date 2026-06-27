@@ -4181,6 +4181,50 @@ def test_worker_context_worker_slim_uses_tighter_caps(kanban_home):
     assert "[truncated," in slim
 
 
+
+def test_worker_context_reviewer_review_uses_larger_body_cap(kanban_home):
+    """Reviewer code-review cards keep a larger diff/test body visible.
+
+    Regression: compact code-review cards exceeded the default 8 KiB body cap,
+    so the verdict-only reviewer could see instructions but not the full
+    implementation/test evidence and exhausted its iteration budget asking for
+    more context. Ordinary tasks keep the default cap; only assignee=reviewer +
+    kind=review gets the larger opening-body window.
+    """
+    default_cap = kb._CTX_CAP_PROFILES["full"]["body_bytes"]
+    reviewer_cap = kb._CTX_CAP_PROFILES["reviewer_review"]["body_bytes"]
+    assert reviewer_cap > default_cap
+    body = "BEGIN\n" + ("x" * (default_cap + 100)) + "\nVISIBLE_REVIEW_EVIDENCE"
+
+    with kb.connect() as conn:
+        reviewer_task = kb.create_task(
+            conn, title="review patch", body=body, assignee="reviewer", kind="review"
+        )
+        coder_task = kb.create_task(conn, title="ordinary", body=body, assignee="coder")
+        reviewer_ctx = kb.build_worker_context(conn, reviewer_task, profile="full")
+        coder_ctx = kb.build_worker_context(conn, coder_task, profile="full")
+
+    assert "VISIBLE_REVIEW_EVIDENCE" in reviewer_ctx
+    assert "VISIBLE_REVIEW_EVIDENCE" not in coder_ctx
+    assert "[truncated," in coder_ctx
+
+
+def test_worker_context_reviewer_review_continuation_uses_retry_caps(kanban_home):
+    """The larger reviewer body cap must not apply to continuation retries."""
+    retry_cap = kb._CTX_CAP_PROFILES["retry"]["body_bytes"]
+    body = "BEGIN\n" + ("x" * (retry_cap + 100)) + "\nHIDDEN_ON_RETRY"
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn, title="review retry", body=body, assignee="reviewer", kind="review"
+        )
+        conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (task_id,))
+        conn.commit()
+        ctx = kb.build_worker_context(conn, task_id, profile="full")
+
+    assert "This is continuation run 1/" in ctx
+    assert "HIDDEN_ON_RETRY" not in ctx
+    assert "[truncated," in ctx
+
 def test_worker_context_worker_slim_retry_uses_retry_profile(kanban_home):
     """Continuation workers on worker_slim use the tighter retry caps."""
     big_body = "BODY-" + ("x" * 3000)

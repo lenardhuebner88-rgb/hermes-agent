@@ -314,6 +314,21 @@ _CTX_CAP_PROFILES = {
         "comment_bytes": _CTX_MAX_COMMENT_BYTES,
         "role_history": 5,
     },
+    # Verdict-only code-review cards often carry a compact diff/test bundle in
+    # the opening body. The default 8 KiB task-body cap is good for ordinary
+    # worker cards, but it can amputate the actual changed-code evidence and
+    # make the reviewer loop burn iterations asking for context it cannot see.
+    # Keep this narrow: only initial reviewer/review contexts get the larger
+    # body window; retry/continuation contexts still switch to the tight retry
+    # profile below.
+    "reviewer_review": {
+        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
+        "comments": _CTX_MAX_COMMENTS,
+        "field_bytes": _CTX_MAX_FIELD_BYTES,
+        "body_bytes": 32 * 1024,
+        "comment_bytes": _CTX_MAX_COMMENT_BYTES,
+        "role_history": 5,
+    },
     "worker_slim": {
         "prior_attempts": 3,
         "comments": 8,
@@ -20229,6 +20244,12 @@ def build_worker_context(
         raise ValueError(f"unknown task {task_id}")
     if int(task.continuation_count or 0) > 0 and profile in {"worker_slim", "full"}:
         profile = "retry"
+    elif (
+        profile == "full"
+        and (task.assignee or "").strip().lower() == "reviewer"
+        and (task.kind or "").strip().lower() == "review"
+    ):
+        profile = "reviewer_review"
     caps = _CTX_CAP_PROFILES.get(profile, _CTX_CAP_PROFILES["full"])
     prior_attempts_limit = int(caps["prior_attempts"])
     comments_limit = int(caps["comments"])
