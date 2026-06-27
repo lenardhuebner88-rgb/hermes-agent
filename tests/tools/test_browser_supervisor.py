@@ -175,7 +175,24 @@ def _fire_on_page(cdp_url: str, expression: str) -> None:
             )
             sid = attach["result"]["sessionId"]
             await call("Page.navigate", {"url": _test_page_url()}, session_id=sid)
-            await asyncio.sleep(1.5)  # let the page load
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                ready = await call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "document.readyState",
+                        "returnByValue": True,
+                    },
+                    session_id=sid,
+                )
+                if (
+                    ready.get("result", {})
+                    .get("result", {})
+                    .get("value")
+                    == "complete"
+                ):
+                    break
+                await asyncio.sleep(0.05)
             await call(
                 "Runtime.evaluate",
                 {"expression": expression, "returnByValue": True},

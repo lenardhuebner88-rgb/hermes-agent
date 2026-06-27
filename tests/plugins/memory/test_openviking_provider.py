@@ -2398,11 +2398,12 @@ class _HungThread:
         return None
 
 
-def test_on_session_end_skips_commit_when_sync_worker_outlives_join():
+def test_on_session_end_skips_commit_when_sync_worker_outlives_join(monkeypatch):
     """If the sync worker is still alive after the 10s join, the commit must
     be skipped — late writes from the worker would otherwise land in an
     already-committed session and never be extracted. Leave _turn_count
     intact so the session stays marked dirty."""
+    monkeypatch.setattr(openviking_module, "_SESSION_DRAIN_TIMEOUT", 0.05)
     provider = _make_provider_with_session("old-sid", turn_count=3)
     provider._inflight_writers["old-sid"] = {_HungThread()}
 
@@ -2433,7 +2434,8 @@ def test_on_session_switch_skips_commit_when_sync_worker_outlives_join():
 # old sid and would otherwise land its writes past the commit boundary.
 # ---------------------------------------------------------------------------
 
-def test_on_session_end_waits_for_all_writers_not_just_latest():
+def test_on_session_end_waits_for_all_writers_not_just_latest(monkeypatch):
+    monkeypatch.setattr(openviking_module, "_SESSION_DRAIN_TIMEOUT", 0.05)
     provider = _make_provider_with_session("old-sid", turn_count=2)
     provider._inflight_writers["old-sid"] = {_HungThread()}
 

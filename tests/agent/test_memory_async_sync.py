@@ -109,7 +109,10 @@ def test_no_providers_does_not_create_executor():
 def test_shutdown_all_is_bounded_with_wedged_provider():
     """A provider that never returns must not hang teardown."""
     mgr = MemoryManager()
-    mgr.add_provider(_SlowProvider(delay=30.0))
+    # Keep the fake provider slower than the 5s drain timeout so an unbounded
+    # shutdown still fails the <8s assertion, without making pytest wait 30s
+    # for the executor thread to finish before subprocess exit.
+    mgr.add_provider(_SlowProvider(delay=10.0))
     mgr.sync_all("hi", "hey")
 
     t0 = time.time()

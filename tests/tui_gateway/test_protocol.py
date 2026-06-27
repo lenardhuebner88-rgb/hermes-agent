@@ -21,10 +21,28 @@ def _restore_stdout():
 
 @pytest.fixture()
 def server():
+    def _resolve_plugin_command_result(result):
+        if hasattr(result, "__await__"):
+            import asyncio
+
+            return asyncio.run(result)
+        return result
+
+    fake_plugins = types.SimpleNamespace(
+        get_plugin_command_handler=lambda _name: None,
+        resolve_plugin_command_result=_resolve_plugin_command_result,
+    )
+    fake_skill_commands = types.SimpleNamespace(
+        get_skill_commands=lambda: {},
+        scan_skill_commands=lambda: {},
+        build_skill_invocation_message=lambda *_args, **_kwargs: None,
+    )
     with patch.dict("sys.modules", {
+        "agent.skill_commands": fake_skill_commands,
         "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
+        "hermes_cli.plugins": fake_plugins,
         "hermes_state": MagicMock(),
     }):
         import importlib

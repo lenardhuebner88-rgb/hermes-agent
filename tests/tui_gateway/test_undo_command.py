@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import threading
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -34,20 +35,38 @@ def hermes_home(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def server(hermes_home):
+    def _resolve_plugin_command_result(result):
+        if hasattr(result, "__await__"):
+            import asyncio
+
+            return asyncio.run(result)
+        return result
+
+    fake_plugins = types.SimpleNamespace(
+        get_plugin_command_handler=lambda _name: None,
+        resolve_plugin_command_result=_resolve_plugin_command_result,
+    )
+    fake_skill_commands = types.SimpleNamespace(
+        scan_skill_commands=lambda: {},
+        build_skill_invocation_message=lambda *_args, **_kwargs: None,
+    )
     with patch.dict(
         "sys.modules",
         {
+            "agent.skill_commands": fake_skill_commands,
             "hermes_cli.env_loader": MagicMock(),
             "hermes_cli.banner": MagicMock(),
+            "hermes_cli.plugins": fake_plugins,
         },
     ):
         mod = importlib.import_module("tui_gateway.server")
         yield mod
         mod._sessions.clear()
         mod._pending.clear()
+        mod._pending_prompt_payloads.clear()
         mod._answers.clear()
-        mod._methods.clear()
-        importlib.reload(mod)
+        mod._db = None
+        mod._db_error = None
 
 
 @pytest.fixture()

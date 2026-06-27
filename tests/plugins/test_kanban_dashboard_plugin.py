@@ -83,8 +83,8 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     profiles = home / "profiles"
     for name in [
-        "default", "coder", "premium", "research", "reviewer", "scout", "claude-cli", "ops", "x", "a", "b", "old",
-        "new", "worker", "linguist", "alice", "bob",
+        "default", "coder", "premium", "research", "ops", "x", "a", "b", "old", "new", "worker", "linguist",
+        "alice", "bob",
     ]:
         d = profiles / name
         d.mkdir(parents=True, exist_ok=True)
@@ -97,10 +97,22 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-@pytest.fixture
-def client(kanban_home):
+@pytest.fixture(scope="module")
+def kanban_app():
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    app.state.kanban_plugin_module = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    return app
+
+
+@pytest.fixture
+def client(kanban_home, kanban_app):
+    mod = kanban_app.state.kanban_plugin_module
+    sys.modules["hermes_dashboard_plugin_kanban_test"] = mod
+    mod._lane_profile_cache = None
+    with mod._board_cache_lock:
+        mod._board_cache.clear()
+    app = kanban_app
     return TestClient(app)
 
 
