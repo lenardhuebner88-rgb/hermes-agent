@@ -92,7 +92,10 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod
+from hermes_cli import kanban_context as _kanban_context
+from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_templates
+from hermes_cli import kanban_worker_runtime as _worker_runtime
 
 _log = logging.getLogger(__name__)
 
@@ -294,58 +297,14 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
     return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
 
-# Worker-context caps so build_worker_context() stays bounded on
-# pathological boards (retry-heavy tasks, comment storms, giant
-# summaries). Values chosen to fit a typical 100k-char LLM prompt with
-# plenty of headroom. Each constant is tuned independently so users
-# who need to relax one don't have to relax all of them.
-_CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
-_CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
-_CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
-_CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
-_CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
-
-_CTX_CAP_PROFILES = {
-    "full": {
-        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
-        "comments": _CTX_MAX_COMMENTS,
-        "field_bytes": _CTX_MAX_FIELD_BYTES,
-        "body_bytes": _CTX_MAX_BODY_BYTES,
-        "comment_bytes": _CTX_MAX_COMMENT_BYTES,
-        "role_history": 5,
-    },
-    # Verdict-only code-review cards often carry a compact diff/test bundle in
-    # the opening body. The default 8 KiB task-body cap is good for ordinary
-    # worker cards, but it can amputate the actual changed-code evidence and
-    # make the reviewer loop burn iterations asking for context it cannot see.
-    # Keep this narrow: only initial reviewer/review contexts get the larger
-    # body window; retry/continuation contexts still switch to the tight retry
-    # profile below.
-    "reviewer_review": {
-        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
-        "comments": _CTX_MAX_COMMENTS,
-        "field_bytes": _CTX_MAX_FIELD_BYTES,
-        "body_bytes": 32 * 1024,
-        "comment_bytes": _CTX_MAX_COMMENT_BYTES,
-        "role_history": 5,
-    },
-    "worker_slim": {
-        "prior_attempts": 3,
-        "comments": 8,
-        "field_bytes": 1536,
-        "body_bytes": 4 * 1024,
-        "comment_bytes": 1024,
-        "role_history": 2,
-    },
-    "retry": {
-        "prior_attempts": 1,
-        "comments": 4,
-        "field_bytes": 1024,
-        "body_bytes": 2560,
-        "comment_bytes": 512,
-        "role_history": 0,
-    },
-}
+# Worker-context caps live in ``kanban_context``. Keep these aliases for
+# existing tests and call sites that import the historic private names.
+_CTX_MAX_PRIOR_ATTEMPTS = _kanban_context._CTX_MAX_PRIOR_ATTEMPTS
+_CTX_MAX_COMMENTS = _kanban_context._CTX_MAX_COMMENTS
+_CTX_MAX_FIELD_BYTES = _kanban_context._CTX_MAX_FIELD_BYTES
+_CTX_MAX_BODY_BYTES = _kanban_context._CTX_MAX_BODY_BYTES
+_CTX_MAX_COMMENT_BYTES = _kanban_context._CTX_MAX_COMMENT_BYTES
+_CTX_CAP_PROFILES = _kanban_context._CTX_CAP_PROFILES
 
 
 # ---------------------------------------------------------------------------
@@ -2826,11 +2785,13 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        # input_tokens/output_tokens/cost_usd/cost_status/verdict are appended to fresh DBs
-        # by the additive run_cols migration; mirror them here in the same order
-        # so a rebuilt legacy task_runs stays byte-identical to fresh and does
-        # not silently drop the budget columns (dispatcher) / verdict (review).
-        " error TEXT, input_tokens INTEGER, output_tokens INTEGER,"
+        # pre_run_commit_sha exists in SCHEMA_SQL; input_tokens/output_tokens/
+        # cost_usd/cost_status/verdict are appended to fresh DBs by the
+        # additive run_cols migration. Mirror them here in the same order so a
+        # rebuilt legacy task_runs stays byte-identical to fresh and does not
+        # silently drop the review baseline, budget columns, or verdict.
+        " error TEXT, pre_run_commit_sha TEXT,"
+        " input_tokens INTEGER, output_tokens INTEGER,"
         " cost_usd REAL,"
         " cost_status TEXT CHECK (cost_status IN ('actual','estimated')),"
         " verdict TEXT)",
@@ -17780,18 +17741,10 @@ def _dispatch_once_locked(
     # Tasks blocked this way go to skipped_per_profile_capped (not
     # skipped_unassigned — the operator-actionable signal is different:
     # "this profile is busy, try again later" not "this needs routing").
-    _per_profile_cap = max_in_progress_per_profile if (
-        isinstance(max_in_progress_per_profile, int)
-        and max_in_progress_per_profile > 0
-    ) else None
+    _per_profile_cap = _dispatch_policy.positive_int(max_in_progress_per_profile)
     _per_profile_running: dict[str, int] = {}
     if _per_profile_cap is not None:
-        for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
-        ):
-            _per_profile_running[prow["assignee"]] = int(prow["n"])
+        _per_profile_running = _dispatch_policy.profile_running_counts(conn)
 
     # serialize_by_repo (A+C): a per-resolved-repo_root in-flight lock beside the
     # per-profile cap. Seed from every NON-TERMINAL task that is NOT itself a fresh
@@ -17806,13 +17759,10 @@ def _dispatch_once_locked(
     _max_per_repo = max(1, int(max_concurrent_per_repo or 1))
     _repo_count: dict[str, int] = {}
     if serialize_by_repo:
-        for irow in conn.execute(
-            "SELECT workspace_kind, workspace_path FROM tasks "
-            "WHERE status NOT IN ('done', 'archived', 'ready', 'scheduled')"
-        ):
-            _rr = _repo_root_for_row(irow["workspace_kind"], irow["workspace_path"])
-            if _rr:
-                _repo_count[_rr] = _repo_count.get(_rr, 0) + 1
+        _repo_count = _dispatch_policy.repo_inflight_counts(
+            conn,
+            _repo_root_for_row,
+        )
 
     # C1 (N-C1) budget gate preflight. Caps default OFF (None) → both branches
     # are skipped, ``_budget_capped_profiles`` stays empty and
@@ -17822,38 +17772,18 @@ def _dispatch_once_locked(
     # so the per-row check is a set/bool lookup. K16 lesson: the subscription
     # fleet runs at $0 so tokens-per-profile is the real signal; $ catches
     # metered/OpenRouter. NULL token/cost values count as 0 (fail-soft).
-    _token_cap = daily_token_cap_per_profile if (
-        isinstance(daily_token_cap_per_profile, int)
-        and daily_token_cap_per_profile > 0
-    ) else None
-    _cost_cap = daily_cost_cap_usd if (
-        isinstance(daily_cost_cap_usd, (int, float))
-        and not isinstance(daily_cost_cap_usd, bool)
-        and daily_cost_cap_usd > 0
-    ) else None
+    _token_cap = _dispatch_policy.positive_int(daily_token_cap_per_profile)
+    _cost_cap = _dispatch_policy.positive_number(daily_cost_cap_usd)
     _budget_capped_profiles: set[str] = set()
     _global_cost_exceeded = False
     if (_token_cap is not None or _cost_cap is not None) and ready_rows:
-        _budget_window_start = int(time.time()) - 86400
-        if _token_cap is not None:
-            for brow in conn.execute(
-                "SELECT profile, "
-                "COALESCE(SUM(COALESCE(input_tokens, 0) + "
-                "              COALESCE(output_tokens, 0)), 0) AS tok "
-                "FROM task_runs WHERE started_at >= ? AND profile IS NOT NULL "
-                "GROUP BY profile",
-                (_budget_window_start,),
-            ):
-                if int(brow["tok"]) >= _token_cap:
-                    _budget_capped_profiles.add(brow["profile"])
-        if _cost_cap is not None:
-            _total_cost = conn.execute(
-                "SELECT COALESCE(SUM(COALESCE(cost_usd, 0)), 0) "
-                "FROM task_runs WHERE started_at >= ?",
-                (_budget_window_start,),
-            ).fetchone()[0]
-            if float(_total_cost or 0) >= _cost_cap:
-                _global_cost_exceeded = True
+        _budget_capped_profiles, _global_cost_exceeded = (
+            _dispatch_policy.capped_profiles_for_window(
+                conn,
+                token_cap=_token_cap,
+                cost_cap=_cost_cap,
+            )
+        )
 
     # G1 per-task input-token runaway guard preflight. Cap None/0 → guard OFF,
     # ``_per_task_input_usage`` stays empty and the per-row block below never
@@ -17862,27 +17792,13 @@ def _dispatch_once_locked(
     # count as 0) for THIS tick's ready candidates ONCE here — same "aggregate
     # once, lookup per row" shape as the C1 caps above. Fresh tasks (no runs)
     # simply don't appear in the map and read as 0.
-    _per_task_input_cap = per_task_input_token_cap if (
-        isinstance(per_task_input_token_cap, int)
-        and not isinstance(per_task_input_token_cap, bool)
-        and per_task_input_token_cap > 0
-    ) else None
+    _per_task_input_cap = _dispatch_policy.positive_int(per_task_input_token_cap)
     _per_task_input_usage: dict[str, tuple[int, int]] = {}
     if _per_task_input_cap is not None and ready_rows:
-        _ready_ids = [r["id"] for r in ready_rows]
-        for _chunk_start in range(0, len(_ready_ids), 500):
-            _chunk = _ready_ids[_chunk_start:_chunk_start + 500]
-            _placeholders = ",".join("?" * len(_chunk))
-            for urow in conn.execute(
-                "SELECT task_id, "
-                "COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS tok, "
-                "COUNT(*) AS n FROM task_runs "
-                f"WHERE task_id IN ({_placeholders}) GROUP BY task_id",
-                _chunk,
-            ):
-                _per_task_input_usage[urow["task_id"]] = (
-                    int(urow["tok"] or 0), int(urow["n"] or 0)
-                )
+        _per_task_input_usage = _dispatch_policy.per_task_input_usage(
+            conn,
+            [r["id"] for r in ready_rows],
+        )
 
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
@@ -18821,193 +18737,39 @@ def _maybe_scope_worker_cmd(cmd: list[str]) -> list[str]:
     ] + cmd
 
 
-def _claude_worker_bin() -> str:
-    """Resolve the ``claude`` CLI binary used for claude-CLI worker spawns.
-
-    Order: ``$HERMES_CLAUDE_BIN`` (explicit operator override) → the known
-    install path ``/home/piet/.local/bin/claude`` if it exists → bare
-    ``"claude"`` (PATH fallback).
-    """
-    env_bin = os.environ.get("HERMES_CLAUDE_BIN")
-    if env_bin:
-        return env_bin
-    default_path = "/home/piet/.local/bin/claude"
-    if os.path.exists(default_path):
-        return default_path
-    return "claude"
-
-
-def _is_claude_cli_profile(profile_arg: str, hermes_home: Optional[str]) -> bool:
-    """True if ``profile_arg`` should be dispatched via the ``claude`` CLI.
-
-    Fail-soft: returns False on ANY error so a broken profile config can never
-    divert the default (hermes) spawn path.
-
-    Two seams, checked in order:
-
-    1. Env allowlist (primary for tests/ops): ``HERMES_CLAUDE_CLI_PROFILES`` is
-       a comma-separated list of profile names; an exact (case-sensitive) match
-       after stripping whitespace returns True.
-    2. Profile config flag (production): the profile-scoped
-       ``<hermes_home>/config.yaml`` top-level key ``worker_runtime`` equal to
-       the string ``"claude-cli"`` returns True.
-    """
-    try:
-        allow = os.environ.get("HERMES_CLAUDE_CLI_PROFILES", "")
-        for name in allow.split(","):
-            if name.strip() == profile_arg:
-                return True
-        if hermes_home:
-            try:
-                import yaml
-            except Exception:
-                return False
-            cfg_path = os.path.join(hermes_home, "config.yaml")
-            if os.path.isfile(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as fh:
-                    cfg = yaml.safe_load(fh) or {}
-                if isinstance(cfg, dict) and cfg.get("worker_runtime") == "claude-cli":
-                    return True
-        return False
-    except Exception:
-        return False
-
-
-def _claude_profile_model(hermes_home: Optional[str]) -> Optional[str]:
-    """Per-profile default claude model for a claude-CLI worker.
-
-    Reads the top-level ``claude_model`` key from the profile-scoped
-    ``<hermes_home>/config.yaml``. Returns None on any error / absence so the
-    worker falls back to the claude subscription default. This is the MIDDLE
-    tier of claude model routing:
-
-        task.model_override  (per-task escalation, highest)
-        > claude_model       (per-profile default tier — this helper)
-        > subscription default (omit --model, currently opus-4-8)
-
-    A profile can thus default to a fast/cheap tier (e.g. ``claude-fable-5``)
-    while hard tasks escalate to Opus via the per-task override.
-    """
-    try:
-        if not hermes_home:
-            return None
-        import yaml
-        cfg_path = os.path.join(hermes_home, "config.yaml")
-        if not os.path.isfile(cfg_path):
-            return None
-        with open(cfg_path, "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
-        if isinstance(cfg, dict):
-            model = cfg.get("claude_model")
-            if isinstance(model, str) and model.strip():
-                return model.strip()
-        return None
-    except Exception:
-        return None
-
-
-def _claude_profile_instructions(hermes_home: Optional[str], *, max_chars: int = 12000) -> str:
-    """Return profile SOUL instructions for claude-CLI workers, fail-soft.
-
-    Claude-CLI workers do not enter ``hermes -p <profile> chat``, so the normal
-    Hermes profile system prompt would otherwise be skipped. Loading SOUL.md here
-    keeps profile hardening (scope contracts, worker discipline, cost guards) active
-    for the Max-subscription worker path too.
-    """
-    try:
-        if not hermes_home:
-            return ""
-        soul_path = os.path.join(hermes_home, "SOUL.md")
-        if not os.path.isfile(soul_path):
-            return ""
-        with open(soul_path, "r", encoding="utf-8") as fh:
-            text = fh.read().strip()
-        if not text:
-            return ""
-        if len(text) > max_chars:
-            text = text[:max_chars].rstrip() + "\n[SOUL.md truncated by dispatcher]"
-        return text
-    except Exception:
-        return ""
-
-
-# --- Worker env allowlist (security hardening S1) -------------------------
-#
-# Workers are spawned with broad autonomy (the claude-CLI lane even runs
-# `--dangerously-skip-permissions`), so the dispatcher must NOT forward its
-# own environment wholesale: the gateway env carries Discord bot tokens,
-# API_SERVER_KEY, and provider keys for lanes the worker doesn't run.
-# Hermes-lane workers re-load their profile-scoped `.env` from disk at
-# startup (load_hermes_dotenv, override=True), so stripping inherited
-# secrets does not starve them of their own lane credentials.
-
-# Name prefixes forwarded to workers: the Hermes worker contract + config
-# vars, terminal/timeout knobs, locale, and XDG base dirs.
-_WORKER_ENV_PREFIXES = ("HERMES_", "TERMINAL_", "LC_", "XDG_")
-
-# Exact names forwarded to workers: process basics only.
-_WORKER_ENV_PASSTHROUGH = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
-    "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP", "PWD",
-    "VIRTUAL_ENV", "PYTHONUNBUFFERED", "PYTHONIOENCODING",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-    # Windows process basics (no-ops elsewhere).
-    "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "PATHEXT",
-})
-
-# LLM provider keys hermes-lane workers may legitimately use. Passed through
-# as a safety net for profiles without their own `.env` (the profile `.env`
-# overrides these on load anyway). Deliberately NOT bot tokens / gateway
-# secrets. The claude-CLI lane drops even these (Max subscription needs no
-# provider key at all).
-_WORKER_LANE_PROVIDER_KEYS = frozenset({
-    "OPENROUTER_API_KEY", "MINIMAX_API_KEY", "MINIMAX_BASE_URL",
-    "KIMI_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL",
-    "HONCHO_API_KEY",
-})
-
-_CLAUDE_CLI_ALWAYS_DENIED_TOOLS = ("WebFetch", "WebSearch")
+_claude_worker_bin = _worker_runtime.claude_worker_bin
+_is_claude_cli_profile = _worker_runtime.is_claude_cli_profile
+_claude_profile_model = _worker_runtime.claude_profile_model
+_claude_profile_instructions = _worker_runtime.claude_profile_instructions
+_WORKER_ENV_PREFIXES = _worker_runtime.WORKER_ENV_PREFIXES
+_WORKER_ENV_PASSTHROUGH = _worker_runtime.WORKER_ENV_PASSTHROUGH
+_WORKER_LANE_PROVIDER_KEYS = _worker_runtime.WORKER_LANE_PROVIDER_KEYS
+_CLAUDE_CLI_ALWAYS_DENIED_TOOLS = _worker_runtime.CLAUDE_CLI_ALWAYS_DENIED_TOOLS
 _CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS = (
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "Task",
-    "Agent",
+    _worker_runtime.CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS
 )
-_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = {"reviewer", "critic"}
-
+_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = (
+    _worker_runtime.CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
+)
 
 def _build_worker_env(parent_env) -> dict:
-    """Allowlisted copy of ``parent_env`` for spawned kanban workers.
-
-    Everything not matched by the allowlist is dropped — most importantly
-    DISCORD_* bot tokens, API_SERVER_KEY, ANTHROPIC_API_KEY and any other
-    credential the dispatcher process happens to hold.
-    """
-    env: dict = {}
-    for key, value in parent_env.items():
-        if (
-            key in _WORKER_ENV_PASSTHROUGH
-            or key in _WORKER_LANE_PROVIDER_KEYS
-            or key.startswith(_WORKER_ENV_PREFIXES)
-        ):
-            env[key] = value
-    return env
+    return _worker_runtime.build_worker_env(
+        parent_env,
+        passthrough=_WORKER_ENV_PASSTHROUGH,
+        lane_provider_keys=_WORKER_LANE_PROVIDER_KEYS,
+        prefixes=_WORKER_ENV_PREFIXES,
+    )
 
 
 def _is_claude_verdict_read_only_lane(
     profile_arg: str,
     lane_entry: Optional[dict],
 ) -> bool:
-    """Return whether the active runtime map puts this verdict lane on claude-cli."""
-    if not lane_entry:
-        return False
-    if str(lane_entry.get("worker_runtime") or "").strip().lower() != "claude-cli":
-        return False
-    return profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
+    return _worker_runtime.is_claude_verdict_read_only_lane(
+        profile_arg,
+        lane_entry,
+        read_only_profiles=_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES,
+    )
 
 
 def _spawn_claude_worker(
@@ -19814,12 +19576,7 @@ def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     and the comment-thread renderer (:func:`_render_comment_thread`) cap text
     identically.
     """
-    if not s:
-        return ""
-    s = s.strip()
-    if len(s) <= limit:
-        return s
-    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+    return _kanban_context.cap_text(s, limit)
 
 
 def _render_comment_thread(
@@ -19849,48 +19606,11 @@ def _render_comment_thread(
     are shown (each body still capped). Returns ``[]`` for an empty thread so
     callers emit no block.
     """
-    if not comments:
-        return []
-    directives = [c for c in comments if getattr(c, "kind", "comment") == "directive"]
-    regular = [c for c in comments if getattr(c, "kind", "comment") != "directive"]
-
-    lines: list[str] = []
-
-    if directives:
-        lines.append("## ⚠️ OPERATOR DIRECTIVE — supersedes the task body above")
-        for c in directives:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
-            safe_author = (c.author or "").replace("`", "")
-            lines.append(f"operator directive `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, comment_bytes))
-            lines.append("")
-
-    if regular:
-        if len(regular) > max_comments:
-            omitted_c = len(regular) - max_comments
-            shown_c = regular[-max_comments:]
-        else:
-            omitted_c = 0
-            shown_c = regular
-        lines.append("## Comment thread")
-        if omitted_c:
-            lines.append(
-                f"_({omitted_c} earlier comment{'s' if omitted_c != 1 else ''} "
-                f"omitted; showing most recent {len(shown_c)})_"
-            )
-        for c in shown_c:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
-            # Render author with explicit "comment from worker" framing so
-            # operator-controlled HERMES_PROFILE values like "hermes-system"
-            # or "operator" can't be misread by the next worker as a system
-            # directive above the (attacker-influenceable) comment body.
-            # Defense-in-depth — the LLM-controlled author-forgery surface
-            # was already closed in #22435. See #22452.
-            safe_author = (c.author or "").replace("`", "")
-            lines.append(f"comment from worker `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, comment_bytes))
-            lines.append("")
-    return lines
+    return _kanban_context.render_comment_thread(
+        comments,
+        max_comments=max_comments,
+        comment_bytes=comment_bytes,
+    )
 
 
 def _render_parent_results_and_role_history(
@@ -20242,15 +19962,8 @@ def build_worker_context(
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
-    if int(task.continuation_count or 0) > 0 and profile in {"worker_slim", "full"}:
-        profile = "retry"
-    elif (
-        profile == "full"
-        and (task.assignee or "").strip().lower() == "reviewer"
-        and (task.kind or "").strip().lower() == "review"
-    ):
-        profile = "reviewer_review"
-    caps = _CTX_CAP_PROFILES.get(profile, _CTX_CAP_PROFILES["full"])
+    profile = _kanban_context.context_profile_for_task(task, profile)
+    caps = _kanban_context.context_caps(profile)
     prior_attempts_limit = int(caps["prior_attempts"])
     comments_limit = int(caps["comments"])
     field_bytes = int(caps["field_bytes"])

@@ -3405,7 +3405,16 @@ def _resolve_auto(
         # on a depleted main provider would pay one doomed 402 RTT before
         # falling to Step-2.
         main_chain_label = _normalize_chain_label(resolved_provider)
-        if main_chain_label and _is_provider_unhealthy(main_chain_label):
+        if (
+            _normalize_aux_provider(resolved_provider) == "openai-codex"
+            and not _codex_auto_aux_model_allowed(main_model)
+        ):
+            logger.warning(
+                "Auxiliary auto-detect: skipping openai-codex main model %r "
+                "because it is not in the local Codex OAuth catalog; trying fallback",
+                main_model,
+            )
+        elif main_chain_label and _is_provider_unhealthy(main_chain_label):
             _log_skip_unhealthy(main_chain_label)
         else:
             client, resolved = resolve_provider_client(
@@ -3456,6 +3465,30 @@ def _resolve_auto(
                    "Set OPENROUTER_API_KEY or configure a local model in config.yaml.",
                    ", ".join(tried))
     return None, None
+
+
+def _codex_auto_aux_model_allowed(model: str) -> bool:
+    """Return whether a main model is plausible for Codex OAuth aux calls.
+
+    ``openai-codex`` has no hardcoded auxiliary default because its accepted
+    OAuth-backed model allow-list drifts. But if a profile accidentally sets an
+    obviously non-Codex model (for example a Google Gemini slug), Step 1 of
+    auto auxiliary resolution would otherwise retry that doomed model on every
+    side-task before fallback. The local Codex catalog/cache is cheap and
+    already used by the picker, so use it as a guardrail for auto mode only.
+    """
+    candidate = (model or "").strip()
+    if not candidate:
+        return False
+    try:
+        from hermes_cli.codex_models import get_codex_model_ids
+
+        allowed = {m.lower() for m in get_codex_model_ids(access_token=None)}
+    except Exception:
+        # Fail open: if the catalog is unavailable, preserve historical
+        # main-model-first behavior instead of silently bypassing Codex.
+        return True
+    return candidate.lower() in allowed
 
 
 # ── Centralized Provider Router ─────────────────────────────────────────────

@@ -147,6 +147,38 @@ class TestResolveAutoMainFirst:
         mock_main_chain.assert_not_called()
         mock_openrouter.assert_not_called()
 
+    def test_codex_main_with_non_codex_model_skips_doomed_step_one(self):
+        """A stale profile can pair openai-codex with a non-Codex model.
+
+        Live logs showed research/web_extract repeatedly trying
+        openai-codex + gemini-3.5-flash and receiving provider 400s. Auto aux
+        should not pay that doomed round-trip when the model is absent from the
+        local Codex OAuth catalog; fall through to configured fallback instead.
+        """
+        task_client = MagicMock()
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="openai-codex",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="gemini-3.5-flash",
+        ), patch(
+            "hermes_cli.codex_models.get_codex_model_ids",
+            return_value=["gpt-5.5", "gpt-5.4-mini"],
+        ), patch(
+            "agent.auxiliary_client.resolve_provider_client",
+        ) as mock_resolve, patch(
+            "agent.auxiliary_client._try_configured_fallback_chain",
+            return_value=(task_client, "fallback-model", "fallback_chain[0](openrouter)"),
+        ) as mock_task_chain:
+            from agent.auxiliary_client import _resolve_auto
+
+            client, model = _resolve_auto(task="web_extract")
+
+        assert client is task_client
+        assert model == "fallback-model"
+        mock_resolve.assert_not_called()
+        mock_task_chain.assert_called_once_with(
+            "web_extract", "openai-codex", reason="main provider unavailable")
+
     def test_main_unavailable_uses_main_fallback_chain_before_builtin_chain(self):
         """Auto aux resolution honors top-level fallback_providers before built-ins."""
         main_fallback_client = MagicMock()

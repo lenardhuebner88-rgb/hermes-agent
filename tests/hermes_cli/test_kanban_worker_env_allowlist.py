@@ -61,6 +61,7 @@ def captured_spawn(monkeypatch):
         "hermes_cli.profiles.normalize_profile_name",
         lambda name: name,
     )
+    monkeypatch.setattr(kb, "_resolve_worker_cli_toolsets", lambda hermes_home: None)
     return captured
 
 
