@@ -712,7 +712,8 @@ def _mask_quoted_spans(text: str) -> str:
     quotes and should still block ingest.
     """
     chars = list(text)
-    closers = {"'": "'", '"': '"', "“": "”", "„": "“", "‘": "’"}
+    # Straight, English smart, German smart (inner) single quotes.
+    closers = {"'": "'", '"': '"', "“": "”", "„": "“", "‘": "’", "‚": "‘"}
 
     def _is_documentary_quote(content: str) -> bool:
         stripped = content.strip()

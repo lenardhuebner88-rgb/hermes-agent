@@ -274,6 +274,18 @@ def test_residue_tokens_exempts_quoted_markers_in_code_spans():
     assert planspecs._residue_tokens("siehe `.worktrees/...` und a/b/c.py") == []
 
 
+def test_residue_tokens_exempts_german_single_quotes_for_documentary_examples():
+    """German typography uses ‚…‘ (single low-9 + single high-6) for inner quotes.
+    Documentary rubric examples inside these quotes must be masked exactly like
+    the straight / double / English-smart variants, so a PlanSpec describing the
+    rubric does not false-trip on its own examples."""
+    assert planspecs._residue_tokens("‚AC-less subtask: <id>‘") == []
+    assert planspecs._residue_tokens("‚lane: council‘") == []
+    assert planspecs._residue_tokens("‚review_tier: critical‘") == []
+    # A genuine placeholder inside German single quotes still blocks.
+    assert planspecs._residue_tokens("‚Implement the <handler> for X‘") == ["<handler>"]
+
+
 def test_residue_tokens_still_flags_genuine_prose_placeholders():
     """Unit-level: a marker sitting bare in prose (no backticks / not a path) is
     still reported — the gate is not weakened."""
