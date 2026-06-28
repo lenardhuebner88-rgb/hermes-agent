@@ -547,6 +547,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_status TEXT,
     cost_source TEXT,
     pricing_version TEXT,
+    openrouter_generation_id TEXT,
     title TEXT,
     api_call_count INTEGER DEFAULT 0,
     handoff_state TEXT,
@@ -1602,6 +1603,7 @@ class SessionDB:
         billing_base_url: Optional[str] = None,
         billing_mode: Optional[str] = None,
         api_call_count: int = 0,
+        openrouter_generation_id: Optional[str] = None,
         absolute: bool = False,
     ) -> None:
         """Update token counters and backfill model if not already set.
@@ -1637,7 +1639,8 @@ class SessionDB:
                    billing_base_url = COALESCE(?, billing_base_url),
                    billing_mode = COALESCE(?, billing_mode),
                    model = COALESCE(model, ?),
-                   api_call_count = ?
+                   api_call_count = ?,
+                   openrouter_generation_id = COALESCE(?, openrouter_generation_id)
                    WHERE id = ?"""
         else:
             sql = """UPDATE sessions SET
@@ -1658,7 +1661,8 @@ class SessionDB:
                    billing_base_url = COALESCE(?, billing_base_url),
                    billing_mode = COALESCE(?, billing_mode),
                    model = COALESCE(model, ?),
-                   api_call_count = COALESCE(api_call_count, 0) + ?
+                   api_call_count = COALESCE(api_call_count, 0) + ?,
+                   openrouter_generation_id = COALESCE(?, openrouter_generation_id)
                    WHERE id = ?"""
         params = (
             input_tokens,
@@ -1677,6 +1681,7 @@ class SessionDB:
             billing_mode,
             model,
             api_call_count,
+            openrouter_generation_id,
             session_id,
         )
         def _do(conn):

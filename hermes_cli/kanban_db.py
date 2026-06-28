@@ -4693,7 +4693,8 @@ def _extract_run_cost_tokens(
     Purely in-process: the only source is the ``metadata`` dict a caller
     hands to ``_end_run`` (e.g. a worker that recorded its own usage).
     Tolerant of the common shapes — top-level keys, a nested ``usage`` block,
-    and the OpenAI-style ``prompt_tokens``/``completion_tokens`` aliases.
+    the OpenAI-style ``prompt_tokens``/``completion_tokens`` aliases, and a
+    nested ``cost`` block stamped by the NeuralWatt/dispatch path.
     Returns ``(None, None, None)`` when nothing usable is present, so a run
     with no usage data writes NULLs rather than crashing or guessing. The
     cross-DB ``state.db`` backfill is a separate slice (K5b).
@@ -4702,6 +4703,11 @@ def _extract_run_cost_tokens(
         return None, None, None
     usage = metadata.get("usage")
     usage = usage if isinstance(usage, dict) else {}
+    # NeuralWatt dispatch stamps cost under a nested ``cost`` dict:
+    # metadata.cost.request_cost_usd / cost_status. Treat it as an additional
+    # lookup source alongside the legacy top-level keys.
+    cost_block = metadata.get("cost")
+    cost_block = cost_block if isinstance(cost_block, dict) else {}
 
     def _first_int(*vals: Any) -> Optional[int]:
         for v in vals:
@@ -4733,6 +4739,9 @@ def _extract_run_cost_tokens(
         metadata.get("estimated_cost_usd"),
         metadata.get("cost"),
         usage.get("cost_usd"),
+        cost_block.get("request_cost_usd"),
+        cost_block.get("actual_cost_usd"),
+        cost_block.get("estimated_cost_usd"),
     )
     return input_tokens, output_tokens, cost_usd
 
@@ -4742,11 +4751,18 @@ def _extract_run_cost_status(metadata: Optional[dict]) -> Optional[str]:
         return None
     usage = metadata.get("usage")
     usage = usage if isinstance(usage, dict) else {}
+    cost_block = metadata.get("cost")
+    cost_block = cost_block if isinstance(cost_block, dict) else {}
     return _normalize_cost_status(
-        metadata.get("cost_status") or usage.get("cost_status"),
-        actual_cost_usd=metadata.get("actual_cost_usd") or usage.get("actual_cost_usd"),
+        metadata.get("cost_status")
+        or usage.get("cost_status")
+        or cost_block.get("cost_status"),
+        actual_cost_usd=metadata.get("actual_cost_usd")
+        or usage.get("actual_cost_usd")
+        or cost_block.get("actual_cost_usd"),
         estimated_cost_usd=metadata.get("estimated_cost_usd")
-        or usage.get("estimated_cost_usd"),
+        or usage.get("estimated_cost_usd")
+        or cost_block.get("estimated_cost_usd"),
     )
 
 
@@ -5608,6 +5624,17 @@ _PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
     # lands in models.dev.
     "kimi-k2.7": (0.67, 3.50, 0.20, 0.67),
     "moonshotai/Kimi-K2.7": (0.67, 3.50, 0.20, 0.67),
+
+    # GLM-5.2 family (Z.AI / NeuralWatt lane). Source: models.dev GLM pricing
+    # 2026-06-27. Base model glm-5.2: input $0.60/M, output $2.20/M. Variants
+    # (-fast, -short) inherit base pricing; cache rates default to 0.0 (GLM
+    # does not publish separate cache pricing). Entries for the variants are
+    # explicit so the override wins immediately without relying on suffix
+    # truncation in _lookup_model_price_per_mtok.
+    "glm-5.2": (0.60, 2.20, 0.0, 0.0),
+    "glm-5.2-fast": (0.60, 2.20, 0.0, 0.0),
+    "glm-5.2-short": (0.60, 2.20, 0.0, 0.0),
+    "glm-5.2-short-fast": (0.60, 2.20, 0.0, 0.0),
 }
 
 
@@ -5686,7 +5713,22 @@ def _lookup_model_price_per_mtok(
     except Exception:
         return None
     if info is None or not info.has_cost_data():
-        return None
+        # AC-2: suffix-truncation fallback. If the exact model name is not in
+        # models.dev, strip -short-fast, -fast, -short suffixes and retry with
+        # the base model name. This lets glm-5.2-fast → glm-5.2 base resolve
+        # even when the variant is not separately listed.
+        base_label = _strip_model_variant_suffix(model_label)
+        if base_label is not None:
+            try:
+                info = get_model_info(lookup_provider or "", base_label)
+                if info is None and base_label.lower().startswith("claude-"):
+                    info = get_model_info("anthropic", base_label)
+            except Exception:
+                return None
+            if info is None or not info.has_cost_data():
+                return None
+        else:
+            return None
     try:
         return (
             float(info.cost_input),
@@ -5696,6 +5738,24 @@ def _lookup_model_price_per_mtok(
         )
     except (TypeError, ValueError):
         return None
+
+
+def _strip_model_variant_suffix(model_label: str) -> Optional[str]:
+    """Strip -short-fast, -fast, -short suffixes from a model label.
+
+    Returns the base label if a known suffix was stripped, else None (no
+    truncation applicable — caller should not retry).
+
+    Only strips ONE known suffix per call (the longest match first), so
+    ``glm-5.2-short-fast`` → ``glm-5.2`` not ``glm-5.2-short``.
+    """
+    if not model_label:
+        return None
+    lowered = model_label.lower()
+    for suffix in ("-short-fast", "-short", "-fast"):
+        if lowered.endswith(suffix) and len(lowered) > len(suffix):
+            return model_label[: -len(suffix)]
+    return None
 
 
 def _equiv_from_tokens(
@@ -6627,6 +6687,24 @@ def _end_run(
                 cost_status = b_status
     if cost_status is None and cost is not None:
         cost_status = "actual"
+    # AC-3: NeuralWatt/subscription cost fallback. If no response cost was
+    # stamped anywhere, estimate from models.dev pricing × token counts and
+    # mark cost_status='estimated'. If estimation is impossible (no tokens or
+    # no price), record metadata.cost.cost_status='unknown' while leaving the
+    # historical task_runs.cost_status column NULL (its live CHECK constraint
+    # only accepts actual/estimated). Never hard-error on cost.
+    metadata_for_store = dict(metadata) if isinstance(metadata, dict) else metadata
+    if cost is None and isinstance(metadata_for_store, dict):
+        provider, model = _run_metadata_provider_model(metadata_for_store, profile=None)
+        est = _equiv_from_tokens(provider, model, in_tok, out_tok)
+        if est is not None:
+            cost = est
+            if cost_status is None:
+                cost_status = "estimated"
+        else:
+            cost_block = metadata_for_store.setdefault("cost", {})
+            if isinstance(cost_block, dict):
+                cost_block.setdefault("cost_status", "unknown")
     conn.execute(
         """
         UPDATE task_runs
@@ -6651,7 +6729,7 @@ def _end_run(
             outcome,
             summary,
             error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            json.dumps(metadata_for_store, ensure_ascii=False) if metadata_for_store else None,
             now,
             in_tok,
             out_tok,

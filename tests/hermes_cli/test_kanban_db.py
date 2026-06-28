@@ -666,6 +666,36 @@ def _write_state_session(
     return db
 
 
+def test_cost_pipeline_glm52_pricing_and_suffix_fallback(kanban_home):
+    assert kb._equiv_from_tokens(None, "glm-5.2", 1_000_000, 1_000_000) == pytest.approx(2.80)
+    assert kb._equiv_from_tokens(None, "glm-5.2-fast", 1_000_000, 1_000_000) == pytest.approx(2.80)
+    assert kb._equiv_from_tokens(None, "glm-5.2-short", 1_000_000, 1_000_000) == pytest.approx(2.80)
+    assert kb._equiv_from_tokens(None, "glm-5.2-short-fast", 1_000_000, 1_000_000) == pytest.approx(2.80)
+
+
+def test_cost_pipeline_unknown_neuralwatt_cost_status_is_metadata_only(kanban_home):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="unknown-cost", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            metadata={
+                "provider": "neuralwatt",
+                "model": "no-such-model",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+        row = conn.execute(
+            "SELECT cost_usd, cost_status, metadata FROM task_runs WHERE task_id=?",
+            (tid,),
+        ).fetchone()
+        assert row["cost_usd"] is None
+        assert row["cost_status"] is None
+        assert json.loads(row["metadata"])["cost"]["cost_status"] == "unknown"
+
+
 def test_k5b_backfills_cost_from_state_db_on_session_match(kanban_home):
     """K5b: a run with only worker_session_id (no in-process usage) gets its
     token/cost backfilled from the matching state.db session."""
@@ -945,6 +975,132 @@ def test_k16_kimi_k27_price_override_is_available():
     )
 
 
+def test_b1_glm52_price_override_entries():
+    """AC-1: _PRICE_OVERRIDES_PER_MTOK has explicit entries for the glm-5.2 family."""
+    assert "glm-5.2" in kb._PRICE_OVERRIDES_PER_MTOK
+    assert "glm-5.2-fast" in kb._PRICE_OVERRIDES_PER_MTOK
+    assert "glm-5.2-short" in kb._PRICE_OVERRIDES_PER_MTOK
+    # All variants inherit base pricing: input $0.60/M, output $2.20/M
+    for model in ("glm-5.2", "glm-5.2-fast", "glm-5.2-short"):
+        rates = kb._PRICE_OVERRIDES_PER_MTOK[model]
+        assert rates[0] == pytest.approx(0.60)  # input
+        assert rates[1] == pytest.approx(2.20)  # output
+
+
+def test_b1_glm52_price_override_via_lookup():
+    """AC-1: the override dict is consulted by _lookup_model_price_per_mtok."""
+    rates = kb._lookup_model_price_per_mtok("neuralwatt", "glm-5.2")
+    assert rates is not None
+    assert rates[0] == pytest.approx(0.60)
+    assert rates[1] == pytest.approx(2.20)
+
+
+def test_b2_strip_model_variant_suffix():
+    """AC-2: suffix truncation for -fast, -short, -short-fast variants."""
+    assert kb._strip_model_variant_suffix("glm-5.2-fast") == "glm-5.2"
+    assert kb._strip_model_variant_suffix("glm-5.2-short") == "glm-5.2"
+    assert kb._strip_model_variant_suffix("glm-5.2-short-fast") == "glm-5.2"
+    # No known suffix → None (caller should not retry)
+    assert kb._strip_model_variant_suffix("gpt-5.5") is None
+    assert kb._strip_model_variant_suffix("") is None
+
+
+def test_b3_neuralwatt_cost_block_extraction():
+    """AC-3: _extract_run_cost_tokens reads metadata.cost.request_cost_usd."""
+    metadata = {
+        "cost": {
+            "request_cost_usd": 0.0042,
+            "cost_status": "actual",
+        }
+    }
+    in_tok, out_tok, cost = kb._extract_run_cost_tokens(metadata)
+    assert cost == pytest.approx(0.0042)
+    status = kb._extract_run_cost_status(metadata)
+    assert status == "actual"
+
+
+def test_b3_neuralwatt_cost_status_estimated_fallback(kanban_home, tmp_path, monkeypatch):
+    """AC-3: when response cost is missing, _end_run falls back to estimated."""
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (0.60, 2.20, 0.0, 0.0) if model and "glm-5.2" in model else None,
+    )
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="nw-fallback", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done",
+            metadata={
+                "provider": "neuralwatt",
+                "model": "glm-5.2-fast",
+                "input_tokens": 10000,
+                "output_tokens": 5000,
+            },
+        )
+        row = conn.execute(
+            "SELECT cost_usd, cost_status FROM task_runs WHERE task_id=?", (tid,)
+        ).fetchone()
+        assert row["cost_usd"] is not None
+        assert row["cost_usd"] > 0
+        assert row["cost_status"] == "estimated"
+
+
+def test_b3_neuralwatt_cost_status_unknown_when_no_pricing(kanban_home, tmp_path, monkeypatch):
+    """AC-3: when both response cost and models.dev pricing are unavailable,
+    cost_status is 'unknown' in the metadata (never hard-error). The
+    task_runs.cost_status column stays NULL because its CHECK constraint
+    only accepts actual/estimated."""
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok", lambda provider, model: None,
+    )
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="nw-unknown", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done",
+            metadata={"provider": "neuralwatt", "model": "unknown-model"},
+        )
+        row = conn.execute(
+            "SELECT cost_usd, cost_status, metadata FROM task_runs WHERE task_id=?", (tid,)
+        ).fetchone()
+        assert row["cost_usd"] is None
+        # 'unknown' is in the metadata.cost.cost_status, not the column.
+        import json as _json
+        meta = _json.loads(row["metadata"]) if row["metadata"] else {}
+        cost_block = meta.get("cost", {})
+        assert cost_block.get("cost_status") == "unknown"
+
+
+def test_b4_openrouter_generation_id_extraction():
+    """AC-4: _extract_openrouter_generation_id reads response.id."""
+    from agent.conversation_loop import _extract_openrouter_generation_id
+    resp = type("R", (), {"id": "gen-abc123", "_openrouter_generation_id": None})()
+    assert _extract_openrouter_generation_id(resp) == "gen-abc123"
+    resp2 = type("R", (), {"id": None})()
+    assert _extract_openrouter_generation_id(resp2) is None
+
+
+def test_b4_openrouter_generation_id_persisted(tmp_path):
+    """AC-4: openrouter_generation_id column exists and is writable in state.db."""
+    import sqlite3 as _sqlite3
+    from hermes_state import SessionDB
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path)
+    db.update_token_counts(
+        "sess-or-1", input_tokens=100, output_tokens=50,
+        model="glm-5.2", openrouter_generation_id="gen-xyz789",
+    )
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        conn.row_factory = _sqlite3.Row
+        row = conn.execute(
+            "SELECT openrouter_generation_id FROM sessions WHERE id=?", ("sess-or-1",)
+        ).fetchone()
+        assert row["openrouter_generation_id"] == "gen-xyz789"
+    finally:
+        conn.close()
+
+
 def test_k16_backfill_run_costs_skips_run_without_session_id(kanban_home, tmp_path, monkeypatch):
     """K16: a run with no worker_session_id is skipped, never crashes."""
     profile_dir = tmp_path / "profiles" / "critic"
@@ -1176,6 +1332,7 @@ def _write_session_rows(db_path, rows):
             "input_tokens INTEGER, output_tokens INTEGER, "
             "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT, "
             "model TEXT, billing_provider TEXT, cost_status TEXT, "
+            "openrouter_generation_id TEXT, "
             "cache_read_tokens INTEGER, cache_write_tokens INTEGER)"
         )
         for r in rows:
@@ -1183,14 +1340,15 @@ def _write_session_rows(db_path, rows):
                 "INSERT INTO sessions (id, source, started_at, ended_at, "
                 "input_tokens, output_tokens, actual_cost_usd, "
                 "estimated_cost_usd, cwd, model, billing_provider, "
-                "cost_status, cache_read_tokens, cache_write_tokens) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cost_status, openrouter_generation_id, cache_read_tokens, cache_write_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     r["id"], r.get("source", "cli"), r.get("started_at"),
                     r.get("ended_at"), r.get("input_tokens"),
                     r.get("output_tokens"), r.get("actual_cost_usd"),
                     r.get("estimated_cost_usd"), r.get("cwd"), r.get("model"),
                     r.get("billing_provider"), r.get("cost_status"),
+                    r.get("openrouter_generation_id"),
                     r.get("cache_read_tokens"), r.get("cache_write_tokens"),
                 ),
             )

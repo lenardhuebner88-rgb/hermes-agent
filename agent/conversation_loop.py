@@ -72,6 +72,38 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def _extract_openrouter_generation_id(response: Any) -> Optional[str]:
+    """Extract the OpenRouter generation id from a model response.
+
+    The OpenRouter generation id is returned in two ways:
+    1. As the ``id`` field of the JSON response body (OpenAI-compatible).
+    2. As the ``x-openrouter-id`` HTTP response header.
+
+    For non-streaming calls the OpenAI SDK does not expose raw HTTP headers on
+    the ``ChatCompletion`` object, so we read the ``id`` field from the parsed
+    response body. For streaming calls, the streaming adapter can stamp
+    ``_openrouter_generation_id`` on the response object via the diag headers
+    captured in :func:`agent.stream_diag.stream_diag_capture_response`.
+    Returns ``None`` silently if no id is available — never raises.
+    """
+    try:
+        # Stamped by the streaming adapter from diag["headers"]["x-openrouter-id"]
+        stamped = getattr(response, "_openrouter_generation_id", None)
+        if stamped and isinstance(stamped, str) and stamped.strip():
+            return stamped.strip()
+    except Exception:
+        pass
+    try:
+        body_id = getattr(response, "id", None)
+        if body_id and isinstance(body_id, str) and body_id.strip():
+            # OpenRouter generation ids typically start with "gen-";
+            # accept any non-empty string id as the generation id.
+            return body_id.strip()
+    except Exception:
+        pass
+    return None
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -1966,6 +1998,7 @@ def run_conversation(
                                 if cost_result.status == "included" else None,
                                 model=agent.model,
                                 api_call_count=1,
+                                openrouter_generation_id=_extract_openrouter_generation_id(response),
                             )
                         except Exception as e:
                             # Log token persistence failures so they're
