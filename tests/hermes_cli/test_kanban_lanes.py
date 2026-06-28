@@ -215,6 +215,10 @@ class TestLaneSpawnResolution:
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
         monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+        # Phase 2 (AC-1): the verdict-lane allowlist fail-closed gate probes the
+        # Claude CLI version. The test binary is a stub, so pin the gate ON to
+        # reach the cmd-capture (the dedicated fail-closed test pins it OFF).
+        monkeypatch.setenv("HERMES_VERDICT_ALLOWLIST_ENFORCEABLE", "1")
 
         task = self._make_task(tmp_path, assignee=assignee, model_override=model_override)
         kb._default_spawn(task, str(tmp_path / "ws"))
@@ -230,6 +234,12 @@ class TestLaneSpawnResolution:
         assert cmd[0] == "/usr/local/bin/claude-test", f"not the claude path: {cmd[:3]}"
         assert "--disallowedTools" in cmd, f"--disallowedTools missing: {cmd}"
         return set(cmd[cmd.index("--disallowedTools") + 1].split(","))
+
+    def _claude_allowed_tools(self, cmd):
+        """Phase 2: verdict lanes use --allowedTools (allowlist fail-closed)."""
+        assert cmd[0] == "/usr/local/bin/claude-test", f"not the claude path: {cmd[:3]}"
+        assert "--allowedTools" in cmd, f"--allowedTools missing: {cmd}"
+        return set(cmd[cmd.index("--allowedTools") + 1].split(","))
 
     def test_claude_verdict_lanes_get_read_only_cage(
         self, kanban_home, tmp_path, monkeypatch,
@@ -250,12 +260,17 @@ class TestLaneSpawnResolution:
             lane_profiles=lane_profiles,
         )
 
-        expected = {
-            "WebFetch", "WebSearch", "Edit", "Write", "MultiEdit",
-            "NotebookEdit", "Task", "Agent",
-        }
-        assert expected <= self._claude_disallowed_tools(reviewer_cmd)
-        assert expected <= self._claude_disallowed_tools(critic_cmd)
+        # Phase 2 (AC-1): verdict lanes use --allowedTools (allowlist), NOT
+        # --disallowedTools (denylist). The allowlist is the minimal read-only
+        # set: Read, Grep, Glob. No Bash (no native read-only Bash tool).
+        # --dangerously-skip-permissions must NOT appear in the verdict cmd.
+        expected_allow = {"Read", "Grep", "Glob"}
+        assert self._claude_allowed_tools(reviewer_cmd) == expected_allow
+        assert self._claude_allowed_tools(critic_cmd) == expected_allow
+        assert "--dangerously-skip-permissions" not in reviewer_cmd
+        assert "--dangerously-skip-permissions" not in critic_cmd
+        assert "--disallowedTools" not in reviewer_cmd
+        assert "--disallowedTools" not in critic_cmd
 
     def test_claude_coder_and_premium_lanes_keep_full_tools(
         self, kanban_home, tmp_path, monkeypatch,
