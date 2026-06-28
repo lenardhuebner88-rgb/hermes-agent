@@ -1632,6 +1632,23 @@ def _resolve_busy_timeout_ms() -> int:
     return DEFAULT_BUSY_TIMEOUT_MS
 
 
+def _register_connection_functions(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Install Python-backed SQL functions required by triggers/transition SQL."""
+    conn.create_function(
+        "kanban_review_done_authorized",
+        0,
+        lambda: 1 if _REVIEW_DONE_TERMINAL_AUTHORITY.get() else 0,
+    )
+    conn.create_function(
+        "kanban_review_gate_should_apply",
+        1,
+        lambda task_id: 1
+        if _review_gate_should_apply(conn, str(task_id), None)
+        else 0,
+    )
+    return conn
+
+
 def _sqlite_connect(
     path: Path, busy_timeout_ms: Optional[int] = None
 ) -> sqlite3.Connection:
@@ -1649,18 +1666,7 @@ def _sqlite_connect(
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
-    conn.create_function(
-        "kanban_review_done_authorized",
-        0,
-        lambda: 1 if _REVIEW_DONE_TERMINAL_AUTHORITY.get() else 0,
-    )
-    conn.create_function(
-        "kanban_review_gate_should_apply",
-        1,
-        lambda task_id: 1
-        if _review_gate_should_apply(conn, str(task_id), None)
-        else 0,
-    )
+    _register_connection_functions(conn)
     # ``sqlite3.connect(timeout=...)`` normally maps to busy_timeout, but set
     # the PRAGMA explicitly so it is observable and survives future wrapper
     # changes. Parameter binding is not supported for PRAGMA assignments.

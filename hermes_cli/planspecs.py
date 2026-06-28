@@ -534,6 +534,7 @@ def mark_planspec_not_needed(
     *,
     plans_root: Path = DEFAULT_PLANS_ROOT,
     author: str = "dashboard",
+    board: str | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_planspec_path(path, plans_root=plans_root)
     try:
@@ -552,22 +553,47 @@ def mark_planspec_not_needed(
             "closed_reason": _closed_reason(current_status),
         }
 
+    archived_chain: dict[str, Any] | None = None
+    kanban_state = _planspec_kanban_state(resolved, board=board)
+    root_id = str((kanban_state or {}).get("root_task_id") or "").strip()
+    if root_id and (kanban_state or {}).get("state") not in _CLOSED_KANBAN_STATES:
+        conn = kanban_db.connect(board=board)
+        try:
+            running = kanban_db.planspec_chain_running_subtasks(conn, root_id)
+            if running:
+                raise PlanSpecBlocked(
+                    [
+                        "cannot mark PlanSpec as not needed while its Kanban chain has running/review children",
+                        f"root {root_id}: running child task(s) {', '.join(running)}",
+                    ]
+                )
+            child_ids = kanban_db.parent_ids(conn, root_id)
+            _archive_planspec_chain(conn, root_id)
+            archived_chain = {"root_task_id": root_id, "child_ids": child_ids}
+        finally:
+            conn.close()
+
     frontmatter["status"] = "obsolete"
     frontmatter["closed_at"] = datetime.now(timezone.utc).date().isoformat()
     frontmatter["closed_by"] = author.strip() or "dashboard"
     frontmatter["closed_reason"] = "not needed anymore"
+    if root_id:
+        frontmatter["kanban_root_task_id"] = root_id
 
     raw_frontmatter = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
     next_text = f"---\n{raw_frontmatter}\n---\n\n{body.lstrip()}"
     tmp_path = resolved.with_name(f".{resolved.name}.tmp")
     tmp_path.write_text(next_text, encoding="utf-8")
     tmp_path.replace(resolved)
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "path": str(resolved),
         "status": "obsolete",
         "closed_reason": "not needed anymore",
     }
+    if archived_chain:
+        result["archived_chain"] = archived_chain
+    return result
 
 
 def mark_planspec_shipped(

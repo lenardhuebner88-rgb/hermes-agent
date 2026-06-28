@@ -37,7 +37,7 @@ import {
 } from "../lib/fleet";
 import { getFlowSubtaskStatusExplanation } from "../lib/flowStatus";
 import { countActionableFailures, countOpenFunnelDrafts, summarizeFlowAttention } from "../lib/flowAttention";
-import { getHeldFlowDispatchGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
+import { getHeldFlowDispatchGuard, getHeldFlowRootGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
 import {
   useBoard,
   useDispositionItems,
@@ -599,6 +599,7 @@ function statusTone(s: TaskStatus) {
 
 interface FlowDispatchChoice extends HeldFlowDispatchGuard {
   taskId: string;
+  releaseCount?: number;
 }
 
 function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStatus, manualReviewFallback, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
@@ -2058,15 +2059,25 @@ export function FlowView() {
     setCheckingDispatchId(task.id);
     void (async () => {
       const detail = taskDetail.detailById[task.id] ?? await fetchDetail(task.id);
-      const rootId = detail?.events
-        .map((event) => event.payload?.from_decompose_of)
-        .find((value): value is string => typeof value === "string" && !!value.trim()) ?? null;
-      const rootDetail = rootId ? (taskDetail.detailById[rootId] ?? await fetchDetail(rootId)) : null;
-      const guard = getHeldFlowDispatchGuard(task, detail, rootDetail, allTasks);
-      if (guard) {
-        setDispatchChoice({ taskId: task.id, ...guard });
+      const rootGuard = getHeldFlowRootGuard(task, detail, allTasks);
+      if (rootGuard) {
+        setDispatchChoice({
+          taskId: task.id,
+          rootId: rootGuard.rootId,
+          heldSiblingIds: rootGuard.heldChildIds,
+          releaseCount: rootGuard.heldChildIds.length,
+        });
       } else {
-        runTaskAction(task.id, action);
+        const rootId = detail?.events
+          .map((event) => event.payload?.from_decompose_of)
+          .find((value): value is string => typeof value === "string" && !!value.trim()) ?? null;
+        const rootDetail = rootId ? (taskDetail.detailById[rootId] ?? await fetchDetail(rootId)) : null;
+        const guard = getHeldFlowDispatchGuard(task, detail, rootDetail, allTasks);
+        if (guard) {
+          setDispatchChoice({ taskId: task.id, ...guard, releaseCount: guard.heldSiblingIds.length + 1 });
+        } else {
+          runTaskAction(task.id, action);
+        }
       }
       setCheckingDispatchId(null);
     })();
@@ -2088,7 +2099,7 @@ export function FlowView() {
   }, [flowRelease, fetchDetail, selectedId]);
   const onReleaseChain = useCallback(() => {
     if (!dispatchChoice) return;
-    onReleasePlan(dispatchChoice.rootId, dispatchChoice.heldSiblingIds.length + 1);
+    onReleasePlan(dispatchChoice.rootId, dispatchChoice.releaseCount ?? dispatchChoice.heldSiblingIds.length + 1);
     setDispatchChoice(null);
   }, [dispatchChoice, onReleasePlan]);
   const onDispatchSingle = useCallback(() => {

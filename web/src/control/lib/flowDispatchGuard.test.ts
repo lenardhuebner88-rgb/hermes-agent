@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getHeldFlowDispatchGuard } from "./flowDispatchGuard";
+import { getHeldFlowDispatchGuard, getHeldFlowRootGuard } from "./flowDispatchGuard";
 import type { BoardTask } from "./types";
 import type { TaskDetailResponse } from "./schemas";
 
@@ -78,6 +78,27 @@ describe("getHeldFlowDispatchGuard", () => {
       null,
       [selected],
     );
+
+    expect(guard).toBeNull();
+  });
+});
+
+
+describe("getHeldFlowRootGuard", () => {
+  it("detects a held PlanSpec root so root dispatch releases the chain instead of patching the root", () => {
+    const root = task("t_root", "scheduled");
+    const guard = getHeldFlowRootGuard(root, rootDetail(["t_child_a", "t_child_b"]), [
+      root,
+      task("t_child_a", "scheduled"),
+      task("t_child_b", "scheduled"),
+    ]);
+
+    expect(guard).toEqual({ rootId: "t_root", heldChildIds: ["t_child_a", "t_child_b"] });
+  });
+
+  it("ignores PlanSpec roots whose children are already released", () => {
+    const root = task("t_root", "scheduled");
+    const guard = getHeldFlowRootGuard(root, rootDetail(["t_child_a"]), [root, task("t_child_a", "todo")]);
 
     expect(guard).toBeNull();
   });
