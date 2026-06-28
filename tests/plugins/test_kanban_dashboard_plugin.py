@@ -3073,7 +3073,8 @@ def test_patch_status_done_with_summary_and_metadata(client):
         run = kb.latest_run(conn, tid)
         assert run.outcome == "completed"
         assert run.summary == "shipped the thing"
-        assert run.metadata == {"changed_files": ["a.py", "b.py"], "tests_run": 7}
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {"changed_files": ["a.py", "b.py"], "tests_run": 7}
     finally:
         conn.close()
 

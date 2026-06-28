@@ -433,7 +433,8 @@ def test_complete_happy_path(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
         assert run.summary == "got the thing done"
-        assert run.metadata == {"files": 2}
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {"files": 2}
     finally:
         conn.close()
 
@@ -461,7 +462,8 @@ def test_complete_metadata_round_trips_through_show(worker_env):
     shown = json.loads(show_out)
     assert shown["task"]["status"] == "done"
     assert shown["runs"][-1]["summary"] == "finished with structured evidence"
-    assert shown["runs"][-1]["metadata"] == handoff
+    shown_md = {k: v for k, v in shown["runs"][-1]["metadata"].items() if k != "cost"}
+    assert shown_md == handoff
 
 
 def test_complete_stamps_worker_session_id_from_env(monkeypatch, worker_env):
@@ -481,7 +483,8 @@ def test_complete_stamps_worker_session_id_from_env(monkeypatch, worker_env):
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
-        assert run.metadata == {
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {
             "files": 2,
             "worker_session_id": "session-trusted",
         }
@@ -508,7 +511,8 @@ def test_complete_does_not_stamp_worker_session_id_without_scoped_task(
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
-        assert run.metadata == {
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {
             "files": 2,
             "worker_session_id": "user-provided",
         }
@@ -1417,7 +1421,8 @@ def test_worker_lifecycle_through_tools(worker_env):
         assert parent.current_run_id is None
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
-        assert run.metadata == {"child_task": child_out["task_id"]}
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {"child_task": child_out["task_id"]}
         # Child is todo (parent just finished, but recompute_ready may
         # have promoted it — complete_task runs recompute internally).
         child = kb.get_task(conn, child_out["task_id"])

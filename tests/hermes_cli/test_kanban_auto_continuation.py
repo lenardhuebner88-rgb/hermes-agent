@@ -66,7 +66,8 @@ def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
         assert run.status == "iteration_budget_exhausted"
         assert run.outcome == "iteration_budget_exhausted"
         assert run.summary == "Inspected 7 files; continue from API routing section."
-        assert run.metadata == {"phase": "routing"}
+        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert md == {"phase": "routing"}
 
         events = kb.list_events(conn, tid)
         assert [event.kind for event in events][-2:] == [

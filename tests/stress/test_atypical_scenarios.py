@@ -143,7 +143,8 @@ def _(home, kb):
         )
         run = kb.latest_run(conn, tid)
         assert run.summary == "完成了 📝 résumé", f"summary round-trip failed"
-        assert run.metadata == meta, (
+        _md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert _md == meta, (
             f"metadata round-trip failed: {run.metadata} != {meta}"
         )
         print(f"  metadata with CJK + emoji round-tripped")
@@ -173,7 +174,8 @@ def _(home, kb):
         assert back.body == huge_body, f"body truncated: {len(back.body)} vs {len(huge_body)}"
         run = kb.latest_run(conn, tid)
         assert run.summary == huge_summary
-        assert run.metadata == meta
+        _md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert _md == meta
         print(f"  1 MB body + 1 MB summary + 50-deep metadata OK")
     finally:
         conn.close()
