@@ -212,6 +212,22 @@ def test_compile_plan_emits_contract_receipt_source_and_schema(tmp_path: Path):
     assert schema["title"] == "PlanContract"
 
 
+def test_compile_plan_accepts_crlf_line_endings(tmp_path: Path):
+    """CRLF line endings must not be mistaken for missing frontmatter."""
+    plan = tmp_path / "crlf-plan.md"
+    plan.write_bytes(VALID_PLAN.replace("\n", "\r\n").encode("utf-8"))
+
+    artifacts = compile_plan(
+        plan,
+        compiled_root=tmp_path / "compiled",
+        templates_root=tmp_path / "templates",
+    )
+
+    assert artifacts["contract"].exists()
+    contract = yaml.safe_load(artifacts["contract"].read_text(encoding="utf-8"))
+    assert contract["goal"] == "Ship a local contract compiler"
+
+
 def test_compile_plan_accepts_structured_acceptance_criteria(tmp_path: Path):
     plan = tmp_path / "structured-ac-plan.md"
     plan.write_text(STRUCTURED_AC_PLAN, encoding="utf-8")
