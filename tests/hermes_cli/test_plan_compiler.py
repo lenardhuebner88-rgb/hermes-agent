@@ -228,6 +228,22 @@ def test_compile_plan_accepts_crlf_line_endings(tmp_path: Path):
     assert contract["goal"] == "Ship a local contract compiler"
 
 
+def test_compile_plan_accepts_utf8_bom(tmp_path: Path):
+    """A leading UTF-8 BOM must not be mistaken for missing frontmatter."""
+    plan = tmp_path / "bom-plan.md"
+    plan.write_bytes("\ufeff".encode("utf-8") + VALID_PLAN.encode("utf-8"))
+
+    artifacts = compile_plan(
+        plan,
+        compiled_root=tmp_path / "compiled",
+        templates_root=tmp_path / "templates",
+    )
+
+    assert artifacts["contract"].exists()
+    contract = yaml.safe_load(artifacts["contract"].read_text(encoding="utf-8"))
+    assert contract["goal"] == "Ship a local contract compiler"
+
+
 def test_compile_plan_accepts_structured_acceptance_criteria(tmp_path: Path):
     plan = tmp_path / "structured-ac-plan.md"
     plan.write_text(STRUCTURED_AC_PLAN, encoding="utf-8")

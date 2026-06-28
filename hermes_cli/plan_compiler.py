@@ -256,6 +256,9 @@ def slugify(value: str) -> str:
 def _extract_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     # Normalize line endings so CRLF or classic-Mac files parse identically to LF.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Strip a leading UTF-8 BOM so editors that emit one (common on Windows)
+    # don't look like they lack a frontmatter delimiter.
+    text = text.removeprefix("\ufeff")
     if not text.startswith("---\n"):
         raise CompileBlocked(["missing YAML frontmatter delimited by ---"])
     end = text.find("\n---", 4)
