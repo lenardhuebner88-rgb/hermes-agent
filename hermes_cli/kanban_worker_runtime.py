@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+import re
+import subprocess
+from typing import Optional, Tuple
 
 
 def claude_worker_bin() -> str:
@@ -111,6 +113,119 @@ CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS = (
     "Agent",
 )
 CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = {"reviewer", "critic"}
+
+# AC-1 (Verdict-Cage Phase 2): allowlist fail-closed for verdict lanes.
+# Instead of --dangerously-skip-permissions + --disallowedTools (denylist),
+# verdict lanes use --allowedTools with a minimal read-only set. This is
+# enforced by Claude Code's own permission system (no skip-permissions bypass).
+# Bash is intentionally EXCLUDED — verdict lanes must not execute code.
+# The guard-dangerous-ops.sh PreToolUse hook remains as belt-and-suspenders.
+CLAUDE_CLI_VERDICT_ALLOWLIST = ("Read", "Grep", "Glob")
+
+# AC-1 (Verdict-Cage Phase 2) fail-closed gate. The minimum Claude CLI version
+# we trust to enforce ``--allowedTools`` as a HARD cage when the worker is
+# spawned WITHOUT ``--dangerously-skip-permissions``. A 2026-06 spike found
+# ``--allowedTools`` was silently ignored *under* the skip-permissions bypass;
+# verdict lanes drop that bypass, so the normal permission engine applies — but
+# only on a CLI new enough to have it. Below this version, or if the version is
+# undetectable, we MUST fail-closed (refuse to spawn) rather than fall back to
+# the denylist+bypass model, which would hand a verdict worker write/exec tools.
+# The floor is intentionally conservative (1.0.0): every shipped Claude Code
+# release honors ``--allowedTools`` without the bypass; the gate exists to catch
+# a missing/broken binary, not to chase a specific patch level.
+VERDICT_ALLOWLIST_MIN_CLAUDE_VERSION: Tuple[int, int, int] = (1, 0, 0)
+
+# AC-1 (Verdict-Cage Phase 2): the ONLY sanctioned way to grant a verdict lane
+# read-only Bash. Default EMPTY — verdict lanes get Read,Grep,Glob and nothing
+# else. Bash must NEVER be added to CLAUDE_CLI_VERDICT_ALLOWLIST directly; an
+# operator who genuinely needs e.g. `git diff` in a review sets
+# HERMES_REVIEW_BASH_ALLOWLIST to comma-separated Claude Code tool-permission
+# strings (e.g. "Bash(git diff:*),Bash(git log:*)") which are appended verbatim
+# to the verdict --allowedTools. Keeping this a separate, explicit, default-empty
+# seam keeps the read-only cage auditable.
+REVIEW_BASH_ALLOWLIST_ENV = "HERMES_REVIEW_BASH_ALLOWLIST"
+
+# Operator/test override for the enforceability gate. "1"/"true"/"yes"/"on"
+# pins enforceable, "0"/"false"/"no"/"off" pins NOT enforceable (fail-closed).
+# Lets the operator vouch for a CLI whose ``--version`` we cannot parse, and
+# lets tests exercise both branches without a real binary.
+VERDICT_ALLOWLIST_ENFORCEABLE_ENV = "HERMES_VERDICT_ALLOWLIST_ENFORCEABLE"
+
+# Memoised per binary path: the dispatcher is long-lived and we do not want a
+# ``claude --version`` subprocess on every verdict spawn. Versions only climb,
+# so a stale-low cache can only over-restrict (fail-closed) until restart — the
+# safe direction for a security floor.
+_CLAUDE_CLI_VERSION_CACHE: dict[str, Optional[Tuple[int, int, int]]] = {}
+
+
+def claude_cli_version(
+    claude_bin: str,
+    *,
+    env: Optional[dict] = None,
+) -> Optional[Tuple[int, int, int]]:
+    """Best-effort ``(major, minor, patch)`` of the Claude CLI, or None.
+
+    Fail-soft: any probe failure (missing binary, non-zero exit, unparsable
+    output, timeout) returns None so the caller can decide. Memoised per
+    ``claude_bin`` path.
+    """
+    if claude_bin in _CLAUDE_CLI_VERSION_CACHE:
+        return _CLAUDE_CLI_VERSION_CACHE[claude_bin]
+    version: Optional[Tuple[int, int, int]] = None
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            [claude_bin, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        if proc.returncode == 0:
+            match = re.search(r"(\d+)\.(\d+)\.(\d+)", proc.stdout or "")
+            if match:
+                version = (
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                )
+    except Exception:
+        version = None
+    _CLAUDE_CLI_VERSION_CACHE[claude_bin] = version
+    return version
+
+
+def review_bash_allowlist(*, env: Optional[dict] = None) -> Tuple[str, ...]:
+    """Operator-configured read-only Bash allowlist entries for verdict lanes.
+
+    Default empty. Entries are full Claude Code tool-permission strings (e.g.
+    ``Bash(git diff:*)``) appended verbatim to the verdict ``--allowedTools``.
+    Sourced from ``HERMES_REVIEW_BASH_ALLOWLIST`` (comma-separated).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(REVIEW_BASH_ALLOWLIST_ENV, "") or ""
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def verdict_allowlist_enforceable(
+    claude_bin: str,
+    *,
+    env: Optional[dict] = None,
+) -> bool:
+    """AC-1 fail-closed gate: is ``--allowedTools`` a hard cage on this CLI?
+
+    Resolution order:
+      1. Explicit operator/test override ``HERMES_VERDICT_ALLOWLIST_ENFORCEABLE``.
+      2. Otherwise a detectable Claude CLI version >= the known-enforcing floor.
+         An undetectable version => not enforceable => fail-closed (no spawn).
+    """
+    source = env if env is not None else os.environ
+    override = source.get(VERDICT_ALLOWLIST_ENFORCEABLE_ENV)
+    if override is not None and override.strip() != "":
+        return override.strip().lower() in ("1", "true", "yes", "on")
+    version = claude_cli_version(claude_bin, env=env)
+    if version is None:
+        return False
+    return version >= VERDICT_ALLOWLIST_MIN_CLAUDE_VERSION
 
 
 def build_worker_env(

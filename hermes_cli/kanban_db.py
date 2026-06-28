@@ -18796,6 +18796,9 @@ _CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS = (
 _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES = (
     _worker_runtime.CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
 )
+_CLAUDE_CLI_VERDICT_ALLOWLIST = _worker_runtime.CLAUDE_CLI_VERDICT_ALLOWLIST
+_verdict_allowlist_enforceable = _worker_runtime.verdict_allowlist_enforceable
+_review_bash_allowlist = _worker_runtime.review_bash_allowlist
 
 def _build_worker_env(parent_env) -> dict:
     return _worker_runtime.build_worker_env(
@@ -18972,23 +18975,64 @@ def _spawn_claude_worker(
     if read_only_verdict_lane:
         denied_tools.extend(_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS)
 
-    cmd = [
-        _claude_worker_bin(),
-        "-p", prompt,
-        "--dangerously-skip-permissions",
-        # Deny the direct-HTTP tools (S2): with --dangerously-skip-permissions
-        # Claude Code 2.1.190 still honored --disallowedTools while a spike
-        # showed --allowedTools was NOT enforced under the same permissions
-        # bypass. Bash-level egress (curl -d, scp, nc, ...) is gated by the
-        # user-global guard-dangerous-ops.sh PreToolUse hook, which loads for
-        # these workers too.
-        "--disallowedTools", ",".join(denied_tools),
-        "--output-format", "json",
-        # Keep the memsearch memory plugin out of worker sessions (see env
-        # comment above). enabledPlugins merges into user settings, so other
-        # plugins (superpowers, guard hooks) keep their normal state.
-        "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
-    ]
+    # AC-1 (Verdict-Cage Phase 2): verdict lanes use allowlist fail-closed.
+    # Instead of --dangerously-skip-permissions + --disallowedTools (denylist),
+    # verdict lanes use --allowedTools with a minimal read-only set enforced
+    # by Claude Code's own permission system. No --dangerously-skip-permissions
+    # means the allowlist IS enforced (unlike the denylist-under-bypass approach).
+    # Non-verdict workers keep the denylist + bypass model (existing behavior).
+    if read_only_verdict_lane:
+        # AC-1 fail-closed: only spawn a read-only verdict worker when
+        # ``--allowedTools`` is an enforceable cage on this Claude CLI. If it is
+        # not (version undetectable / below the floor / operator pinned off),
+        # refuse to spawn rather than fall back to the denylist+bypass model —
+        # that fallback would hand a verdict worker Edit/Write/Bash/Agent. No
+        # child process is started on this path.
+        _verdict_claude_bin = _claude_worker_bin()
+        if not _verdict_allowlist_enforceable(_verdict_claude_bin, env=env):
+            _log.error(
+                "spawn_refused_allowlist_unenforceable task=%s bin=%s — verdict "
+                "lane --allowedTools is not enforceable on this Claude CLI; "
+                "refusing to spawn a read-only verdict worker without a cage.",
+                task.id,
+                _verdict_claude_bin,
+            )
+            raise RuntimeError(
+                "spawn_refused_allowlist_unenforceable: verdict-lane "
+                f"--allowedTools is not enforceable on {_verdict_claude_bin!r}. "
+                "Refusing to spawn a read-only verdict worker without an "
+                "enforceable cage (set HERMES_VERDICT_ALLOWLIST_ENFORCEABLE=1 "
+                "only if the installed Claude CLI is known to honor "
+                "--allowedTools without --dangerously-skip-permissions)."
+            )
+        # Read-only set + the (default-empty) operator review_bash_allowlist.
+        # Bash is never in _CLAUDE_CLI_VERDICT_ALLOWLIST; the only way a verdict
+        # lane gets read-only Bash is this explicit, auditable seam.
+        _verdict_allowed_tools = list(_CLAUDE_CLI_VERDICT_ALLOWLIST) + list(
+            _review_bash_allowlist(env=env)
+        )
+        cmd = [
+            _verdict_claude_bin,
+            "-p", prompt,
+            "--allowedTools", ",".join(_verdict_allowed_tools),
+            "--output-format", "json",
+            "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+        ]
+    else:
+        cmd = [
+            _claude_worker_bin(),
+            "-p", prompt,
+            "--dangerously-skip-permissions",
+            # Deny the direct-HTTP tools (S2): with --dangerously-skip-permissions
+            # Claude Code 2.1.190 still honored --disallowedTools while a spike
+            # showed --allowedTools was NOT enforced under the same permissions
+            # bypass. Bash-level egress (curl -d, scp, nc, ...) is gated by the
+            # user-global guard-dangerous-ops.sh PreToolUse hook, which loads for
+            # these workers too.
+            "--disallowedTools", ",".join(denied_tools),
+            "--output-format", "json",
+            "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+        ]
     # Model routing: per-task override > active lane (F1) > per-profile default
     # (claude_model) > subscription default (omit --model). A profile can default
     # to a fast/cheap tier (e.g. claude-fable-5) while hard tasks escalate via
@@ -19271,13 +19315,34 @@ def _default_spawn(
         lane_runtime is None
         and _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME"))
     ):
+        # AC-1 (Verdict-Cage Phase 2): fail-closed for verdict profiles.
+        # If a verdict-profile (reviewer/critic) is routed through the
+        # claude-CLI spawn path but the verdict-lane lane_entry is missing
+        # or unverifiable, we MUST NOT fall back to the denylist+bypass model
+        # (--dangerously-skip-permissions), because that is less restrictive
+        # than the allowlist model. Raise explicitly instead of silently
+        # spawning with full bypass permissions on a verdict lane.
+        _verdict_lane = _is_claude_verdict_read_only_lane(
+            profile_arg, lane_entry
+        )
+        if (
+            profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES
+            and not _verdict_lane
+        ):
+            raise RuntimeError(
+                f"Verdict-Cage fail-closed: profile '{profile_arg}' is a "
+                f"verdict-read-only profile but the active lane_entry is "
+                f"missing or not claude-cli. Refusing to spawn with "
+                f"denylist+bypass model — the allowlist cannot be "
+                f"enforced without a proper lane_entry."
+            )
         return _spawn_claude_worker(
             task,
             workspace,
             env=env,
             board=board,
             lane_model=lane_model,
-            read_only_verdict_lane=_is_claude_verdict_read_only_lane(profile_arg, lane_entry),
+            read_only_verdict_lane=_verdict_lane,
         )
 
     cmd = [
