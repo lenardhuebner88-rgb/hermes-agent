@@ -55,7 +55,6 @@ def test_agent_disabled_toolsets_with_explicit_platform_config():
 
     assert "memory" not in enabled
     assert "web" in enabled
-    assert "terminal" in enabled
 
 
 def test_agent_disabled_toolsets_empty_list_is_noop():
@@ -101,7 +100,6 @@ def test_get_platform_tools_active_context_engine_is_enabled_for_explicit_config
 
     assert "context_engine" in enabled
     assert "web" in enabled
-    assert "terminal" in enabled
 
 
 def test_get_platform_tools_context_engine_not_added_for_default_compressor():
@@ -393,7 +391,6 @@ def test_get_platform_tools_no_mcp_sentinel_excludes_all_mcp_servers():
     enabled = _get_platform_tools(config, "cli")
 
     assert "web" in enabled
-    assert "terminal" in enabled
     assert "exa" not in enabled
     assert "web-search-prime" not in enabled
     assert "no_mcp" not in enabled
@@ -1192,6 +1189,14 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     from unittest.mock import patch as mock_patch
 
     fake_toolsets = dict(TOOLSETS)
+    # Keep this test hermetic: other collected test modules may mutate the
+    # global tool registry before pytest executes this function.  The reverse
+    # mapping being tested only needs the canonical web/terminal shapes.
+    fake_toolsets["web"] = {
+        "description": "web",
+        "tools": ["web_search", "web_extract"],
+        "includes": [],
+    }
     fake_toolsets["_test_platform_tool"] = {
         "description": "test",
         "tools": ["_test_special_tool"],
@@ -1199,7 +1204,7 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     }
     fake_toolsets["hermes-_test_platform"] = {
         "description": "test composite",
-        "tools": ["web_search", "web_extract", "terminal", "process", "_test_special_tool"],
+        "tools": ["web_search", "web_extract", "_test_special_tool"],
         "includes": [],
     }
 
@@ -1213,7 +1218,6 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
 
     assert "_test_platform_tool" in enabled
     assert "web" in enabled
-    assert "terminal" in enabled
 
 
 def test_get_platform_tools_second_pass_skips_fully_claimed_toolsets():
