@@ -12811,30 +12811,117 @@ def heartbeat_worker(
     return True
 
 
+def _fmt_byte_size(size: int) -> str:
+    """Compact byte-size string matching the legacy heartbeat-note wording."""
+    if size >= 1024:
+        return f"{size / 1024:.0f}KB"
+    return f"{size}B"
+
+
+def _claude_projects_dir() -> Path:
+    """Claude Code's per-project transcript root (``<config>/projects``).
+
+    Honors ``CLAUDE_CONFIG_DIR`` (Claude Code's documented config-dir override)
+    and otherwise falls back to ``$HOME/.claude``. The returned path may not
+    exist; callers are fail-soft. Profile-safe: no hardcoded user paths.
+    """
+    cfg = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    base = Path(cfg) if cfg else (Path.home() / ".claude")
+    return base / "projects"
+
+
+def _claude_transcript_dir_for_workspace(workspace_path: str) -> Path:
+    """Map a worker workspace (cwd) to its Claude session-transcript directory.
+
+    Claude Code stores each session under ``<projects>/<munged-cwd>/`` where the
+    munged name is the absolute cwd with every non-alphanumeric character
+    replaced by ``-`` (e.g. ``/home/x/.foo`` → ``-home-x--foo``). A ``claude -p``
+    kanban worker runs with ``cwd`` == its worktree/workspace path, so that same
+    mapping locates the live transcript directory for the run.
+    """
+    munged = re.sub(r"[^a-zA-Z0-9]", "-", str(workspace_path))
+    return _claude_projects_dir() / munged
+
+
+def _claude_jsonl_activity(
+    workspace_path: Optional[str],
+) -> Optional[tuple[int, int]]:
+    """Newest Claude session transcript ``(mtime, size)`` for ``workspace_path``.
+
+    Returns the modification time (epoch seconds) and byte size of the most
+    recently modified ``*.jsonl`` transcript under the workspace's Claude
+    project directory, or ``None`` when the workspace is unknown, the directory
+    is absent, or it holds no transcript.
+
+    AC-2: only ``stat`` metadata is read — the transcript body is never opened,
+    so no session content (secrets, tool output) can leak into the Kanban DB.
+    Fully fail-soft: any error degrades to ``None`` (existing behaviour).
+    """
+    if not workspace_path:
+        return None
+    try:
+        tdir = _claude_transcript_dir_for_workspace(workspace_path)
+        newest_mtime = -1
+        newest_size = 0
+        for entry in tdir.iterdir():
+            if entry.suffix != ".jsonl":
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            mtime = int(st.st_mtime)
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest_size = int(st.st_size)
+        if newest_mtime < 0:
+            return None
+        return newest_mtime, newest_size
+    except Exception:
+        return None
+
+
 def _claude_cli_heartbeat_note(
     task_id: str, *, board: Optional[str] = None,
+    workspace_path: Optional[str] = None,
 ) -> str:
     """Honest one-line liveness note for a live claude-CLI worker.
 
-    The dispatcher cannot see inside a ``claude -p`` session, so the only
-    ground truth is the per-task worker log: how much output it has produced
-    and how recently it last wrote. Reported verbatim — no fake percentage.
-    Always returns at least ``"claude-cli running"``; the log detail is
-    additive and fully fail-soft (missing/unreadable log → base note).
+    The dispatcher cannot see inside a ``claude -p`` session. Two complementary
+    ground-truth signals are reported, both fail-soft and additive:
+
+    * the per-task stdout log — how much it has produced and how recently it
+      last wrote (verbatim, no fake percentage); and
+    * the Claude session transcript (``<config>/projects/<munged-cwd>/*.jsonl``)
+      when ``workspace_path`` is known. ``claude -p`` writes its real work to
+      that JSONL, not stdout, so a productive run routinely leaves the stdout
+      log at ``0B``. Surfacing the transcript's freshness/size lets an operator
+      tell a live session (``claude session … active 3s ago``) from a genuinely
+      hung process — the t_c16549e9 incident, where a misleading
+      ``log 0B · last output 1080s`` note triggered takeover risk.
+
+    Always returns at least ``"claude-cli running"``. When no transcript exists
+    (AC-3) the wording is byte-for-byte the legacy log-only note.
     """
     base = "claude-cli running"
+    now = int(time.time())
+    parts = [base]
     try:
         log_path = worker_logs_dir(board=board) / f"{task_id}.log"
         st = log_path.stat()
         size = int(st.st_size)
-        if size >= 1024:
-            size_str = f"{size / 1024:.0f}KB"
-        else:
-            size_str = f"{size}B"
-        age = max(0, int(time.time()) - int(st.st_mtime))
-        return f"{base} · log {size_str} · last output {age}s"
+        age = max(0, now - int(st.st_mtime))
+        parts.append(f"log {_fmt_byte_size(size)} · last output {age}s")
     except Exception:
-        return base
+        pass
+
+    activity = _claude_jsonl_activity(workspace_path)
+    if activity is not None:
+        j_mtime, j_size = activity
+        j_age = max(0, now - j_mtime)
+        parts.append(f"claude session {_fmt_byte_size(j_size)} · active {j_age}s ago")
+
+    return " · ".join(parts)
 
 
 def heartbeat_live_claude_cli_workers(
@@ -12879,7 +12966,7 @@ def heartbeat_live_claude_cli_workers(
     try:
         rows = conn.execute(
             "SELECT t.id, t.worker_pid, t.last_heartbeat_at, t.claim_lock, "
-            "       t.current_run_id, r.profile "
+            "       t.current_run_id, t.workspace_path, r.profile "
             "FROM tasks t "
             "LEFT JOIN task_runs r ON r.id = t.current_run_id "
             "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL"
@@ -12911,7 +12998,9 @@ def heartbeat_live_claude_cli_workers(
                 heartbeat_claim(conn, tid, claimer=lock)
             except Exception:
                 pass
-            note = _claude_cli_heartbeat_note(tid, board=board)
+            note = _claude_cli_heartbeat_note(
+                tid, board=board, workspace_path=row["workspace_path"],
+            )
             if heartbeat_worker(conn, tid, note=note, expected_run_id=run_id):
                 beat.append(tid)
         except Exception:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -12737,12 +12738,13 @@ def test_permanent_provisioning_error_blocks_immediately(
 
 def _make_running_worker(
     conn, *, profile, pid, claim_lock=None, last_heartbeat_at=None,
-    started_at=None, title="claude-cli-live",
+    started_at=None, title="claude-cli-live", workspace_path=None,
 ):
     """Set up a ``running`` task + matching ``task_runs`` row directly.
 
     Mirrors the raw-SQL setup used by the dashboard worker tests so we can
     pin ``profile`` / ``worker_pid`` / ``claim_lock`` / ``last_heartbeat_at``
+    (and optionally ``workspace_path`` for the claude-CLI transcript probe)
     without going through the code-task contract gate in ``claim_task``.
     Returns ``(task_id, run_id)``.
     """
@@ -12759,8 +12761,12 @@ def _make_running_worker(
         conn.execute(
             "UPDATE tasks SET status = 'running', current_run_id = ?, "
             "claim_lock = ?, worker_pid = ?, started_at = ?, "
-            "last_heartbeat_at = ? WHERE id = ?",
-            (run_id, lock, pid, start, last_heartbeat_at, t),
+            "last_heartbeat_at = ?, "
+            "workspace_kind = CASE WHEN ? IS NULL THEN workspace_kind ELSE 'worktree' END, "
+            "workspace_path = COALESCE(?, workspace_path) "
+            "WHERE id = ?",
+            (run_id, lock, pid, start, last_heartbeat_at,
+             workspace_path, workspace_path, t),
         )
     return t, run_id
 
@@ -12898,6 +12904,131 @@ def test_claude_cli_heartbeat_note_failsoft_without_log(kanban_home, monkeypatch
             (t,),
         ).fetchone()
         assert ev["note"] == "claude-cli running"
+
+
+def _seed_claude_transcript(
+    monkeypatch, tmp_path, workspace_path, *, body, mtime,
+    filename="34ffd866-1d4b-49c8-81ea-8e7c0cca07c9.jsonl",
+):
+    """Plant a Claude Code session transcript for ``workspace_path`` under an
+    isolated CLAUDE_CONFIG_DIR and return the file path.
+
+    Claude Code stores each session under ``<config>/projects/<munged-cwd>/``
+    where the munged name is the absolute cwd with every non-alphanumeric char
+    replaced by ``-``. We reproduce that mapping so the heartbeat probe finds it.
+    """
+    config_dir = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    munged = re.sub(r"[^a-zA-Z0-9]", "-", str(workspace_path))
+    proj_dir = config_dir / "projects" / munged
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    jsonl = proj_dir / filename
+    jsonl.write_text(body)
+    os.utime(jsonl, (mtime, mtime))
+    return jsonl
+
+
+def test_claude_cli_heartbeat_note_surfaces_jsonl_when_log_stale(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """AC-1: an empty/stale stdout log but a freshly-written Claude transcript
+    must surface the transcript activity, not only the misleading ``log 0B``.
+
+    Reproduces the t_c16549e9 incident: ``claude -p`` writes its real output to
+    a session JSONL, leaving the per-task stdout log at 0B; the old note read
+    ``claude-cli running · log 0B · last output 1080s`` and looked hung.
+    """
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+    workspace = "/home/x/.hermes/hermes-agent/.worktrees/kanban/t_360a4052"
+    secret = "ANTHROPIC_API_KEY=sk-ant-shouldnotleak"
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=5721, workspace_path=workspace,
+        )
+        # Per-task stdout log present but empty + stale (the misleading signal).
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{t}.log"
+        log_path.write_text("")
+        os.utime(log_path, (now - 1080, now - 1080))
+        # Live Claude transcript: freshly modified, holds a secret in its body.
+        _seed_claude_transcript(
+            monkeypatch, tmp_path, workspace,
+            body='{"type":"assistant"}\n' + secret + "\n", mtime=now - 3,
+        )
+
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        note = conn.execute(
+            "SELECT json_extract(payload, '$.note') AS note FROM task_events "
+            "WHERE task_id = ? AND kind = 'heartbeat' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()["note"]
+
+    # Existing wording preserved (prefix + honest stdout-log detail)…
+    assert note.startswith("claude-cli running")
+    # …but the live-session signal is now present so operators can tell a live
+    # claude session from a genuinely hung process.
+    assert "claude session" in note
+    # AC-2: only stat metadata is reported — never transcript contents.
+    assert secret not in note
+    assert "sk-ant" not in note
+
+
+def test_claude_cli_heartbeat_note_unchanged_without_transcript(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """AC-3: when no Claude transcript exists for the workspace, the note is
+    byte-for-byte the pre-existing wording (no spurious session clause)."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    # Point CLAUDE_CONFIG_DIR at an empty dir → no transcript for this workspace.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude"))
+    now = int(time.time())
+    workspace = "/home/x/.hermes/hermes-agent/.worktrees/kanban/t_nope"
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=5722, workspace_path=workspace,
+        )
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"{t}.log").write_text("x" * 2048)
+        os.utime(log_dir / f"{t}.log", (now - 5, now - 5))
+        note = _kb._claude_cli_heartbeat_note(t, workspace_path=workspace)
+
+    assert note == "claude-cli running · log 2KB · last output 5s"
+    assert "claude session" not in note
+
+
+def test_claude_jsonl_activity_reads_only_metadata(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """AC-2: the transcript probe returns (mtime, size) only — it never reads
+    the JSONL body into the result, and ignores non-jsonl noise files."""
+    import hermes_cli.kanban_db as _kb
+    now = int(time.time())
+    workspace = "/home/x/work/t_probe"
+    jsonl = _seed_claude_transcript(
+        monkeypatch, tmp_path, workspace,
+        body="secret-line\n" * 50, mtime=now - 7,
+    )
+    # A newer non-jsonl sibling must be ignored (only *.jsonl counts).
+    (jsonl.parent / "notes.txt").write_text("ignore me")
+    os.utime(jsonl.parent / "notes.txt", (now, now))
+
+    activity = _kb._claude_jsonl_activity(workspace)
+    assert activity is not None
+    mtime, size = activity
+    assert mtime == now - 7
+    assert size == jsonl.stat().st_size
+    # Unknown / missing workspace → None (AC-3 fail-soft path).
+    assert _kb._claude_jsonl_activity(None) is None
+    assert _kb._claude_jsonl_activity("/no/such/workspace/here") is None
 
 
 def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
