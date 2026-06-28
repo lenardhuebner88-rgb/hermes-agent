@@ -86,6 +86,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/codex-app-server-runtime',
             'user-guide/features/kanban-tutorial',
             'user-guide/features/kanban-worker-lanes',
+            'user-guide/features/kanban-ingest-worker-system-runbook',
             'user-guide/features/goals',
             'user-guide/features/workflow-library',
             'user-guide/features/code-execution',
@@ -311,6 +312,7 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/bundled/software-development/software-development-hermes-agent-skill-authoring',
+                    'user-guide/skills/bundled/software-development/software-development-hermes-kanban-ingest-worker-system',
                     'user-guide/skills/bundled/software-development/software-development-node-inspect-debugger',
                     'user-guide/skills/bundled/software-development/software-development-plan',
                     'user-guide/skills/bundled/software-development/software-development-python-debugpy',

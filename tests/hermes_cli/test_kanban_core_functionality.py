@@ -1763,7 +1763,11 @@ def test_run_closed_on_complete_with_summary(kanban_home):
         assert r.status == "done"
         assert r.outcome == "completed"
         assert r.summary == "implemented rate limiter, tests pass"
-        assert r.metadata == {"changed_files": ["limiter.py"], "tests_run": 12}
+        # Run completion now appends cost provenance when no concrete cost is
+        # available; caller-provided metadata must remain intact alongside it.
+        assert r.metadata["changed_files"] == ["limiter.py"]
+        assert r.metadata["tests_run"] == 12
+        assert r.metadata["cost"] == {"cost_status": "unknown"}
         assert r.ended_at is not None
     finally:
         conn.close()
@@ -2228,7 +2232,8 @@ def test_cli_runs_json(kanban_home):
     data = json.loads(out)
     assert len(data) == 1
     assert data[0]["outcome"] == "completed"
-    assert data[0]["metadata"] == {"files": 1}
+    assert data[0]["metadata"]["files"] == 1
+    assert data[0]["metadata"]["cost"] == {"cost_status": "unknown"}
 
 
 def test_cli_complete_with_summary_and_metadata(kanban_home):
@@ -2250,7 +2255,8 @@ def test_cli_complete_with_summary_and_metadata(kanban_home):
     finally:
         conn.close()
     assert r.summary == "done it"
-    assert r.metadata == {"files": 3}
+    assert r.metadata["files"] == 3
+    assert r.metadata["cost"] == {"cost_status": "unknown"}
 
 
 def test_cli_edit_backfills_result_on_done_task(kanban_home):
