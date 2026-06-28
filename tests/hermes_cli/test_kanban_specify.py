@@ -84,6 +84,28 @@ def test_extract_json_blob_returns_none_for_unparseable():
     assert spec._extract_json_blob("{not: valid}") is None
 
 
+def test_extract_json_blob_handles_braces_in_string_values():
+    # `}` inside a string value must not terminate the object early.
+    raw = '{"title": "T", "body": "use a } brace and { another"}'
+    assert spec._extract_json_blob(raw) == {
+        "title": "T",
+        "body": "use a } brace and { another",
+    }
+
+
+def test_extract_json_blob_skips_invalid_brace_block_before_valid_json():
+    # An invalid `{...}` block in the prose before the real JSON is skipped.
+    raw = 'note: {placeholder} then the answer:\n{"title": "T", "body": "B"}'
+    assert spec._extract_json_blob(raw) == {"title": "T", "body": "B"}
+
+
+def test_extract_json_blob_tolerates_unbalanced_quote_in_preamble():
+    # Prose with an odd number of double-quotes before the JSON must not throw
+    # off extraction — raw_decode starts AT the `{`, so the preamble is ignored.
+    raw = 'The width is 5" so:\n{"title": "T", "body": "B"}'
+    assert spec._extract_json_blob(raw) == {"title": "T", "body": "B"}
+
+
 # ---------------------------------------------------------------------------
 # specify_task (module-level entry point)
 # ---------------------------------------------------------------------------

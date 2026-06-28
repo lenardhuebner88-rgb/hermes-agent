@@ -120,24 +120,27 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    """Lenient JSON extraction — tolerates fenced code blocks and
-    leading/trailing whitespace. Returns None if nothing parses."""
+    """Lenient JSON extraction — tolerates fenced code blocks, surrounding prose,
+    and braces/quotes inside string values. Scans each ``{`` with the real JSON
+    parser (``raw_decode``) and returns the first object that parses, else None.
+
+    Decoding AT each ``{`` (instead of slicing the first ``{`` to the last ``}``)
+    means stray quotes or an invalid ``{...}`` block in the surrounding prose can
+    never corrupt a valid object — raw_decode tracks JSON string state itself."""
     if not raw:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
-    # Greedy: find the first `{` and last `}` and try that slice.
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    decoder = json.JSONDecoder()
+    idx = stripped.find("{")
+    while idx != -1:
+        try:
+            val, _ = decoder.raw_decode(stripped, idx)
+        except (ValueError, json.JSONDecodeError):
+            val = None
+        if isinstance(val, dict):
+            return val
+        idx = stripped.find("{", idx + 1)
+    return None
 
 
 
