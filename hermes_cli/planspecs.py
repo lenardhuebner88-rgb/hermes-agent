@@ -710,6 +710,9 @@ def _mask_quoted_spans(text: str) -> str:
     Backtick code spans are handled separately; normal prose quotes are *not*
     masked by default because an operator-authored placeholder can appear inside
     quotes and should still block ingest.
+
+    Nested quotes are handled recursively so an inner documentary example is
+    masked even when it sits inside an outer prose sentence.
     """
     chars = list(text)
     # Straight, English smart, German smart (inner) single quotes.
@@ -746,9 +749,17 @@ def _mask_quoted_spans(text: str) -> str:
         if j >= len(chars) or chars[j] != closer:
             i += 1
             continue
-        if _is_documentary_quote("".join(chars[i + 1 : j])):
-            for p in range(i, j + 1):
+        content = "".join(chars[i + 1 : j])
+        # Mask nested quotes first so inner documentary examples are recognised
+        # regardless of the outer prose wrapper.
+        masked_inner = _mask_quoted_spans(content)
+        for p, c in enumerate(masked_inner, start=i + 1):
+            if c == " " and chars[p] != "\n":
                 chars[p] = " "
+        if _is_documentary_quote(content):
+            for p in range(i, j + 1):
+                if chars[p] != "\n":
+                    chars[p] = " "
         i = j + 1
     return "".join(chars)
 

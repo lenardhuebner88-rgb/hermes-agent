@@ -286,6 +286,17 @@ def test_residue_tokens_exempts_german_single_quotes_for_documentary_examples():
     assert planspecs._residue_tokens("‚Implement the <handler> for X‘") == ["<handler>"]
 
 
+def test_residue_tokens_exempts_nested_quotes_for_documentary_examples():
+    """Documentary rubric examples may be wrapped in nested quotes (e.g. a German
+    outer sentence containing an inner quoted example). The outer prose wrapper
+    must not prevent the inner documentary example from being masked."""
+    assert planspecs._residue_tokens("„The rubric reports ‚AC-less subtask: <id>‘ as a finding“") == []
+    assert planspecs._residue_tokens("„An ‚unknown lane: <x>‘ example“") == []
+    assert planspecs._residue_tokens("„Use ‚lane: council‘ only in freigabe“") == []
+    # A genuine placeholder inside nested quotes still blocks.
+    assert planspecs._residue_tokens("„A sentence with ‚<handler>‘ inside“") == ["<handler>"]
+
+
 def test_residue_tokens_still_flags_genuine_prose_placeholders():
     """Unit-level: a marker sitting bare in prose (no backticks / not a path) is
     still reported — the gate is not weakened."""
