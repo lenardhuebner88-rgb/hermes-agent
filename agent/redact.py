@@ -157,7 +157,7 @@ _PRIVATE_KEY_RE = re.compile(
 # Database connection strings: protocol://user:PASSWORD@host
 # Catches postgres, mysql, mongodb, redis, amqp URLs and redacts the password
 _DB_CONNSTR_RE = re.compile(
-    r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:]+:)([^@]+)(@)",
+    r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\r\n]+:)([^@\r\n]+)(@)",
     re.IGNORECASE,
 )
 
@@ -472,7 +472,13 @@ def redact_sensitive_text(
 
     # Database connection string passwords
     if "://" in text:
-        text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+        def _redact_db_connstr(m: re.Match[str]) -> str:
+            password = m.group(2)
+            if code_file and "{" in password and "}" in password:
+                return m.group(0)
+            return f"{m.group(1)}***{m.group(3)}"
+
+        text = _DB_CONNSTR_RE.sub(_redact_db_connstr, text)
 
     # JWT tokens (eyJ... — base64-encoded JSON headers)
     if "eyJ" in text:
