@@ -902,6 +902,8 @@ def _residue_tokens(text: str) -> list[str]:
         angle_spans.append(match.span())
         _add(match.group(0))
     for match in _RESIDUE_MARKER_RE.finditer(scan):
+        if any(start <= match.start() and match.end() <= end for start, end in angle_spans):
+            continue
         _add(match.group(0))
     for match in _RESIDUE_ELLIPSIS_RE.finditer(scan):
         if any(start <= match.start() and match.end() <= end for start, end in angle_spans):

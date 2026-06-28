@@ -323,6 +323,16 @@ def test_residue_tokens_flags_genuine_placeholders_inside_prose_quotes():
     assert planspecs._residue_tokens('Fill the placeholder example "<endpoint>" here') == ["<endpoint>"]
 
 
+def test_residue_tokens_reports_marker_inside_angle_placeholder_once():
+    """A marker like TODO inside an angle placeholder <TODO> is a single
+    template-residue token; the inner marker must not be reported again, just as
+    an ellipsis inside an angle placeholder is not reported twice."""
+    assert planspecs._residue_tokens("Implement <TODO>") == ["<TODO>"]
+    assert planspecs._residue_tokens("Fix <FIXME> and resolve <TBD>") == ["<FIXME>", "<TBD>"]
+    # Bare markers outside angle brackets are still caught separately.
+    assert planspecs._residue_tokens("TODO: implement <handler>") == ["<handler>", "TODO"]
+
+
 def test_quoted_placeholder_in_ac_with_documentary_words_blocks(kanban_home, tmp_path: Path):
     """A real placeholder inside quotes still blocks, even when the line also
     contains example/placeholder wording that used to trigger broad masking.
