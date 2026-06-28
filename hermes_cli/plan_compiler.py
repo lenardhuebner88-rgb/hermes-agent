@@ -292,6 +292,8 @@ def _as_acceptance_criteria(data: dict[str, Any], key: str) -> list[Any]:
     value = data.get(key)
     if isinstance(value, str):
         return [value]
+    if isinstance(value, dict):
+        return [value]
     if isinstance(value, list):
         return value
     return []

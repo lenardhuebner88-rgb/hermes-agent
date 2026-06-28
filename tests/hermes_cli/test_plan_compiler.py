@@ -171,6 +171,42 @@ Reject the plan.
 """
 
 
+SINGLE_DICT_AC_PLAN = """---
+contract_version: 1
+goal: Accept a single mapping as acceptance criteria
+anti_scope:
+  - no runtime config changes
+acceptance_criteria:
+  id: AC-SINGLE-1
+  scope_level: plan
+  statement: A single mapping is accepted as one criterion.
+  verification: Inspect compiled contract.
+  done_signal: contract.acceptance_criteria[0].id == AC-SINGLE-1
+evidence_required:
+  - pytest passes
+risk_class: MEDIUM
+next_decision: Continue
+allowed_actions:
+  - edit plan only
+forbidden_actions:
+  - restart services
+requires_approval:
+  - deploy
+---
+## Goal
+Accept single mapping.
+
+## Acceptance Criteria
+- Single mapping works.
+
+## Anti-Scope
+- None.
+
+## Evidence Required
+- Tests.
+"""
+
+
 INVALID_PLAN = """---
 goal: Incomplete plan
 risk_class: MEDIUM
@@ -265,6 +301,23 @@ def test_compile_plan_accepts_structured_acceptance_criteria(tmp_path: Path):
 
     schema = json.loads(artifacts["schema"].read_text(encoding="utf-8"))
     assert "AcceptanceCriterion" in schema["$defs"]
+
+
+def test_compile_plan_accepts_single_mapping_acceptance_criteria(tmp_path: Path):
+    """A lone structured criterion written as a mapping (not wrapped in a list)
+    must not be silently dropped."""
+    plan = tmp_path / "single-dict-ac-plan.md"
+    plan.write_text(SINGLE_DICT_AC_PLAN, encoding="utf-8")
+
+    artifacts = compile_plan(
+        plan,
+        compiled_root=tmp_path / "compiled",
+        templates_root=tmp_path / "templates",
+    )
+
+    contract = yaml.safe_load(artifacts["contract"].read_text(encoding="utf-8"))
+    assert len(contract["acceptance_criteria"]) == 1
+    assert contract["acceptance_criteria"][0]["id"] == "AC-SINGLE-1"
 
 
 def test_structured_acceptance_criteria_require_verification(tmp_path: Path, capsys):
