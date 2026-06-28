@@ -1219,14 +1219,18 @@ def _parse_spec_judge_verdict(resp: Any) -> SpecJudgeVerdict | None:
         return None
     if not raw:
         return None
-    first = raw.find("{")
-    last = raw.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    try:
-        obj = json.loads(raw[first : last + 1])
-    except (ValueError, json.JSONDecodeError):
-        return None
+    decoder = json.JSONDecoder()
+    start = raw.find("{")
+    obj = None
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(raw, start)
+        except (ValueError, json.JSONDecodeError):
+            start = raw.find("{", start + 1)
+            continue
+        if isinstance(obj, dict):
+            break
+        start = raw.find("{", start + 1)
     if not isinstance(obj, dict):
         return None
 

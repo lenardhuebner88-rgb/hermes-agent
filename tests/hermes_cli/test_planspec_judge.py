@@ -188,6 +188,29 @@ def test_parse_verdict_empty_choices_returns_none():
     assert planspecs._parse_spec_judge_verdict(resp) is None
 
 
+def test_parse_verdict_ignores_trailing_prose_with_braces():
+    """Regression: trailing prose (especially with braces) must not corrupt the
+    JSON extraction. The parser should recover the first complete JSON object."""
+    resp = _fake_aux_response(
+        '{"verdict": "fail", "reasons": ["bad"]} Here is extra context: {foo: bar}.'
+    )
+    verdict = planspecs._parse_spec_judge_verdict(resp)
+    assert verdict is not None
+    assert verdict.passed is False
+    assert verdict.reasons == ["bad"]
+
+
+def test_parse_verdict_handles_braces_inside_reason_string():
+    """Braces inside a JSON string value must not confuse object-boundary detection."""
+    resp = _fake_aux_response(
+        '{"verdict": "fail", "reasons": ["Use {metric} instead"]}'
+    )
+    verdict = planspecs._parse_spec_judge_verdict(resp)
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "Use {metric} instead" in verdict.reasons
+
+
 # ---------------------------------------------------------------------------
 # run_spec_quality_judge — unit (no DB)
 # ---------------------------------------------------------------------------
