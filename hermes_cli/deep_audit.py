@@ -423,6 +423,34 @@ def _usage_tokens(resp: Any) -> int:
         return 0
 
 
+def _per_turn_cost(resp: Any, model_label: str | None) -> float:
+    """Estimate the cost of a single LLM turn from token usage + model pricing.
+
+    Uses the same models.dev price lookup + _PRICE_OVERRIDES_PER_MTOK overrides
+    as the kanban cost path (lazy import to avoid circular dependency).
+    Returns 0.0 when pricing is unavailable — never raises.
+    """
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is None and isinstance(resp, dict):
+            usage = resp.get("usage")
+        if usage is None:
+            return 0.0
+        in_tok = getattr(usage, "prompt_tokens", None)
+        if in_tok is None and isinstance(usage, dict):
+            in_tok = usage.get("prompt_tokens") or usage.get("input_tokens")
+        out_tok = getattr(usage, "completion_tokens", None)
+        if out_tok is None and isinstance(usage, dict):
+            out_tok = usage.get("completion_tokens") or usage.get("output_tokens")
+        if not in_tok and not out_tok:
+            return 0.0
+        from hermes_cli.kanban_db import _equiv_from_tokens
+        est = _equiv_from_tokens(None, model_label, int(in_tok or 0), int(out_tok or 0))
+        return float(est) if est is not None else 0.0
+    except Exception:
+        return 0.0
+
+
 def _model_label(resp: Any) -> str | None:
     model = getattr(resp, "model", None)
     if model is None and isinstance(resp, dict):
@@ -642,6 +670,7 @@ def run_deep_audit(
     """
     request_id = f"deep-audit-{uuid.uuid4().hex[:12]}"
     started = time.time()
+    cost_usd = 0.0
     try:
         files = resolve_subsystem_files(subsystem, max_files=max_files)
         sandbox = DeepAuditSandbox(files)
@@ -709,6 +738,7 @@ def run_deep_audit(
             resp = llm_call(task="code_audit", tools=tool_schemas(), messages=messages, temperature=0, max_tokens=4000)
             tokens += _usage_tokens(resp)
             model_label = _model_label(resp) or model_label
+            cost_usd += _per_turn_cost(resp, model_label)
             message = _message_from_response(resp)
             calls = _tool_calls(message)
             if not calls:
@@ -759,6 +789,10 @@ def run_deep_audit(
             "subsystem": subsystem,
             "model": model_label,
             "tokens": tokens,
+            "cost": {
+                "request_cost_usd": round(cost_usd, 6),
+                "cost_status": "estimated" if cost_usd > 0 else "unknown",
+            },
             "iterations": iterations,
             "reason": reason,
             "request_id": request_id,
@@ -772,6 +806,10 @@ def run_deep_audit(
             "subsystem": subsystem,
             "model": None,
             "tokens": 0,
+            "cost": {
+                "request_cost_usd": round(cost_usd, 6),
+                "cost_status": "estimated" if cost_usd > 0 else "unknown",
+            },
             "iterations": 0,
             "reason": f"{type(exc).__name__}: {exc}",
             "request_id": request_id,
