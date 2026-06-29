@@ -28,6 +28,27 @@ from hermes_constants import OPENROUTER_MODELS_URL
 from utils import base_url_host_matches
 
 
+def _is_linked_worktree(project_root: Path) -> bool:
+    """True when ``project_root`` is a *linked* git worktree.
+
+    A linked worktree's ``.git`` is a gitdir-pointer FILE; the primary checkout's
+    ``.git`` is a directory (and a non-git/tarball install has no ``.git`` at all).
+
+    The kanban worker worktrees under ``.worktrees/`` (and the remote
+    ``.claude/worktrees/bridge-cse_*`` sessions) are transient: their only venv is
+    a ``.venv`` symlink bridge to the live checkout and the whole tree is pruned
+    after the task. ``hermes doctor --fix`` run from such a checkout (PROJECT_ROOT
+    resolving to the worktree) must NOT repoint the user-global
+    ``~/.local/bin/hermes`` command symlink at a worktree-relative venv path — the
+    link dangles the moment the worktree is pruned. Only the primary working tree
+    manages the global command link.
+    """
+    try:
+        return (project_root / ".git").is_file()
+    except OSError:
+        return False
+
+
 _PROVIDER_ENV_HINTS = (
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
@@ -1324,10 +1345,17 @@ def run_doctor(args):
                         f"(→ {_target}, expected → {_expected})"
                     )
                     if should_fix:
-                        _cmd_link.unlink()
-                        _cmd_link.symlink_to(_venv_bin)
-                        check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
-                        fixed_count += 1
+                        if _is_linked_worktree(PROJECT_ROOT):
+                            check_info(
+                                f"Skipping {_cmd_link_display}/hermes fix — running from a "
+                                f"transient worktree ({PROJECT_ROOT}); the global command "
+                                f"link is only managed from the primary checkout"
+                            )
+                        else:
+                            _cmd_link.unlink()
+                            _cmd_link.symlink_to(_venv_bin)
+                            check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
+                            fixed_count += 1
                     else:
                         issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
             elif _cmd_link.exists():
@@ -1338,7 +1366,13 @@ def run_doctor(args):
                     f"{_cmd_link_display}/hermes not found",
                     "(hermes command may not work outside the venv)"
                 )
-                if should_fix:
+                if should_fix and _is_linked_worktree(PROJECT_ROOT):
+                    check_info(
+                        f"Skipping {_cmd_link_display}/hermes creation — running from a "
+                        f"transient worktree ({PROJECT_ROOT}); the global command link is "
+                        f"only managed from the primary checkout"
+                    )
+                elif should_fix:
                     _cmd_link_dir.mkdir(parents=True, exist_ok=True)
                     _cmd_link.symlink_to(_venv_bin)
                     check_ok(f"Created symlink: {_cmd_link_display}/hermes → {_venv_bin}")

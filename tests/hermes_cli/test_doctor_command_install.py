@@ -239,6 +239,53 @@ class TestDoctorCommandInstallation:
         assert "Command Installation" in out
         assert "$PREFIX/bin" in out
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlink check is Unix-only")
+    def test_fix_skips_global_symlink_from_linked_worktree(self, monkeypatch, tmp_path):
+        """A doctor --fix run from a *linked git worktree* must NOT repoint the
+        user-global ~/.local/bin/hermes symlink at the worktree-relative venv.
+
+        Regression: a worker ran `doctor --fix` with a worktree on sys.path, so
+        PROJECT_ROOT resolved to the transient worktree (whose only venv is a
+        .venv symlink bridge). doctor repointed the global command link at
+        <worktree>/.venv/bin/hermes; when the worktree was pruned the link
+        dangled. Only the primary checkout may manage the global link.
+        """
+        home, project, hermes_bin = _setup_doctor_env(monkeypatch, tmp_path)
+        # Mark `project` as a *linked* worktree: its .git is a gitdir pointer
+        # FILE (the live checkout's .git is a directory).
+        (project / ".git").write_text("gitdir: /somewhere/.git/worktrees/wt\n")
+
+        # An existing, correct global symlink pointing at a *stable* path.
+        cmd_link_dir = tmp_path / ".local" / "bin"
+        cmd_link_dir.mkdir(parents=True)
+        cmd_link = cmd_link_dir / "hermes"
+        stable_target = tmp_path / "stable_hermes"
+        stable_target.write_text("#!/usr/bin/env python\n")
+        cmd_link.symlink_to(stable_target)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out = _run_doctor(fix=True)
+        # The global link must be left untouched, not repointed at the worktree.
+        assert cmd_link.resolve() == stable_target.resolve()
+        assert "Fixed symlink" not in out
+        assert "worktree" in out.lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlink check is Unix-only")
+    def test_fix_skips_missing_symlink_creation_from_linked_worktree(self, monkeypatch, tmp_path):
+        """From a linked worktree, --fix must not *create* the global symlink
+        either (it would point at the transient worktree venv)."""
+        home, project, hermes_bin = _setup_doctor_env(monkeypatch, tmp_path)
+        (project / ".git").write_text("gitdir: /somewhere/.git/worktrees/wt\n")
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out = _run_doctor(fix=True)
+        cmd_link = tmp_path / ".local" / "bin" / "hermes"
+        assert not cmd_link.exists()
+        assert "Created symlink" not in out
+        assert "worktree" in out.lower()
+
     def test_windows_skips_check(self, monkeypatch, tmp_path):
         """On Windows, the Command Installation section is skipped."""
         home = tmp_path / ".hermes"
