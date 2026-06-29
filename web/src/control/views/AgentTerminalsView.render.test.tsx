@@ -8,6 +8,8 @@ const apiMock = {
   getAgentTerminalWindows: vi.fn(),
   ensureAgentTerminalWindow: vi.fn(),
 };
+const fitFitMock = vi.fn();
+let triggerResize: (() => void) | null = null;
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -29,7 +31,7 @@ vi.mock("@/lib/xtermSurface", () => ({
       onData: vi.fn(() => ({ dispose: vi.fn() })),
       dispose: vi.fn(),
     },
-    fit: { fit: vi.fn() },
+    fit: { fit: fitFitMock },
   })),
 }));
 
@@ -66,6 +68,7 @@ async function loadView() {
 }
 
 function installDom(matches = false) {
+  triggerResize = null;
   Object.defineProperty(window, "matchMedia", {
     writable: true,
     value: vi.fn().mockImplementation((query: string) => ({
@@ -76,7 +79,11 @@ function installDom(matches = false) {
     })),
   });
   global.ResizeObserver = class ResizeObserver {
+    constructor(callback: ResizeObserverCallback) {
+      triggerResize = () => callback([] as ResizeObserverEntry[], this as unknown as ResizeObserver);
+    }
     observe = vi.fn();
+    unobserve = vi.fn();
     disconnect = vi.fn();
   } as unknown as typeof ResizeObserver;
   global.requestAnimationFrame = (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 0);
@@ -114,6 +121,19 @@ describe("AgentTerminalsView rendering", () => {
     expect((await screen.findAllByText("Agent Terminals")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getAllByRole("button", { name: /Tools/i })[0]);
     expect(screen.getAllByText("Terminal-Kontext").length).toBeGreaterThan(0);
+  });
+
+  it("fits the terminal on mount and when its host is resized", async () => {
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    await waitFor(() => expect(fitFitMock).toHaveBeenCalled());
+    const callsAfterMount = fitFitMock.mock.calls.length;
+
+    triggerResize?.();
+
+    expect(fitFitMock).toHaveBeenCalledTimes(callsAfterMount + 1);
   });
 
   it("renders empty and error states", async () => {
