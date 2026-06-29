@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Agent Terminal Hub Mockup</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --ink: #1f2421;
+      --muted: #69716d;
+      --line: #d2cbc0;
+      --panel: #fffaf2;
+      --panel-strong: #f8efe0;
+      --terminal: #111513;
+      --terminal-soft: #19201d;
+      --terminal-ink: #d8eadf;
+      --green: #3b8f70;
+      --blue: #376f9f;
+      --amber: #a66d22;
+      --rose: #ad5a63;
+      --shadow: 0 16px 40px rgba(31, 36, 33, 0.16);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 250, 242, 0.96), rgba(244, 241, 234, 0.98)),
+        repeating-linear-gradient(90deg, rgba(31, 36, 33, 0.04) 0, rgba(31, 36, 33, 0.04) 1px, transparent 1px, transparent 44px);
+      color: var(--ink);
+    }
+
+    main {
+      width: min(1420px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 22px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 32px;
+      line-height: 1.05;
+      font-weight: 760;
+    }
+
+    .subtitle {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+      margin-top: 10px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 250, 242, 0.78);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 660;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(59, 143, 112, 0.14);
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      gap: 24px;
+      align-items: start;
+    }
+
+    .frame {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .frame-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 46px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .frame-title h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      font-weight: 780;
+      color: #3b3f3c;
+    }
+
+    .desktop-shell {
+      display: grid;
+      grid-template-columns: 220px minmax(420px, 1fr) 300px;
+      min-height: 720px;
+    }
+
+    .rail {
+      border-right: 1px solid var(--line);
+      background: #fbf5ea;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .rail-head,
+    .rail-foot {
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .rail-foot {
+      margin-top: auto;
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+    }
+
+    .search {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: #fffdf8;
+      font-size: 12px;
+    }
+
+    .session-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+    }
+
+    .session {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 253, 248, 0.88);
+      padding: 10px;
+    }
+
+    .session.active {
+      border-color: rgba(55, 111, 159, 0.52);
+      background: #eef5f8;
+    }
+
+    .session-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .agent-icon {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      color: white;
+      font-size: 12px;
+      font-weight: 760;
+      background: var(--blue);
+      flex: 0 0 auto;
+    }
+
+    .agent-icon.hermes {
+      background: var(--green);
+    }
+
+    .agent-icon.claude {
+      background: var(--amber);
+    }
+
+    .agent-icon.kimi {
+      background: var(--rose);
+    }
+
+    .agent-title {
+      font-size: 13px;
+      font-weight: 760;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .agent-sub {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .terminal-area {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: #f7f2e8;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 52px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fff9ee;
+    }
+
+    .tab {
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+    }
+
+    .tab.active {
+      color: #123b5b;
+      border-color: rgba(55, 111, 159, 0.42);
+      background: #e8f2f7;
+    }
+
+    .topbar-spacer {
+      flex: 1;
+    }
+
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: var(--ink);
+      font-weight: 780;
+    }
+
+    .terminal {
+      margin: 14px;
+      flex: 1;
+      min-height: 0;
+      border-radius: 8px;
+      background: var(--terminal);
+      color: var(--terminal-ink);
+      border: 1px solid #26302b;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .terminal-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 0 12px;
+      background: var(--terminal-soft);
+      border-bottom: 1px solid #29332f;
+      color: #9db9aa;
+      font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .terminal-body {
+      padding: 14px;
+      flex: 1;
+      font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      overflow: hidden;
+    }
+
+    .prompt {
+      color: #8dd5b2;
+    }
+
+    .muted-term {
+      color: #7e9488;
+    }
+
+    .selection {
+      display: inline;
+      background: rgba(245, 199, 107, 0.22);
+      color: #f7e3ae;
+      outline: 1px solid rgba(245, 199, 107, 0.35);
+    }
+
+    .handoff {
+      border-left: 1px solid var(--line);
+      background: #fffaf2;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .handoff-section {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .handoff-section h3 {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #3f4842;
+      margin-bottom: 10px;
+    }
+
+    .preview {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffdf8;
+      padding: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .field {
+      display: grid;
+      gap: 5px;
+      margin-top: 10px;
+    }
+
+    .field label {
+      font-size: 11px;
+      font-weight: 740;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .select,
+    .textarea {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      min-height: 34px;
+      padding: 8px 9px;
+      color: var(--ink);
+      font-size: 12px;
+    }
+
+    .textarea {
+      min-height: 82px;
+      line-height: 1.35;
+      color: var(--muted);
+    }
+
+    .stepper {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffdf8;
+      font-size: 12px;
+    }
+
+    .step-num {
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(59, 143, 112, 0.14);
+      color: var(--green);
+      font-weight: 780;
+    }
+
+    .step small {
+      color: var(--muted);
+    }
+
+    .primary {
+      min-height: 36px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--green);
+      color: white;
+      font-size: 12px;
+      font-weight: 760;
+      padding: 0 12px;
+    }
+
+    .secondary {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 720;
+      padding: 0 12px;
+    }
+
+    .mobile-frame {
+      width: min(390px, 100%);
+      margin-left: auto;
+      min-height: 760px;
+      border: 1px solid #1f2421;
+      border-radius: 8px;
+      background: #fffaf2;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .mobile-shell {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      min-height: 760px;
+    }
+
+    .mobile-head {
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .mobile-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-weight: 780;
+      font-size: 14px;
+    }
+
+    .mobile-switcher {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fffaf2;
+    }
+
+    .mobile-switcher .tab {
+      justify-content: center;
+      min-width: 0;
+      padding: 0 4px;
+    }
+
+    .mobile-terminal {
+      margin: 10px;
+      min-height: 0;
+    }
+
+    .mobile-sheet {
+      border-top: 1px solid var(--line);
+      background: #fffaf2;
+      padding: 10px;
+    }
+
+    .sheet-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .mini-preview {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      padding: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    @media (max-width: 1080px) {
+      .stage {
+        grid-template-columns: 1fr;
+      }
+
+      .mobile-frame {
+        margin: 0 auto;
+      }
+
+      .desktop-shell {
+        grid-template-columns: 190px minmax(360px, 1fr);
+      }
+
+      .handoff {
+        display: none;
+      }
+    }
+
+    @media (max-width: 760px) {
+      main {
+        width: min(100vw - 20px, 720px);
+        padding-top: 20px;
+      }
+
+      header {
+        display: block;
+      }
+
+      .meta {
+        justify-content: flex-start;
+        margin-top: 14px;
+      }
+
+      .stage > .frame {
+        display: none;
+      }
+
+      .stage {
+        gap: 0;
+      }
+
+      .desktop-shell {
+        grid-template-columns: 1fr;
+        min-height: 620px;
+      }
+
+      .rail {
+        display: none;
+      }
+
+      .topbar {
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Agent Terminal Hub</h1>
+        <p class="subtitle">Remote-first mockup for normal Hermes, Claude Code, Codex, and Kimi Code terminals. Agent processes live in tmux on the homeserver; the phone connects over Tailscale and only attaches. No prefilled prompt, no auto-send.</p>
+      </div>
+      <div class="meta">
+        <span class="pill"><span class="dot"></span>Tailscale :9443</span>
+        <span class="pill">tmux work</span>
+        <span class="pill">Optional handoff</span>
+        <span class="pill">Mobile first fallback</span>
+      </div>
+    </header>
+
+    <section class="stage">
+      <article class="frame" aria-label="Desktop mockup">
+        <div class="frame-title">
+          <h2>Desktop / Remote Control Dashboard</h2>
+            <span class="pill">normal terminal</span>
+        </div>
+        <div class="desktop-shell">
+          <aside class="rail">
+            <div class="rail-head">
+              <div class="search">tmux work - sessions/windows</div>
+            </div>
+            <div class="session-list">
+              <div class="session active">
+                <div class="session-row">
+                  <span class="agent-icon">Cx</span>
+                  <div>
+                    <div class="agent-title">work:codex</div>
+                    <div class="agent-sub">node/codex - attached</div>
+                  </div>
+                </div>
+              </div>
+              <div class="session">
+                <div class="session-row">
+                  <span class="agent-icon claude">Cl</span>
+                  <div>
+                    <div class="agent-title">work:claude</div>
+                    <div class="agent-sub">claude - active</div>
+                  </div>
+                </div>
+              </div>
+              <div class="session">
+                <div class="session-row">
+                  <span class="agent-icon hermes">He</span>
+                  <div>
+                    <div class="agent-title">work:hermes</div>
+                    <div class="agent-sub">ensure window</div>
+                  </div>
+                </div>
+              </div>
+              <div class="session">
+                <div class="session-row">
+                  <span class="agent-icon kimi">Ki</span>
+                  <div>
+                    <div class="agent-title">work:kimi</div>
+                    <div class="agent-sub">bash/kimi - running</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="rail-foot">
+              <button class="primary" type="button">Ensure Window</button>
+            </div>
+          </aside>
+
+          <section class="terminal-area">
+            <div class="topbar">
+              <span class="tab active">Codex</span>
+              <span class="tab">Claude</span>
+              <span class="tab">Hermes</span>
+              <span class="tab">Kimi</span>
+              <span class="topbar-spacer"></span>
+              <button class="icon-button" type="button" aria-label="Split terminal">S</button>
+              <button class="icon-button" type="button" aria-label="Copy selection">C</button>
+              <button class="icon-button" type="button" aria-label="Stop terminal">X</button>
+            </div>
+            <div class="terminal">
+              <div class="terminal-status">
+                <span class="dot"></span>
+                <span>Tailscale -> dashboard -> tmux attach work:codex</span>
+              </div>
+              <div class="terminal-body">
+                <div><span class="prompt">$</span> codex</div>
+                <div class="muted-term">Plan: inspect tmux work, build remote attach hub, create PlanSpec handoff.</div>
+                <br>
+                <div><span class="prompt">codex&gt;</span> turn selected terminal output into a Hermes worker plan</div>
+                <div>1. Create persistent session registry.</div>
+                <div>2. Generalize PTY command resolver.</div>
+                <div><span class="selection">3. Add explicit handoff drawer: selection -> validate -> ingest -> dispatch dry-run.</span></div>
+                <div>4. Mobile disconnect kills only the attach client, never the tmux window.</div>
+                <br>
+                <div class="muted-term">Selection captured. Ready for PlanSpec draft.</div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="handoff">
+            <div class="handoff-section">
+              <h3>Optional Tools</h3>
+              <div class="preview">Normal typing goes straight to tmux. Capture or handoff only runs when you click an action.</div>
+              <div class="field">
+                <label>Capture target</label>
+                <div class="select">Clipboard / PlanSpec / Kanban</div>
+              </div>
+              <div class="field">
+                <label>Mode</label>
+                <div class="select">Manual terminal, no auto prompt</div>
+              </div>
+              <div class="field">
+                <label>Optional draft</label>
+                <div class="textarea">Only filled after selecting output and choosing Draft. Nothing is sent to the agent automatically.</div>
+              </div>
+            </div>
+            <div class="handoff-section">
+              <h3>Optional worker pipeline</h3>
+              <div class="stepper">
+                <div class="step"><span class="step-num">1</span><span>Capture<br><small>tmux pane selection/range</small></span><span>ready</span></div>
+                <div class="step"><span class="step-num">2</span><span>Validate<br><small>rubric + graph</small></span><span>next</span></div>
+                <div class="step"><span class="step-num">3</span><span>Ingest held<br><small>freigabe: operator</small></span><span>hold</span></div>
+                <div class="step"><span class="step-num">4</span><span>Dispatch<br><small>operator release</small></span><span>gate</span></div>
+              </div>
+            </div>
+            <div class="handoff-section">
+              <button class="primary" type="button">Capture Output</button>
+              <button class="secondary" type="button" style="margin-left: 6px;">Draft Plan</button>
+            </div>
+          </aside>
+        </div>
+      </article>
+
+      <article aria-label="Mobile mockup">
+        <div class="mobile-frame">
+          <div class="mobile-shell">
+            <div class="mobile-head">
+              <div class="mobile-title">
+                <span>Remote Agent Terminal</span>
+                <button class="icon-button" type="button" aria-label="Open sessions">L</button>
+              </div>
+            </div>
+            <div class="mobile-switcher">
+              <span class="tab active">Cx</span>
+              <span class="tab">Cl</span>
+              <span class="tab">He</span>
+              <span class="tab">Ki</span>
+            </div>
+            <div class="terminal mobile-terminal">
+              <div class="terminal-status">
+                <span class="dot"></span>
+                <span>work:codex via Tailscale</span>
+              </div>
+              <div class="terminal-body">
+                <div><span class="prompt">$</span> codex</div>
+                <div class="muted-term">tmux persists while the phone sleeps.</div>
+                <br>
+                <div>Need handoff:</div>
+                <div><span class="selection">Selection -> PlanSpec -> validate -> ingest held.</span></div>
+                <br>
+                <div class="muted-term">Reconnect attaches back to the same pane.</div>
+              </div>
+            </div>
+            <div class="mobile-sheet">
+              <div class="mini-preview">Attached to tmux work:codex. Normal input goes straight to the pane.</div>
+              <div class="sheet-grid">
+                <button class="secondary" type="button">Copy</button>
+                <button class="secondary" type="button">Ask Hermes</button>
+                <button class="secondary" type="button">Draft Plan</button>
+                <button class="primary" type="button">Capture</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
