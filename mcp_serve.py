@@ -134,6 +134,21 @@ def _coerce_int(
     return max(minimum, min(coerced, maximum))
 
 
+def _tmux_agent_service():
+    """Return the shared tmux-backed terminal service, or None when unavailable."""
+    try:
+        from hermes_cli.agent_terminals import TmuxAgentSessionService
+
+        return TmuxAgentSessionService()
+    except Exception as e:
+        logger.debug("Tmux agent session service unavailable: %s", e)
+        return None
+
+
+def _tmux_error(message: str) -> str:
+    return json.dumps({"error": message})
+
+
 def _extract_message_content(msg: dict) -> str:
     """Extract text content from a message, handling multi-part content."""
     content = msg.get("content", "")
@@ -855,6 +870,84 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
         result = bridge.respond_to_approval(id, decision)
         return json.dumps(result, indent=2)
+
+    # -- terminal_sessions_list --------------------------------------------
+
+    @mcp.tool()
+    def terminal_sessions_list() -> str:
+        """List tmux-backed agent terminal sessions.
+
+        This uses the same TmuxAgentSessionService as the dashboard/API. It
+        only observes tmux state and creates no separate session registry.
+        """
+        service = _tmux_agent_service()
+        if not service:
+            return _tmux_error("Tmux agent session service unavailable")
+        try:
+            sessions = [item.__dict__ for item in service.list_sessions()]
+            return json.dumps({"count": len(sessions), "sessions": sessions}, indent=2)
+        except Exception as e:
+            return _tmux_error(str(e))
+
+    # -- terminal_capture ---------------------------------------------------
+
+    @mcp.tool()
+    def terminal_capture(session: str, window: str, start: int = -200) -> str:
+        """Capture recent pane text from a tmux-backed terminal."""
+        service = _tmux_agent_service()
+        if not service:
+            return _tmux_error("Tmux agent session service unavailable")
+        start = _coerce_int(start, default=-200, minimum=-5000, maximum=0)
+        try:
+            content = service.capture(session, window, start=start)
+            return json.dumps({"content": content}, indent=2)
+        except Exception as e:
+            return _tmux_error(str(e))
+
+    # -- terminal_send_keys -------------------------------------------------
+
+    @mcp.tool()
+    def terminal_send_keys(session: str, window: str, text: str) -> str:
+        """Send literal keystrokes to a tmux pane.
+
+        Text is passed through the shared service's literal send-keys path;
+        this tool does not expose arbitrary shell commands or tmux commands.
+        """
+        service = _tmux_agent_service()
+        if not service:
+            return _tmux_error("Tmux agent session service unavailable")
+        try:
+            service.send_keys(session, window, text)
+            return json.dumps({"ok": True}, indent=2)
+        except Exception as e:
+            return _tmux_error(str(e))
+
+    # -- terminal_attach_metadata ------------------------------------------
+
+    @mcp.tool()
+    def terminal_attach_metadata(session: str, window: str) -> str:
+        """Return tmux attach metadata for an existing agent terminal."""
+        service = _tmux_agent_service()
+        if not service:
+            return _tmux_error("Tmux agent session service unavailable")
+        try:
+            return json.dumps({"metadata": service.attach_metadata(session, window)}, indent=2)
+        except Exception as e:
+            return _tmux_error(str(e))
+
+    # -- terminal_handoff_draft --------------------------------------------
+
+    @mcp.tool()
+    def terminal_handoff_draft(session: str, window: str, start: int = -120) -> str:
+        """Draft a Markdown handoff from tmux metadata and pane capture."""
+        service = _tmux_agent_service()
+        if not service:
+            return _tmux_error("Tmux agent session service unavailable")
+        start = _coerce_int(start, default=-120, minimum=-5000, maximum=0)
+        try:
+            return json.dumps({"draft": service.handoff_draft(session, window, start=start)}, indent=2)
+        except Exception as e:
+            return _tmux_error(str(e))
 
     return mcp
 

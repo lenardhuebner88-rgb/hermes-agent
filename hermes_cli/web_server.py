@@ -1021,6 +1021,10 @@ class AgentTerminalCaptureRequest(AgentTerminalTargetRequest):
     start: int = -200
 
 
+class AgentTerminalHandoffDraftRequest(AgentTerminalTargetRequest):
+    start: int = -120
+
+
 class AgentTerminalSendKeysRequest(AgentTerminalTargetRequest):
     text: str
 
@@ -12139,6 +12143,22 @@ async def agent_terminal_capture(req: AgentTerminalCaptureRequest) -> Dict[str, 
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"content": content}
+
+
+@app.post("/api/agent-terminals/attach-metadata")
+async def agent_terminal_attach_metadata(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        return {"metadata": _agent_terminal_service().attach_metadata(req.session, req.window)}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/handoff-draft")
+async def agent_terminal_handoff_draft(req: AgentTerminalHandoffDraftRequest) -> Dict[str, object]:
+    try:
+        return {"draft": _agent_terminal_service().handoff_draft(req.session, req.window, start=req.start)}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
 
 
 @app.post("/api/agent-terminals/send-keys")

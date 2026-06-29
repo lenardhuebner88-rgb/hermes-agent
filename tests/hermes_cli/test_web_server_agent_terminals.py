@@ -36,6 +36,14 @@ class FakeAgentTerminalService:
         assert (session, window, start) == ("work", "hermes", -10)
         return "captured"
 
+    def attach_metadata(self, session, window):
+        assert (session, window) == ("work", "hermes")
+        return {"target": "work:hermes", "attach_argv": ["tmux", "attach-session", "-t", "work:hermes"]}
+
+    def handoff_draft(self, session, window, *, start=-120):
+        assert (session, window, start) == ("work", "hermes", -12)
+        return {"target": "work:hermes", "content": "# handoff"}
+
     def send_keys(self, session, window, text):
         assert (session, window, text) == ("work", "hermes", "abc")
 
@@ -57,6 +65,8 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/show", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["session"] == "work"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
+    assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
+    assert client.post("/api/agent-terminals/handoff-draft", json={"session": "work", "window": "hermes", "start": -12}, headers=headers).json()["draft"]["content"] == "# handoff"
     assert client.post("/api/agent-terminals/send-keys", json={"session": "work", "window": "hermes", "text": "abc"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/interrupt", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/detach-client", json={"client_id": "client1"}, headers=headers).json() == {"ok": True}
@@ -66,6 +76,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
         "AgentTerminalEnsureRequest",
         "AgentTerminalTargetRequest",
         "AgentTerminalCaptureRequest",
+        "AgentTerminalHandoffDraftRequest",
         "AgentTerminalSendKeysRequest",
         "AgentTerminalDetachRequest",
     }

@@ -302,7 +302,7 @@ class TmuxAgentSessionService:
 
     def send_keys(self, session: str, window: str, text: str) -> None:
         target = self._target(session, window)
-        self._run("send-keys", "-t", target, "-l", text)
+        self._run("send-keys", "-t", target, "-l", "--", text)
         self._log_event("send_keys", session=session, window=window, bytes=len(text.encode("utf-8")))
 
     def interrupt(self, session: str, window: str) -> None:
@@ -312,6 +312,47 @@ class TmuxAgentSessionService:
 
     def attach_argv(self, session: str, window: str) -> list[str]:
         return self._tmux_cmd("attach-session", "-t", self._target(session, window))
+
+    def attach_metadata(self, session: str, window: str) -> dict[str, object]:
+        info = self.show(session, window)
+        target = self._target(info.session, info.window)
+        argv = self.attach_argv(info.session, info.window)
+        self._log_event("attach_metadata", session=info.session, window=info.window)
+        return {
+            "target": target,
+            "session": info.session,
+            "window": info.window,
+            "active": info.active,
+            "pane_id": info.pane_id,
+            "pid": info.pid,
+            "command": info.command,
+            "attach_argv": argv,
+            "attach_command": shlex.join(argv),
+        }
+
+    def handoff_draft(self, session: str, window: str, *, start: int = -120) -> dict[str, object]:
+        info = self.show(session, window)
+        transcript = self.capture(info.session, info.window, start=start).rstrip()
+        target = self._target(info.session, info.window)
+        title = f"Terminal handoff for {target}"
+        content = (
+            f"# {title}\n\n"
+            f"- tmux target: `{target}`\n"
+            f"- pane: `{info.pane_id}`\n"
+            f"- command: `{info.command}`\n\n"
+            "## Recent pane capture\n\n"
+            "```text\n"
+            f"{transcript}\n"
+            "```\n"
+        )
+        self._log_event("handoff_draft", session=info.session, window=info.window)
+        return {
+            "target": target,
+            "session": info.session,
+            "window": info.window,
+            "title": title,
+            "content": content,
+        }
 
     def detach_client(self, client_id: str) -> None:
         client_id = self.validate_name(client_id, field="client")

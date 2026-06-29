@@ -84,15 +84,26 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     assert created.window == "hermes"
     assert any(w.window == "hermes" for w in service.list_windows("work"))
 
-    service.send_keys("work", "hermes", "hello-from-test")
+    service.send_keys("work", "hermes", "-hello-from-test")
     captured = service.capture("work", "hermes", start=-20)
     assert "fake hermes tui" in captured
+    assert "-hello-from-test" in captured
+    metadata = service.attach_metadata("work", "hermes")
+    assert metadata["target"] == "work:hermes"
+    attach_argv = metadata["attach_argv"]
+    assert isinstance(attach_argv, list)
+    assert attach_argv[-1] == "work:hermes"
+    draft = service.handoff_draft("work", "hermes", start=-20)
+    assert draft["target"] == "work:hermes"
+    assert "## Recent pane capture" in str(draft["content"])
     service.interrupt("work", "hermes")
 
     log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
     assert "hello-from-test" not in log
     assert "send_keys" in log
     assert "capture" in log
+    assert "attach_metadata" in log
+    assert "handoff_draft" in log
 
 
 def test_ensure_existing_window_does_not_overwrite_process(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
