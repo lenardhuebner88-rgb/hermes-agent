@@ -25,6 +25,9 @@ const PulseView = lazy(() =>
 const AgentOpsView = lazy(() =>
   import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
 );
+const AgentTerminalsView = lazy(() =>
+  import("./views/AgentTerminalsView").then((m) => ({ default: m.AgentTerminalsView })),
+);
 const FlowView = lazy(() =>
   import("./views/FlowView").then((m) => ({ default: m.FlowView })),
 );
@@ -80,6 +83,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
   if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
+  if (pathname.includes("/control/agent-terminals")) return "agentTerminals";
   // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
   if (pathname.includes("/control/flow")) return "flow";
   if (pathname.includes("/control/ketten")) return "ketten";
@@ -111,6 +115,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   overview: () => import("./views/OverviewView"),
   pulse: () => import("./views/PulseView"),
   workstreams: () => import("./views/AgentOpsView"),
+  agentTerminals: () => import("./views/AgentTerminalsView"),
   flow: () => import("./views/FlowView"),
   ketten: () => import("./views/ChainVizView"),
   statistik: () => import("./views/StatistikView"),
@@ -138,6 +143,7 @@ const tabPath: Record<ControlTab, string> = {
   overview: "/control/overview",
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
+  agentTerminals: "/control/agent-terminals",
   flow: "/control/flow",
   ketten: "/control/ketten",
   statistik: "/control/statistik",
@@ -243,6 +249,7 @@ export default function ControlPage() {
             <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
+            <Route path="agent-terminals" element={<AgentTerminalsView />} />
             {/* hermes wurde in Flow absorbiert (Phase 2) */}
             <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
             <Route path="statistik" element={<StatistikView />} />
