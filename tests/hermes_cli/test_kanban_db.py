@@ -8968,6 +8968,132 @@ def test_4a_decompose_failure_exemption_is_scoped_to_active_hold(kanban_home):
     assert root_task.status == "blocked"
 
 
+def test_decompose_failure_is_transient_pure_rule():
+    # HEILER-DECOMPOSE-FALLBACK-S1: pure classifier that tells a transient/infra
+    # decompose failure (aux client down, LLM error, benign race) from a genuine
+    # spec defect. The transient set is sourced from the ok=False reason strings
+    # in kanban_decompose.decompose_task. Case-insensitive substring match; a
+    # None/empty/unknown reason is NOT transient (defaults to the unchanged
+    # bad-spec escalation, so a counter bumped without a reason behaves as before).
+    transient = [
+        "no auxiliary client configured",
+        "auxiliary client unavailable",
+        "LLM error: APITimeoutError",
+        "LLM returned malformed JSON",
+        "DB error: OperationalError",
+        "task moved out of triage before promotion",
+        "task moved out of triage before decomposition",
+        "unknown task id",
+        "task is not in triage (status='todo')",
+        "decompose_task crashed: RuntimeError",
+    ]
+    for r in transient:
+        assert kb._decompose_failure_is_transient(r), r
+    genuine = [
+        "decomposer returned fanout=false with no title/body",
+        "decomposer returned fanout=true with empty tasks list",
+        "tasks[0].title is missing or empty",
+        "DB rejected graph: invalid assignee",
+    ]
+    for r in genuine:
+        assert not kb._decompose_failure_is_transient(r), r
+    assert not kb._decompose_failure_is_transient(None)
+    assert not kb._decompose_failure_is_transient("")
+
+
+def test_decompose_transient_failure_retries_then_parks_transient(kanban_home):
+    # HEILER-DECOMPOSE-FALLBACK-S1 (AC-1): a decompose failure whose recorded
+    # reason is transient/infra must NOT escalate as bad-spec. It runs through the
+    # SAME bounded, backoff-spaced transient-retry budget the rate-limit loop uses
+    # (the task stays in triage so the decomposer re-attempts it once the aux
+    # client recovers — a success would reset the counter and escalate nothing);
+    # only an EXHAUSTED budget escalates, and then classified TRANSIENT (infra),
+    # never bad-spec. Sweeps step the logical clock; the per-attempt backoff is
+    # keyed on the real-time event stamp (moot under a far-future ``now``, exactly
+    # like the rate-limit test).
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="decompose triage", assignee="coder", triage=True,
+        )
+        # Record limit failures carrying a transient reason (aux client down).
+        for _ in range(3):
+            kb.record_decompose_failure(
+                conn, tid, reason="no auxiliary client configured",
+            )
+
+        s1 = kb.no_silent_stall_sweep(conn, now=now)
+        s2 = kb.no_silent_stall_sweep(conn, now=now + 1)
+        # TRANSIENT_RETRY_LIMIT (=2) rounds spent → budget exhausted → parks.
+        s3 = kb.no_silent_stall_sweep(conn, now=now + 2)
+
+        task = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        heiler = [
+            (e.payload or {}).get("class")
+            for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+
+    # Never parked or classified as bad-spec on any sweep.
+    for s in (s1, s2, s3):
+        assert {"task_id": tid, "class": "triage_decompose_failed"} not in s["parked"]
+    # Retried within budget, then transient-parked exactly once.
+    assert {"task_id": tid, "class": "triage_decompose_transient"} in s3["parked"]
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+    assert kb.HEILER_CLASS_TRANSIENT in heiler
+    assert kb.HEILER_CLASS_BAD_SPEC not in heiler
+
+
+def test_decompose_genuine_defect_still_parks_bad_spec(kanban_home):
+    # HEILER-DECOMPOSE-FALLBACK-S1 (AC-2 guard): a genuine spec defect (the
+    # decomposer engaged but the spec cannot be turned into work) must STILL
+    # escalate as bad-spec — never silently pushed through as a single atomic
+    # task. Unchanged path; this pins that the discrimination did not weaken it.
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="vague triage", assignee="coder", triage=True,
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(
+                conn, tid,
+                reason="decomposer returned fanout=false with no title/body",
+            )
+        s = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        heiler = [
+            (e.payload or {}).get("class")
+            for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+    assert {"task_id": tid, "class": "triage_decompose_failed"} in s["parked"]
+    assert task.status == "blocked"
+    assert kb.HEILER_CLASS_BAD_SPEC in heiler
+    assert kb.HEILER_CLASS_TRANSIENT not in heiler
+
+
+def test_decompose_no_reason_event_preserves_bad_spec_park(kanban_home):
+    # Back-compat: a decompose_failed counter bumped WITHOUT a reason (older code
+    # path / direct counter use) has no decompose_attempt_failed event, so the
+    # latest-reason lookup returns None → not transient → unchanged bad-spec park.
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="no-reason triage", assignee="coder", triage=True,
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(conn, tid)  # no reason
+        s = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+    assert {"task_id": tid, "class": "triage_decompose_failed"} in s["parked"]
+    assert task.status == "blocked"
+
+
 def test_4a_rate_limited_loop_retries_then_parks(kanban_home):
     # HEILER-TRANSIENT-RETRY-BUDGET-S1: a persistent rate-limit loop is transient
     # infra, so it now runs through a BOUNDED, backoff-spaced retry budget before
