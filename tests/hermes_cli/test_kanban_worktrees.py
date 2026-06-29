@@ -2288,6 +2288,36 @@ def test_resolve_fixer_worktree_is_isolated(tmp_path):
     assert kwt.split_provisioned_path(wt) is not None
 
 
+def test_release_gate_fixer_spawn_isolates_mcp(monkeypatch, tmp_path):
+    """disposition-di_109b5a17-S1: the release-gate fixer claude-cli spawn pins
+    --strict-mcp-config so no external MCP servers (vault qmd, @playwright/mcp
+    headless chromium) load. Those server child processes keep the Node event
+    loop alive, so ``claude -p`` cannot exit after its turn — the post-commit
+    ep_poll idle hang (0-byte json log, slot + token stream pinned)."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    kwt._spawn_release_gate_fixer_process(
+        worktree=wt, branch="wt/t_root", prompt="fix it",
+        task_id="t_child", root_id="t_root",
+    )
+    assert "--strict-mcp-config" in captured["cmd"], captured["cmd"]
+    # Empty-server-set form: no companion --mcp-config smuggling servers back in.
+    assert "--mcp-config" not in captured["cmd"], captured["cmd"]
+
+
 def test_default_fixer_provisions_isolated_worktree_not_live(
     kanban_home, repo, monkeypatch,
 ):

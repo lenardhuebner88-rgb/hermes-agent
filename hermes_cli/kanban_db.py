@@ -19285,6 +19285,22 @@ def _spawn_claude_worker(
             "--output-format", "json",
             "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
         ]
+    # Worker MCP isolation (idle-hang fix, disposition-di_109b5a17-S1): never
+    # load external MCP servers for a claude-cli kanban worker. Without this the
+    # CLI starts the configured MCP servers (vault qmd, @playwright/mcp headless
+    # chromium, the claude.ai connectors) as long-lived child processes. Those
+    # children keep the Node event loop alive, so ``claude -p`` cannot exit after
+    # its agent turn — it sits in ``ep_poll`` indefinitely and the buffered
+    # ``--output-format json`` result is never flushed (the post-commit "idle
+    # hang": 0-byte log, last output >1000s, worker slot + token stream pinned
+    # until a reaper kills it ~1h later). A kanban worker drives its lifecycle via
+    # Bash → ``hermes kanban`` (NOT MCP) and edits via Claude's built-in
+    # Read/Grep/Glob/Edit/Write/Bash, so stripping MCP costs the worker nothing
+    # while removing ~190 MB RSS + chromium startup per spawn. ``--strict-mcp-config``
+    # with no ``--mcp-config`` loads an empty server set (verified on Claude CLI
+    # 2.1.195: spawns zero MCP children and exits 0). Applies to both the verdict
+    # allowlist path and the denylist+bypass path above.
+    cmd.append("--strict-mcp-config")
     # Model routing: per-task override > active lane (F1) > per-profile default
     # (claude_model) > subscription default (omit --model). A profile can default
     # to a fast/cheap tier (e.g. claude-fable-5) while hard tasks escalate via
