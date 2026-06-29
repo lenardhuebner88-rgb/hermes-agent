@@ -443,6 +443,26 @@ def mock_config():
     }
 
 
+@pytest.fixture()
+def restore_sys_modules():
+    """Restore ``sys.modules`` exactly after a test that purges/re-imports it.
+
+    Opt-in (request it explicitly). Tests that force a config/module re-read
+    with ``del sys.modules["hermes_cli.config"]`` and then re-import leak a
+    module-identity split into every later test file that bound the module at
+    import time — silently pointing those tests at the wrong HERMES_HOME unless
+    the originals are put back. Request this fixture **first** in the signature
+    so it wraps the others: it snapshots before they purge and restores after
+    they tear down, leaving the table byte-identical (see
+    ``tests/_module_isolation.py`` for the rationale and the per-file-isolation
+    design in ``scripts/run_tests.sh``).
+    """
+    from tests._module_isolation import preserve_sys_modules
+
+    with preserve_sys_modules():
+        yield
+
+
 # ── Per-test timeout — handled by the isolation plugin ─────────────────────
 #
 # The subprocess-per-test plugin enforces the configured ``isolate_timeout``

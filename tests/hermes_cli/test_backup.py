@@ -2044,7 +2044,11 @@ class TestRunPreUpdateBackup:
     covers config gate, ``--no-backup`` flag, and user-facing output."""
 
     @pytest.fixture
-    def hermes_home(self, tmp_path, monkeypatch):
+    def hermes_home(self, tmp_path, monkeypatch, restore_sys_modules):
+        # restore_sys_modules wraps this fixture (requested first) so the
+        # config/hermes_constants purge below is put back on teardown — without
+        # it the re-import leaks a module-identity split into later test files
+        # (see tests/_module_isolation.py).
         root = tmp_path / ".hermes"
         root.mkdir()
         _make_hermes_tree(root)
@@ -2107,11 +2111,8 @@ class TestRunPreUpdateBackup:
             "_config_version": 22,
             "updates": {"pre_update_backup": True},
         }))
-        import sys as _sys
-        for mod in list(_sys.modules.keys()):
-            if mod.startswith("hermes_cli.config"):
-                del _sys.modules[mod]
-
+        # config was purged in the hermes_home fixture and is re-read fresh
+        # from this unique HERMES_HOME on the next import below.
         from hermes_cli.main import _run_pre_update_backup
         _run_pre_update_backup(Namespace(no_backup=False, backup=False))
         out = capsys.readouterr().out
@@ -2128,12 +2129,8 @@ class TestRunPreUpdateBackup:
             "_config_version": 22,
             "updates": {"pre_update_backup": False},
         }))
-        # Ensure config module re-reads
-        import sys as _sys
-        for mod in list(_sys.modules.keys()):
-            if mod.startswith("hermes_cli.config"):
-                del _sys.modules[mod]
-
+        # config was purged in the hermes_home fixture and is re-read fresh
+        # from this unique HERMES_HOME on the next import below.
         from hermes_cli.main import _run_pre_update_backup
         _run_pre_update_backup(Namespace(no_backup=False, backup=False))
         out = capsys.readouterr().out
@@ -2148,15 +2145,82 @@ class TestRunPreUpdateBackup:
             "_config_version": 22,
             "updates": {"pre_update_backup": True},
         }))
-        import sys as _sys
-        for mod in list(_sys.modules.keys()):
-            if mod.startswith("hermes_cli.config"):
-                del _sys.modules[mod]
-
+        # config was purged in the hermes_home fixture and is re-read fresh
+        # from this unique HERMES_HOME on the next import below.
         from hermes_cli.main import _run_pre_update_backup
         _run_pre_update_backup(Namespace(no_backup=True, backup=False))
         out = capsys.readouterr().out
         assert "skipped (--no-backup)" in out
+
+
+class TestSysModulesRestore:
+    """Guards the sys.modules-restore that keeps the config-purging tests above
+    order-independent under a single-process run (per-file-isolation design of
+    scripts/run_tests.sh).
+
+    The ``hermes_home`` fixture in :class:`TestRunPreUpdateBackup` deletes the
+    ``hermes_cli.config`` / ``hermes_constants`` modules to force a re-read.
+    Without the restore those re-imports leak a module-identity split into every
+    later test file that bound the module at import time. These tests pin the
+    restore contract so the anti-pattern can't silently creep back in.
+    """
+
+    def test_preserve_sys_modules_restores_purged_config(self):
+        """preserve_sys_modules() puts the original module objects back even
+        when the body purges + re-imports them (the exact del-sys.modules
+        pattern the config tests use)."""
+        import sys
+
+        from tests._module_isolation import preserve_sys_modules
+
+        import hermes_cli.config  # ensure it is present to begin with
+        import hermes_constants
+        original_config = sys.modules["hermes_cli.config"]
+        original_const = sys.modules["hermes_constants"]
+
+        with preserve_sys_modules():
+            for mod in list(sys.modules):
+                if mod.startswith("hermes_cli.config") or mod == "hermes_constants":
+                    del sys.modules[mod]
+            # Re-import => brand-new module objects inside the block.
+            import hermes_cli.config  # noqa: F811
+            import hermes_constants  # noqa: F811
+            assert sys.modules["hermes_cli.config"] is not original_config
+            assert sys.modules["hermes_constants"] is not original_const
+
+        # On exit the originals are restored byte-identically.
+        assert sys.modules["hermes_cli.config"] is original_config
+        assert sys.modules["hermes_constants"] is original_const
+
+    def test_preserve_sys_modules_drops_modules_imported_inside(self):
+        """A module that did NOT exist before the block is removed on exit, so
+        nothing imported during the test leaks out either."""
+        import sys
+
+        from tests._module_isolation import preserve_sys_modules
+
+        sentinel = "tests._module_isolation"  # importable, simple to purge
+        sys.modules.pop(sentinel, None)
+        assert sentinel not in sys.modules
+
+        with preserve_sys_modules():
+            import tests._module_isolation  # noqa: F401
+            assert sentinel in sys.modules
+
+        assert sentinel not in sys.modules
+
+    def test_restore_sys_modules_fixture_allows_purge(self, restore_sys_modules):
+        """The opt-in fixture lets a test purge + re-import config without
+        error; the restore itself runs at teardown (covered end-to-end by the
+        order-sensitivity check in scripts/run_tests.sh per-file isolation)."""
+        import sys
+
+        for mod in list(sys.modules):
+            if mod.startswith("hermes_cli.config"):
+                del sys.modules[mod]
+        import hermes_cli.config  # noqa: F401, F811
+
+        assert "hermes_cli.config" in sys.modules
 
 
 # ---------------------------------------------------------------------------
