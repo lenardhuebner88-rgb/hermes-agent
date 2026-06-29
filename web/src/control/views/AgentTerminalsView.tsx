@@ -29,6 +29,7 @@ export type TerminalUiState =
   | "missing window"
   | "Tailscale/mobile reconnect";
 
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
 export function classifyTerminalState(args: {
   window: AgentTerminalWindow | null;
   socketReady: boolean;
@@ -43,6 +44,7 @@ export function classifyTerminalState(args: {
   return "detached";
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
 export function pickInitialTarget(
   windows: AgentTerminalWindow[],
   preferredKind: AgentTerminalKind,
@@ -138,11 +140,13 @@ export function AgentTerminalsView() {
   }, [selectedKind]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async tmux inventory load on mount / selectedKind change
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
     const match = windows.find((w) => w.window === selectedKind);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync attach target to the externally-changed window inventory/selection
     if (match) setTarget(targetFromWindow(match));
   }, [selectedKind, windows]);
 
@@ -161,7 +165,9 @@ export function AgentTerminalsView() {
     const resize = () => {
       try {
         fit.fit();
-      } catch {}
+      } catch {
+        /* best-effort fit; ignore transient resize errors */
+      }
     };
     requestAnimationFrame(resize);
     const observer = new ResizeObserver(resize);
