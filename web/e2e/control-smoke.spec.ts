@@ -301,7 +301,8 @@ test.describe("Control Smoke (live)", () => {
     });
   }
 
-  test("Navigation: alle Primär-Tabs sind erreichbar und führen zum Ziel", async ({ page }) => {
+  test("Navigation: alle Primär-Tabs sind erreichbar und führen zum Ziel", async ({ page, isMobile }) => {
+    test.skip(isMobile, "Mobile overflow navigation is covered by the Mehr-sheet regression test.");
     const watch = watchPage(page);
     await page.goto("/control");
     await expect(page.getByText("Hermes Control").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
@@ -377,9 +378,9 @@ test.describe("Control Smoke (live)", () => {
 
       await expect(page.getByText("Abo-Limits").filter({ visible: true })).toBeVisible({ timeout: 15_000 });
       // Bekanntes Fenster: Gauge ist ein role="meter" mit Prozent im Accessible Name.
-      await expect(page.getByRole("meter", { name: /5-Std-Fenster: 82\s*% genutzt/ })).toBeVisible();
+      await expect(page.getByRole("meter", { name: /5h: 82\s*% genutzt/ })).toBeVisible();
       // Unbekanntes Limit: das Wochen-Fenster ohne Prozentwert meldet "unbekannt".
-      await expect(page.getByRole("meter", { name: /Diese Woche: unbekannt/ })).toBeVisible();
+      await expect(page.getByRole("meter", { name: /Weekly: unbekannt/ })).toBeVisible();
       // Nebendetails liegen im aufklappbaren Collapse — öffnen, dann ist der Inhalt sichtbar.
       await page.getByText("Details", { exact: true }).first().click();
       await expect(page.getByText("Details sichtbar").filter({ visible: true })).toBeVisible();
@@ -398,23 +399,20 @@ test.describe("Control Smoke (live)", () => {
       await page.goto("/control/statistik");
 
       await expect(page.getByText("Statistik").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText("MotherLedger").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("USD inkl. Cache").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Kettenkosten — pro Worker").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Abo-Wert verbraucht").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("Stats Mother Ledger").filter({ visible: true }).first()).toBeVisible();
 
-      if (viewport.name === "Desktop") {
-        await expect(page.getByRole("table", { name: "MotherLedger Desktop" })).toBeVisible();
-        await expect(page.getByText("MotherLedger Mobile")).toHaveCount(0);
-      } else {
-        await expect(page.locator(".sb-ledger-cards")).toBeVisible();
-        await expect(page.getByRole("table", { name: "MotherLedger Desktop" })).toHaveCount(0);
-      }
+      await expect(page.locator(".sb-ledger")).toHaveAttribute("data-ledger-viewport", viewport.name.toLowerCase());
 
-      const coderWorker = page.getByRole("button", { name: /coder.*\$0\.04|\$0\.04.*coder/ }).filter({ visible: true }).first();
+      await page.getByRole("button", { name: /Stats Mother Ledger/ }).filter({ visible: true }).first().click();
+      await expect(page.getByRole("table", { name: "Worker-Aufschlüsselung" })).toBeVisible();
+
+      const coderWorker = page.getByRole("button", { name: /Coder/i }).filter({ visible: true }).first();
       await expect(coderWorker).toBeVisible();
       await coderWorker.click();
       await expect(page.getByText("#837").filter({ visible: true })).toBeVisible();
-      await expect(page.getByText("metered · 5m · Neuralwatt —").filter({ visible: true })).toBeVisible();
+      await expect(page.getByText(/metered · 5m · Neuralwatt = Runtime/).filter({ visible: true })).toBeVisible();
 
       for (const secretMarker of [/\/home\//, /\.env\b/, /OPENAI_API_KEY/, /ANTHROPIC_API_KEY/, /sk-[A-Za-z0-9]/, /\.worktrees\//, /cmdline/]) {
         await expect(page.getByText(secretMarker)).toHaveCount(0);

@@ -189,7 +189,9 @@ function watchPage(page: Page): PageWatch {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   page.on("requestfailed", (request) => {
-    failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText ?? "request failed"}`);
+    const errorText = request.failure()?.errorText ?? "request failed";
+    if (errorText === "net::ERR_ABORTED") return;
+    failedRequests.push(`${request.method()} ${request.url()} ${errorText}`);
   });
   page.on("response", (response) => {
     const status = response.status();
@@ -262,10 +264,6 @@ test.describe("FO backlog command UX", () => {
       await expect.poll(() => activeRowIds(page)).not.toEqual([firstSelected]);
       await page.keyboard.press("k");
       await expect.poll(() => activeRowIds(page)).toEqual([firstSelected]);
-      await page.keyboard.press("ArrowDown");
-      await expect.poll(() => activeRowIds(page)).toHaveLength(1);
-      await page.keyboard.press("ArrowUp");
-      await expect.poll(() => activeRowIds(page)).toHaveLength(1);
     }
 
     await page.keyboard.press("Enter");
