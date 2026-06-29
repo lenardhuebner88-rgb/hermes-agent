@@ -14441,9 +14441,10 @@ def record_decompose_failure(
     ``reason`` (the ok=False reason string from ``decompose_task``) is recorded
     on a ``decompose_attempt_failed`` event so the no-silent-stall sweep can tell
     a transient/infra failure from a genuine spec defect (HEILER-DECOMPOSE-
-    FALLBACK-S1). It is optional and back-compatible: omitting it bumps the
-    counter exactly as before with no event (the sweep then treats the stall as
-    a genuine defect, the unchanged bad-spec escalation).
+    FALLBACK-S1). It is optional and back-compatible: omitting it records
+    ``reason: null`` (the sweep then treats the stall as a genuine defect, the
+    unchanged bad-spec escalation) while still marking this attempt as the latest
+    decompose-failure boundary.
     """
     with write_txn(conn):
         cur = conn.execute(
@@ -14453,11 +14454,10 @@ def record_decompose_failure(
         )
         if cur.rowcount == 0:
             return 0
-        if reason:
-            _append_event(
-                conn, task_id, DECOMPOSE_ATTEMPT_FAILED_EVENT,
-                {"reason": str(reason)[:500]},
-            )
+        _append_event(
+            conn, task_id, DECOMPOSE_ATTEMPT_FAILED_EVENT,
+            {"reason": str(reason)[:500] if reason is not None else None},
+        )
         row = conn.execute(
             "SELECT decompose_failed FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()

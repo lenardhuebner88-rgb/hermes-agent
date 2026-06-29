@@ -9094,6 +9094,40 @@ def test_decompose_no_reason_event_preserves_bad_spec_park(kanban_home):
     assert task.status == "blocked"
 
 
+def test_decompose_no_reason_after_reset_overrides_stale_transient_reason(
+    kanban_home,
+):
+    # Mixed-history guard: a successful/reset decompose attempt must create a new
+    # boundary. Later no-reason failures are legacy/genuine-defect bumps and must
+    # not inherit an older transient reason from before the reset.
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="mixed-history triage", assignee="coder", triage=True,
+        )
+        kb.record_decompose_failure(
+            conn, tid, reason="no auxiliary client configured",
+        )
+        kb.reset_decompose_failed(conn, tid)
+
+        for _ in range(3):
+            kb.record_decompose_failure(conn, tid)  # no reason after reset
+
+        s = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        heiler = [
+            (e.payload or {}).get("class")
+            for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+
+    assert {"task_id": tid, "class": "triage_decompose_failed"} in s["parked"]
+    assert {"task_id": tid, "class": "triage_decompose_transient"} not in s["transient_retried"]
+    assert task.status == "blocked"
+    assert kb.HEILER_CLASS_BAD_SPEC in heiler
+    assert kb.HEILER_CLASS_TRANSIENT not in heiler
+
+
 def test_4a_rate_limited_loop_retries_then_parks(kanban_home):
     # HEILER-TRANSIENT-RETRY-BUDGET-S1: a persistent rate-limit loop is transient
     # infra, so it now runs through a BOUNDED, backoff-spaced retry budget before
