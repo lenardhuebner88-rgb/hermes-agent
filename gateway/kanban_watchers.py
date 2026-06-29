@@ -2248,7 +2248,9 @@ class GatewayKanbanWatchersMixin:
                 except Exception:
                     boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
 
-            def _bump_decompose_counter(target_id: str, *, ok: bool) -> None:
+            def _bump_decompose_counter(
+                target_id: str, *, ok: bool, reason: "Optional[str]" = None,
+            ) -> None:
                 """Fail-soft decompose-failure bookkeeping.
 
                 A counter bump must never break the decomposition tick, so
@@ -2256,13 +2258,20 @@ class GatewayKanbanWatchersMixin:
                 already pinned via HERMES_KANBAN_BOARD, so connect() with no
                 kwarg targets the right DB — same idiom as the rest of this
                 function.
+
+                ``reason`` (the ok=False reason from ``decompose_task``) is
+                forwarded so the no-silent-stall sweep can tell a transient/
+                infra decompose failure from a genuine spec defect (HEILER-
+                DECOMPOSE-FALLBACK-S1).
                 """
                 try:
                     with _kb.connect_closing() as _conn:
                         if ok:
                             _kb.reset_decompose_failed(_conn, target_id)
                         else:
-                            _kb.record_decompose_failure(_conn, target_id)
+                            _kb.record_decompose_failure(
+                                _conn, target_id, reason=reason,
+                            )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug(
                         "kanban auto-decompose: decompose_failed bump failed on %s (%s)",
@@ -2298,12 +2307,15 @@ class GatewayKanbanWatchersMixin:
                             outcome = _decomp.decompose_task(
                                 tid, author="auto-decomposer",
                             )
-                        except Exception:
+                        except Exception as exc:
                             logger.exception(
                                 "kanban auto-decompose: decompose_task crashed on %s",
                                 tid,
                             )
-                            _bump_decompose_counter(tid, ok=False)
+                            _bump_decompose_counter(
+                                tid, ok=False,
+                                reason=f"decompose_task crashed: {type(exc).__name__}",
+                            )
                             continue
                         if outcome.ok:
                             successes += 1
@@ -2319,7 +2331,10 @@ class GatewayKanbanWatchersMixin:
                                     slug, tid,
                                 )
                         else:
-                            _bump_decompose_counter(outcome.task_id, ok=False)
+                            _bump_decompose_counter(
+                                outcome.task_id, ok=False,
+                                reason=outcome.reason,
+                            )
                             # Common no-op reasons (no aux client configured) shouldn't
                             # spam logs every tick. Log at debug.
                             logger.debug(

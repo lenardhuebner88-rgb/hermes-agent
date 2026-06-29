@@ -3283,6 +3283,36 @@ HEILER_CLASSES = (
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
 NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
+# HEILER-DECOMPOSE-FALLBACK-S1: the auto-decomposer bumps ``decompose_failed`` for
+# EVERY ok=False outcome, but most are transient/infra (aux client down, LLM
+# error/timeout, benign races) — NOT spec defects. The uniform bump made all of
+# them escalate as ``bad-spec`` once the limit was hit (the dominant "12 distinct
+# roots, 100% identical 'auto_decompose failed N times'" signature — the
+# fingerprint of a shared infra cause, not 12 independently bad specs). The
+# auto-decomposer now records the failure reason on a ``decompose_attempt_failed``
+# event so the sweep can tell a transient infra failure (route to the bounded
+# transient-retry budget, classify TRANSIENT, keep the task in triage for
+# re-decomposition on recovery) from a genuine spec defect (escalate as bad-spec,
+# unchanged). Nothing is dispatched as a single atomic task, so a decompose-
+# needing spec is never blindly pushed through (AC-2 holds by construction).
+DECOMPOSE_ATTEMPT_FAILED_EVENT = "decompose_attempt_failed"
+DECOMPOSE_TRANSIENT_STALL_CLASS = "triage_decompose_transient"
+# Lowercased substrings of the ok=False reason strings in
+# ``kanban_decompose.decompose_task`` that mark a failure as transient/infra
+# rather than a genuine spec defect. An unknown/absent reason is NOT transient and
+# keeps the unchanged bad-spec escalation, so any counter bumped without a reason
+# behaves exactly as before this change.
+_DECOMPOSE_TRANSIENT_REASON_FRAGMENTS = (
+    "auxiliary client unavailable",
+    "no auxiliary client configured",
+    "llm error",
+    "llm returned malformed json",
+    "db error",
+    "moved out of triage",     # benign race: the task already progressed
+    "unknown task id",         # benign race
+    "task is not in triage",   # benign race
+    "crashed",                 # decompose_task raised — infra, not a spec defect
+)
 # Heiler: transient re-integration retry lane (no_silent_stall_sweep §5).
 # An integration-parked task whose park reason is classified ``transient`` by
 # ``kanban_worktrees._integration_park_class`` (dirty overlap / in-progress git
@@ -13877,6 +13907,10 @@ _HEILER_STALL_CLASS = {
     "rate_limited_loop": HEILER_CLASS_TRANSIENT,
     "review_without_verifier": HEILER_CLASS_BAD_SPEC,
     "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
+    # HEILER-DECOMPOSE-FALLBACK-S1: a decompose stall whose recorded reason was
+    # transient/infra (aux client down, LLM error, race) escalates — only after
+    # an exhausted bounded retry budget — as TRANSIENT, never bad-spec.
+    DECOMPOSE_TRANSIENT_STALL_CLASS: HEILER_CLASS_TRANSIENT,
 }
 # HEILER-OUTCOME-RECLASSIFY-S1: WEAKER structural mappings, evaluated only AFTER
 # the free-text signals (unlike the STRONG tables above, which win over text).
@@ -14392,13 +14426,24 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 _clear_spawn_failures = _clear_failure_counter
 
 
-def record_decompose_failure(conn: sqlite3.Connection, task_id: str) -> int:
+def record_decompose_failure(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: Optional[str] = None,
+) -> int:
     """Bump the per-task ``decompose_failed`` counter and return its new value.
 
     Called from the auto_decompose callers when ``decompose_task`` returns
     ok=False or crashes for ``task_id``. Decompose-specific bookkeeping that
     is independent of the spawn circuit breaker (``consecutive_failures``).
     Returns 0 when the row doesn't exist.
+
+    ``reason`` (the ok=False reason string from ``decompose_task``) is recorded
+    on a ``decompose_attempt_failed`` event so the no-silent-stall sweep can tell
+    a transient/infra failure from a genuine spec defect (HEILER-DECOMPOSE-
+    FALLBACK-S1). It is optional and back-compatible: omitting it bumps the
+    counter exactly as before with no event (the sweep then treats the stall as
+    a genuine defect, the unchanged bad-spec escalation).
     """
     with write_txn(conn):
         cur = conn.execute(
@@ -14408,10 +14453,52 @@ def record_decompose_failure(conn: sqlite3.Connection, task_id: str) -> int:
         )
         if cur.rowcount == 0:
             return 0
+        if reason:
+            _append_event(
+                conn, task_id, DECOMPOSE_ATTEMPT_FAILED_EVENT,
+                {"reason": str(reason)[:500]},
+            )
         row = conn.execute(
             "SELECT decompose_failed FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         return int(row["decompose_failed"]) if row is not None else 0
+
+
+def _decompose_failure_is_transient(reason: Optional[str]) -> bool:
+    """True when a recorded decompose-failure reason is transient/infra rather
+    than a genuine spec defect (HEILER-DECOMPOSE-FALLBACK-S1).
+
+    Pure and case-insensitive substring match against
+    ``_DECOMPOSE_TRANSIENT_REASON_FRAGMENTS``. ``None``/empty/unknown reasons
+    return False — they are treated as genuine defects (bad-spec escalation),
+    preserving pre-fix behaviour for any failure recorded without a reason.
+    """
+    if not reason:
+        return False
+    low = str(reason).lower()
+    return any(frag in low for frag in _DECOMPOSE_TRANSIENT_REASON_FRAGMENTS)
+
+
+def _latest_decompose_failure_reason(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[str]:
+    """Reason string of the most recent ``decompose_attempt_failed`` event, or
+    None when none was recorded (counter bumped without a reason)."""
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id, DECOMPOSE_ATTEMPT_FAILED_EVENT),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("reason") is not None:
+        return str(payload["reason"])
+    return None
 
 
 def reset_decompose_failed(conn: sqlite3.Connection, task_id: str) -> None:
@@ -15351,12 +15438,53 @@ def no_silent_stall_sweep(
         stall_class = "triage_decompose_failed"
         if _has_stall_marker(conn, row["id"], stall_class):
             continue
-        reason = (
-            f"auto_decompose failed {int(row['decompose_failed'])} times"
-        )
+        attempts = int(row["decompose_failed"])
+        reason = f"auto_decompose failed {attempts} times"
+        # HEILER-DECOMPOSE-FALLBACK-S1: the uniform decompose_failed bump cannot
+        # tell a transient/infra failure (aux client down, LLM error, benign
+        # race) from a genuine spec defect, so every one used to escalate as
+        # bad-spec. Read the LATEST recorded attempt reason: a transient one is
+        # NOT a bad spec — give it the SAME bounded, backoff-spaced transient-
+        # retry budget the rate-limit loop uses (§4). The task stays in triage so
+        # the decomposer re-attempts it once the aux client recovers; a success
+        # resets the counter and escalates nothing. Only an EXHAUSTED budget
+        # escalates, and then classified TRANSIENT (infra) rather than bad-spec.
+        # An unknown/absent reason falls through to the unchanged bad-spec park.
+        latest_reason = _latest_decompose_failure_reason(conn, row["id"])
+        if _decompose_failure_is_transient(latest_reason):
+            decision = _transient_retry_or_escalate(
+                conn, row, error=reason, now=ts,
+            )
+            if decision == "retried":
+                summary["transient_retried"].append(
+                    {"task_id": row["id"], "class": stall_class}
+                )
+                continue
+            if decision == "backoff":
+                continue
+            # exhausted budget → escalate, honestly classified transient infra.
+            t_class = DECOMPOSE_TRANSIENT_STALL_CLASS
+            if _has_stall_marker(conn, row["id"], t_class):
+                continue
+            t_reason = (
+                f"auto_decompose failed {attempts} times "
+                f"(transient: {latest_reason})"
+            )
+            if _park_stall_once(
+                conn, row, stall_class=t_class, reason=t_reason,
+                evidence={
+                    "attempts": attempts,
+                    "transient_reason": latest_reason,
+                },
+                now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": row["id"], "class": t_class}
+                )
+            continue
         if _park_stall_once(
             conn, row, stall_class=stall_class, reason=reason,
-            evidence={"attempts": int(row["decompose_failed"])}, now=ts,
+            evidence={"attempts": attempts}, now=ts,
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
