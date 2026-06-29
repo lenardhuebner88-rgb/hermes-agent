@@ -89,10 +89,52 @@ function sanitizeTerminalStartOptions(options = {}) {
   }
 }
 
+function normalizeTerminalSize(size = {}) {
+  return {
+    cols: Math.max(2, Number.parseInt(String(size?.cols || 80), 10) || 80),
+    rows: Math.max(2, Number.parseInt(String(size?.rows || 24), 10) || 24)
+  }
+}
+
+function resizeTerminalSession(sessions, id, size = {}) {
+  const sessionInfo = sessions.get(String(id || ''))
+
+  if (!sessionInfo) {
+    return false
+  }
+
+  const { cols, rows } = normalizeTerminalSize(size)
+  sessionInfo.pty.resize(cols, rows)
+
+  return true
+}
+
+function disposeTerminalSession(sessions, id) {
+  const key = String(id || '')
+  const sessionInfo = sessions.get(key)
+
+  if (!sessionInfo) {
+    return false
+  }
+
+  sessions.delete(key)
+
+  try {
+    sessionInfo.pty.kill()
+  } catch {
+    // Process may already be gone.
+  }
+
+  return true
+}
+
 module.exports = {
   buildTmuxTargetArg,
+  disposeTerminalSession,
   findOnPath,
+  normalizeTerminalSize,
   normalizeTmuxTarget,
   resolveTerminalSpawnSpec,
+  resizeTerminalSession,
   sanitizeTerminalStartOptions
 }

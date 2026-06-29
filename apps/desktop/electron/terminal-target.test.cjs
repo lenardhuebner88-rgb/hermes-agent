@@ -1,7 +1,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { resolveTerminalSpawnSpec, sanitizeTerminalStartOptions } = require('./terminal-target.cjs')
+const {
+  disposeTerminalSession,
+  resizeTerminalSession,
+  resolveTerminalSpawnSpec,
+  sanitizeTerminalStartOptions
+} = require('./terminal-target.cjs')
 
 test('uses interactive shell when no controlled terminal target is requested', () => {
   const shellSpec = { command: '/bin/bash', args: ['-il'], name: 'bash' }
@@ -73,4 +78,43 @@ test('preload sanitizer forwards only the controlled terminal start contract', (
       tmuxTarget: { session: 'coder', window: 'agent_1' }
     }
   )
+})
+
+test('terminal resize IPC path clamps dimensions and rejects unknown sessions', () => {
+  const resizeCalls = []
+  const sessions = new Map([
+    [
+      'term-1',
+      {
+        pty: {
+          resize: (cols, rows) => resizeCalls.push([cols, rows])
+        }
+      }
+    ]
+  ])
+
+  assert.equal(resizeTerminalSession(sessions, 'missing', { cols: 120, rows: 40 }), false)
+  assert.equal(resizeTerminalSession(sessions, 'term-1', { cols: 1, rows: '0' }), true)
+  assert.deepEqual(resizeCalls, [[2, 24]])
+})
+
+test('terminal dispose IPC path removes the session and kills the PTY once', () => {
+  let kills = 0
+  const sessions = new Map([
+    [
+      'term-1',
+      {
+        pty: {
+          kill: () => {
+            kills += 1
+          }
+        }
+      }
+    ]
+  ])
+
+  assert.equal(disposeTerminalSession(sessions, 'term-1'), true)
+  assert.equal(disposeTerminalSession(sessions, 'term-1'), false)
+  assert.equal(sessions.has('term-1'), false)
+  assert.equal(kills, 1)
 })

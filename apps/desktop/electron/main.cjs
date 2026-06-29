@@ -91,7 +91,11 @@ const {
   resolveRequestedPathForIpc,
   resolveTimeoutMs
 } = require('./hardening.cjs')
-const { resolveTerminalSpawnSpec } = require('./terminal-target.cjs')
+const {
+  disposeTerminalSession: disposeTerminalSessionFromRegistry,
+  resizeTerminalSession,
+  resolveTerminalSpawnSpec
+} = require('./terminal-target.cjs')
 
 let nodePty = null
 let nodePtyDir = null
@@ -6213,21 +6217,7 @@ function terminalChannel(id, suffix) {
 }
 
 function disposeTerminalSession(id) {
-  const sessionInfo = terminalSessions.get(id)
-
-  if (!sessionInfo) {
-    return false
-  }
-
-  terminalSessions.delete(id)
-
-  try {
-    sessionInfo.pty.kill()
-  } catch {
-    // Process may already be gone.
-  }
-
-  return true
+  return disposeTerminalSessionFromRegistry(terminalSessions, id)
 }
 
 ipcMain.handle('hermes:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
@@ -6291,20 +6281,9 @@ ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
   return true
 })
 
-ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
-  const sessionInfo = terminalSessions.get(String(id || ''))
-
-  if (!sessionInfo) {
-    return false
-  }
-
-  const cols = Math.max(2, Number.parseInt(String(size?.cols || 80), 10) || 80)
-  const rows = Math.max(2, Number.parseInt(String(size?.rows || 24), 10) || 24)
-
-  sessionInfo.pty.resize(cols, rows)
-
-  return true
-})
+ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) =>
+  resizeTerminalSession(terminalSessions, id, size)
+)
 ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
 ipcMain.handle('hermes:updates:check', async () =>
