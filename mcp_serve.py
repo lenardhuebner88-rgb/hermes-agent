@@ -884,7 +884,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         if not service:
             return _tmux_error("Tmux agent session service unavailable")
         try:
-            sessions = [item.__dict__ for item in service.list_sessions()]
+            sessions = service.list_sessions()
             return json.dumps({"count": len(sessions), "sessions": sessions}, indent=2)
         except Exception as e:
             return _tmux_error(str(e))

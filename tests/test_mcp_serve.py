@@ -930,16 +930,14 @@ class TestE2ETerminalTools:
 
         server, _ = mcp_server_e2e
         service = MagicMock()
-        service.list_sessions.return_value = [
-            SimpleNamespace(session="hermes", window="agent", active=True, pane_id="%1", pid=123, command="zsh")
-        ]
+        service.list_sessions.return_value = ["work"]
         service.capture.return_value = "pane text"
         service.attach_metadata.return_value = {"target": "hermes:agent", "attach_argv": ["tmux", "attach-session", "-t", "hermes:agent"]}
         service.handoff_draft.return_value = {"target": "hermes:agent", "content": "# handoff"}
         monkeypatch.setattr(mcp_serve, "_tmux_agent_service", lambda: service)
 
         listed = _run_tool(server, "terminal_sessions_list")
-        assert listed["sessions"][0]["pane_id"] == "%1"
+        assert listed == {"count": 1, "sessions": ["work"]}
 
         captured = _run_tool(server, "terminal_capture", {"session": "hermes", "window": "agent", "start": "-10"})
         assert captured["content"] == "pane text"
