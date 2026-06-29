@@ -17613,12 +17613,12 @@ def reviewer_role_fit_hold_reason(
 
 
 _AUTO_RETRY_QUESTION_RE = re.compile(
-    r"(\?|\bwhich\b|\bchoose\b|\bdecision\b|\bdecide\b|\boperator\b|"
+    r"(\?|\boperator\b|"
     r"\bhuman\b|\bcredential\b|\bcredentials?\b|\bsecret\b|\btoken\b|"
     r"\bapproval\b|\bmissing credentials?\b|\bpush\b|\bdeploy\b|"
     r"\bforce[- ]?push\b|\bgit reset\b|\brm -rf\b|\bdelete\b|"
     r"\bdrop\b|\btruncate\b|\balter\b|\bcreate\s+table\b|\bmigration\b|"
-    r"\bfrage\b|\bentscheidung\b|\bentscheiden\b|\bfreigabe\b|"
+    r"\bfreigabe\b|"
     r"\bgeheim\b|\bzugang\b|\bpasswort\b|\bdeployen\b|\blöschen\b)",
     re.IGNORECASE,
 )
@@ -17692,16 +17692,19 @@ def _blocked_kind_for_auto_retry(
     last_auto_retry_body_hash: Optional[str] = None,
 ) -> str:
     text = (reason or "").strip()
-    if text and _AUTO_RETRY_QUESTION_RE.search(text):
-        return "operator_question"
+    normalized_verdict = str(verdict or "").strip().upper()
     if (
-        str(verdict or "").strip().upper() == "REQUEST_CHANGES"
+        normalized_verdict == "REQUEST_CHANGES"
         and int(auto_retry_count or 0) >= 1
         and body_hash
         and last_auto_retry_body_hash
         and body_hash == last_auto_retry_body_hash
     ):
         return "needs_operator"
+    if normalized_verdict == "REQUEST_CHANGES" and int(auto_retry_count or 0) == 0:
+        return "retryable"
+    if text and _AUTO_RETRY_QUESTION_RE.search(text):
+        return "operator_question"
     return "retryable"
 
 
