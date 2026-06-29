@@ -112,6 +112,64 @@ def test_no_hook_on_failed_transition(kanban_home, captured_hooks):
     assert [e for e in captured_hooks if e[0] == "kanban_task_completed"] == []
 
 
+def test_complete_hook_fires_after_dependents_promoted(kanban_home):
+    """complete_task runs recompute_ready BEFORE firing kanban_task_completed,
+    so a plugin observing the completed event already sees dependents promoted.
+
+    Locks the documented hook ordering: were the hook to fire before the
+    dependent promotion, a plugin reading the board would see a stale 'todo'
+    child — an invisible regression today (no test asserts the order).
+    """
+    mgr = get_plugin_manager()
+    saved = {k: list(v) for k, v in mgr._hooks.items()}
+    observed_child_status: list[str] = []
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="child", assignee="worker", parents=[parent]
+        )
+        assert kb.get_task(conn, child).status == "todo"  # gated by open parent
+
+        def _observe(**kw):
+            # The completed hook fires after the write txn committed, so the
+            # child's promotion must be visible on a fresh connection.
+            with kb.connect_closing() as c2:
+                observed_child_status.append(kb.get_task(c2, child).status)
+
+        mgr._hooks.setdefault("kanban_task_completed", []).append(_observe)
+        kb.claim_task(conn, parent)
+        assert kb.complete_task(conn, parent, summary="done")
+    finally:
+        conn.close()
+        mgr._hooks = saved
+    assert observed_child_status == ["ready"]
+
+
+def test_unblock_dependency_to_todo_fires_no_lifecycle_hook(kanban_home, captured_hooks):
+    """unblock_task is intentionally NOT in the claim/complete/block hook set
+    (see _fire_kanban_lifecycle_hook docstring). A dependency block whose
+    unblock re-gates the child back to 'todo' must fire no lifecycle hook —
+    no spurious completed/blocked/claimed on that transition.
+    """
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="child", assignee="worker", parents=[parent]
+        )
+        # Force the gated child to 'blocked' (SQL, not the hook-firing API),
+        # then unblock it. Parent is still open so it re-gates to 'todo'.
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child,))
+        conn.commit()
+        before = len(captured_hooks)
+        assert kb.unblock_task(conn, child)
+        assert kb.get_task(conn, child).status == "todo"  # re-gated on open parent
+    finally:
+        conn.close()
+    assert len(captured_hooks) == before  # unblock fired no lifecycle hook
+
+
 def test_misbehaving_hook_does_not_break_transition(kanban_home, monkeypatch):
     """A hook callback that raises must not break the board transition."""
     mgr = get_plugin_manager()

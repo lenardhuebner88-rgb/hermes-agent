@@ -4130,6 +4130,119 @@ def test_unblock_without_parents_goes_to_ready(kanban_home):
         assert kb.get_task(conn, t).status == "ready"
 
 
+# ---------------------------------------------------------------------------
+# D1 block-semantics regression slice (disposition-di_1bd971c1-S1)
+#
+# These lock the block_task / complete_task / recompute_ready contracts that
+# carry the "dependency wait" and "no tight redispatch loop" behaviour:
+#   * block_task fires from BOTH 'running' and 'ready' and synthesizes an
+#     ended run when blocking a never-claimed ('ready') task so the reason
+#     survives; it refuses a 'todo' task and a stale expected_run_id (CAS).
+#   * complete_task wipes the circuit-breaker counters on success.
+#   * recompute_ready must NOT promote a dependency-blocked child while its
+#     parent is still open — promoting it back to 'ready' is exactly what
+#     would let the dispatcher reclaim-then-reblock in a tight loop.
+# (NB: there are no `block_kind`/`dependency_wait`/`block_loop_detected`
+# symbols in the tree; those names from the task framing were never shipped.
+# The behaviour they describe lives in the functions exercised below.)
+# ---------------------------------------------------------------------------
+
+
+def test_block_task_from_ready_state_synthesizes_run(kanban_home):
+    """A never-claimed 'ready' task can be blocked; because no run is open the
+    reason is preserved on a synthesized ended run rather than dropped."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="lone ready", assignee="a")
+        assert kb.get_task(conn, t).status == "ready"  # parent-free -> ready
+        # No claim => current_run_id is NULL, so block must synthesize a run.
+        assert kb.block_task(conn, t, reason="operator hold")
+        assert kb.get_task(conn, t).status == "blocked"
+        row = conn.execute(
+            "SELECT outcome, summary FROM task_runs WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert row is not None  # synthesized, not silently dropped
+        assert row["outcome"] == "blocked"
+        assert row["summary"] == "operator hold"
+
+
+def test_block_task_on_todo_task_is_rejected(kanban_home):
+    """block_task only fires from 'running'/'ready'. A gated 'todo' child
+    (open parent) cannot be force-blocked, and no orphan run is synthesized."""
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(conn, title="child", assignee="a", parents=[parent])
+        assert kb.get_task(conn, child).status == "todo"  # gated by open parent
+        before = conn.execute(
+            "SELECT COUNT(*) AS c FROM task_runs WHERE task_id = ?", (child,)
+        ).fetchone()["c"]
+        assert kb.block_task(conn, child, reason="noop") is False
+        assert kb.get_task(conn, child).status == "todo"  # unchanged
+        after = conn.execute(
+            "SELECT COUNT(*) AS c FROM task_runs WHERE task_id = ?", (child,)
+        ).fetchone()["c"]
+        assert after == before  # rejected block synthesizes nothing
+
+
+def test_block_task_expected_run_id_mismatch_is_rejected(kanban_home):
+    """A stale worker's expected_run_id must not block the live attempt
+    (compare-and-swap guard). Mismatch -> no transition, status stays running;
+    the matching id blocks as expected."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="x", assignee="a")
+        kb.claim_task(conn, t)
+        live_run = kb._current_run_id(conn, t)
+        assert live_run is not None
+        assert kb.block_task(conn, t, reason="stale", expected_run_id=live_run + 1) is False
+        assert kb.get_task(conn, t).status == "running"  # untouched
+        assert kb.block_task(conn, t, reason="real", expected_run_id=live_run) is True
+        assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_complete_task_clears_consecutive_failures(kanban_home):
+    """complete_task wipes the circuit-breaker counters on success (the
+    'complete_task reset' path) — symmetric with unblock_task."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="x", assignee="a")
+        kb.claim_task(conn, t)
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures = 4, transient_retry_count = 2, "
+            "last_failure_error = 'boom' WHERE id = ?",
+            (t,),
+        )
+        conn.commit()
+        assert kb.complete_task(conn, t, summary="green")
+        task = kb.get_task(conn, t)
+        assert task.status == "done"
+        assert task.consecutive_failures == 0
+        assert task.last_failure_error is None
+
+
+def test_recompute_ready_leaves_blocked_child_gated_while_parent_open(kanban_home):
+    """A dependency-blocked child whose parent is still open must NOT be
+    promoted by recompute_ready. Promoting it back to 'ready' here is exactly
+    what would let the dispatcher reclaim-then-reblock in a tight loop; the
+    child only becomes eligible once the parent is done."""
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(conn, title="child", assignee="a", parents=[parent])
+        # Parent in progress (claimed, not done); force the child to blocked.
+        kb.claim_task(conn, parent)
+        conn.execute(
+            "UPDATE tasks SET status='blocked', consecutive_failures=0, "
+            "last_failure_error=NULL WHERE id=?",
+            (child,),
+        )
+        conn.commit()
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "blocked"  # still gated
+        # Only once the parent is done does the child become eligible.
+        kb.complete_task(conn, parent, result="ok")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "ready"
+
+
 def test_assign_refuses_while_running(kanban_home):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
