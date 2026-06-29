@@ -80,7 +80,7 @@ declare global {
         onData: (id: string, callback: (payload: string) => void) => () => void
         onExit: (id: string, callback: (payload: HermesTerminalExit) => void) => () => void
         resize: (id: string, size: { cols: number; rows: number }) => Promise<boolean>
-        start: (options?: { cols?: number; cwd?: string; rows?: number }) => Promise<HermesTerminalSession>
+        start: (options?: HermesTerminalStartOptions) => Promise<HermesTerminalSession>
         write: (id: string, data: string) => Promise<boolean>
       }
       onClosePreviewRequested?: (callback: () => void) => () => void
@@ -152,6 +152,19 @@ export interface HermesTerminalSession {
   cwd: string
   id: string
   shell: string
+  target?: HermesTerminalTmuxTarget | null
+}
+
+export interface HermesTerminalStartOptions {
+  cols?: number
+  cwd?: string
+  rows?: number
+  tmuxTarget?: HermesTerminalTmuxTarget | null
+}
+
+export interface HermesTerminalTmuxTarget {
+  session: string
+  window?: string
 }
 
 export interface HermesTerminalExit {

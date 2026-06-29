@@ -91,6 +91,7 @@ const {
   resolveRequestedPathForIpc,
   resolveTimeoutMs
 } = require('./hardening.cjs')
+const { resolveTerminalSpawnSpec } = require('./terminal-target.cjs')
 
 let nodePty = null
 let nodePtyDir = null
@@ -6243,7 +6244,10 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   ensureSpawnHelperExecutable()
 
   const id = crypto.randomUUID()
-  const { args, command, name } = terminalShellCommand()
+  const { args, command, name, target } = resolveTerminalSpawnSpec({
+    payload,
+    shellSpec: terminalShellCommand()
+  })
   const cwd = safeTerminalCwd(payload?.cwd)
   const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
   const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
@@ -6272,7 +6276,7 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   })
   event.sender.once('destroyed', () => disposeTerminalSession(id))
 
-  return { cwd, id, shell: name }
+  return { cwd, id, shell: name, target }
 })
 
 ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
