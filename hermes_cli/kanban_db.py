@@ -13836,6 +13836,22 @@ _HEILER_TEXT_SIGNALS = (
         "no actionable implementation spec",
         "no implementation spec",
         "missing task spec",
+        # HEILER-CLASSIFY-SIGNAL-GAP-S1: the dominant live "settled block"
+        # reasons that fell through to unclassified are placeholder / null-body
+        # spec gaps. These sit ahead of the deliberately-last broad git/branch
+        # transient catch-alls, so a spec gap that incidentally mentions a branch
+        # classifies bad-spec, not transient. Kept precise (no bare
+        # "placeholder" and no bare "no actionable") so a reviewer finding that
+        # merely MENTIONS placeholders or missing proof is not hijacked off
+        # real-bug (AC-2 over-mapping guard).
+        "no actionable review scope",
+        "no actionable implementation scope",
+        "no actionable task spec",
+        "no actionable task body",
+        "body is a placeholder",
+        "unblockable placeholder",
+        "task body is null",
+        "task body is empty",
     )),
     (HEILER_CLASS_FLAKY, (
         "flake",
@@ -13849,6 +13865,12 @@ _HEILER_TEXT_SIGNALS = (
         "request_changes",
         "requested changes",
         "request changes",
+        # HEILER-CLASSIFY-SIGNAL-GAP-S1: a reviewer NEEDS_REVISION verdict is a
+        # reviewer finding (changes needed), the same defect signal as
+        # request_changes — a settled block carrying it must not default to
+        # unclassified.
+        "needs_revision",
+        "needs revision",
         "reviewer finding",
         "red gate",
         "gate failed",
@@ -13933,6 +13955,18 @@ _HEILER_OUTCOME_FALLBACK_CLASS = {
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
 }
+# HEILER-CLASSIFY-SIGNAL-GAP-S1 (deliberately NOT a signal): the failure
+# circuit-breaker's "retry ladder exhausted" why_now and the silent-block sweep's
+# "settled block (last run outcome: …)" why_now are UNIVERSAL escalation
+# *wrappers* — every gave_up / settled-block escalation carries them. They are
+# therefore intentionally NOT mapped to any class: a wrapper signal would
+# reclassify EVERY bare gave_up (incl. genuinely-opaque ``unknown``/``gave_up``
+# outcomes that must stay unclassified) and over-claim a class the escalation
+# does not warrant — exactly the over-mapping AC-2 forbids. The honest class of
+# such an escalation comes from its REAL trigger_outcome (mapped structurally
+# above) or its block REASON (mapped by ``_HEILER_TEXT_SIGNALS`` — e.g. a
+# spec-gap reason → bad-spec, a reviewer NEEDS_REVISION → real-bug), per the
+# existing REASON-FIDELITY design, not from the wrapper boilerplate.
 
 
 def _classify_failure(

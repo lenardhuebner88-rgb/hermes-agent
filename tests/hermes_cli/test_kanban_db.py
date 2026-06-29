@@ -13727,6 +13727,96 @@ def test_s4_classify_failure_missing_spec_bad_spec():
     assert cls == kb.HEILER_CLASS_BAD_SPEC
 
 
+# HEILER-CLASSIFY-SIGNAL-GAP-S1 ----------------------------------------------
+# Close the classify-coverage hole where settled-block / circuit-breaker
+# escalations fell through to unclassified. The genuine signal is the block
+# REASON (REASON-FIDELITY design), not the universal "settled block" /
+# "retry ladder exhausted" wrappers: a spec-gap reason -> bad-spec, a reviewer
+# NEEDS_REVISION verdict -> real-bug. The wrappers themselves are deliberately
+# NOT mapped — a wrapper signal would reclassify every bare gave_up (incl.
+# genuinely-opaque ones that must stay unclassified), the over-mapping AC-2
+# forbids.
+
+def test_s4_classify_reviewer_needs_revision_is_real_bug():
+    """A settled block whose reason is a reviewer NEEDS_REVISION verdict is a
+    reviewer finding -> real-bug (parallel to request_changes), not the opaque
+    default."""
+    cls, _ = kb._classify_failure(
+        error="Urteil: NEEDS_REVISION\nWarum: die Belege sind widerspruechlich")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+    cls, _ = kb._classify_failure(error="reviewer says this needs revision")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_s4_classify_no_actionable_spec_beats_broad_transient():
+    """A spec-gap reason that incidentally mentions a branch/git must classify
+    bad-spec, NOT transient — bad-spec sits ahead of the deliberately-last broad
+    git/branch transient catch-alls (the documented precedence intent)."""
+    cls, _ = kb._classify_failure(
+        error="No actionable review scope (premium/opus, auto-retries exhausted "
+              "2/2): title is placeholder 'review'; branch kanban/t_x is empty")
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+
+
+def test_s4_classify_placeholder_body_is_bad_spec():
+    """A settled block whose reason says the task body itself is a placeholder /
+    null / empty is a spec gap -> bad-spec."""
+    for err in (
+        "Task body is a placeholder: it contains only the generic Hermes Coder "
+        "Contract v1 template",
+        "Unblockable placeholder: body contains only boilerplate",
+        "BLOCKED: task body is null — title alone is not an actionable contract",
+        "Blocked: current task body is empty/null",
+    ):
+        cls, _ = kb._classify_failure(error=err)
+        assert cls == kb.HEILER_CLASS_BAD_SPEC, err
+
+
+def test_s4_no_actionable_without_spec_context_stays_unclassified():
+    """AC-2 over-mapping guard: bare 'no actionable' is too broad. Only
+    concrete scope/body/spec-gap phrases classify bad-spec; opaque missing-proof
+    wording remains unclassified until a better signal exists."""
+    cls, _ = kb._classify_failure(
+        error="settled block: no actionable evidence was provided by worker"
+    )
+    assert cls == kb.HEILER_CLASS_UNCLASSIFIED
+
+
+def test_s4_request_changes_mentioning_placeholders_stays_real_bug():
+    """AC-2 over-mapping guard: a genuine reviewer REQUEST_CHANGES that merely
+    MENTIONS 'placeholders' (e.g. unchecked receipt placeholders) must stay
+    real-bug — the placeholder bad-spec signals are precise enough ('body is a
+    placeholder') to not hijack a real defect into bad-spec."""
+    cls, _ = kb._classify_failure(
+        error="REQUEST_CHANGES — AC-3 UNMET: the receipts are still unchecked "
+              "OPERATOR-FILL placeholders (`receipt: ____`)")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_s4_settled_block_classifies_by_reason_not_wrapper():
+    """The 'settled block (last run outcome: …)' why_now is a universal wrapper:
+    the class comes from the block REASON in last_error, not the wrapper. A
+    spec-gap reason -> bad-spec; a bare wrapper with an opaque reason and a
+    trigger_outcome carrying no signal stays honestly unclassified (NOT
+    over-mapped, AC-2)."""
+    spec = kb._classify_escalation_payload({
+        "why_now": "settled block (last run outcome: blocked) with no "
+                   "operator_escalation",
+        "evidence": {
+            "trigger_outcome": "blocked",
+            "last_error": "Task body is a placeholder: only boilerplate, no "
+                          "actionable specification",
+        },
+    })
+    assert spec[0] == kb.HEILER_CLASS_BAD_SPEC
+    opaque = kb._classify_escalation_payload({
+        "why_now": "settled block (last run outcome: blocked) with no "
+                   "operator_escalation",
+        "evidence": {"trigger_outcome": "blocked", "last_error": ""},
+    })
+    assert opaque[0] == kb.HEILER_CLASS_UNCLASSIFIED
+
+
 def test_s4_record_task_failure_writes_heiler_classification(kanban_home):
     """A simulated transient block and a red-gate block each write a
     heiler_classification ledger event with the right class + evidence."""
