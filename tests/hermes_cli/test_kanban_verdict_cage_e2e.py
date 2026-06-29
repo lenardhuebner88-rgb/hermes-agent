@@ -513,3 +513,50 @@ class TestVerdictLaneAllowlistFailClosed(_BaseSpawnTest):
             "fail-closed path must not launch the verdict worker argv"
         )
         assert "-p" not in worker_cmd
+
+
+class TestWorkerMcpIsolation(_BaseSpawnTest):
+    """disposition-di_109b5a17-S1: claude-cli kanban workers must spawn with
+    ``--strict-mcp-config`` so no external MCP servers (vault qmd,
+    @playwright/mcp headless chromium, claude.ai connectors) load.
+
+    Those server child processes keep the Node event loop alive, so ``claude -p``
+    cannot exit after its agent turn — it sits in ``ep_poll`` and the buffered
+    ``--output-format json`` result is never flushed (the post-commit idle hang:
+    0-byte log, last output >1000s, worker slot + token stream pinned). The
+    kanban lifecycle is driven via Bash → ``hermes kanban`` (not MCP), so
+    stripping MCP costs the worker nothing.
+    """
+
+    def test_non_verdict_lane_spawn_uses_strict_mcp_config(self, tmp_path, monkeypatch):
+        """The default (denylist+bypass) worker spawn pins --strict-mcp-config."""
+        cmd = self._spawn_and_capture_cmd(
+            tmp_path, monkeypatch, assignee="coder"
+        )
+        assert "--strict-mcp-config" in cmd, (
+            f"non-verdict worker must isolate MCP via --strict-mcp-config, got: {cmd}"
+        )
+
+    def test_verdict_lane_spawn_uses_strict_mcp_config(self, tmp_path, monkeypatch):
+        """The verdict (allowlist) worker spawn also pins --strict-mcp-config."""
+        cmd = self._spawn_and_capture_cmd(
+            tmp_path, monkeypatch, assignee="reviewer"
+        )
+        assert "--strict-mcp-config" in cmd, (
+            f"verdict worker must isolate MCP via --strict-mcp-config, got: {cmd}"
+        )
+
+    def test_strict_mcp_config_loads_no_external_mcp_config(self, tmp_path, monkeypatch):
+        """--strict-mcp-config must be the EMPTY-server-set form: no companion
+        --mcp-config may smuggle external servers back in (defeats the cage)."""
+        for assignee in ("coder", "reviewer"):
+            cmd = self._spawn_and_capture_cmd(
+                tmp_path, monkeypatch, assignee=assignee
+            )
+            assert cmd.count("--strict-mcp-config") == 1, (
+                f"expected exactly one --strict-mcp-config for {assignee}, got: {cmd}"
+            )
+            assert "--mcp-config" not in cmd, (
+                f"--strict-mcp-config must not be paired with --mcp-config for "
+                f"{assignee} (that would re-enable external servers), got: {cmd}"
+            )

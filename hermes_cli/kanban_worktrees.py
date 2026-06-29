@@ -1004,6 +1004,13 @@ def _spawn_release_gate_fixer_process(
         "--disallowedTools", "WebFetch,WebSearch",
         "--output-format", "json",
         "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+        # Worker MCP isolation (idle-hang fix, disposition-di_109b5a17-S1): never
+        # load external MCP servers (vault qmd, @playwright/mcp headless chromium,
+        # claude.ai connectors). Their child processes keep the Node event loop
+        # alive so ``claude -p`` cannot exit after its turn (the post-commit
+        # ``ep_poll`` idle hang). The fixer drives its lifecycle via Bash →
+        # ``hermes`` and edits via built-in tools, so MCP is pure dead weight.
+        "--strict-mcp-config",
     ]
     try:
         from hermes_cli import kanban_db as kb
