@@ -386,6 +386,40 @@ export async function buildWsUrl(
   return `${proto}//${window.location.host}${BASE}${path}?${qs}`;
 }
 
+export type AgentTerminalKind = "hermes" | "claude" | "codex" | "kimi";
+
+export interface AgentTerminalCapabilityState {
+  tmux_available: boolean;
+  hermes_tui_available: boolean;
+  hermes_binary: string | null;
+  reason: string | null;
+}
+
+export interface AgentTerminalWindow {
+  session: string;
+  window: string;
+  active: boolean;
+  pane_id: string;
+  pid: number | null;
+  command: string;
+}
+
+export interface AgentTerminalSessionsResponse {
+  sessions: string[];
+}
+
+export interface AgentTerminalWindowsResponse {
+  windows: AgentTerminalWindow[];
+}
+
+export interface AgentTerminalWindowResponse {
+  window: AgentTerminalWindow;
+}
+
+export interface AgentTerminalCaptureResponse {
+  content: string;
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -401,6 +435,34 @@ function appendProfileParam(url: string, profile?: string): string {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getAgentTerminalCapabilities: () =>
+    fetchJSON<AgentTerminalCapabilityState>("/api/agent-terminals/capabilities"),
+  getAgentTerminalSessions: () =>
+    fetchJSON<AgentTerminalSessionsResponse>("/api/agent-terminals/sessions"),
+  getAgentTerminalWindows: (session?: string) =>
+    fetchJSON<AgentTerminalWindowsResponse>(
+      `/api/agent-terminals/windows${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+    ),
+  showAgentTerminalWindow: (session: string, window: string) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/show", {
+      method: "POST",
+      body: JSON.stringify({ session, window }),
+    }),
+  ensureAgentTerminalWindow: (kind: AgentTerminalKind) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/ensure", {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    }),
+  captureAgentTerminalWindow: (session: string, window: string, start?: number) =>
+    fetchJSON<AgentTerminalCaptureResponse>("/api/agent-terminals/capture", {
+      method: "POST",
+      body: JSON.stringify({ session, window, ...(start !== undefined ? { start } : {}) }),
+    }),
+  detachAgentTerminalClient: (clientId: string) =>
+    fetchJSON<{ ok: boolean }>("/api/agent-terminals/detach-client", {
+      method: "POST",
+      body: JSON.stringify({ client_id: clientId }),
+    }),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *

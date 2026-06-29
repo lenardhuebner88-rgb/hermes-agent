@@ -15,6 +15,7 @@ import os
 import sqlite3
 import time
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -920,7 +921,53 @@ class TestE2EPermissions:
 
 
 # ---------------------------------------------------------------------------
-# 4. TOOL LISTING — verify all 10 tools are registered
+# 4. TERMINAL TOOLS — tmux-backed shared controller adapter
+# ---------------------------------------------------------------------------
+
+class TestE2ETerminalTools:
+    def test_terminal_tools_delegate_to_shared_tmux_service(self, mcp_server_e2e, _event_loop, monkeypatch):
+        import mcp_serve
+
+        server, _ = mcp_server_e2e
+        service = MagicMock()
+        service.list_sessions.return_value = [
+            SimpleNamespace(session="hermes", window="agent", active=True, pane_id="%1", pid=123, command="zsh")
+        ]
+        service.capture.return_value = "pane text"
+        service.attach_metadata.return_value = {"target": "hermes:agent", "attach_argv": ["tmux", "attach-session", "-t", "hermes:agent"]}
+        service.handoff_draft.return_value = {"target": "hermes:agent", "content": "# handoff"}
+        monkeypatch.setattr(mcp_serve, "_tmux_agent_service", lambda: service)
+
+        listed = _run_tool(server, "terminal_sessions_list")
+        assert listed["sessions"][0]["pane_id"] == "%1"
+
+        captured = _run_tool(server, "terminal_capture", {"session": "hermes", "window": "agent", "start": "-10"})
+        assert captured["content"] == "pane text"
+        service.capture.assert_called_once_with("hermes", "agent", start=-10)
+
+        sent = _run_tool(server, "terminal_send_keys", {"session": "hermes", "window": "agent", "text": "-not-a-tmux-option"})
+        assert sent["ok"] is True
+        service.send_keys.assert_called_once_with("hermes", "agent", "-not-a-tmux-option")
+
+        metadata = _run_tool(server, "terminal_attach_metadata", {"session": "hermes", "window": "agent"})
+        assert metadata["metadata"]["target"] == "hermes:agent"
+
+        draft = _run_tool(server, "terminal_handoff_draft", {"session": "hermes", "window": "agent", "start": -20})
+        assert draft["draft"]["content"] == "# handoff"
+        service.handoff_draft.assert_called_once_with("hermes", "agent", start=-20)
+
+    def test_terminal_tools_fail_closed_when_tmux_unavailable(self, mcp_server_e2e, _event_loop, monkeypatch):
+        import mcp_serve
+
+        server, _ = mcp_server_e2e
+        monkeypatch.setattr(mcp_serve, "_tmux_agent_service", lambda: None)
+
+        result = _run_tool(server, "terminal_sessions_list")
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# 5. TOOL LISTING — verify all tools are registered
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration:
@@ -934,6 +981,8 @@ class TestToolRegistration:
             "attachments_fetch", "events_poll", "events_wait",
             "messages_send", "channels_list",
             "permissions_list_open", "permissions_respond",
+            "terminal_sessions_list", "terminal_capture", "terminal_send_keys",
+            "terminal_attach_metadata", "terminal_handoff_draft",
         }
         assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

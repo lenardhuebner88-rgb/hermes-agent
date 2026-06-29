@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
+const { sanitizeTerminalStartOptions } = require('./terminal-target.cjs')
 
 contextBridge.exposeInMainWorld('hermesDesktop', {
   getConnection: profile => ipcRenderer.invoke('hermes:connection', profile),
@@ -59,7 +60,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   terminal: {
     dispose: id => ipcRenderer.invoke('hermes:terminal:dispose', id),
     resize: (id, size) => ipcRenderer.invoke('hermes:terminal:resize', id, size),
-    start: options => ipcRenderer.invoke('hermes:terminal:start', options),
+    start: options => ipcRenderer.invoke('hermes:terminal:start', sanitizeTerminalStartOptions(options)),
     write: (id, data) => ipcRenderer.invoke('hermes:terminal:write', id, data),
     onData: (id, callback) => {
       const channel = `hermes:terminal:${id}:data`

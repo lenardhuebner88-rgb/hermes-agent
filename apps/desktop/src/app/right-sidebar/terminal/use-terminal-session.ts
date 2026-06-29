@@ -131,9 +131,15 @@ function stripInitialPromptGap(data: string) {
   return prefix
 }
 
+interface DesktopTerminalTmuxTarget {
+  session: string
+  window?: string
+}
+
 interface UseTerminalSessionOptions {
   cwd: string
   onAddSelectionToChat: (text: string, label?: string) => void
+  tmuxTarget?: DesktopTerminalTmuxTarget | null
 }
 
 // Bind the palette to the live skin surface so the terminal blends with the app
@@ -232,7 +238,7 @@ function quotePathForShell(path: string, shellName: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`
 }
 
-export function useTerminalSession({ cwd, onAddSelectionToChat }: UseTerminalSessionOptions) {
+export function useTerminalSession({ cwd, onAddSelectionToChat, tmuxTarget }: UseTerminalSessionOptions) {
   // Key off renderedMode (the painted surface type), not resolvedMode (the
   // clicked switch) — a skin can keep a light surface in "dark" mode, and we
   // must match the surface or the ANSI palette inverts against it. themeName
@@ -557,7 +563,7 @@ export function useTerminalSession({ cwd, onAddSelectionToChat }: UseTerminalSes
 
     const startSession = () =>
       void terminalApi
-        .start({ cols: term.cols, cwd, rows: term.rows })
+        .start({ cols: term.cols, cwd, rows: term.rows, tmuxTarget })
         .then(session => {
           if (disposed) {
             void terminalApi.dispose(session.id)
@@ -567,8 +573,13 @@ export function useTerminalSession({ cwd, onAddSelectionToChat }: UseTerminalSes
 
           sessionIdRef.current = session.id
           lastSentSize = { cols: term.cols, rows: term.rows }
-          shellNameRef.current = session.shell || 'shell'
-          setShellName(session.shell || 'shell')
+
+          const displayShell = session.target
+            ? `tmux:${session.target.window ? `${session.target.session}:${session.target.window}` : session.target.session}`
+            : session.shell || 'shell'
+
+          shellNameRef.current = displayShell
+          setShellName(displayShell)
 
           const initial = term.hasSelection() ? term.getSelection() : ''
           selectionRef.current = initial
@@ -654,7 +665,7 @@ export function useTerminalSession({ cwd, onAddSelectionToChat }: UseTerminalSes
       selectionRef.current = ''
       selectionLabelRef.current = ''
     }
-  }, [addSelectionToChat, cwd])
+  }, [addSelectionToChat, cwd, tmuxTarget])
 
   useEffect(() => {
     const term = termRef.current
