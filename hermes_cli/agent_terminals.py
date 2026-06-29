@@ -161,8 +161,14 @@ class TmuxAgentSessionService:
 
     # ----- capabilities / definitions -----------------------------------
     def resolve_hermes_binary(self) -> Path:
-        candidate = self.hermes_binary_override or Path(shutil.which("hermes") or "")
-        if not candidate:
+        if self.hermes_binary_override is not None:
+            candidate = self.hermes_binary_override
+        else:
+            discovered = shutil.which("hermes")
+            if discovered is None:
+                raise CapabilityError("hermes binary not found on PATH")
+            candidate = Path(discovered)
+        if not str(candidate):
             raise CapabilityError("hermes binary not found on PATH")
         try:
             resolved = candidate.resolve(strict=True)

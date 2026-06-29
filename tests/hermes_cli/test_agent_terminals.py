@@ -59,6 +59,22 @@ def test_broken_or_transient_hermes_binary_reports_capability_state(tmp_path: Pa
     assert "transient worktree" in str(caps["reason"])
 
 
+def test_missing_path_hermes_reports_unavailable_without_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    service = TmuxAgentSessionService(tmux_binary="tmux", hermes_home=tmp_path)
+
+    with pytest.raises(CapabilityError, match="not found"):
+        service.resolve_hermes_binary()
+
+    caps = service.capabilities().to_dict()
+    assert caps["hermes_tui_available"] is False
+    assert caps["hermes_binary"] is None
+    assert "not found" in str(caps["reason"])
+
+
 def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
     fake = _fake_hermes(tmp_path)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_binary=fake, hermes_home=tmp_path)
