@@ -6277,6 +6277,82 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
 
 
 # ---------------------------------------------------------------------------
+# Terminal handoff (ATH-S5) — materialise an operator-authored PlanSpec draft
+# (built in the Agent-Terminals view from selected text / captured lines) into a
+# .md under the plans root, then reuse the EXISTING validate / ingest pipeline.
+# No DB write logic here; nothing dispatches. Validate and Ingest are distinct,
+# separately-clicked steps — the frontend never auto-fires either.
+# ---------------------------------------------------------------------------
+
+class HandoffDraftBody(BaseModel):
+    content: PlanSpecText
+    # Optional filename slug; when absent the first non-empty draft line is used.
+    slug: Optional[ShortText] = None
+    author: Optional[ShortText] = "dashboard"
+
+
+def _handoff_slug(body: "HandoffDraftBody") -> str:
+    from hermes_cli import terminal_handoff  # noqa: WPS433 (intentional)
+
+    if body.slug and body.slug.strip():
+        return terminal_handoff.slugify(body.slug)
+    first_line = next(
+        (ln.strip() for ln in (body.content or "").splitlines() if ln.strip()),
+        "",
+    )
+    # Drop a leading markdown/yaml marker so a slug derives from real words.
+    first_line = first_line.lstrip("#").lstrip("-").strip().strip('"').strip("'")
+    return terminal_handoff.slugify(first_line)
+
+
+@router.post("/planspecs/validate")
+def validate_planspec_draft(payload: HandoffDraftBody):
+    """Read-only PlanSpec validation for a handoff draft.
+
+    Materialises ``content`` to a draft .md under the plans root and runs the
+    EXISTING deterministic validator (``planspecs.validate_planspec``) on it.
+    Never raises — an invalid draft comes back as ``disposition: "invalid"`` with
+    the findings, so the UI can show *why* without an error toast. Writes only the
+    draft file; touches no DB and dispatches nothing.
+    """
+    from hermes_cli import planspecs, terminal_handoff  # noqa: WPS433 (intentional)
+
+    root = planspecs.DEFAULT_PLANS_ROOT
+    path = terminal_handoff.write_handoff_draft(
+        payload.content, slug=_handoff_slug(payload), plans_root=root
+    )
+    return planspecs.validate_planspec(path, plans_root=root)
+
+
+@router.post("/planspecs/ingest-draft")
+def ingest_planspec_draft(payload: HandoffDraftBody, board: Optional[str] = Query(None)):
+    """Ingest a handoff draft via the EXISTING PlanSpec ingest path.
+
+    Materialises ``content`` to the same draft .md, then delegates to
+    ``planspecs.ingest_planspec`` (which owns all Kanban DB writes — no SQL here).
+    A structural / rubric / judge failure surfaces as 400 with the findings, the
+    same contract as ``/planspecs/ingest``. This creates a *held* chain
+    (``freigabe: operator`` by default) — it does NOT dispatch.
+    """
+    from hermes_cli import planspecs, terminal_handoff  # noqa: WPS433 (intentional)
+
+    board = _resolve_board(board)
+    root = planspecs.DEFAULT_PLANS_ROOT
+    path = terminal_handoff.write_handoff_draft(
+        payload.content, slug=_handoff_slug(payload), plans_root=root
+    )
+    try:
+        return planspecs.ingest_planspec(
+            path,
+            board=board,
+            author=payload.author or "dashboard",
+            plans_root=root,
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+
+
+# ---------------------------------------------------------------------------
 # Flow capture Phase B — backend-driven planning (documented/lean) + gate + spec
 # ---------------------------------------------------------------------------
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
-import { Activity, AlertTriangle, ChevronUp, PanelLeft, PanelRight, RefreshCw, Server, TerminalSquare, X } from "lucide-react";
+import { Activity, AlertTriangle, ChevronUp, PanelLeft, PanelRight, RefreshCw, Server, Share2, TerminalSquare, X } from "lucide-react";
 import {
   api,
   buildWsUrl,
@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { createHermesXtermSurface, TERMINAL_THEME_STATIC } from "@/lib/xtermSurface";
+import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 
 const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: string }> = [
   { kind: "hermes", label: "Hermes", hint: "hermes --tui" },
@@ -109,6 +110,7 @@ export function AgentTerminalsView() {
   const [error, setError] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
 
@@ -288,6 +290,15 @@ export function AgentTerminalsView() {
       <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs text-amber-50">
         Handoff bleibt optional: Diese Fläche erzwingt keinen Prompt- oder Übergabe-Flow.
       </div>
+      <button
+        type="button"
+        onClick={() => { setHandoffOpen(true); setToolsOpen(false); }}
+        disabled={!target}
+        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-40"
+      >
+        <Share2 className="h-3.5 w-3.5" />
+        Handoff öffnen (Auswahl → PlanSpec/Kanban)
+      </button>
     </div>
   );
 
@@ -326,6 +337,14 @@ export function AgentTerminalsView() {
       {mobile && sessionsOpen && <div className="fixed inset-0 z-50 bg-black/55 p-3"><div className="h-full overflow-auto rounded-2xl border border-white/10 bg-[#071b1d] p-3"><div className="mb-2 flex justify-end"><button type="button" onClick={() => setSessionsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button></div>{sessionList}</div></div>}
       {mobile && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
       {mobile && !toolsOpen && <button type="button" onClick={() => setToolsOpen(true)} className="fixed bottom-4 right-4 z-40 rounded-full border border-cyan-300/40 bg-[#0b2d31] px-3 py-2 text-xs text-cyan-100 shadow-xl"><ChevronUp className="mr-1 inline h-3.5 w-3.5" />Tools</button>}
+
+      {handoffOpen && (
+        <TerminalHandoffPanel
+          target={target}
+          getSelection={() => termRef.current?.getSelection() ?? ""}
+          onClose={() => setHandoffOpen(false)}
+        />
+      )}
     </div>
   );
 }
