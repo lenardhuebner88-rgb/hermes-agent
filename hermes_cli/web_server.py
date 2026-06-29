@@ -66,6 +66,11 @@ from hermes_cli.config import (
     write_platform_config_field,
     _deep_merge,
 )
+from hermes_cli.agent_terminals import (
+    AgentTerminalError,
+    InvalidTarget,
+    TmuxAgentSessionService,
+)
 from hermes_cli.error_sanitize import safe_detail, scrub_detail
 from hermes_cli.stats_config import load_stats_config
 from hermes_cli.memory_providers import (
@@ -1001,6 +1006,27 @@ class ManagedDirectoryCreate(BaseModel):
 class ManagedFileDelete(BaseModel):
     path: str
     recursive: bool = False
+
+
+class AgentTerminalEnsureRequest(BaseModel):
+    kind: str
+
+
+class AgentTerminalTargetRequest(BaseModel):
+    session: str
+    window: str
+
+
+class AgentTerminalCaptureRequest(AgentTerminalTargetRequest):
+    start: int = -200
+
+
+class AgentTerminalSendKeysRequest(AgentTerminalTargetRequest):
+    text: str
+
+
+class AgentTerminalDetachRequest(BaseModel):
+    client_id: str
 
 
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
@@ -12059,6 +12085,182 @@ def _ws_close_reason(text: str) -> str:
     if len(encoded) <= 123:
         return text
     return encoded[:120].decode("utf-8", "ignore") + "..."
+
+
+def _agent_terminal_service() -> TmuxAgentSessionService:
+    return TmuxAgentSessionService()
+
+
+def _agent_terminal_error(exc: Exception) -> HTTPException:
+    status = 400 if isinstance(exc, InvalidTarget) else 503
+    detail = scrub_detail(str(exc)) or exc.__class__.__name__
+    return HTTPException(status_code=status, detail=detail)
+
+
+@app.get("/api/agent-terminals/capabilities")
+async def agent_terminal_capabilities() -> Dict[str, object]:
+    return _agent_terminal_service().capabilities().to_dict()
+
+
+@app.get("/api/agent-terminals/sessions")
+async def agent_terminal_sessions() -> Dict[str, object]:
+    return {"sessions": _agent_terminal_service().list_sessions()}
+
+
+@app.get("/api/agent-terminals/windows")
+async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, object]:
+    try:
+        windows = _agent_terminal_service().list_windows(session)
+    except AgentTerminalError as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"windows": [window.to_dict() for window in windows]}
+
+
+@app.post("/api/agent-terminals/show")
+async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().show(req.session, req.window).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/ensure")
+async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().ensure(req.kind).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/capture")
+async def agent_terminal_capture(req: AgentTerminalCaptureRequest) -> Dict[str, object]:
+    try:
+        content = _agent_terminal_service().capture(req.session, req.window, start=req.start)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"content": content}
+
+
+@app.post("/api/agent-terminals/send-keys")
+async def agent_terminal_send_keys(req: AgentTerminalSendKeysRequest) -> Dict[str, object]:
+    try:
+        _agent_terminal_service().send_keys(req.session, req.window, req.text)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/agent-terminals/interrupt")
+async def agent_terminal_interrupt(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        _agent_terminal_service().interrupt(req.session, req.window)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/agent-terminals/detach-client")
+async def agent_terminal_detach_client(req: AgentTerminalDetachRequest) -> Dict[str, object]:
+    try:
+        _agent_terminal_service().detach_client(req.client_id)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"ok": True}
+
+
+@app.websocket("/api/agent-terminals/attach")
+async def agent_terminal_attach_ws(ws: WebSocket) -> None:
+    peer = ws.client.host if ws.client else "?"
+    auth_reason, cred = _ws_auth_reason(ws)
+    mode = _ws_auth_mode()
+    if auth_reason is not None:
+        _log.warning("agent-terminal auth rejected reason=%s mode=%s cred=%s peer=%s", auth_reason, mode, cred, peer)
+        await ws.close(code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
+        return
+    host_origin_reason = _ws_host_origin_reason(ws)
+    if host_origin_reason is not None:
+        _log.warning("agent-terminal refused: %s peer=%s", host_origin_reason, peer)
+        await ws.close(code=4403, reason=_ws_close_reason(host_origin_reason))
+        return
+    client_reason = _ws_client_reason(ws)
+    if client_reason is not None:
+        _log.warning("agent-terminal refused: %s", client_reason)
+        await ws.close(code=4408, reason=_ws_close_reason(client_reason))
+        return
+
+    await ws.accept()
+    if not _PTY_BRIDGE_AVAILABLE:
+        await ws.send_text("\r\n\x1b[31mAgent terminal attach unavailable: POSIX PTY required.\x1b[0m\r\n")
+        await ws.close(code=1011)
+        return
+    assert PtyBridge is not None
+
+    try:
+        session = TmuxAgentSessionService.validate_name(ws.query_params.get("session") or "", field="session")
+        window = TmuxAgentSessionService.validate_name(ws.query_params.get("window") or "", field="window")
+        argv = _agent_terminal_service().attach_argv(session, window)
+    except AgentTerminalError as exc:
+        await ws.send_text(f"\r\n\x1b[31mInvalid tmux target: {scrub_detail(str(exc))}\x1b[0m\r\n")
+        await ws.close(code=1008)
+        return
+
+    try:
+        bridge = PtyBridge.spawn(argv, cwd=str(Path.home()), env=None)
+    except (PtyUnavailableError, FileNotFoundError, OSError) as exc:
+        detail = scrub_detail(f"Agent terminal attach failed: {exc}") or "Agent terminal attach failed"
+        await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")
+        await ws.close(code=1011)
+        return
+
+    loop = asyncio.get_running_loop()
+
+    async def pump_attach_to_ws() -> None:
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, bridge.read, _PTY_READ_CHUNK_TIMEOUT)
+                if chunk is None:
+                    return
+                if not chunk:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await ws.send_bytes(chunk)
+                except Exception:
+                    return
+        finally:
+            try:
+                await asyncio.to_thread(bridge.close)
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    reader_task = asyncio.create_task(pump_attach_to_ws())
+    try:
+        while True:
+            try:
+                msg = await ws.receive()
+            except RuntimeError:
+                break
+            if msg.get("type") == "websocket.disconnect":
+                break
+            raw = msg.get("bytes")
+            if raw is None:
+                text = msg.get("text")
+                raw = text.encode("utf-8") if isinstance(text, str) else b""
+            if raw:
+                bridge.write(raw)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        bridge.close()
 
 
 @app.websocket("/api/pty")
