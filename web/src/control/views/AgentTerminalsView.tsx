@@ -60,17 +60,25 @@ function targetFromWindow(window: AgentTerminalWindow): { session: string; windo
   return { session: window.session, window: window.window };
 }
 
-function useIsMobile(): boolean {
-  const [mobile, setMobile] = useState(() => (typeof window === "undefined" ? false : window.innerWidth < 768));
+function useMediaQuery(query: string, fallback = false): boolean {
+  const [matches, setMatches] = useState(() => (typeof window === "undefined" ? fallback : window.matchMedia(query).matches));
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const media = window.matchMedia("(max-width: 767px)");
-    const onChange = () => setMobile(media.matches);
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
     onChange();
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
-  }, []);
-  return mobile;
+  }, [query]);
+  return matches;
+}
+
+function useIsMobile(): boolean {
+  return useMediaQuery("(max-width: 767px)");
+}
+
+function useIsCompactTerminalLayout(): boolean {
+  return useMediaQuery("(max-width: 1023px)");
 }
 
 function StatusPill({ state }: { state: TerminalUiState }) {
@@ -89,10 +97,10 @@ function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabi
   const windowsOk = capability?.tmux_available ?? false;
   const hermesOk = agent.kind === "hermes" ? (capability?.hermes_tui_available ?? false) : windowsOk;
   const ok = windowsOk && hermesOk;
-  const label = ok ? "verfügbar" : capability?.reason?.includes("symlink") ? "kaputter Symlink/Binary" : capability?.reason ? "fehlend" : "unbekannt";
+  const label = ok ? "verfügbar" : capability?.reason?.includes("symlink") ? "kaputter Symlink/Binary" : capability?.reason ? "CLI fehlt" : "unbekannt";
   const title = capability?.reason ?? (agent.kind === "hermes" ? capability?.hermes_binary ?? agent.hint : agent.hint);
   return (
-    <span title={title} className={cn("rounded border px-1.5 py-0.5 text-[10px]", ok ? "border-emerald-400/35 text-emerald-200" : "border-amber-400/35 text-amber-100")}>
+    <span title={title} className={cn("rounded border px-1.5 py-0.5 text-[10px]", ok ? "border-emerald-400/35 text-emerald-200" : "border-white/15 text-white/45")}>
       {label}
     </span>
   );
@@ -100,6 +108,7 @@ function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabi
 
 export function AgentTerminalsView() {
   const mobile = useIsMobile();
+  const compactLayout = useIsCompactTerminalLayout();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -115,7 +124,6 @@ export function AgentTerminalsView() {
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
-
   const selectedWindow = useMemo(() => {
     if (!target) return null;
     return windows.find((w) => w.session === target.session && w.window === target.window) ?? null;
@@ -165,6 +173,12 @@ export function AgentTerminalsView() {
     const resize = () => {
       try {
         fit.fit();
+        const cols = Math.max(2, Math.floor(term.cols));
+        const rows = Math.max(2, Math.floor(term.rows));
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(`\x1b[RESIZE:${cols};${rows}]`);
+        }
       } catch {
         /* best-effort fit; ignore transient resize errors */
       }
@@ -208,6 +222,14 @@ export function AgentTerminalsView() {
           setSocketReady(true);
           setSocketConnecting(false);
           term.clear();
+          try {
+            fitRef.current?.fit();
+            const cols = Math.max(2, Math.floor(term.cols));
+            const rows = Math.max(2, Math.floor(term.rows));
+            ws.send(`\x1b[RESIZE:${cols};${rows}]`);
+          } catch {
+            /* best-effort initial PTY resize */
+          }
         };
         ws.onmessage = (event) => {
           if (typeof event.data === "string") {
@@ -315,7 +337,7 @@ export function AgentTerminalsView() {
           <p className="hc-eyebrow">Agent Terminals</p>
           <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-white/50">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-red-200"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="grid w-full grid-cols-2 gap-1.5 sm:flex sm:w-auto sm:flex-wrap">
           {AGENTS.map((agent) => (
             <button key={agent.kind} type="button" onClick={() => void ensureAgent(agent.kind)} className={cn("rounded-lg border px-2.5 py-1.5 text-left text-xs", selectedKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]")}> 
               <span className="flex items-center gap-2"><TerminalSquare className="h-3.5 w-3.5" />{agent.label}<CapabilityPill capability={capability} agent={agent} /></span>
@@ -324,25 +346,27 @@ export function AgentTerminalsView() {
         </div>
       </div>
 
-      <div className="grid flex-1 gap-3 md:grid-cols-[260px_minmax(0,1fr)_280px]">
-        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 md:block">{sessionList}</aside>
-        <section className="min-h-[540px] overflow-hidden rounded-2xl border border-white/10 bg-[#041113]">
+      <div className="grid flex-1 gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
+        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 lg:block">{sessionList}</aside>
+        <section className="min-h-[calc(100svh-13rem)] overflow-hidden rounded-2xl border border-white/10 bg-[#041113] md:min-h-[640px] lg:min-h-[540px]">
           <div className="flex items-center justify-between border-b border-white/10 px-3 py-2 text-xs text-white/65">
             <div className="flex items-center gap-2"><Activity className="h-3.5 w-3.5" />{target ? `${target.session}:${target.window}` : "missing window"}</div>
-            <div className="flex items-center gap-1 md:hidden"><button type="button" onClick={() => setSessionsOpen(true)} className="inline-flex items-center rounded-md border border-white/10 px-2 py-1 text-white/70 hover:bg-white/10"><PanelLeft className="mr-1 h-3.5 w-3.5" />Sessions</button><button type="button" onClick={() => setToolsOpen(true)} className="inline-flex items-center rounded-md border border-white/10 px-2 py-1 text-white/70 hover:bg-white/10"><PanelRight className="mr-1 h-3.5 w-3.5" />Tools</button></div>
+            {compactLayout && <div className="flex items-center gap-1"><button type="button" onClick={() => setSessionsOpen(true)} className="inline-flex items-center rounded-md border border-white/10 px-2 py-1 text-white/70 hover:bg-white/10"><PanelLeft className="mr-1 h-3.5 w-3.5" />Sessions</button><button type="button" onClick={() => setToolsOpen(true)} className="inline-flex items-center rounded-md border border-white/10 px-2 py-1 text-white/70 hover:bg-white/10"><PanelRight className="mr-1 h-3.5 w-3.5" />Tools</button></div>}
           </div>
           {!target && !loading ? (
             <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Agent oben wählen, um eins anzulegen.</div>
           ) : (
-            <div ref={hostRef} className="h-[540px] w-full overflow-hidden md:h-[calc(100vh-17rem)]" />
+            <div className="flex h-[calc(100svh-24rem)] min-h-[320px] w-full flex-col md:h-[calc(100svh-18rem)] md:min-h-[560px] lg:h-[calc(100vh-17rem)]">
+              <div ref={hostRef} className="min-h-0 flex-1 w-full overflow-hidden" />
+            </div>
           )}
         </section>
-        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 md:block">{toolsDrawer}</aside>
+        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 xl:block">{toolsDrawer}</aside>
       </div>
 
-      {mobile && sessionsOpen && <div className="fixed inset-0 z-50 bg-black/55 p-3"><div className="h-full overflow-auto rounded-2xl border border-white/10 bg-[#071b1d] p-3"><div className="mb-2 flex justify-end"><button type="button" onClick={() => setSessionsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button></div>{sessionList}</div></div>}
-      {mobile && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
-      {mobile && !toolsOpen && <button type="button" onClick={() => setToolsOpen(true)} className="fixed bottom-4 right-4 z-40 rounded-full border border-cyan-300/40 bg-[#0b2d31] px-3 py-2 text-xs text-cyan-100 shadow-xl"><ChevronUp className="mr-1 inline h-3.5 w-3.5" />Tools</button>}
+      {compactLayout && sessionsOpen && <div className="fixed inset-0 z-50 bg-black/55 p-3"><div className="h-full overflow-auto rounded-2xl border border-white/10 bg-[#071b1d] p-3"><div className="mb-2 flex justify-end"><button type="button" onClick={() => setSessionsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button></div>{sessionList}</div></div>}
+      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
+      {compactLayout && !toolsOpen && <button type="button" onClick={() => setToolsOpen(true)} className="fixed bottom-4 right-4 z-40 rounded-full border border-cyan-300/40 bg-[#0b2d31] px-3 py-2 text-xs text-cyan-100 shadow-xl"><ChevronUp className="mr-1 inline h-3.5 w-3.5" />Tools</button>}
 
       {handoffOpen && (
         <TerminalHandoffPanel

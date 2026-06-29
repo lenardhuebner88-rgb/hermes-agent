@@ -206,3 +206,23 @@ describe("fetchJSON GET timeout", () => {
     await assertion;
   });
 });
+
+
+describe("agent terminal worker contract", () => {
+  it("posts JSON bodies with an application/json content type", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => mockResponse(200, { jsonBody: { window: { session: "work", window: "codex" } } })));
+
+    await api.ensureAgentTerminalWindow("codex");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/agent-terminals/ensure",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ kind: "codex" }),
+        headers: expect.any(Headers),
+      }),
+    );
+    const headers = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers;
+    expect(headers.get("Content-Type")).toBe("application/json");
+  });
+});

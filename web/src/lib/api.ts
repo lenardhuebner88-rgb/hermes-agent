@@ -446,21 +446,25 @@ export const api = {
   showAgentTerminalWindow: (session: string, window: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/show", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window }),
     }),
   ensureAgentTerminalWindow: (kind: AgentTerminalKind) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/ensure", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind }),
     }),
   captureAgentTerminalWindow: (session: string, window: string, start?: number) =>
     fetchJSON<AgentTerminalCaptureResponse>("/api/agent-terminals/capture", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window, ...(start !== undefined ? { start } : {}) }),
     }),
   detachAgentTerminalClient: (clientId: string) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/detach-client", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: clientId }),
     }),
   /**

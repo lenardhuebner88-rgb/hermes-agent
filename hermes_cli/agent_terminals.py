@@ -160,16 +160,29 @@ class TmuxAgentSessionService:
             pass
 
     # ----- capabilities / definitions -----------------------------------
+    def _discover_hermes_binary(self) -> Path | None:
+        discovered = shutil.which("hermes")
+        if discovered:
+            return Path(discovered)
+        candidates: list[Path] = []
+        if self.hermes_home.name == ".hermes":
+            candidates.append(self.hermes_home.parent / ".local" / "bin" / "hermes")
+        candidates.extend([Path("/usr/local/bin/hermes"), Path("/usr/bin/hermes")])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     def resolve_hermes_binary(self) -> Path:
         if self.hermes_binary_override is not None:
             candidate = self.hermes_binary_override
         else:
-            discovered = shutil.which("hermes")
+            discovered = self._discover_hermes_binary()
             if discovered is None:
-                raise CapabilityError("hermes binary not found on PATH")
-            candidate = Path(discovered)
+                raise CapabilityError("hermes binary not found on PATH or standard install locations")
+            candidate = discovered
         if not str(candidate):
-            raise CapabilityError("hermes binary not found on PATH")
+            raise CapabilityError("hermes binary not found on PATH or standard install locations")
         try:
             resolved = candidate.resolve(strict=True)
         except OSError as exc:

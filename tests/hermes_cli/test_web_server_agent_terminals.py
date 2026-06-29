@@ -127,6 +127,48 @@ def test_agent_terminal_attach_uses_only_tmux_attach_argv(monkeypatch):
     assert spawned["env"] is None
 
 
+def test_agent_terminal_attach_consumes_resize_escape(monkeypatch):
+    class AttachService(FakeAgentTerminalService):
+        def attach_argv(self, session, window):
+            return ["tmux", "attach-session", "-t", "work:hermes"]
+
+    observed = {"writes": [], "resizes": []}
+
+    class FakeBridge:
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None):
+            return cls()
+
+        def read(self, timeout):
+            time.sleep(0.02)
+            return b""
+
+        def write(self, raw):
+            observed["writes"].append(raw)
+
+        def resize(self, cols, rows):
+            observed["resizes"].append((cols, rows))
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: AttachService())
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "PtyBridge", FakeBridge)
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes") as ws:
+        ws.send_text("\x1b[RESIZE:47;31]")
+        ws.send_text("real-input")
+        time.sleep(0.1)
+
+    assert observed["resizes"] == [(47, 31)]
+    assert observed["writes"] == [b"real-input"]
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 def test_agent_terminal_attach_disconnect_reaps_only_attach_client(monkeypatch, tmp_path: Path):
     socket = tmp_path / "tmux.sock"

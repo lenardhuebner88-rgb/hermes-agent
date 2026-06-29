@@ -12270,8 +12270,22 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
             if raw is None:
                 text = msg.get("text")
                 raw = text.encode("utf-8") if isinstance(text, str) else b""
-            if raw:
-                bridge.write(raw)
+            if not raw:
+                continue
+
+            # Resize escape is consumed locally, never written to the tmux
+            # attach PTY.  Without this, the browser xterm may fit to a
+            # narrow mobile/tablet viewport while the tmux client keeps the
+            # PTY default (80x24), so full-screen TUIs render for the wrong
+            # width and appear horizontally crushed/overwrapped in the UI.
+            match = _RESIZE_RE.match(raw)
+            if match and match.end() == len(raw):
+                cols = int(match.group(1))
+                rows = int(match.group(2))
+                bridge.resize(cols=cols, rows=rows)
+                continue
+
+            bridge.write(raw)
     except WebSocketDisconnect:
         pass
     finally:

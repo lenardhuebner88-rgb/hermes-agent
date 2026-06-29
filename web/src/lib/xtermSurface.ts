@@ -25,17 +25,35 @@ export function terminalTierWidthPx(host: HTMLElement | null): number {
 }
 
 export function terminalFontSizeForWidth(layoutWidthPx: number): number {
-  if (layoutWidthPx < 300) return 7;
-  if (layoutWidthPx < 360) return 8;
-  if (layoutWidthPx < 420) return 9;
-  if (layoutWidthPx < 520) return 10;
-  if (layoutWidthPx < 720) return 11;
-  if (layoutWidthPx < 1024) return 12;
+  if (layoutWidthPx < 300) return 8;
+  if (layoutWidthPx < 420) return 10;
+  if (layoutWidthPx < 520) return 11;
+  if (layoutWidthPx < 720) return 12;
+  if (layoutWidthPx < 1024) return 13;
   return 14;
 }
 
 export function terminalLineHeightForWidth(layoutWidthPx: number): number {
-  return layoutWidthPx < 1024 ? 1.02 : 1.15;
+  return layoutWidthPx < 1024 ? 1.2 : 1.15;
+}
+
+export function hardenTerminalTextInput(host: HTMLElement): void {
+  const apply = () => {
+    const textareas = host.querySelectorAll<HTMLTextAreaElement>("textarea.xterm-helper-textarea, textarea");
+    textareas.forEach((textarea) => {
+      textarea.setAttribute("autocomplete", "off");
+      textarea.setAttribute("autocorrect", "off");
+      textarea.setAttribute("autocapitalize", "off");
+      textarea.setAttribute("spellcheck", "false");
+      textarea.setAttribute("aria-autocomplete", "none");
+      textarea.setAttribute("enterkeyhint", "send");
+      textarea.setAttribute("data-ms-editor", "false");
+      textarea.spellcheck = false;
+    });
+  };
+
+  apply();
+  requestAnimationFrame(apply);
 }
 
 export interface HermesXtermSurfaceOptions {
@@ -99,6 +117,7 @@ export function createHermesXtermSurface({
   term.unicode.activeVersion = "11";
   term.loadAddon(new WebLinksAddon());
   term.open(host);
+  hardenTerminalTextInput(host);
 
   if (terminalTierWidthPx(host) >= 768) {
     try {
