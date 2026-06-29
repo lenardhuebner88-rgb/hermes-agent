@@ -5001,7 +5001,7 @@ def test_dispatch_auto_retry_allows_first_request_changes_block(
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
         kb.claim_task(conn, t)
-        kb.block_task(conn, t, reason="Verifier found a missing assertion")
+        kb.block_task(conn, t, reason="Verifier found which assertion is missing")
         conn.execute(
             "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
             "WHERE task_id = ? AND outcome = 'blocked'",
@@ -5017,6 +5017,42 @@ def test_dispatch_auto_retry_allows_first_request_changes_block(
         ).fetchone()
         assert row["status"] == "ready"
         assert row["auto_retry_count"] == 1
+
+
+def test_dispatch_auto_retry_keeps_operator_hold_blocked(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder")
+        kb.claim_task(conn, t)
+        assert kb.hold_task(conn, t, reason="operator hold") is True
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["blocked_kind"] == "operator_question"
+
+
+def test_dispatch_auto_retry_harmless_prose_without_verdict_is_retryable(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Worker noted which assertion failed")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 1)]
+        assert kb.get_task(conn, t).status == "ready"
 
 
 def test_dispatch_auto_retry_escalates_repeated_request_changes_on_unchanged_body(
