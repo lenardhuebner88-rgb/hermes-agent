@@ -87,15 +87,44 @@ describe("pollingStore", () => {
     expect(loader).not.toHaveBeenCalled();
   });
 
-  it("skips the fetch while the document is hidden", async () => {
-    (globalThis as { document?: unknown }).document = { hidden: true, addEventListener: () => {} };
+  it("skips the fetch while the document is hidden and resumes on visible", async () => {
+    let onVisibility: (() => void) | null = null;
+    let hidden = true;
+    const doc = {
+      get hidden() {
+        return hidden;
+      },
+      set hidden(v: boolean) {
+        hidden = v;
+      },
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") onVisibility = fn;
+      },
+    };
+    (globalThis as { document?: unknown }).document = doc;
+
     const loader = vi.fn().mockResolvedValue(1);
     subscribe("k", loader, 1000, vi.fn());
     await vi.advanceTimersByTimeAsync(0);
     expect(loader).not.toHaveBeenCalled(); // hidden → no fetch
-    (globalThis as { document: { hidden: boolean } }).document.hidden = false;
+
+    doc.hidden = false;
+    onVisibility?.();
     await vi.advanceTimersByTimeAsync(1000);
-    expect(loader).toHaveBeenCalledTimes(1); // resumes when visible
+    expect(loader).toHaveBeenCalledTimes(2); // immediate refresh + next tick
+  });
+
+  it("does not fetch for an extended period while the document stays hidden", async () => {
+    (globalThis as { document?: unknown }).document = {
+      hidden: true,
+      addEventListener: () => {},
+    };
+    const loader = vi.fn().mockResolvedValue(1);
+    subscribe("long-hidden", loader, 1000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    // Even after multiple background reschedule cycles no fetch happens.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(loader).not.toHaveBeenCalled();
   });
 
   it("refresh() forces an immediate tick", async () => {
@@ -105,6 +134,84 @@ describe("pollingStore", () => {
     expect(loader).toHaveBeenCalledTimes(1);
     await refresh("k");
     expect(loader).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a short foreground timer with the slower background cadence when hidden", async () => {
+    let onVisibility: (() => void) | null = null;
+    let hidden = false;
+    const doc = {
+      get hidden() {
+        return hidden;
+      },
+      set hidden(v: boolean) {
+        hidden = v;
+      },
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") onVisibility = fn;
+      },
+    };
+    (globalThis as { document?: unknown }).document = doc;
+
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const loader = vi.fn().mockResolvedValue(1);
+    subscribe("recalibrate", loader, 1_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    setTimeoutSpy.mockClear();
+    clearTimeoutSpy.mockClear();
+    doc.hidden = true;
+    onVisibility?.();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy).toHaveBeenCalled();
+    expect(setTimeoutSpy.mock.calls.at(-1)?.[1]).toBe(6_000);
+
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(loader).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(loader).toHaveBeenCalledTimes(1);
+  });
+
+  it("throttles background polling to a bounded interval", async () => {
+    let onVisibility: (() => void) | null = null;
+    let hidden = false;
+    const doc = {
+      get hidden() {
+        return hidden;
+      },
+      set hidden(v: boolean) {
+        hidden = v;
+      },
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") onVisibility = fn;
+      },
+    };
+    (globalThis as { document?: unknown }).document = doc;
+
+    const loader = vi.fn().mockResolvedValue(1);
+    subscribe("k", loader, 1_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0); // initial visible tick
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    // background cadence: timer is throttled to 6s but does NOT fetch while hidden.
+    doc.hidden = true;
+    onVisibility?.(); // entering background recalibrates the timer
+
+    for (let i = 0; i < 5; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(loader).toHaveBeenCalledTimes(1);
+    }
+
+    // at the 6th second the slow heartbeat fires, sees hidden, reschedules again
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    doc.hidden = false;
+    onVisibility?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(loader).toHaveBeenCalledTimes(3); // immediate refresh + next normal tick
   });
 
   it("setIntervalScale stretches the cadence and restores it on reset", async () => {

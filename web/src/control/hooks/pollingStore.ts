@@ -21,6 +21,14 @@
 
 const MAX_BACKOFF_MS = 60_000;
 
+/**
+ * How much to stretch polls while the tab is in the background.
+ * A 6x multiplier turns a 5s poll into 30s; a 10s poll is capped at 30s.
+ * This bounds timer wake-ups while still keeping data vaguely current.
+ */
+const BACKGROUND_INTERVAL_SCALE = 6;
+const MAX_BACKGROUND_INTERVAL_MS = 30_000;
+
 /** Spacing between per-key refreshes when the tab returns to the foreground.
  * On a phone the (Tailscale-)link is itself just waking up; 12+ simultaneous
  * fetches in that window reliably drop some with "Failed to fetch". */
@@ -80,6 +88,17 @@ function isServerError(err: StructuredError): boolean {
   return /^5\d\d$/.test(err.code) || err.code === "network";
 }
 
+function normalIntervalMs(key: string, entry: Entry<unknown>): number {
+  return entry.intervalMs * (getStore().intervalScales.get(key) ?? 1);
+}
+
+function backgroundIntervalMs(key: string, entry: Entry<unknown>): number {
+  return Math.min(
+    normalIntervalMs(key, entry) * BACKGROUND_INTERVAL_SCALE,
+    MAX_BACKGROUND_INTERVAL_MS,
+  );
+}
+
 interface StoreGlobal {
   entries: Map<string, Entry<unknown>>;
   visibilityBound: boolean;
@@ -98,14 +117,28 @@ function getStore(): StoreGlobal {
   if (!store.visibilityBound && typeof document !== "undefined") {
     store.visibilityBound = true;
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) return;
+      const hidden = document.hidden;
+      if (hidden) {
+        // Backgrounded before the next tick: slow the timer down now, instead
+        // of waking up at the (often 1-5s) foreground delay just to reschedule.
+        for (const [key, entry] of store.entries) {
+          const bgDelay = backgroundIntervalMs(key, entry);
+          if (entry.timer && bgDelay > entry.nextDelayMs) {
+            clearTimeout(entry.timer);
+            entry.timer = null;
+            entry.nextDelayMs = bgDelay;
+            scheduleNext(key);
+          }
+        }
+        return;
+      }
       // Tab refocused: refresh everything and reset backoff so a recovered
       // endpoint snaps back to its normal cadence — staggered rather than
       // all at once (thundering herd, see FOREGROUND_STAGGER_MS).
       let i = 0;
       for (const key of store.entries.keys()) {
         const entry = store.entries.get(key);
-        if (entry) entry.nextDelayMs = entry.intervalMs;
+        if (entry) entry.nextDelayMs = normalIntervalMs(key, entry);
         const delay = Math.min(i * FOREGROUND_STAGGER_MS, FOREGROUND_STAGGER_CAP_MS);
         if (delay === 0) void refresh(key);
         else setTimeout(() => void refresh(key), delay);
@@ -149,12 +182,21 @@ async function tick(key: string): Promise<void> {
   if (entry.listeners.size === 0) return; // stopped — no reschedule
 
   const hidden = typeof document !== "undefined" && document.hidden;
-  if (!hidden && !entry.inFlight) {
+  if (hidden) {
+    // Background tab: don't fetch, but keep a slow heartbeat so we pick up
+    // work again quickly when the user comes back. Clear any pending timer
+    // first because we may have been called from scheduleNext/refresh.
+    entry.nextDelayMs = backgroundIntervalMs(key, entry);
+    scheduleNext(key);
+    return;
+  }
+
+  if (!entry.inFlight) {
     entry.inFlight = true;
     try {
       const data = await entry.loader();
       entry.failCount = 0;
-      entry.nextDelayMs = entry.intervalMs * (getStore().intervalScales.get(key) ?? 1);
+      entry.nextDelayMs = normalIntervalMs(key, entry);
       const nextPayloadJson = payloadJson(data);
       const unchangedPayload =
         nextPayloadJson != null &&
@@ -171,8 +213,8 @@ async function tick(key: string): Promise<void> {
       const errObj = parseStructuredError(e);
       entry.failCount += 1;
       entry.nextDelayMs = isServerError(errObj)
-        ? Math.min(entry.intervalMs * 2 ** entry.failCount, MAX_BACKOFF_MS)
-        : entry.intervalMs;
+        ? Math.min(normalIntervalMs(key, entry) * 2 ** entry.failCount, MAX_BACKOFF_MS)
+        : normalIntervalMs(key, entry);
       // stale-while-error: keep the last good `data`, flag it stale.
       patch(entry, { error: errObj.message, errorObj: errObj, loading: false, isStale: entry.snapshot.data != null });
     } finally {
@@ -204,7 +246,7 @@ export function setIntervalScale(key: string, scale: number): void {
   if (entry && scale <= 1 && entry.timer && entry.failCount === 0) {
     clearTimeout(entry.timer);
     entry.timer = null;
-    entry.nextDelayMs = entry.intervalMs;
+    entry.nextDelayMs = normalIntervalMs(key, entry);
     scheduleNext(key);
   }
 }
