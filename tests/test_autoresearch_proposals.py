@@ -254,7 +254,9 @@ def test_prune_archives_old_done_and_ttl_reaps_stale_open(tmp_home):
         "old-reverted", status="proposed", last_outcome="reverted_no_improvement", created_at=old,
     )
     # frisch genug → bleibt in der Queue (TTL greift nur bei alten proposed).
-    _store_minimal_proposal("fresh-open", status="proposed")  # created_at default ~now
+    _store_minimal_proposal(
+        "fresh-open", status="proposed", created_at=proposals._utc_now()
+    )
 
     result = proposals.prune_proposals(archive_done_older_than_days=7)
 
