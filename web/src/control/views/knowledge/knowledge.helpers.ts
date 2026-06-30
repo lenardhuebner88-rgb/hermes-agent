@@ -32,6 +32,12 @@ export interface KnowledgeCatalog {
 
 export type KnowledgeDocDetail = KnowledgeDoc & { body_md: string };
 
+export interface KnowledgeTypeCount {
+  id: string;
+  label: string;
+  count: number;
+}
+
 /** "3 Abschnitte" / "1 Abschnitt" — grammatisch korrekt. */
 export function sectionsLabel(n: number): string {
   return `${n} Abschnitt${n === 1 ? "" : "e"}`;
@@ -40,4 +46,86 @@ export function sectionsLabel(n: number): string {
 /** Gesamtzahl Dokumente über alle Sammlungen. */
 export function totalDocs(collections: KnowledgeCollection[]): number {
   return collections.reduce((sum, c) => sum + c.docs.length, 0);
+}
+
+export function allDocs(collections: KnowledgeCollection[]): KnowledgeDoc[] {
+  return collections.flatMap((collection) => collection.docs);
+}
+
+export function knowledgeType(doc: KnowledgeDoc): string {
+  const typeTag = doc.tags.find((tag) => tag.startsWith("type:"));
+  if (typeTag) return typeTag.slice("type:".length);
+  if (doc.collection === "skills") return "skill";
+  if (doc.collection === "rollen") return "rolle";
+  if (doc.collection === "kanon" || doc.collection === "orchestrierung") return "doc";
+  return "page";
+}
+
+export function knowledgeTypeLabel(type: string): string {
+  switch (type) {
+    case "concept":
+      return "Konzepte";
+    case "entity":
+      return "Entitäten";
+    case "source":
+      return "Quellen";
+    case "query":
+      return "Antworten";
+    case "lint":
+      return "Checks";
+    case "overview":
+      return "Überblick";
+    case "synthesis":
+      return "Synthesen";
+    case "skill":
+      return "Skills";
+    case "rolle":
+      return "Rollen";
+    case "doc":
+      return "Dokumente";
+    default:
+      return type;
+  }
+}
+
+export function typeCounts(collections: KnowledgeCollection[]): KnowledgeTypeCount[] {
+  const counts = new Map<string, number>();
+  for (const doc of allDocs(collections)) {
+    const type = knowledgeType(doc);
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  const rank = new Map([
+    ["concept", 0],
+    ["entity", 1],
+    ["source", 2],
+    ["query", 3],
+    ["overview", 4],
+    ["synthesis", 5],
+    ["skill", 6],
+    ["rolle", 7],
+    ["doc", 8],
+    ["lint", 9],
+  ]);
+  return Array.from(counts.entries())
+    .map(([id, count]) => ({ id, label: knowledgeTypeLabel(id), count }))
+    .sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99) || a.label.localeCompare(b.label));
+}
+
+export function filterCatalog(
+  catalog: KnowledgeCatalog,
+  collectionId: string | null,
+  typeId: string | null,
+): KnowledgeCatalog {
+  const collections = catalog.collections
+    .filter((collection) => !collectionId || collection.id === collectionId)
+    .map((collection) => ({
+      ...collection,
+      docs: collection.docs.filter((doc) => !typeId || knowledgeType(doc) === typeId),
+    }))
+    .filter((collection) => collection.docs.length > 0);
+  return {
+    ...catalog,
+    collections,
+    count: totalDocs(collections),
+  };
 }

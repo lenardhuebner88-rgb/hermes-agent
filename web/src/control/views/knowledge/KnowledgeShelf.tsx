@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
-import { BookOpen, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ToneCallout } from "../../components/atoms";
 import { toneClasses } from "../../lib/tones";
 import {
+  filterCatalog,
+  knowledgeType,
+  knowledgeTypeLabel,
   sectionsLabel,
   totalDocs,
+  typeCounts,
   type KnowledgeCatalog,
   type KnowledgeCollection,
   type KnowledgeDoc,
+  type KnowledgeTypeCount,
 } from "./knowledge.helpers";
 import { KnowledgeReader } from "./KnowledgeReader";
 
@@ -28,6 +33,8 @@ function CollectionGlyph({ name, className }: { name: string; className?: string
       return <Users className={className} />;
     case "Newspaper":
       return <Newspaper className={className} />;
+    case "Brain":
+      return <Brain className={className} />;
     default:
       return <BookOpen className={className} />;
   }
@@ -42,16 +49,118 @@ const t = {
   emptyDesc: "Keine Sammlung enthält diesen Suchbegriff. Tipp anpassen oder Suche leeren.",
   hitsFor: (n: number, q: string) => `${n} Treffer für „${q}“`,
   docs: (n: number) => `${n} ${n === 1 ? "Dokument" : "Dokumente"}`,
+  all: "Alle",
+  collections: "Regale",
+  types: "Typen",
+  total: (n: number) => `${n} Dokumente`,
 };
+
+function FilterButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[0.74rem] transition-colors ${
+        active
+          ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+          : "border-white/10 hc-soft hover:bg-white/5"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function CountBadge({ count }: { count: number }) {
+  return <span className="hc-mono text-[0.66rem] hc-dim">{count}</span>;
+}
+
+function CatalogFilters({
+  catalog,
+  activeCollection,
+  activeType,
+  onCollection,
+  onType,
+}: {
+  catalog: KnowledgeCatalog;
+  activeCollection: string | null;
+  activeType: string | null;
+  onCollection: (id: string | null) => void;
+  onType: (id: string | null) => void;
+}) {
+  const types: KnowledgeTypeCount[] = typeCounts(catalog.collections);
+  return (
+    <div className="space-y-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="hc-eyebrow">{t.total(totalDocs(catalog.collections))}</p>
+        <button
+          type="button"
+          onClick={() => {
+            onCollection(null);
+            onType(null);
+          }}
+          className="inline-flex min-h-8 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.72rem] hc-soft hover:bg-white/5"
+        >
+          Filter leeren
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[0.72rem] font-medium uppercase text-[var(--hc-muted)]">{t.collections}</p>
+        <div className="flex flex-wrap gap-1.5">
+          <FilterButton active={activeCollection === null} onClick={() => onCollection(null)}>
+            {t.all}
+            <CountBadge count={totalDocs(catalog.collections)} />
+          </FilterButton>
+          {catalog.collections.map((collection) => (
+            <FilterButton
+              key={collection.id}
+              active={activeCollection === collection.id}
+              onClick={() => onCollection(activeCollection === collection.id ? null : collection.id)}
+            >
+              {collection.title}
+              <CountBadge count={collection.docs.length} />
+            </FilterButton>
+          ))}
+        </div>
+      </div>
+
+      {types.length > 0 ? (
+        <div className="space-y-2">
+          <p className="text-[0.72rem] font-medium uppercase text-[var(--hc-muted)]">{t.types}</p>
+          <div className="flex flex-wrap gap-1.5">
+            <FilterButton active={activeType === null} onClick={() => onType(null)}>
+              {t.all}
+              <CountBadge count={totalDocs(catalog.collections)} />
+            </FilterButton>
+            {types.map((type) => (
+              <FilterButton
+                key={type.id}
+                active={activeType === type.id}
+                onClick={() => onType(activeType === type.id ? null : type.id)}
+              >
+                {type.label}
+                <CountBadge count={type.count} />
+              </FilterButton>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /** Eine Doc-Karte im Regal. Exportiert für Unit-Tests. */
 export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: KnowledgeDoc) => void }) {
+  const typeLabel = knowledgeTypeLabel(knowledgeType(doc));
   return (
     <button
       type="button"
       onClick={() => onOpen(doc)}
-      className="hc-surface-card flex h-full flex-col gap-2 p-4 text-left transition-colors hover:bg-white/5"
+      className="hc-surface-card flex h-full min-h-[11rem] flex-col gap-2 p-4 text-left transition-colors hover:bg-white/5"
     >
+      <p className="hc-eyebrow">{typeLabel}</p>
       <h4 className="text-[0.95rem] font-semibold leading-snug text-white">{doc.title}</h4>
       <p className="line-clamp-2 flex-1 text-[0.8rem] leading-relaxed hc-soft">{doc.summary}</p>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] hc-dim">
@@ -73,8 +182,8 @@ export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: Know
  *  Exportiert für Unit-Tests. */
 export function CollectionSection({ collection, onOpen }: { collection: KnowledgeCollection; onOpen: (doc: KnowledgeDoc) => void }) {
   return (
-    <section className="hc-surface-card p-4 sm:p-5">
-      <header className="mb-4 flex items-start gap-3">
+    <section className="space-y-3">
+      <header className="flex items-start gap-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
         <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${toneClasses(collection.accent)}`}>
           <CollectionGlyph name={collection.icon} className="h-5 w-5" />
         </span>
@@ -98,6 +207,8 @@ export function CollectionSection({ collection, onOpen }: { collection: Knowledg
 export function KnowledgeShelf() {
   const [catalog, setCatalog] = useState<KnowledgeCatalog | null>(null);
   const [q, setQ] = useState("");
+  const [activeCollection, setActiveCollection] = useState<string | null>(null);
+  const [activeType, setActiveType] = useState<string | null>(null);
   const [reading, setReading] = useState<KnowledgeDoc | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -119,13 +230,18 @@ export function KnowledgeShelf() {
     return () => window.clearTimeout(handle);
   }, [q, load]);
 
+  const visibleCatalog = useMemo(
+    () => (catalog ? filterCatalog(catalog, activeCollection, activeType) : null),
+    [activeCollection, activeType, catalog],
+  );
+
   if (reading) {
     const collectionTitle =
       catalog?.collections.find((c) => c.id === reading.collection)?.title ?? "";
     return <KnowledgeReader doc={reading} collectionTitle={collectionTitle} onBack={() => setReading(null)} />;
   }
 
-  const collections = catalog?.collections ?? [];
+  const collections = visibleCatalog?.collections ?? [];
   const searching = q.trim().length > 0;
 
   return (
@@ -144,7 +260,17 @@ export function KnowledgeShelf() {
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
 
-      {searching && catalog ? (
+      {catalog ? (
+        <CatalogFilters
+          catalog={catalog}
+          activeCollection={activeCollection}
+          activeType={activeType}
+          onCollection={setActiveCollection}
+          onType={setActiveType}
+        />
+      ) : null}
+
+      {searching && visibleCatalog ? (
         <p className="text-[0.78rem] hc-dim">{t.hitsFor(totalDocs(collections), q.trim())}</p>
       ) : null}
 

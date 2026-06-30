@@ -23,7 +23,7 @@ const t = {
   modeWissen: "Nachschlagewerk",
   modeLesesaal: "Lesesaal",
   wissenTitle: "Nachschlagewerk",
-  wissenSubtitle: "Das dauerhafte Wissen des Servers — sauber geordnet zum Nachschlagen, für Agents und dich.",
+  wissenSubtitle: "Dauerhaftes Serverwissen, geordnet zum Nachschlagen.",
   lesesaalTitle: "Der Lesesaal",
   lesesaalSubtitle: "Alles, was Hermes produziert, menschenlesbar an einem Ort — Digests, Recherchen, Receipts.",
   searchPlaceholder: "Suche in Titel + Text …",

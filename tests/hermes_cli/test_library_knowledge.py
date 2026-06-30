@@ -98,13 +98,50 @@ def kb_home(tmp_path, monkeypatch):
         "# empty-name\n\nBody.\n",
         encoding="utf-8",
     )
+
+    wiki = tmp_path / "llm-wiki" / "wiki"
+    (wiki / "concepts").mkdir(parents=True)
+    (wiki / "entities").mkdir()
+    (wiki / "queries").mkdir()
+    (wiki / "sources").mkdir()
+    (wiki / "lint").mkdir()
+    (wiki / "overview.md").write_text(
+        "---\n"
+        "title: \"LLM-Wiki Überblick\"\n"
+        "type: overview\n"
+        "tags:\n"
+        "  - llm-wiki\n"
+        "  - einstieg\n"
+        "---\n\n"
+        "# LLM-Wiki Überblick\n\nDas Wiki sammelt agentisches Referenzwissen.\n",
+        encoding="utf-8",
+    )
+    (wiki / "concepts" / "ingest-query-lint.md").write_text(
+        "---\n"
+        "title: \"Ingest Query Lint\"\n"
+        "type: concept\n"
+        "tags:\n"
+        "  - workflow\n"
+        "  - lint\n"
+        "---\n\n"
+        "# Ingest Query Lint\n\nDer ingest workflow prüft Quellen, Links und Queries.\n",
+        encoding="utf-8",
+    )
+    (wiki / "entities" / "qmd.md").write_text("# qmd\n\nLokale Markdown-Suche.\n", encoding="utf-8")
+    (wiki / "queries" / "what-is-the-ingest-workflow.md").write_text(
+        "# What is the ingest workflow?\n\nAntwort mit Quellen.\n", encoding="utf-8"
+    )
+    (wiki / "sources" / "karpathy-llm-wiki-pattern.md").write_text(
+        "# Karpathy LLM Wiki Pattern\n\nQuelle.\n", encoding="utf-8"
+    )
+    (wiki / "lint" / "auto-health-check.md").write_text("# Auto Health Check\n\nOK.\n", encoding="utf-8")
     return tmp_path
 
 
-def test_catalog_has_four_collections_in_order(kb_home):
+def test_catalog_has_collections_in_order(kb_home):
     out = kn.list_knowledge()
     ids = [c["id"] for c in out["collections"]]
-    assert ids == ["kanon", "orchestrierung", "skills", "rollen"]
+    assert ids == ["kanon", "orchestrierung", "skills", "rollen", "llm-wiki"]
     assert out["query"] == ""
     assert out["now"] > 0
 
@@ -191,6 +228,24 @@ def test_role_with_empty_name_falls_back_to_slug(kb_home):
     assert empty["title"] == "empty-name"
 
 
+def test_llm_wiki_pages_are_scanned_with_frontmatter_tags(kb_home):
+    out = kn.list_knowledge()
+    wiki = next(c for c in out["collections"] if c["id"] == "llm-wiki")
+    by_id = {d["id"]: d for d in wiki["docs"]}
+    assert list(by_id)[:2] == [
+        "kb::llm::overview.md",
+        "kb::llm::concepts/ingest-query-lint.md",
+    ]
+    concept = by_id["kb::llm::concepts/ingest-query-lint.md"]
+    assert concept["title"] == "Ingest Query Lint"
+    assert concept["source_ref"] == "llm-wiki/concepts/ingest-query-lint.md"
+    assert "llm-wiki" in concept["tags"]
+    assert "type:concept" in concept["tags"]
+    assert "workflow" in concept["tags"]
+    assert concept["heading_count"] == 1
+    assert "body_md" not in concept
+
+
 def test_read_static_doc_returns_body(kb_home):
     doc = kn.read_knowledge_doc("kb::doc::canon-infra-topology")
     assert doc is not None
@@ -206,6 +261,14 @@ def test_read_skill_strips_frontmatter(kb_home):
     assert "description:" not in doc["body_md"]
 
 
+def test_read_llm_wiki_doc_strips_frontmatter(kb_home):
+    doc = kn.read_knowledge_doc("kb::llm::concepts/ingest-query-lint.md")
+    assert doc is not None
+    assert doc["id"] == "kb::llm::concepts/ingest-query-lint.md"
+    assert doc["body_md"].lstrip().startswith("# Ingest Query Lint")
+    assert "type: concept" not in doc["body_md"]
+
+
 def test_unknown_static_doc_raises(kb_home):
     with pytest.raises(ValueError):
         kn.read_knowledge_doc("kb::doc::does-not-exist")
@@ -214,6 +277,10 @@ def test_unknown_static_doc_raises(kb_home):
 def test_missing_skill_returns_none(kb_home):
     # Slug gültig, aber kein Verzeichnis → None (→ 404), kein Traversal.
     assert kn.read_knowledge_doc("kb::skill::nonexistent") is None
+
+
+def test_missing_llm_wiki_doc_returns_none(kb_home):
+    assert kn.read_knowledge_doc("kb::llm::concepts/does-not-exist.md") is None
 
 
 def test_malformed_id_raises(kb_home):
@@ -228,6 +295,10 @@ def test_traversal_slug_rejected(kb_home):
         kn.read_knowledge_doc("kb::skill::../../../etc/passwd")
     with pytest.raises(ValueError):
         kn.read_knowledge_doc("kb::role::..")
+    with pytest.raises(ValueError):
+        kn.read_knowledge_doc("kb::llm::../raw/secret.md")
+    with pytest.raises(ValueError):
+        kn.read_knowledge_doc("kb::llm::concepts/../../secret.md")
 
 
 def test_search_filters_and_drops_empty_collections(kb_home):
@@ -244,6 +315,14 @@ def test_search_matches_skill_body(kb_home):
     out = kn.list_knowledge(q="tippen")
     ids = [c["id"] for c in out["collections"]]
     assert ids == ["skills"]
+
+
+def test_search_matches_llm_wiki_body(kb_home):
+    out = kn.list_knowledge(q="queries")
+    ids = [c["id"] for c in out["collections"]]
+    assert ids == ["llm-wiki"]
+    docs = out["collections"][0]["docs"]
+    assert [d["id"] for d in docs] == ["kb::llm::concepts/ingest-query-lint.md"]
 
 
 def test_heading_count_ignores_fenced_code(kb_home):

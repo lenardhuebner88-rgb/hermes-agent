@@ -6,7 +6,7 @@ import { ProseMarkdown } from "../../components/ProseMarkdown";
 import { fmtClock } from "../../lib/derive";
 import { extractToc, type TocEntry } from "../../lib/slug";
 import type { KnowledgeDoc, KnowledgeDocDetail } from "./knowledge.helpers";
-import { sectionsLabel } from "./knowledge.helpers";
+import { knowledgeType, knowledgeTypeLabel, sectionsLabel } from "./knowledge.helpers";
 
 const t = {
   back: "Alle Regale",
@@ -50,6 +50,7 @@ export function KnowledgeReader({ doc, collectionTitle, onBack }: {
 }) {
   const [detail, setDetail] = useState<KnowledgeDocDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const typeLabel = knowledgeTypeLabel(knowledgeType(doc));
   // Reset beim Doc-Wechsel als Render-Phase-Anpassung (React-Doku-Muster),
   // wie ReadingView im Lesesaal.
   const [detailFor, setDetailFor] = useState<string>(doc.id);
@@ -97,13 +98,21 @@ export function KnowledgeReader({ doc, collectionTitle, onBack }: {
         <p className="hc-eyebrow">{collectionTitle}</p>
         <h2 className="mt-1 text-lg font-semibold text-white">{doc.title}</h2>
         <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.72rem] hc-dim">
-          <span className="inline-flex items-center gap-1.5">
+          <span>{typeLabel}</span>
+          <span className="inline-flex min-w-0 items-center gap-1.5">
             <FileText className="h-3.5 w-3.5" />
-            <span className="hc-mono">{doc.source_ref}</span>
+            <span className="hc-mono break-all">{doc.source_ref}</span>
           </span>
           {doc.heading_count > 0 ? <span>{sectionsLabel(doc.heading_count)}</span> : null}
           {doc.updated_ts > 0 ? <span>{t.updated} {fmtClock(doc.updated_ts)}</span> : null}
         </p>
+        {doc.tags.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-1">
+            {doc.tags.slice(0, 10).map((tag) => (
+              <span key={tag} className="rounded-full border border-white/10 px-1.5 py-0.5 text-[0.62rem] hc-dim">{tag}</span>
+            ))}
+          </div>
+        ) : null}
       </header>
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}

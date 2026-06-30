@@ -14,6 +14,8 @@ Vier Sammlungen (Regale):
      können; Titel/Kurzbeschreibung aus dem Frontmatter).
   4. **Subagent-Rollen** — ``~/.claude/agents/*.md`` (die Lese-/Bau-/Urteils-
      Rollen).
+  5. **LLM-Wiki** — ``~/llm-wiki/wiki/**/*.md`` (agentisch gepflegte Quellen,
+     Konzepte, Entitäten, Abfragen und Synthesen).
 
 Sicherheits-Vertrag (wie ``library_view``): read-only, unter ``/api/`` (erbt
 das Session-Gate, nie in PUBLIC_API_PATHS), Blocking-FS via ``asyncio.to_thread``.
@@ -40,6 +42,10 @@ _SUMMARY_CHARS = 220
 # Slug eines Skills/einer Rolle (= Verzeichnis-/Dateiname). Streng: kein Punkt,
 # kein Slash → kann nie aus dem Wurzelverzeichnis ausbrechen.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Relativer Wiki-Pfad unter ~/llm-wiki/wiki. Erlaubt "overview.md" und
+# "concepts/foo.md", aber keine Punkte ausser ".md", keine Backslashes, kein
+# ".." und keine Request-gelieferte absolute Pfadkomponente.
+_LLM_WIKI_REL_RE = re.compile(r"^(?:[a-z0-9][a-z0-9_-]*/)*[a-z0-9][a-z0-9_-]*\.md$")
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +66,10 @@ def _skills_root() -> Path:
 
 def _agents_root() -> Path:
     return Path.home() / ".claude" / "agents"
+
+
+def _llm_wiki_root() -> Path:
+    return Path.home() / "llm-wiki" / "wiki"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +117,14 @@ _COLLECTIONS: tuple[_Collection, ...] = (
         "wird.",
         accent="emerald",
         icon="Users",
+    ),
+    _Collection(
+        "llm-wiki",
+        "LLM-Wiki",
+        "Agentisch gepflegtes Wissen aus Quellen, Konzepten, Entitäten, "
+        "Abfragen und Synthesen — direkt aus ~/llm-wiki/wiki.",
+        accent="indigo",
+        icon="Brain",
     ),
 )
 
@@ -272,6 +290,20 @@ def _parse_meta(fm_text: str) -> dict[str, str]:
     return meta
 
 
+def _parse_frontmatter_data(fm_text: str) -> dict[str, Any]:
+    """Frontmatter als strukturiertes dict. Für das LLM-Wiki brauchen wir
+    neben Strings auch Listen wie ``tags:``; bei YAML-Problemen fällt die
+    Funktion auf den flachen Parser zurück."""
+    try:
+        import yaml
+        data = yaml.safe_load(fm_text)
+        if isinstance(data, dict):
+            return {str(k).lower(): v for k, v in data.items()}
+    except Exception:
+        logger.debug("knowledge: rich yaml frontmatter parse failed", exc_info=True)
+    return _parse_meta(fm_text)
+
+
 def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
     """``---``-umrahmtes Frontmatter abtrennen → (meta, body). Fail-soft: ohne
     sauberes ``---``-Paar zählt alles als Body."""
@@ -283,6 +315,17 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
             meta = _parse_meta("\n".join(lines[1:idx]))
             return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
     return {}, raw  # nie geschlossen → kein Frontmatter
+
+
+def _split_frontmatter_rich(raw: str) -> tuple[dict[str, Any], str]:
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, raw
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            meta = _parse_frontmatter_data("\n".join(lines[1:idx]))
+            return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
+    return {}, raw
 
 
 def _count_headings(body: str) -> int:
@@ -325,6 +368,87 @@ def _first_sentence(text: str, limit: int = _SUMMARY_CHARS) -> str:
     if len(out) > limit:
         out = out[: limit - 1].rstrip() + "…"
     return out
+
+
+def _meta_string(meta: dict[str, Any], key: str) -> str:
+    value = meta.get(key)
+    if value is None or isinstance(value, (list, dict)):
+        return ""
+    return " ".join(str(value).split())
+
+
+def _meta_string_list(meta: dict[str, Any], key: str) -> list[str]:
+    value = meta.get(key)
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if item is None or isinstance(item, (list, dict)):
+                continue
+            text = " ".join(str(item).split())
+            if text:
+                out.append(text)
+        return out
+    if value is None or isinstance(value, dict):
+        return []
+    text = " ".join(str(value).split())
+    return [text] if text else []
+
+
+def _first_heading(body: str) -> str:
+    for line in body.splitlines():
+        m = _HEADING_RE.match(line)
+        if m:
+            return " ".join(m.group(2).split())
+    return ""
+
+
+def _llm_wiki_type(rel: str, meta: dict[str, Any]) -> str:
+    declared = _meta_string(meta, "type").lower()
+    if declared:
+        return declared
+    first = rel.split("/", 1)[0]
+    if first.endswith(".md"):
+        return "page"
+    return first[:-1] if first.endswith("s") else first
+
+
+def _build_llm_wiki(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
+    if not _LLM_WIKI_REL_RE.match(rel):
+        return None
+    root = _llm_wiki_root().resolve(strict=False)
+    target = (root / rel).resolve(strict=False)
+    if not str(target).startswith(str(root) + "/") or not target.is_file():
+        return None
+    raw = _read_text(target)
+    if raw is None:
+        return None
+    meta, body = _split_frontmatter_rich(raw)
+    wiki_type = _llm_wiki_type(rel, meta)
+    title = _meta_string(meta, "title") or _first_heading(body) or Path(rel).stem.replace("-", " ").title()
+    summary = (
+        _meta_string(meta, "summary")
+        or _meta_string(meta, "description")
+        or _summarize(body, title)
+    )
+    tags = ["llm-wiki", f"type:{wiki_type}"]
+    for tag in _meta_string_list(meta, "tags"):
+        if tag not in tags:
+            tags.append(tag)
+    try:
+        updated = int(target.stat().st_mtime)
+    except OSError:
+        updated = 0
+    return _KbDoc(
+        id=f"kb::llm::{rel}",
+        collection="llm-wiki",
+        title=title,
+        summary=summary,
+        source_ref=f"llm-wiki/{rel}",
+        tags=tags,
+        updated_ts=updated,
+        heading_count=_count_headings(body),
+        body_md=body if with_body else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +569,42 @@ def _scan_role_slugs() -> list[str]:
     return sorted(slugs)
 
 
+def _scan_llm_wiki_rels() -> list[str]:
+    root = _llm_wiki_root()
+    if not root.is_dir():
+        return []
+    try:
+        entries = list(root.rglob("*.md"))
+    except OSError:
+        return []
+    rels: list[str] = []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        try:
+            rel = entry.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if _LLM_WIKI_REL_RE.match(rel):
+            rels.append(rel)
+
+    rank = {
+        "overview.md": 0,
+        "synthesis.md": 1,
+        "concepts": 2,
+        "entities": 3,
+        "queries": 4,
+        "sources": 5,
+        "lint": 6,
+    }
+
+    def sort_key(rel: str) -> tuple[int, str]:
+        head = rel.split("/", 1)[0]
+        return rank.get(rel, rank.get(head, 9)), rel
+
+    return sorted(rels, key=sort_key)
+
+
 def _collect_docs(*, with_bodies: bool) -> list[_KbDoc]:
     docs: list[_KbDoc] = []
     for static in _STATIC_DOCS:
@@ -468,6 +628,14 @@ def _collect_docs(*, with_bodies: bool) -> list[_KbDoc]:
             built = _build_role(slug, with_body=with_bodies)
         except Exception:
             logger.debug("knowledge: role failed: %s", slug, exc_info=True)
+            built = None
+        if built is not None:
+            docs.append(built)
+    for rel in _scan_llm_wiki_rels():
+        try:
+            built = _build_llm_wiki(rel, with_body=with_bodies)
+        except Exception:
+            logger.debug("knowledge: llm-wiki page failed: %s", rel, exc_info=True)
             built = None
         if built is not None:
             docs.append(built)
@@ -545,6 +713,10 @@ def read_knowledge_doc(doc_id: str) -> Optional[dict[str, Any]]:
         if not _SLUG_RE.match(rest):
             raise ValueError("invalid role slug")
         built = _build_role(rest, with_body=True)
+    elif kind == "llm":
+        if not _LLM_WIKI_REL_RE.match(rest):
+            raise ValueError("invalid llm-wiki path")
+        built = _build_llm_wiki(rest, with_body=True)
     else:
         raise ValueError("unknown knowledge kind")
     return built.as_detail() if built is not None else None

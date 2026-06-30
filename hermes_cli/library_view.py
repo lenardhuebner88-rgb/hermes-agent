@@ -132,7 +132,7 @@ def _resolve_store(store_id: str) -> Optional[Path]:
 
 
 def _load_jobs_meta(store_dir: Path) -> dict[str, dict]:
-    """job_id → {name, schedule_display, enabled} aus jobs.json (fail-soft)."""
+    """job_id → {name, schedule_display, prompt, script, enabled} aus jobs.json."""
     try:
         raw = json.loads((store_dir / "jobs.json").read_text(encoding="utf-8"))
         jobs = raw.get("jobs", []) if isinstance(raw, dict) else []
@@ -148,6 +148,8 @@ def _load_jobs_meta(store_dir: Path) -> dict[str, dict]:
             "schedule_display": str(
                 schedule.get("display") or schedule.get("expr") or ""
             ) if isinstance(schedule, dict) else "",
+            "prompt": str(job.get("prompt") or ""),
+            "script": str(job.get("script") or ""),
             "enabled": bool(job.get("enabled", False)),
         }
     return meta
@@ -230,9 +232,9 @@ class _Item:
 #      Negativ-Einträgen (Datei ohne ##-Response-Teil → None).
 _MAX_OUTPUTS_PER_JOB = 40
 # path → (mtime_ns, size, meta_fingerprint, geparstes Item mit Body oder None).
-# meta_fingerprint = (series, category, series_meta) — invalidiert den Eintrag,
-# wenn der Job umbenannt/umkategorisiert wird (Datei-mtime ändert sich da nicht).
-_cron_parse_cache: dict[str, tuple[int, int, tuple[str, str, str], Optional[_Item]]] = {}
+# meta_fingerprint enthält sichtbare Serie/Kategorie UND Prompt/Script — so
+# invalidiert ein umgebauter Testjob auch bei unverändertem Output-mtime.
+_cron_parse_cache: dict[str, tuple[int, int, tuple[str, ...], Optional[_Item]]] = {}
 # job_dir → (dir_mtime_ns, newest-N Dateinamen). Ein 30k-Einträge-Verzeichnis
 # zu listen+sortieren kostet allein ~0.5 s; das Verzeichnis-mtime ändert sich
 # bei jedem Anlegen/Löschen einer Datei und ist darum ein sicherer Schlüssel.
@@ -257,6 +259,24 @@ def _newest_output_names(job_dir: Path) -> list[str]:
     return names
 
 
+def _is_trivial_test_cron_output(name: str, body: str, meta: dict) -> bool:
+    """Hide accidental throwaway cron jobs from the Lesesaal.
+
+    The live failure is a job literally named ``w`` with prompt ``echo hi``.
+    Keep the predicate exact so real Watch/WM/Wartung reports stay visible.
+    """
+    name_norm = " ".join(str(name or "").split()).casefold()
+    prompt_norm = " ".join(str(meta.get("prompt") or "").split()).casefold()
+    script_norm = str(meta.get("script") or "").strip()
+    body_norm = " ".join(body.split()).casefold()
+    return (
+        name_norm == "w"
+        and prompt_norm == "echo hi"
+        and not script_norm
+        and body_norm == "hi"
+    )
+
+
 def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
     from dataclasses import replace as _dc_replace
     items: list[_Item] = []
@@ -273,6 +293,8 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
             name = meta.get("name", job_dir.name)
             category = _categorize_job(job_dir.name, name)
             series_meta = meta.get("schedule_display", "")
+            prompt = str(meta.get("prompt") or "")
+            script = str(meta.get("script") or "")
             profile = store_id.split(":", 1)[1] if ":" in store_id else None
             for fname in _newest_output_names(job_dir):
                 md_file = job_dir / fname
@@ -282,7 +304,7 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     continue
                 cache_key = str(md_file)
                 seen_paths.add(cache_key)
-                meta_fp = (name, category, series_meta)
+                meta_fp = (name, category, series_meta, prompt, script)
                 cached = _cron_parse_cache.get(cache_key)
                 if (
                     cached is not None
@@ -308,6 +330,11 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                         stat.st_mtime_ns, stat.st_size, meta_fp, None,
                     )
                     continue  # ohne Response-Teil nichts Lesbares
+                if _is_trivial_test_cron_output(name, body, meta):
+                    _cron_parse_cache[cache_key] = (
+                        stat.st_mtime_ns, stat.st_size, meta_fp, None,
+                    )
+                    continue
                 ts = _output_ts(md_file.name, stat.st_mtime)
                 day = _time.strftime("%d.%m. %H:%M", _time.localtime(ts))
                 item = _Item(
@@ -356,6 +383,8 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
     jobs_meta = _load_jobs_meta(store_dir)
     meta = jobs_meta.get(job_id, {})
     name = meta.get("name", job_id)
+    if _is_trivial_test_cron_output(name, body, meta):
+        return None
     ts = _output_ts(filename, target.stat().st_mtime)
     profile = store_id.split(":", 1)[1] if ":" in store_id else None
     item = _Item(
@@ -813,7 +842,13 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
     return {}, raw
 
 
-def _parse_receipt_file(md_file: Path, agent: str, stat: Any) -> Optional[_Item]:
+def _parse_receipt_file(
+    md_file: Path,
+    agent: str,
+    stat: Any,
+    *,
+    receipt_name: str | None = None,
+) -> Optional[_Item]:
     try:
         raw = md_file.read_text(encoding="utf-8", errors="replace")
         if len(raw) > _MAX_BODY_BYTES:
@@ -828,15 +863,16 @@ def _parse_receipt_file(md_file: Path, agent: str, stat: Any) -> Optional[_Item]
         (ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), "",
     ) or md_file.stem
     meta_bits = [f"**{k}:** {meta[k]}" for k in ("status", "task", "date") if meta.get(k)]
+    name = receipt_name or md_file.name
     return _Item(
-        id=f"receipt::{agent}::{md_file.name}",
+        id=f"receipt::{agent}::{name}",
         category="receipts",
         series_id=f"receipts/{agent}",
         series=agent,
         title=title,
         ts=int(stat.st_mtime),
         preview=_preview(body),
-        source_ref=f"receipt:{agent}/{md_file.name}",
+        source_ref=f"receipt:{agent}/{name}",
         body_md=f"> {' · '.join(meta_bits)}\n\n{body}" if meta_bits else body,
     )
 
@@ -874,7 +910,12 @@ def _collect_receipt_items(*, with_bodies: bool) -> list[_Item]:
                         else _dc_replace(cached[2], body_md=None)
                     )
                 continue
-            item = _parse_receipt_file(md_file, agent_dir.name, stat)
+            item = _parse_receipt_file(
+                md_file,
+                agent_dir.name,
+                stat,
+                receipt_name=fname,
+            )
             _receipt_parse_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, item)
             if item is not None:
                 items.append(item if with_bodies else _dc_replace(item, body_md=None))
@@ -883,11 +924,21 @@ def _collect_receipt_items(*, with_bodies: bool) -> list[_Item]:
     return items
 
 
+def _valid_receipt_relpath(filename: str) -> Optional[Path]:
+    parts = filename.split("/")
+    if len(parts) == 1:
+        return Path(filename) if _RECEIPT_FILE_RE.match(parts[0]) else None
+    if len(parts) == 2 and parts[0] in _RECEIPT_SUBDIRS and _RECEIPT_FILE_RE.match(parts[1]):
+        return Path(parts[0]) / parts[1]
+    return None
+
+
 def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
-    if not _TASK_ID_RE.match(agent) or not _RECEIPT_FILE_RE.match(filename):
+    rel_path = _valid_receipt_relpath(filename)
+    if not _TASK_ID_RE.match(agent) or rel_path is None:
         raise ValueError("invalid receipt id")
     receipts_root = (_receipts_root() / agent / "receipts").resolve(strict=False)
-    target = receipts_root / filename
+    target = receipts_root / rel_path
     # The collector deliberately excludes symlinks; the detail path must match
     # that policy so a symlinked receipt cannot be read by naming it directly.
     if target.is_symlink():
@@ -897,7 +948,7 @@ def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
         raise ValueError("path escape")
     if not target.is_file():
         return None
-    return _parse_receipt_file(target, agent, target.stat())
+    return _parse_receipt_file(target, agent, target.stat(), receipt_name=filename)
 
 
 # ---------------------------------------------------------------------------

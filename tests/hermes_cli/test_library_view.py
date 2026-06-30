@@ -30,13 +30,22 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-def _write_cron_store(store_dir: Path, *, job_id: str, name: str,
-                      filename: str, response: str) -> None:
+def _write_cron_store(
+    store_dir: Path,
+    *,
+    job_id: str,
+    name: str,
+    filename: str,
+    response: str,
+    prompt: str = "GEHEIM: dieser Prompt darf nie ausgeliefert werden",
+    script: str | None = None,
+) -> None:
     store_dir.mkdir(parents=True, exist_ok=True)
     (store_dir / "jobs.json").write_text(json.dumps({
         "jobs": [{
             "id": job_id, "name": name, "enabled": True,
-            "prompt": "GEHEIM: dieser Prompt darf nie ausgeliefert werden",
+            "prompt": prompt,
+            "script": script,
             "schedule": {"kind": "cron", "expr": "30 7 * * *", "display": "30 7 * * *"},
         }],
     }), encoding="utf-8")
@@ -44,7 +53,7 @@ def _write_cron_store(store_dir: Path, *, job_id: str, name: str,
     out.mkdir(parents=True)
     (out / filename).write_text(
         f"# Cron Job: {name}\n\n**Job ID:** {job_id}\n\n## Prompt\n\n"
-        f"GEHEIM: dieser Prompt darf nie ausgeliefert werden\n\n"
+        f"{prompt}\n\n"
         f"## Eingebettetes Heading im Prompt\n\nnoch geheim\n\n"
         f"## Response\n\n{response}\n",
         encoding="utf-8",
@@ -109,6 +118,25 @@ def test_cron_items_multi_store_with_redacted_response(kanban_home):
     detail = lv._get_item(wm.id)
     assert detail is not None and "WM-Morgenbrief-Inhalt." in detail.body_md
     assert "GEHEIM" not in detail.body_md
+
+
+def test_trivial_w_cron_outputs_are_filtered(kanban_home):
+    """Throwaway test jobs must not flood Briefings.
+
+    Live regression: a job named "w" with prompt "echo hi" ran every five
+    minutes and filled the Lesesaal with "hi" reports.
+    """
+    _write_cron_store(
+        kanban_home / "cron",
+        job_id="4c2f1fa423d2",
+        name="w",
+        filename="2026-06-30_11-01-12.md",
+        response="hi",
+        prompt="echo hi",
+    )
+    assert lv._collect_cron_items(with_bodies=True) == []
+    assert lv._list_items("briefings", "w", 10)["count"] == 0
+    assert lv._get_item("cron::main::4c2f1fa423d2::2026-06-30_11-01-12.md") is None
 
 
 def test_cron_item_id_traversal_is_rejected(kanban_home):
@@ -402,6 +430,19 @@ def test_library_view_receipts_subdirs(kanban_home, tmp_path):
         "Auto 0", "Auto 1", "Auto 2",
         "Mother 0", "Mother 1",
     }
+    auto_item = next(i for i in items if i.title == "Auto 2")
+    assert auto_item.id == "receipt::Hermes::auto/auto-2.md"
+    assert auto_item.source_ref == "receipt:Hermes/auto/auto-2.md"
+    auto_detail = lv._get_item(auto_item.id)
+    assert auto_detail is not None and auto_detail.title == "Auto 2"
+    mother_item = next(i for i in items if i.title == "Mother 1")
+    assert mother_item.id == "receipt::Hermes::mother/mother-1.md"
+    mother_detail = lv._get_item(mother_item.id)
+    assert mother_detail is not None and mother_detail.title == "Mother 1"
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::Hermes::other/mother-1.md")
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::Hermes::mother/nested/mother-1.md")
 
     lv._receipt_dir_cache.clear()
     for n in range(50):

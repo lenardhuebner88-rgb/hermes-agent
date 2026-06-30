@@ -2,7 +2,17 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CollectionSection, DocCard } from "./KnowledgeShelf";
 import { TocNav } from "./KnowledgeReader";
-import { sectionsLabel, totalDocs, type KnowledgeCollection, type KnowledgeDoc } from "./knowledge.helpers";
+import {
+  filterCatalog,
+  knowledgeType,
+  knowledgeTypeLabel,
+  sectionsLabel,
+  totalDocs,
+  typeCounts,
+  type KnowledgeCatalog,
+  type KnowledgeCollection,
+  type KnowledgeDoc,
+} from "./knowledge.helpers";
 
 const doc = (over: Partial<KnowledgeDoc>): KnowledgeDoc => ({
   id: "kb::doc::canon-infra-topology",
@@ -17,8 +27,9 @@ const doc = (over: Partial<KnowledgeDoc>): KnowledgeDoc => ({
 });
 
 describe("DocCard", () => {
-  it("zeigt Titel, Kurzbeschreibung, Quelle, Abschnittszahl und Tags", () => {
+  it("zeigt Typ, Titel, Kurzbeschreibung, Quelle, Abschnittszahl und Tags", () => {
     const html = renderToStaticMarkup(<DocCard doc={doc({})} onOpen={() => {}} />);
+    expect(html).toContain("Dokumente");
     expect(html).toContain("Infrastruktur &amp; Topologie");
     expect(html).toContain("Ports, Pfade, Services.");
     expect(html).toContain("vault/00-Canon/infra-topology.md");
@@ -85,5 +96,66 @@ describe("helpers", () => {
       { id: "a", title: "", description: "", accent: "cyan", icon: "", docs: [doc({}), doc({})] },
       { id: "b", title: "", description: "", accent: "amber", icon: "", docs: [doc({})] },
     ])).toBe(3);
+  });
+
+  it("knowledgeType liest type:-Tags und hat Collection-Fallbacks", () => {
+    expect(knowledgeType(doc({ tags: ["llm-wiki", "type:concept"] }))).toBe("concept");
+    expect(knowledgeType(doc({ collection: "skills", tags: [] }))).toBe("skill");
+    expect(knowledgeTypeLabel("concept")).toBe("Konzepte");
+  });
+
+  it("typeCounts sortiert bekannte Typen stabil", () => {
+    const collections: KnowledgeCollection[] = [
+      {
+        id: "llm-wiki",
+        title: "LLM-Wiki",
+        description: "",
+        accent: "indigo",
+        icon: "Brain",
+        docs: [
+          doc({ id: "query", tags: ["type:query"] }),
+          doc({ id: "concept-a", tags: ["type:concept"] }),
+          doc({ id: "concept-b", tags: ["type:concept"] }),
+        ],
+      },
+    ];
+    expect(typeCounts(collections)).toEqual([
+      { id: "concept", label: "Konzepte", count: 2 },
+      { id: "query", label: "Antworten", count: 1 },
+    ]);
+  });
+
+  it("filterCatalog filtert nach Regal und Typ und aktualisiert count", () => {
+    const catalog: KnowledgeCatalog = {
+      collections: [
+        {
+          id: "kanon",
+          title: "Kanon",
+          description: "",
+          accent: "cyan",
+          icon: "Landmark",
+          docs: [doc({ id: "canon", collection: "kanon", tags: [] })],
+        },
+        {
+          id: "llm-wiki",
+          title: "LLM-Wiki",
+          description: "",
+          accent: "indigo",
+          icon: "Brain",
+          docs: [
+            doc({ id: "concept", collection: "llm-wiki", tags: ["type:concept"] }),
+            doc({ id: "query", collection: "llm-wiki", tags: ["type:query"] }),
+          ],
+        },
+      ],
+      count: 3,
+      query: "",
+      now: 1,
+    };
+
+    const filtered = filterCatalog(catalog, "llm-wiki", "concept");
+    expect(filtered.count).toBe(1);
+    expect(filtered.collections).toHaveLength(1);
+    expect(filtered.collections[0].docs.map((item) => item.id)).toEqual(["concept"]);
   });
 });
