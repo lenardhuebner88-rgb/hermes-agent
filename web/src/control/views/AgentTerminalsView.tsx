@@ -376,10 +376,48 @@ export function AgentTerminalsView() {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- async read-only dashboard context load on mount / polling tick
-    void refreshReadOnlyContext();
-    const timer = window.setInterval(() => void refreshReadOnlyContext(), 20000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer: number | null = null;
+
+    function isHidden(): boolean {
+      return typeof document !== "undefined" && document.hidden;
+    }
+
+    function clearTimer(): void {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    }
+
+    function scheduleNext(): void {
+      clearTimer();
+      if (disposed || isHidden()) return;
+      timer = window.setTimeout(() => void run(), 20000);
+    }
+
+    async function run(): Promise<void> {
+      clearTimer();
+      if (disposed || isHidden()) return;
+      try {
+        await refreshReadOnlyContext();
+      } finally {
+        scheduleNext();
+      }
+    }
+
+    function onVisibilityChange(): void {
+      if (isHidden()) clearTimer();
+      else void run();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void run();
+    return () => {
+      disposed = true;
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [refreshReadOnlyContext]);
 
   useEffect(() => {

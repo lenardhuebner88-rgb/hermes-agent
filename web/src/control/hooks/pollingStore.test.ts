@@ -278,4 +278,40 @@ describe("foreground refresh stagger", () => {
     await vi.advanceTimersByTimeAsync(150);
     expect(loaders[2]).toHaveBeenCalledTimes(1);
   });
+
+  it("clears pending background timers before delayed foreground refreshes", async () => {
+    let onVisibility: (() => void) | null = null;
+    let hidden = true;
+    const doc = {
+      get hidden() {
+        return hidden;
+      },
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") onVisibility = fn;
+      },
+    };
+    (globalThis as { document?: unknown }).document = doc;
+
+    const loaders = [
+      vi.fn().mockResolvedValue(1),
+      vi.fn().mockResolvedValue(2),
+    ];
+    subscribe("k0", loaders[0], 1_000, vi.fn());
+    subscribe("k1", loaders[1], 1_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    loaders.forEach((loader) => loader.mockClear());
+
+    // Hidden heartbeat for both keys is now scheduled at 6s. Returning to the
+    // foreground after 5.9s must cancel those heartbeats, otherwise k1 would
+    // fetch once at 6.0s and again at its 150ms stagger.
+    await vi.advanceTimersByTimeAsync(5_900);
+    hidden = false;
+    onVisibility!();
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(loaders[0]).toHaveBeenCalledTimes(1);
+    expect(loaders[1]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(loaders[1]).toHaveBeenCalledTimes(1);
+  });
 });

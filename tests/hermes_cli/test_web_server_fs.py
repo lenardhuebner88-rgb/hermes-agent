@@ -159,6 +159,32 @@ def test_fs_git_root_ignores_empty_dot_git(client, tmp_path):
     assert response.json()["root"] != str(tmp_path)
 
 
+def test_fs_git_root_ignores_bogus_dot_git_file(client, tmp_path):
+    (tmp_path / ".git").write_text("", encoding="utf-8")
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    target = nested / "file.py"
+    target.write_text("x")
+
+    response = client.get("/api/fs/git-root", params={"path": str(target)})
+
+    assert response.status_code == 200
+    assert response.json()["root"] != str(tmp_path)
+
+
+def test_fs_git_root_accepts_worktree_dot_git_file(client, tmp_path):
+    (tmp_path / ".git").write_text("gitdir: ../real-git-dir\n", encoding="utf-8")
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    target = nested / "file.py"
+    target.write_text("x")
+
+    response = client.get("/api/fs/git-root", params={"path": str(target)})
+
+    assert response.status_code == 200
+    assert response.json() == {"root": str(tmp_path)}
+
+
 def test_fs_git_root_returns_null_outside_repo(client, tmp_path):
     response = client.get("/api/fs/git-root", params={"path": str(tmp_path)})
 

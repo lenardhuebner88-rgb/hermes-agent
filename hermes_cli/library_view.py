@@ -938,6 +938,8 @@ def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
     if not _TASK_ID_RE.match(agent) or rel_path is None:
         raise ValueError("invalid receipt id")
     receipts_root = (_receipts_root() / agent / "receipts").resolve(strict=False)
+    if len(rel_path.parts) == 2 and (receipts_root / rel_path.parts[0]).is_symlink():
+        return None
     target = receipts_root / rel_path
     # The collector deliberately excludes symlinks; the detail path must match
     # that policy so a symlinked receipt cannot be read by naming it directly.
@@ -1046,7 +1048,7 @@ def register_library_routes(app: Any) -> None:
 
     @app.get("/api/library/knowledge/doc")
     async def library_knowledge_doc(  # type: ignore[unused-variable]
-        id: str = Query(..., max_length=160),
+        id: str = Query(..., max_length=300),
     ):
         try:
             doc = await asyncio.to_thread(library_knowledge.read_knowledge_doc, id)

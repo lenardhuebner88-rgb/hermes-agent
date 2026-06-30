@@ -21,6 +21,7 @@ const terminalScrollToBottomMock = vi.fn();
 const terminalFocusMock = vi.fn();
 let triggerResize: (() => void) | null = null;
 let websocketSends: string[] = [];
+let documentHidden = false;
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -84,8 +85,19 @@ async function loadView() {
   return module.AgentTerminalsView;
 }
 
+function setDocumentHidden(hidden: boolean) {
+  documentHidden = hidden;
+  Object.defineProperty(document, "hidden", {
+    configurable: true,
+    get() {
+      return documentHidden;
+    },
+  });
+}
+
 function installDom(matches = false) {
   triggerResize = null;
+  setDocumentHidden(false);
   Object.defineProperty(HTMLElement.prototype, "clientWidth", {
     configurable: true,
     get() {
@@ -163,6 +175,23 @@ describe("AgentTerminalsView rendering", () => {
     expect(screen.getAllByText("hermes-agents:codex").length).toBeGreaterThan(0);
     expect(await screen.findByText("/home/piet/.hermes/hermes-agent")).toBeTruthy();
     expect(screen.getByText("node/codex")).toBeTruthy();
+  });
+
+  it("pauses read-only context loading while hidden and resumes on visible", async () => {
+    setDocumentHidden(true);
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    expect(apiMock.getSkills).not.toHaveBeenCalled();
+    expect(apiMock.getControlOverviewHealth).not.toHaveBeenCalled();
+
+    setDocumentHidden(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    await waitFor(() => expect(apiMock.getSkills).toHaveBeenCalledTimes(1));
+    expect(apiMock.getControlOverviewHealth).toHaveBeenCalledTimes(1);
+    expect(apiMock.getControlOverviewDecisionQueue).toHaveBeenCalledTimes(1);
   });
 
   it("renders mobile switcher actions and the tools bottom sheet", async () => {

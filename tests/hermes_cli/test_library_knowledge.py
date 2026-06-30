@@ -244,6 +244,8 @@ def test_llm_wiki_pages_are_scanned_with_frontmatter_tags(kb_home):
     assert "workflow" in concept["tags"]
     assert concept["heading_count"] == 1
     assert "body_md" not in concept
+    assert "type:entity" in by_id["kb::llm::entities/qmd.md"]["tags"]
+    assert "type:query" in by_id["kb::llm::queries/what-is-the-ingest-workflow.md"]["tags"]
 
 
 def test_read_static_doc_returns_body(kb_home):

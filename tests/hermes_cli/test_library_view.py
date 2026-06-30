@@ -470,6 +470,17 @@ def test_library_view_receipts_subdirs(kanban_home, tmp_path):
     assert "auto/new-auto.md" in refreshed
 
 
+def test_library_view_receipt_detail_rejects_symlinked_allowlisted_subdir(kanban_home, tmp_path):
+    receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    real_auto = receipts / "real-auto"
+    real_auto.mkdir(parents=True)
+    (real_auto / "hidden.md").write_text("# Hidden\n", encoding="utf-8")
+    (receipts / "auto").symlink_to(real_auto, target_is_directory=True)
+
+    assert lv._newest_receipt_names(receipts) == []
+    assert lv._get_item("receipt::Hermes::auto/hidden.md") is None
+
+
 def test_deliverable_adapter_lists_markdown(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="Build X")

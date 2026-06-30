@@ -1434,7 +1434,8 @@ def _is_git_repo_marker(dot_git: Path) -> bool:
     the caller, preserving the original give-up-and-return-None behaviour.
     """
     if dot_git.is_file():
-        return True
+        with dot_git.open("r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(256).lstrip().startswith("gitdir:")
     if dot_git.is_dir():
         return (dot_git / "HEAD").exists()
     return False

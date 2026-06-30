@@ -407,9 +407,16 @@ def _llm_wiki_type(rel: str, meta: dict[str, Any]) -> str:
     if declared:
         return declared
     first = rel.split("/", 1)[0]
-    if first.endswith(".md"):
-        return "page"
-    return first[:-1] if first.endswith("s") else first
+    inferred = {
+        "concepts": "concept",
+        "entities": "entity",
+        "queries": "query",
+        "sources": "source",
+        "lint": "lint",
+        "overview.md": "overview",
+        "synthesis.md": "synthesis",
+    }
+    return inferred.get(first, "page" if first.endswith(".md") else first)
 
 
 def _build_llm_wiki(rel: str, *, with_body: bool) -> Optional[_KbDoc]:

@@ -136,9 +136,12 @@ function getStore(): StoreGlobal {
       // endpoint snaps back to its normal cadence — staggered rather than
       // all at once (thundering herd, see FOREGROUND_STAGGER_MS).
       let i = 0;
-      for (const key of store.entries.keys()) {
-        const entry = store.entries.get(key);
-        if (entry) entry.nextDelayMs = normalIntervalMs(key, entry);
+      for (const [key, entry] of store.entries) {
+        if (entry.timer) {
+          clearTimeout(entry.timer);
+          entry.timer = null;
+        }
+        entry.nextDelayMs = normalIntervalMs(key, entry);
         const delay = Math.min(i * FOREGROUND_STAGGER_MS, FOREGROUND_STAGGER_CAP_MS);
         if (delay === 0) void refresh(key);
         else setTimeout(() => void refresh(key), delay);
