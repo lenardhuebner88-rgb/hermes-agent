@@ -971,6 +971,42 @@ def _normalize_kind_choice(
     return chosen
 
 
+def _is_single_owner_demotion_reason(reason: Optional[str]) -> bool:
+    """Return True for fanout shapes that should promote as one owner task."""
+    if not reason:
+        return False
+    return (
+        "fanout=true with <2 tasks" in reason
+        or reason.startswith("over-decomposed:")
+    )
+
+
+def _single_owner_title_body(
+    parsed: dict,
+    task: "kb.Task",
+    *,
+    fallback_to_task: bool,
+    preserve_empty_task_values: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    new_title = parsed.get("title")
+    new_body = parsed.get("body")
+    title_val = new_title.strip() if isinstance(new_title, str) and new_title.strip() else None
+    body_val = new_body if isinstance(new_body, str) and new_body.strip() else None
+    if fallback_to_task and title_val is None:
+        task_title = task.title if isinstance(task.title, str) else ""
+        if task_title.strip():
+            title_val = task_title.strip()
+        elif preserve_empty_task_values:
+            title_val = ""
+    if fallback_to_task and body_val is None:
+        task_body = task.body if isinstance(task.body, str) else None
+        if preserve_empty_task_values:
+            body_val = task_body
+        else:
+            body_val = task_body if task_body and task_body.strip() else None
+    return title_val, body_val
+
+
 def _children_from_parsed(
     parsed: dict,
     task: "kb.Task",
@@ -990,6 +1026,15 @@ def _children_from_parsed(
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return None, "decomposer returned fanout=true with empty tasks list"
+    if len(raw_tasks) < 2:
+        return None, "fanout=true with <2 tasks — use fanout=false for a single task"
+    if len(raw_tasks) > 6:
+        logger.warning(
+            "decompose: task %s — LLM returned %d tasks, capped to 6",
+            task.id,
+            len(raw_tasks),
+        )
+        raw_tasks = raw_tasks[:6]
 
     # Rewrite invalid assignees to the default fallback. Never leave a
     # task with assignee=None — the user explicitly does not want that.
@@ -1037,6 +1082,15 @@ def _children_from_parsed(
         }
         children.append(_ensure_worker_scope_contract(child, parent_task=task))
 
+    if len(children) < 4 and all(not child.get("parents") for child in children):
+        reason = (
+            f"over-decomposed: all {len(children)} subtasks are fully independent "
+            "with no dependency edges — use fanout=false (single-owner) for <4 "
+            "atomic parallel tasks; add deps to keep as fanout"
+        )
+        logger.warning("decompose: task %s — %s", task.id, reason)
+        return None, reason
+
     scope_report = validate_worker_scope_contracts(children)
     if not scope_report.ok:
         first = scope_report.issues[0]
@@ -1078,6 +1132,56 @@ def _children_from_parsed(
             )
 
     return children, None
+
+
+def _promote_triage_single_owner(
+    task: "kb.Task",
+    parsed: dict,
+    *,
+    default_assignee: str,
+    valid_names: set[str],
+    audit_author: str,
+    demotion_reason: Optional[str] = None,
+) -> DecomposeOutcome:
+    title_val, body_val = _single_owner_title_body(
+        parsed, task, fallback_to_task=bool(demotion_reason),
+    )
+    assignee_val = None
+    if not task.assignee:
+        assignee_val = _normalize_assignee_choice(
+            parsed.get("assignee"),
+            default_assignee=default_assignee,
+            valid_names=valid_names,
+        )
+    if title_val is None and body_val is None:
+        return DecomposeOutcome(
+            task.id, False, "decomposer returned fanout=false with no title/body",
+        )
+    with kb.connect_closing() as conn:
+        ok = kb.specify_triage_task(
+            conn,
+            task.id,
+            title=title_val,
+            body=body_val,
+            assignee=assignee_val,
+            author=audit_author,
+        )
+    if not ok:
+        return DecomposeOutcome(
+            task.id, False, "task moved out of triage before promotion",
+        )
+    reason = "single task (no fanout)"
+    if demotion_reason:
+        logger.info(
+            "decompose: task %s — demoting fanout response to single-owner: %s",
+            task.id,
+            demotion_reason,
+        )
+        reason = "single task (demoted from fanout)"
+    return DecomposeOutcome(
+        task.id, True, reason,
+        fanout=False, new_title=title_val,
+    )
 
 
 # ── N-Epics P5: konservative Auto-Zuordnung beim Zerlegen ────────────────────
@@ -1221,37 +1325,12 @@ def decompose_task(
 
     if not fanout:
         # Fall back to single-task spec promotion (same effect as specify).
-        new_title = parsed.get("title")
-        new_body = parsed.get("body")
-        title_val = new_title.strip() if isinstance(new_title, str) and new_title.strip() else None
-        body_val = new_body if isinstance(new_body, str) and new_body.strip() else None
-        assignee_val = None
-        if not task.assignee:
-            assignee_val = _normalize_assignee_choice(
-                parsed.get("assignee"),
-                default_assignee=default_assignee,
-                valid_names=valid_names,
-            )
-        if title_val is None and body_val is None:
-            return DecomposeOutcome(
-                task_id, False, "decomposer returned fanout=false with no title/body",
-            )
-        with kb.connect_closing() as conn:
-            ok = kb.specify_triage_task(
-                conn,
-                task_id,
-                title=title_val,
-                body=body_val,
-                assignee=assignee_val,
-                author=audit_author,
-            )
-        if not ok:
-            return DecomposeOutcome(
-                task_id, False, "task moved out of triage before promotion",
-            )
-        return DecomposeOutcome(
-            task_id, True, "single task (no fanout)",
-            fanout=False, new_title=title_val,
+        return _promote_triage_single_owner(
+            task,
+            parsed,
+            default_assignee=default_assignee,
+            valid_names=valid_names,
+            audit_author=audit_author,
         )
 
     children, child_err = _children_from_parsed(
@@ -1260,6 +1339,15 @@ def decompose_task(
         default_assignee=default_assignee,
     )
     if child_err is not None:
+        if _is_single_owner_demotion_reason(child_err):
+            return _promote_triage_single_owner(
+                task,
+                parsed,
+                default_assignee=default_assignee,
+                valid_names=valid_names,
+                audit_author=audit_author,
+                demotion_reason=child_err,
+            )
         return DecomposeOutcome(task_id, False, child_err)
 
     try:
@@ -1625,56 +1713,65 @@ def plan_and_document(
     rationale = rationale.strip() if isinstance(rationale, str) and rationale.strip() else ""
     audit_author = author or kb._profile_author()
     fanout = bool(parsed.get("fanout"))
+    demotion_reason: Optional[str] = None
 
     if fanout:
         children, child_err = _children_from_parsed(
             parsed, task, valid_names=valid_names, default_assignee=default_assignee,
         )
         if child_err is not None:
-            return DecomposeOutcome(task_id, False, child_err)
-        summaries = _subtask_summaries(parsed, len(children))
-        child_status = "scheduled" if gate else "todo"
-        try:
-            with kb.connect_closing() as conn:
-                child_ids = kb.decompose_triage_task(
-                    conn,
+            if _is_single_owner_demotion_reason(child_err):
+                demotion_reason = child_err
+                logger.info(
+                    "flow-plan: task %s — demoting fanout response to single-owner: %s",
                     task_id,
-                    root_assignee=orchestrator,
-                    children=children,
-                    author=audit_author,
-                    auto_promote=(not gate),
-                    initial_child_status=child_status,
-                    expected_root_status="scheduled",
-                    validate_assignees=True,
+                    child_err,
                 )
-        except ValueError as exc:
-            return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
-        except Exception:
-            logger.exception("flow-plan: DB error on task %s", task_id)
-            return DecomposeOutcome(task_id, False, "DB error during fan-out")
-        if child_ids is None:
+            else:
+                return DecomposeOutcome(task_id, False, child_err)
+        else:
+            summaries = _subtask_summaries(parsed, len(children))
+            child_status = "scheduled" if gate else "todo"
+            try:
+                with kb.connect_closing() as conn:
+                    child_ids = kb.decompose_triage_task(
+                        conn,
+                        task_id,
+                        root_assignee=orchestrator,
+                        children=children,
+                        author=audit_author,
+                        auto_promote=(not gate),
+                        initial_child_status=child_status,
+                        expected_root_status="scheduled",
+                        validate_assignees=True,
+                    )
+            except ValueError as exc:
+                return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
+            except Exception:
+                logger.exception("flow-plan: DB error on task %s", task_id)
+                return DecomposeOutcome(task_id, False, "DB error during fan-out")
+            if child_ids is None:
+                return DecomposeOutcome(
+                    task_id, False, "flow-plan root left 'scheduled' before fan-out",
+                )
+            relpath = None
+            if document:
+                markdown = _render_flow_plan_spec(
+                    task=task, narrative=narrative, rationale=rationale,
+                    children=children, child_ids=child_ids, summaries=summaries, gated=gate,
+                )
+                relpath = _write_flow_plan_spec(task_id, markdown)
+            _record_flow_plan(task_id, relpath, gate, audit_author, len(child_ids), document=document)
+            kind = "documented plan" if document else "lean plan"
             return DecomposeOutcome(
-                task_id, False, "flow-plan root left 'scheduled' before fan-out",
+                task_id, True, f"{kind} with {len(child_ids)} subtasks",
+                fanout=True, child_ids=child_ids, spec_relpath=relpath, gated=gate,
             )
-        relpath = None
-        if document:
-            markdown = _render_flow_plan_spec(
-                task=task, narrative=narrative, rationale=rationale,
-                children=children, child_ids=child_ids, summaries=summaries, gated=gate,
-            )
-            relpath = _write_flow_plan_spec(task_id, markdown)
-        _record_flow_plan(task_id, relpath, gate, audit_author, len(child_ids), document=document)
-        kind = "documented plan" if document else "lean plan"
-        return DecomposeOutcome(
-            task_id, True, f"{kind} with {len(child_ids)} subtasks",
-            fanout=True, child_ids=child_ids, spec_relpath=relpath, gated=gate,
-        )
 
     # fanout=false — single atomic task, still documented with a (1-row) spec.
-    new_title = parsed.get("title")
-    new_body = parsed.get("body")
-    title_val = new_title.strip() if isinstance(new_title, str) and new_title.strip() else (task.title or "")
-    body_val = new_body if isinstance(new_body, str) and new_body.strip() else task.body
+    title_val, body_val = _single_owner_title_body(
+        parsed, task, fallback_to_task=True, preserve_empty_task_values=True,
+    )
     assignee_val = task.assignee
     if not assignee_val:
         assignee_val = _normalize_assignee_choice(
@@ -1699,7 +1796,10 @@ def plan_and_document(
         relpath = _write_flow_plan_spec(task_id, markdown)
     _record_flow_plan(task_id, relpath, gate, audit_author, 0, document=document)
     kind = "documented single task" if document else "lean single task"
+    reason = f"{kind} (no fanout)"
+    if demotion_reason:
+        reason = f"{kind} (demoted from fanout)"
     return DecomposeOutcome(
-        task_id, True, f"{kind} (no fanout)",
+        task_id, True, reason,
         fanout=False, new_title=title_val, spec_relpath=relpath, gated=gate,
     )

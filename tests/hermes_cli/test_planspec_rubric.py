@@ -122,6 +122,105 @@ def test_validate_spec_rubric_returns_none_for_clean_spec(tmp_path: Path):
     assert planspecs.validate_spec_rubric(spec) is None
 
 
+def test_over_decomposition_fully_independent_lt4_warns(tmp_path: Path):
+    body = """---
+status: freigegeben-komplett
+owner: Hermes
+slice: R1
+topic: "Over decomposed"
+freigabe: complete
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: R1-S1
+      title: "Adjust hermes_cli/planspecs.py warnings"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Warning collection is visible for this subtask"
+      body: "Touch hermes_cli/planspecs.py for the warning path"
+    - id: R1-S2
+      title: "Test hermes_cli/planspecs.py warnings"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Warning tests cover this subtask"
+      body: "Touch hermes_cli/planspecs.py for tests"
+    - id: R1-S3
+      title: "Review hermes_cli/planspecs.py warnings"
+      lane: reviewer
+      deps: []
+      acceptance_criteria:
+        - "Review result is recorded"
+      body: "Review hermes_cli/planspecs.py for warning-only behavior"
+---
+# R1
+"""
+    path = _write(tmp_path / "03-Agents", body, name="over-decomposed.md")
+    spec = planspecs.parse_binding_planspec(path, plans_root=tmp_path / "03-Agents")
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert any(finding.startswith("over-decomposed: ") for finding in findings), findings
+    assert planspecs.validate_spec_rubric(spec) is None
+
+
+def test_fanout_with_deps_does_not_warn(tmp_path: Path):
+    path = _write(tmp_path / "03-Agents", CLEAN, name="with-deps.md")
+    spec = planspecs.parse_binding_planspec(path, plans_root=tmp_path / "03-Agents")
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(finding.startswith("over-decomposed: ") for finding in findings), findings
+
+
+def test_fanout_4_or_more_independent_does_not_warn(tmp_path: Path):
+    body = """---
+status: freigegeben-komplett
+owner: Hermes
+slice: R1
+topic: "Wide fanout"
+freigabe: complete
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: R1-S1
+      title: "First independent task"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "First result exists"
+    - id: R1-S2
+      title: "Second independent task"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Second result exists"
+    - id: R1-S3
+      title: "Third independent task"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Third result exists"
+    - id: R1-S4
+      title: "Fourth independent task"
+      lane: reviewer
+      deps: []
+      acceptance_criteria:
+        - "Fourth result exists"
+---
+# R1
+"""
+    path = _write(tmp_path / "03-Agents", body, name="wide-fanout.md")
+    spec = planspecs.parse_binding_planspec(path, plans_root=tmp_path / "03-Agents")
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(finding.startswith("over-decomposed: ") for finding in findings), findings
+
+
 def test_rubric_allows_documentary_placeholder_examples(tmp_path: Path):
     """Rubric documentation may quote the tokens it rejects without being
     treated as an unfilled template slot itself.

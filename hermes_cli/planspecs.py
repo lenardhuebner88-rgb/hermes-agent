@@ -92,6 +92,9 @@ _CC_INSTRUMENT_AC_TOKENS = {
     "cross-family",
 }
 
+_WARN_ONLY_RUBRIC_PREFIXES = ("over-decomposed: ",)
+_FO_VIEW_SURFACE_NAMES = frozenset({"admin", "kitchen", "lists", "shopping"})
+
 # Template-residue patterns: a literal ``<…>`` angle placeholder, a TODO/FIXME/TBD
 # marker, or a bare ``…`` / ``...`` ellipsis left over from a spec template.
 # The TODO/FIXME/TBD marker is CASE-SENSITIVE (no re.IGNORECASE): the literal
@@ -923,9 +926,62 @@ def _ac_statements_for_child(child: dict[str, Any]) -> list[str]:
     return statements
 
 
+def _surface_tokens_for_over_decomposition(text: str) -> set[str]:
+    tokens: set[str] = set()
+    low = text.lower()
+    if "web/src/control/" in low:
+        tokens.add("web/src/control/")
+    for view in _FO_VIEW_SURFACE_NAMES:
+        if re.search(rf"(?<![\w-])/?{re.escape(view)}(?![\w-])", low):
+            tokens.add(f"FO view {view}")
+    for match in re.finditer(r"\bhermes_cli/([A-Za-z_][\w]*)(?:\.py)?(?:\b|/)", text):
+        tokens.add(f"hermes_cli/{match.group(1).lower()}")
+    return tokens
+
+
+def _shared_over_decomposition_surface(spec: BindingPlanSpec) -> str | None:
+    shared: set[str] | None = None
+    for subtask in spec.hints.subtasks:
+        text = f"{subtask.title}\n{subtask.body}"
+        tokens = _surface_tokens_for_over_decomposition(text)
+        shared = set(tokens) if shared is None else shared & tokens
+    if not shared:
+        return None
+    return sorted(shared)[0]
+
+
+def _check_over_decomposition(spec: BindingPlanSpec, findings: list[str]) -> None:
+    subtasks = spec.hints.subtasks
+    if len(subtasks) < 2 or len(subtasks) >= 4:
+        return
+    if any(subtask.deps for subtask in subtasks):
+        return
+    surface = _shared_over_decomposition_surface(spec)
+    if surface:
+        findings.append(
+            "over-decomposed: "
+            f"{len(subtasks)} fully independent subtasks share {surface} with no "
+            "dependency edges — prefer one single-owner task unless deps justify fanout"
+        )
+    else:
+        findings.append(
+            "over-decomposed: "
+            f"{len(subtasks)} fully independent subtasks have no dependency edges — "
+            "consider fanout=false/single-owner for <4 atomic parallel tasks"
+        )
+
+
+def _blocking_spec_rubric_findings(findings: list[str]) -> list[str]:
+    return [
+        finding
+        for finding in findings
+        if not finding.startswith(_WARN_ONLY_RUBRIC_PREFIXES)
+    ]
+
+
 def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
     """Run the deterministic rubric over an already-parsed *spec* and return all
-    findings (empty list = the spec passes the rubric).
+    findings, including advisory warn-only findings.
 
     Layered ON TOP of :func:`parse_binding_planspec` (which already validated the
     structural shape: binding, ids, deps, live_test_depth, freigabe, status). The
@@ -978,6 +1034,7 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
             for token in _CC_INSTRUMENT_AC_TOKENS:
                 if re.search(rf"\b{re.escape(token)}\b", low):
                     findings.append(f"CC-instrument in AC of {sid}: {token}")
+    _check_over_decomposition(spec, findings)
     return findings
 
 
@@ -996,7 +1053,7 @@ def validate_spec_rubric(spec: BindingPlanSpec) -> None:
     validation in :func:`parse_binding_planspec`; meant to run synchronously in
     :func:`ingest_planspec` before any DB write.
     """
-    findings = _collect_spec_rubric_findings(spec)
+    findings = _blocking_spec_rubric_findings(_collect_spec_rubric_findings(spec))
     if findings:
         raise PlanSpecBlocked(findings)
 
@@ -1055,10 +1112,11 @@ def validate_planspec(
         }
 
     findings = _collect_spec_rubric_findings(spec)
+    blocking_findings = _blocking_spec_rubric_findings(findings)
     signed = _spec_is_signed(spec)
     if not findings:
         disposition = "clean"
-    elif signed:
+    elif signed or not blocking_findings:
         disposition = "warn"
     else:
         disposition = "block"
