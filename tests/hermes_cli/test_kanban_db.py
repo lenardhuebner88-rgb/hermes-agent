@@ -8146,6 +8146,8 @@ def test_create_task_code_role_gets_coder_contract(
     assert "## Hermes Coder Contract v1" in task.body
     assert f"Workspace: dir:{repo}" in task.body
     assert "Dependency gate:" in task.body
+    assert "Kanban CLI self-tests:" in task.body
+    assert "HERMES_SANDBOX_MODE=1" in task.body
     assert "Completion metadata:" in task.body
 
 

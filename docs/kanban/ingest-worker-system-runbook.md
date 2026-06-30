@@ -170,10 +170,11 @@ Expected:
 
 ## End-to-end smoke test without touching production board
 
-Use a temporary Hermes home so the test exercises real DB/CLI code but cannot mutate `~/.hermes/kanban.db`. Add minimal dummy profile configs so spawnable-assignee validation exercises the real worker roster names without using credentials. Real model/profile readiness is still validated separately with `hermes kanban assignees` against the operator home.
+Use a temporary Hermes home and `HERMES_SANDBOX_MODE=1` so the test exercises real DB/CLI code but cannot mutate `~/.hermes/kanban.db`, even when a worker inherited live-board env vars. Add minimal dummy profile configs so spawnable-assignee validation exercises the real worker roster names without using credentials. Real model/profile readiness is still validated separately with `hermes kanban assignees` against the operator home.
 
 ```bash
 export HERMES_HOME="$(mktemp -d)"
+export HERMES_SANDBOX_MODE=1
 for p in coder premium research reviewer critic default; do
   mkdir -p "$HERMES_HOME/profiles/$p"
   printf "model:\n  provider: test\n  name: test\n" > "$HERMES_HOME/profiles/$p/config.yaml"
@@ -192,6 +193,7 @@ Pass criteria:
 - `init`, both `create` commands, `show`, `diagnostics`, and `stats` exit 0.
 - The root and children appear in the temp DB.
 - Diagnostics are empty or explainable for the artificial graph.
+- Live-board env vars such as `HERMES_KANBAN_DB`/`HERMES_KANBAN_BOARD` do not redirect writes back to production.
 - Removing `$HERMES_HOME` deletes the smoke board.
 
 ## Mother receipt template

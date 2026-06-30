@@ -3511,6 +3511,13 @@ def _with_code_task_contract(
                 "of reverting unrelated work.\n"
             ),
             (
+                "- Kanban CLI self-tests: run throwaway `hermes kanban create`, "
+                "`block`, `unblock`, or `complete` probes with "
+                "HERMES_SANDBOX_MODE=1 or an isolated HERMES_HOME; only "
+                "lifecycle calls on $HERMES_KANBAN_TASK may write the live "
+                "board.\n"
+            ),
+            (
                 "- Completion metadata: summarize changed paths, commands run, "
                 "residual risk, and next gate/review needs."
             ),
