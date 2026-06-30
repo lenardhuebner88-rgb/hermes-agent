@@ -69,6 +69,7 @@ class TmuxWindow:
     pane_id: str
     pid: int | None
     command: str
+    cwd: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +79,7 @@ class TmuxWindow:
             "pane_id": self.pane_id,
             "pid": self.pid,
             "command": self.command,
+            "cwd": self.cwd,
         }
 
 
@@ -245,7 +247,12 @@ class TmuxAgentSessionService:
         return [line for line in proc.stdout.splitlines() if line]
 
     def list_windows(self, session: str | None = None) -> list[TmuxWindow]:
-        args = ["list-windows", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"]
+        args = [
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}",
+        ]
         if session:
             args.insert(1, "-t")
             args.insert(2, self.validate_name(session, field="session"))
@@ -255,10 +262,11 @@ class TmuxAgentSessionService:
         windows: list[TmuxWindow] = []
         for line in proc.stdout.splitlines():
             parts = line.split("\t")
-            if len(parts) != 6:
+            if len(parts) < 6:
                 continue
             pid = int(parts[4]) if parts[4].isdigit() else None
-            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[5]))
+            cwd = parts[6] if len(parts) > 6 and parts[6] else None
+            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[5], cwd))
         return windows
 
     def window_exists(self, session: str, window: str) -> bool:
@@ -300,11 +308,12 @@ class TmuxAgentSessionService:
             "-p",
             "-t",
             target,
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}",
         )
         parts = proc.stdout.rstrip("\n").split("\t")
         pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
-        return TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[5] if len(parts) > 5 else "")
+        cwd = parts[6] if len(parts) > 6 and parts[6] else None
+        return TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[5] if len(parts) > 5 else "", cwd)
 
     def capture(self, session: str, window: str, *, start: int = -200) -> str:
         target = self._target(session, window)
@@ -339,6 +348,7 @@ class TmuxAgentSessionService:
             "pane_id": info.pane_id,
             "pid": info.pid,
             "command": info.command,
+            "cwd": info.cwd,
             "attach_argv": argv,
             "attach_command": shlex.join(argv),
         }
@@ -352,7 +362,8 @@ class TmuxAgentSessionService:
             f"# {title}\n\n"
             f"- tmux target: `{target}`\n"
             f"- pane: `{info.pane_id}`\n"
-            f"- command: `{info.command}`\n\n"
+            f"- command: `{info.command}`\n"
+            f"- cwd: `{info.cwd or 'unknown'}`\n\n"
             "## Recent pane capture\n\n"
             "```text\n"
             f"{transcript}\n"

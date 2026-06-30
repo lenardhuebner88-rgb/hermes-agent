@@ -166,6 +166,19 @@ describe("buildPipeline", () => {
     // todo2 (priority 5) before todo1 (priority 1)
     expect(order.indexOf("todo2")).toBeLessThan(order.indexOf("todo1"));
   });
+
+  it("surfaces every non-terminal lifecycle task, including queued and running work", () => {
+    const tasks = [
+      t("queued", "ready", 1),
+      t("running", "running", 2),
+      t("review", "review", 0),
+      t("blocked", "blocked", 3),
+      t("done", "done", 99),
+      t("archived", "archived", 99),
+    ];
+    const active = buildPipeline(tasks).active.map((task) => task.id);
+    expect(active).toEqual(["blocked", "running", "review", "queued"]);
+  });
 });
 
 describe("groupByStage", () => {

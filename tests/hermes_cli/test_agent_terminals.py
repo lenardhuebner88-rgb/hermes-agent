@@ -82,6 +82,7 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     created = service.ensure("hermes")
     assert created.session == "work"
     assert created.window == "hermes"
+    assert created.cwd == str(Path.home())
     assert any(w.window == "hermes" for w in service.list_windows("work"))
 
     service.send_keys("work", "hermes", "-hello-from-test")
@@ -90,11 +91,13 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     assert "-hello-from-test" in captured
     metadata = service.attach_metadata("work", "hermes")
     assert metadata["target"] == "work:hermes"
+    assert metadata["cwd"] == str(Path.home())
     attach_argv = metadata["attach_argv"]
     assert isinstance(attach_argv, list)
     assert attach_argv[-1] == "work:hermes"
     draft = service.handoff_draft("work", "hermes", start=-20)
     assert draft["target"] == "work:hermes"
+    assert f"- cwd: `{Path.home()}`" in str(draft["content"])
     assert "## Recent pane capture" in str(draft["content"])
     service.interrupt("work", "hermes")
 

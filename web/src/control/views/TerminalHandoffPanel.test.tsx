@@ -42,7 +42,7 @@ describe("TerminalHandoffPanel", () => {
     expect(fetchJSONMock).not.toHaveBeenCalled();
     expect(captureMock).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: /Text übernehmen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
 
     // Selection capture is purely client-side: still zero network, nothing dispatched.
     await waitFor(() => {
@@ -58,7 +58,7 @@ describe("TerminalHandoffPanel", () => {
     // Switch source to "last N lines" (second radio) and set N.
     fireEvent.click(screen.getAllByRole("radio")[1]);
     fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "120" } });
-    fireEvent.click(screen.getByRole("button", { name: /Text übernehmen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Letzte 120 Zeilen" }));
 
     await waitFor(() => expect(captureMock).toHaveBeenCalledWith("hermes-agents", "hermes", -120));
     await waitFor(() => {
@@ -77,7 +77,7 @@ describe("TerminalHandoffPanel", () => {
       freigabe: "operator",
     });
     renderPanel();
-    fireEvent.click(screen.getByRole("button", { name: /Text übernehmen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
     await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
 
     fireEvent.click(screen.getByRole("button", { name: /^Validieren/ }));
@@ -100,7 +100,7 @@ describe("TerminalHandoffPanel", () => {
       live_test_depth: "smoke",
     });
     renderPanel();
-    fireEvent.click(screen.getByRole("button", { name: /Text übernehmen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
     await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
 
     fireEvent.click(screen.getByRole("button", { name: /^Ingest/ }));
@@ -117,7 +117,7 @@ describe("TerminalHandoffPanel", () => {
     fetchJSONMock.mockResolvedValue({ task: { id: "t_triage1", status: "triage" } });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Kanban-Triage/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Text übernehmen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
     await waitFor(() => screen.getByLabelText("Triage-Aufgabentext"));
 
     fireEvent.click(screen.getByRole("button", { name: /Triage-Task anlegen/ }));

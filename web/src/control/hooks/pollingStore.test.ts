@@ -88,7 +88,7 @@ describe("pollingStore", () => {
   });
 
   it("skips the fetch while the document is hidden and resumes on visible", async () => {
-    let onVisibility: (() => void) | null = null;
+    let onVisibility: () => void = () => undefined;
     let hidden = true;
     const doc = {
       get hidden() {
@@ -109,7 +109,7 @@ describe("pollingStore", () => {
     expect(loader).not.toHaveBeenCalled(); // hidden → no fetch
 
     doc.hidden = false;
-    onVisibility?.();
+    onVisibility();
     await vi.advanceTimersByTimeAsync(1000);
     expect(loader).toHaveBeenCalledTimes(2); // immediate refresh + next tick
   });
@@ -137,7 +137,7 @@ describe("pollingStore", () => {
   });
 
   it("replaces a short foreground timer with the slower background cadence when hidden", async () => {
-    let onVisibility: (() => void) | null = null;
+    let onVisibility: () => void = () => undefined;
     let hidden = false;
     const doc = {
       get hidden() {
@@ -162,7 +162,7 @@ describe("pollingStore", () => {
     setTimeoutSpy.mockClear();
     clearTimeoutSpy.mockClear();
     doc.hidden = true;
-    onVisibility?.();
+    onVisibility();
 
     expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
     expect(setTimeoutSpy).toHaveBeenCalled();
@@ -175,7 +175,7 @@ describe("pollingStore", () => {
   });
 
   it("throttles background polling to a bounded interval", async () => {
-    let onVisibility: (() => void) | null = null;
+    let onVisibility: () => void = () => undefined;
     let hidden = false;
     const doc = {
       get hidden() {
@@ -197,7 +197,7 @@ describe("pollingStore", () => {
 
     // background cadence: timer is throttled to 6s but does NOT fetch while hidden.
     doc.hidden = true;
-    onVisibility?.(); // entering background recalibrates the timer
+    onVisibility(); // entering background recalibrates the timer
 
     for (let i = 0; i < 5; i += 1) {
       await vi.advanceTimersByTimeAsync(1_000);
@@ -209,7 +209,7 @@ describe("pollingStore", () => {
     expect(loader).toHaveBeenCalledTimes(1);
 
     doc.hidden = false;
-    onVisibility?.();
+    onVisibility();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(loader).toHaveBeenCalledTimes(3); // immediate refresh + next normal tick
   });

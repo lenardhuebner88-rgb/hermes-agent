@@ -67,7 +67,7 @@ function ResultBox({
 export function TerminalHandoffPanel({ target, getSelection, onClose }: TerminalHandoffPanelProps) {
   const [mode, setMode] = useState<Mode>("planspec");
   const [source, setSource] = useState<Source>("selection");
-  const [tailLines, setTailLines] = useState(200);
+  const [tailLines, setTailLines] = useState(120);
   const [title, setTitle] = useState("");
   const [liveTestDepth, setLiveTestDepth] = useState<LiveTestDepth>("smoke");
   const [captured, setCaptured] = useState("");
@@ -97,14 +97,18 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
   // Capture ONLY fills the working text — it never validates, ingests, creates
   // or dispatches (AC-2). It opens no flow on its own.
   const doCapture = useCallback(
-    () =>
+    (sourceOverride?: Source, tailOverride?: number) =>
       run("capture", async () => {
+        const effectiveSource = sourceOverride ?? source;
+        const effectiveTailLines = tailOverride ?? tailLines;
+        if (sourceOverride) setSource(sourceOverride);
+        if (tailOverride !== undefined) setTailLines(effectiveTailLines);
         let text: string;
-        if (source === "selection") {
+        if (effectiveSource === "selection") {
           text = stripAnsi(getSelection());
         } else {
           if (!target) throw new Error("Kein Terminal-Fenster gewählt.");
-          const resp = await api.captureAgentTerminalWindow(target.session, target.window, -tailLines);
+          const resp = await api.captureAgentTerminalWindow(target.session, target.window, -effectiveTailLines);
           text = stripAnsi(resp.content);
         }
         setCaptured(text);
@@ -230,7 +234,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                   checked={source === "selection"}
                   onChange={() => setSource("selection")}
                 />
-                Auswahl (markierter Text)
+                Auswahl übernehmen
               </label>
               <label className="flex items-center gap-1.5">
                 <input
@@ -252,11 +256,27 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
               </label>
               <button
                 type="button"
+                onClick={() => void doCapture("selection")}
+                disabled={busy !== null}
+                className="ml-auto rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1.5 text-xs text-white hover:bg-white/10 disabled:opacity-50"
+              >
+                {busy === "capture" ? "Übernehme…" : "Auswahl übernehmen"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void doCapture("tail", 120)}
+                disabled={busy !== null || !target}
+                className="rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1.5 text-xs text-white hover:bg-white/10 disabled:opacity-50"
+              >
+                Letzte 120 Zeilen
+              </button>
+              <button
+                type="button"
                 onClick={() => void doCapture()}
                 disabled={busy !== null}
-                className="ml-auto rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-50"
+                className="rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-50"
               >
-                {busy === "capture" ? "Übernehme…" : "Text übernehmen"}
+                {mode === "planspec" ? "PlanSpec-Draft vorbereiten" : "Kanban-Triage-Task vorbereiten"}
               </button>
             </div>
             {captured && (
@@ -279,7 +299,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
               )}
             >
               <FileText className="h-3.5 w-3.5" />
-              PlanSpec-Draft
+              PlanSpec-Draft vorbereiten
             </button>
             <button
               type="button"
@@ -292,7 +312,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
               )}
             >
               <ClipboardList className="h-3.5 w-3.5" />
-              Kanban-Triage
+              Kanban-Triage-Task vorbereiten
             </button>
           </div>
 

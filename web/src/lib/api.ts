@@ -402,6 +402,7 @@ export interface AgentTerminalWindow {
   pane_id: string;
   pid: number | null;
   command: string;
+  cwd?: string | null;
 }
 
 export interface AgentTerminalSessionsResponse {
@@ -418,6 +419,55 @@ export interface AgentTerminalWindowResponse {
 
 export interface AgentTerminalCaptureResponse {
   content: string;
+}
+
+export interface ControlOverviewHealthResponse {
+  overall?: string;
+  subsystems?: Record<string, { status?: string; detail?: string; error?: string | null }>;
+}
+
+export interface ControlOverviewVaultSession {
+  agent: string;
+  started: string;
+  task: string;
+  path: string;
+  stale?: boolean;
+}
+
+export interface ControlOverviewVaultReceipt {
+  when: string;
+  agent: string;
+  file: string;
+  path: string;
+}
+
+export interface ControlOverviewVaultResponse {
+  error?: string | null;
+  stale_count?: number;
+  open_sessions?: ControlOverviewVaultSession[];
+  recent_receipts?: ControlOverviewVaultReceipt[];
+}
+
+export interface ControlOverviewKanbanTask {
+  id: string;
+  title: string;
+  status: string;
+  assignee?: string | null;
+}
+
+export interface ControlOverviewKanbanColumn {
+  name: string;
+  tasks: ControlOverviewKanbanTask[];
+}
+
+export interface ControlOverviewKanbanBoardResponse {
+  columns?: ControlOverviewKanbanColumn[];
+  now?: number;
+}
+
+export interface ControlOverviewDecisionQueueResponse {
+  count?: number;
+  decisions?: Array<{ task_id?: string; task_title?: string; kind?: string }>;
 }
 
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
@@ -467,6 +517,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: clientId }),
     }),
+  getControlOverviewHealth: () =>
+    fetchJSON<ControlOverviewHealthResponse>("/api/health-status"),
+  getControlOverviewVault: () =>
+    fetchJSON<ControlOverviewVaultResponse>("/api/vault/provenance"),
+  getControlOverviewKanbanBoard: () =>
+    fetchJSON<ControlOverviewKanbanBoardResponse>(
+      "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none",
+    ),
+  getControlOverviewDecisionQueue: () =>
+    fetchJSON<ControlOverviewDecisionQueueResponse>("/api/plugins/kanban/decision-queue"),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *

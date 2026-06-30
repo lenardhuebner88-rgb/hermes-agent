@@ -160,6 +160,8 @@ export interface StageBucket {
 export interface PipelineModel {
   /** Per-stage counts for the rail (Capture..Ship). */
   buckets: StageBucket[];
+  /** Every active, non-terminal task the operator may need to track. */
+  active: BoardTaskLite[];
   /** Tasks waiting on an operator decision, newest-stage-first. */
   actionable: BoardTaskLite[];
   /** Count parked in blocked (needs rework). */
@@ -169,6 +171,7 @@ export interface PipelineModel {
 }
 
 const ACTIONABLE_ORDER: TaskStatus[] = ["review", "blocked", "triage", "todo", "scheduled"];
+const ACTIVE_ORDER: TaskStatus[] = ["blocked", "running", "review", "ready", "scheduled", "todo", "triage"];
 
 export function buildPipeline(tasks: BoardTaskLite[]): PipelineModel {
   const buckets: StageBucket[] = FLEET_STAGES.map((stage) => ({
@@ -179,6 +182,7 @@ export function buildPipeline(tasks: BoardTaskLite[]): PipelineModel {
   const byStage = new Map<FleetStage, StageBucket>(buckets.map((b) => [b.stage, b]));
   let blockedCount = 0;
   let total = 0;
+  const active: BoardTaskLite[] = [];
   const actionable: BoardTaskLite[] = [];
 
   for (const task of tasks) {
@@ -187,8 +191,16 @@ export function buildPipeline(tasks: BoardTaskLite[]): PipelineModel {
     if (task.status === "blocked") blockedCount += 1;
     const stage = statusToStage(task.status);
     if (stage) byStage.get(stage)!.count += 1;
+    if (task.status !== "done") active.push(task);
     if (isActionableStatus(task.status)) actionable.push(task);
   }
+
+  active.sort((a, b) => {
+    const ra = ACTIVE_ORDER.indexOf(a.status);
+    const rb = ACTIVE_ORDER.indexOf(b.status);
+    if (ra !== rb) return ra - rb;
+    return (b.priority ?? 0) - (a.priority ?? 0);
+  });
 
   actionable.sort((a, b) => {
     const ra = ACTIONABLE_ORDER.indexOf(a.status);
@@ -197,7 +209,7 @@ export function buildPipeline(tasks: BoardTaskLite[]): PipelineModel {
     return (b.priority ?? 0) - (a.priority ?? 0);
   });
 
-  return { buckets, actionable, blockedCount, total };
+  return { buckets, active, actionable, blockedCount, total };
 }
 
 /** Group board tasks into the five Flow stage columns (Capture..Ship). Archived

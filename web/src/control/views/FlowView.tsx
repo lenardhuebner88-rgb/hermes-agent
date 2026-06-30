@@ -72,6 +72,7 @@ import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState, FleetPanel, RoleChip } from "../components/fleet/atoms";
 import { EpicCreate } from "../components/fleet/EpicCreate";
+import { FleetPipeline } from "../components/fleet/FleetPipeline";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
 import { useClientNowSeconds } from "../lib/clock";
@@ -2320,6 +2321,14 @@ export function FlowView() {
           ))}
         </ToneCallout>
       ) : null}
+
+      <FleetPipeline
+        tasks={filteredTasks}
+        workers={workerList}
+        now={now}
+        reload={board.reload}
+        onSelectTask={selectTask}
+      />
 
       <div id="flow-section-recovery"><RecoveryStrip /></div>
 
