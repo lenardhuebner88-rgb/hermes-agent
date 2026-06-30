@@ -18195,12 +18195,15 @@ def _dispatch_once_locked(
         in_progress = conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
         ).fetchone()[0]
+        running_count = int(in_progress)
         if in_progress >= max_in_progress:
             return result
-        # Only spawn enough to reach the cap, respecting max_spawn too.
-        remaining = max_in_progress - in_progress
-        if max_spawn is None or max_spawn > remaining:
-            max_spawn = remaining
+        # max_spawn is compared against running_count + spawned inside the
+        # loop, so it must be the absolute live cap, not the remaining slots.
+        # Using remaining would double-count already-running tasks and
+        # under-spawn every tick.
+        if max_spawn is None or max_spawn > max_in_progress:
+            max_spawn = max_in_progress
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -18594,6 +18597,7 @@ def _dispatch_once_locked(
                 continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
+            spawned += 1
             # Increment per-profile counter even in dry_run so the cap
             # check sees the would-be spawn on subsequent iterations.
             # Without this, dry_run reports every task as spawnable and
@@ -18783,6 +18787,7 @@ def _dispatch_once_locked(
             continue
         if dry_run:
             result.spawned.append((row["id"], _spawn_profile, ""))
+            spawned += 1
             continue
         claimed = claim_review_task(
             conn, row["id"], ttl_seconds=ttl_seconds, reviewer_profile=_spawn_profile,

@@ -5678,6 +5678,53 @@ def test_dispatch_max_spawn_fills_remaining_capacity(
         assert kb.get_task(conn, ready_b).status == "ready"
 
 
+def test_dispatch_dry_run_max_spawn_counts_would_be_spawns(
+    kanban_home, all_assignees_spawnable
+):
+    """Dry-run dispatch must stop after the max_spawn would-be spawns."""
+    with kb.connect_closing() as conn:
+        first = kb.create_task(conn, title="first", assignee="alice")
+        second = kb.create_task(conn, title="second", assignee="bob")
+        third = kb.create_task(conn, title="third", assignee="carol")
+
+        res = kb.dispatch_once(conn, dry_run=True, max_spawn=1)
+
+        assert res.spawned == [(first, "alice", "")]
+        assert kb.get_task(conn, first).status == "ready"
+        assert kb.get_task(conn, second).status == "ready"
+        assert kb.get_task(conn, third).status == "ready"
+
+
+def test_dispatch_max_in_progress_with_max_spawn_fills_remaining_capacity(
+    kanban_home, all_assignees_spawnable
+):
+    """max_in_progress and max_spawn combine as live concurrency caps."""
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    with kb.connect_closing() as conn:
+        running = kb.create_task(conn, title="running", assignee="alice")
+        ready_a = kb.create_task(conn, title="ready-a", assignee="bob")
+        ready_b = kb.create_task(conn, title="ready-b", assignee="carol")
+        ready_c = kb.create_task(conn, title="ready-c", assignee="alice")
+        kb.claim_task(conn, running)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            max_in_progress=3,
+            max_spawn=10,
+        )
+
+        assert len(res.spawned) == 2
+        assert spawns == [ready_a, ready_b]
+        assert kb.get_task(conn, ready_a).status == "running"
+        assert kb.get_task(conn, ready_b).status == "running"
+        assert kb.get_task(conn, ready_c).status == "ready"
+
+
 def test_dispatch_reclaims_stale_before_spawning(kanban_home):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="alice")
