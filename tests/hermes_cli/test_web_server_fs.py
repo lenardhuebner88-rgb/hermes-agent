@@ -130,6 +130,7 @@ def test_fs_read_data_url_rejects_over_cap(client, tmp_path, monkeypatch):
 
 def test_fs_git_root_for_nested_file(client, tmp_path):
     (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     nested = tmp_path / "pkg" / "mod"
     nested.mkdir(parents=True)
     target = nested / "file.py"
@@ -139,6 +140,23 @@ def test_fs_git_root_for_nested_file(client, tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"root": str(tmp_path)}
+
+
+def test_fs_git_root_ignores_empty_dot_git(client, tmp_path):
+    # A stray, empty `.git` directory (no HEAD) — e.g. a leftover `mkdir` under a
+    # shared /tmp — is not a real repo and must NOT be reported as a root. Guards
+    # the nightly fs gate against ambient .git pollution above pytest's tmp_path.
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    target = nested / "file.py"
+    target.write_text("x")
+
+    response = client.get("/api/fs/git-root", params={"path": str(target)})
+
+    assert response.status_code == 200
+    # The empty marker at tmp_path is ignored; the walk continues past it.
+    assert response.json()["root"] != str(tmp_path)
 
 
 def test_fs_git_root_returns_null_outside_repo(client, tmp_path):

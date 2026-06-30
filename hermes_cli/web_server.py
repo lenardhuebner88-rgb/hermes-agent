@@ -1422,11 +1422,29 @@ def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
     return target, st
 
 
+def _is_git_repo_marker(dot_git: Path) -> bool:
+    """True only for a REAL git marker.
+
+    A worktree/submodule uses a ``.git`` *file* (a ``gitdir:`` pointer); a normal
+    repo uses a ``.git`` *directory* that always contains ``HEAD``. A bare, empty
+    ``.git`` directory — e.g. a stray ``mkdir`` left under a shared ``/tmp`` — is
+    NOT a repository and must not be reported as a root. Without this guard the
+    file browser walks up into the unrelated empty marker and the nightly fs gate
+    goes red on a polluted host. OSError (e.g. permission denied) propagates to
+    the caller, preserving the original give-up-and-return-None behaviour.
+    """
+    if dot_git.is_file():
+        return True
+    if dot_git.is_dir():
+        return (dot_git / "HEAD").exists()
+    return False
+
+
 def _fs_find_git_root(start: Path) -> str | None:
     directory = start
     for _ in range(50):
         try:
-            if (directory / ".git").exists():
+            if _is_git_repo_marker(directory / ".git"):
                 return str(directory)
         except OSError:
             return None
