@@ -286,7 +286,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   const [planspecSearch, setPlanspecSearch] = useState("");
   const [openOnly, setOpenOnly] = useState(false);
   const plans = usePlanSpecs({ scope: openOnly ? "open" : "all", limit: 8, search: planspecSearch });
-  const [plansOpen, setPlansOpen] = useState(false);
+  const [plansOpen, setPlansOpen] = useState(true);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
   const [promptByPath, setPromptByPath] = useState<Record<string, string>>({});
@@ -371,7 +371,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
     <div className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="hc-eyebrow">Planspec-Hub</span>
+          <span className="hc-eyebrow">PlanSpec-Hub</span>
           <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{openCount}/{items.length} offen · Vault</span>
         </div>
         <button
@@ -455,7 +455,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   aria-label={`PlanSpec ${item.topic} in Kanban umsetzen`}
                 >
                   {ingestBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
-                  Kanban
+                  Flow-Kette erstellen
                 </button>
                 {ingestBlocked && ingestBlockerReason && !closed ? <p className="col-span-2 break-words text-[0.7rem] text-amber-300/80 sm:col-span-1">⚠ {ingestBlockerReason}</p> : null}
                 <button
@@ -466,7 +466,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   aria-label={`Details für PlanSpec ${item.topic} öffnen`}
                 >
                   <FileText className="h-3.5 w-3.5" />
-                  Details
+                  PlanSpec öffnen
                 </button>
                 <button
                   type="button"
@@ -588,7 +588,7 @@ const EVENT_LABEL: Record<string, string> = {
   edited: "Bearbeitet", reprioritized: "Neu priorisiert", assigned: "Zugewiesen",
   deliverables_preserved: "Deliverables gesichert", spawn_failed: "Spawn fehlgeschlagen",
   decomposed: "In Subtasks zerlegt", specified: "Spezifiziert", linked: "Verknüpft",
-  commented: "Kommentiert", flow_plan: "Plan-Spec geschrieben",
+  commented: "Kommentiert", flow_plan: "PlanSpec geschrieben",
 };
 function eventLabel(kind: string): string {
   return EVENT_LABEL[kind] ?? kind.replace(/_/g, " ");

@@ -28,7 +28,7 @@ export interface StageMeta {
 
 export const STAGE_META: Record<FleetStage, StageMeta> = {
   capture: { id: "capture", label: "Capture", purpose: "Eingang · Aufgabe erfasst", tone: "zinc", statuses: ["triage"] },
-  plan: { id: "plan", label: "Plan", purpose: "Spezifiziert · wartet auf Dispatch", tone: "sky", statuses: ["todo", "scheduled", "ready"] },
+  plan: { id: "plan", label: "Flow-Kette", purpose: "Gehalten · wartet auf Operator-Freigabe", tone: "sky", statuses: ["todo", "scheduled", "ready"] },
   execute: { id: "execute", label: "Execute", purpose: "Worker läuft · Tool-Calls", tone: "amber", statuses: ["running"] },
   verify: { id: "verify", label: "Verify", purpose: "Verifier-Gate · echte Tests", tone: "cyan", statuses: ["review"] },
   ship: { id: "ship", label: "Ship", purpose: "Abgenommen · geliefert", tone: "emerald", statuses: ["done"] },
@@ -66,7 +66,7 @@ export interface StageAction {
 
 const ACTION: Record<StageActionKey, StageAction> = {
   plan: { key: "plan", label: "Plan", target: "todo", tone: "sky", intent: "advance", confirm: "Aufgabe spezifizieren (Triage → Plan)?" },
-  dispatch: { key: "dispatch", label: "Dispatch", target: "ready", tone: "amber", intent: "advance", confirm: "Startklar setzen — der Dispatcher übernimmt automatisch?" },
+  dispatch: { key: "dispatch", label: "Starten", target: "ready", tone: "amber", intent: "advance", confirm: "Operator-Freigabe setzen — danach übernimmt der Dispatcher automatisch?" },
   ship: { key: "ship", label: "Ausliefern", target: "done", tone: "emerald", intent: "advance", confirm: "Prüfung abnehmen und auf Fertig setzen?" },
   rework: { key: "rework", label: "Nacharbeit", target: "blocked", tone: "red", intent: "danger", confirm: "Zurück in Nacharbeit (Prüfung → Blockiert)?" },
   reopen: { key: "reopen", label: "Reopen", target: "ready", tone: "sky", intent: "advance", confirm: "Blockade lösen und neu einreihen?" },
@@ -87,7 +87,7 @@ export function stageActions(status: TaskStatus): StageAction[] {
 
 /** Why a stage has no manual button — the honest, explaining guard state. */
 export function stageGuard(status: TaskStatus): string | null {
-  if (status === "ready") return "Eingereiht — der Dispatcher übernimmt automatisch (~60 s).";
+  if (status === "ready") return "Freigegeben — der Dispatcher übernimmt automatisch (~60 s).";
   if (status === "running") return "Worker läuft — schließt selbst ab; das Verifier-Gate routet danach automatisch.";
   if (status === "done") return "Abgenommen — Lauf ist terminal.";
   return null;
@@ -116,7 +116,7 @@ const ROLE_BY_PROFILE: Record<string, RoleChip> = {
   coder: { label: "Coder", short: "C", tone: "amber" },
   premium: { label: "Coder", short: "C", tone: "amber" },
   devpower: { label: "DevPower", short: "D", tone: "amber" },
-  research: { label: "Researcher", short: "R", tone: "emerald" },
+  research: { label: "Research", short: "R", tone: "emerald" },
   planner: { label: "Planner", short: "P", tone: "emerald" },
   critic: { label: "Critic", short: "K", tone: "rose" },
   admin: { label: "Admin", short: "A", tone: "violet" },

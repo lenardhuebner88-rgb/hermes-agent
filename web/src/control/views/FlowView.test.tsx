@@ -205,7 +205,7 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
   });
 
   it("keeps the PlanSpec hub default all-scoped with open-filter and readable on phones", () => {
-    expect(src).toMatch(/Planspec-Hub/);
+    expect(src).toMatch(/PlanSpec-Hub/);
     expect(src).toMatch(/offen · Vault/);
     expect(src).toMatch(/PlanSpecSearch/);
     expect(src).toMatch(/Nur offene/);
@@ -326,5 +326,17 @@ describe("FlowView attention band — real triage/funnel counts (C1 honesty)", (
     expect(src).toMatch(/triageFailures\.data === null \|\| funnelDrafts\.data === null/);
     // The render gate must suppress quiet-only state while loading.
     expect(src).toMatch(/!attentionSummary\.quiet \|\| !attentionLoading/);
+  });
+});
+
+
+describe("PlanSpec operability terminology", () => {
+  it("distinguishes the Vault PlanSpec source from the generated Flow chain", () => {
+    expect(src).toMatch(/PlanSpec-Hub/);
+    expect(src).toMatch(/PlanSpec öffnen/);
+    expect(src).toMatch(/Flow-Kette erstellen/);
+    expect(src).toMatch(/useState\(true\)/);
+    expect(src).not.toMatch(/Planspec-Hub/);
+    expect(src).not.toMatch(/Plan-Spec/);
   });
 });

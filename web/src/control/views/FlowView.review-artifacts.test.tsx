@@ -155,7 +155,7 @@ describe("FlowView review gate and RESULT artifacts", () => {
     expect(html).toContain("/api/plugins/kanban/tasks/t_result_artifact/deliverables/RESULT.md");
   });
 
-  it("copy split fixture keeps Plan-Spec for flow_plan and Spec-Draft/RESULT for single-task artifacts", () => {
+  it("copy split fixture keeps PlanSpec for flow_plan and Spec-Draft/RESULT for single-task artifacts", () => {
     const srcHtml = renderToStaticMarkup(
       <FlowReceiptRail
         taskId="t_flow_plan"
@@ -176,7 +176,7 @@ describe("FlowView review gate and RESULT artifacts", () => {
       />,
     );
 
-    expect(srcHtml).toContain("Plan-Spec öffnen");
+    expect(srcHtml).toContain("PlanSpec öffnen");
     expect(srcHtml).not.toContain("Spec-Draft / RESULT");
 
     const artifactHtml = renderToStaticMarkup(
@@ -195,6 +195,6 @@ describe("FlowView review gate and RESULT artifacts", () => {
     );
 
     expect(artifactHtml).toContain("Spec-Draft / RESULT");
-    expect(artifactHtml).not.toContain("Plan-Spec öffnen");
+    expect(artifactHtml).not.toContain("PlanSpec öffnen");
   });
 });
