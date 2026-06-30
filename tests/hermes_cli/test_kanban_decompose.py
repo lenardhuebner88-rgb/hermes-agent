@@ -111,6 +111,10 @@ def _patch_extra_body():
     )
 
 
+def _task_stub(task_id: str = "t_parent", body: str = ""):
+    return type("TaskStub", (), {"id": task_id, "body": body})()
+
+
 def _patch_list_profiles(names: list[str]):
     """Pretend the named profiles exist. The decomposer uses
     profiles_mod.list_profiles() to build the roster + valid-set, and
@@ -512,6 +516,7 @@ def test_decompose_unknown_assignee_falls_back_to_default(kanban_home):
         "rationale": "test",
         "tasks": [
             {"title": "do X", "body": "", "assignee": "made_up", "parents": []},
+            {"title": "check X", "body": "", "assignee": "fallback", "parents": [0]},
         ],
     })
 
@@ -537,7 +542,7 @@ def test_decompose_unknown_assignee_falls_back_to_default(kanban_home):
             p.stop()
 
     assert outcome.ok, outcome.reason
-    assert outcome.child_ids and len(outcome.child_ids) == 1
+    assert outcome.child_ids and len(outcome.child_ids) == 2
     with kb.connect() as conn:
         child = kb.get_task(conn, outcome.child_ids[0])
     # 'made_up' wasn't in roster, so assignee rewritten to 'fallback'
@@ -572,8 +577,8 @@ def test_children_from_parsed_normalizes_optional_kind(kanban_home):
         "fanout": True,
         "tasks": [
             {"title": "valid", "assignee": "writer", "kind": "CODE"},
-            {"title": "invalid", "assignee": "writer", "kind": "garbage"},
-            {"title": "missing", "assignee": "writer"},
+            {"title": "invalid", "assignee": "writer", "kind": "garbage", "parents": [0]},
+            {"title": "missing", "assignee": "writer", "parents": [1]},
         ],
     }
 
@@ -587,6 +592,126 @@ def test_children_from_parsed_normalizes_optional_kind(kanban_home):
     assert err is None
     assert children is not None
     assert [child["kind"] for child in children] == ["code", None, None]
+
+
+def test_decompose_demotes_single_task_fanout_to_single_owner(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="single parent",
+            body="Original single-owner spec.",
+            triage=True,
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "accidental single fanout",
+        "tasks": [
+            {"title": "single", "body": "do it", "assignee": "writer", "parents": []},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "writer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body(), patch(
+            "hermes_cli.kanban_decompose._load_config",
+            return_value={"kanban": {"default_assignee": "writer"}},
+        ):
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is False
+    assert outcome.child_ids is None
+    assert "demoted from fanout" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        tasks = kb.list_tasks(conn, limit=10)
+    assert task is not None
+    assert task.status == "ready"
+    assert task.title == "single parent"
+    assert task.body == "Original single-owner spec."
+    assert task.assignee == "writer"
+    assert [task.id for task in tasks] == [tid]
+
+
+def test_children_from_parsed_caps_at_six():
+    children, err = decomp._children_from_parsed(
+        {
+            "fanout": True,
+            "tasks": [
+                {"title": f"task {idx}", "body": "", "assignee": "writer", "parents": []}
+                for idx in range(7)
+            ],
+        },
+        _task_stub(),
+        valid_names={"writer"},
+        default_assignee="writer",
+    )
+
+    assert err is None
+    assert children is not None
+    assert len(children) == 6
+
+
+def test_decompose_demotes_three_fully_independent_tasks_to_single_owner(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="three independent chores",
+            body="Keep this as one owner-visible task.",
+            triage=True,
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "accidental over-split",
+        "tasks": [
+            {"title": "first", "body": "", "assignee": "writer", "parents": []},
+            {"title": "second", "body": "", "assignee": "writer", "parents": []},
+            {"title": "third", "body": "", "assignee": "writer", "parents": []},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "writer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body(), patch(
+            "hermes_cli.kanban_db.record_decompose_failure",
+        ) as record_failure, patch(
+            "hermes_cli.kanban_decompose._load_config",
+            return_value={"kanban": {"default_assignee": "writer"}},
+        ):
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    record_failure.assert_not_called()
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is False
+    assert outcome.child_ids is None
+    assert "demoted from fanout" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        tasks = kb.list_tasks(conn, limit=10)
+        row = conn.execute(
+            "SELECT decompose_failed, last_failure_error FROM tasks WHERE id = ?",
+            (tid,),
+        ).fetchone()
+    assert task is not None
+    assert task.status == "ready"
+    assert task.title == "three independent chores"
+    assert task.body == "Keep this as one owner-visible task."
+    assert task.assignee == "writer"
+    assert [task.id for task in tasks] == [tid]
+    assert row["decompose_failed"] == 0
+    assert row["last_failure_error"] is None
 
 
 def test_decompose_handles_malformed_llm_json(kanban_home):
@@ -868,6 +993,7 @@ def test_decompose_blocks_before_db_insert_when_worker_contract_invalid(kanban_h
         "rationale": "worker graph",
         "tasks": [
             {"title": "code change", "body": "Modify the decomposer.", "assignee": "coder", "parents": []},
+            {"title": "review change", "body": "Review the decomposer.", "assignee": "coder", "parents": [0]},
         ],
     })
 
@@ -1245,6 +1371,57 @@ def test_plan_and_document_lean_gate_holds_without_spec(kanban_home, tmp_path, m
         kinds = [e.kind for e in kb.list_events(conn, tid)]
     assert all(s == "scheduled" for s in statuses), statuses
     assert "flow_plan" not in kinds, "lean method emits no flow_plan event"
+
+
+def test_plan_and_document_demotes_independent_lt4_to_single_owner(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Flow single-owner",
+            body="Keep the flow root as one task.",
+            triage=True,
+            tenant="flow-capture",
+        )
+    _park_in_scheduled(tid)
+
+    payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "accidental over-split",
+        "tasks": [
+            {"title": "first", "body": "", "assignee": "writer", "parents": []},
+            {"title": "second", "body": "", "assignee": "writer", "parents": []},
+            {"title": "third", "body": "", "assignee": "writer", "parents": []},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "writer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(payload), _patch_extra_body(), patch(
+            "hermes_cli.kanban_decompose._load_config",
+            return_value={"kanban": {"default_assignee": "writer"}},
+        ):
+            outcome = decomp.plan_and_document(
+                tid, gate=False, document=False, author="user",
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is False
+    assert outcome.child_ids is None
+    assert "demoted from fanout" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        tasks = kb.list_tasks(conn, limit=10)
+    assert task is not None
+    assert task.status == "ready"
+    assert task.title == "Flow single-owner"
+    assert task.body == "Keep the flow root as one task."
+    assert task.assignee == "writer"
+    assert [task.id for task in tasks] == [tid]
 
 
 def test_plan_and_document_rejects_non_scheduled_root(kanban_home):
