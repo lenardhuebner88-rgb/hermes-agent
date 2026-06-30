@@ -889,6 +889,218 @@ def release_gate_fixer_max_retries() -> int:
     return 2
 
 
+_VISUAL_GATE_IME_NOTE = "mobile-IME physically unverified"
+_VISUAL_GATE_SCREENSHOTS_ROOT = Path("/tmp/hermes-visual-gate")
+_VISUAL_GATE_URL = "http://127.0.0.1:9119/control"
+
+
+def visual_gate_enabled() -> bool:
+    """Resolve ``kanban.visual_gate`` from root config, default off.
+
+    ``HERMES_KANBAN_VISUAL_GATE`` wins for tests/operator one-offs. Default
+    is deliberately ``False`` so existing worker gates keep today's behavior
+    unless the operator opts in.
+    """
+    env = (os.environ.get("HERMES_KANBAN_VISUAL_GATE") or "").strip().lower()
+    if env:
+        return env in {"1", "true", "yes", "on"}
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            value = (root_cfg.get("kanban") or {}).get("visual_gate")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized:
+                    return normalized in {"1", "true", "yes", "on"}
+    except Exception:
+        pass
+    return False
+
+
+def visual_gate_max_retries() -> int:
+    """Bounded visual-gate fixer retry budget.
+
+    ``HERMES_KANBAN_VISUAL_GATE_MAX_RETRIES`` wins over config
+    ``kanban.visual_gate_max_retries``. Default 3, clamped to 0..5.
+    """
+    env = (os.environ.get("HERMES_KANBAN_VISUAL_GATE_MAX_RETRIES") or "").strip()
+    if env:
+        try:
+            return min(5, max(0, int(env)))
+        except ValueError:
+            pass
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            value = (root_cfg.get("kanban") or {}).get("visual_gate_max_retries")
+            if isinstance(value, bool):
+                value = None
+            if isinstance(value, int):
+                return min(5, max(0, value))
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.lstrip("-").isdigit():
+                    return min(5, max(0, int(stripped)))
+    except Exception:
+        pass
+    return 3
+
+
+def _visual_gate_with_ime_note(detail: str) -> str:
+    text = detail or "visual-gate failed"
+    if _VISUAL_GATE_IME_NOTE in text:
+        return text
+    return f"{text}\nnotes: {_VISUAL_GATE_IME_NOTE}"
+
+
+def _visual_gate_error(message: str, screenshot_paths: Sequence[Path]) -> str:
+    paths = "\n".join(f"- {path}" for path in screenshot_paths)
+    detail = f"visual-gate: {message}"
+    if paths:
+        detail = f"{detail}\nscreenshots:\n{paths}"
+    return _visual_gate_with_ime_note(detail)
+
+
+def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
+    """Run the non-MCP dashboard visual gate.
+
+    Returns ``None`` on pass, otherwise an error tail beginning with
+    ``visual-gate:`` and including screenshot paths. The dashboard must already
+    be running in the live checkout context; this helper never starts it.
+    """
+    repo_root = Path(repo_root)
+    run_id = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        + f"-{os.getpid()}"
+    )
+    run_dir = Path(screenshots_dir) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    desktop_path = run_dir / "desktop-1280x800.png"
+    mobile_path = run_dir / "mobile-390x844.png"
+    scripted_mobile_path = run_dir / "mobile-playwright.png"
+    screenshot_paths = [desktop_path, mobile_path, scripted_mobile_path]
+
+    try:
+        health = subprocess.run(  # noqa: S603 -- fixed argv
+            ["curl", "-fsS", _VISUAL_GATE_URL],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return _visual_gate_error(
+            f"dashboard unreachable: curl timed out for {_VISUAL_GATE_URL}",
+            screenshot_paths,
+        )
+    except FileNotFoundError:
+        return _visual_gate_error("dashboard unreachable: curl not found", screenshot_paths)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _visual_gate_error(f"dashboard unreachable: {exc}", screenshot_paths)
+    if health.returncode != 0:
+        tail = (health.stdout + "\n" + health.stderr).strip()[-1000:]
+        return _visual_gate_error(
+            f"dashboard unreachable: curl exit {health.returncode}\n{tail}",
+            screenshot_paths,
+        )
+
+    shots = (
+        ("desktop", "1280,800", desktop_path),
+        ("mobile", "390,844", mobile_path),
+    )
+    for label, size, path in shots:
+        try:
+            shot = subprocess.run(  # noqa: S603 -- fixed argv
+                [
+                    "chromium-shot",
+                    f"--screenshot={path}",
+                    f"--window-size={size}",
+                    "--virtual-time-budget=12000",
+                    _VISUAL_GATE_URL,
+                ],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return _visual_gate_error(
+                f"{label} chromium-shot timed out after 120s",
+                screenshot_paths,
+            )
+        except FileNotFoundError:
+            return _visual_gate_error("chromium-shot not found", screenshot_paths)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _visual_gate_error(
+                f"{label} chromium-shot failed: {exc}", screenshot_paths,
+            )
+        if shot.returncode != 0:
+            tail = (shot.stdout + "\n" + shot.stderr).strip()[-2000:]
+            return _visual_gate_error(
+                f"{label} chromium-shot exit {shot.returncode}\n{tail}",
+                screenshot_paths,
+            )
+
+    env = dict(os.environ)
+    env["HERMES_VISUAL_GATE_SCREENSHOT"] = str(scripted_mobile_path)
+    try:
+        node = subprocess.run(  # noqa: S603 -- fixed argv
+            ["node", "scripts/visual_check_mobile.mjs"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return _visual_gate_error(
+            "mobile Playwright check timed out after 120s", screenshot_paths,
+        )
+    except FileNotFoundError:
+        return _visual_gate_error("node not found", screenshot_paths)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _visual_gate_error(f"mobile Playwright check failed: {exc}", screenshot_paths)
+
+    stdout = (node.stdout or "").strip()
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        tail = ((node.stdout or "") + "\n" + (node.stderr or "")).strip()[-2000:]
+        return _visual_gate_error(
+            f"mobile Playwright check returned non-JSON output\n{tail}",
+            screenshot_paths,
+        )
+    if payload.get("screenshotPath"):
+        try:
+            scripted_path = Path(str(payload["screenshotPath"]))
+            if scripted_path not in screenshot_paths:
+                screenshot_paths.append(scripted_path)
+        except TypeError:
+            pass
+    if node.returncode != 0 or not payload.get("ok"):
+        tail = json.dumps(payload, ensure_ascii=False, sort_keys=True)[-2000:]
+        stderr = (node.stderr or "").strip()[-1000:]
+        if stderr:
+            tail = f"{tail}\nstderr:\n{stderr}"
+        return _visual_gate_error(
+            f"mobile Playwright check failed\n{tail}",
+            screenshot_paths,
+        )
+    return None
+
+
 def _release_gate_context(
     conn: sqlite3.Connection, task_id: str,
 ) -> Optional[dict]:
@@ -962,6 +1174,11 @@ def _default_release_gate_runner(
         return False, f"release-gate command error: {exc}"
     ok = proc.returncode == 0
     tail = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
+    if ok and visual_gate_enabled():
+        err = _run_visual_gate(LIVE_CHECKOUT_ROOT, _VISUAL_GATE_SCREENSHOTS_ROOT)
+        if err:
+            return False, err
+        tail = "\n".join(part for part in (tail, _VISUAL_GATE_IME_NOTE) if part)
     return ok, tail
 
 
@@ -969,6 +1186,22 @@ def _release_gate_fixer_prompt(
     *, gate_error: str, attempt: int, task_id: str, root_id: str,
 ) -> str:
     commands = "\n".join(_RELEASE_GATE_COMMANDS)
+    visual_guidance = ""
+    if (gate_error or "").startswith("visual-gate:"):
+        screenshot_lines = "\n".join(
+            line for line in (gate_error or "").splitlines()
+            if ".png" in line or "screenshot" in line.lower()
+        )
+        visual_guidance = (
+            "\n\nVisual-gate context:\n"
+            "The failing artifacts are these screenshot paths from the gate "
+            f"output:\n{screenshot_lines or '(none parsed)'}\n"
+            "Fix mobile CSS/layout overflow first: the scripted criterion is "
+            "`document.documentElement.scrollWidth <= window.innerWidth` after "
+            "focus in a 390x844 touch viewport, with zero browser console "
+            "errors. Treat this as a CSS/mobile rendering failure unless the "
+            "captured console errors prove a runtime cause."
+        )
     return (
         "You are a bounded Hermes release-gate fixer running headless on the "
         "premium lane. The dashboard release gate for chain "
@@ -976,7 +1209,8 @@ def _release_gate_fixer_prompt(
         "Gate commands (run in the live checkout — do NOT edit there):\n"
         f"{commands}\n\n"
         "Most recent gate output:\n"
-        f"{(gate_error or '')[-3000:]}\n\n"
+        f"{(gate_error or '')[-3000:]}"
+        f"{visual_guidance}\n\n"
         "Your job: read the error, find and fix the root cause in THIS git "
         "worktree, then verify locally by running `npm run build` inside this "
         "worktree's `web/` directory. Commit your fix on this branch.\n\n"
@@ -1264,12 +1498,18 @@ def execute_release_gate(
             "(no release_gate_parked event)"
         )
     root_id = ctx["root_id"]
+    explicit_max_retries = max_retries is not None
     if max_retries is None:
         max_retries = release_gate_fixer_max_retries()
     max_retries = max(0, int(max_retries))
     gate_runner = gate_runner or _default_release_gate_runner
     fixer_runner = fixer_runner or _default_release_gate_fixer
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+
+    def _retry_budget_for(output: str) -> int:
+        if not explicit_max_retries and (output or "").startswith("visual-gate:"):
+            return visual_gate_max_retries()
+        return max_retries
 
     # Attempt 0: bare gate run.
     ok, output = gate_runner()
@@ -1281,7 +1521,7 @@ def execute_release_gate(
         return {"status": "green", "fixer_attempts": 0, "root_id": root_id}
 
     fixer_attempts = 0
-    while fixer_attempts < max_retries:
+    while fixer_attempts < _retry_budget_for(output):
         fixer_attempts += 1
         worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
         _record_release_gate_fix_attempt(
@@ -1812,6 +2052,14 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         if err:
             return False, err
 
+    if visual_gate_enabled() and any(
+        f.startswith("web/src/control/") for f in changed_files
+    ):
+        err = _run_visual_gate(repo_root, _VISUAL_GATE_SCREENSHOTS_ROOT)
+        if err:
+            return False, _visual_gate_with_ime_note(err)
+        notes.append(_VISUAL_GATE_IME_NOTE)
+
     return True, "; ".join(notes)
 
 
@@ -1863,6 +2111,11 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
         tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
         return False, f"build: exit {proc.returncode}\n{tail}"
     notes.append("npm run build ok")
+    if visual_gate_enabled():
+        err = _run_visual_gate(repo_root, _VISUAL_GATE_SCREENSHOTS_ROOT)
+        if err:
+            return False, _visual_gate_with_ime_note(err)
+        notes.append(_VISUAL_GATE_IME_NOTE)
     return True, "; ".join(notes)
 
 
