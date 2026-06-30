@@ -10941,22 +10941,26 @@ def promote_task(
             f"'todo' or 'blocked'"
         )
 
-    if not force:
-        parents = conn.execute(
-            "SELECT t.id, t.status FROM tasks t "
-            "JOIN task_links l ON l.parent_id = t.id "
-            "WHERE l.child_id = ?",
-            (task_id,),
-        ).fetchall()
-        unsatisfied = [
-            p["id"] for p in parents
-            if p["status"] != "done"
-        ]
-        if unsatisfied:
-            return False, (
-                f"unsatisfied parent dependencies: "
-                f"{', '.join(unsatisfied)} (use --force to override)"
-            )
+    parents = conn.execute(
+        "SELECT t.id, t.status FROM tasks t "
+        "JOIN task_links l ON l.parent_id = t.id "
+        "WHERE l.child_id = ?",
+        (task_id,),
+    ).fetchall()
+    unsatisfied = [
+        p["id"] for p in parents
+        if p["status"] != "done"
+    ]
+    if unsatisfied and cur_status == "blocked":
+        return False, (
+            f"dependency wait: unsatisfied parent dependencies: "
+            f"{', '.join(unsatisfied)}"
+        )
+    if unsatisfied and not force:
+        return False, (
+            f"unsatisfied parent dependencies: "
+            f"{', '.join(unsatisfied)} (use --force to override)"
+        )
 
     if dry_run:
         return True, None
