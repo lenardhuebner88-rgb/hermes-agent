@@ -11,7 +11,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, FileText, HeartPulse, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, HeartPulse, Link2, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -61,7 +61,7 @@ import {
 } from "../hooks/useControlData";
 import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
 import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./flow/planSpecKanban";
-import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
+import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName, VaultMemoryLink } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, KanbanDecision, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -733,6 +733,7 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
   const ageSec = task.age?.created_age_seconds ?? null;
   const hasProgress = task.progress != null && task.progress.total > 0;
   const pct = hasProgress ? Math.round((task.progress!.done / task.progress!.total) * 100) : 0;
+  const vaultMemoryLinks = task.vault_memory_links ?? [];
   // mobileOverflowGuard: all phone-width rows below need min-w-0 + wrapping or
   // long task ids / branch names can push the Flow tab off the right edge.
   return (
@@ -811,6 +812,11 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
         {enriched.deliverableCount ? (
           <span className="rounded-[7px] border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 hc-mono text-[10px] text-emerald-200">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</span>
         ) : null}
+        {vaultMemoryLinks.length ? (
+          <span className="inline-flex items-center gap-1 rounded-[7px] border border-sky-400/30 bg-sky-400/10 px-2 py-1 hc-mono text-[10px] text-sky-100">
+            <Link2 className="h-3 w-3" aria-hidden />{vaultMemoryLinks.length} Vault/Memory
+          </span>
+        ) : null}
       </div>
       {task.latest_summary ? <p className="mt-2 line-clamp-2 text-xs hc-soft">{task.latest_summary}</p> : null}
       {/* Blocked-Reason-Bar */}
@@ -826,6 +832,7 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
           <DeliverableOpenButton url={resultArtifact.url} label="RESULT öffnen" />
         </div>
       ) : null}
+      <VaultMemoryCompactRail links={vaultMemoryLinks} />
       <FlowCostFooter task={task} />
       <FlowCardActions
         status={task.status}
@@ -1284,6 +1291,146 @@ function DeliverableOpenButton({ url, label = "öffnen" }: { url: string; label?
   );
 }
 
+function vaultMemoryKindLabel(kind: VaultMemoryLink["kind"]): string {
+  return kind === "vault" ? "Vault" : "Memory";
+}
+
+function vaultMemorySourceLabel(source: string): string {
+  if (source === "title") return "Titel";
+  if (source === "body") return "Task";
+  if (source === "result") return "Result";
+  if (source === "latest_summary") return "Run";
+  if (source === "planspec_source") return "PlanSpec";
+  if (source.startsWith("comment:")) return "Kommentar";
+  if (source.startsWith("event:")) return "Event";
+  return source || "Quelle";
+}
+
+function VaultMemoryOpenButton({ link, label = "öffnen" }: { link: VaultMemoryLink; label?: string }) {
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const actions = useMemo(() => {
+    const next: Array<{ id: "obsidian" | "preview" | "copy"; label: string; title: string; icon: typeof ExternalLink | typeof Copy }> = [];
+    if (link.kind === "vault" && link.obsidian_url) {
+      next.push({ id: "obsidian", label: "Obsidian", title: link.obsidian_url, icon: ExternalLink });
+    }
+    if (link.url) {
+      next.push({ id: "preview", label: link.kind === "vault" ? "Vorschau" : label, title: link.url, icon: ExternalLink });
+    }
+    if (!next.length) {
+      const title = link.path ?? link.target;
+      next.push({ id: "copy", label: "kopieren", title, icon: Copy });
+    }
+    return next;
+  }, [label, link.kind, link.obsidian_url, link.path, link.target, link.url]);
+  const onOpen = useCallback(async (action: "obsidian" | "preview" | "copy") => {
+    setBusyAction(action);
+    setOpenError(null);
+    try {
+      if (action === "obsidian" && link.obsidian_url) {
+        const opened = window.open(link.obsidian_url, "_blank", "noopener,noreferrer");
+        if (!opened) throw new Error("Der Browser hat den Obsidian-Tab blockiert.");
+      } else if (action === "preview" && link.url) {
+        await openAuthedApiFile(link.url, "Vault/Memory-Link");
+      } else {
+        await navigator.clipboard.writeText(link.path ?? link.target);
+      }
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [link.obsidian_url, link.path, link.target, link.url]);
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      {actions.map((action) => {
+        const Icon = action.icon;
+        const busy = busyAction === action.id;
+        return (
+          <button
+            key={action.id}
+            type="button"
+            onClick={(event) => { event.stopPropagation(); void onOpen(action.id); }}
+            disabled={busyAction !== null}
+            title={action.title}
+            aria-label={`${action.label}: ${action.title}`}
+            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-[var(--hc-border)] px-2 py-1 hc-type-label text-emerald-100 hover:border-emerald-400/40 hover:bg-emerald-400/10 disabled:cursor-wait disabled:opacity-60"
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Icon className="h-3 w-3" aria-hidden />}
+            {busy ? "öffnet" : action.label}
+          </button>
+        );
+      })}
+      {openError ? <span className="max-w-36 truncate hc-type-label text-red-300" title={openError}>{openError}</span> : null}
+    </span>
+  );
+}
+
+function VaultMemoryCompactRail({ links }: { links: VaultMemoryLink[] }) {
+  const first = links[0];
+  if (!first) return null;
+  const missing = links.filter((link) => link.exists === false).length;
+  const label = first.label || first.display_path || first.target;
+  return (
+    <div className="mt-2 flex min-w-0 items-center justify-between gap-2 rounded-md border border-sky-400/20 bg-sky-500/[.06] px-2 py-1.5">
+      <span className="min-w-0 truncate hc-type-label text-sky-100" title={first.display_path || first.target}>
+        {vaultMemoryKindLabel(first.kind)} · {label}
+        {links.length > 1 ? ` +${links.length - 1}` : ""}
+        {missing ? ` · ${missing} fehlt` : ""}
+      </span>
+      <VaultMemoryOpenButton link={first} label={first.url || first.obsidian_url ? "öffnen" : "kopieren"} />
+    </div>
+  );
+}
+
+function VaultMemoryLinksPanel({ links, loading, detailUnavailable }: { links: VaultMemoryLink[]; loading: boolean; detailUnavailable?: boolean }) {
+  if (loading) {
+    return (
+      <div className="mt-4">
+        <Eyebrow>Vault / Memory</Eyebrow>
+        <div className="mt-2"><SkeletonCard rows={2} /></div>
+      </div>
+    );
+  }
+  if (!links.length) {
+    return (
+      <div className="mt-4">
+        <Eyebrow>Vault / Memory</Eyebrow>
+        {detailUnavailable ? (
+          <FleetEmptyState title="Detaildaten nicht geladen" desc="Kartenlinks bleiben sichtbar; Kommentare und Events fehlen bis zum nächsten Detailabruf." />
+        ) : (
+          <FleetEmptyState title="Keine Vault/Memory-Links" desc="Dieser Task enthält noch keine Wikilinks, Vault-Pfade oder Memory-Refs." />
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4">
+      <Eyebrow>Vault / Memory</Eyebrow>
+      <ul className="mt-2 space-y-1.5">
+        {links.map((link, index) => {
+          const missing = link.exists === false;
+          const key = `${link.kind}-${link.path ?? link.target}-${link.source}-${index}`;
+          return (
+            <li key={key} className={cn("flex min-w-0 items-center justify-between gap-2 rounded-[7px] border bg-[var(--hc-panel-card)] px-2.5 py-1.5 shadow-[var(--hc-elev-1)]", missing ? "border-red-500/30" : "border-[var(--hc-border)]")}>
+              <div className="min-w-0">
+                <p className="truncate text-[0.78rem] text-[var(--hc-text)]" title={link.path ?? link.target}>
+                  {vaultMemoryKindLabel(link.kind)} · {link.label || link.display_path || link.target}
+                </p>
+                <p className={cn("truncate hc-type-label", missing ? "text-red-300" : "hc-dim")}>
+                  {vaultMemorySourceLabel(link.source)} · {link.display_path}
+                  {missing ? " · Ziel fehlt" : ""}
+                </p>
+              </div>
+              <VaultMemoryOpenButton link={link} label={link.url || link.obsidian_url ? "öffnen" : "kopieren"} />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 // Operator-Direktive an einen Task: schreibt einen Kommentar via
 // POST /tasks/{id}/comments (Backend seit 2026-06-19). Bisher nur per CLI
 // erreichbar — diese Fläche bringt die Kurskorrektur an einen laufenden/geblockten
@@ -1385,7 +1532,9 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
   const deliverables = detail?.deliverables ?? [];
   const resultArtifactLinks = enriched.resultArtifactLinks ?? [];
   const artifactLinksOnly = resultArtifactLinks.filter((link) => !deliverables.some((deliverable) => artifactKey(deliverable) === artifactKey(link)));
-  const empty = !loading && !error && runs.length === 0 && events.length === 0 && deliverables.length === 0 && artifactLinksOnly.length === 0;
+  const vaultMemoryLinks = detail?.task?.vault_memory_links ?? task?.vault_memory_links ?? [];
+  const detailUnavailable = Boolean(error && !detail);
+  const empty = !loading && !error && runs.length === 0 && events.length === 0 && deliverables.length === 0 && artifactLinksOnly.length === 0 && vaultMemoryLinks.length === 0;
   return (
     <aside className="hc-surface-card h-fit p-4 xl:sticky xl:top-4">
       <Eyebrow>{de.flow.selectedChain}</Eyebrow>
@@ -1421,6 +1570,10 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
 
       <section aria-label="Ketten-Kontext">
         <FlowChainInsight task={task} detail={detail} boardTasks={boardTasks} snapshotLabel={snapshotLabel} />
+      </section>
+
+      <section aria-label="Vault-Memory-Verlinkungen">
+        <VaultMemoryLinksPanel links={vaultMemoryLinks} loading={loading && !detail && vaultMemoryLinks.length === 0} detailUnavailable={detailUnavailable && vaultMemoryLinks.length === 0} />
       </section>
 
       {error ? <div className="mt-3"><ToneCallout tone="red">{error}</ToneCallout></div> : null}

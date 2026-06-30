@@ -367,6 +367,27 @@ _DELIVERABLES_MAX_FILES = 50
 # instead of letting one task monopolize the control API.
 _DELIVERABLES_MAX_SCANNED = 5_000
 _DELIVERABLE_EXCERPT_LIMIT = 600
+_VAULT_MEMORY_CARD_SOURCE_CHARS = 4_000
+
+
+def _vault_memory_file_url(path: str) -> str:
+    return f"/api/plugins/kanban/vault-memory-links/file?path={quote(path, safe='')}"
+
+
+def _with_vault_memory_file_urls(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for link in links:
+        item = dict(link)
+        path = item.get("path")
+        resolved = (
+            kanban_db.resolve_vault_memory_link_path(str(path))
+            if path and item.get("exists") is True
+            else None
+        )
+        if resolved is not None and resolved.is_file():
+            item["url"] = _vault_memory_file_url(str(path))
+        enriched.append(item)
+    return enriched
 
 
 def _coerce_str_list(value: Any) -> list[str]:
@@ -769,6 +790,23 @@ def _resolve_deliverable_file(task_id: str, relative_path: str) -> Path:
     except OSError:
         raise HTTPException(status_code=404, detail="deliverable not found")
     return candidate
+
+
+@router.get("/vault-memory-links/file")
+def open_vault_memory_link_file(path: str = Query(..., min_length=1)):
+    """Serve a normalized Vault/Memory link through the dashboard auth boundary."""
+    resolved = kanban_db.resolve_vault_memory_link_path(path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="link target is outside allowed vault/memory roots")
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail="link target not found")
+    media_type, _encoding = mimetypes.guess_type(str(resolved))
+    return FileResponse(
+        resolved,
+        media_type=media_type or "text/plain",
+        filename=resolved.name,
+        content_disposition_type="inline",
+    )
 
 
 def _recent_result_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
@@ -1462,6 +1500,16 @@ def get_board(
         block_reason_map: dict[str, Optional[str]] = {}
         if blocked_ids:
             block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
+        planspec_source_map: dict[str, str] = {}
+        if tasks:
+            placeholders = ",".join("?" for _ in tasks)
+            planspec_source_map = {
+                row["id"]: row["planspec_source"]
+                for row in conn.execute(
+                    f"SELECT id, planspec_source FROM tasks WHERE id IN ({placeholders}) AND planspec_source IS NOT NULL",
+                    [t.id for t in tasks],
+                ).fetchall()
+            }
 
         for t in tasks:
             full = summary_map.get(t.id)
@@ -1485,6 +1533,15 @@ def get_board(
             # Chain key for the /control Flow board: equals the task's own id
             # for standalone tasks and chain roots, the sink's id for members.
             d["root_id"] = _resolve_root(t.id)
+            d["vault_memory_links"] = _with_vault_memory_file_urls(
+                kanban_db.vault_memory_links_for_task(
+                    t,
+                    latest_summary=full,
+                    planspec_source=planspec_source_map.get(t.id),
+                    source_char_limit=_VAULT_MEMORY_CARD_SOURCE_CHARS,
+                    limit=4,
+                )
+            )
             cost = cost_map.get(t.id)
             if cost is not None:
                 # Per-run cost read-out for the card footer — only attached when
@@ -1690,11 +1747,23 @@ def get_task(
         # Card->PlanSpec 1-hop: resolve the originating PlanSpec straight off the
         # task's own row (no parent->root walk) so the drawer can deep-link a
         # card to its spec. None for non-PlanSpec tasks.
-        task_d["planspec_source"] = kanban_db.planspec_source_for_task(conn, task_id)
+        planspec_source = kanban_db.planspec_source_for_task(conn, task_id)
+        task_d["planspec_source"] = planspec_source
+        comments = kanban_db.list_comments(conn, task_id)
+        events = kanban_db.list_events(conn, task_id)
+        task_d["vault_memory_links"] = _with_vault_memory_file_urls(
+            kanban_db.vault_memory_links_for_task(
+                task,
+                latest_summary=full_summary,
+                planspec_source=planspec_source,
+                comments=comments,
+                events=events,
+            )
+        )
         return {
             "task": task_d,
-            "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
-            "events": [_event_dict(e) for e in kanban_db.list_events(conn, task_id)],
+            "comments": [_comment_dict(c) for c in comments],
+            "events": [_event_dict(e) for e in events],
             "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
             "deliverables": _list_task_deliverables(task_id),
             "links": _links_for(conn, task_id),

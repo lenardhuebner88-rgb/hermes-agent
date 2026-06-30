@@ -1149,6 +1149,62 @@ def test_task_detail_includes_links_and_events(client):
     assert len(data["events"]) >= 1
 
 
+def test_task_detail_and_board_surface_vault_memory_links(client, tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    note = vault / "00-Canon" / "vision.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Vision\nCanon note.\n", encoding="utf-8")
+    pdf_note = vault / "00-Canon" / "brief.pdf"
+    pdf_note.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(vault))
+
+    memory_note = Path(os.environ["HERMES_HOME"]) / "memories" / "MEMORY.md"
+    memory_note.parent.mkdir(parents=True)
+    memory_note.write_text("# Hermes Memory\nManual note.\n", encoding="utf-8")
+
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "linked task",
+            "body": f"Use [[#Local Heading]], [[00-Canon/vision|Vision]], [[00-Canon/brief.pdf|Brief]] and {memory_note}",
+        },
+    ).json()["task"]
+
+    board = client.get(
+        "/api/plugins/kanban/board",
+        params={"card_body": "none", "card_diagnostics": "summary"},
+    ).json()
+    card = next(
+        task
+        for col in board["columns"]
+        for task in col["tasks"]
+        if task["id"] == created["id"]
+    )
+    assert [(link["kind"], link["display_path"]) for link in card["vault_memory_links"]] == [
+        ("vault", "00-Canon/vision.md"),
+        ("vault", "00-Canon/brief.pdf"),
+        ("memory", "MEMORY.md"),
+    ]
+    assert all(link["path"] != str(vault) for link in card["vault_memory_links"])
+    card_links = {link["display_path"]: link for link in card["vault_memory_links"]}
+    assert card_links["00-Canon/vision.md"]["url"]
+    assert card_links["00-Canon/vision.md"]["obsidian_url"].startswith("obsidian://open?")
+    assert card_links["00-Canon/brief.pdf"]["url"] is None
+    assert card_links["00-Canon/brief.pdf"]["obsidian_url"].startswith("obsidian://open?")
+    assert card_links["MEMORY.md"]["url"]
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()
+    links = detail["task"]["vault_memory_links"]
+    assert links[0]["obsidian_url"].startswith("obsidian://open?")
+    assert links[1]["path"] == str(pdf_note)
+    assert links[1]["url"] is None
+    assert links[2]["path"] == str(memory_note)
+
+    opened = client.get(links[0]["url"])
+    assert opened.status_code == 200
+    assert "Canon note." in opened.text
+
+
 def test_task_detail_404_on_unknown(client):
     r = client.get("/api/plugins/kanban/tasks/does-not-exist")
     assert r.status_code == 404
@@ -2808,7 +2864,8 @@ def test_task_detail_includes_runs(client):
     assert run["outcome"] == "completed"
     assert run["profile"] == "worker"
     assert run["summary"] == "tested on rate limiter"
-    assert run["metadata"] == {"changed_files": ["limiter.py"]}
+    md = {k: v for k, v in run["metadata"].items() if k != "cost"}
+    assert md == {"changed_files": ["limiter.py"]}
     assert run["ended_at"] is not None
 
 

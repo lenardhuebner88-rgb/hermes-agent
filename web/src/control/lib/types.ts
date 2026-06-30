@@ -387,6 +387,18 @@ export interface TaskArtifactLink extends TaskDeliverable {
   source: "metadata.artifacts" | "deliverables_preserved";
 }
 
+export interface VaultMemoryLink {
+  kind: "vault" | "memory";
+  label: string;
+  target: string;
+  source: string;
+  path: string | null;
+  display_path: string;
+  exists: boolean | null;
+  obsidian_url: string | null;
+  url: string | null;
+}
+
 export type VerifierVerdict = "APPROVED" | "REQUEST_CHANGES";
 export type VerificationState = "approved" | "request_changes" | "pending" | "ungated";
 export type ResultQualityState = "verifier_approved" | "ungated" | "rejected_needs_work" | "unknown_legacy";
@@ -500,6 +512,7 @@ export interface BoardTask {
   completed_at: number | null;
   branch_name: string | null;
   latest_summary: string | null;
+  vault_memory_links?: VaultMemoryLink[];
   /** Round D: block reason for blocked tasks (latest task_run summary). "operator hold" marks an operator hold. Older payloads → undefined/null. */
   block_reason?: string | null;
   auto_retry_count?: number;

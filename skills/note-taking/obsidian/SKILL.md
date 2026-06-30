@@ -59,3 +59,18 @@ Use `patch` for focused note changes when the current content gives you stable c
 ## Wikilinks
 
 Obsidian links notes with `[[Note Name]]` syntax. When creating notes, use these to link related content.
+
+## Kanban / Dashboard links
+
+Hermes Kanban and the `/control/flow` board recognize Vault and memory references in task bodies, task results, run summaries, comments, and PlanSpec provenance.
+
+Use one of these stable forms when a task should point back to knowledge:
+
+- `[[03-Agents/Hermes/receipts/example-receipt]]` for an Obsidian note under the configured vault root.
+- `[Vision](00-Canon/vision.md)` for a relative Markdown link under the vault root.
+- `/home/piet/vault/00-Canon/vision.md` for an absolute vault path.
+- `${HERMES_HOME}/memories/MEMORY.md`, `$HERMES_HOME/memories/MEMORY.md`, or `/home/piet/.memsearch/shared/memory/YYYY-MM-DD.md` for memory files.
+- `memsearch:<chunk-hash>` when only the episodic memory chunk is known.
+
+Prefer folder-qualified wikilinks such as `[[00-Canon/vision]]` over basename-only links. The dashboard resolves links without scanning the whole vault on every board poll, so fully qualified note paths are more reliable and cheaper.
+Browser previews are limited to text-like targets (`.md`, `.txt`, `.jsonl`); Vault links still prefer Obsidian when an `obsidian://` jump is available.

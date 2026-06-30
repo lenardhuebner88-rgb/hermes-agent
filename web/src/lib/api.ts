@@ -332,10 +332,17 @@ export async function authedFetch(
  * it, fetch the file through the authenticated API path, then navigate the new
  * tab to a browser-owned blob URL for viewing/downloading.
  */
-export async function openAuthedApiFile(url: string): Promise<void> {
+export async function openAuthedApiFile(url: string, label = "Hermes-Deliverable"): Promise<void> {
+  const safeLabel = label.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char] ?? char));
   const opened = window.open("about:blank", "_blank");
   if (!opened) {
-    throw new Error("Der Browser hat den Deliverable-Tab blockiert.");
+    throw new Error(`Der Browser hat den ${label}-Tab blockiert.`);
   }
   try {
     opened.opener = null;
@@ -343,7 +350,7 @@ export async function openAuthedApiFile(url: string): Promise<void> {
     /* best-effort noopener hardening */
   }
   try {
-    opened.document?.write("<p>Hermes-Deliverable wird geladen…</p>");
+    opened.document?.write(`<p>${safeLabel} wird geladen…</p>`);
   } catch {
     /* some browsers disallow writing to the placeholder; navigation below still works */
   }
@@ -355,7 +362,7 @@ export async function openAuthedApiFile(url: string): Promise<void> {
     } catch {
       /* ignore */
     }
-    throw new Error(`Deliverable konnte nicht geladen werden (${res.status}: ${text})`);
+    throw new Error(`${label} konnte nicht geladen werden (${res.status}: ${text})`);
   }
   const blob = await res.blob();
   const blobUrl = URL.createObjectURL(blob);

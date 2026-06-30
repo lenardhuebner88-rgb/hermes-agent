@@ -68,6 +68,21 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).not.toMatch(/href=\{d\.url\}/);
   });
 
+  it("surfaces Vault/Memory links with loading, empty, and missing-target states", () => {
+    expect(src).toMatch(/VaultMemoryCompactRail/);
+    expect(src).toMatch(/VaultMemoryLinksPanel/);
+    expect(src).toMatch(/vault_memory_links/);
+    expect(src).toMatch(/section aria-label="Vault-Memory-Verlinkungen"/);
+    expect(src).toMatch(/Keine Vault\/Memory-Links/);
+    expect(src).toMatch(/Detaildaten nicht geladen/);
+    expect(src).toMatch(/Ziel fehlt/);
+    expect(src).toMatch(/SkeletonCard rows=\{2\}/);
+    expect(src).toMatch(/Vault\/Memory-Link/);
+    expect(src).toMatch(/Obsidian/);
+    expect(src).toMatch(/Vorschau/);
+    expect(src).toMatch(/obsidian_url/);
+  });
+
   it("does not promote raw task-detail parents into certain blocking-cause copy", () => {
     expect(src).not.toMatch(/Wartet auf direkte Parents/);
     expect(src).not.toMatch(/Fan-in: .*Parents müssen abgeschlossen sein/);

@@ -86,6 +86,7 @@ import sys
 import threading
 import logging
 import time
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1275,6 +1276,391 @@ class Event:
     payload: Optional[dict]
     created_at: int
     run_id: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Vault / Memory link extraction
+# ---------------------------------------------------------------------------
+
+_DEFAULT_VAULT_ROOT = Path("/home/piet/vault")
+_VAULT_WIKILINK_RE = re.compile(r"(?<!!)\[\[([^\]\n]+)\]\]")
+_MARKDOWN_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\(([^)\n]+)\)")
+_MEMSEARCH_REF_RE = re.compile(r"\bmemsearch:([a-f0-9]{12,64})\b", re.IGNORECASE)
+_ABS_VAULT_MEMORY_PATH_RE = re.compile(
+    r"(?<![\w:/])("
+    r"\$(?:\{HERMES_HOME\}|HERMES_HOME)/memories/[^\s)\],;]+"
+    r"|"
+    r"~/(?:\.hermes/memories|\.memsearch/shared/memory|\.codex/memories)/[^\s)\],;]+"
+    r"|/home/piet/(?:vault|\.hermes/memories|\.memsearch/shared/memory|\.codex/memories)/[^\s)\],;]+"
+    r"|\bvault/[^\s)\],;]+"
+    r"|/[^\s)\],;]+"
+    r")"
+)
+_TRAILING_LINK_PUNCTUATION = ".,;:!?"
+_LINKABLE_FILE_SUFFIXES = {".md", ".txt", ".jsonl"}
+_MARKDOWN_LINK_TITLE_RE = re.compile(r"^(.+?)\s+(\"[^\"]*\"|'[^']*'|\([^)]*\))$")
+
+
+def _default_vault_root() -> Path:
+    raw = os.environ.get("OBSIDIAN_VAULT_PATH", "").strip()
+    return Path(raw).expanduser() if raw else _DEFAULT_VAULT_ROOT
+
+
+def _default_memory_roots() -> list[Path]:
+    roots: list[Path] = []
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        roots.extend([get_hermes_home() / "memories", get_default_hermes_root() / "memories"])
+    except Exception:
+        roots.append(Path.home() / ".hermes" / "memories")
+    roots.extend([
+        Path.home() / ".memsearch" / "shared" / "memory",
+        Path.home() / ".codex" / "memories",
+    ])
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.expanduser())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root.expanduser())
+    return deduped
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _relative_display_path(path: Path, root: Path) -> str:
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _clean_link_target(raw: str) -> str:
+    target = (raw or "").strip().strip("<>")
+    if not target:
+        return ""
+    if " " in target and not target.startswith("obsidian://"):
+        # Drop optional Markdown link titles: [x](path "title").
+        titled = _MARKDOWN_LINK_TITLE_RE.match(target)
+        if titled:
+            target = titled.group(1).strip()
+    while target and target[-1] in _TRAILING_LINK_PUNCTUATION:
+        target = target[:-1]
+    return os.path.expandvars(unquote(target))
+
+
+def _candidate_from_obsidian_target(target: str, vault_root: Path) -> Path | None:
+    path_part = target.split("|", 1)[0].split("#", 1)[0].strip()
+    path_part = path_part.replace("\\", "/")
+    if not path_part:
+        return None
+    path = Path(path_part).expanduser()
+    if path.is_absolute():
+        return path
+    if path.suffix == "":
+        path = path.with_suffix(".md")
+    return vault_root / path
+
+
+def _candidate_from_target(target: str, vault_root: Path) -> Path | None:
+    if not target:
+        return None
+    if target.startswith("obsidian://"):
+        parsed = urlparse(target)
+        query = parse_qs(parsed.query)
+        raw_path = (query.get("path") or query.get("file") or [""])[0]
+        return Path(raw_path).expanduser() if raw_path else None
+    if target.startswith("file://"):
+        parsed = urlparse(target)
+        return Path(unquote(parsed.path)).expanduser()
+    if target.startswith("vault/"):
+        return vault_root / target.removeprefix("vault/")
+    path = Path(target).expanduser()
+    if path.is_absolute():
+        return path
+    if path.suffix.lower() in _LINKABLE_FILE_SUFFIXES:
+        return vault_root / path
+    return None
+
+
+def _classify_vault_memory_path(
+    path: Path,
+    *,
+    vault_root: Path,
+    memory_roots: Sequence[Path],
+) -> tuple[str, Path, str] | None:
+    expanded = path.expanduser()
+    if _path_under(expanded, vault_root):
+        return ("vault", expanded, _relative_display_path(expanded, vault_root))
+    for root in memory_roots:
+        if _path_under(expanded, root):
+            return ("memory", expanded, _relative_display_path(expanded, root))
+    return None
+
+
+def _vault_memory_link(
+    *,
+    kind: str,
+    label: str,
+    target: str,
+    source: str,
+    path: Path | None = None,
+    display_path: str | None = None,
+    exists: bool | None = None,
+    obsidian_url: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "label": label or display_path or target,
+        "target": target,
+        "source": source,
+        "path": str(path) if path is not None else None,
+        "display_path": display_path or (path.as_posix() if path is not None else target),
+        "exists": exists,
+        "obsidian_url": obsidian_url,
+        "url": None,
+    }
+
+
+def _link_for_path(
+    path: Path,
+    *,
+    label: str,
+    target: str,
+    source: str,
+    vault_root: Path,
+    memory_roots: Sequence[Path],
+) -> dict[str, Any] | None:
+    classified = _classify_vault_memory_path(path, vault_root=vault_root, memory_roots=memory_roots)
+    if classified is None:
+        return None
+    kind, resolved_path, display_path = classified
+    exists = resolved_path.exists()
+    if exists and resolved_path.is_dir():
+        return None
+    if not exists and resolved_path.suffix == "":
+        return None
+    obsidian_url = (
+        "obsidian://open?" + urlencode({"path": str(resolved_path)})
+        if kind == "vault"
+        else None
+    )
+    return _vault_memory_link(
+        kind=kind,
+        label=label,
+        target=target,
+        source=source,
+        path=resolved_path,
+        display_path=display_path,
+        exists=exists,
+        obsidian_url=obsidian_url,
+    )
+
+
+def _append_link(links: list[dict[str, Any]], seen: set[tuple[str, str]], link: dict[str, Any] | None) -> None:
+    if link is None:
+        return
+    key = (str(link.get("kind") or ""), str(link.get("path") or link.get("target") or ""))
+    if key in seen:
+        return
+    seen.add(key)
+    links.append(link)
+
+
+def parse_vault_memory_links(
+    text: str | None,
+    *,
+    source: str = "text",
+    vault_root: Path | str | None = None,
+    memory_roots: Sequence[Path | str] | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Extract Obsidian Vault and Hermes memory references from Markdown text.
+
+    Recognized forms are intentionally common and low-magic:
+    ``[[03-Agents/Hermes/receipts/x]]``, Markdown/file links to allowed roots,
+    bare ``/home/piet/vault/...`` / ``vault/...`` paths, and
+    ``memsearch:<chunk-hash>`` anchors. Relative wikilinks resolve under the
+    configured Obsidian vault root; basename-wide vault scans are avoided so
+    board polling stays bounded.
+    """
+    if not text:
+        return []
+    vault = Path(vault_root).expanduser() if vault_root is not None else _default_vault_root()
+    memories = (
+        [Path(root).expanduser() for root in memory_roots]
+        if memory_roots is not None
+        else _default_memory_roots()
+    )
+    body = str(text)
+    links: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for match in _VAULT_WIKILINK_RE.finditer(body):
+        raw = _clean_link_target(match.group(1))
+        if not raw:
+            continue
+        label = raw.split("|", 1)[1].strip() if "|" in raw else raw
+        path = _candidate_from_obsidian_target(raw, vault)
+        if path is None:
+            continue
+        _append_link(
+            links,
+            seen,
+            _link_for_path(path, label=label, target=f"[[{raw}]]", source=source, vault_root=vault, memory_roots=memories),
+        )
+        if len(links) >= limit:
+            return links
+
+    for match in _MARKDOWN_LINK_RE.finditer(body):
+        label = (match.group(1) or "").strip()
+        target = _clean_link_target(match.group(2))
+        path = _candidate_from_target(target, vault)
+        if path is None:
+            continue
+        _append_link(
+            links,
+            seen,
+            _link_for_path(path, label=label or target, target=target, source=source, vault_root=vault, memory_roots=memories),
+        )
+        if len(links) >= limit:
+            return links
+
+    for match in _ABS_VAULT_MEMORY_PATH_RE.finditer(body):
+        target = _clean_link_target(match.group(1))
+        path = _candidate_from_target(target, vault)
+        if path is None:
+            continue
+        _append_link(
+            links,
+            seen,
+            _link_for_path(path, label=target, target=target, source=source, vault_root=vault, memory_roots=memories),
+        )
+        if len(links) >= limit:
+            return links
+
+    for match in _MEMSEARCH_REF_RE.finditer(body):
+        chunk_hash = match.group(1)
+        _append_link(
+            links,
+            seen,
+            _vault_memory_link(
+                kind="memory",
+                label=f"memsearch:{chunk_hash[:12]}",
+                target=f"memsearch:{chunk_hash}",
+                source=source,
+                display_path=f"memsearch:{chunk_hash}",
+                exists=None,
+            ),
+        )
+        if len(links) >= limit:
+            return links
+
+    return links
+
+
+def _iter_payload_strings(value: Any, *, max_items: int = 40) -> list[str]:
+    strings: list[str] = []
+
+    def walk(node: Any) -> None:
+        if len(strings) >= max_items:
+            return
+        if isinstance(node, str):
+            strings.append(node)
+        elif isinstance(node, Mapping):
+            for item in node.values():
+                walk(item)
+                if len(strings) >= max_items:
+                    break
+        elif isinstance(node, Sequence) and not isinstance(node, (bytes, bytearray, str)):
+            for item in node:
+                walk(item)
+                if len(strings) >= max_items:
+                    break
+
+    walk(value)
+    return strings
+
+
+def vault_memory_links_for_task(
+    task: Task,
+    *,
+    latest_summary: str | None = None,
+    planspec_source: str | None = None,
+    comments: Sequence[Comment] | None = None,
+    events: Sequence[Event] | None = None,
+    vault_root: Path | str | None = None,
+    memory_roots: Sequence[Path | str] | None = None,
+    source_char_limit: int | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_from(text: str | None, source: str) -> None:
+        nonlocal links
+        if len(links) >= limit:
+            return
+        if source_char_limit is not None and text is not None:
+            text = text[:source_char_limit]
+        for link in parse_vault_memory_links(
+            text,
+            source=source,
+            vault_root=vault_root,
+            memory_roots=memory_roots,
+            limit=limit - len(links),
+        ):
+            _append_link(links, seen, link)
+            if len(links) >= limit:
+                break
+
+    add_from(task.title, "title")
+    add_from(task.body, "body")
+    add_from(task.result, "result")
+    add_from(latest_summary, "latest_summary")
+    add_from(planspec_source, "planspec_source")
+    for comment in comments or ():
+        add_from(comment.body, f"comment:{comment.id}")
+    for event in events or ():
+        for value in _iter_payload_strings(event.payload):
+            add_from(value, f"event:{event.kind}")
+            if len(links) >= limit:
+                break
+        if len(links) >= limit:
+            break
+    return links
+
+
+def resolve_vault_memory_link_path(
+    raw_path: str,
+    *,
+    vault_root: Path | str | None = None,
+    memory_roots: Sequence[Path | str] | None = None,
+) -> Path | None:
+    """Resolve a client-supplied link path if it is inside an allowed root."""
+    target = _clean_link_target(raw_path)
+    vault = Path(vault_root).expanduser() if vault_root is not None else _default_vault_root()
+    memories = (
+        [Path(root).expanduser() for root in memory_roots]
+        if memory_roots is not None
+        else _default_memory_roots()
+    )
+    path = _candidate_from_target(target, vault) or Path(target).expanduser()
+    classified = _classify_vault_memory_path(path, vault_root=vault, memory_roots=memories)
+    if classified is None:
+        return None
+    resolved = classified[1].resolve(strict=False)
+    if resolved.suffix.lower() not in _LINKABLE_FILE_SUFFIXES:
+        return None
+    return resolved
 
 
 # ---------------------------------------------------------------------------

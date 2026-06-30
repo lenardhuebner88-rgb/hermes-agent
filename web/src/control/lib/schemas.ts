@@ -416,6 +416,18 @@ const BoardSourceErrorSchema = z.object({
   retry_count: z.coerce.number().catch(0),
 });
 
+const VaultMemoryLinkSchema = z.object({
+  kind: z.enum(["vault", "memory"]).catch("vault"),
+  label: z.string().catch(""),
+  target: z.string().catch(""),
+  source: z.string().catch(""),
+  path: z.string().nullable().catch(null),
+  display_path: z.string().catch(""),
+  exists: z.boolean().nullable().catch(null),
+  obsidian_url: z.string().nullable().catch(null),
+  url: z.string().nullable().catch(null),
+});
+
 export const BoardTaskSchema = z.object({
   id: z.coerce.string(),
   title: z.string().catch("Ohne Titel"),
@@ -427,6 +439,7 @@ export const BoardTaskSchema = z.object({
   completed_at: z.coerce.number().nullable().catch(null),
   branch_name: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
+  vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
   auto_retry_count: z.coerce.number().catch(0),
   link_counts: z.object({ parents: z.coerce.number().catch(0), children: z.coerce.number().catch(0) }).catch({ parents: 0, children: 0 }),
   comment_count: z.coerce.number().catch(0),
@@ -1254,6 +1267,7 @@ const TaskDetailTaskSchema = z.object({
   status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("todo"),
   assignee: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
+  vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
 }).partial().catch({});
 const TaskLinksSchema = z.object({
   parents: z.array(z.coerce.string()).catch([]),

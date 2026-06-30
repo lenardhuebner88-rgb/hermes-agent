@@ -98,6 +98,64 @@ def test_create_task_rejects_unknown_review_tier(kanban_home):
             kb.create_task(conn, title="bad tier", assignee="coder", review_tier="bogus")
 
 
+def test_parse_vault_memory_links_recognizes_obsidian_and_memory_targets(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    canon = vault / "00-Canon"
+    canon.mkdir(parents=True)
+    note = canon / "vision.md"
+    note.write_text("# Vision\n", encoding="utf-8")
+    spaced_note = canon / "my note.md"
+    spaced_note.write_text("# Note with spaces\n", encoding="utf-8")
+    pdf_note = canon / "brief.pdf"
+    pdf_note.write_bytes(b"%PDF-1.4\n")
+
+    hermes_home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    memory_root = hermes_home / "memories"
+    memory_root.mkdir(parents=True)
+    memory_note = memory_root / "MEMORY.md"
+    memory_note.write_text("# Memory\n", encoding="utf-8")
+    other_memory_note = memory_root / "OTHER.md"
+    other_memory_note.write_text("# Other Memory\n", encoding="utf-8")
+    plain_memory_note = memory_root / "PLAIN.txt"
+    plain_memory_note.write_text("Plain memory\n", encoding="utf-8")
+
+    links = kb.parse_vault_memory_links(
+        (
+            "See [[00-Canon/vision|Vision]], [[#Local Heading]], [[00-Canon/brief.pdf|Brief]], "
+            "[space note](00-Canon/my note.md \"title\"), "
+            "[manual memory](${HERMES_HOME}/memories/MEMORY.md), "
+            "${HERMES_HOME}/memories/OTHER.md, $HERMES_HOME/memories/PLAIN.txt, vault/00-Canon, "
+            "and memsearch:abcdef1234567890."
+        ),
+        source="body",
+        vault_root=vault,
+        memory_roots=[memory_root],
+    )
+
+    assert [link["kind"] for link in links] == ["vault", "vault", "vault", "memory", "memory", "memory", "memory"]
+    assert links[0]["path"] == str(note)
+    assert links[0]["display_path"] == "00-Canon/vision.md"
+    assert links[0]["obsidian_url"].startswith("obsidian://open?")
+    assert links[0]["exists"] is True
+    assert links[1]["path"] == str(pdf_note)
+    assert links[1]["display_path"] == "00-Canon/brief.pdf"
+    assert links[1]["obsidian_url"].startswith("obsidian://open?")
+    assert links[1]["url"] is None
+    assert links[2]["path"] == str(spaced_note)
+    assert links[2]["display_path"] == "00-Canon/my note.md"
+    assert links[3]["path"] == str(memory_note)
+    assert links[3]["display_path"] == "MEMORY.md"
+    assert links[3]["url"] is None
+    assert links[4]["path"] == str(other_memory_note)
+    assert links[4]["display_path"] == "OTHER.md"
+    assert links[5]["path"] == str(plain_memory_note)
+    assert links[5]["display_path"] == "PLAIN.txt"
+    assert links[6]["path"] is None
+    assert links[6]["target"] == "memsearch:abcdef1234567890"
+    assert all(link["path"] != str(vault) for link in links)
+
+
 _PLANSPEC_COLS = [
     "planspec_subtask_id",
     "planspec_source",
