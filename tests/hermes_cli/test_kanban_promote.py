@@ -78,7 +78,36 @@ def test_promote_with_force_bypasses_dependency_check(conn):
         conn, child, actor="tester", reason="recovery", force=True
     )
     assert ok and err is None
-    assert kb.get_task(conn, child).status == "ready"
+    task = kb.get_task(conn, child)
+    assert task is not None
+    assert task.status == "ready"
+
+
+def test_promote_force_does_not_release_blocked_dependency_wait(conn):
+    """A blocked child with open parents is a dependency-wait hold, not a
+    stale todo. Even a manual force promote must not make it runnable while
+    the dependency is still open; the child can promote once the parent is
+    actually done."""
+    child, parents = _stuck_todo(conn, parents_done=False)
+    conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child,))
+
+    ok, err = kb.promote_task(
+        conn, child, actor="tester", reason="dependency wait", force=True
+    )
+
+    assert ok is False
+    assert err is not None and "dependency wait" in err
+    assert parents[0] in err
+    task = kb.get_task(conn, child)
+    assert task is not None
+    assert task.status == "blocked"
+    assert kb.claim_task(conn, child) is None
+
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parents[0],))
+    kb.recompute_ready(conn)
+    task = kb.get_task(conn, child)
+    assert task is not None
+    assert task.status == "ready"
 
 
 def test_promote_emits_audit_event(conn):
