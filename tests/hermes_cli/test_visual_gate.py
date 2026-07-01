@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.request import urlopen
 
 from hermes_cli import kanban_worktrees as kwt
 
@@ -133,3 +134,24 @@ def test_run_visual_gate_tears_down_after_failure(tmp_path, monkeypatch):
     assert detail is not None
     assert "dashboard unreachable" in detail
     assert stopped == [True]
+
+
+def test_visual_gate_static_server_serves_fresh_web_dist_marker(tmp_path):
+    web_dist = tmp_path / "fresh-web-dist"
+    (web_dist / "assets").mkdir(parents=True)
+    marker = "fresh-visual-gate-marker-5a797539"
+    (web_dist / "index.html").write_text(
+        f"<!doctype html><html><head><title>{marker}</title></head><body></body></html>",
+        encoding="utf-8",
+    )
+
+    server = kwt._VisualGateStaticServer(web_dist)
+    try:
+        url = server.start()
+        with urlopen(url, timeout=5) as response:
+            body = response.read().decode("utf-8")
+    finally:
+        server.stop()
+
+    assert marker in body
+
