@@ -34,7 +34,9 @@ def client(tmp_path, monkeypatch):
     prev_required = getattr(web_server.app.state, "auth_required", None)
     web_server.app.state.bound_host = "127.0.0.1"
     web_server.app.state.auth_required = False
-    yield TestClient(web_server.app, base_url="http://127.0.0.1:9119")
+    test_client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
+    test_client._hermes_test_root = tmp_path  # type: ignore[attr-defined]
+    yield test_client
     web_server.app.state.bound_host = prev_host
     web_server.app.state.auth_required = prev_required
 
@@ -85,6 +87,51 @@ def test_item_unknown_id_is_404_and_gate_applies(client):
         "/api/library/item", params={"id": "research::t_00000000"}, headers=HEADERS,
     )
     assert res.status_code == 404
+
+
+def test_knowledge_route_exposes_vault_plans_metadata(client):
+    vault_root = client._hermes_test_root / "vault" / "03-Agents"  # type: ignore[attr-defined]
+    plan_path = vault_root / "Hermes" / "plans" / "2026-07-01-dashboard-refresh.md"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        """---
+created: 2026-07-01
+owner: Hermes
+type: implementation
+status: active
+---
+# Dashboard Refresh
+
+Widgets härten.
+""",
+        encoding="utf-8",
+    )
+
+    assert client.get("/api/library/knowledge").status_code == 401
+    res = client.get("/api/library/knowledge", headers=HEADERS)
+    assert res.status_code == 200
+    payload = res.json()
+    collection = next(item for item in payload["collections"] if item["id"] == "vault-plans")
+    assert collection["title"] == "Vault Plans"
+    assert collection["accent"] == "rose"
+    assert collection["icon"] == "Newspaper"
+    assert len(collection["docs"]) == 1
+    doc = collection["docs"][0]
+    assert doc["title"] == "Dashboard Refresh"
+    assert doc["created"] == "2026-07-01"
+    assert doc["owner"] == "Hermes"
+    assert doc["type"] == "implementation"
+    assert doc["status"] == "active"
+
+    detail = client.get("/api/library/knowledge/doc", params={"id": doc["id"]}, headers=HEADERS)
+    assert detail.status_code == 200
+    detail_doc = detail.json()
+    assert detail_doc["source_ref"] == doc["source_ref"]
+    assert detail_doc["source_ref"].endswith("Hermes/plans/2026-07-01-dashboard-refresh.md")
+    assert detail_doc["created"] == "2026-07-01"
+    assert detail_doc["owner"] == "Hermes"
+    assert detail_doc["type"] == "implementation"
+    assert detail_doc["status"] == "active"
 
 
 def test_saved_search_routes_create_list_update_delete(client):

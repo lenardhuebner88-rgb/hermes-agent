@@ -26,6 +26,20 @@ const doc = (over: Partial<KnowledgeDoc>): KnowledgeDoc => ({
   ...over,
 });
 
+const vaultPlan = (over: Partial<KnowledgeDoc> = {}): KnowledgeDoc => doc({
+  id: "kb::plan::Hermes/plans/dashboard-refresh.md",
+  collection: "vault-plans",
+  title: "Dashboard Refresh",
+  summary: "Widgets härten.",
+  source_ref: "Hermes/plans/dashboard-refresh.md",
+  tags: ["vault-plans", "owner:Hermes", "status:active"],
+  created: "2026-07-01",
+  owner: "Hermes",
+  type: "implementation",
+  status: "active",
+  ...over,
+});
+
 describe("DocCard", () => {
   it("zeigt Typ, Titel, Kurzbeschreibung, Quelle, Abschnittszahl und Tags", () => {
     const html = renderToStaticMarkup(<DocCard doc={doc({})} onOpen={() => {}} />);
@@ -100,8 +114,37 @@ describe("helpers", () => {
 
   it("knowledgeType liest type:-Tags und hat Collection-Fallbacks", () => {
     expect(knowledgeType(doc({ tags: ["llm-wiki", "type:concept"] }))).toBe("concept");
+    expect(knowledgeType(vaultPlan())).toBe("plan");
     expect(knowledgeType(doc({ collection: "skills", tags: [] }))).toBe("skill");
     expect(knowledgeTypeLabel("concept")).toBe("Konzepte");
+    expect(knowledgeTypeLabel("implementation")).toBe("Implementierung");
+  });
+
+  it("akzeptiert das Vault-Plans-Backend-Schema inklusive Metadaten, Icon und Akzent", () => {
+    const plan = vaultPlan({ tags: ["vault-plans", "type:planspec", "status:done"] });
+    const catalog: KnowledgeCatalog = {
+      collections: [
+        {
+          id: "vault-plans",
+          title: "Vault Plans",
+          description: "Vault-Plan-Dokumente aus 03-Agents.",
+          accent: "rose",
+          icon: "Newspaper",
+          docs: [plan],
+        },
+      ],
+      count: 1,
+      query: "",
+      now: 1,
+    };
+
+    expect(plan.created).toBe("2026-07-01");
+    expect(plan.owner).toBe("Hermes");
+    expect(plan.type).toBe("implementation");
+    expect(plan.status).toBe("active");
+    expect(catalog.collections[0].accent).toBe("rose");
+    expect(catalog.collections[0].icon).toBe("Newspaper");
+    expect(typeCounts(catalog.collections)).toEqual([{ id: "planspec", label: "PlanSpec", count: 1 }]);
   });
 
   it("typeCounts sortiert bekannte Typen stabil", () => {
