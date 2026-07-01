@@ -5,7 +5,7 @@ Lesesaal (``library_view``): ein **kuratiertes, thema-geordnetes Nachschlagewerk
 des dauerhaften Referenzwissens auf dem Homeserver — gedacht für Agenten *und*
 den Operator zum Nachschlagen.
 
-Vier Sammlungen (Regale):
+Sechs Sammlungen (Regale):
   1. **Kanon** — ``~/vault/00-Canon/*.md`` (geteilte Cross-Agent-Wahrheit:
      Topologie, Konventionen & Gates, Roster, Projekt-Landkarte, Memory).
   2. **Orchestrierung** — ``~/orchestration/CLAUDE.md`` (Verfassung) +
@@ -16,6 +16,8 @@ Vier Sammlungen (Regale):
      Rollen).
   5. **LLM-Wiki** — ``~/llm-wiki/wiki/**/*.md`` (agentisch gepflegte Quellen,
      Konzepte, Entitäten, Abfragen und Synthesen).
+  6. **Vault Plans** — ``~/vault/03-Agents/*/plans/**/*.md`` (Plan-Dokumente
+     mit Frontmatter-Parse für Titel, Status, Tags und Summary).
 
 Sicherheits-Vertrag (wie ``library_view``): read-only, unter ``/api/`` (erbt
 das Session-Gate, nie in PUBLIC_API_PATHS), Blocking-FS via ``asyncio.to_thread``.
@@ -46,6 +48,13 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # "concepts/foo.md", aber keine Punkte ausser ".md", keine Backslashes, kein
 # ".." und keine Request-gelieferte absolute Pfadkomponente.
 _LLM_WIKI_REL_RE = re.compile(r"^(?:[a-z0-9][a-z0-9_-]*/)*[a-z0-9][a-z0-9_-]*\.md$")
+# Relativer Plan-Pfad unter ~/vault/03-Agents. Erwartet Agent-Verzeichnis +
+# plans/ + optionale Unterordner. Agent-Ordner im Vault verwenden teils CamelCase
+# und Bindestriche (Hermes, Claude-Code), Pfadsegmente bleiben traversal-sicher.
+_VAULT_PLAN_REL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/plans/(?:[A-Za-z0-9][A-Za-z0-9_-]*/)*"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*\.md$"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +79,10 @@ def _agents_root() -> Path:
 
 def _llm_wiki_root() -> Path:
     return Path.home() / "llm-wiki" / "wiki"
+
+
+def _vault_agents_root() -> Path:
+    return Path.home() / "vault" / "03-Agents"
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +138,14 @@ _COLLECTIONS: tuple[_Collection, ...] = (
         "Abfragen und Synthesen — direkt aus ~/llm-wiki/wiki.",
         accent="indigo",
         icon="Brain",
+    ),
+    _Collection(
+        "vault-plans",
+        "Vault Plans",
+        "Plan-Dokumente aus ~/vault/03-Agents/*/plans — mit Titel, Status, Tags "
+        "und Summary direkt aus dem Frontmatter.",
+        accent="rose",
+        icon="Newspaper",
     ),
 )
 
@@ -226,9 +247,10 @@ class _KbDoc:
     updated_ts: int
     heading_count: int
     body_md: Optional[str] = field(default=None, repr=False)
+    extra: dict[str, str] = field(default_factory=dict)
 
     def as_card(self) -> dict[str, Any]:
-        return {
+        card: dict[str, Any] = {
             "id": self.id,
             "collection": self.collection,
             "title": self.title,
@@ -238,6 +260,8 @@ class _KbDoc:
             "updated_ts": self.updated_ts,
             "heading_count": self.heading_count,
         }
+        card.update(self.extra)
+        return card
 
     def as_detail(self) -> dict[str, Any]:
         d = self.as_card()
@@ -325,6 +349,39 @@ def _split_frontmatter_rich(raw: str) -> tuple[dict[str, Any], str]:
         if lines[idx].strip() == "---":
             meta = _parse_frontmatter_data("\n".join(lines[1:idx]))
             return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
+    return {}, raw
+
+
+def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> Optional[tuple[dict[str, Any], str]]:
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, raw
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() != "---":
+            continue
+        fm_text = "\n".join(lines[1:idx])
+        try:
+            import yaml
+
+            data = yaml.safe_load(fm_text)
+        except Exception as exc:
+            logger.warning(
+                "knowledge: skipping vault plan with malformed frontmatter: %s (%s)",
+                rel,
+                exc,
+            )
+            return None
+        if data is None:
+            meta: dict[str, Any] = {}
+        elif isinstance(data, dict):
+            meta = {str(k).lower(): v for k, v in data.items()}
+        else:
+            logger.warning(
+                "knowledge: skipping vault plan with malformed frontmatter: %s (frontmatter is not a mapping)",
+                rel,
+            )
+            return None
+        return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
     return {}, raw
 
 
@@ -455,6 +512,57 @@ def _build_llm_wiki(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
         updated_ts=updated,
         heading_count=_count_headings(body),
         body_md=body if with_body else None,
+    )
+
+
+def _build_vault_plan(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
+    if not _VAULT_PLAN_REL_RE.match(rel):
+        return None
+    root = _vault_agents_root().resolve(strict=False)
+    target = (root / rel).resolve(strict=False)
+    if not str(target).startswith(str(root) + "/") or not target.is_file():
+        return None
+    raw = _read_text(target)
+    if raw is None:
+        return None
+    parsed = _split_vault_plan_frontmatter(raw, rel=rel)
+    if parsed is None:
+        return None
+    meta, body = parsed
+    title = _meta_string(meta, "title") or _first_heading(body) or Path(rel).stem.replace("-", " ").title()
+    summary = (
+        _meta_string(meta, "summary")
+        or _meta_string(meta, "description")
+        or _summarize(body, title)
+    )
+    extra = {
+        key: value
+        for key in ("created", "owner", "type", "status")
+        if (value := _meta_string(meta, key))
+    }
+    plan_type = extra.get("type") or "plan"
+    status = extra.get("status", "")
+    tags = ["vault-plan", f"type:{plan_type}"]
+    if status:
+        tags.append(f"status:{status}")
+    for tag in _meta_string_list(meta, "tags"):
+        if tag not in tags:
+            tags.append(tag)
+    try:
+        updated = int(target.stat().st_mtime)
+    except OSError:
+        updated = 0
+    return _KbDoc(
+        id=f"kb::plan::{rel}",
+        collection="vault-plans",
+        title=title,
+        summary=summary,
+        source_ref=f"vault/03-Agents/{rel}",
+        tags=tags,
+        updated_ts=updated,
+        heading_count=_count_headings(body),
+        body_md=body if with_body else None,
+        extra=extra,
     )
 
 
@@ -612,6 +720,27 @@ def _scan_llm_wiki_rels() -> list[str]:
     return sorted(rels, key=sort_key)
 
 
+def _scan_vault_plan_rels() -> list[str]:
+    root = _vault_agents_root()
+    if not root.is_dir():
+        return []
+    try:
+        entries = list(root.glob("*/plans/**/*.md"))
+    except OSError:
+        return []
+    rels: list[str] = []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        try:
+            rel = entry.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if _VAULT_PLAN_REL_RE.match(rel):
+            rels.append(rel)
+    return sorted(rels, key=str.casefold)
+
+
 def _collect_docs(*, with_bodies: bool) -> list[_KbDoc]:
     docs: list[_KbDoc] = []
     for static in _STATIC_DOCS:
@@ -643,6 +772,14 @@ def _collect_docs(*, with_bodies: bool) -> list[_KbDoc]:
             built = _build_llm_wiki(rel, with_body=with_bodies)
         except Exception:
             logger.debug("knowledge: llm-wiki page failed: %s", rel, exc_info=True)
+            built = None
+        if built is not None:
+            docs.append(built)
+    for rel in _scan_vault_plan_rels():
+        try:
+            built = _build_vault_plan(rel, with_body=with_bodies)
+        except Exception:
+            logger.debug("knowledge: vault plan failed: %s", rel, exc_info=True)
             built = None
         if built is not None:
             docs.append(built)
@@ -724,6 +861,10 @@ def read_knowledge_doc(doc_id: str) -> Optional[dict[str, Any]]:
         if not _LLM_WIKI_REL_RE.match(rest):
             raise ValueError("invalid llm-wiki path")
         built = _build_llm_wiki(rest, with_body=True)
+    elif kind == "plan":
+        if not _VAULT_PLAN_REL_RE.match(rest):
+            raise ValueError("invalid vault plan path")
+        built = _build_vault_plan(rest, with_body=True)
     else:
         raise ValueError("unknown knowledge kind")
     return built.as_detail() if built is not None else None

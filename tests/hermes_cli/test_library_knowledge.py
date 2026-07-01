@@ -12,7 +12,7 @@ from hermes_cli import library_knowledge as kn
 
 @pytest.fixture
 def kb_home(tmp_path, monkeypatch):
-    """Isolierter $HOME mit Canon-, Orchestrierungs-, Skill- und Rollen-Quellen."""
+    """Isolierter $HOME mit Canon-, Orchestrierungs-, Skill-, Rollen- und Plan-Quellen."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     canon = tmp_path / "vault" / "00-Canon"
@@ -135,15 +135,64 @@ def kb_home(tmp_path, monkeypatch):
         "# Karpathy LLM Wiki Pattern\n\nQuelle.\n", encoding="utf-8"
     )
     (wiki / "lint" / "auto-health-check.md").write_text("# Auto Health Check\n\nOK.\n", encoding="utf-8")
+
+    plans = tmp_path / "vault" / "03-Agents" / "Hermes" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "dashboard-refresh.md").write_text(
+        "---\n"
+        "title: \"Dashboard Refresh\"\n"
+        "created: 2026-07-01\n"
+        "owner: Hermes\n"
+        "type: implementation\n"
+        "status: active\n"
+        "summary: Additive UI refresh plan.\n"
+        "tags:\n"
+        "  - dashboard\n"
+        "  - slice-b\n"
+        "---\n\n"
+        "# Dashboard Refresh\n\nPlan body mentions async widgets.\n\n## Steps\n\n- Build.\n",
+        encoding="utf-8",
+    )
+    (plans / "nested").mkdir()
+    (plans / "nested" / "fallback.md").write_text(
+        "# Fallback Plan\n\nFirst paragraph becomes the summary.\n",
+        encoding="utf-8",
+    )
     return tmp_path
 
 
 def test_catalog_has_collections_in_order(kb_home):
     out = kn.list_knowledge()
     ids = [c["id"] for c in out["collections"]]
-    assert ids == ["kanon", "orchestrierung", "skills", "rollen", "llm-wiki"]
+    assert ids == ["kanon", "orchestrierung", "skills", "rollen", "llm-wiki", "vault-plans"]
     assert out["query"] == ""
     assert out["now"] > 0
+
+
+def test_vault_plans_are_scanned_with_frontmatter(kb_home):
+    out = kn.list_knowledge()
+    plans = next(c for c in out["collections"] if c["id"] == "vault-plans")
+    by_id = {d["id"]: d for d in plans["docs"]}
+    assert list(by_id) == [
+        "kb::plan::Hermes/plans/dashboard-refresh.md",
+        "kb::plan::Hermes/plans/nested/fallback.md",
+    ]
+    dashboard = by_id["kb::plan::Hermes/plans/dashboard-refresh.md"]
+    assert dashboard["title"] == "Dashboard Refresh"
+    assert dashboard["summary"] == "Additive UI refresh plan."
+    assert dashboard["created"] == "2026-07-01"
+    assert dashboard["owner"] == "Hermes"
+    assert dashboard["type"] == "implementation"
+    assert dashboard["status"] == "active"
+    assert dashboard["source_ref"] == "vault/03-Agents/Hermes/plans/dashboard-refresh.md"
+    assert "vault-plan" in dashboard["tags"]
+    assert "type:implementation" in dashboard["tags"]
+    assert "status:active" in dashboard["tags"]
+    assert "dashboard" in dashboard["tags"]
+    assert dashboard["heading_count"] == 2
+    fallback = by_id["kb::plan::Hermes/plans/nested/fallback.md"]
+    assert fallback["title"] == "Fallback Plan"
+    assert fallback["summary"] == "First paragraph becomes the summary."
 
 
 def test_canon_docs_present_with_curated_summary_and_heading_count(kb_home):
@@ -271,6 +320,32 @@ def test_read_llm_wiki_doc_strips_frontmatter(kb_home):
     assert "type: concept" not in doc["body_md"]
 
 
+def test_read_vault_plan_strips_frontmatter(kb_home):
+    doc = kn.read_knowledge_doc("kb::plan::Hermes/plans/dashboard-refresh.md")
+    assert doc is not None
+    assert doc["id"] == "kb::plan::Hermes/plans/dashboard-refresh.md"
+    assert doc["created"] == "2026-07-01"
+    assert doc["owner"] == "Hermes"
+    assert doc["type"] == "implementation"
+    assert doc["status"] == "active"
+    assert doc["body_md"].lstrip().startswith("# Dashboard Refresh")
+    assert "status: active" not in doc["body_md"]
+
+
+def test_malformed_vault_plan_frontmatter_is_skipped_with_warning(kb_home, caplog):
+    broken = kb_home / "vault" / "03-Agents" / "Hermes" / "plans" / "broken.md"
+    broken.write_text("---\ntitle: [oops\n---\n\n# Broken\n", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="hermes_cli.library_knowledge"):
+        out = kn.list_knowledge()
+
+    plans = next(c for c in out["collections"] if c["id"] == "vault-plans")
+    ids = [d["id"] for d in plans["docs"]]
+    assert "kb::plan::Hermes/plans/broken.md" not in ids
+    assert "skipping vault plan with malformed frontmatter" in caplog.text
+    assert "Hermes/plans/broken.md" in caplog.text
+
+
 def test_unknown_static_doc_raises(kb_home):
     with pytest.raises(ValueError):
         kn.read_knowledge_doc("kb::doc::does-not-exist")
@@ -283,6 +358,10 @@ def test_missing_skill_returns_none(kb_home):
 
 def test_missing_llm_wiki_doc_returns_none(kb_home):
     assert kn.read_knowledge_doc("kb::llm::concepts/does-not-exist.md") is None
+
+
+def test_missing_vault_plan_returns_none(kb_home):
+    assert kn.read_knowledge_doc("kb::plan::Hermes/plans/does-not-exist.md") is None
 
 
 def test_malformed_id_raises(kb_home):
@@ -301,6 +380,8 @@ def test_traversal_slug_rejected(kb_home):
         kn.read_knowledge_doc("kb::llm::../raw/secret.md")
     with pytest.raises(ValueError):
         kn.read_knowledge_doc("kb::llm::concepts/../../secret.md")
+    with pytest.raises(ValueError):
+        kn.read_knowledge_doc("kb::plan::Hermes/plans/../../secret.md")
 
 
 def test_search_filters_and_drops_empty_collections(kb_home):
@@ -325,6 +406,14 @@ def test_search_matches_llm_wiki_body(kb_home):
     assert ids == ["llm-wiki"]
     docs = out["collections"][0]["docs"]
     assert [d["id"] for d in docs] == ["kb::llm::concepts/ingest-query-lint.md"]
+
+
+def test_search_matches_vault_plan_body(kb_home):
+    out = kn.list_knowledge(q="widgets")
+    ids = [c["id"] for c in out["collections"]]
+    assert ids == ["vault-plans"]
+    docs = out["collections"][0]["docs"]
+    assert [d["id"] for d in docs] == ["kb::plan::Hermes/plans/dashboard-refresh.md"]
 
 
 def test_heading_count_ignores_fenced_code(kb_home):

@@ -12,6 +12,10 @@ export interface KnowledgeDoc {
   tags: string[];
   updated_ts: number;
   heading_count: number;
+  created?: string;
+  owner?: string;
+  type?: string;
+  status?: string;
 }
 
 export interface KnowledgeCollection {
@@ -55,6 +59,7 @@ export function allDocs(collections: KnowledgeCollection[]): KnowledgeDoc[] {
 export function knowledgeType(doc: KnowledgeDoc): string {
   const typeTag = doc.tags.find((tag) => tag.startsWith("type:"));
   if (typeTag) return typeTag.slice("type:".length);
+  if (doc.collection === "vault-plans") return "plan";
   if (doc.collection === "skills") return "skill";
   if (doc.collection === "rollen") return "rolle";
   if (doc.collection === "kanon" || doc.collection === "orchestrierung") return "doc";
@@ -77,6 +82,12 @@ export function knowledgeTypeLabel(type: string): string {
       return "Überblick";
     case "synthesis":
       return "Synthesen";
+    case "implementation":
+      return "Implementierung";
+    case "planspec":
+      return "PlanSpec";
+    case "plan":
+      return "Pläne";
     case "skill":
       return "Skills";
     case "rolle":
@@ -101,10 +112,13 @@ export function typeCounts(collections: KnowledgeCollection[]): KnowledgeTypeCou
     ["query", 3],
     ["overview", 4],
     ["synthesis", 5],
-    ["skill", 6],
-    ["rolle", 7],
-    ["doc", 8],
-    ["lint", 9],
+    ["implementation", 6],
+    ["planspec", 7],
+    ["plan", 8],
+    ["skill", 9],
+    ["rolle", 10],
+    ["doc", 11],
+    ["lint", 12],
   ]);
   return Array.from(counts.entries())
     .map(([id, count]) => ({ id, label: knowledgeTypeLabel(id), count }))
