@@ -9,6 +9,9 @@ import { statusDot, statusTone } from "./dagLayout";
 import { de } from "../../i18n/de";
 import { taskStatusLabel, profileLabel } from "../../lib/tones";
 
+/** Mögliche Review-Run-States, die vom Board-Endpoint geliefert werden. */
+export type ReviewRunState = "approved" | "request_changes" | "active" | "pending";
+
 export interface ChainNodeCardProps {
   node: ChainGraphNode;
   isRoot: boolean;
@@ -24,11 +27,15 @@ export interface ChainNodeCardProps {
   /** Round C: Callback für Fortsetzen (Unblock via PATCH /tasks/{id} → ready). */
   onResume?: (taskId: string) => void | Promise<void>;
   resumeBusy?: boolean;
+  /** Grund für den blockierten Status (aus dem Board-Endpoint, BoardTask.block_reason). */
+  blockReason?: string | null;
+  /** Review-Run-State aus dem review-verdicts Endpoint — treibt den Verdict-Chip. */
+  reviewRunState?: ReviewRunState | null;
 }
 
 export const ChainNodeCard = memo(
   forwardRef<HTMLDivElement, ChainNodeCardProps>(function ChainNodeCard(
-    { node, isRoot, worker, isOperatorHeld, now, inspectLoading, onInspect, onWorkerAction, workerActionBusy, onResume, resumeBusy },
+    { node, isRoot, worker, isOperatorHeld, now, inspectLoading, onInspect, onWorkerAction, workerActionBusy, onResume, resumeBusy, blockReason, reviewRunState },
     ref,
   ) {
     // now-Fallback ohne Date.now() im Default-Parameter (impure function lint).
@@ -73,6 +80,21 @@ export const ChainNodeCard = memo(
     // card heartbeat — see ChainNodeCard.test.tsx).
     const subtaskLabel = hasProgress ? de.ketten.progressOf(progress.done, progress.total) : null;
 
+    // Verdict-Chip: APPROVED (emerald) · NEEDS_REVISION (amber) · BLOCK (red).
+    // BLOCK = request_changes auf einem bereits blockierten Task; NEEDS_REVISION =
+    // request_changes, Task noch in Review (Nacharbeit steht an, kein Hard-Block).
+    const isBlocked = node.status === "blocked";
+    const verdictChip: { label: string; cls: string } | null = (() => {
+      if (!reviewRunState) return null;
+      if (reviewRunState === "approved")
+        return { label: de.ketten.verdictApproved, cls: "border-emerald-400/50 bg-emerald-400/10 text-emerald-300" };
+      if (reviewRunState === "request_changes")
+        return isBlocked
+          ? { label: de.ketten.verdictBlock, cls: "border-red-500/50 bg-red-500/10 text-red-300" }
+          : { label: de.ketten.verdictNeedsRevision, cls: "border-amber-400/50 bg-amber-400/10 text-amber-300" };
+      return null;
+    })();
+
     return (
       <div
         ref={ref}
@@ -105,6 +127,18 @@ export const ChainNodeCard = memo(
               </span>
             ) : null}
             <StatusPill tone={tone} label={taskStatusLabel[node.status] ?? node.status} dot={dot} size="sm" />
+            {/* Verdict-Chip: APPROVED / NEEDS_REVISION / BLOCK */}
+            {verdictChip ? (
+              <span
+                className={cn(
+                  "hc-mono inline-flex items-center rounded-[7px] border px-1.5 py-0.5 text-[10px] font-semibold",
+                  verdictChip.cls,
+                )}
+                data-verdict={reviewRunState}
+              >
+                {verdictChip.label}
+              </span>
+            ) : null}
             {/* Round C: Aufklapp-Toggle für laufende Knoten */}
             {isRunning ? (
               <button
@@ -122,6 +156,17 @@ export const ChainNodeCard = memo(
         <p className="mt-2 line-clamp-2 text-base font-semibold leading-snug text-[var(--hc-text)]">
           {node.title}
         </p>
+
+        {/* Blocker-Grund-Zeile: kompakte rote Leiste analog zur Flow-Tab-Locked-Leiste. */}
+        {isBlocked && blockReason ? (
+          <p
+            className="mt-2 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-200"
+            data-block-reason
+          >
+            <span className="font-semibold">{de.ketten.blockReasonLabel}</span>{" "}
+            {blockReason}
+          </p>
+        ) : null}
 
         {/* Progress: bar with the percent read-out inline on the right. */}
         <div className="mt-3 flex items-center gap-2.5">

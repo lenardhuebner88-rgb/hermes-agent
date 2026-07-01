@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ChainNodeCard } from "./ChainNodeCard";
+import type { ReviewRunState } from "./ChainNodeCard";
 import { linearizeNodes } from "./dagLayout";
 import type { ChainGraphEdge, ChainGraphNode, Worker } from "../../lib/types";
 import type { WorkerActionKey } from "../../components/WorkerCard";
@@ -22,6 +23,10 @@ interface KettenGraphProps {
   workerActionBusyRunId?: string | null;
   onResume?: (taskId: string) => void | Promise<void>;
   resumeBusyId?: string | null;
+  /** Blocker-Grund je task_id (aus dem Board-Endpoint; nur für status===blocked). */
+  blockReasonByTaskId?: Map<string, string>;
+  /** Review-Run-State je task_id (aus review-verdicts Endpoint). */
+  reviewStateByTaskId?: Map<string, ReviewRunState>;
 }
 
 export function KettenGraph({
@@ -37,6 +42,8 @@ export function KettenGraph({
   workerActionBusyRunId,
   onResume,
   resumeBusyId,
+  blockReasonByTaskId,
+  reviewStateByTaskId,
 }: KettenGraphProps) {
   const ordered = useMemo(() => linearizeNodes(nodes, edges), [nodes, edges]);
 
@@ -124,6 +131,8 @@ export function KettenGraph({
                 workerActionBusy={workerRunId != null && workerActionBusyRunId === workerRunId}
                 onResume={onResume}
                 resumeBusy={resumeBusyId === node.id}
+                blockReason={blockReasonByTaskId?.get(node.id) ?? null}
+                reviewRunState={reviewStateByTaskId?.get(node.id) ?? null}
               />
             </div>
           );

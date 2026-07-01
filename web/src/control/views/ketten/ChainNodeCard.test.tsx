@@ -115,3 +115,127 @@ describe("ChainNodeCard", () => {
     expect(html).toContain("3m");
   });
 });
+
+// ── Blocker-Grund (Teil 1) ───────────────────────────────────────────────────
+describe("ChainNodeCard – Blocker-Grund", () => {
+  const blockedNode: ChainGraphNode = {
+    id: "t_blocked",
+    title: "Blocked task",
+    status: "blocked",
+    assignee: null,
+    level: 0,
+    parents: [],
+    children: [],
+    created_at: 0,
+    started_at: null,
+    completed_at: null,
+    last_heartbeat_at: null,
+    runtime_seconds: null,
+    progress: null,
+    latest_run: null,
+    cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cost_usd_equivalent: 0,
+    cost_effective_usd: 0,
+  };
+
+  it("rendert den Blocker-Grund wenn status=blocked und blockReason gesetzt", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={blockedNode} isRoot={false} blockReason="Circuit-Breaker: 3× Fehler" />,
+    );
+    expect(html).toContain("Circuit-Breaker: 3× Fehler");
+    expect(html).toContain("Blockiert:");
+  });
+
+  it("rendert den Blocker-Grund NICHT wenn blockReason leer/null", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={blockedNode} isRoot={false} blockReason={null} />,
+    );
+    expect(html).not.toContain("Blockiert:");
+  });
+
+  it("rendert den Blocker-Grund NICHT bei nicht-blockierten Knoten (auch wenn Prop gesetzt)", () => {
+    const runningNode: ChainGraphNode = { ...blockedNode, status: "running" };
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={runningNode} isRoot={false} blockReason="sollte nicht erscheinen" />,
+    );
+    expect(html).not.toContain("Blockiert:");
+    expect(html).not.toContain("sollte nicht erscheinen");
+  });
+});
+
+// ── Verdict-Chips (Teil 2) ───────────────────────────────────────────────────
+describe("ChainNodeCard – Verdict-Chip", () => {
+  const reviewNode: ChainGraphNode = {
+    id: "t_review",
+    title: "Review task",
+    status: "review",
+    assignee: null,
+    level: 0,
+    parents: [],
+    children: [],
+    created_at: 0,
+    started_at: null,
+    completed_at: null,
+    last_heartbeat_at: null,
+    runtime_seconds: null,
+    progress: null,
+    latest_run: null,
+    cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cost_usd_equivalent: 0,
+    cost_effective_usd: 0,
+  };
+
+  const blockedNode: ChainGraphNode = { ...reviewNode, id: "t_blocked_v", status: "blocked" };
+
+  it("rendert APPROVED-Chip (grün) wenn reviewRunState='approved'", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={reviewNode} isRoot={false} reviewRunState="approved" />,
+    );
+    expect(html).toContain("APPROVED");
+    // grüner Ton
+    expect(html).toMatch(/emerald/);
+  });
+
+  it("rendert NEEDS_REVISION-Chip (amber) wenn request_changes + status=review", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={reviewNode} isRoot={false} reviewRunState="request_changes" />,
+    );
+    expect(html).toContain("NEEDS_REVISION");
+    expect(html).toMatch(/amber/);
+  });
+
+  it("rendert BLOCK-Chip (rot) wenn request_changes + status=blocked", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={blockedNode} isRoot={false} reviewRunState="request_changes" />,
+    );
+    expect(html).toContain("BLOCK");
+    expect(html).toMatch(/red/);
+    expect(html).not.toContain("NEEDS_REVISION");
+  });
+
+  it("rendert keinen Chip wenn reviewRunState nicht gesetzt", () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeCard node={reviewNode} isRoot={false} />,
+    );
+    expect(html).not.toContain("APPROVED");
+    expect(html).not.toContain("NEEDS_REVISION");
+    expect(html).not.toContain("BLOCK");
+    expect(html).not.toContain("data-verdict");
+  });
+
+  it("rendert keinen Chip für active/pending review-Zustände", () => {
+    const htmlActive = renderToStaticMarkup(
+      <ChainNodeCard node={reviewNode} isRoot={false} reviewRunState="active" />,
+    );
+    expect(htmlActive).not.toContain("data-verdict");
+
+    const htmlPending = renderToStaticMarkup(
+      <ChainNodeCard node={reviewNode} isRoot={false} reviewRunState="pending" />,
+    );
+    expect(htmlPending).not.toContain("data-verdict");
+  });
+});

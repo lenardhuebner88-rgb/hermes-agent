@@ -926,5 +926,22 @@ export const de = {
     summaryStatCost: "Kosten",
     summaryStatTokens: "Tokens",
     summaryStatRuns: "Runs",
+    // Blocker-Grund
+    blockReasonLabel: "Blockiert:",
+    // Review-Verdict-Chips
+    verdictApproved: "APPROVED",
+    verdictNeedsRevision: "NEEDS_REVISION",
+    verdictBlock: "BLOCK",
+    // Planung-steht-an-Strip
+    planungEyebrow: "Planung",
+    planungEmpty: "Nichts wartet auf Planung",
+    planungPlanSpecs: (n: number) => `${n} PlanSpec${n === 1 ? "" : "s"} offen`,
+    planungProposals: (n: number) =>
+      `${n} Strategen-Vorschlag${n === 1 ? "" : "schläge"} offen`,
+    planungCollapse: "Einklappen",
+    planungExpand: "Aufklappen",
+    planungLinkFlow: "Flow-Tab",
+    planungLinkStratege: "Strategen-Tab",
+    planungLinkChain: "Kette",
   },
 } as const;

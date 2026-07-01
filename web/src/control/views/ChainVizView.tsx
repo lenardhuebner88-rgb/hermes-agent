@@ -1,15 +1,17 @@
 import { useCallback, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
-import { useBoard, useChainGraph, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
+import { useBoard, useChainGraph, useHermesReviewVerdicts, useHermesWorkers, usePlanSpecs, useRunInspect, useStrategistCount, useTaskAction } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
 import { fmtAge, fmtTokens, formatEffectiveCost, nowSec, workerSortRank } from "../lib/derive";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
+import { cn } from "@/lib/utils";
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
-import type { ChainGraphNode, Worker } from "../lib/types";
+import type { ReviewRunState } from "./ketten/ChainNodeCard";
+import type { ChainGraphNode, PlanSpecRecord, Worker } from "../lib/types";
 import type { WorkerActionKey } from "../components/WorkerCard";
 import { fetchJSON } from "@/lib/api";
 
@@ -104,11 +106,122 @@ function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PlanungStrip — kompakter kollabierbarer Strip über dem ChainSelector.
+// Pure-component: empfängt Daten als Props, keine eigenen Hooks.
+
+export interface PlanungStripProps {
+  /** Offene PlanSpecs (scope="open", bereits gefiltert). */
+  planspecs: PlanSpecRecord[];
+  /** Anzahl offener Strategen-Vorschläge (aus useStrategistCount). */
+  strategistCount: number;
+  /** Callback für In-Tab-Auswahl einer Kette via ?root=. */
+  onSelectRoot: (rootId: string) => void;
+}
+
+export function PlanungStrip({ planspecs, strategistCount, onSelectRoot }: PlanungStripProps) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  const hasItems = planspecs.length > 0 || strategistCount > 0;
+
+  return (
+    <div
+      className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-3 shadow-[var(--hc-elev-1)]"
+      data-planung-strip
+    >
+      {/* Header-Zeile */}
+      <div className="flex items-center justify-between gap-2">
+        <p className="hc-eyebrow">{de.ketten.planungEyebrow}</p>
+        {hasItems ? (
+          <button
+            type="button"
+            onClick={() => setCollapsed((v) => !v)}
+            className="hc-mono rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[10px] text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]"
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? de.ketten.planungExpand : de.ketten.planungCollapse}
+          </button>
+        ) : null}
+      </div>
+
+      {/* Inhalt */}
+      {!hasItems ? (
+        <p className="mt-1.5 text-[12px] text-[var(--hc-text-dim)]">{de.ketten.planungEmpty}</p>
+      ) : collapsed ? null : (
+        <div className="mt-2 flex flex-col gap-2">
+          {/* PlanSpec-Einträge */}
+          {planspecs.length > 0 ? (
+            <div>
+              <p className="hc-eyebrow mb-1" style={{ fontSize: 9 }}>
+                {de.ketten.planungPlanSpecs(planspecs.length)}
+              </p>
+              <ul className="flex flex-col gap-1">
+                {planspecs.map((ps) => {
+                  const hasChain = ps.kanban_root_task_id != null;
+                  return (
+                    <li key={ps.path} className="flex min-w-0 items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-[12px] text-[var(--hc-text-soft)]">
+                        {ps.topic || ps.filename}
+                      </span>
+                      {hasChain ? (
+                        <button
+                          type="button"
+                          onClick={() => onSelectRoot(ps.kanban_root_task_id!)}
+                          className={cn(
+                            "hc-mono shrink-0 rounded-[7px] border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
+                            "px-2 py-0.5 text-[10px] text-[var(--hc-accent-text)] transition hover:border-[var(--hc-accent-text)]",
+                          )}
+                        >
+                          {de.ketten.planungLinkChain}
+                        </button>
+                      ) : (
+                        <Link
+                          to="/control/flow"
+                          className={cn(
+                            "hc-mono shrink-0 rounded-[7px] border border-[var(--hc-border)]",
+                            "px-2 py-0.5 text-[10px] text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]",
+                          )}
+                        >
+                          {de.ketten.planungLinkFlow}
+                        </Link>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+
+          {/* Strategen-Vorschläge */}
+          {strategistCount > 0 ? (
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[12px] text-[var(--hc-text-soft)]">
+                {de.ketten.planungProposals(strategistCount)}
+              </p>
+              <Link
+                to="/control/stratege"
+                className={cn(
+                  "hc-mono shrink-0 rounded-[7px] border border-[var(--hc-border)]",
+                  "px-2 py-0.5 text-[10px] text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]",
+                )}
+              >
+                {de.ketten.planungLinkStratege}
+              </Link>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface ChainPanelProps {
   rootId: string;
   workerByTaskId: Map<string, Worker>;
   operatorHeldIds: Set<string>;
+  blockReasonByTaskId: Map<string, string>;
+  reviewStateByTaskId: Map<string, ReviewRunState>;
   inspectLoading: string | null;
   onInspect: (runId: string) => void;
   onWorkerAction: (runId: string, action: WorkerActionKey, extra?: { model_override?: string; assignee?: string }) => void | Promise<void>;
@@ -121,6 +234,8 @@ function ChainPanel({
   rootId,
   workerByTaskId,
   operatorHeldIds,
+  blockReasonByTaskId,
+  reviewStateByTaskId,
   inspectLoading,
   onInspect,
   onWorkerAction,
@@ -162,6 +277,8 @@ function ChainPanel({
         workerActionBusyRunId={workerActionBusyRunId}
         onResume={onResume}
         resumeBusyId={resumeBusyId}
+        blockReasonByTaskId={blockReasonByTaskId}
+        reviewStateByTaskId={reviewStateByTaskId}
       />
       <p className="text-right text-xs text-[var(--hc-text-dim)]">
         {graph.data.checked_at ? (
@@ -250,6 +367,39 @@ export function ChainVizView(_props: { density?: unknown }) {
     return held;
   }, [board.data]);
 
+  // Blocker-Grund je task_id: aus dem Board-Endpoint (BoardTask.block_reason),
+  // nur für blockierte Tasks mit gesetztem Grund.
+  const blockReasonByTaskId = useMemo(() => {
+    const allTasks = board.data?.columns.flatMap((c) => c.tasks) ?? [];
+    const map = new Map<string, string>();
+    for (const t of allTasks) {
+      if (t.status === "blocked" && t.block_reason != null && t.block_reason.trim() !== "") {
+        map.set(t.id, t.block_reason);
+      }
+    }
+    return map;
+  }, [board.data]);
+
+  // Review-Run-State je task_id: aus dem review-verdicts Endpoint.
+  const verdicts = useHermesReviewVerdicts();
+  const reviewStateByTaskId = useMemo(() => {
+    const map = new Map<string, ReviewRunState>();
+    for (const r of verdicts.data?.reviews ?? []) {
+      if (r.review_run_state != null) {
+        map.set(r.task_id, r.review_run_state as ReviewRunState);
+      }
+    }
+    return map;
+  }, [verdicts.data]);
+
+  // PlanungStrip: offene PlanSpecs + Strategen-Vorschläge
+  const planspecs = usePlanSpecs({ scope: "open", limit: 5 });
+  const strategistCount = useStrategistCount();
+  const heldPlanspecs = useMemo(
+    () => (planspecs.data?.planspecs ?? []).filter((ps) => ps.open),
+    [planspecs.data],
+  );
+
   const { activeChains, doneChains } = useMemo(() => {
     if (!board.data) return { activeChains: [], doneChains: [] };
     const allTasks = board.data.columns.flatMap((c) => c.tasks);
@@ -300,14 +450,29 @@ export function ChainVizView(_props: { density?: unknown }) {
       ) : board.error && !board.data ? (
         <Hero eyebrow={de.ketten.eyebrow} tone="red" title={de.ketten.loadError} subtitle={board.error} />
       ) : activeChains.length === 0 && doneChains.length === 0 ? (
-        <Hero
-          eyebrow={de.ketten.eyebrow}
-          tone="zinc"
-          title={de.ketten.emptyTitle}
-          subtitle={de.ketten.emptyDesc}
-        />
+        <div className="grid gap-4">
+          {/* Auch ohne Ketten sichtbar: gerade dann zählt "was steht zur Planung an". */}
+          <PlanungStrip
+            planspecs={heldPlanspecs}
+            strategistCount={strategistCount.data?.count ?? 0}
+            onSelectRoot={handleSelect}
+          />
+          <Hero
+            eyebrow={de.ketten.eyebrow}
+            tone="zinc"
+            title={de.ketten.emptyTitle}
+            subtitle={de.ketten.emptyDesc}
+          />
+        </div>
       ) : (
         <div className="grid gap-4">
+          {/* Planung-Strip: oben, über dem Selector */}
+          <PlanungStrip
+            planspecs={heldPlanspecs}
+            strategistCount={strategistCount.data?.count ?? 0}
+            onSelectRoot={handleSelect}
+          />
+
           <div className="hc-surface-card p-3 lg:max-w-md">
             <Eyebrow>{de.ketten.chooseChain}</Eyebrow>
             <div className="mt-2">
@@ -327,6 +492,8 @@ export function ChainVizView(_props: { density?: unknown }) {
               rootId={focusedRootId}
               workerByTaskId={workerByTaskId}
               operatorHeldIds={operatorHeldIds}
+              blockReasonByTaskId={blockReasonByTaskId}
+              reviewStateByTaskId={reviewStateByTaskId}
               inspectLoading={loadingRun}
               onInspect={inspect}
               onWorkerAction={onWorkerAction}
