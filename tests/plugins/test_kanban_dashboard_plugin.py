@@ -6405,7 +6405,7 @@ def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
     assert any(m["id"] == "qwen/qwen3.7-max" for m in openrouter_rows)
     assert "gpt-5.4" in model_ids
     assert "moonshotai/kimi-k2.7" in model_ids
-    assert any(m["runtime"] == "claude-cli" and m.get("locked") for m in data["models"])
+    assert any(m["runtime"] == "claude-cli" and m["id"] == "claude-fable-5" for m in data["models"])
 
 
 def test_lanes_openrouter_import_smokes_then_persists_config(client, monkeypatch):
