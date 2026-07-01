@@ -247,9 +247,10 @@ class _KbDoc:
     updated_ts: int
     heading_count: int
     body_md: Optional[str] = field(default=None, repr=False)
+    extra: dict[str, str] = field(default_factory=dict)
 
     def as_card(self) -> dict[str, Any]:
-        return {
+        card: dict[str, Any] = {
             "id": self.id,
             "collection": self.collection,
             "title": self.title,
@@ -259,6 +260,8 @@ class _KbDoc:
             "updated_ts": self.updated_ts,
             "heading_count": self.heading_count,
         }
+        card.update(self.extra)
+        return card
 
     def as_detail(self) -> dict[str, Any]:
         d = self.as_card()
@@ -346,6 +349,39 @@ def _split_frontmatter_rich(raw: str) -> tuple[dict[str, Any], str]:
         if lines[idx].strip() == "---":
             meta = _parse_frontmatter_data("\n".join(lines[1:idx]))
             return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
+    return {}, raw
+
+
+def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> Optional[tuple[dict[str, Any], str]]:
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, raw
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() != "---":
+            continue
+        fm_text = "\n".join(lines[1:idx])
+        try:
+            import yaml
+
+            data = yaml.safe_load(fm_text)
+        except Exception as exc:
+            logger.warning(
+                "knowledge: skipping vault plan with malformed frontmatter: %s (%s)",
+                rel,
+                exc,
+            )
+            return None
+        if data is None:
+            meta: dict[str, Any] = {}
+        elif isinstance(data, dict):
+            meta = {str(k).lower(): v for k, v in data.items()}
+        else:
+            logger.warning(
+                "knowledge: skipping vault plan with malformed frontmatter: %s (frontmatter is not a mapping)",
+                rel,
+            )
+            return None
+        return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
     return {}, raw
 
 
@@ -489,15 +525,24 @@ def _build_vault_plan(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
     raw = _read_text(target)
     if raw is None:
         return None
-    meta, body = _split_frontmatter_rich(raw)
+    parsed = _split_vault_plan_frontmatter(raw, rel=rel)
+    if parsed is None:
+        return None
+    meta, body = parsed
     title = _meta_string(meta, "title") or _first_heading(body) or Path(rel).stem.replace("-", " ").title()
     summary = (
         _meta_string(meta, "summary")
         or _meta_string(meta, "description")
         or _summarize(body, title)
     )
-    status = _meta_string(meta, "status")
-    tags = ["vault-plan", "type:plan"]
+    extra = {
+        key: value
+        for key in ("created", "owner", "type", "status")
+        if (value := _meta_string(meta, key))
+    }
+    plan_type = extra.get("type") or "plan"
+    status = extra.get("status", "")
+    tags = ["vault-plan", f"type:{plan_type}"]
     if status:
         tags.append(f"status:{status}")
     for tag in _meta_string_list(meta, "tags"):
@@ -517,6 +562,7 @@ def _build_vault_plan(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
         updated_ts=updated,
         heading_count=_count_headings(body),
         body_md=body if with_body else None,
+        extra=extra,
     )
 
 

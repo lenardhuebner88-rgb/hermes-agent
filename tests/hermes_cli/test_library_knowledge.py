@@ -141,6 +141,9 @@ def kb_home(tmp_path, monkeypatch):
     (plans / "dashboard-refresh.md").write_text(
         "---\n"
         "title: \"Dashboard Refresh\"\n"
+        "created: 2026-07-01\n"
+        "owner: Hermes\n"
+        "type: implementation\n"
         "status: active\n"
         "summary: Additive UI refresh plan.\n"
         "tags:\n"
@@ -177,9 +180,13 @@ def test_vault_plans_are_scanned_with_frontmatter(kb_home):
     dashboard = by_id["kb::plan::Hermes/plans/dashboard-refresh.md"]
     assert dashboard["title"] == "Dashboard Refresh"
     assert dashboard["summary"] == "Additive UI refresh plan."
+    assert dashboard["created"] == "2026-07-01"
+    assert dashboard["owner"] == "Hermes"
+    assert dashboard["type"] == "implementation"
+    assert dashboard["status"] == "active"
     assert dashboard["source_ref"] == "vault/03-Agents/Hermes/plans/dashboard-refresh.md"
     assert "vault-plan" in dashboard["tags"]
-    assert "type:plan" in dashboard["tags"]
+    assert "type:implementation" in dashboard["tags"]
     assert "status:active" in dashboard["tags"]
     assert "dashboard" in dashboard["tags"]
     assert dashboard["heading_count"] == 2
@@ -317,8 +324,26 @@ def test_read_vault_plan_strips_frontmatter(kb_home):
     doc = kn.read_knowledge_doc("kb::plan::Hermes/plans/dashboard-refresh.md")
     assert doc is not None
     assert doc["id"] == "kb::plan::Hermes/plans/dashboard-refresh.md"
+    assert doc["created"] == "2026-07-01"
+    assert doc["owner"] == "Hermes"
+    assert doc["type"] == "implementation"
+    assert doc["status"] == "active"
     assert doc["body_md"].lstrip().startswith("# Dashboard Refresh")
     assert "status: active" not in doc["body_md"]
+
+
+def test_malformed_vault_plan_frontmatter_is_skipped_with_warning(kb_home, caplog):
+    broken = kb_home / "vault" / "03-Agents" / "Hermes" / "plans" / "broken.md"
+    broken.write_text("---\ntitle: [oops\n---\n\n# Broken\n", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="hermes_cli.library_knowledge"):
+        out = kn.list_knowledge()
+
+    plans = next(c for c in out["collections"] if c["id"] == "vault-plans")
+    ids = [d["id"] for d in plans["docs"]]
+    assert "kb::plan::Hermes/plans/broken.md" not in ids
+    assert "skipping vault plan with malformed frontmatter" in caplog.text
+    assert "Hermes/plans/broken.md" in caplog.text
 
 
 def test_unknown_static_doc_raises(kb_home):
