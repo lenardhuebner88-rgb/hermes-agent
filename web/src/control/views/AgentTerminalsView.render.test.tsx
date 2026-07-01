@@ -7,6 +7,8 @@ const apiMock = {
   getAgentTerminalCapabilities: vi.fn(),
   getAgentTerminalWindows: vi.fn(),
   ensureAgentTerminalWindow: vi.fn(),
+  respawnAgentTerminalWindow: vi.fn(),
+  killDeadAgentTerminalWindow: vi.fn(),
   getSkills: vi.fn(),
   getToolsets: vi.fn(),
   getControlOverviewHealth: vi.fn(),
@@ -46,6 +48,9 @@ vi.mock("@/lib/xtermSurface", () => ({
       scrollToBottom: terminalScrollToBottomMock,
       focus: terminalFocusMock,
       dispose: vi.fn(),
+      options: {},
+      cols: 80,
+      rows: 24,
     },
     fit: { fit: fitFitMock },
   })),
@@ -78,6 +83,7 @@ const capability: AgentTerminalCapabilityState = {
 const windows: AgentTerminalWindow[] = [
   { session: "hermes-agents", window: "hermes", active: true, pane_id: "%1", pid: 111, command: "hermes", cwd: "/home/piet" },
   { session: "hermes-agents", window: "codex", active: false, pane_id: "%2", pid: 222, command: "node", cwd: "/home/piet/.hermes/hermes-agent" },
+  { session: "hermes-agents", window: "claude", active: false, pane_id: "%3", pid: null, command: "", cwd: null, dead: true },
 ];
 
 async function loadView() {
@@ -134,6 +140,7 @@ function installDom(matches = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   websocketSends = [];
+  window.localStorage.clear();
   installDom(false);
   apiMock.getAgentTerminalCapabilities.mockResolvedValue(capability);
   apiMock.getAgentTerminalWindows.mockResolvedValue({ windows });
@@ -256,6 +263,61 @@ describe("AgentTerminalsView rendering", () => {
     triggerResize?.();
 
     await waitFor(() => expect(fitFitMock.mock.calls.length).toBeGreaterThan(callsAfterMount));
+  });
+
+  it("sends composer input through the websocket and clears the field", async () => {
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    const textarea = (await screen.findByLabelText("Text an Terminal senden")) as HTMLTextAreaElement;
+    await waitFor(() => expect(textarea.disabled).toBe(false));
+
+    fireEvent.change(textarea, { target: { value: "echo hallo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Eingabe senden" }));
+    expect(websocketSends).toContain("echo hallo\r");
+    expect(textarea.value).toBe("");
+
+    fireEvent.change(textarea, { target: { value: "zeile 1\nzeile 2" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(websocketSends).toContain("\x1b[200~zeile 1\nzeile 2\x1b[201~\r");
+  });
+
+  it("sends special keys from the mobile quick-key row", async () => {
+    installDom(true);
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send Esc" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send Esc" }));
+    expect(websocketSends).toContain("\x1b");
+    fireEvent.click(screen.getByRole("button", { name: "Send ^C" }));
+    expect(websocketSends).toContain("\x03");
+    fireEvent.click(screen.getByRole("button", { name: "Send ⏎" }));
+    expect(websocketSends).toContain("\r");
+  });
+
+  it("toggles fullscreen mode and adjusts the terminal font size", async () => {
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vollbild" }));
+    expect(screen.getByRole("button", { name: "Vollbild verlassen" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Vollbild verlassen" }));
+    expect(screen.getByRole("button", { name: "Vollbild" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Schrift größer" }));
+    await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-fontsize")).toBe("13"));
+  });
+
+  it("offers respawn for dead windows and targets the recreated window", async () => {
+    apiMock.respawnAgentTerminalWindow.mockResolvedValue({
+      window: { session: "hermes-agents", window: "claude", active: false, pane_id: "%3", pid: 333, command: "claude", cwd: "/home/piet" },
+    });
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
+    await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
   });
 
   it("renders empty and error states", async () => {

@@ -395,11 +395,25 @@ export async function buildWsUrl(
 
 export type AgentTerminalKind = "hermes" | "claude" | "codex" | "kimi";
 
+export interface AgentTerminalAgentState {
+  available: boolean;
+  binary: string | null;
+  reason: string | null;
+}
+
+export interface AgentTerminalWorkdirOption {
+  key: string;
+  label: string;
+  path: string;
+}
+
 export interface AgentTerminalCapabilityState {
   tmux_available: boolean;
   hermes_tui_available: boolean;
   hermes_binary: string | null;
   reason: string | null;
+  agents?: Record<string, AgentTerminalAgentState>;
+  workdirs?: AgentTerminalWorkdirOption[];
 }
 
 export interface AgentTerminalWindow {
@@ -410,6 +424,7 @@ export interface AgentTerminalWindow {
   pid: number | null;
   command: string;
   cwd?: string | null;
+  dead?: boolean;
 }
 
 export interface AgentTerminalSessionsResponse {
@@ -506,11 +521,23 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window }),
     }),
-  ensureAgentTerminalWindow: (kind: AgentTerminalKind) =>
+  ensureAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/ensure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
+      body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
+    }),
+  respawnAgentTerminalWindow: (session: string, window: string) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/respawn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, window }),
+    }),
+  killDeadAgentTerminalWindow: (session: string, window: string) =>
+    fetchJSON<{ ok: boolean }>("/api/agent-terminals/kill-dead", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, window }),
     }),
   captureAgentTerminalWindow: (session: string, window: string, start?: number) =>
     fetchJSON<AgentTerminalCaptureResponse>("/api/agent-terminals/capture", {

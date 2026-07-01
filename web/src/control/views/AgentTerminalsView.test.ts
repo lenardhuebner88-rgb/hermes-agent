@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentTerminalWindow } from "@/lib/api";
-import { classifyTerminalState, pickInitialTarget } from "./AgentTerminalsView";
+import { buildComposerPayload, classifyTerminalState, pickInitialTarget } from "./AgentTerminalsView";
 
 const running: AgentTerminalWindow = {
   session: "hermes-agents",
@@ -30,6 +30,15 @@ describe("AgentTerminalsView state helpers", () => {
   it("marks empty and dead target states", () => {
     expect(classifyTerminalState({ window: null, socketReady: false, socketConnecting: false, mobile: false })).toBe("missing window");
     expect(classifyTerminalState({ window: dead, socketReady: false, socketConnecting: false, mobile: false })).toBe("dead pane");
+    // pane_dead-Flag gewinnt, auch wenn tmux noch die stale pid meldet
+    expect(classifyTerminalState({ window: { ...running, dead: true }, socketReady: true, socketConnecting: false, mobile: false })).toBe("dead pane");
+  });
+
+  it("builds composer payloads with submit and bracketed paste", () => {
+    expect(buildComposerPayload("", true)).toBeNull();
+    expect(buildComposerPayload("ls -la", false)).toBe("ls -la");
+    expect(buildComposerPayload("ls -la", true)).toBe("ls -la\r");
+    expect(buildComposerPayload("zeile 1\nzeile 2", true)).toBe("\x1b[200~zeile 1\nzeile 2\x1b[201~\r");
   });
 
   it("keeps an existing window target across view switches and reconnects", () => {

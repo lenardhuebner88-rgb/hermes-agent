@@ -1010,6 +1010,7 @@ class ManagedFileDelete(BaseModel):
 
 class AgentTerminalEnsureRequest(BaseModel):
     kind: str
+    workdir: Optional[str] = None
 
 
 class AgentTerminalTargetRequest(BaseModel):
@@ -12150,9 +12151,26 @@ async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, obje
 @app.post("/api/agent-terminals/ensure")
 async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().ensure(req.kind).to_dict()}
+        return {"window": _agent_terminal_service().ensure(req.kind, req.workdir).to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/respawn")
+async def agent_terminal_respawn(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().respawn_dead(req.session, req.window).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/kill-dead")
+async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        _agent_terminal_service().kill_dead(req.session, req.window)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"ok": True}
 
 
 @app.post("/api/agent-terminals/capture")

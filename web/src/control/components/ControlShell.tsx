@@ -20,6 +20,9 @@ export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "agent
 // these and lives in the "Mehr" overflow (moreTabs) below.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
+  // Terminals = Haupt-Arbeitszentrale (Operator-Entscheid 2026-07-01): der Tab,
+  // in dem im tmux mit Hermes/Claude/Codex gearbeitet wird — daher primär.
+  { id: "agentTerminals", label: "Terminals", mobileLabel: "Terminal", path: "/control/agent-terminals", icon: TerminalSquare },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
   { id: "ketten", label: "Ketten", mobileLabel: "Ketten", path: "/control/ketten", icon: GitBranch },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Statistik", path: "/control/statistik", icon: ChartSpline },
@@ -27,7 +30,7 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
-const mobileTabs = tabs.filter((tab) => ["inbox", "flow", "ketten", "statistik"].includes(tab.id));
+const mobileTabs = tabs.filter((tab) => ["inbox", "agentTerminals", "flow", "ketten"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.
@@ -35,7 +38,6 @@ const moreTabs = [
   { label: de.tabs.overview, path: "/control/overview", icon: Activity },
   { label: de.tabs.pulse, path: "/control/pulse", icon: Activity },
   { label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
-  { label: "Agent Terminals", path: "/control/agent-terminals", icon: TerminalSquare },
   { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
   { label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
   { label: de.tabs.crons, path: "/control/crons", icon: Clock },

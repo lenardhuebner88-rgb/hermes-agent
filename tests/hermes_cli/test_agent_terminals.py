@@ -94,7 +94,7 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     assert metadata["cwd"] == str(Path.home())
     attach_argv = metadata["attach_argv"]
     assert isinstance(attach_argv, list)
-    assert attach_argv[-1] == "work:hermes"
+    assert attach_argv[-1] == "work:=hermes"
     draft = service.handoff_draft("work", "hermes", start=-20)
     assert draft["target"] == "work:hermes"
     assert f"- cwd: `{Path.home()}`" in str(draft["content"])
@@ -120,7 +120,79 @@ def test_ensure_existing_window_does_not_overwrite_process(tmp_path: Path, tmux_
     assert "existing-window" in service.capture("work", "hermes")
 
 
-def test_baseline_non_hermes_windows_are_not_created(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
+def _fake_agent_cli(home: Path, name: str) -> Path:
+    path = home / ".local" / "bin" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\nprintf 'fake {name} cli\\n'\nsleep 60\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_non_hermes_agent_without_binary_reports_capability_error(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
-    with pytest.raises(CapabilityError):
+    with pytest.raises(CapabilityError, match="CLI not found"):
         service.ensure("claude")
+
+
+def test_ensure_spawns_claude_in_allowlisted_workdir(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()  # fixture points HOME at tmp
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    fo_dir = home / "projects" / "family-organizer"
+    fo_dir.mkdir(parents=True)
+
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    created = service.ensure("claude", "family-organizer")
+    assert created.session == "work"
+    assert created.window == "claude-fo"
+    assert created.cwd == str(fo_dir)
+    assert "fake claude cli" in service.capture("work", "claude-fo")
+
+    with pytest.raises(InvalidTarget):
+        service.ensure("claude", "not-a-workdir")
+    with pytest.raises(CapabilityError, match="workdir not available"):
+        service.ensure("claude", "orchestration")
+
+
+def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    live = service.ensure("claude")
+    assert live.window == "claude"
+    with pytest.raises(CapabilityError, match="live process"):
+        service.respawn_dead("work", "claude")
+    with pytest.raises(CapabilityError, match="live process"):
+        service.kill_dead("work", "claude")
+
+    # Dead pane: remain-on-exit keeps the window around after the process exits.
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-window", "-d", "-t", "work:", "-n", "codex", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    dead = service.show("work", "codex")
+    assert dead.dead or not dead.pid
+
+    _fake_agent_cli(home, "codex")
+    respawned = service.respawn_dead("work", "codex")
+    assert respawned.window == "codex"
+    assert respawned.pid
+    assert not respawned.dead
+
+    service._run("new-window", "-d", "-t", "work:", "-n", "kimi", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    service.kill_dead("work", "kimi")
+    assert not service.window_exists("work", "kimi")
+
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sh -c 'exit 0'")
+        time.sleep(0.3)
+        service.respawn_dead("work", "scratch-thing")

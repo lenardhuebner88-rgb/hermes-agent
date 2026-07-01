@@ -16,15 +16,20 @@ import {
   ChevronsDown,
   ChevronsUp,
   ClipboardList,
+  CornerDownLeft,
   Gauge,
   Inbox,
+  Maximize2,
+  Minimize2,
   PanelLeft,
   PanelRight,
   RefreshCw,
+  RotateCcw,
   Server,
   Share2,
   Sparkles,
   TerminalSquare,
+  Trash2,
   Wrench,
   X,
 } from "lucide-react";
@@ -39,6 +44,7 @@ import {
   type AgentTerminalCapabilityState,
   type AgentTerminalKind,
   type AgentTerminalWindow,
+  type AgentTerminalWorkdirOption,
   type SkillInfo,
   type ToolsetInfo,
 } from "@/lib/api";
@@ -60,6 +66,27 @@ const TMUX_PREFIX = "\x02";
 const TMUX_COPY_MODE = `${TMUX_PREFIX}[`;
 const TMUX_PAGE_UP = `${TMUX_PREFIX}\x1b[5~`;
 const TMUX_LINE_STEP = 5;
+
+const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
+const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
+const FONT_MIN = 8;
+const FONT_MAX = 20;
+
+// Fallback, falls capabilities noch nicht geladen sind — Wahrheit kommt vom Backend.
+const FALLBACK_WORKDIRS: AgentTerminalWorkdirOption[] = [
+  { key: "home", label: "Zuhause (~)", path: "~" },
+  { key: "hermes-agent", label: "Hermes-Agent", path: "~/.hermes/hermes-agent" },
+  { key: "family-organizer", label: "Family Organizer", path: "~/projects/family-organizer" },
+  { key: "orchestration", label: "Orchestrierung", path: "~/orchestration" },
+];
+
+const QUICK_KEYS: Array<{ label: string; sequence: string }> = [
+  { label: "Esc", sequence: "\x1b" },
+  { label: "Tab", sequence: "\t" },
+  { label: "⇧Tab", sequence: "\x1b[Z" },
+  { label: "^C", sequence: "\x03" },
+  { label: "⏎", sequence: "\r" },
+];
 
 const CONTROL_CAPABILITIES: Array<{ label: string; patterns: string[]; command: string }> = [
   { label: "Firecrawl", patterns: ["firecrawl"], command: "/firecrawl-search" },
@@ -105,11 +132,24 @@ export function classifyTerminalState(args: {
   mobile: boolean;
 }): TerminalUiState {
   if (!args.window) return "missing window";
-  if (!args.window.pid) return "dead pane";
+  if (!args.window.pid || args.window.dead) return "dead pane";
   if (args.socketReady) return "attached";
   if (args.mobile && args.socketConnecting) return "Tailscale/mobile reconnect";
   if (args.socketConnecting) return "window running";
   return "detached";
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function buildComposerPayload(text: string, submit: boolean): string | null {
+  if (!text) return null;
+  // Mehrzeiliges als Bracketed Paste, damit CLIs (claude/codex) es als EINE
+  // Eingabe nehmen statt jede Zeile einzeln zu submitten.
+  const body = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
+  return submit ? `${body}\r` : body;
+}
+
+function isDeadWindow(window: AgentTerminalWindow): boolean {
+  return !window.pid || window.dead === true;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
@@ -129,13 +169,14 @@ function targetFromWindow(window: AgentTerminalWindow): { session: string; windo
 }
 
 function kindFromWindow(window: AgentTerminalWindow | null, fallback: AgentTerminalKind): AgentTerminalKind {
-  const candidate = window?.window as AgentTerminalKind | undefined;
-  return candidate && AGENT_KINDS.has(candidate) ? candidate : fallback;
+  // Suffix-Fenster (claude-fo, hermes-agent, …) gehören zum Basis-Kind.
+  const base = (window?.window ?? "").split("-")[0] as AgentTerminalKind;
+  return AGENT_KINDS.has(base) ? base : fallback;
 }
 
 function terminalProcessLabel(window: AgentTerminalWindow | null, kind: AgentTerminalKind): string {
   const command = (window?.command ?? "").trim();
-  if (!window?.pid) return "dead pane";
+  if (!window?.pid || window.dead) return "dead pane";
   if (!command) return kind;
   return command.toLowerCase().includes(kind) ? command : `${command}/${kind}`;
 }
@@ -212,10 +253,12 @@ function StatusPill({ state }: { state: TerminalUiState }) {
 
 function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabilityState | null; agent: (typeof AGENTS)[number] }) {
   const windowsOk = capability?.tmux_available ?? false;
-  const hermesOk = agent.kind === "hermes" ? (capability?.hermes_tui_available ?? false) : windowsOk;
-  const ok = windowsOk && hermesOk;
-  const label = ok ? "verfügbar" : capability?.reason?.includes("symlink") ? "kaputter Symlink/Binary" : capability?.reason ? "CLI fehlt" : "unbekannt";
-  const title = capability?.reason ?? (agent.kind === "hermes" ? capability?.hermes_binary ?? agent.hint : agent.hint);
+  const agentState = capability?.agents?.[agent.kind] ?? null;
+  const agentOk = agentState ? agentState.available : agent.kind === "hermes" ? (capability?.hermes_tui_available ?? false) : windowsOk;
+  const ok = windowsOk && agentOk;
+  const reason = agentState?.reason ?? capability?.reason ?? null;
+  const label = ok ? "verfügbar" : reason?.includes("symlink") || reason?.includes("resolvable") ? "kaputter Symlink/Binary" : reason ? "CLI fehlt" : "unbekannt";
+  const title = reason ?? agentState?.binary ?? agent.hint;
   return (
     <span title={title} className={cn("rounded border px-1.5 py-0.5 text-[10px]", ok ? "border-emerald-400/35 text-emerald-200" : "border-white/15 text-white/45")}>
       {label}
@@ -324,6 +367,24 @@ export function AgentTerminalsView() {
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
   const [controlContext, setControlContext] = useState<ReadOnlyControlContext>(EMPTY_CONTROL_CONTEXT);
+  const [composerText, setComposerText] = useState("");
+  const [zen, setZen] = useState(false);
+  const [zenHeight, setZenHeight] = useState<number | null>(null);
+  const [workdir, setWorkdir] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(WORKDIR_STORAGE_KEY) ?? "home";
+    } catch {
+      return "home";
+    }
+  });
+  const [fontSize, setFontSize] = useState<number | null>(() => {
+    try {
+      const stored = Number(window.localStorage.getItem(FONT_STORAGE_KEY));
+      return Number.isFinite(stored) && stored >= FONT_MIN && stored <= FONT_MAX ? stored : null;
+    } catch {
+      return null;
+    }
+  });
   const selectedWindow = useMemo(() => {
     if (!target) return null;
     return windows.find((w) => w.session === target.session && w.window === target.window) ?? null;
@@ -421,20 +482,22 @@ export function AgentTerminalsView() {
   }, [refreshReadOnlyContext]);
 
   useEffect(() => {
-    const match = windows.find((w) => w.window === selectedKind);
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync attach target to the externally-changed window inventory/selection
-    if (match) setTarget(targetFromWindow(match));
-  }, [selectedKind, windows]);
-
-  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    let storedFont: number | null = null;
+    try {
+      const stored = Number(window.localStorage.getItem(FONT_STORAGE_KEY));
+      storedFont = Number.isFinite(stored) && stored >= FONT_MIN && stored <= FONT_MAX ? stored : null;
+    } catch {
+      storedFont = null;
+    }
     const { term, fit } = createHermesXtermSurface({
       host,
       theme: { ...TERMINAL_THEME_STATIC, background: "#071b1d" },
       scrollback: 4000,
       loggerName: "agent-terminals",
       onWheelScrollBuffer: true,
+      terminalOptions: storedFont ? { fontSize: storedFont } : undefined,
     });
     termRef.current = term;
     fitRef.current = fit;
@@ -558,7 +621,7 @@ export function AgentTerminalsView() {
     setSelectedKind(kind);
     setError(null);
     try {
-      const response = await api.ensureAgentTerminalWindow(kind);
+      const response = await api.ensureAgentTerminalWindow(kind, workdir);
       setTarget(targetFromWindow(response.window));
       await refresh();
     } catch (err) {
@@ -566,9 +629,77 @@ export function AgentTerminalsView() {
     }
   };
 
+  const respawnWindow = useCallback(
+    async (win: { session: string; window: string }) => {
+      setError(null);
+      try {
+        const response = await api.respawnAgentTerminalWindow(win.session, win.window);
+        setTarget(targetFromWindow(response.window));
+        await refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refresh],
+  );
+
+  const killWindow = useCallback(
+    async (win: { session: string; window: string }) => {
+      setError(null);
+      try {
+        await api.killDeadAgentTerminalWindow(win.session, win.window);
+        await refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refresh],
+  );
+
   const sendRaw = useCallback((sequence: string) => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(sequence);
+  }, []);
+
+  const syncPtySize = useCallback(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    try {
+      fit.fit();
+      const cols = Math.max(2, Math.floor(term.cols));
+      const rows = Math.max(2, Math.floor(term.rows));
+      sendRaw(`\x1b[RESIZE:${cols};${rows}]`);
+    } catch {
+      /* best-effort refit */
+    }
+  }, [sendRaw]);
+
+  const adjustFont = useCallback(
+    (delta: number) => {
+      const term = termRef.current;
+      if (!term) return;
+      const current = fontSize ?? (typeof term.options?.fontSize === "number" ? term.options.fontSize : 12);
+      const next = Math.min(FONT_MAX, Math.max(FONT_MIN, current + delta));
+      term.options.fontSize = next;
+      setFontSize(next);
+      try {
+        window.localStorage.setItem(FONT_STORAGE_KEY, String(next));
+      } catch {
+        /* storage optional */
+      }
+      requestAnimationFrame(() => syncPtySize());
+    },
+    [fontSize, syncPtySize],
+  );
+
+  const selectWorkdir = useCallback((key: string) => {
+    setWorkdir(key);
+    try {
+      window.localStorage.setItem(WORKDIR_STORAGE_KEY, key);
+    } catch {
+      /* storage optional */
+    }
   }, []);
 
   const scrollTerminal = useCallback(
@@ -596,10 +727,49 @@ export function AgentTerminalsView() {
 
   const sendKey = useCallback(
     (sequence: string) => {
+      // Tasten zielen auf die App, nicht auf den Scrollback — Copy-Mode verlassen.
+      if (tmuxCopyModeRef.current) {
+        sendRaw("q");
+        tmuxCopyModeRef.current = false;
+        termRef.current?.scrollToBottom();
+      }
       sendRaw(sequence);
     },
     [sendRaw],
   );
+
+  const sendComposer = useCallback(
+    (submit: boolean) => {
+      const payload = buildComposerPayload(composerText, submit);
+      if (!payload) return;
+      // Aus dem tmux-Copy-Mode raus, sonst landet die Eingabe im Scrollback.
+      if (tmuxCopyModeRef.current) {
+        sendRaw("q");
+        tmuxCopyModeRef.current = false;
+        termRef.current?.scrollToBottom();
+      }
+      sendRaw(payload);
+      setComposerText("");
+    },
+    [composerText, sendRaw],
+  );
+
+  const toggleZen = useCallback(() => {
+    setZen((current) => !current);
+    setZenHeight(null);
+  }, []);
+
+  // Zen/Vollbild: Höhe an den Visual Viewport koppeln, damit die Composer-Zeile
+  // auf Mobile über der eingeblendeten Tastatur bleibt.
+  useEffect(() => {
+    if (!zen) return;
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const update = () => setZenHeight(Math.round(viewport.height));
+    update();
+    viewport.addEventListener("resize", update);
+    return () => viewport.removeEventListener("resize", update);
+  }, [zen]);
 
   const enabledSkills = useMemo(() => controlContext.skills.filter((skill) => skill.enabled), [controlContext.skills]);
   const enabledToolsets = useMemo(() => controlContext.toolsets.filter((toolset) => toolset.enabled), [controlContext.toolsets]);
@@ -643,11 +813,24 @@ export function AgentTerminalsView() {
             <div className="grid gap-1">
               {windows.filter((w) => w.session === session).map((win) => {
                 const active = target?.session === win.session && target.window === win.window;
+                const dead = isDeadWindow(win);
                 return (
-                  <button key={`${win.session}:${win.window}`} type="button" onClick={() => { setTarget(targetFromWindow(win)); setSessionsOpen(false); }} className={cn("rounded-md border px-2 py-2 text-left text-xs transition", active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-transparent text-white/65 hover:border-white/10 hover:bg-white/5")}> 
-                    <span className="flex items-center justify-between gap-2"><span>{win.window}</span><span className={cn("h-2 w-2 rounded-full", win.pid ? "bg-emerald-300" : "bg-red-300")} /></span>
-                    <span className="mt-0.5 block truncate text-[10px] text-white/40">{win.command || "dead pane"}</span>
-                  </button>
+                  <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
+                    <button type="button" onClick={() => { setTarget(targetFromWindow(win)); setSessionsOpen(false); }} className={cn("min-w-0 flex-1 rounded-md border px-2 py-2 text-left text-xs transition", active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-transparent text-white/65 hover:border-white/10 hover:bg-white/5")}>
+                      <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-red-300" : "bg-emerald-300")} /></span>
+                      <span className="mt-0.5 block truncate text-[10px] text-white/40">{dead ? "dead pane" : win.command || "—"}</span>
+                    </button>
+                    {dead && (
+                      <>
+                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-white/10 text-white/55 hover:border-cyan-300/40 hover:text-cyan-100">
+                          <RotateCcw className="h-3.5 w-3.5" />
+                        </button>
+                        <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-white/10 text-white/55 hover:border-red-300/40 hover:text-red-200">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -835,36 +1018,81 @@ export function AgentTerminalsView() {
     </div>
   );
 
+  const composer = (
+    <div className="shrink-0 border-t border-white/10 bg-[#06191b] px-2 py-1.5 sm:px-3">
+      <div className="flex items-end gap-1.5">
+        <textarea
+          aria-label="Text an Terminal senden"
+          value={composerText}
+          onChange={(event) => setComposerText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              sendComposer(true);
+            }
+          }}
+          placeholder={socketReady ? "Prompt oder Befehl … (Enter sendet)" : "Terminal nicht verbunden"}
+          disabled={!socketReady}
+          rows={Math.min(4, Math.max(1, composerText.split("\n").length))}
+          enterKeyHint="send"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          className="min-h-10 min-w-0 flex-1 resize-none rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[13px] leading-5 text-white placeholder:text-white/30 focus:border-cyan-300/50 focus:outline-none disabled:opacity-40"
+        />
+        <button
+          type="button"
+          aria-label="Eingabe senden"
+          title="Senden (mit Enter)"
+          disabled={!socketReady || !composerText}
+          onClick={() => sendComposer(true)}
+          className="grid h-10 w-12 shrink-0 place-items-center rounded-lg border border-cyan-300/50 bg-cyan-300/15 text-cyan-100 transition hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-35"
+        >
+          <CornerDownLeft className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+
   const terminalControls = compactLayout ? (
-    <div className="shrink-0 border-t border-white/10 bg-[#06191b] px-2 pb-[calc(2.25rem+env(safe-area-inset-bottom,0px))] pt-1.5 md:pb-2 md:pt-2">
-      <div className="grid grid-cols-2 gap-1.5">
-        <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal scroll controls">
-          <TerminalControlButton label="Terminal scroll page up" onClick={() => scrollTerminal("pageUp")}>
-            <ChevronsUp className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Terminal scroll up" onClick={() => scrollTerminal("lineUp")}>
-            <ChevronUp className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Terminal scroll down" onClick={() => scrollTerminal("lineDown")}>
-            <ChevronDown className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Terminal scroll to bottom" onClick={() => scrollTerminal("bottom")}>
-            <ChevronsDown className="h-4 w-4" />
-          </TerminalControlButton>
+    <div className={cn("shrink-0 border-t border-white/10 bg-[#06191b] px-2 pt-1.5", zen ? "pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]" : "pb-[calc(2.25rem+env(safe-area-inset-bottom,0px))] md:pb-2 md:pt-2")}>
+      <div className="grid gap-1.5">
+        <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal scroll controls">
+            <TerminalControlButton label="Terminal scroll page up" onClick={() => scrollTerminal("pageUp")}>
+              <ChevronsUp className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Terminal scroll up" onClick={() => scrollTerminal("lineUp")}>
+              <ChevronUp className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Terminal scroll down" onClick={() => scrollTerminal("lineDown")}>
+              <ChevronDown className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Terminal scroll to bottom" onClick={() => scrollTerminal("bottom")}>
+              <ChevronsDown className="h-4 w-4" />
+            </TerminalControlButton>
+          </div>
+          <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal arrow key controls">
+            <TerminalControlButton label="Send arrow left" disabled={!socketReady} onClick={() => sendKey("\x1b[D")}>
+              <ArrowLeft className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Send arrow up" disabled={!socketReady} onClick={() => sendKey("\x1b[A")}>
+              <ArrowUp className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Send arrow down" disabled={!socketReady} onClick={() => sendKey("\x1b[B")}>
+              <ArrowDown className="h-4 w-4" />
+            </TerminalControlButton>
+            <TerminalControlButton label="Send arrow right" disabled={!socketReady} onClick={() => sendKey("\x1b[C")}>
+              <ArrowRight className="h-4 w-4" />
+            </TerminalControlButton>
+          </div>
         </div>
-        <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal arrow key controls">
-          <TerminalControlButton label="Send arrow left" disabled={!socketReady} onClick={() => sendKey("\x1b[D")}>
-            <ArrowLeft className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Send arrow up" disabled={!socketReady} onClick={() => sendKey("\x1b[A")}>
-            <ArrowUp className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Send arrow down" disabled={!socketReady} onClick={() => sendKey("\x1b[B")}>
-            <ArrowDown className="h-4 w-4" />
-          </TerminalControlButton>
-          <TerminalControlButton label="Send arrow right" disabled={!socketReady} onClick={() => sendKey("\x1b[C")}>
-            <ArrowRight className="h-4 w-4" />
-          </TerminalControlButton>
+        <div className="grid grid-cols-5 gap-1" role="group" aria-label="Terminal special keys">
+          {QUICK_KEYS.map((key) => (
+            <TerminalControlButton key={key.label} label={`Send ${key.label}`} disabled={!socketReady} onClick={() => sendKey(key.sequence)}>
+              <span className="font-mono text-[11px]">{key.label}</span>
+            </TerminalControlButton>
+          ))}
         </div>
       </div>
     </div>
@@ -877,31 +1105,73 @@ export function AgentTerminalsView() {
           <p className="hc-eyebrow">Agent Terminals</p>
           <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-white/50">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-red-200"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
         </div>
-        <div className="grid w-full grid-cols-4 gap-1.5 sm:grid-cols-2 md:flex md:w-auto md:flex-wrap">
-          {AGENTS.map((agent) => (
-            <button key={agent.kind} type="button" onClick={() => void ensureAgent(agent.kind)} className={cn("rounded-lg border px-1.5 py-2 text-center text-[11px] sm:px-2.5 sm:text-left sm:text-xs", selectedKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]")}>
-              <span className="flex min-w-0 items-center justify-center gap-1.5 sm:justify-start sm:gap-2"><TerminalSquare className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{agent.label}</span><span className="hidden sm:inline-flex"><CapabilityPill capability={capability} agent={agent} /></span></span>
-            </button>
-          ))}
+        <div className="flex w-full flex-col gap-1.5 md:w-auto md:items-end">
+          <div className="grid w-full grid-cols-4 gap-1.5 sm:grid-cols-2 md:flex md:w-auto md:flex-wrap">
+            {AGENTS.map((agent) => (
+              <button key={agent.kind} type="button" onClick={() => void ensureAgent(agent.kind)} className={cn("rounded-lg border px-1.5 py-2 text-center text-[11px] sm:px-2.5 sm:text-left sm:text-xs", selectedKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]")}>
+                <span className="flex min-w-0 items-center justify-center gap-1.5 sm:justify-start sm:gap-2"><TerminalSquare className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{agent.label}</span><span className="hidden sm:inline-flex"><CapabilityPill capability={capability} agent={agent} /></span></span>
+              </button>
+            ))}
+          </div>
+          <label className="flex items-center gap-1.5 text-[11px] text-white/50">
+            <span className="shrink-0">Neue Fenster starten in</span>
+            <select
+              aria-label="Arbeitsverzeichnis für neue Terminals"
+              value={workdir}
+              onChange={(event) => selectWorkdir(event.target.value)}
+              className="min-w-0 max-w-[12rem] rounded-lg border border-white/10 bg-[#0a2427] px-2 py-1.5 text-xs text-white/85 focus:border-cyan-300/50 focus:outline-none"
+            >
+              {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
+                <option key={option.key} value={option.key}>{option.label}</option>
+              ))}
+            </select>
+          </label>
         </div>
       </div>
 
       <div className="grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
         <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 lg:block">{sessionList}</aside>
-        <section className="overflow-hidden rounded-2xl border border-white/10 bg-[#041113] md:min-h-[640px] lg:min-h-[540px]">
-          <div className="flex items-center justify-between border-b border-white/10 px-3 py-2 text-xs text-white/65">
-            <div className="flex items-center gap-2"><Activity className="h-3.5 w-3.5" />{target ? `${target.session}:${target.window}` : "missing window"}</div>
-            {compactLayout && <div className="flex items-center gap-1"><button type="button" onClick={() => setSessionsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelLeft className="mr-1 h-3.5 w-3.5" />Sessions</button><button type="button" onClick={() => setToolsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelRight className="mr-1 h-3.5 w-3.5" />Tools</button></div>}
+        <section
+          style={zen && zenHeight ? { height: `${zenHeight}px` } : undefined}
+          className={cn(
+            "overflow-hidden border-white/10 bg-[#041113]",
+            zen ? "fixed inset-0 z-[45] flex flex-col" : "rounded-2xl border md:min-h-[640px] lg:min-h-[540px]",
+          )}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-white/65">
+            <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{target ? `${target.session}:${target.window}` : "missing window"}</span></div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A−</button>
+              <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A+</button>
+              <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 text-white/70 hover:bg-white/10">
+                {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+              </button>
+              {compactLayout && (
+                <>
+                  <button type="button" onClick={() => setSessionsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelLeft className="mr-1 h-3.5 w-3.5" />Sessions</button>
+                  <button type="button" onClick={() => setToolsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelRight className="mr-1 h-3.5 w-3.5" />Tools</button>
+                </>
+              )}
+            </div>
           </div>
           {!target && !loading ? (
             <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Agent oben wählen, um eins anzulegen.</div>
           ) : (
-            <div className="flex h-[calc(100svh-20rem)] min-h-[420px] w-full flex-col md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]">
+            <div className={cn("flex w-full flex-col", zen ? "min-h-0 flex-1" : "h-[calc(100svh-20rem)] min-h-[420px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
               <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />
+              {state === "dead pane" && selectedWindow && (
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-[11px] text-amber-100">
+                  <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
+                  <button type="button" onClick={() => void respawnWindow(selectedWindow)} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-300/40 px-2 py-1 hover:bg-amber-300/15">
+                    <RotateCcw className="h-3 w-3" />Neu starten
+                  </button>
+                </div>
+              )}
               <div
                 ref={hostRef}
                 className="min-h-0 min-w-0 flex-1 w-full overflow-hidden [&_.xterm]:box-border [&_.xterm]:px-2 [&_.xterm]:py-1 [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:touch-pan-y"
               />
+              {composer}
               {terminalControls}
             </div>
           )}
