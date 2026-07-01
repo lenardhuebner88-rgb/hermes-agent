@@ -455,7 +455,7 @@ export function persistLaneModels(
 
 /** Fallback catalog when the backend payload carries no `models` yet. */
 export const FALLBACK_MODELS: LaneModelOption[] = [
-  { id: "claude-fable-5", label: "Claude Fable 5 (gesperrt)", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },

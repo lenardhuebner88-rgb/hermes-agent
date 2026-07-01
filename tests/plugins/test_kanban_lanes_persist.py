@@ -101,7 +101,7 @@ def test_lane_model_catalog_marks_cloud_max_models_selectable(plugin_module, mon
     assert by_id["claude-opus-4-8"]["group"] == "Claude (Max-Abo)"
     assert by_id["claude-opus-4-8"]["locked"] is False
     assert by_id["claude-sonnet-4-6"]["locked"] is False
-    assert by_id["claude-fable-5"]["locked"] is True
+    assert by_id["claude-fable-5"]["locked"] is False
 
 def test_persist_hermes_branch_writes_model_default_and_provider(kanban_home, client):
     _write_profile_config(
