@@ -124,7 +124,7 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
   const moreActive = !mobileTabs.some((tab) => tab.id === active);
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
-      <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <header data-testid="control-header" className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
         <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} strategistCount={strategistCount ?? 0} onNavigate={onNavigate} onPrefetch={onPrefetch} />
@@ -177,7 +177,7 @@ function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inbo
         <PanelLeft className="h-4 w-4 hc-dim" />
       </aside>
       <div className="min-w-0 px-6 py-5">
-        <header className="mb-5 flex items-center justify-between gap-3">
+        <header data-testid="control-header" className="mb-5 flex items-center justify-between gap-3">
           <div><p className="hc-eyebrow">Hermes Control</p><h1 className="mt-1 text-xl font-semibold text-white">{tabs.find((t) => t.id === active)?.label}</h1></div>
           <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><StatusDots health={health} /></div>
         </header>
