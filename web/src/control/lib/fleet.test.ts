@@ -129,7 +129,7 @@ describe("roleChip", () => {
   it("colours known profiles by role", () => {
     expect(roleChip("verifier")).toMatchObject({ label: "Verifier", tone: "sky" });
     expect(roleChip("coder")).toMatchObject({ label: "Coder", tone: "amber" });
-    expect(roleChip("research")).toMatchObject({ label: "Researcher", tone: "emerald" });
+    expect(roleChip("research")).toMatchObject({ label: "Research", tone: "emerald" });
   });
   it("overrides to Verifier when the run is a verification run", () => {
     expect(roleChip("coder", "verification")).toMatchObject({ label: "Verifier" });
