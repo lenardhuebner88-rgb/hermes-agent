@@ -898,6 +898,76 @@ _VISUAL_GATE_SCREENSHOTS_ROOT = Path("/tmp/hermes-visual-gate")
 _VISUAL_GATE_URL = "http://127.0.0.1:9119/control"
 
 
+class _VisualGateStaticServer:
+    """Ephemeral loopback-only static server for the freshly built dashboard."""
+
+    def __init__(self, web_dist: Path) -> None:
+        self.web_dist = Path(web_dist)
+        self._server = None
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> str:
+        index = self.web_dist / "index.html"
+        if not index.is_file():
+            raise RuntimeError(f"web_dist missing index.html: {index}")
+
+        from hermes_cli import web_server
+        import uvicorn
+
+        # Reuse the dashboard app so the built SPA sees the same API surface as
+        # production, but force the loopback server into auth-free mode instead
+        # of the externally gated auth path. WEB_DIST is global in web_server
+        # and referenced dynamically by the frontend route handlers.
+        web_server.WEB_DIST = self.web_dist
+        app = web_server.app
+        app.state.auth_required = False
+        app.state.bound_host = "127.0.0.1"
+        app.state.extra_allowed_hosts = set()
+
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="warning",
+            access_log=False,
+            lifespan="off",
+        )
+        server = uvicorn.Server(config)
+        server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+        self._server = server
+        self._thread = threading.Thread(
+            target=server.run,
+            name="hermes-visual-gate-static-server",
+            daemon=True,
+        )
+        self._thread.start()
+
+        deadline = time.monotonic() + 10
+        port: Optional[int] = None
+        while time.monotonic() < deadline:
+            servers = getattr(server, "servers", None) or []
+            if servers:
+                sockets = getattr(servers[0], "sockets", None) or []
+                if sockets:
+                    port = int(sockets[0].getsockname()[1])
+                    break
+            if self._thread and not self._thread.is_alive():
+                break
+            time.sleep(0.05)
+        if port is None:
+            self.stop()
+            raise RuntimeError("uvicorn did not expose a loopback port within 10s")
+        return f"http://127.0.0.1:{port}/control"
+
+    def stop(self) -> None:
+        server = self._server
+        if server is not None:
+            server.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+
+
 def visual_gate_enabled() -> bool:
     """Resolve ``kanban.visual_gate`` from root config, default off.
 
@@ -981,8 +1051,9 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
     """Run the non-MCP dashboard visual gate.
 
     Returns ``None`` on pass, otherwise an error tail beginning with
-    ``visual-gate:`` and including screenshot paths. The dashboard must already
-    be running in the live checkout context; this helper never starts it.
+    ``visual-gate:`` and including screenshot paths. The helper serves the
+    freshly built ``hermes_cli/web_dist`` through a throwaway auth-free
+    loopback uvicorn instance and always tears it down before returning.
     """
     repo_root = Path(repo_root)
     run_id = (
@@ -996,113 +1067,125 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
     scripted_mobile_path = run_dir / "mobile-playwright.png"
     screenshot_paths = [desktop_path, mobile_path, scripted_mobile_path]
 
+    server = _VisualGateStaticServer(repo_root / "hermes_cli" / "web_dist")
     try:
-        health = subprocess.run(  # noqa: S603 -- fixed argv
-            ["curl", "-fsS", _VISUAL_GATE_URL],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        return _visual_gate_error(
-            f"dashboard unreachable: curl timed out for {_VISUAL_GATE_URL}",
-            screenshot_paths,
-        )
-    except FileNotFoundError:
-        return _visual_gate_error("dashboard unreachable: curl not found", screenshot_paths)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _visual_gate_error(f"dashboard unreachable: {exc}", screenshot_paths)
-    if health.returncode != 0:
-        tail = (health.stdout + "\n" + health.stderr).strip()[-1000:]
-        return _visual_gate_error(
-            f"dashboard unreachable: curl exit {health.returncode}\n{tail}",
-            screenshot_paths,
-        )
-
-    shots = (
-        ("desktop", "1280,800", desktop_path),
-        ("mobile", "390,844", mobile_path),
-    )
-    for label, size, path in shots:
         try:
-            shot = subprocess.run(  # noqa: S603 -- fixed argv
-                [
-                    "chromium-shot",
-                    f"--screenshot={path}",
-                    f"--window-size={size}",
-                    "--virtual-time-budget=12000",
-                    _VISUAL_GATE_URL,
-                ],
+            visual_gate_url = server.start()
+        except Exception as exc:
+            return _visual_gate_error(
+                f"dashboard static server failed: {exc}", screenshot_paths
+            )
+
+        try:
+            health = subprocess.run(  # noqa: S603 -- fixed argv
+                ["curl", "-fsS", visual_gate_url],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return _visual_gate_error(
+                f"dashboard unreachable: curl timed out for {visual_gate_url}",
+                screenshot_paths,
+            )
+        except FileNotFoundError:
+            return _visual_gate_error("dashboard unreachable: curl not found", screenshot_paths)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _visual_gate_error(f"dashboard unreachable: {exc}", screenshot_paths)
+        if health.returncode != 0:
+            tail = (health.stdout + "\n" + health.stderr).strip()[-1000:]
+            return _visual_gate_error(
+                f"dashboard unreachable: curl exit {health.returncode}\n{tail}",
+                screenshot_paths,
+            )
+
+        shots = (
+            ("desktop", "1280,800", desktop_path),
+            ("mobile", "390,844", mobile_path),
+        )
+        for label, size, path in shots:
+            try:
+                shot = subprocess.run(  # noqa: S603 -- fixed argv
+                    [
+                        "chromium-shot",
+                        f"--screenshot={path}",
+                        f"--window-size={size}",
+                        "--virtual-time-budget=12000",
+                        visual_gate_url,
+                    ],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.TimeoutExpired:
+                return _visual_gate_error(
+                    f"{label} chromium-shot timed out after 120s",
+                    screenshot_paths,
+                )
+            except FileNotFoundError:
+                return _visual_gate_error("chromium-shot not found", screenshot_paths)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return _visual_gate_error(
+                    f"{label} chromium-shot failed: {exc}", screenshot_paths,
+                )
+            if shot.returncode != 0:
+                tail = (shot.stdout + "\n" + shot.stderr).strip()[-2000:]
+                return _visual_gate_error(
+                    f"{label} chromium-shot exit {shot.returncode}\n{tail}",
+                    screenshot_paths,
+                )
+
+        env = dict(os.environ)
+        env["HERMES_VISUAL_GATE_SCREENSHOT"] = str(scripted_mobile_path)
+        env["HERMES_VISUAL_GATE_URL"] = visual_gate_url
+        try:
+            node = subprocess.run(  # noqa: S603 -- fixed argv
+                ["node", "scripts/visual_check_mobile.mjs"],
                 cwd=str(repo_root),
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return _visual_gate_error(
-                f"{label} chromium-shot timed out after 120s",
-                screenshot_paths,
+                "mobile Playwright check timed out after 120s", screenshot_paths,
             )
         except FileNotFoundError:
-            return _visual_gate_error("chromium-shot not found", screenshot_paths)
+            return _visual_gate_error("node not found", screenshot_paths)
         except (OSError, subprocess.SubprocessError) as exc:
+            return _visual_gate_error(f"mobile Playwright check failed: {exc}", screenshot_paths)
+
+        stdout = (node.stdout or "").strip()
+        try:
+            payload = json.loads(stdout) if stdout else {}
+        except json.JSONDecodeError:
+            tail = ((node.stdout or "") + "\n" + (node.stderr or "")).strip()[-2000:]
             return _visual_gate_error(
-                f"{label} chromium-shot failed: {exc}", screenshot_paths,
-            )
-        if shot.returncode != 0:
-            tail = (shot.stdout + "\n" + shot.stderr).strip()[-2000:]
-            return _visual_gate_error(
-                f"{label} chromium-shot exit {shot.returncode}\n{tail}",
+                f"mobile Playwright check returned non-JSON output\n{tail}",
                 screenshot_paths,
             )
-
-    env = dict(os.environ)
-    env["HERMES_VISUAL_GATE_SCREENSHOT"] = str(scripted_mobile_path)
-    try:
-        node = subprocess.run(  # noqa: S603 -- fixed argv
-            ["node", "scripts/visual_check_mobile.mjs"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return _visual_gate_error(
-            "mobile Playwright check timed out after 120s", screenshot_paths,
-        )
-    except FileNotFoundError:
-        return _visual_gate_error("node not found", screenshot_paths)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _visual_gate_error(f"mobile Playwright check failed: {exc}", screenshot_paths)
-
-    stdout = (node.stdout or "").strip()
-    try:
-        payload = json.loads(stdout) if stdout else {}
-    except json.JSONDecodeError:
-        tail = ((node.stdout or "") + "\n" + (node.stderr or "")).strip()[-2000:]
-        return _visual_gate_error(
-            f"mobile Playwright check returned non-JSON output\n{tail}",
-            screenshot_paths,
-        )
-    if payload.get("screenshotPath"):
-        try:
-            scripted_path = Path(str(payload["screenshotPath"]))
-            if scripted_path not in screenshot_paths:
-                screenshot_paths.append(scripted_path)
-        except TypeError:
-            pass
-    if node.returncode != 0 or not payload.get("ok"):
-        tail = json.dumps(payload, ensure_ascii=False, sort_keys=True)[-2000:]
-        stderr = (node.stderr or "").strip()[-1000:]
-        if stderr:
-            tail = f"{tail}\nstderr:\n{stderr}"
-        return _visual_gate_error(
-            f"mobile Playwright check failed\n{tail}",
-            screenshot_paths,
-        )
-    return None
+        if payload.get("screenshotPath"):
+            try:
+                scripted_path = Path(str(payload["screenshotPath"]))
+                if scripted_path not in screenshot_paths:
+                    screenshot_paths.append(scripted_path)
+            except TypeError:
+                pass
+        if node.returncode != 0 or not payload.get("ok"):
+            tail = json.dumps(payload, ensure_ascii=False, sort_keys=True)[-2000:]
+            stderr = (node.stderr or "").strip()[-1000:]
+            if stderr:
+                tail = f"{tail}\nstderr:\n{stderr}"
+            return _visual_gate_error(
+                f"mobile Playwright check failed\n{tail}",
+                screenshot_paths,
+            )
+        return None
+    finally:
+        server.stop()
 
 
 def _release_gate_context(

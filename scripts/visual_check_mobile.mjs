@@ -7,7 +7,7 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("/home/piet/.hermes/hermes-agent/node_modules/playwright-core");
 
-const CONTROL_URL = "http://127.0.0.1:9119/control";
+const CONTROL_URL = process.env.HERMES_VISUAL_GATE_URL || "http://127.0.0.1:9119/control";
 const CONNECT_TIMEOUT_MS = 5_000;
 const screenshotPath = process.env.HERMES_VISUAL_GATE_SCREENSHOT
   || path.join(os.tmpdir(), `hermes-visual-gate-mobile-${process.pid}.png`);
@@ -50,11 +50,10 @@ async function typeIntoVisibleInput(page) {
       + "[contenteditable='true'], "
       + "[role='textbox']",
   ).filter({ visible: true }).first();
-  if (!(await input.count())) {
-    throw new Error("No visible input/search field found for focus overflow check");
-  }
+  if (!(await input.count())) return false;
   await input.click({ timeout: CONNECT_TIMEOUT_MS });
   await input.type("gate", { delay: 10, timeout: CONNECT_TIMEOUT_MS });
+  return true;
 }
 
 async function readOverflow() {
@@ -74,6 +73,7 @@ async function readOverflow() {
 async function main() {
   const consoleErrors = [];
   let overflowAfterFocus = null;
+  let focusTargetFound = false;
   let browser = null;
 
   try {
@@ -105,9 +105,17 @@ async function main() {
     await page.getByText("Hermes Control").filter({ visible: true }).first()
       .waitFor({ timeout: 15_000 });
 
+    const overflowBeforeInteraction = await page.evaluate(readOverflow);
+    if (!overflowBeforeInteraction.ok) {
+      throw new Error(
+        `horizontal overflow before interaction: scrollWidth=${overflowBeforeInteraction.scrollWidth} `
+        + `innerWidth=${overflowBeforeInteraction.innerWidth}`,
+      );
+    }
+
     await clickFirstUsefulButton(page);
     await page.waitForTimeout(250);
-    await typeIntoVisibleInput(page);
+    focusTargetFound = await typeIntoVisibleInput(page);
     await page.waitForTimeout(250);
 
     overflowAfterFocus = await page.evaluate(readOverflow);
@@ -131,6 +139,7 @@ async function main() {
       ok: true,
       consoleErrors,
       overflowAfterFocus,
+      focusTargetFound,
       screenshotPath,
     }) + "\n");
     return 0;
@@ -149,6 +158,7 @@ async function main() {
       ok: false,
       consoleErrors,
       overflowAfterFocus,
+      focusTargetFound,
       screenshotPath,
       error: message,
     }) + "\n");
