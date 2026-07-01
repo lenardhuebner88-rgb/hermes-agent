@@ -1157,7 +1157,7 @@ export function AgentTerminalsView() {
           {!target && !loading ? (
             <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Agent oben wählen, um eins anzulegen.</div>
           ) : (
-            <div className={cn("flex w-full flex-col", zen ? "min-h-0 flex-1" : "h-[calc(100svh-20rem)] min-h-[420px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
+            <div className={cn("flex w-full flex-col", zen ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
               <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />
               {state === "dead pane" && selectedWindow && (
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-[11px] text-amber-100">
@@ -1181,7 +1181,6 @@ export function AgentTerminalsView() {
 
       {compactLayout && sessionsOpen && <div className="fixed inset-0 z-50 bg-black/55 p-3"><div className="h-full overflow-auto rounded-2xl border border-white/10 bg-[#071b1d] p-3"><div className="mb-2 flex justify-end"><button type="button" onClick={() => setSessionsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button></div>{sessionList}</div></div>}
       {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
-      {compactLayout && !toolsOpen && <button type="button" onClick={() => setToolsOpen(true)} className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] right-4 z-40 min-h-10 rounded-full border border-cyan-300/40 bg-[#0b2d31] px-3 py-2 text-xs text-cyan-100 shadow-xl"><ChevronUp className="mr-1 inline h-3.5 w-3.5" />Tools</button>}
 
       {handoffOpen && (
         <TerminalHandoffPanel
