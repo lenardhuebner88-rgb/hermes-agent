@@ -1,5 +1,6 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
+import re
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -61,6 +62,105 @@ class TestUpdateFromResponse:
     def test_missing_fields_default_zero(self, compressor):
         compressor.update_from_response({})
         assert compressor.last_prompt_tokens == 0
+
+
+class TestSerializeForSummaryRelevanceTruncation:
+    def _long_tool_result_with_relevant_middle(self):
+        head = "".join(f"head filler line {i}: unrelated setup text\n" for i in range(140))
+        middle = (
+            "def preserve_relevance_target(config):\n"
+            "    return config['important_middle_value']\n"
+        )
+        tail = "".join(f"tail filler line {i}: unrelated teardown text\n" for i in range(100))
+        content = head + middle + tail
+        assert len(content) > ContextCompressor._CONTENT_MAX
+        return content
+
+    def _serialized_tool_content(self, serialized):
+        return serialized.split("[TOOL RESULT call_1]: ", 1)[1]
+
+    def test_relevant_middle_chunk_survives_when_task_signal_mentions_it(self, compressor):
+        content = self._long_tool_result_with_relevant_middle()
+        turns = [
+            {
+                "role": "user",
+                "content": "Find preserve_relevance_target in the large tool result.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": content},
+        ]
+
+        serialized = compressor._serialize_for_summary_with_relevance_ranking(turns)
+        tool_content = self._serialized_tool_content(serialized)
+
+        assert "def preserve_relevance_target(config):" in tool_content
+
+    def test_relevance_truncation_stays_within_content_budget_plus_markers(self, compressor):
+        content = self._long_tool_result_with_relevant_middle()
+        turns = [
+            {
+                "role": "user",
+                "content": "Find preserve_relevance_target in the large tool result.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": content},
+        ]
+
+        serialized = compressor._serialize_for_summary_with_relevance_ranking(turns)
+        tool_content = self._serialized_tool_content(serialized)
+        markers = re.findall(r"\n\.\.\.\[\d+ chars skipped\]\.\.\.\n", tool_content)
+        marker_chars = sum(len(marker) for marker in markers)
+
+        assert len(tool_content) - marker_chars <= (
+            compressor._CONTENT_HEAD + compressor._CONTENT_TAIL
+        )
+
+    def test_without_task_signal_uses_legacy_head_tail_truncation(self, compressor):
+        content = "A" * 4500 + "middle content that should be removed" + "Z" * 2200
+        turns = [{"role": "tool", "tool_call_id": "call_1", "content": content}]
+
+        serialized = compressor._serialize_for_summary_with_relevance_ranking(turns)
+        tool_content = self._serialized_tool_content(serialized)
+
+        expected = (
+            content[:compressor._CONTENT_HEAD]
+            + "\n...[truncated]...\n"
+            + content[-compressor._CONTENT_TAIL:]
+        )
+        assert tool_content == expected
+
+    def test_relevance_truncation_is_deterministic(self, compressor):
+        content = self._long_tool_result_with_relevant_middle()
+        turns = [
+            {
+                "role": "user",
+                "content": "Find preserve_relevance_target in the large tool result.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": content},
+        ]
+
+        first = compressor._serialize_for_summary_with_relevance_ranking(turns)
+        second = compressor._serialize_for_summary_with_relevance_ranking(turns)
+
+        assert first == second
+
+    def test_legacy_serializer_keeps_head_tail_even_with_task_signal(self, compressor):
+        content = self._long_tool_result_with_relevant_middle()
+        turns = [
+            {
+                "role": "user",
+                "content": "Find preserve_relevance_target in the large tool result.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": content},
+        ]
+
+        serialized = compressor._serialize_for_summary(turns)
+        tool_content = self._serialized_tool_content(serialized)
+
+        expected = (
+            content[:compressor._CONTENT_HEAD]
+            + "\n...[truncated]...\n"
+            + content[-compressor._CONTENT_TAIL:]
+        )
+        assert tool_content == expected
 
 
 class TestPreflightDeferral:

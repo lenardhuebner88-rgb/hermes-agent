@@ -179,6 +179,35 @@ _MAX_TAIL_MESSAGE_FLOOR = 8
 
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
+_SUMMARY_SIGNAL_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{3,}")
+_SUMMARY_SIGNAL_STOPWORDS = frozenset(
+    {
+        "about",
+        "after",
+        "and",
+        "are",
+        "because",
+        "but",
+        "can",
+        "context",
+        "find",
+        "for",
+        "from",
+        "have",
+        "into",
+        "large",
+        "please",
+        "result",
+        "that",
+        "the",
+        "this",
+        "tool",
+        "with",
+        "you",
+    }
+)
+_SUMMARY_RELEVANCE_CHUNK_TARGET = 500
+_SUMMARY_RELEVANCE_TERM_LIMIT = 80
 
 # MEDIA delivery directives must not reach the summarizer — if one leaks into
 # the summary, the downstream model may re-emit it as an active directive on
@@ -288,6 +317,207 @@ def _content_text_for_contains(content: Any) -> str:
                     parts.append(text)
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def _tokenize_summary_signal(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in _SUMMARY_SIGNAL_TOKEN_RE.findall(text):
+        token = match.strip(".,;:()[]{}<>\"'`").lower()
+        if len(token) < 3 or token in _SUMMARY_SIGNAL_STOPWORDS:
+            continue
+        candidates = [token]
+        candidates.extend(
+            part
+            for part in re.split(r"[/_.:-]+", token)
+            if len(part) >= 3 and part not in _SUMMARY_SIGNAL_STOPWORDS
+        )
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                terms.append(candidate)
+                if len(terms) >= _SUMMARY_RELEVANCE_TERM_LIMIT:
+                    return terms
+    return terms
+
+
+def _extract_summary_relevance_terms(turns: List[Dict[str, Any]]) -> tuple[str, ...]:
+    """Extract deterministic task-signal terms for summary-input truncation."""
+    latest_user = ""
+    tool_signals: list[str] = []
+
+    for msg in turns:
+        role = msg.get("role", "unknown")
+        if role == "user":
+            text = redact_sensitive_text(_content_text_for_contains(msg.get("content") or ""))
+            if text.strip():
+                latest_user = text
+            continue
+        if role != "assistant":
+            continue
+        for tool_call in msg.get("tool_calls") or []:
+            name, args = _extract_tool_call_name_and_args(tool_call)
+            signal = "\n".join(
+                part for part in (name, redact_sensitive_text(args)) if part
+            )
+            if signal.strip():
+                tool_signals.append(signal)
+
+    combined = "\n".join(part for part in [latest_user, *tool_signals] if part)
+    return tuple(_tokenize_summary_signal(combined))
+
+
+def _legacy_summary_content_truncate(
+    content: str,
+    *,
+    head_chars: int,
+    tail_chars: int,
+) -> str:
+    return content[:head_chars] + "\n...[truncated]...\n" + content[-tail_chars:]
+
+
+def _summary_relevance_chunks(
+    content: str,
+    *,
+    start: int,
+    end: int,
+    target_chars: int = _SUMMARY_RELEVANCE_CHUNK_TARGET,
+) -> list[tuple[int, int, str]]:
+    chunks: list[tuple[int, int, str]] = []
+    if end <= start:
+        return chunks
+
+    offset = 0
+    current_start: int | None = None
+    current_parts: list[str] = []
+    current_len = 0
+
+    def flush() -> None:
+        nonlocal current_start, current_parts, current_len
+        if current_start is not None and current_parts:
+            text = "".join(current_parts)
+            chunks.append((current_start, current_start + len(text), text))
+        current_start = None
+        current_parts = []
+        current_len = 0
+
+    for line in content[start:end].splitlines(keepends=True):
+        line_start = start + offset
+        if len(line) > target_chars:
+            flush()
+            for piece_start in range(0, len(line), target_chars):
+                piece = line[piece_start : piece_start + target_chars]
+                absolute_start = line_start + piece_start
+                chunks.append((absolute_start, absolute_start + len(piece), piece))
+            offset += len(line)
+            continue
+
+        if current_parts and current_len + len(line) > target_chars:
+            flush()
+        if current_start is None:
+            current_start = line_start
+        current_parts.append(line)
+        current_len += len(line)
+        offset += len(line)
+
+    flush()
+    return chunks
+
+
+def _summary_chunk_relevance_score(chunk: str, terms: tuple[str, ...]) -> int:
+    lower = chunk.lower()
+    score = 0
+    for term in terms:
+        occurrences = lower.count(term)
+        if occurrences:
+            weight = 3 if any(ch in term for ch in "_/.-:") else 1
+            score += occurrences * weight
+    return score
+
+
+def _join_summary_segments_with_elisions(
+    content: str,
+    segments: list[tuple[int, int]],
+) -> str:
+    cleaned: list[tuple[int, int]] = []
+    content_len = len(content)
+    for start, end in sorted(segments):
+        start = max(0, min(start, content_len))
+        end = max(start, min(end, content_len))
+        if start == end:
+            continue
+        if cleaned and start <= cleaned[-1][1]:
+            cleaned[-1] = (cleaned[-1][0], max(cleaned[-1][1], end))
+        else:
+            cleaned.append((start, end))
+
+    output: list[str] = []
+    cursor = 0
+    for start, end in cleaned:
+        if start > cursor:
+            output.append(f"\n...[{start - cursor} chars skipped]...\n")
+        output.append(content[start:end])
+        cursor = end
+    if cursor < content_len:
+        output.append(f"\n...[{content_len - cursor} chars skipped]...\n")
+    return "".join(output)
+
+
+def _truncate_summary_content_by_relevance(
+    content: str,
+    terms: tuple[str, ...],
+    *,
+    head_chars: int,
+    tail_chars: int,
+) -> str:
+    if not terms:
+        return _legacy_summary_content_truncate(
+            content, head_chars=head_chars, tail_chars=tail_chars
+        )
+
+    base_budget = head_chars + tail_chars
+    if base_budget <= 0:
+        return ""
+
+    head_anchor = min(head_chars, max(600, base_budget // 5), len(content))
+    remaining_after_head = max(0, len(content) - head_anchor)
+    tail_anchor = min(tail_chars, max(400, base_budget // 6), remaining_after_head)
+    middle_budget = max(0, base_budget - head_anchor - tail_anchor)
+    middle_start = head_anchor
+    middle_end = max(middle_start, len(content) - tail_anchor)
+
+    chunks = _summary_relevance_chunks(content, start=middle_start, end=middle_end)
+    scored = [
+        (score, index, start, end)
+        for index, (start, end, chunk) in enumerate(chunks)
+        if (score := _summary_chunk_relevance_score(chunk, terms)) > 0
+    ]
+    if not scored or middle_budget <= 0:
+        return _legacy_summary_content_truncate(
+            content, head_chars=head_chars, tail_chars=tail_chars
+        )
+
+    selected: list[tuple[int, int]] = []
+    used = 0
+    for _, _, start, end in sorted(scored, key=lambda item: (-item[0], item[1])):
+        chunk_len = end - start
+        if chunk_len > middle_budget:
+            end = start + middle_budget
+            chunk_len = end - start
+        if used + chunk_len > middle_budget:
+            continue
+        selected.append((start, end))
+        used += chunk_len
+        if used >= middle_budget:
+            break
+
+    if not selected:
+        return _legacy_summary_content_truncate(
+            content, head_chars=head_chars, tail_chars=tail_chars
+        )
+
+    segments = [(0, head_anchor), *selected, (len(content) - tail_anchor, len(content))]
+    return _join_summary_segments_with_elisions(content, segments)
 
 
 def _append_text_to_content(content: Any, text: str, *, prepend: bool = False) -> Any:
@@ -1228,6 +1458,68 @@ class ContextCompressor(ContextEngine):
 
         return "\n\n".join(parts)
 
+    def _serialize_for_summary_with_relevance_ranking(
+        self,
+        turns: List[Dict[str, Any]],
+    ) -> str:
+        """Serialize turns with deterministic relevance-ranked body truncation."""
+        parts = []
+        relevance_terms = _extract_summary_relevance_terms(turns)
+        for msg in turns:
+            role = msg.get("role", "unknown")
+            content = redact_sensitive_text(msg.get("content") or "")
+            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
+
+            if role == "tool":
+                tool_id = msg.get("tool_call_id", "")
+                if len(content) > self._CONTENT_MAX:
+                    content = _truncate_summary_content_by_relevance(
+                        content,
+                        relevance_terms,
+                        head_chars=self._CONTENT_HEAD,
+                        tail_chars=self._CONTENT_TAIL,
+                    )
+                parts.append(f"[TOOL RESULT {tool_id}]: {content}")
+                continue
+
+            if role == "assistant":
+                if len(content) > self._CONTENT_MAX:
+                    content = _truncate_summary_content_by_relevance(
+                        content,
+                        relevance_terms,
+                        head_chars=self._CONTENT_HEAD,
+                        tail_chars=self._CONTENT_TAIL,
+                    )
+                tool_calls = msg.get("tool_calls", [])
+                if tool_calls:
+                    tc_parts = []
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            fn = tc.get("function", {})
+                            name = fn.get("name", "?")
+                            args = redact_sensitive_text(fn.get("arguments", ""))
+                            if len(args) > self._TOOL_ARGS_MAX:
+                                args = args[:self._TOOL_ARGS_HEAD] + "..."
+                            tc_parts.append(f"  {name}({args})")
+                        else:
+                            fn = getattr(tc, "function", None)
+                            name = getattr(fn, "name", "?") if fn else "?"
+                            tc_parts.append(f"  {name}(...)")
+                    content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
+                parts.append(f"[ASSISTANT]: {content}")
+                continue
+
+            if len(content) > self._CONTENT_MAX:
+                content = _truncate_summary_content_by_relevance(
+                    content,
+                    relevance_terms,
+                    head_chars=self._CONTENT_HEAD,
+                    tail_chars=self._CONTENT_TAIL,
+                )
+            parts.append(f"[{role.upper()}]: {content}")
+
+        return "\n\n".join(parts)
+
     def _build_static_fallback_summary(
         self,
         turns_to_summarize: List[Dict[str, Any]],
@@ -1480,7 +1772,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             return None
 
         summary_budget = self._compute_summary_budget(turns_to_summarize)
-        content_to_summarize = self._serialize_for_summary(turns_to_summarize)
+        content_to_summarize = self._serialize_for_summary_with_relevance_ranking(
+            turns_to_summarize
+        )
 
         # Current date for temporal anchoring (see ## Temporal Anchoring below).
         # Date-only granularity matches system_prompt.py:337 (PR #20451) and the
