@@ -20,6 +20,7 @@ from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
     DelegateEvent,
+    _STANDING_BRIEF,
     _get_max_concurrent_children,
     _LEGACY_EVENT_MAP,
     MAX_DEPTH,
@@ -74,6 +75,19 @@ class TestDelegateRequirements(unittest.TestCase):
         # predictable budgets.
         self.assertNotIn("max_iterations", props)
         self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
+
+    def test_context_description_includes_brief_checklist(self):
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        descriptions = [
+            props["context"]["description"],
+            props["tasks"]["items"]["properties"]["context"]["description"],
+        ]
+        for description in descriptions:
+            self.assertIn("goal", description.lower())
+            self.assertIn("affected files", description)
+            self.assertIn("testable done-when", description)
+            self.assertIn("Anti-scope", description)
+            self.assertIn("conventions", description)
 
     def test_schema_description_advertises_runtime_limits(self):
         """The model must see the user's actual concurrency / spawn-depth caps,
@@ -131,16 +145,23 @@ class TestChildSystemPrompt(unittest.TestCase):
         self.assertIn("Fix the tests", prompt)
         self.assertIn("YOUR TASK", prompt)
         self.assertNotIn("CONTEXT", prompt)
+        self.assertIn(_STANDING_BRIEF, prompt)
 
     def test_goal_with_context(self):
-        prompt = _build_child_system_prompt("Fix the tests", "Error: assertion failed in test_foo.py line 42")
+        goal = "Fix the tests"
+        context = "Error: assertion failed in test_foo.py line 42"
+        prompt = _build_child_system_prompt(goal, context)
+        self.assertIn(f"YOUR TASK:\n{goal}", prompt)
+        self.assertIn(f"CONTEXT:\n{context}", prompt)
         self.assertIn("Fix the tests", prompt)
         self.assertIn("CONTEXT", prompt)
         self.assertIn("assertion failed", prompt)
+        self.assertIn(_STANDING_BRIEF, prompt)
 
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+        self.assertIn(_STANDING_BRIEF, prompt)
 
 
 class TestStripBlockedTools(unittest.TestCase):

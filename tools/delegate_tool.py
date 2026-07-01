@@ -52,6 +52,14 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
+_STANDING_BRIEF = """STANDING BRIEF:
+- Hermes checkout: /home/piet/.hermes/hermes-agent; venv .venv; run tests via scripts/run_tests.sh.
+- Canonical facts are read-only under /home/piet/vault/00-Canon/.
+- Evidence before claims: say "green" or "done" only with the command run and quoted output.
+- Return distilled conclusions with file:line evidence; do not paste raw dumps.
+- Boundaries: no commit/push/deploy, no service start/restart, and do not delete anything you did not create.
+- If unsure or blocked, block cleanly and put the question in your result summary instead of guessing."""
+
 
 # ---------------------------------------------------------------------------
 # Subagent approval callbacks
@@ -674,6 +682,8 @@ def _build_child_system_prompt(
         "You are a focused subagent working on a specific delegated task.",
         "",
         f"YOUR TASK:\n{goal}",
+        "",
+        _STANDING_BRIEF,
     ]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
@@ -3036,7 +3046,9 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Background information the subagent needs: file paths, "
                     "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
+                    "specific you are, the better the subagent performs. Good "
+                    "brief checklist: goal, affected files, testable done-when, "
+                    "Anti-scope, and relevant conventions."
                 ),
             },
             "toolsets": {
@@ -3059,7 +3071,11 @@ DELEGATE_TASK_SCHEMA = {
                         "goal": {"type": "string", "description": "Task goal"},
                         "context": {
                             "type": "string",
-                            "description": "Task-specific context",
+                            "description": (
+                                "Task-specific context. Good brief checklist: "
+                                "goal, affected files, testable done-when, "
+                                "Anti-scope, and relevant conventions."
+                            ),
                         },
                         "toolsets": {
                             "type": "array",
