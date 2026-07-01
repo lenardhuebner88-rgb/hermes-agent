@@ -2985,6 +2985,7 @@ def close_epic_endpoint(
 _LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = (
     {"id": "claude-fable-5", "label": "Claude Fable 5 (gesperrt)", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
     {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
+    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
     {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
     {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
 )
