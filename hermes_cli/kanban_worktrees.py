@@ -911,18 +911,23 @@ class _VisualGateStaticServer:
         if not index.is_file():
             raise RuntimeError(f"web_dist missing index.html: {index}")
 
-        from hermes_cli import web_server
+        from fastapi import FastAPI
+        from fastapi.responses import FileResponse
+        from fastapi.staticfiles import StaticFiles
         import uvicorn
 
-        # Reuse the dashboard app so the built SPA sees the same API surface as
-        # production, but force the loopback server into auth-free mode instead
-        # of the externally gated auth path. WEB_DIST is global in web_server
-        # and referenced dynamically by the frontend route handlers.
-        web_server.WEB_DIST = self.web_dist
-        app = web_server.app
-        app.state.auth_required = False
-        app.state.bound_host = "127.0.0.1"
-        app.state.extra_allowed_hosts = set()
+        app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+        assets = self.web_dist / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def _serve_spa(full_path: str = "") -> FileResponse:
+            requested = (self.web_dist / full_path).resolve()
+            root = self.web_dist.resolve()
+            if requested.is_file() and requested.is_relative_to(root):
+                return FileResponse(requested)
+            return FileResponse(index)
 
         config = uvicorn.Config(
             app,
