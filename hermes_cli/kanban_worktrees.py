@@ -68,6 +68,10 @@ _IGNORED_DIRTY_PREFIXES = (
     # Ignored from dirty-file detection so it doesn't park the chain
     # either — it's a tool byproduct like node_modules.
     "playwright/.auth/",
+    # Critic profile metadata: transient per-run output, not a visual/test
+    # artifact. Without this ignore it matches _ARTIFACT_LIKE_SUFFIXES via
+    # '.json' and parks the chain with ARTIFACT_POLICY_MISSING.
+    ".critic_meta.json",
 )
 _IGNORED_DIRTY_PATHS = (
     ".deliverable.md",
