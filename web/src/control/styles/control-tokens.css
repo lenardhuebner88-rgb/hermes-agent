@@ -92,6 +92,25 @@ body:has([data-control]) header[role="banner"] { display: none; }
 [data-control] pre,
 [data-control] .hc-mono { font-family: var(--hc-font-mono); }
 
+/* Agent terminal composer lives on a dark terminal rail inside the otherwise
+   light-schemed Control UI. iOS/WebKit can apply light form-control text fill
+   despite Tailwind `text-white`, so pin the input paint explicitly. */
+[data-control] .agent-terminal-composer-input {
+  color: #fff;
+  -webkit-text-fill-color: #fff;
+  caret-color: #fff;
+  color-scheme: dark;
+}
+
+[data-control] .agent-terminal-composer-input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.55);
+}
+
+[data-control] .agent-terminal-composer-input:disabled {
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.75);
+}
+
 .hc-page {
   position: relative;
   isolation: isolate;

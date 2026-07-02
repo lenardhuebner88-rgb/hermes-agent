@@ -1052,7 +1052,7 @@ export function AgentTerminalsView() {
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
-          className="min-h-10 min-w-0 flex-1 resize-none rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[13px] leading-5 text-white placeholder:text-white/30 focus:border-cyan-300/50 focus:outline-none disabled:opacity-40"
+          className="agent-terminal-composer-input min-h-10 min-w-0 flex-1 resize-none rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[13px] leading-5 text-white placeholder:text-white/55 focus:border-cyan-300/50 focus:outline-none disabled:opacity-40"
         />
         <button
           type="button"
