@@ -1116,6 +1116,10 @@ class AgentTerminalTargetRequest(BaseModel):
     window: str
 
 
+class AgentTerminalRenameRequest(AgentTerminalTargetRequest):
+    name: str
+
+
 class AgentTerminalCaptureRequest(AgentTerminalTargetRequest):
     start: int = -200
 
@@ -13262,6 +13266,14 @@ async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, obj
     return {"windows": [window.to_dict() for window in windows]}
 
 
+@app.get("/api/agent-terminals/overview")
+async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
+    try:
+        return _agent_terminal_service().overview(tail_lines=tail_lines)
+    except AgentTerminalError as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
 @app.post("/api/agent-terminals/show")
 async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
@@ -13278,10 +13290,26 @@ async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, ob
         raise _agent_terminal_error(exc) from exc
 
 
+@app.post("/api/agent-terminals/create")
+async def agent_terminal_create(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().create_new(req.kind, req.workdir).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
 @app.post("/api/agent-terminals/respawn")
 async def agent_terminal_respawn(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
         return {"window": _agent_terminal_service().respawn_dead(req.session, req.window).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/rename")
+async def agent_terminal_rename(req: AgentTerminalRenameRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().rename(req.session, req.window, req.name).to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 

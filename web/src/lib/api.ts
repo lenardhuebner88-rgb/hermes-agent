@@ -429,6 +429,20 @@ export interface AgentTerminalWindow {
   command: string;
   cwd?: string | null;
   dead?: boolean;
+  activity?: number | null;
+}
+
+export type AgentTerminalOverviewState = "dead" | "frage" | "laeuft" | "wartet" | "idle";
+
+export interface AgentTerminalOverviewWindow extends AgentTerminalWindow {
+  tail: string | null;
+  state: AgentTerminalOverviewState;
+  state_source: "heuristic";
+}
+
+export interface AgentTerminalOverviewResponse {
+  now: number;
+  windows: AgentTerminalOverviewWindow[];
 }
 
 export interface AgentTerminalSessionsResponse {
@@ -532,6 +546,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
     }),
+  createAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
+    }),
   respawnAgentTerminalWindow: (session: string, window: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/respawn", {
       method: "POST",
@@ -555,6 +575,20 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: clientId }),
+    }),
+  renameAgentTerminalWindow: (session: string, window: string, name: string) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, window, name }),
+    }),
+  getAgentTerminalOverview: () =>
+    fetchJSON<AgentTerminalOverviewResponse>("/api/agent-terminals/overview"),
+  sendAgentTerminalKeys: (session: string, window: string, text: string) =>
+    fetchJSON<{ ok: boolean }>("/api/agent-terminals/send-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, window, text }),
     }),
   getControlOverviewHealth: () =>
     fetchJSON<ControlOverviewHealthResponse>("/api/health-status"),

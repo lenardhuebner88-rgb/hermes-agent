@@ -13,7 +13,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -21,8 +21,98 @@ from hermes_cli.config import get_hermes_home
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
+_TRAILING_NUMBER_RE = re.compile(r"-\d+$")
+_MAX_NUMBERED_WINDOWS = 9
 
 _AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi")
+
+# ----- ANSI stripping --------------------------------------------------------
+# Order matters: OSC sequences also start with ESC, so they must be stripped
+# before the generic single-ESC catch-all would otherwise mangle them.
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_ANSI_ESC_RE = re.compile(r"\x1b.")
+
+
+def strip_ansi(text: str) -> str:
+    """Strip CSI/OSC/simple ESC sequences from captured tmux pane text."""
+    text = _ANSI_OSC_RE.sub("", text)
+    text = _ANSI_CSI_RE.sub("", text)
+    text = _ANSI_ESC_RE.sub("", text)
+    return text
+
+
+# ----- agent pane classification ---------------------------------------------
+# Precedence order matches the numbered rules this function implements below;
+# do not reorder without re-checking the fixtures in test_agent_terminals.py.
+_QUESTION_YN_RE = re.compile(r"y/n", re.IGNORECASE)
+_QUESTION_ALLOW_RE = re.compile(r"\ballow\b", re.IGNORECASE)
+_QUESTION_DO_YOU_WANT_RE = re.compile(r"do you want", re.IGNORECASE)
+_QUESTION_PRESS_ENTER_RE = re.compile(r"press enter to", re.IGNORECASE)
+_QUESTION_NUMBERED_RE = re.compile(r"[❯›]\s*\d+\.")
+
+
+def _is_question_window(lines: Sequence[str], last_non_empty: str) -> bool:
+    window = "\n".join(lines)
+    if _QUESTION_YN_RE.search(window):
+        return True
+    if _QUESTION_DO_YOU_WANT_RE.search(window):
+        return True
+    if _QUESTION_ALLOW_RE.search(window):
+        return True
+    if _QUESTION_NUMBERED_RE.search(window):
+        return True
+    if _QUESTION_PRESS_ENTER_RE.search(window):
+        return True
+    return last_non_empty.rstrip().endswith("?")
+
+
+def _is_running_window(lines: Sequence[str], activity_age_s: float | None) -> bool:
+    window = "\n".join(lines)
+    if "esc to interrupt" in window.lower():
+        return True
+    if "Working (" in window:
+        return True
+    return activity_age_s is not None and activity_age_s < 15
+
+
+def _is_prompt_marker_line(line: str) -> bool:
+    stripped = line.lstrip()
+    if stripped.startswith("❯") or stripped.startswith("›"):
+        return True
+    if "│ >" in line:
+        return True
+    return "─ ready │" in line
+
+
+def classify_agent_pane(tail: str, activity_age_s: float | None, dead: bool) -> str:
+    """Heuristische Zustands-Klassifikation eines Agent-Panes.
+
+    Rückgabe: "dead" | "frage" | "laeuft" | "wartet" | "idle".
+    """
+    if dead:
+        return "dead"
+
+    lines = (tail or "").splitlines()
+    non_empty = [line for line in lines if line.strip()]
+    last_non_empty = non_empty[-1] if non_empty else ""
+    recent_window = lines[-8:]
+
+    if _is_question_window(recent_window, last_non_empty):
+        return "frage"
+
+    if _is_running_window(recent_window, activity_age_s):
+        return "laeuft"
+
+    if any(_is_prompt_marker_line(line) for line in non_empty[-3:]):
+        if activity_age_s is None or activity_age_s < 1800:
+            return "wartet"
+        return "idle"
+
+    if activity_age_s is not None and activity_age_s < 60:
+        return "laeuft"
+    return "idle"
+
 
 # Workdir allowlist: browser clients pick a key, the path is resolved here.
 # (key, German label, path parts under $HOME, window-name suffix or None)
@@ -76,6 +166,7 @@ class AgentWindowDefinition:
     argv: tuple[str, ...]
     cwd: Path
     env: Mapping[str, str]
+    workdir_key: str
 
 
 @dataclass(frozen=True)
@@ -88,6 +179,7 @@ class TmuxWindow:
     command: str
     cwd: str | None = None
     dead: bool = False
+    activity: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -99,6 +191,7 @@ class TmuxWindow:
             "command": self.command,
             "cwd": self.cwd,
             "dead": self.dead,
+            "activity": self.activity,
         }
 
 
@@ -292,16 +385,41 @@ class TmuxAgentSessionService:
 
     @staticmethod
     def _identity_from_window(window: str) -> tuple[str, str]:
-        """Map a dashboard-managed window name back to (kind, workdir key)."""
+        """Map a dashboard-managed window name back to (kind, workdir key).
+
+        `create_new` numbers collisions as `{base}-2`, `{base}-3`, … — strip a
+        trailing `-<digits>` suffix before matching so those windows still
+        resolve. Workdir suffixes (agent/fo/orch) never end in digits, so the
+        strip is unambiguous.
+        """
+        base = _TRAILING_NUMBER_RE.sub("", window)
         for kind in _AGENT_KINDS:
-            if window == kind:
+            if base == kind:
                 return kind, "home"
-            if window.startswith(f"{kind}-"):
-                suffix = window[len(kind) + 1 :]
+            if base.startswith(f"{kind}-"):
+                suffix = base[len(kind) + 1 :]
                 key = _WORKDIR_KEY_BY_SUFFIX.get(suffix)
                 if key:
                     return kind, key
         raise CapabilityError(f"window {window!r} is not a dashboard-managed agent window")
+
+    def identity_for(self, session: str, window: str) -> tuple[str, str]:
+        """Resolve (kind, workdir key) for a window, preferring window options.
+
+        `@hermes_kind`/`@hermes_workdir` are set at spawn time and survive a
+        `rename()`, unlike `_identity_from_window`'s name-based parsing.
+        Windows created before this option was introduced have neither set,
+        so we fall back to name parsing for them.
+        """
+        target = self._cmd_target(session, window)
+        kind_proc = self._run("show-options", "-w", "-v", "-t", target, "@hermes_kind", check=False)
+        workdir_proc = self._run("show-options", "-w", "-v", "-t", target, "@hermes_workdir", check=False)
+        if kind_proc.returncode == 0 and workdir_proc.returncode == 0:
+            kind = kind_proc.stdout.strip()
+            workdir_key = workdir_proc.stdout.strip()
+            if kind in _AGENT_KINDS and workdir_key in _WORKDIR_BY_KEY:
+                return kind, workdir_key
+        return self._identity_from_window(window)
 
     def capabilities(self) -> CapabilityState:
         tmux_available = shutil.which(self.tmux_binary) is not None or Path(self.tmux_binary).exists()
@@ -335,7 +453,9 @@ class TmuxAgentSessionService:
         else:
             argv = (str(binary),)
             env = self._safe_env()
-        return AgentWindowDefinition(kind=kind, session="work", window=window, argv=argv, cwd=cwd, env=env)
+        return AgentWindowDefinition(
+            kind=kind, session="work", window=window, argv=argv, cwd=cwd, env=env, workdir_key=workdir_key
+        )
 
     # ----- inventory ------------------------------------------------------
     def list_sessions(self) -> list[str]:
@@ -347,12 +467,13 @@ class TmuxAgentSessionService:
     def list_windows(self, session: str | None = None) -> list[TmuxWindow]:
         # pane_current_path stays LAST: it is the only field a pane process can
         # steer (cd into a crafted dir) — trailing position keeps injected tabs
-        # from shifting pid/dead into the wrong columns.
+        # from shifting pid/dead into the wrong columns. window_activity goes
+        # right before it, so it's still bounded by the trailing-cwd rule.
         args = [
             "list-windows",
             "-a",
             "-F",
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
         ]
         if session:
             args.insert(1, "-t")
@@ -367,8 +488,9 @@ class TmuxAgentSessionService:
                 continue
             pid = int(parts[4]) if parts[4].isdigit() else None
             dead = parts[5] == "1"
-            cwd = ("\t".join(parts[7:]) or None) if len(parts) > 7 else None
-            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead))
+            activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+            cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead, activity))
         return windows
 
     def window_exists(self, session: str, window: str) -> bool:
@@ -378,20 +500,8 @@ class TmuxAgentSessionService:
         return self._run("list-panes", "-t", target, "-F", "#{window_name}", check=False).returncode == 0
 
     # ----- lifecycle / IO -------------------------------------------------
-    def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
-        kind = self.validate_name(kind, field="kind")
-        if kind not in _AGENT_KINDS:
-            raise InvalidTarget(f"unknown agent kind: {kind}")
-        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
-            raise InvalidTarget(f"unknown workdir: {workdir!r}")
-        workdir_key = workdir or "home"
-        # Attach path first: an existing window stays reachable even if the
-        # CLI binary or workdir is currently unresolvable.
-        window = self.window_name_for(kind, workdir_key)
-        if self.window_exists("work", window):
-            self._log_event("ensure_existing", kind=kind, session="work", window=window)
-            return self.show("work", window)
-        definition = self.definition_for(kind, workdir_key)
+    def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
+        """Create a tmux window from a resolved definition and return it."""
         if not definition.argv:
             raise CapabilityError(f"baseline window {definition.session}:{definition.window} is missing")
         if definition.session not in self.list_sessions():
@@ -411,21 +521,83 @@ class TmuxAgentSessionService:
             *env_args,
             shlex.join(definition.argv),
         )
-        self._log_event("ensure_created", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        # Window options survive rename() — unlike the name-based parsing in
+        # `_identity_from_window`, they let identity_for() recover kind/workdir
+        # for a window whose name a user has since changed.
+        target = self._cmd_target(definition.session, definition.window)
+        self._run("set-option", "-w", "-t", target, "@hermes_kind", definition.kind)
+        self._run("set-option", "-w", "-t", target, "@hermes_workdir", definition.workdir_key)
         return self.show(definition.session, definition.window)
+
+    def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+        kind = self.validate_name(kind, field="kind")
+        if kind not in _AGENT_KINDS:
+            raise InvalidTarget(f"unknown agent kind: {kind}")
+        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
+            raise InvalidTarget(f"unknown workdir: {workdir!r}")
+        workdir_key = workdir or "home"
+        # Attach path first: an existing window stays reachable even if the
+        # CLI binary or workdir is currently unresolvable.
+        window = self.window_name_for(kind, workdir_key)
+        if self.window_exists("work", window):
+            self._log_event("ensure_existing", kind=kind, session="work", window=window)
+            return self.show("work", window)
+        definition = self.definition_for(kind, workdir_key)
+        result = self._spawn_window(definition)
+        self._log_event("ensure_created", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        return result
+
+    def create_new(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+        """Always create a fresh window, never reuse an existing one.
+
+        Unlike `ensure` (get-or-create), a collision with the base window
+        name is resolved by numbering: `{base}-2`, `{base}-3`, … up to
+        `_MAX_NUMBERED_WINDOWS`.
+        """
+        kind = self.validate_name(kind, field="kind")
+        if kind not in _AGENT_KINDS:
+            raise InvalidTarget(f"unknown agent kind: {kind}")
+        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
+            raise InvalidTarget(f"unknown workdir: {workdir!r}")
+        workdir_key = workdir or "home"
+        base_name = self.window_name_for(kind, workdir_key)
+        window_name = base_name
+        if self.window_exists("work", window_name):
+            window_name = None
+            for suffix in range(2, _MAX_NUMBERED_WINDOWS + 1):
+                candidate = f"{base_name}-{suffix}"
+                if not self.window_exists("work", candidate):
+                    window_name = candidate
+                    break
+            if window_name is None:
+                raise CapabilityError(
+                    f"too many open {base_name!r} windows (max {_MAX_NUMBERED_WINDOWS}); "
+                    "close one before creating another"
+                )
+        definition = self.definition_for(kind, workdir_key)
+        if window_name != definition.window:
+            definition = replace(definition, window=window_name)
+        result = self._spawn_window(definition)
+        self._log_event("create_new", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        return result
 
     def respawn_dead(self, session: str, window: str) -> TmuxWindow:
         """Kill a dead agent pane and recreate its window — never live processes."""
         info = self.show(session, window)
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing respawn")
-        kind, workdir_key = self._identity_from_window(info.window)
+        kind, workdir_key = self.identity_for(session, info.window)
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
-        self.definition_for(kind, workdir_key)
+        definition = self.definition_for(kind, workdir_key)
+        # Recreate under the SAME name: a dead `claude-2` kommt als `claude-2`
+        # zurück — ensure() würde stattdessen still das lebende Basis-Fenster
+        # zurückgeben und das nummerierte Fenster verschwinden lassen.
+        if definition.window != info.window:
+            definition = replace(definition, window=info.window)
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
-        return self.ensure(kind, workdir_key)
+        return self._spawn_window(definition)
 
     def kill_dead(self, session: str, window: str) -> None:
         """Remove a dead pane's window — guarded so live sessions cannot be killed."""
@@ -434,6 +606,24 @@ class TmuxAgentSessionService:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("kill_dead", session=session, window=window)
+
+    def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
+        """Rename a dashboard-managed window, preserving its respawn identity."""
+        new_name = self.validate_name(new_name, field="window")
+        # identity_for raises CapabilityError for windows this service doesn't
+        # manage — renaming a foreign tmux window is refused, not allowlisted.
+        kind, workdir_key = self.identity_for(session, window)
+        if self.window_exists(session, new_name):
+            raise CapabilityError(f"window {session}:{new_name} already exists")
+        target = self._cmd_target(session, window)
+        # Old windows resolved via the name-based fallback have no @hermes_*
+        # options yet — set them now so the rename doesn't strand the window
+        # without a respawn identity.
+        self._run("set-option", "-w", "-t", target, "@hermes_kind", kind)
+        self._run("set-option", "-w", "-t", target, "@hermes_workdir", workdir_key)
+        self._run("rename-window", "-t", target, new_name)
+        self._log_event("rename", session=session, window=window, new_window=new_name, kind=kind, workdir=workdir_key)
+        return self.show(session, new_name)
 
     def show(self, session: str, window: str) -> TmuxWindow:
         target = self._cmd_target(session, window)
@@ -444,20 +634,56 @@ class TmuxAgentSessionService:
             "-p",
             "-t",
             target,
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
         )
         parts = proc.stdout.rstrip("\n").split("\t")
         pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
         dead = len(parts) > 5 and parts[5] == "1"
-        cwd = ("\t".join(parts[7:]) or None) if len(parts) > 7 else None
-        return TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead)
+        activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+        cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+        return TmuxWindow(
+            parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead, activity
+        )
 
-    def capture(self, session: str, window: str, *, start: int = -200) -> str:
+    def capture(self, session: str, window: str, *, start: int = -200, log: bool = True) -> str:
         target = self._cmd_target(session, window)
         start = max(-5000, min(0, int(start)))
         proc = self._run("capture-pane", "-p", "-t", target, "-S", str(start))
-        self._log_event("capture", session=session, window=window, lines=abs(start))
+        if log:
+            self._log_event("capture", session=session, window=window, lines=abs(start))
         return proc.stdout
+
+    def overview(self, *, tail_lines: int = 10) -> dict[str, object]:
+        """Fleet snapshot: every tmux window plus a best-effort live tail and
+        an honest heuristic state — one call for the dashboard control room.
+
+        Pane contents never reach `_log_event` (same rule as elsewhere in this
+        module); only the window count is logged.
+        """
+        now = self._now()
+        entries: list[dict[str, object]] = []
+        for window in self.list_windows():
+            tail: str | None
+            try:
+                raw = self.capture(window.session, window.window, start=-tail_lines, log=False)
+            except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+                tail = None
+            else:
+                cleaned = strip_ansi(raw)
+                lines = cleaned.splitlines()
+                # A pane whose output hasn't filled its screen yet still
+                # captures padded with blank rows down to the pane height
+                # (tmux has no scrollback to clip against) — drop that
+                # trailing padding before keeping the last tail_lines so we
+                # tail real content, not empty screen rows.
+                while lines and not lines[-1].strip():
+                    lines.pop()
+                tail = "\n".join(lines[-tail_lines:])[-600:]
+            age = (now - window.activity) if window.activity is not None else None
+            state = classify_agent_pane(tail or "", age, window.dead)
+            entries.append({**window.to_dict(), "tail": tail, "state": state, "state_source": "heuristic"})
+        self._log_event("overview", windows=len(entries))
+        return {"now": int(now), "windows": entries}
 
     def send_keys(self, session: str, window: str, text: str) -> None:
         target = self._cmd_target(session, window)

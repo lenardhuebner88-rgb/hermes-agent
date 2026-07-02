@@ -33,9 +33,18 @@ class FakeAgentTerminalService:
         assert workdir in (None, "hermes-agent")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
 
+    def create_new(self, kind, workdir=None):
+        assert kind == "hermes"
+        assert workdir in (None, "hermes-agent")
+        return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes-2"})
+
     def respawn_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
+
+    def rename(self, session, window, name):
+        assert (session, window, name) == ("work", "hermes", "hermes-renamed")
+        return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes-renamed"})
 
     def kill_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
@@ -61,6 +70,28 @@ class FakeAgentTerminalService:
     def detach_client(self, client_id):
         assert client_id == "client1"
 
+    def overview(self, *, tail_lines=10):
+        assert tail_lines == 10
+        return {
+            "now": 1751500000,
+            "windows": [
+                {
+                    "session": "work",
+                    "window": "hermes",
+                    "active": True,
+                    "pane_id": "%1",
+                    "pid": 123,
+                    "command": "hermes",
+                    "cwd": "/home/user",
+                    "dead": False,
+                    "activity": 1751499990,
+                    "tail": "─ ready │ gpt 5.5\n❯ Try \"write a test for…\"",
+                    "state": "wartet",
+                    "state_source": "heuristic",
+                }
+            ],
+        }
+
 
 def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_fields(monkeypatch):
     monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: FakeAgentTerminalService())
@@ -70,10 +101,19 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.get("/api/agent-terminals/capabilities", headers=headers).json()["tmux_available"] is True
     assert client.get("/api/agent-terminals/sessions", headers=headers).json() == {"sessions": ["work"]}
     assert client.get("/api/agent-terminals/windows", params={"session": "work"}, headers=headers).json()["windows"][0]["window"] == "hermes"
+    overview = client.get("/api/agent-terminals/overview", headers=headers).json()
+    assert overview["now"] == 1751500000
+    assert overview["windows"][0]["window"] == "hermes"
+    assert overview["windows"][0]["state"] == "wartet"
+    assert overview["windows"][0]["state_source"] == "heuristic"
+    assert "ready" in overview["windows"][0]["tail"]
     assert client.post("/api/agent-terminals/show", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["session"] == "work"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes"
+    assert client.post("/api/agent-terminals/create", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes-2"
+    assert client.post("/api/agent-terminals/create", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes-2"
     assert client.post("/api/agent-terminals/respawn", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
+    assert client.post("/api/agent-terminals/rename", json={"session": "work", "window": "hermes", "name": "hermes-renamed"}, headers=headers).json()["window"]["window"] == "hermes-renamed"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
     assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
@@ -86,6 +126,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     names = {
         "AgentTerminalEnsureRequest",
         "AgentTerminalTargetRequest",
+        "AgentTerminalRenameRequest",
         "AgentTerminalCaptureRequest",
         "AgentTerminalHandoffDraftRequest",
         "AgentTerminalSendKeysRequest",
