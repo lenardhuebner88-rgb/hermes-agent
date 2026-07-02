@@ -13041,6 +13041,21 @@ class DispatchResult:
     with an ``operator_escalation`` — a per-task input-token runaway is not
     self-clearing. Cap ``None``/``0`` → this bucket is always empty →
     byte-identical to the pre-G1 dispatcher."""
+    decompose_root_finalized: list[tuple[str, str]] = field(default_factory=list)
+    """Befund 6 (2026-07-02): decomposed chain roots the dispatcher FINALIZED
+    at dispatch time instead of spawning as a worker, as ``(root_id, action)``
+    pairs. A decompose root must never run as a worker — a spawn re-runs the
+    whole chain (double work). The completion-side integrator
+    (``maybe_integrate_on_complete``) auto-completes the root only when the
+    LAST child completes FROM the provisioned worktree; a chain whose last
+    child completed from a scratch workspace leaves the root stranded in
+    ``ready`` with no integrator, and the old dispatcher then spawned it. Now
+    the root is finalized here instead: integrated when a provisioned chain
+    branch exists, or completed directly for a commitless chain. ``action`` ∈
+    ``integrated`` / ``auto_completed_commitless`` / ``parked`` /
+    ``children_pending`` / ``guard_error`` / ``would_*`` (dry-run). Empty on
+    boards without decompose chains → byte-identical to the pre-guard
+    dispatcher."""
     auto_retried_blocked: list[tuple[str, int]] = field(default_factory=list)
     """Opt-in blocked-run auto-retries performed this tick as
     ``(task_id, attempt)`` pairs."""
@@ -15076,6 +15091,47 @@ def _is_funnel_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
         (created_by or "") in FUNNEL_CREATED_BY
         and not _task_has_parent(conn, row["id"])
     )
+
+
+def _finalize_decompose_root_if_applicable(
+    conn: sqlite3.Connection, row: sqlite3.Row, *, dry_run: bool,
+) -> Optional[str]:
+    """Dispatch guard for a decomposed chain root (Befund 6, 2026-07-02).
+
+    Returns a short finalize-action string when *row* is a decompose root (so
+    the dispatch loop must SKIP the normal spawn/auto-assign path), or ``None``
+    when it is an ordinary task (dispatch normally). The finalize decision
+    itself lives in :func:`hermes_cli.kanban_worktrees.finalize_decompose_root_at_dispatch`.
+
+    Fail-CLOSED for the row once it is known to be a decompose root: if the
+    finalizer raises, we still return a sentinel so the loop does NOT fall
+    through to spawning — a decompose root must never run as a worker. Only a
+    failure of the cheap *detection* query itself (extremely unlikely) falls
+    back to normal dispatch, so a transient error never freezes the whole
+    ready queue.
+    """
+    from hermes_cli import kanban_worktrees as _kwt
+
+    try:
+        is_root = _kwt._is_decompose_root(conn, row["id"])
+    except Exception:
+        _log.debug(
+            "decompose-root detection failed for %s; dispatching normally",
+            row["id"], exc_info=True,
+        )
+        return None
+    if not is_root:
+        return None
+    try:
+        return _kwt.finalize_decompose_root_at_dispatch(
+            conn, row["id"], dry_run=dry_run,
+        )
+    except Exception:
+        _log.warning(
+            "decompose-root finalize failed for %s; SKIPPING spawn (a decompose "
+            "root must never run as a worker)", row["id"], exc_info=True,
+        )
+        return "guard_error"
 
 
 def _is_strategist_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
@@ -18836,6 +18892,26 @@ def _dispatch_once_locked(
         row_assignee = row["assignee"]
         if _is_funnel_root_task(conn, row):
             result.respawn_guarded.append((row["id"], "funnel_protected"))
+            continue
+        # Decompose-root finalizer guard (Befund 6, 2026-07-02). A decomposed
+        # chain root must NEVER be spawned as a worker nor auto-assigned a
+        # default lane — a worker run re-processes the whole chain. The
+        # completion-side integrator (maybe_integrate_on_complete) auto-completes
+        # the root only when the LAST child completes FROM the provisioned
+        # worktree; a chain whose last child completed from a scratch workspace
+        # (split_provisioned_path miss, the deferred branch) leaves the root
+        # stranded in 'ready'. task_links are INVERTED for decompose chains
+        # (parent=child, child=root), so recompute_ready promotes the root
+        # exactly when all children are done — this dispatch point IS that
+        # moment. Finalize here (integrate the chain branch, or complete a
+        # commitless chain directly with evidence) instead of spawning. Placed
+        # BEFORE the default-assignee auto-assign (AC-1) and every spawn path.
+        # Mirror of the funnel-root guard above.
+        _decompose_action = _finalize_decompose_root_if_applicable(
+            conn, row, dry_run=dry_run,
+        )
+        if _decompose_action is not None:
+            result.decompose_root_finalized.append((row["id"], _decompose_action))
             continue
         # G1 per-task input-token runaway guard (additive; cap None/0 → inert,
         # this block is skipped and the loop is byte-identical to before). The

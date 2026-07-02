@@ -2114,6 +2114,225 @@ def test_e2e_auto_merge_tick_is_idempotent(kanban_home, repo, monkeypatch):
     assert done.status == "done"
     assert len(merges) == 1
 
+
+# ---------------------------------------------------------------------------
+# Befund 6 (2026-07-02): dispatch-time decompose-root finalizer.
+# A decomposed chain root must NEVER be spawned as a worker (a spawn re-runs the
+# whole chain). The completion-side integrator only fires when the LAST child
+# completes from the provisioned worktree; a chain whose last completion came
+# from a scratch workspace leaves the root stranded in 'ready'. The dispatcher
+# finalizes it instead.
+# ---------------------------------------------------------------------------
+
+def test_scratch_last_child_finalizes_decompose_root_at_dispatch(
+    kanban_home, repo, monkeypatch,
+):
+    """AC-4: the live t_350e7481 pattern. A decompose chain with MIXED child
+    workspaces — one child in the provisioned chain worktree
+    (<repo>/.worktrees/kanban/<root>), one in a scratch workspace
+    (kanban/workspaces/<id>) — where the LAST child to complete is the scratch
+    child. The completion-side integrator never fires (non-provisioned path,
+    the deferred/None branch), so the root strands in 'ready'. The dispatcher
+    must FINALIZE it (run the existing integrator on the provisioned child's
+    branch, complete the root) and NEVER spawn it or auto-assign it a lane.
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    spawned = []
+
+    def recording_spawn(task, workspace, *a, **kw):
+        spawned.append(task.id)
+        return 4321
+
+    with kb.connect() as conn:
+        # Real decompose root (workspace_kind=dir at the repo) fanned out via
+        # decompose_triage_task, which emits the 'decomposed' event + INVERTED
+        # links (parent=child, child=root) so _is_decompose_root is True. Root
+        # left UNASSIGNED so that, WITHOUT the guard, the dispatcher would
+        # auto-assign default_assignee and spawn it — exactly the incident.
+        root = kb.create_task(
+            conn, title="ship decomposed feature", triage=True,
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "worktree child", "assignee": "coder", "parents": []},
+                {"title": "scratch child", "assignee": "coder",
+                 "workspace_kind": "scratch", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        wt_child, scratch_child = child_ids
+
+        # Child 1 claims the provisioned chain worktree, commits, completes FIRST
+        # -> integrator DEFERS (scratch sibling still open) so the branch survives
+        # un-merged and the worktree stays.
+        task1 = kb.claim_task(conn, wt_child)
+        ws = kwt.provision_for_task(conn, task1, str(repo))
+        assert kwt.split_provisioned_path(str(ws))[1] == root
+        _commit_in(ws, "feature.py", "VALUE = 7\n", msg=f"kanban({wt_child}): work")
+        assert kb.complete_task(conn, wt_child, result="worktree child done")
+        assert _events(conn, wt_child, "integration_merged") == []
+        assert ws.exists()
+
+        # Child 2 runs in a SCRATCH workspace (the real kanban/workspaces/<id>
+        # form) and completes LAST. The integrator hook sees a non-provisioned
+        # path and returns None: no integration, root stranded in 'ready'.
+        scratch_ws = str(kanban_home / "kanban" / "workspaces" / scratch_child)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running', workspace_path = ? "
+                "WHERE id = ?",
+                (scratch_ws, scratch_child),
+            )
+        assert kb.complete_task(conn, scratch_child, result="scratch child done")
+        assert _events(conn, scratch_child, "integration_merged") == []
+        # Bug precondition: root not yet done, worktree not yet integrated.
+        assert kb.get_task(conn, root).status != "done"
+        assert ws.exists()
+
+        # Dispatcher tick: promotes root todo->ready (all children done), then the
+        # guard finalizes it. default_assignee set so, without the guard, the root
+        # would be auto-assigned + spawned.
+        res = kb.dispatch_once(
+            conn, spawn_fn=recording_spawn, default_assignee="coder",
+        )
+
+        root_task = kb.get_task(conn, root)
+        root_kinds = [e.kind for e in kb.list_events(conn, root)]
+        merged = _events(conn, wt_child, "integration_merged")
+        merges = _git(repo, "log", "--merges", "--oneline").splitlines()
+
+    # AC-1: never spawned, never auto-assigned.
+    assert root not in spawned
+    assert res.spawned == []
+    assert res.auto_assigned_default == []
+    assert "spawned" not in root_kinds
+    # AC-2a / AC-4: the EXISTING integrator ran; the root is finalized.
+    assert (root, "integrated") in res.decompose_root_finalized
+    assert root_task.status == "done"
+    assert len(merged) == 1
+    assert len(merges) == 1
+    assert (repo / "feature.py").read_text() == "VALUE = 7\n"
+    assert not ws.exists()  # integrate_chain removed the worktree
+    assert "decompose_root_auto_completed" in root_kinds
+
+
+def test_commitless_decompose_root_direct_completes_at_dispatch(
+    kanban_home, repo, monkeypatch,
+):
+    """AC-2b: a decompose chain where NO child was ever provisioned (all scratch,
+    no chain branch). The dispatcher completes the root DIRECTLY with a
+    decompose_root_auto_completed event + an evidence comment listing the
+    children and their terminal status — never spawns it."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    spawned = []
+
+    def recording_spawn(task, workspace, *a, **kw):
+        spawned.append(task.id)
+        return 999
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="commitless decompose root", triage=True,
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "scratch A", "assignee": "coder",
+                 "workspace_kind": "scratch", "parents": []},
+                {"title": "scratch B", "assignee": "coder",
+                 "workspace_kind": "scratch", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        # Both children run + complete from scratch workspaces (no chain branch).
+        for cid in child_ids:
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = 'running', workspace_path = ? "
+                    "WHERE id = ?",
+                    (str(kanban_home / "kanban" / "workspaces" / cid), cid),
+                )
+            assert kb.complete_task(conn, cid, result=f"{cid} done")
+
+        res = kb.dispatch_once(
+            conn, spawn_fn=recording_spawn, default_assignee="coder",
+        )
+
+        root_task = kb.get_task(conn, root)
+        root_kinds = [e.kind for e in kb.list_events(conn, root)]
+        auto = _events(conn, root, "decompose_root_auto_completed")
+        comments = conn.execute(
+            "SELECT author, body FROM task_comments WHERE task_id = ?", (root,)
+        ).fetchall()
+        merges = _git(repo, "log", "--merges", "--oneline").splitlines()
+
+    # AC-1: never spawned / auto-assigned.
+    assert res.spawned == []
+    assert res.auto_assigned_default == []
+    assert "spawned" not in root_kinds
+    # AC-2b: direct completion with evidence, no integration/merge.
+    assert (root, "auto_completed_commitless") in res.decompose_root_finalized
+    assert root_task.status == "done"
+    assert len(auto) == 1
+    assert auto[0]["integration_action"] == "commitless"
+    assert set(auto[0]["children"]) == set(child_ids)
+    assert merges == []
+    receipt = [c for c in comments if c["author"] == "integrator"]
+    assert receipt and all(cid in receipt[-1]["body"] for cid in child_ids)
+
+
+def test_decompose_root_with_open_child_not_finalized(
+    kanban_home, repo, monkeypatch,
+):
+    """AC-3: a decompose root with a non-done child is neither completed nor
+    spawned — the chain stays visible. Exercises the finalizer's defensive
+    children_pending branch directly (recompute_ready would not promote such a
+    root, so a real dispatch never reaches it)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="incomplete decompose root", triage=True,
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "child A", "assignee": "coder", "parents": []},
+                {"title": "child B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        child_a, child_b = child_ids
+        # Only child A completes (in the provisioned worktree); child B stays open.
+        task_a = kb.claim_task(conn, child_a)
+        ws = kwt.provision_for_task(conn, task_a, str(repo))
+        _commit_in(ws, "feature.py", "VALUE = 1\n", msg=f"kanban({child_a}): work")
+        assert kb.complete_task(conn, child_a, result="child A done")
+        assert kb.get_task(conn, child_b).status != "done"
+
+        # Force the root to 'ready' (defensive: recompute_ready would not do this
+        # with an open child) and finalize.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready' WHERE id = ?", (root,)
+            )
+        action = kwt.finalize_decompose_root_at_dispatch(conn, root, dry_run=False)
+
+        root_task = kb.get_task(conn, root)
+        root_kinds = [e.kind for e in kb.list_events(conn, root)]
+
+    assert action == "children_pending"
+    assert root_task.status == "ready"  # untouched — stays visible on the board
+    assert "decompose_root_auto_completed" not in root_kinds
+    assert "spawned" not in root_kinds
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+
+
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> success event, no fixer, child done."""
     calls = []
