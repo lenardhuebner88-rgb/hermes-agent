@@ -119,6 +119,20 @@ HARVEST_RECEIPT_MAX_CHARS = 12000
 HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
 AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 
+# LEVER-OUTCOMES-S1: maturity window before a shipped lever is measured.
+# Metrics like green_gate_streak need multiple nightly runs to stabilise.
+MATURITY_DAYS: int = 3
+
+# Direction map for the known core metrics: +1 means ↑ is better (improved),
+# -1 means ↓ is better (improved). Unknown keys yield verdict="unknown".
+_VERDICT_DIRECTION: dict[str, int] = {
+    "autonomy_pct": 1,
+    "escalations_per_week": -1,
+    "green_gate_streak.streak": 1,
+    "fail_nights": -1,
+    "recent_avg_cost_per_task": -1,
+}
+
 
 # --------------------------------------------------------------------------- #
 # Lever model + deterministic catalogue
@@ -146,6 +160,10 @@ class Lever:
     # for the deterministic baseline levers (which never traverse that gate).
     grounding: str = ""
     source: str = "baseline"
+    # LEVER-OUTCOMES-S1: optional machine-readable metric key from Opus drafts.
+    # When set, reflect() uses it for delta-verdict; otherwise attempts exact
+    # match against flat metric keys and falls back to None.
+    metric_key: Optional[str] = None
 
     @property
     def roi_score(self) -> float:
@@ -560,6 +578,7 @@ def gather_context(
     cost: Optional[dict[str, Any]] = None,
     notes_dir: Optional[Path] = None,
     ledger_since: Optional[int] = None,
+    outcomes_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Collect the cheap signals the strategist reasons over.
 
@@ -568,6 +587,10 @@ def gather_context(
     and degrades to ``None`` if absent. ``cost`` (the per-lane effective-burn
     view, ``kanban_db.runs_costs``) is likewise injectable; when ``None`` it is
     computed over the cost window and degrades to ``None`` on any error.
+
+    LEVER-OUTCOMES-S1: when ``outcomes_path`` is given, the last 10 outcome
+    records are added as ``lever_outcomes`` (compact view) so they flow into
+    the Opus propose-prompt context without further changes to the callers.
     """
     if metrics is None:
         metrics = strategist_surface.read_vision_metrics()
@@ -577,12 +600,15 @@ def gather_context(
         except Exception:  # cost view is best-effort; never break propose
             cost = None
     ledger = kanban_db.read_escalation_ledger(conn, since=ledger_since)
-    return {
+    ctx: dict[str, Any] = {
         "metrics": metrics if isinstance(metrics, dict) else None,
         "cost": cost if isinstance(cost, dict) else None,
         "ledger": ledger,
         "suppressed": _read_suppressed(notes_dir),
     }
+    if outcomes_path is not None:
+        ctx["lever_outcomes"] = _outcomes_compact(_read_lever_outcomes(outcomes_path))
+    return ctx
 
 
 def derive_levers(context: dict[str, Any]) -> list[Lever]:
@@ -868,6 +894,7 @@ def _levers_from_drafts(drafts: Iterable[dict[str, Any]]) -> list[Lever]:
                 signal_strength=float(raw.get("signal_strength", 1.0)),
                 grounding=str(raw.get("grounding") or "").strip(),
                 source="drafts",
+                metric_key=str(raw.get("metric_key") or "").strip() or None,
             )
         )
     return levers
@@ -888,6 +915,7 @@ def propose(
     counter_budget: float = COUNTER_BUDGET,
     do_ingest: bool = True,
     ledger_since: Optional[int] = None,
+    outcomes_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Run the full propose pipeline. Returns a structured run summary.
 
@@ -915,7 +943,7 @@ def propose(
     try:
         context = gather_context(
             conn, metrics=metrics, cost=cost, notes_dir=notes_dir,
-            ledger_since=ledger_since,
+            ledger_since=ledger_since, outcomes_path=outcomes_path,
         )
     finally:
         if owns_conn:
@@ -995,6 +1023,17 @@ def propose(
             for lv in capped
         ]
 
+    # LEVER-OUTCOMES-S1: write a baseline record for each newly ingested lever.
+    # Only runs when outcomes_path is provided and do_ingest=True (dry runs do
+    # not produce real root_task_ids and must never write baselines).
+    if outcomes_path is not None and do_ingest and ingested:
+        _outcomes_write_baselines(
+            outcomes_path=Path(outcomes_path),
+            ingested=ingested,
+            capped=capped,
+            flat_metrics=_flatten_numeric(context.get("metrics") or {}),
+        )
+
     return {
         "mode": "propose",
         "skipped": False,
@@ -1011,6 +1050,9 @@ def propose(
         "grounding_blocked": grounding_blocked,
         "ingest_errors": ingest_errors,
         "ingested": ingested,
+        # LEVER-OUTCOMES-S1: pre-existing outcomes from context (written by prior
+        # runs); present in --dry-run JSON so Opus can read the wirkungs-history.
+        "lever_outcomes": context.get("lever_outcomes") or [],
     }
 
 
@@ -1225,6 +1267,164 @@ def _update_vetoed_set(path: Path, new_keys: Iterable[str]) -> list[str]:
     return merged
 
 
+# --------------------------------------------------------------------------- #
+# LEVER-OUTCOMES-S1 — anchor-file helpers
+# --------------------------------------------------------------------------- #
+def _flatten_numeric(d: Any, prefix: str = "") -> dict[str, float]:
+    """Recursively flatten *d* and keep only numeric (int/float) leaves.
+
+    Returns a dict with dotted-path keys, e.g. ``{"green_gate_streak.streak": 3.0}``.
+    Boolean values are excluded even though ``isinstance(True, int)`` is True in
+    Python — they are not meaningful metrics.
+    """
+    out: dict[str, float] = {}
+    if not isinstance(d, dict):
+        return out
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            out[key] = float(v)
+        elif isinstance(v, dict):
+            out.update(_flatten_numeric(v, key))
+    return out
+
+
+def _lever_metric_key(lever: "Lever", flat: dict[str, float]) -> Optional[str]:
+    """Resolve the metric_key for a lever given the flattened metrics snapshot.
+
+    Priority:
+    1. Explicit ``lever.metric_key`` (set from Opus draft ``metric_key`` field).
+    2. Exact match of ``lever.target_metric`` text against a flat key.
+    3. ``None`` (no machine-readable key — verdict stays None on this record).
+    """
+    if lever.metric_key:
+        return lever.metric_key
+    if lever.target_metric in flat:
+        return lever.target_metric
+    return None
+
+
+def _read_lever_outcomes(path: Any) -> list[dict[str, Any]]:
+    """Read the lever-outcomes list from *path*; return [] on missing/bad JSON."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _write_lever_outcomes_atomic(path: Path, records: list[dict[str, Any]]) -> None:
+    """Persist *records* to *path* atomically via tmp+rename (os.replace)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _compute_verdict(delta_val: float, metric_key: str) -> str:
+    """Return improved|worsened|unchanged|unknown for *delta_val* on *metric_key*.
+
+    Uses :data:`_VERDICT_DIRECTION`; ``+1`` means ↑ is better, ``-1`` means
+    ↓ is better.  Unknown keys yield ``"unknown"`` regardless of direction.
+    """
+    direction = _VERDICT_DIRECTION.get(metric_key)
+    if direction is None:
+        return "unknown"
+    if abs(delta_val) < 1e-9:
+        return "unchanged"
+    return "improved" if direction * delta_val > 0 else "worsened"
+
+
+def _epoch_from_generated_at(value: Any) -> Optional[int]:
+    """Coerce a metrics ``generated_at`` (epoch number or ISO-8601 string) to epoch.
+
+    The H1 snapshot writes ISO strings like ``2026-07-02T04:00:50+00:00``; older
+    or injected snapshots may carry numeric epochs. Anything unparseable yields
+    ``None`` — the stale-metrics flag is then simply skipped instead of crashing
+    the measurement pass.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value).timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+def _outcomes_compact(records: list[dict[str, Any]], n: int = 10) -> list[dict[str, Any]]:
+    """Return the last *n* records in compact form for the propose context."""
+    sorted_recs = sorted(records, key=lambda r: r.get("proposed_at") or 0, reverse=True)
+    out = []
+    for r in sorted_recs[:n]:
+        mk = r.get("metric_key")
+        delta = r.get("delta") or {}
+        delta_key = delta.get(mk) if mk and isinstance(delta, dict) else None
+        out.append({
+            "lever_key": r.get("lever_key"),
+            "status": r.get("status"),
+            "verdict": r.get("verdict"),
+            "metric_key": mk,
+            "delta_key": delta_key,
+            "proposed_at": r.get("proposed_at"),
+            "shipped_at": r.get("shipped_at"),
+            "measured_at": r.get("measured_at"),
+        })
+    return out
+
+
+def _outcomes_write_baselines(
+    *,
+    outcomes_path: Path,
+    ingested: list[dict[str, Any]],
+    capped: list[Any],
+    flat_metrics: dict[str, float],
+) -> None:
+    """Append baseline records for newly ingested levers (read-modify-write).
+
+    Skips levers whose ``root_task_id`` already has a record (idempotent on
+    re-ingest / ``already_ingested=True``).  Writes atomically.
+    """
+    records = _read_lever_outcomes(outcomes_path)
+    existing_ids = {r.get("root_task_id") for r in records if r.get("root_task_id") is not None}
+    now_ts = int(time.time())
+    changed = False
+    for item in ingested:
+        root_id = item.get("root_task_id")
+        if root_id is None or root_id in existing_ids:
+            continue
+        lever = next((lv for lv in capped if lv.key == item["key"]), None)
+        mk = _lever_metric_key(lever, flat_metrics) if lever is not None else None
+        records.append({
+            "schema_version": 1,
+            "lever_key": item["key"],
+            "root_task_id": root_id,
+            "proposed_at": now_ts,
+            "baseline": flat_metrics,
+            "metric_key": mk,
+            "shipped_at": None,
+            "measured_at": None,
+            "current": None,
+            "delta": None,
+            "verdict": None,
+            "status": "proposed",
+        })
+        existing_ids.add(root_id)
+        changed = True
+    if changed:
+        _write_lever_outcomes_atomic(outcomes_path, records)
+
+
 def _event_payload(raw: Any) -> dict[str, Any]:
     try:
         data = json.loads(raw or "{}")
@@ -1277,6 +1477,8 @@ def reflect(
     since: Optional[int] = None,
     now: Optional[float] = None,
     notes_path: Optional[Path] = None,
+    outcomes_path: Optional[Path] = None,
+    metrics: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Score the strategist's own proposals approved-vs-vetoed since *since*.
 
@@ -1285,6 +1487,14 @@ def reflect(
     approved whose root reached ``done``. Vetoed lever keys are recorded and
     merged into the suppression set so the next propose run does not re-raise
     what the operator rejected.
+
+    LEVER-OUTCOMES-S1: when ``outcomes_path`` is given, also:
+    (a) stamps ``shipped_at`` on proposed records whose root is now done +
+        freigabe_released (status→shipped);
+    (b) measures records that have been shipped for >= MATURITY_DAYS and writes
+        ``current``, ``delta``, ``verdict``, status→measured;
+    (c) adds ``outcomes: {shipped_stamped, measured}`` to the note record.
+    ``metrics`` may be injected (tests); otherwise read from the H1 file.
     """
     if since is None:
         since = _local_midnight_epoch(now)
@@ -1323,6 +1533,76 @@ def reflect(
     vetoed_keys = sorted({r["key"] for r in vetoed if r["key"]})
     approved_keys = sorted({r["key"] for r in approved if r["key"]})
     autoresearch_signals = sorted({r["signal_key"] for r in autoresearch_vetoed if r.get("signal_key")})
+
+    # LEVER-OUTCOMES-S1: update anchor file before building the note so that
+    # outcomes counts can be included in the written note record.
+    outcomes_shipped_stamped = 0
+    outcomes_measured = 0
+    if outcomes_path is not None:
+        now_ts = int(time.time() if now is None else now)
+        outcome_records = _read_lever_outcomes(outcomes_path)
+        # Lazy-read current metrics only when needed for measuring.
+        _current_metrics: Optional[dict[str, Any]] = metrics
+        changed = False
+
+        for rec in outcome_records:
+            status = rec.get("status")
+
+            # (a) Stamp shipped_at: proposed records whose task is now done+released.
+            if status == "proposed" and rec.get("shipped_at") is None:
+                root_id = rec.get("root_task_id")
+                if root_id is not None:
+                    task_row = conn.execute(
+                        "SELECT status, completed_at FROM tasks WHERE id = ?",
+                        (root_id,),
+                    ).fetchone()
+                    if task_row and task_row["status"] == "done":
+                        has_release = conn.execute(
+                            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_released'",
+                            (root_id,),
+                        ).fetchone()
+                        if has_release:
+                            shipped_ts = task_row["completed_at"] or now_ts
+                            rec["shipped_at"] = int(shipped_ts)
+                            rec["status"] = "shipped"
+                            outcomes_shipped_stamped += 1
+                            changed = True
+
+            # (b) Measure: shipped records past the maturity window.
+            if rec.get("status") == "shipped" and rec.get("measured_at") is None:
+                shipped_at = rec.get("shipped_at")
+                if shipped_at is not None and now_ts >= int(shipped_at) + MATURITY_DAYS * 86400:
+                    if _current_metrics is None:
+                        _current_metrics = strategist_surface.read_vision_metrics()
+                    if _current_metrics is not None:
+                        flat_current = _flatten_numeric(_current_metrics)
+                        flat_baseline = rec.get("baseline") or {}
+                        delta = {
+                            k: round(flat_current[k] - float(flat_baseline[k]), 9)
+                            for k in flat_current
+                            if k in flat_baseline
+                        }
+                        rec["current"] = flat_current
+                        rec["delta"] = delta
+                        rec["measured_at"] = now_ts
+                        rec["status"] = "measured"
+                        # Stale-metrics flag: generated_at older than 24 h.
+                        # The H1 file writes ISO-8601 strings; epochs stay accepted.
+                        gen_epoch = _epoch_from_generated_at(_current_metrics.get("generated_at"))
+                        if gen_epoch is not None and now_ts - gen_epoch > 86400:
+                            rec["stale_metrics"] = True
+                        # Verdict: only when metric_key is set and in the direction map.
+                        mk = rec.get("metric_key")
+                        if mk:
+                            delta_val = delta.get(mk)
+                            if delta_val is not None:
+                                rec["verdict"] = _compute_verdict(delta_val, mk)
+                        outcomes_measured += 1
+                        changed = True
+
+        if changed:
+            _write_lever_outcomes_atomic(Path(outcomes_path), outcome_records)
+
     note = {
         "ts": int(time.time() if now is None else now),
         "since": int(since),
@@ -1332,6 +1612,9 @@ def reflect(
         "approved_levers": approved_keys,
         "vetoed_levers": vetoed_keys,
         "vetoed_autoresearch_signals": autoresearch_signals,
+        # LEVER-OUTCOMES-S1: outcome counts in the note so they appear in the
+        # reflections.jsonl record read by the Opus propose-prompt.
+        "outcomes": {"shipped_stamped": outcomes_shipped_stamped, "measured": outcomes_measured},
     }
     suppressed_now: list[str] = []
     if notes_path is not None:
@@ -1871,6 +2154,7 @@ def run_propose(args) -> dict[str, Any]:
         threshold=getattr(args, "budget_threshold", BUDGET_THRESHOLD),
         cap=getattr(args, "cap", CAP_MAX),
         do_ingest=not getattr(args, "dry_run", False),
+        outcomes_path=state_dir / "lever-outcomes.json",
     )
     append_run_history(
         default_state_dir(),
@@ -1926,7 +2210,11 @@ def run_reflect(args) -> dict[str, Any]:
     notes_path = state_dir / "reflections.jsonl"
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
-        return reflect(conn, notes_path=notes_path)
+        return reflect(
+            conn,
+            notes_path=notes_path,
+            outcomes_path=state_dir / "lever-outcomes.json",
+        )
     finally:
         conn.close()
 
