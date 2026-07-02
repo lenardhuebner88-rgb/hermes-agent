@@ -18232,7 +18232,7 @@ def _blocked_kind_for_auto_retry(
 def _latest_blocked_run_for_auto_retry(
     conn: sqlite3.Connection, task_id: str,
 ) -> Optional[sqlite3.Row]:
-    return conn.execute(
+    row = conn.execute(
         """
         SELECT id, profile, summary, error, ended_at, verdict, metadata
           FROM task_runs
@@ -18243,6 +18243,34 @@ def _latest_blocked_run_for_auto_retry(
          LIMIT 1
         """,
         (task_id,),
+    ).fetchone()
+    if row is not None:
+        return row
+    # Fallback: reviewer-verdict path — complete_task() with a non-APPROVED
+    # verdict blocks the task via a direct status UPDATE but keeps the run
+    # outcome='completed' (kanban_db.py:10395-10414).  If the *very latest*
+    # ended run is a completed run carrying a REQUEST_CHANGES verdict
+    # (already normalized by _set_run_verdict), treat it as the blocked run
+    # so the auto-retry lane can act on it.  An older REQUEST_CHANGES run
+    # followed by a newer run with a different outcome does NOT qualify —
+    # the subquery enforces that the candidate is the absolute latest ended run.
+    return conn.execute(
+        """
+        SELECT id, profile, summary, error, ended_at, verdict, metadata
+          FROM task_runs
+         WHERE task_id = ?
+           AND outcome = 'completed'
+           AND verdict = 'REQUEST_CHANGES'
+           AND ended_at IS NOT NULL
+           AND id = (
+               SELECT id FROM task_runs
+                WHERE task_id = ?
+                  AND ended_at IS NOT NULL
+                ORDER BY ended_at DESC, id DESC
+                LIMIT 1
+           )
+        """,
+        (task_id, task_id),
     ).fetchone()
 
 

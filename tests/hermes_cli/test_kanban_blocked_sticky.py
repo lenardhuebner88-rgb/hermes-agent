@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_cli.profiles as profiles_mod
 from hermes_cli import kanban_db as kb
 
 
@@ -396,3 +397,188 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
 # (landed via #28754 / #28781).  The original PR shipped a duplicate test
 # here; dropped during salvage to avoid two assertions of the same contract.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for review-gate tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gate_on(monkeypatch: pytest.MonkeyPatch):
+    """Enable the review gate with coder/premium roles + stub profile_exists."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-verdict path: complete_task with REQUEST_CHANGES verdict
+# (outcome='completed', task blocked via direct UPDATE)
+# ---------------------------------------------------------------------------
+
+
+def test_reviewer_verdict_request_changes_triggers_auto_retry(
+    kanban_home: Path,
+    gate_on: bool,
+) -> None:
+    """Regression: when the reviewer calls complete_task with verdict=
+    REQUEST_CHANGES, the run ends with outcome='completed' (not 'blocked'),
+    but the task is flipped to status='blocked' via a direct UPDATE
+    (kanban_db.py:10395-10414).  Before the fallback fix,
+    _latest_blocked_run_for_auto_retry returned None for this case, so
+    auto_retry_blocked_tasks silently skipped the task and
+    _block_is_settled reported 'settled'.  After the fix, the lane
+    picks up the completed run carrying verdict='REQUEST_CHANGES' and
+    auto-retries the task."""
+    with kb.connect() as conn:
+        # Coder claims and submits work → goes to review.
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+
+        # Reviewer claims and returns REQUEST_CHANGES.
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None and claimed.status == "running"
+        kb.complete_task(
+            conn,
+            tid,
+            summary="needs fixes",
+            metadata={"verdict": "REQUEST_CHANGES"},
+            review_gate=True,
+        )
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked", "task must be blocked after REQUEST_CHANGES"
+
+        # Verify the run has outcome='completed' (not 'blocked') — this is
+        # the exact gap the fix targets.
+        run_row = conn.execute(
+            "SELECT outcome, verdict FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert run_row is not None
+        assert run_row["outcome"] == "completed", (
+            "review run must keep outcome='completed' (not 'blocked')"
+        )
+        assert run_row["verdict"] == "REQUEST_CHANGES"
+
+        # Without the fallback, _latest_blocked_run_for_auto_retry returns
+        # None here → auto_retry_blocked_tasks skips → task stays blocked.
+        # With the fix the fallback picks up the completed/REQUEST_CHANGES run.
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert [t for t, _ in retried] == [tid], (
+            "auto_retry_blocked_tasks must retry a REQUEST_CHANGES-blocked task"
+        )
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_never_claimed_raw_status_flip_remains_settled(
+    kanban_home: Path,
+    gate_on: bool,
+) -> None:
+    """Regression guard: a task that was blocked by a raw status flip
+    (no run at all — 'never-claimed' zombie) must continue to be treated
+    as settled by _block_is_settled and must not be auto-retried.
+    The fallback must NOT fire for tasks with zero runs."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="zombie block")
+        # Direct flip with no claim or run — exactly what an operator triage
+        # or an old integration-park writes.
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,),
+        )
+        conn.commit()
+
+        # Lane must skip: no run of any kind → _latest_blocked_run_for_auto_retry
+        # still returns None after the fix (no completed/REQUEST_CHANGES run either).
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert retried == [], "never-claimed zombie block must not be auto-retried"
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        # _block_is_settled must confirm settled for the silent-block guard.
+        task_row = conn.execute(
+            "SELECT id, created_by, consecutive_failures, max_retries, body, "
+            "auto_retry_count FROM tasks WHERE id = ?",
+            (tid,),
+        ).fetchone()
+        assert task_row is not None
+        settled = kb._block_is_settled(
+            conn,
+            task_row,
+            now=int(time.time()) + 10_000,
+            retry_limit=kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+            failure_limit=kb.DEFAULT_FAILURE_LIMIT,
+            backoff_seconds=0,
+        )
+        assert settled, "never-claimed zombie block must remain settled"
+
+
+def test_completed_run_without_request_changes_verdict_not_retried(
+    kanban_home: Path,
+    gate_on: bool,
+) -> None:
+    """The fallback must only fire for verdict='REQUEST_CHANGES'.  A task
+    whose last run ended with outcome='completed' but verdict=NULL or
+    verdict='APPROVED' (e.g. a manual raw-block after a successful
+    completion) must NOT be auto-retried, and _block_is_settled must
+    still report settled=True."""
+    with kb.connect() as conn:
+        # Coder completes → goes to review.
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+
+        # Reviewer claims and approves (outcome='completed', verdict='APPROVED').
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None
+        kb.complete_task(
+            conn,
+            tid,
+            summary="LGTM",
+            metadata={"verdict": "APPROVED"},
+            review_gate=True,
+        )
+        # After APPROVED the task progresses (done or next stage); force it
+        # blocked manually to simulate an operator triage after a successful run.
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,),
+        )
+        conn.commit()
+
+        # The last run has outcome='completed' but verdict='APPROVED' (or NULL
+        # for non-review stages).  The fallback must NOT treat it as retryable.
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert retried == [], (
+            "completed run without REQUEST_CHANGES verdict must not be auto-retried"
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        task_row = conn.execute(
+            "SELECT id, created_by, consecutive_failures, max_retries, body, "
+            "auto_retry_count FROM tasks WHERE id = ?",
+            (tid,),
+        ).fetchone()
+        assert task_row is not None
+        settled = kb._block_is_settled(
+            conn,
+            task_row,
+            now=int(time.time()) + 10_000,
+            retry_limit=kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+            failure_limit=kb.DEFAULT_FAILURE_LIMIT,
+            backoff_seconds=0,
+        )
+        assert settled, (
+            "block after APPROVED run must be settled (no REQUEST_CHANGES to retry)"
+        )
