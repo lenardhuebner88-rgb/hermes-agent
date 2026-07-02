@@ -959,6 +959,33 @@ export const de = {
     summaryStatTokens: "Tokens",
     summaryStatRuns: "Runs",
     summaryCostSource: "aus Chain-Costs",
+    // S4: Ketten-Aktionen im Detail.
+    actionsEyebrow: "Ketten-Aktionen",
+    actionsTitle: "Stoppen oder erweitern",
+    actionsHint: (n: number) => `${n} ${n === 1 ? "Knoten" : "Knoten"} in dieser Kette`,
+    cancelChain: "Kette stoppen",
+    cancelConfirm: "Stoppen bestätigen",
+    cancelBusy: "stoppt …",
+    cancelAbort: "Abbrechen",
+    cancelFailed: "Kette konnte nicht gestoppt werden.",
+    cancelConfirmHint: (running: number, open: number, skipped: number) =>
+      `${running} ${running === 1 ? "laufender Worker wird" : "laufende Worker werden"} terminiert, ${open} ${open === 1 ? "offener Task wird" : "offene Tasks werden"} gehalten. ${skipped} ${skipped === 1 ? "Knoten bleibt" : "Knoten bleiben"} unverändert.`,
+    cancelSummary: (terminated: number, held: number, skipped: number) =>
+      `Gestoppt: ${terminated} ${terminated === 1 ? "Worker beendet" : "Worker beendet"} · ${held} ${held === 1 ? "Task gehalten" : "Tasks gehalten"} · ${skipped} übersprungen`,
+    addTask: "Task hinzufügen",
+    addTaskTitle: "Titel",
+    addTaskTitlePlaceholder: "Nächster Schritt …",
+    addTaskAssignee: "Assignee / Lane",
+    addTaskParent: "Anknüpfen an",
+    addTaskRootParent: "Root",
+    addTaskPark: "erst halten, nicht sofort dispatchen",
+    addTaskBody: "Body",
+    addTaskBodyPlaceholder: "Optionaler Auftragstext",
+    addTaskSubmit: "Task anlegen",
+    addTaskBusy: "legt an …",
+    addTaskCreated: (id: string) => `angelegt: ${id}`,
+    addTaskTitleRequired: "Titel fehlt.",
+    addTaskFailed: "Task konnte nicht angelegt werden.",
     // Blocker-Grund
     blockReasonLabel: "Blockiert:",
     // Review-Verdict-Chips

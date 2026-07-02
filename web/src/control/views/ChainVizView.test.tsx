@@ -6,6 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChainListPanel } from "./ketten/ChainListPanel";
 import { KettenGraph } from "./ketten/KettenGraph";
 import { ChainNodeCard } from "./ketten/ChainNodeCard";
+import {
+  buildChainTaskCreatePayload,
+  chainAssigneeOptions,
+  initialChainTaskDraft,
+  summarizeChainCancelImpact,
+} from "./ChainVizView";
 import { buildChains } from "../lib/fleet";
 import { fmtAge } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -110,6 +116,64 @@ describe("ChainVizView live wiring", () => {
     expect(de.ketten.subtitle).not.toMatch(/DAG/);
     // The view renders the i18n subtitle (no hard-coded string drift).
     expect(src).toMatch(/de\.ketten\.subtitle/);
+  });
+});
+
+describe("ChainVizView chain actions logic", () => {
+  const actionNodes: ChainGraphNode[] = [
+    makeNode("sink", "done", { title: "Integrations-Task", assignee: "premium" }),
+    makeNode("runner", "running", { assignee: "coder-claude" }),
+    makeNode("ready", "ready", { assignee: "coder" }),
+    makeNode("blocked", "blocked", { assignee: "reviewer" }),
+  ];
+
+  it("summarizes cancel impact the same way the confirm hint speaks", () => {
+    expect(summarizeChainCancelImpact(actionNodes)).toEqual({
+      total: 4,
+      running: 1,
+      heldOpen: 1,
+      skipped: 2,
+    });
+    expect(de.ketten.cancelConfirmHint(1, 1, 2)).toContain("laufender Worker");
+    expect(de.ketten.cancelConfirmHint(1, 1, 2)).toContain("offener Task");
+  });
+
+  it("builds the POST /tasks payload with one selected parent and park default", () => {
+    const draft = initialChainTaskDraft("sink", actionNodes);
+    expect(draft.assignee).toBe("premium");
+    expect(draft.parentId).toBe("sink");
+    expect(draft.park).toBe(true);
+
+    expect(buildChainTaskCreatePayload({
+      ...draft,
+      title: "  Next operator step  ",
+      body: "  follow-up body  ",
+      parentId: "ready",
+    })).toEqual({
+      title: "Next operator step",
+      body: "follow-up body",
+      assignee: "premium",
+      parents: ["ready"],
+      park: true,
+    });
+  });
+
+  it("rejects an empty title and keeps chain assignee suggestions deterministic", () => {
+    expect(buildChainTaskCreatePayload({
+      title: "   ",
+      body: "",
+      assignee: "coder",
+      parentId: "sink",
+      park: true,
+    })).toBeNull();
+
+    expect(chainAssigneeOptions(actionNodes).slice(0, 4)).toEqual([
+      "premium",
+      "coder-claude",
+      "coder",
+      "reviewer",
+    ]);
+    expect(chainAssigneeOptions(actionNodes)).toContain("research");
   });
 });
 

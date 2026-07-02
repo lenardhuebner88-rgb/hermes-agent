@@ -1348,6 +1348,94 @@ export function useChainGraph(rootId: string | null) {
   return { data, loading, error, reload };
 }
 
+export interface ChainCancelResult {
+  ok: boolean;
+  detail?: string;
+  root_id?: string;
+  held: string[];
+  terminated: string[];
+  skipped: string[];
+}
+
+export interface ChainTaskCreatePayload {
+  title: string;
+  body?: string;
+  assignee?: string;
+  parents: string[];
+  park?: boolean;
+}
+
+export interface ChainTaskCreateResult {
+  ok: boolean;
+  detail?: string;
+  taskId?: string;
+  taskStatus?: string;
+}
+
+export function useChainActions() {
+  const [busy, setBusy] = useState<"cancel" | "add" | null>(null);
+  const [error, setError] = useState("");
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const cancelChain = useCallback(async (rootId: string): Promise<ChainCancelResult> => {
+    if (aliveRef.current) {
+      setBusy("cancel");
+      setError("");
+    }
+    try {
+      const res = await fetchJSON<ChainCancelResult>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/cancel-chain`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        },
+      );
+      return {
+        ok: Boolean(res.ok),
+        detail: res.detail,
+        root_id: res.root_id,
+        held: Array.isArray(res.held) ? res.held : [],
+        terminated: Array.isArray(res.terminated) ? res.terminated : [],
+        skipped: Array.isArray(res.skipped) ? res.skipped : [],
+      };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return { ok: false, detail, held: [], terminated: [], skipped: [] };
+    } finally {
+      if (aliveRef.current) setBusy(null);
+    }
+  }, []);
+
+  const addTask = useCallback(async (payload: ChainTaskCreatePayload): Promise<ChainTaskCreateResult> => {
+    if (aliveRef.current) {
+      setBusy("add");
+      setError("");
+    }
+    try {
+      const res = await fetchJSON<{ task?: { id?: string; status?: string } }>(
+        "/api/plugins/kanban/tasks",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      return { ok: true, taskId: res.task?.id, taskStatus: res.task?.status };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return { ok: false, detail };
+    } finally {
+      if (aliveRef.current) setBusy(null);
+    }
+  }, []);
+
+  return { busy, error, cancelChain, addTask };
+}
+
 // In-place dispatch of a parked FO task: PATCH /tasks/{id} with status="ready"
 // moves a task from scheduled/triage → ready so the dispatcher picks it up.
 // Keyed by Board task id (not the FO backlog id). Calls onDone() after success so

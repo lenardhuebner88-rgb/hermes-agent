@@ -8398,6 +8398,135 @@ def hold_task(
     return True
 
 
+_CHAIN_CANCEL_OPEN_STATUSES = {"triage", "todo", "scheduled", "ready", "review"}
+_CHAIN_CANCEL_FINAL_STATUSES = {"done", "archived", "blocked"}
+
+
+def _chain_member_ids_from_sink(conn: sqlite3.Connection, root_id: str) -> list[str]:
+    """Return the same node set the dashboard chain graph shows for ``root_id``."""
+    nodes: set[str] = {root_id}
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+            (current,),
+        ).fetchall()
+        for row in rows:
+            parent = row["parent_id"]
+            if parent not in nodes:
+                nodes.add(parent)
+                stack.append(parent)
+    return sorted(nodes)
+
+
+def cancel_chain(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    reason: Optional[str] = None,
+    signal_fn=None,
+) -> dict[str, list[str]]:
+    """Stop every open task in the sink-rooted chain without inventing a status.
+
+    ``root_id`` is the chain sink used by the dashboard's ``chain-graph`` view:
+    traversal walks ``task_links.child_id -> parent_id`` upward. Running tasks
+    reuse :func:`hold_task`, so active workers are terminated and the resulting
+    block is classified as an operator hold. Other open tasks are moved to
+    ``blocked`` in one write transaction and receive a sticky ``blocked`` event.
+    Final or already blocked tasks are skipped, making repeated calls
+    idempotent.
+    """
+    if get_task(conn, root_id) is None:
+        raise ValueError(f"unknown task {root_id}")
+
+    cancel_reason = (reason or f"operator cancel_chain root {root_id}").strip()
+    if "operator" not in cancel_reason.lower():
+        cancel_reason = f"operator {cancel_reason}"
+
+    member_ids = _chain_member_ids_from_sink(conn, root_id)
+    if not member_ids:
+        member_ids = [root_id]
+
+    placeholders = ",".join("?" for _ in member_ids)
+    rows = conn.execute(
+        f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+        tuple(member_ids),
+    ).fetchall()
+    status_by_id = {row["id"]: row["status"] for row in rows}
+
+    held: list[str] = []
+    terminated: list[str] = []
+    skipped: list[str] = []
+    processed: set[str] = set()
+
+    for task_id in member_ids:
+        if status_by_id.get(task_id) != "running":
+            continue
+        processed.add(task_id)
+        if hold_task(conn, task_id, reason=cancel_reason, signal_fn=signal_fn):
+            held.append(task_id)
+            terminated.append(task_id)
+        else:
+            skipped.append(task_id)
+
+    remaining_ids = [task_id for task_id in member_ids if task_id not in processed]
+    with write_txn(conn):
+        current_by_id: dict[str, str] = {}
+        if remaining_ids:
+            rem_placeholders = ",".join("?" for _ in remaining_ids)
+            current_rows = conn.execute(
+                f"SELECT id, status FROM tasks WHERE id IN ({rem_placeholders})",
+                tuple(remaining_ids),
+            ).fetchall()
+            current_by_id = {row["id"]: row["status"] for row in current_rows}
+
+        for task_id in remaining_ids:
+            status = current_by_id.get(task_id)
+            if status in _CHAIN_CANCEL_OPEN_STATUSES:
+                cur = conn.execute(
+                    "UPDATE tasks "
+                    "SET status = 'blocked', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status IN ('triage', 'todo', 'scheduled', 'ready', 'review')",
+                    (task_id,),
+                )
+                if cur.rowcount == 1:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {
+                            "reason": cancel_reason,
+                            "manual": True,
+                            "chain_cancel_root": root_id,
+                        },
+                    )
+                    held.append(task_id)
+                else:
+                    skipped.append(task_id)
+            elif status in _CHAIN_CANCEL_FINAL_STATUSES or status == "running" or status is None:
+                skipped.append(task_id)
+            else:
+                skipped.append(task_id)
+
+        _append_event(
+            conn,
+            root_id,
+            "chain_cancelled",
+            {
+                "reason": cancel_reason,
+                "manual": True,
+                "chain_cancel_root": root_id,
+                "held": held,
+                "terminated": terminated,
+                "skipped": skipped,
+            },
+        )
+
+    return {"held": held, "terminated": terminated, "skipped": skipped}
+
+
 def reassign_task(
     conn: sqlite3.Connection,
     task_id: str,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import signal
 import secrets
 import sys
 import time
@@ -27,21 +28,25 @@ from hermes_cli import kanban_db as kb
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _load_plugin_router():
+def _load_plugin_module():
     repo_root = Path(__file__).resolve().parents[2]
     plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
 
     mod_name = "hermes_dashboard_plugin_kanban_b1b4_test"
     if mod_name in sys.modules:
-        return sys.modules[mod_name].router
+        return sys.modules[mod_name]
 
     spec = importlib.util.spec_from_file_location(mod_name, plugin_file)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
-    return mod.router
+    return mod
+
+
+def _load_plugin_router():
+    return _load_plugin_module().router
 
 
 @pytest.fixture
@@ -89,6 +94,57 @@ def _make_running_task(*, title="test-task", assignee="coder", model_override=No
     finally:
         conn.close()
     return task_id, run_id
+
+
+def _local_claim_lock(suffix: str) -> str:
+    return f"{kb._claimer_id().split(':', 1)[0]}:{suffix}"
+
+
+def _insert_claimed_running_task(
+    conn,
+    task_id: str,
+    *,
+    worker_pid: int = 43210,
+    claim_lock: str | None = None,
+) -> int:
+    now = int(time.time())
+    lock = claim_lock or _local_claim_lock(f"chain-{secrets.token_hex(4)}")
+    conn.execute(
+        "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
+        "worker_pid=?, started_at=? WHERE id=?",
+        (lock, now + 3600, worker_pid, now, task_id),
+    )
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, status, claim_lock, claim_expires, worker_pid, started_at, profile) "
+        "VALUES (?, 'running', ?, ?, ?, ?, 'coder')",
+        (task_id, lock, now + 3600, worker_pid, now),
+    )
+    run_id = int(cur.lastrowid or 0)
+    conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run_id, task_id))
+    conn.commit()
+    return run_id
+
+
+def _make_cancel_chain(conn):
+    root = kb.create_task(conn, title="chain sink", assignee="coder")
+    running = kb.create_task(conn, title="running parent", assignee="coder")
+    ready = kb.create_task(conn, title="ready parent", assignee="coder")
+    kb.link_tasks(conn, running, root)
+    kb.link_tasks(conn, ready, root)
+    now = int(time.time())
+    conn.execute("UPDATE tasks SET status='done', completed_at=? WHERE id=?", (now, root))
+    conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (ready,))
+    conn.commit()
+    _insert_claimed_running_task(conn, running)
+    return root, running, ready
+
+
+def _dead_signal_recorder(calls: list[tuple[int, signal.Signals]]):
+    def _signal(pid: int, sig: signal.Signals) -> None:
+        calls.append((pid, sig))
+        raise ProcessLookupError(pid)
+    return _signal
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +618,158 @@ def test_hold_task_resume_makes_ready(kanban_home):
         )
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# S4 — chain actions: cancel_chain + extend
+# ---------------------------------------------------------------------------
+
+def test_cancel_chain_holds_open_nodes_terminates_running_skips_done(kanban_home):
+    conn = kb.connect()
+    try:
+        root, running, ready = _make_cancel_chain(conn)
+        calls: list[tuple[int, signal.Signals]] = []
+
+        result = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
+
+        assert set(result["held"]) == {running, ready}
+        assert result["terminated"] == [running]
+        assert result["skipped"] == [root]
+        assert calls == [(43210, signal.SIGTERM)]
+
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                "SELECT id, status FROM tasks WHERE id IN (?, ?, ?)",
+                (root, running, ready),
+            ).fetchall()
+        }
+        assert rows[root] == "done"
+        assert rows[running] == "blocked"
+        assert rows[ready] == "blocked"
+
+        root_event = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='chain_cancelled' "
+            "ORDER BY id DESC LIMIT 1",
+            (root,),
+        ).fetchone()
+        assert root_event is not None
+        payload = json.loads(root_event["payload"])
+        assert payload["chain_cancel_root"] == root
+        assert set(payload["held"]) == {running, ready}
+    finally:
+        conn.close()
+
+
+def test_cancel_chain_endpoint_requires_confirm_without_mutation(kanban_home):
+    conn = kb.connect()
+    try:
+        root, running, ready = _make_cancel_chain(conn)
+    finally:
+        conn.close()
+
+    plugin = _load_plugin_module()
+    result = plugin.cancel_chain_endpoint(root, plugin.ChainCancelBody(confirm=False))
+    assert result == {"ok": False, "detail": "confirm required"}
+
+    conn = kb.connect()
+    try:
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                "SELECT id, status FROM tasks WHERE id IN (?, ?, ?)",
+                (root, running, ready),
+            ).fetchall()
+        }
+        assert rows[root] == "done"
+        assert rows[running] == "running"
+        assert rows[ready] == "ready"
+        assert conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='chain_cancelled'",
+            (root,),
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_cancel_chain_is_idempotent_on_second_call(kanban_home):
+    conn = kb.connect()
+    try:
+        root, running, ready = _make_cancel_chain(conn)
+        calls: list[tuple[int, signal.Signals]] = []
+
+        first = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
+        second = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
+
+        assert set(first["held"]) == {running, ready}
+        assert first["terminated"] == [running]
+        assert second["held"] == []
+        assert second["terminated"] == []
+        assert set(second["skipped"]) == {root, running, ready}
+        assert calls == [(43210, signal.SIGTERM)]
+    finally:
+        conn.close()
+
+
+def test_cancel_chain_blocks_auto_retry_and_recompute_promotion(kanban_home):
+    conn = kb.connect()
+    try:
+        root, running, ready = _make_cancel_chain(conn)
+        kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder([]))
+
+        blocked_run = kb._latest_blocked_run_for_auto_retry(conn, running)
+        assert blocked_run is not None
+        reason = (blocked_run["summary"] or blocked_run["error"] or "").strip()
+        assert kb._blocked_kind_for_auto_retry(reason) == "operator_question"
+        assert kb._has_sticky_block(conn, ready) is True
+
+        kb.auto_retry_blocked_tasks(conn, backoff_seconds=0, retry_limit=99)
+        kb.recompute_ready(conn)
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                "SELECT id, status FROM tasks WHERE id IN (?, ?)",
+                (running, ready),
+            ).fetchall()
+        }
+        assert rows == {running: "blocked", ready: "blocked"}
+    finally:
+        conn.close()
+
+
+def test_create_task_with_parent_extends_chain_graph(kanban_home):
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="extend root", assignee="default")
+    finally:
+        conn.close()
+
+    plugin = _load_plugin_module()
+    created = plugin.create_task(
+        plugin.CreateTaskBody(
+            title="extended chain task",
+            body="follow-up body",
+            assignee="default",
+            parents=[root],
+            park=True,
+        ),
+        board=None,
+    )
+    new_id = created["task"]["id"]
+
+    conn = kb.connect()
+    try:
+        link = conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?",
+            (root, new_id),
+        ).fetchone()
+        assert link is not None
+    finally:
+        conn.close()
+
+    graph = plugin.get_chain_graph(new_id, board=None)
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert {root, new_id} <= node_ids
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import { AlertTriangle, Check, Loader2, OctagonX, Plus, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { useBoard, useChainGraph, useHermesChainCosts, useHermesReviewVerdicts, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
+import { useBoard, useChainActions, useChainGraph, useHermesChainCosts, useHermesReviewVerdicts, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
 import { fmtAge, fmtTokens, formatEffectiveCost, nowSec, workerSortRank } from "../lib/derive";
 import { Hero } from "../components/Hero";
@@ -13,7 +15,78 @@ import type { ReviewRunState } from "./ketten/ChainNodeCard";
 import type { ChainGraphNode, Worker } from "../lib/types";
 import type { ChainCostsResponse } from "../lib/schemas";
 import type { WorkerActionKey } from "../components/WorkerCard";
+import type { ChainCancelResult, ChainTaskCreatePayload, ChainTaskCreateResult } from "../hooks/useControlData";
 import { fetchJSON } from "@/lib/api";
+
+const CHAIN_ADD_DEFAULT_ASSIGNEE = "coder";
+const CHAIN_ADD_LANE_OPTIONS = ["coder", "coder-claude", "premium", "verifier", "research", "admin"] as const;
+const CHAIN_CANCEL_OPEN_STATUSES = new Set<ChainGraphNode["status"]>(["triage", "todo", "scheduled", "ready", "review"]);
+
+export interface ChainCancelImpact {
+  total: number;
+  running: number;
+  heldOpen: number;
+  skipped: number;
+}
+
+export interface ChainTaskDraft {
+  title: string;
+  body: string;
+  assignee: string;
+  parentId: string;
+  park: boolean;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function summarizeChainCancelImpact(nodes: ChainGraphNode[]): ChainCancelImpact {
+  let running = 0;
+  let heldOpen = 0;
+  let skipped = 0;
+  for (const node of nodes) {
+    if (node.status === "running") running += 1;
+    else if (CHAIN_CANCEL_OPEN_STATUSES.has(node.status)) heldOpen += 1;
+    else skipped += 1;
+  }
+  return { total: nodes.length, running, heldOpen, skipped };
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function chainAssigneeOptions(nodes: ChainGraphNode[]): string[] {
+  const options: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: string | null | undefined) => {
+    const trimmed = (value ?? "").trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    options.push(trimmed);
+  };
+  for (const node of nodes) push(node.assignee);
+  for (const option of CHAIN_ADD_LANE_OPTIONS) push(option);
+  return options;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function initialChainTaskDraft(rootId: string, nodes: ChainGraphNode[]): ChainTaskDraft {
+  const root = nodes.find((node) => node.id === rootId);
+  const assignee = root?.assignee?.trim() || nodes.find((node) => node.assignee?.trim())?.assignee?.trim() || CHAIN_ADD_DEFAULT_ASSIGNEE;
+  return { title: "", body: "", assignee, parentId: rootId, park: true };
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function buildChainTaskCreatePayload(draft: ChainTaskDraft): ChainTaskCreatePayload | null {
+  const title = draft.title.trim();
+  const parentId = draft.parentId.trim();
+  if (!title || !parentId) return null;
+  const body = draft.body.trim();
+  const assignee = draft.assignee.trim();
+  return {
+    title,
+    ...(body ? { body } : {}),
+    ...(assignee ? { assignee } : {}),
+    parents: [parentId],
+    park: draft.park,
+  };
+}
 
 // ── Chain summary (progress from graph nodes, cost truth from chain-costs) ──
 
@@ -123,6 +196,204 @@ interface ChainPanelProps {
   workerActionBusyRunId: string | null;
   onResume: (taskId: string) => void | Promise<void>;
   resumeBusyId: string | null;
+  onChainChanged: (newRootId?: string | null) => void | Promise<void>;
+}
+
+interface ChainActionsPanelProps {
+  rootId: string;
+  nodes: ChainGraphNode[];
+  onChanged: (newRootId?: string | null) => void | Promise<void>;
+}
+
+function ChainActionsPanel({ rootId, nodes, onChanged }: ChainActionsPanelProps) {
+  const impact = useMemo(() => summarizeChainCancelImpact(nodes), [nodes]);
+  const assigneeOptions = useMemo(() => chainAssigneeOptions(nodes), [nodes]);
+  const parentOptions = useMemo(() => nodes.filter((node) => node.id.trim() !== ""), [nodes]);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancelResult, setCancelResult] = useState<ChainCancelResult | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [draft, setDraft] = useState<ChainTaskDraft>(() => initialChainTaskDraft(rootId, nodes));
+  const [addResult, setAddResult] = useState<ChainTaskCreateResult | null>(null);
+  const [addError, setAddError] = useState("");
+  const { busy, error, cancelChain, addTask } = useChainActions();
+  const cancelBusy = busy === "cancel";
+  const addBusy = busy === "add";
+
+  const handleCancel = useCallback(async () => {
+    const result = await cancelChain(rootId);
+    setCancelResult(result);
+    if (result.ok) {
+      setConfirmingCancel(false);
+      await onChanged(null);
+    }
+  }, [cancelChain, onChanged, rootId]);
+
+  const handleAddSubmit = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAddError("");
+    setAddResult(null);
+    const payload = buildChainTaskCreatePayload(draft);
+    if (!payload) {
+      setAddError(de.ketten.addTaskTitleRequired);
+      return;
+    }
+    const result = await addTask(payload);
+    setAddResult(result);
+    if (!result.ok) {
+      setAddError(result.detail || de.ketten.addTaskFailed);
+      return;
+    }
+    setDraft((prev) => ({ ...prev, title: "", body: "" }));
+    await onChanged(result.taskId ?? null);
+  }, [addTask, draft, onChanged]);
+
+  const cancelSummary = cancelResult
+    ? de.ketten.cancelSummary(cancelResult.terminated.length, cancelResult.held.length, cancelResult.skipped.length)
+    : null;
+
+  return (
+    <section className="hc-surface-card space-y-3 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">{de.ketten.actionsEyebrow}</p>
+          <h2 className="text-base font-semibold text-[var(--hc-text)]">{de.ketten.actionsTitle}</h2>
+          <p className="mt-1 text-xs text-[var(--hc-text-dim)]">{de.ketten.actionsHint(impact.total)}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={cancelBusy}
+            onClick={() => setConfirmingCancel(true)}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-[7px] border border-red-500/40 bg-red-500/10 px-3 text-xs font-medium text-red-200 transition hover:border-red-400/70 disabled:opacity-50"
+          >
+            {cancelBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <OctagonX className="h-3.5 w-3.5" />}
+            {de.ketten.cancelChain}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAddOpen((open) => !open)}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-[7px] border border-[var(--hc-border)] px-3 text-xs font-medium text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]"
+          >
+            {addOpen ? <X className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+            {de.ketten.addTask}
+          </button>
+        </div>
+      </div>
+
+      {confirmingCancel ? (
+        <div className="rounded-[10px] border border-red-500/35 bg-red-500/10 p-3">
+          <p className="flex items-start gap-2 text-sm text-red-100">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{de.ketten.cancelConfirmHint(impact.running, impact.heldOpen, impact.skipped)}</span>
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={cancelBusy}
+              onClick={() => void handleCancel()}
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-[7px] border border-red-400/50 bg-red-500/20 px-3 text-xs font-semibold text-red-100 disabled:opacity-50"
+            >
+              {cancelBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <OctagonX className="h-3.5 w-3.5" />}
+              {cancelBusy ? de.ketten.cancelBusy : de.ketten.cancelConfirm}
+            </button>
+            <button
+              type="button"
+              disabled={cancelBusy}
+              onClick={() => setConfirmingCancel(false)}
+              className="inline-flex min-h-9 items-center rounded-[7px] border border-[var(--hc-border)] px-3 text-xs text-[var(--hc-text-soft)] disabled:opacity-50"
+            >
+              {de.ketten.cancelAbort}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {cancelSummary ? (
+        <p className={`hc-type-label ${cancelResult?.ok ? "text-[var(--hc-emerald)]" : "text-[var(--hc-red)]"}`}>
+          {cancelResult?.ok ? cancelSummary : cancelResult?.detail || de.ketten.cancelFailed}
+        </p>
+      ) : null}
+      {error ? <p className="hc-type-label text-[var(--hc-red)]">{error}</p> : null}
+
+      {addOpen ? (
+        <form onSubmit={handleAddSubmit} className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="block text-xs text-[var(--hc-text-soft)]">
+              {de.ketten.addTaskTitle}
+              <input
+                value={draft.title}
+                onChange={(event) => setDraft((prev) => ({ ...prev, title: event.target.value }))}
+                className="mt-1 min-h-10 w-full rounded-[7px] border border-[var(--hc-border)] bg-black/20 px-3 text-sm text-[var(--hc-text)] outline-none focus:border-[var(--hc-accent-border)]"
+                placeholder={de.ketten.addTaskTitlePlaceholder}
+                required
+              />
+            </label>
+            <label className="block text-xs text-[var(--hc-text-soft)]">
+              {de.ketten.addTaskAssignee}
+              <input
+                value={draft.assignee}
+                list="chain-add-assignee-options"
+                onChange={(event) => setDraft((prev) => ({ ...prev, assignee: event.target.value }))}
+                className="mt-1 min-h-10 w-full rounded-[7px] border border-[var(--hc-border)] bg-black/20 px-3 text-sm text-[var(--hc-text)] outline-none focus:border-[var(--hc-accent-border)]"
+              />
+              <datalist id="chain-add-assignee-options">
+                {assigneeOptions.map((option) => <option key={option} value={option} />)}
+              </datalist>
+            </label>
+            <label className="block text-xs text-[var(--hc-text-soft)]">
+              {de.ketten.addTaskParent}
+              <select
+                value={draft.parentId}
+                onChange={(event) => setDraft((prev) => ({ ...prev, parentId: event.target.value }))}
+                className="mt-1 min-h-10 w-full rounded-[7px] border border-[var(--hc-border)] bg-black/20 px-3 text-sm text-[var(--hc-text)] outline-none focus:border-[var(--hc-accent-border)]"
+              >
+                {parentOptions.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.id === rootId ? `${node.title} · ${de.ketten.addTaskRootParent}` : `${node.title} · ${node.status}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex min-h-10 items-center gap-2 text-xs text-[var(--hc-text-soft)] md:mt-5">
+              <input
+                type="checkbox"
+                checked={draft.park}
+                onChange={(event) => setDraft((prev) => ({ ...prev, park: event.target.checked }))}
+                className="h-4 w-4 accent-[var(--hc-accent)]"
+              />
+              {de.ketten.addTaskPark}
+            </label>
+          </div>
+          <label className="mt-3 block text-xs text-[var(--hc-text-soft)]">
+            {de.ketten.addTaskBody}
+            <textarea
+              value={draft.body}
+              onChange={(event) => setDraft((prev) => ({ ...prev, body: event.target.value }))}
+              className="mt-1 min-h-[92px] w-full resize-y rounded-[7px] border border-[var(--hc-border)] bg-black/20 px-3 py-2 text-sm text-[var(--hc-text)] outline-none focus:border-[var(--hc-accent-border)]"
+              placeholder={de.ketten.addTaskBodyPlaceholder}
+            />
+          </label>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="submit"
+              disabled={addBusy || !draft.title.trim()}
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-[7px] border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-xs font-semibold text-[var(--hc-accent-text)] disabled:opacity-50"
+            >
+              {addBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+              {addBusy ? de.ketten.addTaskBusy : de.ketten.addTaskSubmit}
+            </button>
+            {addResult?.ok ? (
+              <span className="inline-flex items-center gap-1.5 hc-type-label text-[var(--hc-emerald)]">
+                <Check className="h-3.5 w-3.5" />
+                {de.ketten.addTaskCreated(addResult.taskId ?? "—")}
+              </span>
+            ) : null}
+            {addError ? <span className="hc-type-label text-[var(--hc-red)]">{addError}</span> : null}
+          </div>
+        </form>
+      ) : null}
+    </section>
+  );
 }
 
 function ChainPanel({
@@ -137,10 +408,20 @@ function ChainPanel({
   workerActionBusyRunId,
   onResume,
   resumeBusyId,
+  onChainChanged,
 }: ChainPanelProps) {
   const graph = useChainGraph(rootId);
+  const reloadGraph = graph.reload;
   const chainCosts = useHermesChainCosts(rootId);
   const now = nowSec();
+
+  const handleChainChanged = useCallback(async (newRootId?: string | null) => {
+    if (newRootId) {
+      await onChainChanged(newRootId);
+      return;
+    }
+    await Promise.all([reloadGraph(), onChainChanged(null)]);
+  }, [reloadGraph, onChainChanged]);
 
   if (graph.error) {
     return (
@@ -157,6 +438,12 @@ function ChainPanel({
 
   return (
     <>
+      <ChainActionsPanel
+        rootId={graph.data.root_id}
+        nodes={graph.data.nodes}
+        onChanged={handleChainChanged}
+      />
+
       {/* Kette-Summary card: progress from graph nodes, cost truth from chain-costs. */}
       <ChainSummary nodes={graph.data.nodes} rootId={graph.data.root_id} costs={chainCosts.data} costsLoading={chainCosts.loading} costsError={chainCosts.error} />
 
@@ -192,6 +479,7 @@ function ChainPanel({
 export function ChainVizView(_props: { density?: unknown }) {
   const [params, setParams] = useSearchParams();
   const board = useBoard();
+  const boardReload = board.reload;
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
 
   // Round C: Worker + Inspect + Resume wiring für die KettenGraph-Pipeline.
@@ -316,10 +604,17 @@ export function ChainVizView(_props: { density?: unknown }) {
   }, [activeChains, doneChains, allSelectableChains, requestedRoot, selectedRootId]);
 
   // Keep URL in sync when user selects via selector.
-  function handleSelect(rootId: string) {
+  const handleSelect = useCallback((rootId: string) => {
     setSelectedRootId(rootId);
     setParams(rootId ? { root: rootId } : {}, { replace: true });
-  }
+  }, [setParams]);
+
+  const handleChainChanged = useCallback(async (newRootId?: string | null) => {
+    await boardReload();
+    if (newRootId) {
+      handleSelect(newRootId);
+    }
+  }, [boardReload, handleSelect]);
 
   return (
     <div className="mx-auto w-full max-w-6xl">
@@ -381,6 +676,7 @@ export function ChainVizView(_props: { density?: unknown }) {
               workerActionBusyRunId={busyRun}
               onResume={onResume}
               resumeBusyId={resumeBusyId}
+              onChainChanged={handleChainChanged}
             />
           ) : null}
         </div>
