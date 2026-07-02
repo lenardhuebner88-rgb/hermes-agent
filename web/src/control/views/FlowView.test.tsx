@@ -245,12 +245,25 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/aria-label=\{`Details für PlanSpec \$\{item\.topic\} öffnen`\}/);
   });
 
-  it("places the PlanSpec hub before the active-chain board (C2: Ingest-Einstiegspunkt nach oben)", () => {
-    // C2: PlanSpecHub ist jetzt VOR den aktiven Ketten (war früher ganz unten).
-    // Damit ist er der erste Schritt für neue Arbeit — nicht der letzte.
-    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeGreaterThan(src.indexOf("<CapacityBanner"));
-    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeLessThan(src.indexOf("<DeliveredList"));
-    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeLessThan(src.indexOf("{detailSheetOpen && selectedId ?"));
+  it("ordnet den Tab als Pipeline: Planung vor Execution vor Geliefert", () => {
+    // Stufen-Vertrag (2026-07-02): Stufe 1 Planung (PlanSpecHub + Funnel)
+    // steht VOR Stufe 2 Execution (Capacity/Recovery/Triage/Worker/Ketten),
+    // Stufe 3 Geliefert (DeliveredList + Disposition) kommt zuletzt.
+    const hub = src.indexOf("<PlanSpecHub onIngested={onCaptured} />");
+    const funnel = src.indexOf("<FunnelFreigaben />");
+    const capacity = src.indexOf("<CapacityBanner");
+    const recovery = src.indexOf("<RecoveryStrip />");
+    const triage = src.indexOf("<TriageStrip />");
+    const delivered = src.indexOf("<DeliveredList");
+    const disposition = src.indexOf("<DispositionLifecycle />");
+    expect(hub).toBeGreaterThan(-1);
+    expect(hub).toBeLessThan(capacity);
+    expect(funnel).toBeLessThan(capacity);
+    expect(capacity).toBeLessThan(recovery);
+    expect(recovery).toBeLessThan(triage);
+    expect(triage).toBeLessThan(delivered);
+    expect(delivered).toBeLessThan(disposition);
+    expect(hub).toBeLessThan(src.indexOf("{detailSheetOpen && selectedId ?"));
   });
 
   it("collapses worker cards to compact headers in the worker strip", () => {

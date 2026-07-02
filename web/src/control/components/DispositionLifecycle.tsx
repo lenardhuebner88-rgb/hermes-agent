@@ -246,14 +246,9 @@ export function DispositionLifecycle() {
   // Render nothing when data not yet loaded and no error
   if (data == null && !error) return null;
 
-  // Render nothing when there are no open items (quiet empty state matches panel idiom)
-  if (items.length === 0 && !error) {
-    return (
-      <FleetPanel eyebrow={t.eyebrow} meta={<span className="hidden sm:inline">{t.meta}</span>}>
-        <p className="text-[0.82rem] hc-dim">{t.empty}</p>
-      </FleetPanel>
-    );
-  }
+  // Leere Queue → gar kein Panel. Die Autotriage (worker-done/drop) hält die
+  // Queue kleiner; ein dauerhaft sichtbares Leer-Panel wäre nur Rauschen.
+  if (items.length === 0 && !error) return null;
 
   return (
     <FleetPanel eyebrow={t.eyebrow} meta={<span className="hidden sm:inline">{t.meta}</span>}>

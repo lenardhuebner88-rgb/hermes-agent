@@ -324,6 +324,16 @@ export const de = {
       startSingle: "Nur diesen Task starten",
       cancel: "Abbrechen",
     },
+    // Pipeline-Stufen: der Tab liest sich als Planung → Execution → Geliefert.
+    stagePlanung: "Planung",
+    stagePlanungHint: "PlanSpecs & Trichter-Freigaben — was als Nächstes Arbeit wird",
+    stageExecution: "Execution",
+    stageExecutionHint: "Live-Läufe, Ketten und Störungen",
+    stageGeliefert: "Geliefert",
+    stageGeliefertHint: "Ergebnisse, Belege und offene Follow-ups",
+    chainVizLink: "Ketten-Ansicht",
+    strategistWaiting: (n: number) => (n === 1 ? "1 Strategen-Vorschlag wartet auf Freigabe" : `${n} Strategen-Vorschläge warten auf Freigabe`),
+    strategistLink: "Zum Strategen",
     // Ketten-Board (Phase 2): Root-Gruppen + Projekt-Filter + Worker-Strip.
     projects: "Projekt",
     projectAll: "Alle",
@@ -932,16 +942,9 @@ export const de = {
     verdictApproved: "APPROVED",
     verdictNeedsRevision: "NEEDS_REVISION",
     verdictBlock: "BLOCK",
-    // Planung-steht-an-Strip
-    planungEyebrow: "Planung",
-    planungEmpty: "Nichts wartet auf Planung",
-    planungPlanSpecs: (n: number) => `${n} PlanSpec${n === 1 ? "" : "s"} offen`,
-    planungProposals: (n: number) =>
-      `${n} Strategen-Vorschlag${n === 1 ? "" : "schläge"} offen`,
-    planungCollapse: "Einklappen",
-    planungExpand: "Aufklappen",
-    planungLinkFlow: "Flow-Tab",
-    planungLinkStratege: "Strategen-Tab",
-    planungLinkChain: "Kette",
+    // Absprung zurück in den Flow-Tab (Aktionen + Receipt-Kette der Wurzel).
+    // Die frühere Planung-Strip-Sektion ist in den Flow-Tab (Stufe 1) gezogen —
+    // der Ketten-Tab bleibt die reine Live-Sicht.
+    openInFlow: "Im Flow öffnen",
   },
 } as const;

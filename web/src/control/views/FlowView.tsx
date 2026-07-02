@@ -11,7 +11,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, HeartPulse, Link2, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, GitBranch, HeartPulse, Lightbulb, Link2, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -53,6 +53,7 @@ import {
   useHermesReviewVerdicts,
   usePlanSpecs,
   usePlanSpecDetail,
+  useStrategistCount,
   useSystemHealth,
   useHermesWorkers,
   useRunInspect,
@@ -238,6 +239,19 @@ interface CapacityBannerProps {
   count: number;
   cap: number | null;
   queueDepth: number;
+}
+
+// Pipeline-Stufen-Header: macht den Tab als Planung → Execution → Geliefert
+// lesbar. Reine Beschriftung, keine Logik — die Sektionen selbst bleiben die
+// bestehenden Komponenten.
+function StageDivider({ step, title, hint }: { step: number; title: string; hint: string }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-2 border-b border-[var(--hc-border)] pb-1.5 pt-1">
+      <span className="hc-mono inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[11px] font-semibold text-[var(--hc-accent-text)]">{step}</span>
+      <Eyebrow>{title}</Eyebrow>
+      <span className="hidden hc-type-label hc-dim sm:inline">{hint}</span>
+    </div>
+  );
 }
 
 function CapacityBanner({ count, cap, queueDepth }: CapacityBannerProps) {
@@ -1747,7 +1761,10 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
         tabIndex={0}
         aria-expanded={expanded}
         onClick={onToggle}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
+        // target-Guard: Enter/Space auf inneren Links/Buttons (Epic-Badge,
+        // Ketten-Link) darf nicht die Karte togglen und deren Aktivierung
+        // wegpreventen — nur der Header selbst toggelt per Tastatur.
+        onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
         className="cursor-pointer"
       >
         <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1776,6 +1793,14 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
           {chain.runningCount > 0 ? <StatusPill tone="cyan" label={`${chain.runningCount} läuft`} dot="live" /> : null}
           {reviewTier ? <StatusPill tone="indigo" label={`Review: ${REVIEW_TIER_LABEL[reviewTier]}`} /> : null}
           {activeStage ? <StatusPill tone="violet" label={`Stufe: ${ACTIVE_STAGE_LABEL[activeStage]}`} dot="live" /> : null}
+          <Link
+            to={`/control/ketten?root=${encodeURIComponent(chain.rootId)}`}
+            onClick={(e) => e.stopPropagation()}
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-[7px] border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft transition hover:border-[var(--hc-border-strong)]"
+          >
+            <GitBranch className="h-3 w-3" />
+            {de.flow.chainVizLink}
+          </Link>
         </div>
       </div>
       {expanded ? (
@@ -2283,6 +2308,8 @@ export function FlowView() {
   const dispositionItems = useDispositionItems();
   const triageFailures = useFlowTriageFailures();
   const funnelDrafts = useFunnelDrafts();
+  // Stufe 1 (Planung): wartende Strategen-Vorschläge als Absprung-Zeile.
+  const strategistCount = useStrategistCount();
   const attentionLoading = triageFailures.data === null || funnelDrafts.data === null;
   const attentionSummary = useMemo(() => summarizeFlowAttention({
     recoveryCount: (decisionQueue.data?.decisions ?? []).filter((d) => !RECOVERY_HIDDEN_KINDS.has(d.kind)).length,
@@ -2483,7 +2510,34 @@ export function FlowView() {
         onSelectTask={selectTask}
       />
 
-      <div id="flow-section-recovery"><RecoveryStrip /></div>
+      {/* ── Stufe 1 · Planung ─────────────────────────────────────────────
+          PlanSpec-Ingest, Trichter-Freigaben und wartende Strategen-Vorschläge:
+          alles, was erst noch Arbeit WIRD, gesammelt an einem Ort. */}
+      <StageDivider step={1} title={de.flow.stagePlanung} hint={de.flow.stagePlanungHint} />
+
+      <PlanSpecHub onIngested={onCaptured} />
+
+      {/* Funnel-Freigaben — fertige Drafts aus dem Wunsch-Trichter, die auf
+          den Operator-Klick warten (Freigeben = Build-Task als Ketten-Kind). */}
+      <div id="flow-section-funnel"><FunnelFreigaben /></div>
+
+      {/* Wartende Strategen-Vorschläge: nur eine Zeile mit Absprung — die
+          Freigabe selbst lebt im Strategen-Tab. */}
+      {(strategistCount.data?.count ?? 0) > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2">
+          <span className="inline-flex items-center gap-2 text-xs hc-soft">
+            <Lightbulb className="h-3.5 w-3.5 text-amber-300" />
+            {de.flow.strategistWaiting(strategistCount.data!.count)}
+          </span>
+          <Link to="/control/stratege" className="hc-mono shrink-0 rounded-[7px] border border-[var(--hc-border)] px-2 py-0.5 text-[10px] hc-soft transition hover:border-[var(--hc-border-strong)]">
+            {de.flow.strategistLink}
+          </Link>
+        </div>
+      ) : null}
+
+      {/* ── Stufe 2 · Execution ───────────────────────────────────────────
+          Live-Läufe, Ketten und ihre Störungen (Recovery/Triage). */}
+      <StageDivider step={2} title={de.flow.stageExecution} hint={de.flow.stageExecutionHint} />
 
       {/* F4: Kapazitäts-/Engpass-Banner — schlanke Leiste, nur wenn Worker
           aktiv oder Tasks warten; amber wenn Engpass (alle belegt + Queue > 0). */}
@@ -2495,22 +2549,12 @@ export function FlowView() {
         />
       ) : null}
 
-      {/* C2: PlanSpecHub nach oben — PlanSpec-Ingest ist der Einstiegspunkt
-          neuer Arbeit; gehört vor die aktiven Ketten, nicht ans Ende. */}
-      <PlanSpecHub onIngested={onCaptured} />
+      <div id="flow-section-recovery"><RecoveryStrip /></div>
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
           nichts, wenn es nichts zu triagieren gibt. */}
       <div id="flow-section-triage"><TriageStrip /></div>
-
-      {/* Funnel-Freigaben — fertige Drafts aus dem Wunsch-Trichter, die auf
-          den Operator-Klick warten (Freigeben = Build-Task als Ketten-Kind). */}
-      <div id="flow-section-funnel"><FunnelFreigaben /></div>
-
-      {/* Disposition-Items — offene Follow-ups & Risiken aus abgeschlossenen
-          Tasks, die auf eine Operator-Entscheidung warten (Phase 3b). */}
-      <div id="flow-section-disposition"><DispositionLifecycle /></div>
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
           Runaway-Wache und vollen Aktionen (alle confirm-gated). Ruht die
@@ -2670,12 +2714,24 @@ export function FlowView() {
                   </section>
                 ) : null}
 
-                {/* Geliefert — Ketten + Einzeltasks, jüngste zuerst */}
+                {/* ── Stufe 3 · Geliefert ──────────────────────────────
+                    Ergebnisse + offene Follow-ups (Disposition) aus
+                    abgeschlossener Arbeit. */}
+                {deliveredItems.length || (dispositionItems.data?.items ?? []).length ? (
+                  <StageDivider step={3} title={de.flow.stageGeliefert} hint={de.flow.stageGeliefertHint} />
+                ) : null}
                 {deliveredItems.length ? (
                   <DeliveredList items={deliveredItems} selectedId={selectedId} onSelect={selectTask} now={now} enrichmentById={enrichmentById} />
                 ) : null}
               </>
             )}
+            {/* Disposition-Items — offene Follow-ups & Risiken aus abge-
+                schlossenen Tasks, die auf eine Operator-Entscheidung warten
+                (Phase 3b). Bewusst AUSSERHALB des hasAnyFiltered-Zweigs:
+                Items überleben Task-Archivierung, der Attention-Band-Anker
+                (flow-section-disposition) muss auch bei leerem/gefiltertem
+                Board erreichbar bleiben. Rendert bei leerer Queue nichts. */}
+            <div id="flow-section-disposition"><DispositionLifecycle /></div>
           </div>
           {/* Desktop (xl+): sticky Seitenleiste wie gehabt. Darunter ersetzt
               das Bottom-Sheet die früher unten gestapelte Leiste — die Seite

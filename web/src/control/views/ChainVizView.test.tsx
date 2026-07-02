@@ -2,16 +2,14 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
 
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
 import { ChainNodeCard } from "./ketten/ChainNodeCard";
-import { PlanungStrip } from "./ChainVizView";
 import { buildChains } from "../lib/fleet";
 import { fmtAge } from "../lib/derive";
 import { de } from "../i18n/de";
-import type { BoardTask, ChainGraphEdge, ChainGraphNode, PlanSpecRecord } from "../lib/types";
+import type { BoardTask, ChainGraphEdge, ChainGraphNode } from "../lib/types";
 
 const src = readFileSync(fileURLToPath(new URL("./ChainVizView.tsx", import.meta.url)), "utf8");
 const controlPage = readFileSync(fileURLToPath(new URL("../ControlPage.tsx", import.meta.url)), "utf8");
@@ -318,84 +316,20 @@ describe("checked_at <time> semantic element", () => {
   });
 });
 
-// ── PlanungStrip (Teil 3) ────────────────────────────────────────────────────
-function makePlanSpec(overrides: Partial<PlanSpecRecord> = {}): PlanSpecRecord {
-  return {
-    path: "/vault/00-Canon/test-spec.md",
-    agent: "claude",
-    filename: "test-spec.md",
-    topic: "Test Vorhaben",
-    status: "held",
-    freigabe: "open",
-    live_test_depth: null,
-    binding: true,
-    subtask_count: 3,
-    valid: true,
-    open: true,
-    closed_reason: null,
-    kanban_root_task_id: null,
-    kanban_root_status: null,
-    kanban_state: "not_ingested",
-    kanban_child_total: 0,
-    kanban_child_done: 0,
-    kanban_child_blocked: 0,
-    kanban_child_running: 0,
-    kanban_ingested_at: null,
-    ingest_disposition: "ready",
-    ingest_would_block: false,
-    ingest_findings: [],
-    errors: [],
-    ...overrides,
-  };
-}
+// ── Reine Live-Sicht (Teil 3, 2026-07-02) ───────────────────────────────────
+// Die Planung-Strip-Sektion ist in den Flow-Tab (Stufe 1) gezogen; der
+// Ketten-Tab koppelt stattdessen per Absprung-Link zurück in den Flow.
 
-describe("PlanungStrip", () => {
-  it("zeigt den Leerstand-Text wenn keine PlanSpecs und kein Strategist-Count", () => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter><PlanungStrip planspecs={[]} strategistCount={0} onSelectRoot={() => {}} /></MemoryRouter>,
-    );
-    expect(html).toContain(de.ketten.planungEmpty);
-    expect(html).not.toContain("Aufklappen");
-    expect(html).not.toContain("Einklappen");
+describe("ChainVizView als reine Live-Sicht", () => {
+  it("rendert keinen PlanungStrip mehr", () => {
+    expect(src).not.toContain("PlanungStrip");
+    expect(src).not.toContain("usePlanSpecs");
+    expect(src).not.toContain("useStrategistCount");
   });
 
-  it("zeigt einen held PlanSpec als Listeneintrag", () => {
-    const spec = makePlanSpec({ topic: "Neues Dashboard-Feature" });
-    const html = renderToStaticMarkup(
-      <MemoryRouter><PlanungStrip planspecs={[spec]} strategistCount={0} onSelectRoot={() => {}} /></MemoryRouter>,
-    );
-    expect(html).toContain("Neues Dashboard-Feature");
-    expect(html).toContain(de.ketten.planungPlanSpecs(1));
-    // Kein kanban_root_task_id → Link zum Flow-Tab
-    expect(html).toContain(de.ketten.planungLinkFlow);
-    expect(html).not.toContain(de.ketten.planungEmpty);
-  });
-
-  it("zeigt Ketten-Button wenn PlanSpec bereits eine Kette hat", () => {
-    const spec = makePlanSpec({ kanban_root_task_id: "t_root_42" });
-    const html = renderToStaticMarkup(
-      <MemoryRouter><PlanungStrip planspecs={[spec]} strategistCount={0} onSelectRoot={() => {}} /></MemoryRouter>,
-    );
-    // Kette-Button statt Flow-Link
-    expect(html).toContain("Kette");
-    expect(html).not.toContain(de.ketten.planungLinkFlow);
-  });
-
-  it("zeigt Strategen-Zähler wenn strategistCount > 0", () => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter><PlanungStrip planspecs={[]} strategistCount={3} onSelectRoot={() => {}} /></MemoryRouter>,
-    );
-    expect(html).toContain(de.ketten.planungProposals(3));
-    expect(html).toContain(de.ketten.planungLinkStratege);
-    expect(html).not.toContain(de.ketten.planungEmpty);
-  });
-
-  it("rendert Aufklapp-Button wenn Items vorhanden", () => {
-    const spec = makePlanSpec();
-    const html = renderToStaticMarkup(
-      <MemoryRouter><PlanungStrip planspecs={[spec]} strategistCount={0} onSelectRoot={() => {}} /></MemoryRouter>,
-    );
-    // Standardmäßig aufgeklappt → Einklappen-Button sichtbar
-    expect(html).toContain(de.ketten.planungCollapse);
+  it("verlinkt die fokussierte Kette zurück in den Flow-Tab", () => {
+    expect(src).toContain("/control/flow?task=");
+    expect(src).toContain("de.ketten.openInFlow");
+    expect(de.ketten.openInFlow.length).toBeGreaterThan(0);
   });
 });
