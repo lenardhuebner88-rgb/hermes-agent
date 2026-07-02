@@ -3629,6 +3629,7 @@ HEILER_SOURCE_ESCALATION_SWEEP = "escalation_sweep"
 # ``kanban_worktrees`` but tags itself here so all source vocabulary is colocated.
 HEILER_SOURCE_BUDGET_RUNAWAY = "budget_runaway_park"
 HEILER_SOURCE_RELEASE_GATE = "release_gate_escalation"
+HEILER_SOURCE_NONSPAWNABLE = "nonspawnable_assignee_escalation"
 # The silent-block sweep is itself an escalation writer (it surfaces settled
 # blocks that never escalated on their own path). ESCALATION-INLINE-CLASSIFY-S1
 # closes it as the last escalation write path without inline classification: it
@@ -7663,10 +7664,19 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
     guards), while a freshly escalated task with no resolution stays held.
     Distinct from :func:`_has_operator_escalation` (the permanent "ever
     escalated" predicate used elsewhere), which must not change semantics.
+
+    Ready-stage mis-assignment escalations (``nonspawnable_assignee``) are
+    excluded: they park nothing (the task stays ``ready``) and are resolved
+    by a REASSIGN, never by an ``unblocked`` event — counting them would
+    permanently hold every later, unrelated block of the task out of the
+    self-heal lanes (review finding 2026-07-02).
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN (?, 'unblocked') "
+        "WHERE task_id = ? AND ("
+        "  (kind = ? AND COALESCE(json_extract(payload, "
+        "   '$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee')"
+        "  OR kind = 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id, OPERATOR_ESCALATION_EVENT),
     ).fetchone()
@@ -14528,6 +14538,61 @@ def _operator_escalation_payload(
     }
 
 
+# Terminal/control-plane lanes: assignees that intentionally are NOT Hermes
+# profiles — their ready tasks are pulled by interactive terminals via
+# ``claim_task`` and must never raise a mis-assignment escalation.
+_TERMINAL_LANE_ASSIGNEES_DEFAULT = frozenset({"orion-cc", "orion-research"})
+
+
+def _terminal_lane_assignees() -> frozenset:
+    """Allowlisted pull-lane assignees.
+
+    ``HERMES_KANBAN_TERMINAL_LANES`` (comma-separated) EXTENDS the built-in
+    default so the operator can register a new terminal lane without a code
+    change — and without accidentally de-listing orion-cc by setting only the
+    new lane (review finding 2026-07-02).
+    """
+    raw = os.environ.get("HERMES_KANBAN_TERMINAL_LANES") or ""
+    extra = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return _TERMINAL_LANE_ASSIGNEES_DEFAULT | extra
+
+
+def _nonspawnable_escalation_payload(row: sqlite3.Row, assignee: str) -> dict:
+    """Operator-escalation evidence for a mis-assigned ready task whose
+    assignee is neither a spawnable profile nor a known terminal lane. Mirrors
+    the shape of ``_operator_escalation_payload`` so the decision-queue renders
+    it like any other escalation."""
+    try:
+        from hermes_cli.profiles import list_profiles  # local import: avoids cycle
+        known_profiles = sorted(info.name for info in list_profiles())[:25]
+    except Exception:
+        known_profiles = []
+    return {
+        "task": {
+            "id": row["id"],
+            "title": row["title"] if "title" in row.keys() else None,
+            "status": row["status"] if "status" in row.keys() else None,
+            "assignee": assignee,
+        },
+        "why_now": (
+            f"assignee {assignee!r} is neither a spawnable Hermes profile nor "
+            "a known terminal lane — the task can never auto-dispatch and "
+            "would rot in ready without this escalation"
+        ),
+        "evidence": {
+            "trigger_outcome": "nonspawnable_assignee",
+            "assignee": assignee,
+            "known_profiles": known_profiles,
+            "terminal_lanes": sorted(_terminal_lane_assignees()),
+        },
+        "recommended_human_action": (
+            "reassign the task to a real profile, or — if this assignee IS an "
+            "intentional terminal lane — add it to HERMES_KANBAN_TERMINAL_LANES"
+        ),
+        "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+    }
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -16633,10 +16698,16 @@ def silent_block_task_ids(
     the metric converges to 0 within one dispatcher tick.
     """
     ts = int(time.time()) if now is None else int(now)
+    # Ready-stage mis-assignment escalations (nonspawnable_assignee) do NOT
+    # count as "this task's block was escalated": they predate any block, so
+    # a task that was once mis-assigned and later genuinely silent-blocks
+    # must still be caught by the sweep/metric (review finding 2026-07-02).
     escalated = {
         r["task_id"]
         for r in conn.execute(
-            "SELECT DISTINCT task_id FROM task_events WHERE kind = ?",
+            "SELECT DISTINCT task_id FROM task_events WHERE kind = ? "
+            "AND COALESCE(json_extract(payload, "
+            "'$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee'",
             (OPERATOR_ESCALATION_EVENT,),
         ).fetchall()
     }
@@ -18835,10 +18906,62 @@ def _dispatch_once_locked(
                     (row["id"],),
                 ).fetchone()
                 if latest is None or latest["kind"] != "nonspawnable":
+                    # Known terminal lanes are intentionally non-spawnable →
+                    # timeline diagnostic only. Anything ELSE is a
+                    # mis-assignment (subagent/role name, typo — 2026-06
+                    # finding: ``ui-verifier`` rotted in ready for days):
+                    # raise ONE operator escalation so it reaches the
+                    # decision inbox + Discord alert.
+                    #
+                    # The escalation dedup is DURABLE (any prior
+                    # nonspawnable_assignee escalation on this task), NOT
+                    # latest-kind based: other writers (classify sweep,
+                    # heiler) append events between ticks, which would
+                    # re-open a latest-kind guard and page Discord every
+                    # tick (review finding 2026-07-02). The ``nonspawnable``
+                    # diagnostic stays latest-kind deduped and is appended
+                    # LAST so the guard above covers the whole group.
+                    escalate = False
+                    if row_assignee not in _terminal_lane_assignees():
+                        already = conn.execute(
+                            "SELECT 1 FROM task_events WHERE task_id = ? "
+                            "AND kind = ? AND json_extract(payload, "
+                            "'$.evidence.trigger_outcome') = "
+                            "'nonspawnable_assignee' LIMIT 1",
+                            (row["id"], OPERATOR_ESCALATION_EVENT),
+                        ).fetchone()
+                        escalate = already is None
+                    # Payload (list_profiles = filesystem scan) deliberately
+                    # built BEFORE the write txn.
+                    esc_payload = (
+                        _nonspawnable_escalation_payload(row, row_assignee)
+                        if escalate
+                        else None
+                    )
                     with write_txn(conn):
+                        if esc_payload is not None:
+                            esc_event_id = _append_event(
+                                conn, row["id"], OPERATOR_ESCALATION_EVENT,
+                                esc_payload,
+                            )
+                            # ESCALATION-INLINE-CLASSIFY-S1: classify in the
+                            # same txn (pattern: _park_budget_runaway) so the
+                            # poll-driven sweep never appends a later event
+                            # that would break the nonspawnable dedup above.
+                            h_class, h_ev = _classify_escalation_payload(esc_payload)
+                            _append_event(
+                                conn, row["id"], HEILER_CLASSIFICATION_EVENT,
+                                _heiler_classification_payload(
+                                    heiler_class=h_class, evidence=h_ev,
+                                    source=HEILER_SOURCE_NONSPAWNABLE,
+                                    blocked=False,
+                                    escalation_event_id=esc_event_id,
+                                ),
+                            )
                         _append_event(
                             conn, row["id"], "nonspawnable",
-                            {"assignee": row_assignee},
+                            {"assignee": row_assignee,
+                             "escalated": esc_payload is not None},
                         )
             continue
         # Per-profile concurrency cap (#21582): even if there's global

@@ -6318,6 +6318,98 @@ def test_dispatch_nonspawnable_emits_one_diagnostic_event(kanban_home, monkeypat
     assert evt.payload.get("assignee") == "ui-verifier"
 
 
+def test_dispatch_nonspawnable_misassignment_escalates_to_operator(kanban_home, monkeypatch):
+    """A ready task whose assignee is neither a profile nor a known terminal
+    lane raises ONE operator escalation (decision-inbox + Discord path)
+    alongside the diagnostic event — mis-assignments must not rot silently
+    (2026-06 finding: assignee ``ui-verifier`` sat in ready with no alarm).
+
+    The dedup must survive the REAL gateway tick, which interleaves
+    ``classify_escalations_sweep`` after every dispatch (review finding
+    2026-07-02: a latest-event-kind guard alone re-fires once the sweep
+    appends its classification, paging Discord every tick). Hence the
+    escalation classifies INLINE (one paired ``heiler_classification``)
+    and its dedup is durable across arbitrary later events."""
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="visual check", assignee="ui-verifier")
+        for _ in range(3):
+            kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
+            kb.classify_escalations_sweep(conn)
+        events = kb.list_events(conn, t)
+
+    kinds = [e.kind for e in events]
+    assert kinds.count("operator_escalation") == 1
+    assert kinds.count(kb.HEILER_CLASSIFICATION_EVENT) == 1
+    assert kinds.count("nonspawnable") == 1
+    esc = next(e for e in events if e.kind == "operator_escalation")
+    assert esc.payload["evidence"]["trigger_outcome"] == "nonspawnable_assignee"
+    assert esc.payload["task"]["assignee"] == "ui-verifier"
+    diag = next(e for e in events if e.kind == "nonspawnable")
+    assert diag.payload.get("escalated") is True
+
+
+def test_nonspawnable_escalation_does_not_exempt_later_silent_block(
+    kanban_home, monkeypatch
+):
+    """A ready-stage mis-assignment escalation must NOT count as "this task's
+    block was escalated": after the operator fixes the assignee and the task
+    later genuinely silent-blocks, the silent-block guard still catches it."""
+    from hermes_cli import profiles
+
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="misassigned then blocked", assignee="ui-verifier")
+        kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
+        assert len(_operator_escalations(conn, t)) == 1
+        # The ready-stage escalation parks nothing: it must not register as an
+        # ACTIVE escalation, or every later unrelated block of this task would
+        # be held out of the self-heal lanes forever (resolved by reassign,
+        # never by an ``unblocked`` event).
+        assert kb._operator_escalation_is_active(conn, t) is False
+
+        # Operator "fixes" the assignee; later the task blocks on a question.
+        monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential should I use?")
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+
+
+def test_dispatch_nonspawnable_terminal_lane_stays_quiet(kanban_home, monkeypatch):
+    """Known terminal lanes (pulled via ``claim_task`` by interactive
+    terminals) are intentionally non-spawnable: diagnostic event only,
+    NO operator escalation — otherwise every orion-cc task would page the
+    operator."""
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="terminal work", assignee="orion-cc")
+        kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
+        events = kb.list_events(conn, t)
+
+    kinds = [e.kind for e in events]
+    assert "operator_escalation" not in kinds
+    assert kinds.count("nonspawnable") == 1
+    diag = next(e for e in events if e.kind == "nonspawnable")
+    assert diag.payload.get("escalated") is False
+
+
+def test_terminal_lane_allowlist_env_extends_default(monkeypatch):
+    """HERMES_KANBAN_TERMINAL_LANES EXTENDS the built-in default (it must not
+    replace it — an operator adding one lane would silently de-list orion-cc)."""
+    monkeypatch.setenv("HERMES_KANBAN_TERMINAL_LANES", "my-lane, other ,")
+    lanes = kb._terminal_lane_assignees()
+    assert {"my-lane", "other"} <= lanes
+    assert {"orion-cc", "orion-research"} <= lanes
+    monkeypatch.delenv("HERMES_KANBAN_TERMINAL_LANES")
+    assert "orion-cc" in kb._terminal_lane_assignees()
+
+
 # ---------------------------------------------------------------------------
 # Workspace resolution
 # ---------------------------------------------------------------------------
