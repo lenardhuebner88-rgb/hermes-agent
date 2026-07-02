@@ -140,22 +140,34 @@ def _plan_text(plan_spec: Mapping[str, Any]) -> str:
     return " ".join(values).lower()
 
 
-def _field_text(plan_spec: Mapping[str, Any], keys: Iterable[str]) -> str:
-    values: list[str] = []
-    for key in keys:
-        value = plan_spec.get(key)
-        if isinstance(value, (list, tuple, set)):
-            values.extend(str(item) for item in value)
-        elif value is not None:
-            values.append(str(value))
-    return " ".join(values).lower()
-
-
 _PATHISH_FRAGMENT_RE = re.compile(r"(?u)\S*(?:[/\\]|\.[A-Za-z0-9]{1,12}\b|_[A-Za-z0-9])\S*")
-_NEGATED_MARKER_RE_TEMPLATE = (
-    r"(?<![A-Za-z0-9_-])(?:no|not|without|keine|kein|keinen|nicht|nie|forbidden|verboten)"
-    r"(?:\W+[A-Za-z0-9_-]+){0,3}\W+%s(?![A-Za-z0-9_-])"
+_CRITICAL_REVIEW_MARKER_PATTERNS = {
+    "database": r"databases?",
+    "db": r"dbs?",
+    "migration": r"(?:migrations?|(?:db|database)[-\s]+migrations?)",
+    "deploy": r"deploy(?:s|ed|ing|ments?)?",
+    "secret": r"secrets?",
+    "credential": r"credentials?",
+    "drop": r"drop(?:s|ped|ping)?",
+    "alter": r"alter(?:s|ed|ing|ations?)?",
+    "auth": r"auth(?:entication)?",
+}
+_NEGATION_WORDS = {
+    "no",
+    "not",
+    "without",
+    "keine",
+    "kein",
+    "keinen",
+    "nicht",
+    "nie",
+    "forbidden",
+    "verboten",
+}
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[,.;:()\[\]\n\r]|(?<![A-Za-z0-9_-])(?:but|however|except|though|aber|doch)(?![A-Za-z0-9_-])"
 )
+_WORD_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def _strip_pathish_fragments(text: str) -> str:
@@ -163,34 +175,46 @@ def _strip_pathish_fragments(text: str) -> str:
     return _PATHISH_FRAGMENT_RE.sub(" ", text)
 
 
-def _contains_unnegated_whole_marker(text: str, markers: Iterable[str]) -> bool:
+def _critical_review_chunks(plan_spec: Mapping[str, Any]) -> list[str]:
+    # ``forbidden_actions`` and ``changed_paths`` are intentionally excluded:
+    # anti-scope and file names produced the observed false-critical cascade.
+    values: list[str] = []
+    for key in ("risk_class", "action_class", "scope", "objective", "goal", "allowed_actions"):
+        value = plan_spec.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(str(item) for item in value)
+        elif value is not None:
+            values.append(str(value))
+    return values
+
+
+def _marker_is_negated(text: str, match_start: int) -> bool:
+    prefix = text[:match_start]
+    boundary = 0
+    for boundary_match in _CLAUSE_BOUNDARY_RE.finditer(prefix):
+        boundary = boundary_match.end()
+    words = [word.lower() for word in _WORD_RE.findall(prefix[boundary:])]
+    return any(word in _NEGATION_WORDS for word in words[-3:])
+
+
+def _contains_unnegated_whole_marker(chunks: Iterable[str], markers: Iterable[str]) -> bool:
     """True only for standalone, non-negated risk markers.
 
     The staged-review critical tier must not fire on substrings like
-    ``kanban_db.py``/``drop-in`` or anti-scope like ``no deploy``.
+    ``kanban_db.py``/``drop-in`` or anti-scope like ``no deploy``. Each
+    field/list item is evaluated independently so anti-scope in one field cannot
+    hide a real critical action in another.
     """
-    normalized = _strip_pathish_fragments(text.lower())
-    for marker in markers:
-        literal = re.escape(marker.lower())
-        marker_re = re.compile(rf"(?<![A-Za-z0-9_-]){literal}(?![A-Za-z0-9_-])")
-        negated_re = re.compile(_NEGATED_MARKER_RE_TEMPLATE % literal)
-        for match in marker_re.finditer(normalized):
-            window_start = max(0, match.start() - 80)
-            window = normalized[window_start:match.end()]
-            if negated_re.search(window):
-                continue
-            return True
+    for chunk in chunks:
+        normalized = _strip_pathish_fragments(chunk.lower())
+        for marker in markers:
+            pattern = _CRITICAL_REVIEW_MARKER_PATTERNS.get(marker, re.escape(marker.lower()))
+            marker_re = re.compile(rf"(?<![A-Za-z0-9_-])(?:{pattern})(?![A-Za-z0-9_-])")
+            for match in marker_re.finditer(normalized):
+                if _marker_is_negated(normalized, match.start()):
+                    continue
+                return True
     return False
-
-
-def _critical_review_text(plan_spec: Mapping[str, Any]) -> str:
-    # ``forbidden_actions`` and ``changed_paths`` are intentionally excluded:
-    # anti-scope and file names produced the observed false-critical cascade.
-    return _field_text(
-        plan_spec,
-        ("risk_class", "action_class", "scope", "objective", "goal", "allowed_actions"),
-    )
-
 
 def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
     """Return whether the plan's risk/scope requires Reviewer or Piet override.
@@ -226,7 +250,7 @@ def classify_review_tier(plan_spec: Mapping[str, Any] | None) -> str:
     """
     if not plan_spec or not reviewer_gate_required(plan_spec):
         return "standard"
-    if _contains_unnegated_whole_marker(_critical_review_text(plan_spec), _CRITICAL_REVIEW_MARKERS):
+    if _contains_unnegated_whole_marker(_critical_review_chunks(plan_spec), _CRITICAL_REVIEW_MARKERS):
         return "critical"
     return "review"
 

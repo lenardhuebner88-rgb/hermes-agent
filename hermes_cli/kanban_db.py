@@ -24102,6 +24102,8 @@ def ensure_scout_predecessor(
         body=_scout_recon_body([task]),
         assignee="scout",
         created_by="auto-scout-critical",
+        workspace_kind=task.workspace_kind or "scratch",
+        workspace_path=task.workspace_path,
         priority=task.priority,
         tenant=task.tenant,
         idempotency_key=f"auto-scout:{task_id}",

@@ -41,6 +41,33 @@ RUNTIME_PLAN = {
     "action_class": "profile-config-routing-edit-and-service-change-if-needed",
 }
 
+LIVE_FALSE_POSITIVE_TASK_FIXTURES = (
+    (
+        "t_30804f14",
+        "worker_gate Repo-Identitäts-Lookup für isolierte Worktrees (Stamp fürs Hermes-Repo ermöglichen)",
+        "hermes_cli/kanban_db.py, _submit_for_review, aktuell exakter resolved-Pfad-Match",
+        "code",
+    ),
+    (
+        "t_e61f48fc-anti-scope",
+        "Review-Wert-Telemetrie end-to-end",
+        "KEIN Schema-/Migrations-Change an der DB; Aggregation liest task_runs.metadata-JSON zur Query-Zeit.",
+        "code",
+    ),
+    (
+        "t_ae5ecc3a",
+        "Reviewer-SOUL v2 draften: Code-Diff-Auftrag, Nicht-Wiederholen-Klausel, Pflicht-Fund-Metadata",
+        "Vollständiger Drop-in-Draft für ~/.hermes/profiles/reviewer/SOUL.md als Task-Artefakt.",
+        "code",
+    ),
+    (
+        "t_e61f48fc-visual-ac",
+        "Review-Wert-Telemetrie end-to-end",
+        "headless Screenshot von /control/statistik in Desktop- UND >=390px-Viewport über den auth-enabled Visual-Harness",
+        "code",
+    ),
+)
+
 APPROVED_VERDICT = {
     "workflow_id": WORKFLOW_ID,
     "verdict": "APPROVED",
@@ -183,6 +210,15 @@ def test_classify_review_tier_does_not_critical_on_path_or_subword_markers():
     ) == "review"
 
 
+@pytest.mark.parametrize("task_id,title,body,kind", LIVE_FALSE_POSITIVE_TASK_FIXTURES)
+def test_classify_review_tier_live_false_positive_fixtures_stay_review(task_id, title, body, kind):
+    """Live 2026-07-02 fixture snippets, using the _task_plan_spec field shape."""
+    spec = {"risk_class": kind, "objective": title, "goal": body}
+
+    assert reviewer_gate_required(spec) is True, task_id
+    assert classify_review_tier(spec) == "review", task_id
+
+
 def test_classify_review_tier_ignores_anti_scope_critical_words():
     assert classify_review_tier(
         {
@@ -194,12 +230,32 @@ def test_classify_review_tier_ignores_anti_scope_critical_words():
     ) == "review"
 
 
-def test_classify_review_tier_keeps_true_critical_whole_word_markers():
+def test_classify_review_tier_does_not_let_negated_marker_hide_real_critical():
+    assert classify_review_tier(
+        {"risk_class": "high", "objective": "no database migration but deploy gateway change"}
+    ) == "critical"
+    assert classify_review_tier(
+        {
+            "risk_class": "high",
+            "objective": "release gateway",
+            "goal": "no database migration",
+            "allowed_actions": ["deploy gateway change"],
+        }
+    ) == "critical"
+
+
+def test_classify_review_tier_keeps_true_critical_word_family_markers():
     for objective in (
+        "DB-Migration durchführen",
         "run DB migration",
+        "run migrations",
         "apply ALTER TABLE to database",
+        "schema alterations",
         "deploy gateway change",
+        "production deployment",
         "rotate credential for auth service",
+        "rotate credentials",
+        "read secrets from vault",
     ):
         assert classify_review_tier({"risk_class": "high", "objective": objective}) == "critical"
 

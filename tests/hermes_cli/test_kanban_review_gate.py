@@ -168,15 +168,41 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban
         anti_scope = kb.create_task(
             conn,
             title="refactor code module",
-            body="no database migration, no deploy, no secret access, no auth changes",
+            body="KEIN Schema-/Migrations-Change an der DB; no deploy, no secret access, no auth changes",
             assignee="coder",
         )
         assert kb._effective_review_tier(conn, anti_scope) == "review"
 
+        drop_in = kb.create_task(
+            conn,
+            title="Reviewer-SOUL v2 draften",
+            body="Vollständiger Drop-in-Draft für ~/.hermes/profiles/reviewer/SOUL.md",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, drop_in) == "review"
+
+        auth_enabled_visual = kb.create_task(
+            conn,
+            title="Review-Wert-Telemetrie end-to-end",
+            body="Screenshot über den auth-enabled Visual-Harness",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, auth_enabled_visual) == "review"
+
         real_db = kb.create_task(
-            conn, title="run database migration", body="apply ALTER TABLE", assignee="coder"
+            conn, title="DB-Migration durchführen", body="apply ALTER TABLE", assignee="coder"
         )
         assert kb._effective_review_tier(conn, real_db) == "critical"
+
+        real_deploy_after_anti_scope = kb.create_task(
+            conn,
+            title="no database migration but deploy gateway change",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, real_deploy_after_anti_scope) == "critical"
+
+        plural_security = kb.create_task(conn, title="rotate credentials", assignee="coder")
+        assert kb._effective_review_tier(conn, plural_security) == "critical"
 
 
 def test_effective_review_tier_truncates_future_contract_versions(kanban_home, monkeypatch):
@@ -1092,6 +1118,26 @@ def test_create_task_auto_scout_injects_for_heuristic_critical(kanban_home, _heu
         tid = kb.create_task(conn, title="run database migration and deploy",
                              assignee="coder", auto_scout=True)
         assert kb.scout_predecessor_id(conn, tid) is not None
+
+
+def test_auto_scout_inherits_target_workspace(kanban_home, tmp_path, _heuristic_critical_cfg):
+    """A read-only scout must inspect the target repo, not an empty scratch dir."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="run database migration and deploy",
+            assignee="coder",
+            auto_scout=True,
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        scout_id = kb.scout_predecessor_id(conn, tid)
+        assert scout_id is not None
+        scout = kb.get_task(conn, scout_id)
+        assert scout.workspace_kind == "dir"
+        assert scout.workspace_path == str(repo)
 
 
 def test_create_task_auto_scout_off_by_default(kanban_home, _heuristic_critical_cfg):
