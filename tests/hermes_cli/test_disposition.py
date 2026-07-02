@@ -556,3 +556,38 @@ def test_render_no_mandatory_fields_matches_plain_truncation():
     out = d.render_completion_metadata(meta, 200)
     full = json.dumps(meta, ensure_ascii=False, sort_keys=True)
     assert out == full[:200] + f"… [truncated, {len(full) - 200} chars omitted]"
+
+
+# ---------------------------------------------------------------------------
+# auto_triage_terminal_status — operator-queue relevance policy
+# ---------------------------------------------------------------------------
+
+
+def _item(typ="risk", disposition="delegate", severity="real-risk", next_action="x", evidence="e"):
+    return d.DispositionItem(
+        typ=typ, disposition=disposition, next_action=next_action,
+        severity=severity, evidence=evidence,
+    )
+
+
+@pytest.mark.parametrize("disposition", ["done", "drop"])
+def test_auto_triage_worker_done_drop_is_accepted(disposition):
+    assert d.auto_triage_terminal_status(_item(disposition=disposition)) == "accepted"
+
+
+def test_auto_triage_scope_note_delegate_defer_stays_open():
+    # scope-notes mit delegate/defer bleiben offen: der Strategist-Harvest
+    # konsumiert status='open' inkl. seiner scope-note-Triage-Klasse.
+    assert d.auto_triage_terminal_status(_item(disposition="defer", severity="scope-note")) is None
+    assert d.auto_triage_terminal_status(_item(disposition="delegate", severity="scope-note")) is None
+
+
+@pytest.mark.parametrize("disposition", ["delegate", "defer"])
+@pytest.mark.parametrize("severity", ["real-risk", "scope-note", "none"])
+def test_auto_triage_open_questions_stay_open(disposition, severity):
+    assert d.auto_triage_terminal_status(_item(disposition=disposition, severity=severity)) is None
+
+
+def test_auto_triage_status_is_valid_ledger_status():
+    status = d.auto_triage_terminal_status(_item(disposition="drop"))
+    assert status in d.VALID_LEDGER_STATUS

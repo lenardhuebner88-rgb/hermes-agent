@@ -112,6 +112,28 @@ class DispositionResult:
     items: list[DispositionItem] = field(default_factory=list)
 
 
+#: ``decided_by`` marker for items that never entered the operator queue.
+AUTO_TRIAGE_DECIDED_BY = "auto-triage"
+
+
+def auto_triage_terminal_status(item: DispositionItem) -> str | None:
+    """Terminal ledger status for items that need no operator decision, else ``None``.
+
+    Policy (2026-07-02): items the worker itself dispositioned as ``done``/``drop``
+    carry no open question and go straight to ``accepted`` instead of flooding
+    the operator queue — the strategist harvest reaps open ``drop`` items anyway
+    (``reap_worker_drop_disposition_items``); this just closes them at insert.
+    ``scope-note``/``delegate``/``defer`` items stay ``open`` deliberately: the
+    strategist follow-up harvest consumes exactly ``status='open'`` rows
+    (``load_followup_candidates_from_ledger``), including its scope-note triage
+    class. Grounded in ledger history at introduction: of 58 ``drop`` items the
+    operator had accepted zero, of 15 ``done`` items three (no-op acks).
+    """
+    if item.disposition in ("done", "drop"):
+        return "accepted"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

@@ -10038,7 +10038,7 @@ def _record_disposition_items(
             )
             if is_dup:
                 continue
-            insert_disposition_item(
+            iid = insert_disposition_item(
                 conn,
                 source_task_id=task_id,
                 typ=item.typ,
@@ -10047,6 +10047,18 @@ def _record_disposition_items(
                 severity=item.severity,
                 evidence=item.evidence,
             )
+            # Auto-triage: worker-dispositioned done/drop stays in the ledger
+            # for provenance but never enters the operator queue. Everything
+            # else (incl. scope-notes) stays open — the strategist harvest
+            # consumes open rows.
+            auto_status = _disposition_mod.auto_triage_terminal_status(item)
+            if auto_status is not None:
+                set_disposition_status(
+                    conn,
+                    iid,
+                    status=auto_status,
+                    decided_by=_disposition_mod.AUTO_TRIAGE_DECIDED_BY,
+                )
     except Exception:
         _log.error(
             "disposition ledger write failed for task %s — "

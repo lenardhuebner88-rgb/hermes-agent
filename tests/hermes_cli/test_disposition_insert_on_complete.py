@@ -353,3 +353,72 @@ def test_workflow_step_completion_records_disposition(kanban_home):
 
     assert len(rows) == 2
     assert {r["typ"] for r in rows} == {"risk", "follow_up"}
+
+
+# ===========================================================================
+# 7. Auto-triage: worker-done/drop landet terminal, nie in der Operator-Queue
+# ===========================================================================
+
+_AUTO_TRIAGE_METADATA = {
+    "residual_risk": "low",
+    "disposition": {
+        "items": [
+            {
+                "typ": "risk",
+                "disposition": "delegate",
+                "next_action": "ping security team",
+                "severity": "real-risk",
+                "evidence": "src/auth.py:42",
+            },
+            {
+                "typ": "still_open",
+                "disposition": "drop",
+                "next_action": "",
+                "severity": "none",
+                "evidence": "obsolete after refactor",
+            },
+            {
+                "typ": "follow_up",
+                "disposition": "done",
+                "next_action": "already covered by test",
+                "severity": "none",
+                "evidence": "tests/test_x.py",
+            },
+            {
+                "typ": "risk",
+                "disposition": "defer",
+                "next_action": "note width assumption",
+                "severity": "scope-note",
+                "evidence": "ui only",
+            },
+        ]
+    },
+}
+
+
+def test_record_auto_triages_worker_done_and_drop(db_conn):
+    task_id = "t_auto001"
+    kb._record_disposition_items(db_conn, task_id, _AUTO_TRIAGE_METADATA)
+
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert len(rows) == 4
+
+    # delegate/real-risk UND defer/scope-note bleiben offen (Operator-Queue
+    # bzw. Strategist-Harvest); nur done/drop sind auto-terminal.
+    open_rows = [r for r in rows if r["status"] == "open"]
+    assert sorted(r["disposition"] for r in open_rows) == ["defer", "delegate"]
+
+    auto_rows = [r for r in rows if r["status"] == "accepted"]
+    assert sorted(r["disposition"] for r in auto_rows) == ["done", "drop"]
+    assert all(r["decided_by"] == "auto-triage" for r in auto_rows)
+    assert all(r["decided_at"] is not None for r in auto_rows)
+
+
+def test_record_auto_triage_dedup_still_holds(db_conn):
+    """Retry completion must not resurrect auto-triaged items as duplicates."""
+    task_id = "t_auto002"
+    kb._record_disposition_items(db_conn, task_id, _AUTO_TRIAGE_METADATA)
+    kb._record_disposition_items(db_conn, task_id, _AUTO_TRIAGE_METADATA)
+
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert len(rows) == 4
