@@ -8919,6 +8919,47 @@ def _worker_gate_config() -> dict:
     }
 
 
+def _worker_gate_commands_for_workspace(_wg: dict, workspace: str) -> list[str]:
+    """Return worker-gate commands for *workspace*.
+
+    Direct workspace-path matches keep precedence. If no direct match exists,
+    resolve the git common-dir so an isolated worktree can inherit the command
+    list configured for its main checkout. Non-git workspaces and git failures
+    deliberately fall back to the configured default, matching the previous
+    no-match behavior.
+    """
+    repos = _wg.get("repos") if isinstance(_wg.get("repos"), dict) else {}
+    default = _wg.get("default") or []
+    try:
+        workspace_key = str(Path(workspace).resolve())
+    except Exception:
+        workspace_key = workspace
+    if workspace_key in repos:
+        return repos[workspace_key]
+    if repos:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        common_dir = (proc.stdout or "").strip() if proc and proc.returncode == 0 else ""
+        if common_dir:
+            try:
+                common_path = Path(common_dir).resolve()
+                repo_key = str(common_path.parent if common_path.name == ".git" else common_path)
+            except Exception:
+                repo_key = ""
+            if repo_key in repos:
+                return repos[repo_key]
+    return default
+
+
 def _run_originated_from_review(
     conn: sqlite3.Connection, task_id: str, run_id: Optional[int]
 ) -> bool:
@@ -9316,11 +9357,7 @@ def _submit_for_review(
         _wg_assignee = (_wg_row["assignee"] or "").strip().lower() if _wg_row else ""
         _wg_ws = _wg_row["workspace_path"] if _wg_row else None
         if _wg_assignee in _wg["code_roles"] and _wg_ws and os.path.isdir(_wg_ws):
-            try:
-                _wg_key = str(Path(_wg_ws).resolve())
-            except Exception:
-                _wg_key = _wg_ws
-            _wg_cmds = _wg["repos"].get(_wg_key, _wg["default"])
+            _wg_cmds = _worker_gate_commands_for_workspace(_wg, _wg_ws)
             if _wg_cmds:
                 # Gate will run — initialize stamp as passed (flip on failure)
                 _wg_run_ts = _dt.datetime.now(_dt.timezone.utc).strftime(

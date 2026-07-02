@@ -273,6 +273,79 @@ def test_submitted_for_review_includes_worker_gate_passed(kanban_home, tmp_path,
     assert wg["commit"].startswith(sha[:7]) or len(wg["commit"]) >= 7
 
 
+def test_worker_gate_repo_lookup_matches_git_worktree_main_checkout(
+    kanban_home, repo, tmp_path, monkeypatch
+):
+    """A git worktree of a configured main checkout uses the main repo commands."""
+    worktree = tmp_path / "repo-wt"
+    _git(repo, "worktree", "add", str(worktree), "-b", "worker-gate-wt")
+
+    wg_config = {
+        "enabled": True,
+        "repos": {str(repo.resolve()): ["true"]},
+        "default": ["false"],
+        "timeout": 60,
+        "code_roles": frozenset({"coder"}),
+    }
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="g", assignee="coder",
+                             workspace_path=str(worktree))
+        kb.claim_task(conn, tid)
+        kb._submit_for_review(conn, tid, result="done", summary="done",
+                              metadata=None, verified_cards=[], expected_run_id=None)
+
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+
+    wg = json.loads(row["payload"])["worker_gate"]
+    assert wg["passed"] is True
+    assert wg["commands"] == ["true"]
+
+
+def test_worker_gate_repo_lookup_exact_workspace_path_has_priority(
+    kanban_home, repo, tmp_path, monkeypatch
+):
+    """Direct workspace repo entries keep taking precedence over repo identity."""
+    worktree = tmp_path / "repo-wt"
+    _git(repo, "worktree", "add", str(worktree), "-b", "worker-gate-exact")
+
+    wg_config = {
+        "enabled": True,
+        "repos": {
+            str(repo.resolve()): ["false"],
+            str(worktree.resolve()): ["true"],
+        },
+        "default": [],
+        "timeout": 60,
+        "code_roles": frozenset({"coder"}),
+    }
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="g", assignee="coder",
+                             workspace_path=str(worktree))
+        kb.claim_task(conn, tid)
+        kb._submit_for_review(conn, tid, result="done", summary="done",
+                              metadata=None, verified_cards=[], expected_run_id=None)
+
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+
+    wg = json.loads(row["payload"])["worker_gate"]
+    assert wg["passed"] is True
+    assert wg["commands"] == ["true"]
+
+
 def test_submitted_for_review_worker_gate_not_configured(kanban_home, tmp_path, monkeypatch):
     """When no commands are configured for the repo, payload must have
     worker_gate: {configured: false}."""
@@ -285,8 +358,12 @@ def test_submitted_for_review_worker_gate_not_configured(kanban_home, tmp_path, 
     }
     monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
 
+    workspace = tmp_path / "not-configured"
+    workspace.mkdir()
+
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="g", assignee="coder")
+        conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?", (str(workspace), tid))
         kb.claim_task(conn, tid)
         kb._submit_for_review(conn, tid, result="done", summary="done",
                               metadata=None, verified_cards=[], expected_run_id=None)
@@ -301,7 +378,43 @@ def test_submitted_for_review_worker_gate_not_configured(kanban_home, tmp_path, 
     payload = json.loads(row["payload"])
     wg = payload.get("worker_gate")
     assert wg is not None, "worker_gate field missing"
-    assert wg.get("configured") is False
+    assert wg == {"configured": False}
+
+
+def test_submitted_for_review_worker_gate_payload_shape_stays_stable(
+    kanban_home, repo, monkeypatch
+):
+    """The real submitted_for_review event keeps the verifier stamp contract."""
+    wg_config = {
+        "enabled": True,
+        "repos": {str(repo.resolve()): ["true"]},
+        "default": [],
+        "timeout": 60,
+        "code_roles": frozenset({"coder"}),
+    }
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="g", assignee="coder",
+                             workspace_path=str(repo))
+        kb.claim_task(conn, tid)
+        kb._submit_for_review(conn, tid, result="done", summary="done",
+                              metadata=None, verified_cards=[], expected_run_id=None)
+
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+
+    wg = json.loads(row["payload"])["worker_gate"]
+    assert set(wg) == {"passed", "commands", "exit_codes", "ts", "commit"}
+    assert isinstance(wg["passed"], bool)
+    assert isinstance(wg["commands"], list)
+    assert isinstance(wg["exit_codes"], list)
+    assert isinstance(wg["ts"], str)
+    assert isinstance(wg["commit"], str)
 
 
 def test_submitted_for_review_worker_gate_disabled(kanban_home, monkeypatch):
