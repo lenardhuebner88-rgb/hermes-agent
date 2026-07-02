@@ -12989,6 +12989,13 @@ class DispatchResult:
     same resolved repo_root (kanban.serialize_by_repo). Each entry is
     (task_id, repo_root). NOT a failure — picked up once the holder reaches
     done/archived. Empty when serialize_by_repo is False."""
+    skipped_chain_worktree_serialized: list[tuple[str, str]] = field(default_factory=list)
+    """Ready ``dir`` tasks deferred this tick because another in-flight ``dir``
+    task from the same chain is occupying the shared provisioned worktree
+    (Befund 4, 2026-07-02 chain-worktree-serialization guard).  Each entry is
+    ``(task_id, chain_root_id)``.  NOT a failure — the sibling dispatches once
+    the in-flight task reaches done/archived/review-complete.  Empty when there
+    are no chain siblings or all chains are idle."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -17493,6 +17500,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
 # ``(human label, DispatchResult attribute)``.
 _DISPATCH_HOLD_BUCKETS: tuple[tuple[str, str], ...] = (
     ("repo_serialized", "skipped_repo_serialized"),
+    ("chain_worktree_serialized", "skipped_chain_worktree_serialized"),
     ("respawn_guarded", "respawn_guarded"),
     ("budget_held", "budget_held"),
     ("role_mismatch", "held_role_mismatch"),
@@ -18834,6 +18842,22 @@ def _dispatch_once_locked(
             _repo_root_for_row,
         )
 
+    # Befund 4: chain-worktree-serialization preflight.  One aggregation pass
+    # across all in-flight dir tasks; per-candidate check is a dict lookup.
+    # Always active (no config key) — chain siblings share a provisioned git
+    # worktree and MUST NOT run concurrently inside it.
+    def _chain_root_for_task(task_id: str) -> Optional[str]:
+        try:
+            from hermes_cli import kanban_worktrees as _kwt
+            return _kwt.chain_root_id(conn, task_id)
+        except Exception:
+            return None
+
+    _chain_count: dict[str, int] = _dispatch_policy.chain_worktree_inflight_counts(
+        conn,
+        _chain_root_for_task,
+    )
+
     # C1 (N-C1) budget gate preflight. Caps default OFF (None) → both branches
     # are skipped, ``_budget_capped_profiles`` stays empty and
     # ``_global_cost_exceeded`` stays False → the loop below is byte-identical
@@ -19168,6 +19192,46 @@ def _dispatch_once_locked(
                             {"repo_root": _cand_repo},
                         )
             continue
+        # Befund 4 — chain-worktree-serialization guard: a ``dir`` task whose
+        # chain already has another in-flight ``dir`` sibling is deferred until
+        # that sibling completes.  Chain siblings share the same provisioned git
+        # worktree (``<repo>/.worktrees/kanban/<root_id>``); dispatching two
+        # simultaneously causes DIRTY_WORKTREE conflicts and data races (incident
+        # S2+S3, t_30804f14 + t_ae5ecc3a, 2026-07-02 09:22).
+        #
+        # Doctrine: at-most-one in-flight dir task per chain (serial
+        # worktree use), enforced here.  No config key — always on.
+        # Reversible via git revert.
+        #
+        # EXEMPTION (mirrors the serialize_by_repo exemption above): a
+        # conflict-park fixer MUST enter the worktree even when a blocked
+        # sibling already holds the chain slot — otherwise the fixer and the
+        # blocked parent deadlock (respawn-guard-stall pattern, 2026-06-20
+        # burn-dashboard incident).  Only conflict-fixers are exempt; all
+        # other same-chain dir candidates are deferred.
+        #
+        # Performance: _chain_count is seeded once per tick above (O(in-flight)).
+        # Per-candidate cost here is one _chain_root_for_task() call (≤2 DB
+        # queries) ONLY for dir candidates that pass the repo guard above.
+        if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
+            _cand_chain_root = _chain_root_for_task(row["id"])
+            if _cand_chain_root is not None and _chain_count.get(_cand_chain_root, 0) >= 1:
+                result.skipped_chain_worktree_serialized.append(
+                    (row["id"], _cand_chain_root)
+                )
+                if not dry_run:
+                    latest = conn.execute(
+                        "SELECT kind FROM task_events WHERE task_id = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (row["id"],),
+                    ).fetchone()
+                    if latest is None or latest["kind"] != "chain_worktree_serialized":
+                        with write_txn(conn):
+                            _append_event(
+                                conn, row["id"], "chain_worktree_serialized",
+                                {"chain_root_id": _cand_chain_root},
+                            )
+                continue
         # C1 (N-C1) budget hold: a daily cap is hit. Board-wide $ cap holds
         # every assigned ready task; per-profile token cap holds only that
         # profile's tasks. The task stays in ``ready`` (advisory hold, like the
@@ -19278,6 +19342,13 @@ def _dispatch_once_locked(
                 )
             if serialize_by_repo and _cand_repo:
                 _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
+            # Befund 4 same-tick race: if this dir task belongs to a chain,
+            # increment the chain slot so any subsequent sibling in this
+            # tick's ready_rows sees the slot as occupied and is deferred.
+            if row["workspace_kind"] == "dir":
+                _ctr = _chain_root_for_task(row["id"])
+                if _ctr is not None:
+                    _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -19393,6 +19464,12 @@ def _dispatch_once_locked(
                 )
             if serialize_by_repo and _cand_repo:
                 _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
+            # Befund 4 same-tick race: occupy the chain slot so any
+            # subsequent same-chain dir sibling in this tick is deferred.
+            if claimed.workspace_kind == "dir":
+                _ctr = _chain_root_for_task(claimed.id)
+                if _ctr is not None:
+                    _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
         except Exception as exc:
             # spawn_fn raised (fork/exec blip) — transient infra class: bounded
             # transient retry before escalating (HEILER-TRANSIENT-RETRY-BUDGET-S1).
