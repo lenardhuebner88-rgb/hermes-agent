@@ -899,6 +899,14 @@ export const de = {
     emptyGraphDesc: "Die Kette enthält keine verarbeitbaren Tasks.",
     chooseChain: "Kette wählen",
     noChains: "keine aktiven Ketten",
+    // S1: Ketten-Liste statt Dropdown — Gruppen, Filter, Suche.
+    listGroupRunning: "Läuft jetzt",
+    listGroupWaiting: "Wartet / Gehalten",
+    listGroupDone: "Fertig",
+    listFilterAll: "Alle",
+    listSearchPlaceholder: "Kette durchsuchen…",
+    listEmptySearch: "Keine Kette passt zu diesem Filter.",
+    listLoadMore: (n: number) => `${n} weitere laden`,
     focusRoot: "Fokus",
     // B4: Tooltip für den Fokus-Badge — erklärt die DAG-Richtung
     focusRootTooltip: "Integrations-Task — wartet auf alle Subtasks",

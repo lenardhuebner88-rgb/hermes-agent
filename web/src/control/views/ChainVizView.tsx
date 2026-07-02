@@ -7,7 +7,7 @@ import { fmtAge, fmtTokens, formatEffectiveCost, nowSec, workerSortRank } from "
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
-import { ChainSelector } from "./ketten/ChainSelector";
+import { ChainListPanel } from "./ketten/ChainListPanel";
 import { KettenGraph } from "./ketten/KettenGraph";
 import type { ReviewRunState } from "./ketten/ChainNodeCard";
 import type { ChainGraphNode, Worker } from "../lib/types";
@@ -301,7 +301,7 @@ export function ChainVizView(_props: { density?: unknown }) {
     if (requestedRoot && allSelectableChains.some((c) => c.rootId === requestedRoot)) {
       return requestedRoot;
     }
-    // User selection via ChainSelector (local state).
+    // User selection via ChainListPanel (local state).
     if (selectedRootId && allSelectableChains.some((c) => c.rootId === selectedRootId)) {
       return selectedRootId;
     }
@@ -348,10 +348,10 @@ export function ChainVizView(_props: { density?: unknown }) {
         />
       ) : (
         <div className="grid gap-4">
-          <div className="hc-surface-card p-3 lg:max-w-md">
+          <div className="hc-surface-card p-3">
             <Eyebrow>{de.ketten.chooseChain}</Eyebrow>
             <div className="mt-2">
-              <ChainSelector
+              <ChainListPanel
                 chains={activeChains}
                 doneChains={doneChains}
                 selectedRootId={focusedRootId}

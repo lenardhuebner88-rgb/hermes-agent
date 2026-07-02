@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ChainSelector } from "./ketten/ChainSelector";
+import { ChainListPanel } from "./ketten/ChainListPanel";
 import { KettenGraph } from "./ketten/KettenGraph";
 import { ChainNodeCard } from "./ketten/ChainNodeCard";
 import { buildChains } from "../lib/fleet";
@@ -116,10 +116,11 @@ describe("ChainVizView live wiring", () => {
 // ── E2E-ish integration: the two leaf widgets the view composes ─────────────
 // ChainVizView itself is router/hook-bound (useSearchParams + useBoard +
 // useChainGraph), so it is covered by the source-contract specs above. Here we
-// render the pure widgets it wires together — ChainSelector (board → buildChains)
-// and KettenGraph (chain-graph endpoint) — with one consistent chain, exactly
-// as the view feeds them, and assert they integrate.
-describe("ChainSelector + KettenGraph integration", () => {
+// render the pure widgets it wires together — ChainListPanel (board →
+// buildChains, S1 grouped list replacing the old 236-entry dropdown) and
+// KettenGraph (chain-graph endpoint) — with one consistent chain, exactly as
+// the view feeds them, and assert they integrate.
+describe("ChainListPanel + KettenGraph integration", () => {
   // A real active chain straight out of buildChains, as the view derives it.
   const tasks: BoardTask[] = [
     makeTask("root", "running", "root"),
@@ -137,23 +138,24 @@ describe("ChainSelector + KettenGraph integration", () => {
   function renderComposed() {
     return renderToStaticMarkup(
       <div>
-        <ChainSelector chains={chains} selectedRootId={rootId} onSelect={() => {}} />
+        <ChainListPanel chains={chains} doneChains={[]} selectedRootId={rootId} onSelect={() => {}} />
         <KettenGraph nodes={nodes} edges={edges} rootId={rootId} />
       </div>,
     );
   }
 
-  it("buildChains surfaces the running chain to the selector", () => {
+  it("buildChains surfaces the running chain to the panel", () => {
     expect(chains).toHaveLength(1);
     expect(rootId).toBe("root");
     expect(chains[0].total).toBe(2);
     expect(chains[0].runningCount).toBe(1);
   });
 
-  it("selector and graph render the same chain together (shared root focus)", () => {
+  it("panel and graph render the same chain together (shared root focus)", () => {
     const html = renderComposed();
-    // Selector: the chosen chain is the select's value + the running badge shows.
-    expect(html).toMatch(/<select[^>]*\bid="chain-select"/);
+    // Panel: the running chain shows in the "Läuft jetzt" group with its
+    // live indicator + task count — no more scrolling a flat select.
+    expect(html).toContain(de.ketten.listGroupRunning);
     expect(html).toContain("läuft");
     expect(html).toContain("2 Tasks");
     // Graph: both pipeline stations of that same chain are rendered…
@@ -166,12 +168,12 @@ describe("ChainSelector + KettenGraph integration", () => {
   });
 
   it("renders nothing extra when there is no active chain", () => {
-    // Empty board → no chain → selector shows the empty option, graph collapses.
+    // Empty board → no chain → panel shows the empty state, graph collapses.
     const emptyChains = buildChains([makeTask("solo", "running", "solo")]).active;
     expect(emptyChains).toHaveLength(0);
     const html = renderToStaticMarkup(
       <div>
-        <ChainSelector chains={emptyChains} selectedRootId={null} onSelect={() => {}} />
+        <ChainListPanel chains={emptyChains} doneChains={[]} selectedRootId={null} onSelect={() => {}} />
         <KettenGraph nodes={[]} edges={[]} rootId="" />
       </div>,
     );
@@ -183,9 +185,9 @@ describe("ChainSelector + KettenGraph integration", () => {
   // that keeps the composed widgets inside a 375px column instead of forcing a
   // horizontal scrollbar. The pixel-accurate viewport pass is the visual check.
   describe("mobile (375px) layout contract", () => {
-    it("the select fills its column rather than overflowing it", () => {
+    it("the list panel fills its column rather than overflowing it", () => {
       const html = renderToStaticMarkup(
-        <ChainSelector chains={chains} selectedRootId={rootId} onSelect={() => {}} />,
+        <ChainListPanel chains={chains} doneChains={[]} selectedRootId={rootId} onSelect={() => {}} />,
       );
       expect(html).toMatch(/class="[^"]*\bw-full\b/);
     });
