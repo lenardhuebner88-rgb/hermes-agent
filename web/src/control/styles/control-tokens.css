@@ -202,6 +202,12 @@ body:has([data-control]) header[role="banner"] { display: none; }
    signature voice on hero numbers + statements. opsz makes it more dramatic
    (higher contrast) as it scales up. */
 .hc-type-display  { font-family: var(--hc-font-display); font-optical-sizing: auto; font-size: var(--hc-type-display);  font-weight: var(--hc-type-display-w);  letter-spacing: var(--hc-type-display-ls);  line-height: 1.0; }
+/* Mobile-tight step of the display voice — same properties as .hc-type-display,
+   just smaller below sm (Hero's `tight` prop, Cockpit S5b: Flow-Header lief
+   mobil zu groß). ≥sm reuses the same var/bump so it reads byte-identical to
+   .hc-type-display there — opt-in per Hero call, every other tab untouched. */
+.hc-type-display-tight { font-family: var(--hc-font-display); font-optical-sizing: auto; font-size: 30px; font-weight: var(--hc-type-display-w); letter-spacing: var(--hc-type-display-ls); line-height: 1.0; }
+@media (min-width: 640px) { .hc-type-display-tight { font-size: var(--hc-type-display); } }
 .hc-type-title    { font-size: var(--hc-type-title);    font-weight: var(--hc-type-title-w);    letter-spacing: var(--hc-type-title-ls);    line-height: 1.1; }
 /* The hero's editorial line — the one sentence that gives the tab its voice. */
 .hc-hero-statement { font-family: var(--hc-font-display); font-optical-sizing: auto; font-weight: 600; letter-spacing: -.015em; line-height: 1.04; }
@@ -231,6 +237,7 @@ body:has([data-control]) header[role="banner"] { display: none; }
 
 @media (min-width: 1024px) {
   .hc-type-display { font-size: 58px; }
+  .hc-type-display-tight { font-size: 58px; }
   .hc-type-title   { font-size: 37px; }
 }
 /* Labelled action buttons: the upstream Button sets line-height:0 for single-line

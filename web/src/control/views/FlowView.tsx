@@ -2610,6 +2610,7 @@ export function FlowView() {
   return (
     <div className="space-y-4">
       <Hero
+        tight
         eyebrow={de.flow.eyebrow}
         count={loadingFirst ? "—" : counts.running}
         countHint={!hasAnyRun ? de.flow.heroHintCalm : counts.running > 0 ? de.flow.heroHint(counts.running) : de.flow.heroHintParked}

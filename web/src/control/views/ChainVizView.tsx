@@ -132,7 +132,7 @@ function ChainSummary({ nodes, rootId: _rootId, costs, costsLoading = false, cos
 
   return (
     <div
-      className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]"
+      className="min-w-0 rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]"
     >
       {/* Eyebrow */}
       <p className="hc-eyebrow">{de.ketten.summaryEyebrow}</p>
@@ -252,7 +252,7 @@ function ChainActionsPanel({ rootId, nodes, onChanged }: ChainActionsPanelProps)
     : null;
 
   return (
-    <section className="hc-surface-card space-y-3 p-4">
+    <section className="min-w-0 hc-surface-card space-y-3 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="hc-eyebrow">{de.ketten.actionsEyebrow}</p>
@@ -618,13 +618,16 @@ export function ChainVizView(_props: { density?: unknown }) {
 
   return (
     <div className="mx-auto w-full max-w-6xl">
-      <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
+      <header className="mb-1.5 flex flex-col gap-1 sm:mb-4 sm:gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
           <p className="hc-eyebrow">{de.ketten.eyebrow}</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-normal text-[var(--hc-text)]">
+          <h1 className="mt-1 text-base font-semibold tracking-normal text-[var(--hc-text)] sm:text-2xl">
             {de.ketten.title}
           </h1>
-          <p className="mt-1 text-sm text-[var(--hc-text-soft)]">{de.ketten.subtitle} {de.ketten.subtitleDagHint}</p>
+          {/* Beschreibungstext nur ab sm — auf dem Handy trägt der Titel schon
+              die Aussage; Text+Chips+Suche brauchten sonst zu viel Scrollweg
+              bis zur ersten Kette (Operator-Feedback 2026-07-02). */}
+          <p className="mt-1 hidden text-sm text-[var(--hc-text-soft)] sm:block">{de.ketten.subtitle} {de.ketten.subtitleDagHint}</p>
         </div>
         {focusedRootId ? (
           <Link
@@ -648,10 +651,21 @@ export function ChainVizView(_props: { density?: unknown }) {
           subtitle={de.ketten.emptyDesc}
         />
       ) : (
-        <div className="grid gap-4">
-          <div className="hc-surface-card p-3">
-            <Eyebrow>{de.ketten.chooseChain}</Eyebrow>
-            <div className="mt-2">
+        <div className="grid gap-3 sm:gap-4">
+          {/* min-w-0: ohne das erzwingt ein GRID-Item ohne explizite min-width
+              seine automatische Mindestgröße in BEIDEN Achsen — ein langer,
+              nicht umbrechender Ketten-Titel weiter unten (ChainRow-Titel,
+              truncate = white-space:nowrap) drückt diese Karte sonst real auf
+              ~1800px auf, die dann von einem Ahnen hart geclippt wird statt
+              sauber zu ellipsieren (Alt-Bug, ui-verifier-Fund 2026-07-02,
+              per getBoundingClientRect-Repro bestätigt). */}
+          <div className="min-w-0 hc-surface-card p-2 sm:p-3">
+            {/* "Kette wählen" nur ab sm sichtbar — die sr-only-Suchlabel +
+                Filterchips machen den Zweck auf dem Handy schon klar, das
+                Label war nur zusätzlicher Scrollweg (Operator-Feedback
+                2026-07-02). */}
+            <Eyebrow className="hidden sm:block">{de.ketten.chooseChain}</Eyebrow>
+            <div className="sm:mt-2">
               <ChainListPanel
                 chains={activeChains}
                 doneChains={doneChains}

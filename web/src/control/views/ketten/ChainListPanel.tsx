@@ -92,7 +92,7 @@ export function ChainListPanel({ chains, doneChains, selectedRootId, onSelect, d
   ];
 
   return (
-    <div className={cn("flex min-w-0 flex-col gap-3", disabled && "pointer-events-none opacity-60")}>
+    <div className={cn("flex min-w-0 flex-col gap-1.5 sm:gap-3", disabled && "pointer-events-none opacity-60")}>
       <label className="min-w-0" htmlFor="ketten-list-search">
         <span className="sr-only">{de.ketten.listSearchPlaceholder}</span>
         <input
@@ -102,11 +102,14 @@ export function ChainListPanel({ chains, doneChains, selectedRootId, onSelect, d
           disabled={disabled}
           onChange={(e) => handleSearch(e.target.value)}
           placeholder={de.ketten.listSearchPlaceholder}
-          className="min-h-10 w-full rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-sm outline-none placeholder:text-[var(--hc-text-dim)] focus:border-[var(--hc-accent-border)]"
+          className="min-h-8 w-full rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-sm outline-none placeholder:text-[var(--hc-text-dim)] focus:border-[var(--hc-accent-border)] sm:min-h-10"
         />
       </label>
 
-      <div className="flex flex-wrap items-center gap-1.5">
+      {/* Mobil eine Zeile mit horizontalem Scroll statt Umbruch — der Chip-Wrap
+          fraß nach dem min-w-0-Fix die S5b-Dichtegewinne wieder auf (ui-verifier
+          2026-07-02: erste Karte 330px statt <300px). Ab sm wie gehabt wrappen. */}
+      <div className="flex items-center gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible sm:gap-1.5">
         {filterOptions.map((opt) => (
           <button
             key={opt.key}
@@ -115,7 +118,7 @@ export function ChainListPanel({ chains, doneChains, selectedRootId, onSelect, d
             aria-pressed={filter === opt.key}
             onClick={() => handleFilter(opt.key)}
             className={cn(
-              "inline-flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs transition",
+              "inline-flex min-h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 text-xs transition sm:min-h-8 sm:px-2.5",
               filter === opt.key
                 ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
                 : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
@@ -130,7 +133,7 @@ export function ChainListPanel({ chains, doneChains, selectedRootId, onSelect, d
       {filtered.length === 0 ? (
         <p className="hc-type-label hc-dim">{de.ketten.listEmptySearch}</p>
       ) : (
-        <div className="flex min-w-0 flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
           {CHAIN_LIST_GROUP_ORDER.filter((group) => byGroup[group].length > 0).map((group) => {
             const groupEntries = group === "done" ? donePage.visible : byGroup[group];
             return (
@@ -139,7 +142,7 @@ export function ChainListPanel({ chains, doneChains, selectedRootId, onSelect, d
                   <Eyebrow>{GROUP_LABEL[group]}</Eyebrow>
                   <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{byGroup[group].length}</span>
                 </div>
-                <div className="mt-2 flex min-w-0 flex-col gap-1.5">
+                <div className="mt-1 flex min-w-0 flex-col gap-1.5 sm:mt-2">
                   {groupEntries.map((entry) => (
                     <ChainRow
                       key={entry.chain.rootId}
@@ -192,7 +195,7 @@ function ChainRow({ entry, selected, disabled, onSelect }: {
         }
       }}
       className={cn(
-        "flex min-w-0 max-w-full cursor-pointer items-center gap-3 overflow-hidden rounded-[12px] border px-3 py-2.5 transition",
+        "flex min-w-0 max-w-full cursor-pointer items-center gap-2 overflow-hidden rounded-[12px] border px-2.5 py-2 transition sm:gap-3 sm:px-3 sm:py-2.5",
         selected
           ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]"
           : "border-[var(--hc-border)] bg-[var(--hc-panel-card)] hover:border-[var(--hc-border-strong)]",
