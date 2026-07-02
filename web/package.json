@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "NODE_ENV=test vitest run",
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
