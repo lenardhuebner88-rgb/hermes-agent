@@ -170,6 +170,40 @@ def test_classify_review_tier_levels():
     ) == "critical"
 
 
+def test_classify_review_tier_does_not_critical_on_path_or_subword_markers():
+    """Critical markers must be real risk words, not substrings in paths/titles."""
+    assert classify_review_tier(
+        {"risk_class": "medium", "objective": "fix hermes_cli/kanban_db.py"}
+    ) == "review"
+    assert classify_review_tier(
+        {"risk_class": "medium", "objective": "adjust database.py helper"}
+    ) == "review"
+    assert classify_review_tier(
+        {"risk_class": "medium", "objective": "document drop-in config snippet"}
+    ) == "review"
+
+
+def test_classify_review_tier_ignores_anti_scope_critical_words():
+    assert classify_review_tier(
+        {
+            "risk_class": "medium",
+            "objective": "refactor code module",
+            "goal": "no database migration, no deploy, no secrets, no auth changes",
+            "forbidden_actions": ["drop tables", "alter db schema", "deploy"],
+        }
+    ) == "review"
+
+
+def test_classify_review_tier_keeps_true_critical_whole_word_markers():
+    for objective in (
+        "run DB migration",
+        "apply ALTER TABLE to database",
+        "deploy gateway change",
+        "rotate credential for auth service",
+    ):
+        assert classify_review_tier({"risk_class": "high", "objective": objective}) == "critical"
+
+
 def test_medium_or_runtime_scope_requires_reviewer_or_explicit_piet_override():
     assert reviewer_gate_required(RUNTIME_PLAN) is True
 

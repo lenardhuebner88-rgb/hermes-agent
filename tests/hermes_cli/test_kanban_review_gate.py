@@ -149,6 +149,36 @@ def test_effective_review_tier_ignores_coder_contract_boilerplate(kanban_home, m
         assert kb._effective_review_tier(conn, risky) == "critical"
 
 
+def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban_home, monkeypatch):
+    """Live regression for the false-critical cascade: file names and anti-scope
+    risk words must not force the expensive verifier→reviewer→critic lane."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "code_roles": frozenset({"coder", "premium"})},
+    )
+    with kb.connect() as conn:
+        path_only = kb.create_task(
+            conn,
+            title="fix hermes_cli/kanban_db.py dispatcher edge case",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, path_only) == "review"
+
+        anti_scope = kb.create_task(
+            conn,
+            title="refactor code module",
+            body="no database migration, no deploy, no secret access, no auth changes",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, anti_scope) == "review"
+
+        real_db = kb.create_task(
+            conn, title="run database migration", body="apply ALTER TABLE", assignee="coder"
+        )
+        assert kb._effective_review_tier(conn, real_db) == "critical"
+
+
 def test_effective_review_tier_truncates_future_contract_versions(kanban_home, monkeypatch):
     """Forward-compat: the classify-truncation must strip ANY coder-contract version,
     not only the exact current marker string. A future ``v2`` contract whose anti-scope

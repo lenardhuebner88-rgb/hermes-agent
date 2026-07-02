@@ -20,6 +20,7 @@ logic should use ``orchestrator_gate_decision``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Iterable, Mapping
 
 from hermes_cli import disposition as _disposition_mod
@@ -139,6 +140,58 @@ def _plan_text(plan_spec: Mapping[str, Any]) -> str:
     return " ".join(values).lower()
 
 
+def _field_text(plan_spec: Mapping[str, Any], keys: Iterable[str]) -> str:
+    values: list[str] = []
+    for key in keys:
+        value = plan_spec.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(str(item) for item in value)
+        elif value is not None:
+            values.append(str(value))
+    return " ".join(values).lower()
+
+
+_PATHISH_FRAGMENT_RE = re.compile(r"(?u)\S*(?:[/\\]|\.[A-Za-z0-9]{1,12}\b|_[A-Za-z0-9])\S*")
+_NEGATED_MARKER_RE_TEMPLATE = (
+    r"(?<![A-Za-z0-9_-])(?:no|not|without|keine|kein|keinen|nicht|nie|forbidden|verboten)"
+    r"(?:\W+[A-Za-z0-9_-]+){0,3}\W+%s(?![A-Za-z0-9_-])"
+)
+
+
+def _strip_pathish_fragments(text: str) -> str:
+    """Remove file/path-shaped fragments before risk-word matching."""
+    return _PATHISH_FRAGMENT_RE.sub(" ", text)
+
+
+def _contains_unnegated_whole_marker(text: str, markers: Iterable[str]) -> bool:
+    """True only for standalone, non-negated risk markers.
+
+    The staged-review critical tier must not fire on substrings like
+    ``kanban_db.py``/``drop-in`` or anti-scope like ``no deploy``.
+    """
+    normalized = _strip_pathish_fragments(text.lower())
+    for marker in markers:
+        literal = re.escape(marker.lower())
+        marker_re = re.compile(rf"(?<![A-Za-z0-9_-]){literal}(?![A-Za-z0-9_-])")
+        negated_re = re.compile(_NEGATED_MARKER_RE_TEMPLATE % literal)
+        for match in marker_re.finditer(normalized):
+            window_start = max(0, match.start() - 80)
+            window = normalized[window_start:match.end()]
+            if negated_re.search(window):
+                continue
+            return True
+    return False
+
+
+def _critical_review_text(plan_spec: Mapping[str, Any]) -> str:
+    # ``forbidden_actions`` and ``changed_paths`` are intentionally excluded:
+    # anti-scope and file names produced the observed false-critical cascade.
+    return _field_text(
+        plan_spec,
+        ("risk_class", "action_class", "scope", "objective", "goal", "allowed_actions"),
+    )
+
+
 def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
     """Return whether the plan's risk/scope requires Reviewer or Piet override.
 
@@ -173,8 +226,7 @@ def classify_review_tier(plan_spec: Mapping[str, Any] | None) -> str:
     """
     if not plan_spec or not reviewer_gate_required(plan_spec):
         return "standard"
-    blob = _plan_text(plan_spec)
-    if any(marker in blob for marker in _CRITICAL_REVIEW_MARKERS):
+    if _contains_unnegated_whole_marker(_critical_review_text(plan_spec), _CRITICAL_REVIEW_MARKERS):
         return "critical"
     return "review"
 
