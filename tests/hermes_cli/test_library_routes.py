@@ -60,6 +60,16 @@ def test_items_limit_bounds_are_validated(client):
     assert client.get("/api/library/items?limit=200", headers=HEADERS).status_code == 200
 
 
+def test_items_offset_is_validated_and_wired(client):
+    assert client.get("/api/library/items?offset=-1", headers=HEADERS).status_code == 422
+    assert client.get("/api/library/items?offset=abc", headers=HEADERS).status_code == 422
+    res = client.get("/api/library/items?offset=0", headers=HEADERS)
+    assert res.status_code == 200
+    payload = res.json()
+    assert set(payload) >= {"has_more"}
+    assert payload["has_more"] is False  # leere Bibliothek im isolierten Test-Home
+
+
 def test_items_unknown_category_is_400(client):
     res = client.get("/api/library/items?category=quatsch", headers=HEADERS)
     assert res.status_code == 400

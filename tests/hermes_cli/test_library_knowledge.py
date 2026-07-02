@@ -136,6 +136,51 @@ def kb_home(tmp_path, monkeypatch):
     )
     (wiki / "lint" / "auto-health-check.md").write_text("# Auto Health Check\n\nOK.\n", encoding="utf-8")
 
+    # models/ — cron-gepflegter Bereich (model-return-watch, siehe echte
+    # ~/llm-wiki/wiki/models/*.md): Live-Katalog + Append-only-Discovery-Log.
+    (wiki / "models").mkdir()
+    (wiki / "models" / "model-landscape.md").write_text(
+        "---\n"
+        "title: \"LLM Model Landscape\"\n"
+        "type: entity\n"
+        "tags:\n"
+        "  - llm-wiki\n"
+        "  - models\n"
+        "---\n\n"
+        "# LLM Model Landscape\n\n"
+        "## anthropic\n\n"
+        "| Modell-ID | Erstellt | Kontext | Prompt/Completion pro 1M |\n"
+        "|---|---|---|---|\n"
+        "| `anthropic/claude-sonnet-5` | 2026-06-30 | 1M | $2.00 / $10.00 |\n",
+        encoding="utf-8",
+    )
+    # Zeilenformat 1:1 aus der echten Datei übernommen (siehe
+    # ~/llm-wiki/wiki/models/model-log.md Kopfzeile); die Datenzeilen selbst
+    # sind synthetisch, da das echte Log am 2026-07-02 noch leer ist.
+    (wiki / "models" / "model-log.md").write_text(
+        "---\n"
+        "title: \"LLM Model Discovery Log\"\n"
+        "type: entity\n"
+        "tags:\n"
+        "  - llm-wiki\n"
+        "  - models\n"
+        "---\n\n"
+        "# LLM Model Discovery Log\n\n"
+        "_Append-only. Pro neu entdecktem Modell der Watch-Provider "
+        "(anthropic/, openai/, google/) eine Zeile._\n\n"
+        "_Format: `- YYYY-MM-DD \\`model-id\\` (context Xk, $Y/$Z per 1M)`_\n\n"
+        "- 2026-06-30 `anthropic/claude-sonnet-5` (context 1M, $2.00/$10.00 per 1M)\n"
+        "- 2026-07-01 `google/gemini-3.5-flash` (context 1M, $1.50/$9.00 per 1M)\n"
+        "- 2026-07-02 `x-ai/grok-build-0.1` (context 256k, $1.00/$2.00 per 1M)\n",
+        encoding="utf-8",
+    )
+    # Synthetische dritte models/-Seite OHNE deklarierten `type:` — testet den
+    # neuen Verzeichnis-Fallback (die zwei echten Dateien oben deklarieren
+    # `type: entity` und bleiben dadurch unverändert als Entitäten klassifiziert).
+    (wiki / "models" / "model-notes.md").write_text(
+        "# Model Notes\n\nFreitext ohne Frontmatter.\n", encoding="utf-8"
+    )
+
     plans = tmp_path / "vault" / "03-Agents" / "Hermes" / "plans"
     plans.mkdir(parents=True)
     (plans / "dashboard-refresh.md").write_text(
@@ -332,7 +377,10 @@ def test_read_vault_plan_strips_frontmatter(kb_home):
     assert "status: active" not in doc["body_md"]
 
 
-def test_malformed_vault_plan_frontmatter_is_skipped_with_warning(kb_home, caplog):
+def test_malformed_vault_plan_frontmatter_falls_back_and_is_still_listed(kb_home, caplog):
+    # Regression: kaputtes YAML durfte den Plan früher komplett aus dem Regal
+    # kippen. Jetzt: Doc bleibt gelistet (Metadaten leer, Titel fällt über
+    # first-heading zurück), die Warnung bleibt aber erhalten.
     broken = kb_home / "vault" / "03-Agents" / "Hermes" / "plans" / "broken.md"
     broken.write_text("---\ntitle: [oops\n---\n\n# Broken\n", encoding="utf-8")
 
@@ -340,10 +388,29 @@ def test_malformed_vault_plan_frontmatter_is_skipped_with_warning(kb_home, caplo
         out = kn.list_knowledge()
 
     plans = next(c for c in out["collections"] if c["id"] == "vault-plans")
-    ids = [d["id"] for d in plans["docs"]]
-    assert "kb::plan::Hermes/plans/broken.md" not in ids
-    assert "skipping vault plan with malformed frontmatter" in caplog.text
+    by_id = {d["id"]: d for d in plans["docs"]}
+    assert "kb::plan::Hermes/plans/broken.md" in by_id
+    broken_doc = by_id["kb::plan::Hermes/plans/broken.md"]
+    assert broken_doc["title"] == "Broken"  # first-heading-Fallback
+    assert "created" not in broken_doc  # leere Metadaten, kein Platzhalter
+    assert "owner" not in broken_doc
+    assert "malformed frontmatter" in caplog.text
     assert "Hermes/plans/broken.md" in caplog.text
+
+    doc = kn.read_knowledge_doc("kb::plan::Hermes/plans/broken.md")
+    assert doc is not None
+    assert doc["body_md"].lstrip().startswith("# Broken")
+
+
+def test_malformed_vault_plan_frontmatter_without_heading_falls_back_to_filename_title(kb_home):
+    # Ohne Heading UND ohne brauchbares Frontmatter bleibt nur der Dateiname.
+    broken = kb_home / "vault" / "03-Agents" / "Hermes" / "plans" / "no-heading-broken.md"
+    broken.write_text("---\ntitle: [oops\n---\n\nJust body text, no heading.\n", encoding="utf-8")
+
+    out = kn.list_knowledge()
+    plans = next(c for c in out["collections"] if c["id"] == "vault-plans")
+    by_id = {d["id"]: d for d in plans["docs"]}
+    assert by_id["kb::plan::Hermes/plans/no-heading-broken.md"]["title"] == "No Heading Broken"
 
 
 def test_unknown_static_doc_raises(kb_home):
@@ -426,3 +493,59 @@ def test_heading_count_ignores_fenced_code(kb_home):
     kanon = next(c for c in out["collections"] if c["id"] == "kanon")
     idx = next(d for d in kanon["docs"] if d["id"] == "kb::doc::canon-index")
     assert idx["heading_count"] == 2  # "# Echt" + "## Zweiter", Code ignoriert
+
+
+def test_models_dir_infers_model_type_when_undeclared(kb_home):
+    # Premise-Check: die echten model-landscape.md/model-log.md deklarieren
+    # `type: entity` im Frontmatter — das gewinnt unverändert gegen die
+    # Verzeichnis-Inferenz (bestehendes Präzedenz-Verhalten, hier nicht
+    # angetastet). Der neue Verzeichnis-Fallback greift nur, wenn KEIN `type:`
+    # deklariert ist (model-notes.md).
+    out = kn.list_knowledge()
+    wiki = next(c for c in out["collections"] if c["id"] == "llm-wiki")
+    by_id = {d["id"]: d for d in wiki["docs"]}
+    assert "type:entity" in by_id["kb::llm::models/model-landscape.md"]["tags"]
+    assert "type:entity" in by_id["kb::llm::models/model-log.md"]["tags"]
+    assert "type:model" in by_id["kb::llm::models/model-notes.md"]["tags"]
+    # Rangfolge: nach sources/entities/concepts, vor lint (siehe echte
+    # ~/llm-wiki/wiki-Struktur: concepts, entities, queries, sources, lint).
+    ids = list(by_id)
+    assert ids.index("kb::llm::models/model-landscape.md") > ids.index("kb::llm::sources/karpathy-llm-wiki-pattern.md")
+    assert ids.index("kb::llm::models/model-landscape.md") < ids.index("kb::llm::lint/auto-health-check.md")
+
+
+def test_read_model_landscape_doc_returns_body(kb_home):
+    doc = kn.read_knowledge_doc("kb::llm::models/model-landscape.md")
+    assert doc is not None
+    assert doc["body_md"].lstrip().startswith("# LLM Model Landscape")
+    assert "anthropic/claude-sonnet-5" in doc["body_md"]
+
+
+def test_model_log_pulse_parses_last_three_entries_newest_first(kb_home):
+    # Zeilenformat exakt aus der echten Datei (~/llm-wiki/wiki/models/model-log.md
+    # Kopfzeile: "- YYYY-MM-DD `model-id` (context Xk, $Y/$Z per 1M)").
+    pulse = kn._model_log_pulse()
+    assert pulse == [
+        {"date": "2026-07-02", "model": "x-ai/grok-build-0.1", "detail": "context 256k, $1.00/$2.00 per 1M"},
+        {"date": "2026-07-01", "model": "google/gemini-3.5-flash", "detail": "context 1M, $1.50/$9.00 per 1M"},
+        {"date": "2026-06-30", "model": "anthropic/claude-sonnet-5", "detail": "context 1M, $2.00/$10.00 per 1M"},
+    ]
+
+
+def test_model_log_pulse_missing_file_returns_empty(kb_home):
+    (kb_home / "llm-wiki" / "wiki" / "models" / "model-log.md").unlink()
+    assert kn._model_log_pulse() == []
+
+
+def test_catalog_exposes_per_collection_freshness_metadata(kb_home):
+    out = kn.list_knowledge()
+    kanon = next(c for c in out["collections"] if c["id"] == "kanon")
+    assert kanon["doc_count"] == len(kanon["docs"])
+    assert kanon["updated_ts"] > 0
+    assert "pulse" not in kanon  # nur llm-wiki bekommt den Puls-Strip
+
+    wiki = next(c for c in out["collections"] if c["id"] == "llm-wiki")
+    assert wiki["doc_count"] == len(wiki["docs"])
+    assert wiki["updated_ts"] > 0
+    assert wiki["pulse"][0]["model"] == "x-ai/grok-build-0.1"
+    assert len(wiki["pulse"]) == 3

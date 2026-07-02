@@ -974,7 +974,7 @@ def _collect_all(*, with_bodies: bool) -> list[_Item]:
     return items
 
 
-def _list_items(category: Optional[str], q: Optional[str], limit: int) -> dict:
+def _list_items(category: Optional[str], q: Optional[str], limit: int, offset: int = 0) -> dict:
     needs_bodies = bool(q)
     items = _collect_all(with_bodies=needs_bodies)
     if category:
@@ -987,11 +987,12 @@ def _list_items(category: Optional[str], q: Optional[str], limit: int) -> dict:
             or needle in (i.body_md or "").casefold()
         ]
     total = len(items)
-    sliced = items[:limit]
+    sliced = items[offset:offset + limit]
     return {
         "items": [i.as_dict(with_body=False) for i in sliced],
         "count": total,
         "truncated": total > limit,
+        "has_more": offset + len(sliced) < total,
         "categories": list(CATEGORIES),
         "now": int(_time.time()),
     }
@@ -1022,10 +1023,11 @@ def register_library_routes(app: Any) -> None:
         category: Optional[str] = Query(None),
         q: Optional[str] = Query(None, max_length=200),
         limit: int = Query(60, ge=1, le=200),
+        offset: int = Query(0, ge=0),
     ):
         if category and category not in CATEGORIES:
             raise HTTPException(status_code=400, detail="unknown category")
-        return await asyncio.to_thread(_list_items, category, q, limit)
+        return await asyncio.to_thread(_list_items, category, q, limit, offset)
 
     @app.get("/api/library/item")
     async def library_item(  # type: ignore[unused-variable]

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
+import { MemoryRouter } from "react-router-dom";
+import { CATEGORY_LABEL, countByCategory, dedupeById, groupBySeries, newestPerCategory, seriesNeighbors, sortItems } from "./BibliothekView.helpers";
 import {
   BibliothekView,
   ItemRow,
@@ -13,6 +16,8 @@ import {
   type LibrarySavedSearch,
   type LibraryTopic,
 } from "./BibliothekView";
+
+const src = readFileSync(fileURLToPath(new URL("./BibliothekView.tsx", import.meta.url)), "utf8");
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -185,7 +190,7 @@ describe("Gespeicherte Suchen und aggregierte Themenseite", () => {
 
 describe("LesesaalBody (Such-Input Accessibility)", () => {
   it("das Such-Input trägt aria-label mit demselben Text wie den placeholder", () => {
-    const html = renderToStaticMarkup(<LesesaalBody />);
+    const html = renderToStaticMarkup(<MemoryRouter><LesesaalBody /></MemoryRouter>);
     expect(html).toContain('aria-label="Suche in Titel + Text …"');
   });
 });
@@ -193,23 +198,123 @@ describe("LesesaalBody (Such-Input Accessibility)", () => {
 describe("LesesaalBody Erst-Lade-Skeleton (B1)", () => {
   it("zeigt SkeletonCard (aria-busy) statt leerer Fläche wenn data noch null ist und kein error vorliegt", () => {
     // renderToStaticMarkup führt keinen useEffect aus → data bleibt null, error bleibt null
-    const html = renderToStaticMarkup(<LesesaalBody />);
+    const html = renderToStaticMarkup(<MemoryRouter><LesesaalBody /></MemoryRouter>);
     expect(html).toContain('aria-busy="true"');
   });
 });
 
-describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3)", () => {
-  it("Wissen-Modus (default): beide Tab-Buttons tragen aria-controls; nur Wissen-Panel im DOM", () => {
-    // Default-Render: mode="wissen"
-    const html = renderToStaticMarkup(<BibliothekView />);
+describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3, angepasst für S2/S3)", () => {
+  it("Wissen-Modus (default, keine URL-Params): beide Tab-Buttons tragen aria-controls; beide Panels sind gemountet, Lesesaal ist hidden", () => {
+    const html = renderToStaticMarkup(<MemoryRouter><BibliothekView /></MemoryRouter>);
     // Beide Tab-Buttons haben aria-controls
     expect(html).toContain('aria-controls="bibliothek-panel-wissen"');
     expect(html).toContain('aria-controls="bibliothek-panel-lesesaal"');
-    // Nur das aktive Panel ist gemountet — Wissen-Panel vorhanden
+    // S3: beide Panels bleiben IMMER gemountet (nur `hidden` schaltet um) —
+    // sonst verwirft der Moduswechsel den Zustand des jeweils anderen Modus.
     expect(html).toContain('id="bibliothek-panel-wissen"');
+    expect(html).toContain('id="bibliothek-panel-lesesaal"');
     expect(html).toContain('role="tabpanel"');
-    // Lesesaal-Panel ist NICHT im DOM (Conditional bleibt erhalten)
-    expect(html).not.toContain('id="bibliothek-panel-lesesaal"');
+    expect(html).not.toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
+    expect(html).toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
+  });
+
+  it("Lesesaal-Modus über ?mode=lesesaal (S2, Deep-Link): Wissen-Panel ist jetzt hidden, Lesesaal nicht", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}>
+        <BibliothekView />
+      </MemoryRouter>,
+    );
+    expect(html).toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
+    expect(html).not.toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
+  });
+
+  it("unbekannter mode-Wert fällt sicher auf Wissen zurück", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control/bibliothek?mode=quatsch"]}>
+        <BibliothekView />
+      </MemoryRouter>,
+    );
+    expect(html).not.toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
+    expect(html).toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
+  });
+});
+
+describe("BibliothekView URL-Zustand — Wiring (S2/S3, Quelltext-Beweis wie ChainVizView)", () => {
+  // BibliothekView/LesesaalBody sind router-hook-gebunden (useSearchParams) —
+  // dieselbe Prüf-Konvention wie ChainVizView.test.tsx für Verhalten, das erst
+  // interaktiv (Klick → setSearchParams) sichtbar wird und hier zusätzlich
+  // durch BibliothekView.render.test.tsx (jsdom) verhaltensgeprüft wird.
+  it("Moduswechsel und Item-Schließen sind ein replace (kein Verlaufseintrag)", () => {
+    expect(src).toContain('if (next === "wissen") p.delete("mode");');
+    expect(src).toContain('p.set("mode", next);');
+    expect(src).toContain('p.delete("item");');
+    // Beide replace-Aufrufe (setMode + closeItem) sind verdrahtet.
+    expect(src.match(/\}, \{ replace: true \}\)/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("Dokument-öffnen ist ein push (kein replace) — Back-Button schließt das Dokument", () => {
+    expect(src).toContain('p.set("item", next.id);');
+    // openItem's setSearchParams-Aufruf endet OHNE { replace: true }.
+    expect(src).toContain('p.set("item", next.id);\n      return p;\n    });');
+  });
+
+  it("Deep-Link-Resolution liest den item-Param und fällt auf einen Direkt-Fetch zurück", () => {
+    expect(src).toMatch(/searchParams\.get\("item"\)/);
+    expect(src).toMatch(/\/api\/library\/item\?id=\$\{encodeURIComponent\(id\)\}/);
+  });
+
+  it("has_more/offset steuern \"Mehr laden\" (S6)", () => {
+    expect(src).toMatch(/has_more/);
+    expect(src).toMatch(/offset/);
+    expect(src).toMatch(/dedupeById/);
+  });
+
+  it("Inhaltsverzeichnis nutzt extractToc/TocNav wie das Nachschlagewerk (S4)", () => {
+    expect(src).toMatch(/extractToc/);
+    expect(src).toMatch(/toc\.length >= 3/);
+    expect(src).toMatch(/<TocNav /);
+  });
+});
+
+describe("sortItems (Lesesaal-Sortierung, S5)", () => {
+  const items: LibraryItem[] = [
+    { id: "b", category: "news", series_id: "s", series: "Serie", title: "Bananen-Digest", ts: 200, preview: "", source_ref: "", series_meta: "" },
+    { id: "a", category: "news", series_id: "s", series: "Serie", title: "Apfel-Digest", ts: 100, preview: "", source_ref: "", series_meta: "" },
+    { id: "c", category: "news", series_id: "s", series: "Serie", title: "Citrus-Digest", ts: 300, preview: "", source_ref: "", series_meta: "" },
+  ];
+
+  it("Neueste (Default) lässt die Server-Reihenfolge unverändert", () => {
+    expect(sortItems(items, "newest").map((i) => i.id)).toEqual(["b", "a", "c"]);
+  });
+
+  it("Älteste sortiert nach ts aufsteigend", () => {
+    expect(sortItems(items, "oldest").map((i) => i.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("A–Z sortiert nach Titel", () => {
+    expect(sortItems(items, "az").map((i) => i.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("mutiert die Eingabe nicht (newest gibt dieselbe Referenz zurück, oldest/az kopieren)", () => {
+    const copy = [...items];
+    sortItems(items, "oldest");
+    expect(items).toEqual(copy);
+  });
+});
+
+describe("dedupeById (Mehr laden, S6)", () => {
+  it("verwirft doppelte Ids beim Anhängen einer zweiten Seite, Reihenfolge bleibt stabil", () => {
+    const pageOne: LibraryItem[] = [
+      { id: "cron::main::abc::2026-06-10_07-00-00.md", category: "briefings", series_id: "main/abc", series: "Morning Digest", title: "Morning Digest — Ausgabe 10.06.", ts: 300, preview: "x", source_ref: "cron:abc", series_meta: "" },
+      { id: "cron::main::abc::2026-06-09_07-00-00.md", category: "briefings", series_id: "main/abc", series: "Morning Digest", title: "Morning Digest — Ausgabe 09.06.", ts: 200, preview: "x", source_ref: "cron:abc", series_meta: "" },
+    ];
+    // Server-Rand-Overlap: Seite 2 beginnt erneut mit dem letzten Item von Seite 1.
+    const pageTwo: LibraryItem[] = [
+      pageOne[1],
+      { id: "cron::main::abc::2026-06-08_07-00-00.md", category: "briefings", series_id: "main/abc", series: "Morning Digest", title: "Morning Digest — Ausgabe 08.06.", ts: 100, preview: "x", source_ref: "cron:abc", series_meta: "" },
+    ];
+    const merged = dedupeById([...pageOne, ...pageTwo]);
+    expect(merged.map((i) => i.id)).toEqual([pageOne[0].id, pageOne[1].id, pageTwo[1].id]);
   });
 });
 
