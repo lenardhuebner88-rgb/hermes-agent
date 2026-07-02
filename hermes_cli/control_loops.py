@@ -16,8 +16,12 @@ Design (bindend): vault/03-Agents/Claude-Code/plans/2026-07-02-loop-runner-v1-v2
 from __future__ import annotations
 
 import fcntl
+import json
 import re
+import shutil
 import subprocess
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +142,53 @@ def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
     return [line for line in res.stdout.splitlines() if line.strip()]
 
 
+def _heartbeat(state: Path) -> dict[str, Any] | None:
+    hb = state / "heartbeat.json"
+    if not hb.is_file():
+        return None
+    try:
+        data = json.loads(hb.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _lint_pack_dir(base: Path, name: str) -> str | None:
+    """Werkstatt-Lint: Manifest muss laden, referenzierte Prompts müssen die
+    Pflicht-Konventionen tragen (wie tests/loops Pack-Lint). None = ok."""
+    try:
+        pack = loop_runner.load_pack(base, name)
+    except loop_runner.ManifestError as exc:
+        return str(exc)
+    for pname, phase in pack.phases.items():
+        text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
+        for needle, warum in (
+            ("{{STATE_DIR}}", "STATE_DIR-Platzhalter fehlt"),
+            ("last-status", "last-status-Protokoll fehlt"),
+            ("push", "Verbote-Block fehlt (push)"),
+        ):
+            if needle not in text:
+                return f"Phase {pname} ({phase.prompt}): {warum}"
+    return None
+
+
+def _spawn_land(pack: loop_runner.Pack, log_path: Path) -> None:
+    """Landung detached starten (dauert Minuten: Gates). Seam für Tests."""
+    py = pack.repo / "venv" / "bin" / "python"
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        subprocess.Popen(  # noqa: S603 — Argumente stammen aus validiertem Pack
+            [str(py), "-m", "loops.runner", "--pack", pack.name, "--cmd", "land"],
+            cwd=str(pack.repo),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={"PYTHONPATH": str(pack.repo), "PATH": "/usr/bin:/bin", "HOME": str(Path.home())},
+        )
+
+
 def _timer_enabled(name: str) -> bool:
     res = _systemctl("is-enabled", f"hermes-loop@{name}.timer")
     return res.returncode == 0 and res.stdout.strip() == "enabled"
@@ -167,6 +218,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "stop": pack.stop,
         "params": pack.params,
         "running": _is_running(state),
+        "heartbeat": _heartbeat(state),
         "stop_requested": (state / "STOP").exists(),
         "queue": qcounts if pack.type == "pipeline" else None,
         "commits_ahead": len(_commits_ahead(pack)),
@@ -180,6 +232,15 @@ class StartBody(BaseModel):
 
 class TimerBody(BaseModel):
     enabled: bool
+
+
+class FileBody(BaseModel):
+    content: str
+
+
+class DuplicateBody(BaseModel):
+    source: str
+    name: str
 
 
 def register_loops_routes(app: FastAPI) -> None:
@@ -265,6 +326,88 @@ def register_loops_routes(app: FastAPI) -> None:
         (state / "STOP").write_text("", encoding="utf-8")
         return {"stop_requested": True, "pack": loaded.name,
                 "note": "greift vor der nächsten Phase; laufende Phase endet regulär"}
+
+    @app.get("/api/loops/{pack}/files")
+    def loop_files(pack: str) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        source = "custom" if _dir_for(loaded.name) == loop_runner.CUSTOM_PACKS_DIR else "repo"
+        editable = source == "custom"  # Repo-Packs sind kuratiert: via Git ändern
+        files = []
+        names = ["pack.yaml"] + sorted(
+            p.name for p in loaded.pack_dir.glob("*.md") if p.is_file()
+        )
+        for fname in names:
+            files.append({
+                "name": fname,
+                "content": (loaded.pack_dir / fname).read_text(encoding="utf-8"),
+                "editable": editable,
+            })
+        return {"pack": loaded.name, "source": source, "files": files}
+
+    @app.put("/api/loops/{pack}/files/{filename}")
+    def loop_file_save(pack: str, filename: str, body: FileBody) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        source = "custom" if _dir_for(loaded.name) == loop_runner.CUSTOM_PACKS_DIR else "repo"
+        if source != "custom":
+            raise HTTPException(status_code=403, detail="Repo-Packs sind kuratiert — via Git ändern; zum Editieren erst duplizieren")
+        if not _FILENAME_RE.fullmatch(filename) or not (
+            filename == "pack.yaml" or filename.endswith(".md")
+        ):
+            raise HTTPException(status_code=400, detail=f"Dateiname nicht erlaubt: {filename!r}")
+        target = loaded.pack_dir / filename
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"Datei existiert nicht: {filename!r} (Werkstatt v1 editiert nur Bestehendes)")
+        if len(body.content) > 200_000:
+            raise HTTPException(status_code=400, detail="Datei zu groß")
+        # Erst in einer Schattenkopie validieren, dann persistieren — ein kaputtes
+        # Manifest darf nie live liegen.
+        with tempfile.TemporaryDirectory(prefix="loop-werkstatt-") as tmp:
+            shadow_base = Path(tmp)
+            shutil.copytree(loaded.pack_dir, shadow_base / loaded.name)
+            (shadow_base / loaded.name / filename).write_text(body.content, encoding="utf-8")
+            problem = _lint_pack_dir(shadow_base, loaded.name)
+        if problem:
+            raise HTTPException(status_code=400, detail=f"Lint: {problem}")
+        target.write_text(body.content, encoding="utf-8")
+        return {"saved": True, "pack": loaded.name, "file": filename}
+
+    @app.post("/api/loops/duplicate")
+    def loop_duplicate(body: DuplicateBody) -> dict[str, Any]:
+        src = _load_pack_or_404(body.source)
+        name = body.name.strip()
+        if not loop_runner._PACK_NAME_RE.match(name) or name.startswith("_"):
+            raise HTTPException(status_code=400, detail=f"Ziel-Name ungültig: {name!r}")
+        custom = loop_runner.CUSTOM_PACKS_DIR if PACKS_DIR_OVERRIDE is None else PACKS_DIR_OVERRIDE
+        if (custom / name).exists() or ((_packs_dir() / name / "pack.yaml").is_file()):
+            raise HTTPException(status_code=409, detail=f"Pack {name!r} existiert bereits")
+        custom.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src.pack_dir, custom / name)
+        manifest = custom / name / "pack.yaml"
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        data["name"] = name
+        data["stability"] = "experimental"
+        data["description"] = f"(Kopie von {src.name}) " + str(data.get("description", ""))
+        manifest.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        problem = _lint_pack_dir(custom, name)
+        if problem:
+            shutil.rmtree(custom / name, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"Kopie lintet nicht: {problem}")
+        return {"created": name, "source": src.name}
+
+    @app.post("/api/loops/{pack}/land")
+    def land_loop(pack: str) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        state = _state_root() / loaded.name
+        if _is_running(state):
+            raise HTTPException(status_code=409, detail="Loop läuft — erst stoppen/auslaufen lassen")
+        (state / "logs").mkdir(parents=True, exist_ok=True)
+        log_path = state / "logs" / f"land-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+        try:
+            _spawn_land(loaded, log_path)
+        except OSError as exc:
+            raise HTTPException(status_code=502, detail=f"Landung ließ sich nicht starten: {exc}") from exc
+        return {"land_started": True, "pack": loaded.name, "log": log_path.name,
+                "note": "läuft detached mit allen Schienen; Ergebnis im Ledger (LAND ✅ / rollback / Abbruch)"}
 
     @app.post("/api/loops/{pack}/timer")
     def toggle_timer(pack: str, body: TimerBody) -> dict[str, Any]:

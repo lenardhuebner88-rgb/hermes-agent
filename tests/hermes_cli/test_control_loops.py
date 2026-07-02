@@ -26,7 +26,9 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path) -> None:
     phases = {}
     for pname in phase_names:
         (d / f"{pname}.md").write_text(
-            f"PHASE={pname} STATE={{{{STATE_DIR}}}}\n", encoding="utf-8"
+            f"PHASE={pname} STATE={{{{STATE_DIR}}}}\n"
+            "Schreibe das Ergebnis nach last-status.\nVerbote: NIE push/merge/deploy.\n",
+            encoding="utf-8",
         )
         phases[pname] = {
             "engine": "claude", "model": "claude-sonnet-5",
@@ -169,6 +171,102 @@ def test_timer_toggle_calls_systemctl(api):
     assert ("enable", "--now", "hermes-loop@nacht.timer") in calls
     resp = client.post("/api/loops/nacht/timer", json={"enabled": False})
     assert ("disable", "--now", "hermes-loop@nacht.timer") in calls
+
+
+def test_files_repo_pack_readonly_and_put_403(api):
+    client, _calls, _tmp = api
+    data = client.get("/api/loops/nacht/files").json()
+    names = [f["name"] for f in data["files"]]
+    assert "pack.yaml" in names and "round.md" in names
+    assert all(f["editable"] is False for f in data["files"])
+    resp = client.put("/api/loops/nacht/files/round.md", json={"content": "x"})
+    assert resp.status_code == 403
+
+
+def test_duplicate_then_edit_custom_pack_with_lint(api, tmp_path):
+    client, _calls, _tmp = api
+    # Duplikat entsteht im (Test-)Packs-Dir und ist danach als eigenes Pack sichtbar
+    resp = client.post("/api/loops/duplicate", json={"source": "nacht", "name": "nacht-kopie"})
+    assert resp.status_code == 200, resp.text
+    names = [p["name"] for p in client.get("/api/loops").json()["packs"]]
+    assert "nacht-kopie" in names
+    # Kollision → 409
+    assert client.post("/api/loops/duplicate", json={"source": "nacht", "name": "nacht-kopie"}).status_code == 409
+
+    from hermes_cli import control_loops as cl
+    problem = cl._lint_pack_dir(cl._packs_dir(), "nacht-kopie")
+    assert problem is None
+
+
+VALID_ROUND = "STATE={{STATE_DIR}}\nSchreibe nach last-status.\nVerbote: NIE push/merge.\n"
+
+
+def test_put_custom_pack_lints_before_persist(api, monkeypatch):
+    client, _calls, _tmp = api
+    from hermes_cli import control_loops as cl
+    from loops import runner as lr
+    # Im Test zeigt der Override auf das Packs-Dir; markieren wir es als custom,
+    # greift der echte Editier-Pfad (source == custom).
+    monkeypatch.setattr(lr, "CUSTOM_PACKS_DIR", cl._packs_dir())
+
+    data = client.get("/api/loops/nacht/files").json()
+    assert data["source"] == "custom"
+    assert all(f["editable"] is True for f in data["files"])
+
+    # gültiger Prompt-Edit → persistiert
+    resp = client.put("/api/loops/nacht/files/round.md", json={"content": VALID_ROUND})
+    assert resp.status_code == 200, resp.text
+    assert (cl._packs_dir() / "nacht" / "round.md").read_text(encoding="utf-8") == VALID_ROUND
+
+    # Prompt ohne Pflicht-Konventionen → 400, Datei unverändert
+    resp = client.put("/api/loops/nacht/files/round.md", json={"content": "nur text"})
+    assert resp.status_code == 400 and "Lint" in resp.json()["detail"]
+    assert (cl._packs_dir() / "nacht" / "round.md").read_text(encoding="utf-8") == VALID_ROUND
+
+    # kaputtes Manifest → 400 via Schattenkopie, Original bleibt ladbar
+    resp = client.put("/api/loops/nacht/files/pack.yaml", json={"content": "type: zirkus"})
+    assert resp.status_code == 400
+    assert client.get("/api/loops/nacht/detail").status_code == 200
+
+    # Dateinamens-Härte: Traversal/Neuanlage
+    assert client.put("/api/loops/nacht/files/gibtsnicht.md", json={"content": VALID_ROUND}).status_code == 404
+    assert client.put("/api/loops/nacht/files/boese.sh", json={"content": "x"}).status_code == 400
+
+
+def test_land_endpoint_spawns_detached_and_409_when_running(api, monkeypatch):
+    client, _calls, tmp = api
+    from hermes_cli import control_loops as cl
+    spawned = []
+    monkeypatch.setattr(cl, "_spawn_land", lambda pack, log: spawned.append((pack.name, log.name)))
+    resp = client.post("/api/loops/nacht/land")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["land_started"] is True
+    assert spawned and spawned[0][0] == "nacht" and spawned[0][1].startswith("land-")
+
+    state = tmp / "state" / "nacht"
+    state.mkdir(parents=True, exist_ok=True)
+    lock = (state / ".lock").open("w", encoding="utf-8")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert client.post("/api/loops/nacht/land").status_code == 409
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def test_summary_contains_heartbeat_when_present(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "nacht"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "heartbeat.json").write_text(
+        '{"current": {"phase": "round", "engine": "claude", "model": "claude-sonnet-5", '
+        '"started_at": "2026-07-02T23:30:00", "timeout": 2400}, '
+        '"last": [{"phase": "round", "secs": 512, "rc": 0, "at": "2026-07-02T22:00:00"}]}',
+        encoding="utf-8",
+    )
+    nacht = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "nacht")
+    assert nacht["heartbeat"]["current"]["phase"] == "round"
+    assert nacht["heartbeat"]["last"][0]["secs"] == 512
 
 
 def test_detail_returns_ledger_and_queue(api):

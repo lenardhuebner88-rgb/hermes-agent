@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -393,14 +394,37 @@ class LoopRunner:
             text = text.replace("{{" + key + "}}", str(val))
         return text
 
+    def _heartbeat(self, current: dict | None, done: dict | None = None) -> None:
+        """heartbeat.json fürs Dashboard: aktive Phase + Dauer-Historie (best effort)."""
+        hb_path = self.state / "heartbeat.json"
+        try:
+            data = json.loads(hb_path.read_text(encoding="utf-8")) if hb_path.is_file() else {}
+        except (OSError, ValueError):
+            data = {}
+        history = [h for h in data.get("last", []) if isinstance(h, dict)]
+        if done is not None:
+            history = (history + [done])[-20:]
+        try:
+            hb_path.write_text(
+                json.dumps({"current": current, "last": history}), encoding="utf-8"
+            )
+        except OSError:
+            pass  # Telemetrie darf nie eine Runde kosten
+
     def run_phase(self, phase: str, **extra: str) -> engines.EngineResult:
         cfg = self.phase_cfg(phase)
         self.say(f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}, timeout={cfg.timeout}s)")
         self.status_path.write_text("", encoding="utf-8")
         prompt = self.render_prompt(phase, **extra)
         started = time.time()
+        started_iso = datetime.now().strftime("%FT%T")
+        self._heartbeat({"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                         "started_at": started_iso, "timeout": cfg.timeout})
         result = engines.get_engine(cfg.engine)(cfg.model, prompt, self.wt, cfg.timeout)
         self.phase_secs[phase] = int(time.time() - started)
+        self._heartbeat(None, done={"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                                    "secs": self.phase_secs[phase], "rc": result.rc,
+                                    "at": started_iso})
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
         self.say(f"Phase {phase} fertig in {self.phase_secs[phase]}s (rc={result.rc})")

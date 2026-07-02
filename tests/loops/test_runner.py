@@ -444,6 +444,22 @@ def test_sweep_stops_on_blocked_streak(tmp_path, fake_engine):
     assert calls == ["round", "round"]  # fail_streak=2
 
 
+def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
+    import json
+
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "pulsig", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "pulsig")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    behaviors["round"] = ok("DRY")
+    runner.cmd_run()
+    hb = json.loads((runner.state / "heartbeat.json").read_text(encoding="utf-8"))
+    assert hb["current"] is None, "nach Phasen-Ende darf keine Phase als aktiv stehen"
+    assert len(hb["last"]) == 2 and hb["last"][0]["phase"] == "round"
+    assert {"secs", "rc", "at", "engine", "model"} <= set(hb["last"][0])
+
+
 def test_sweep_stops_on_usage_limit(tmp_path, fake_engine):
     behaviors, calls = fake_engine
     repo = init_repo(tmp_path / "repo")
