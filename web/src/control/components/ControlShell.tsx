@@ -26,11 +26,15 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
   { id: "ketten", label: "Ketten", mobileLabel: "Ketten", path: "/control/ketten", icon: GitBranch },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Statistik", path: "/control/statistik", icon: ChartSpline },
-  { id: "bibliothek", label: "Bibliothek", mobileLabel: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
+  // Kurzlabel "Regal" fürs 6-Slot-Grid der mobilen Bottom-Bar (Cockpit-Slice
+  // "Bibliothek-Lesesaal + Shell-Upgrade") — Desktop-`label` bleibt "Bibliothek".
+  { id: "bibliothek", label: "Bibliothek", mobileLabel: "Regal", path: "/control/bibliothek", icon: BookOpen },
   { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
-const mobileTabs = tabs.filter((tab) => ["inbox", "agentTerminals", "flow", "ketten"].includes(tab.id));
+// Bibliothek zog in die primäre mobile Bottom-Bar (vorher nur per Mehr-Sheet/
+// Direkt-URL erreichbar) — 5 Slots + "Mehr" = 6-Spalten-Grid (siehe unten).
+const mobileTabs = tabs.filter((tab) => ["inbox", "agentTerminals", "flow", "ketten", "bibliothek"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.
@@ -134,7 +138,7 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
-        <div className="grid grid-cols-5">
+        <div className="grid grid-cols-6">
           {mobileTabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button type="button" onClick={() => setMoreOpen(true)} aria-label="Mehr" aria-expanded={moreOpen} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", moreActive && "text-[var(--hc-accent-text)]")}>
             <MoreHorizontal className="h-5 w-5" />

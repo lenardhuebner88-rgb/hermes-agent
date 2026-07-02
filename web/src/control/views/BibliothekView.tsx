@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Library, Newspaper } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Library, ListTree, Newspaper } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
@@ -7,9 +8,24 @@ import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
+import { extractToc, type TocEntry } from "../lib/slug";
 import type { Density } from "../hooks/useDensity";
-import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
+import {
+  CATEGORY_LABEL,
+  countByCategory,
+  dedupeById,
+  groupBySeries,
+  newestPerCategory,
+  seriesNeighbors,
+  sortItems,
+  type LesesaalSort,
+} from "./BibliothekView.helpers";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
+// TocNav ist im Nachschlagewerk (KnowledgeReader) implementiert und exportiert
+// — read-only importiert (KEINE Edits an views/knowledge/, paralleler
+// Builder arbeitet dort), damit der Lesesaal dieselbe Inhaltsverzeichnis-UI
+// nutzt statt sie zu duplizieren.
+import { TocNav } from "./knowledge/KnowledgeReader";
 
 // Bibliothek = zwei klar getrennte Bereiche (Programm 3, Next-Level):
 //   • Nachschlagewerk (Wissen/Kanon) — kuratiertes, thema-geordnetes Referenz-
@@ -36,7 +52,6 @@ const t = {
   back: "← Übersicht",
   prev: "← ältere",
   next: "neuere →",
-  truncated: "Liste gekappt — neueste zuerst.",
   topicsTitle: "Themen folgen",
   topicsMeta: "Beobachtungsliste für deine Bibliothek",
   topicFollow: "Thema folgen",
@@ -47,6 +62,14 @@ const t = {
   savedMeta: "Gespeicherte Suchen",
   savedEmpty: "Noch keine gespeicherten Suchen.",
   savedApply: "Suche öffnen",
+  sortLabel: "Sortierung",
+  sortNewest: "Neueste",
+  sortOldest: "Älteste",
+  sortAz: "A–Z",
+  sortListEyebrow: "Sortierte Liste",
+  loadMore: "Mehr laden",
+  loadingMore: "Lade …",
+  toc: "Inhalt",
 };
 
 
@@ -66,6 +89,9 @@ interface LibraryListResponse {
   items: LibraryItem[];
   count: number;
   truncated: boolean;
+  /** S6 ("Mehr laden"): true, solange nach dieser Seite (offset+limit) noch
+   *  weitere Treffer folgen. */
+  has_more: boolean;
   categories: string[];
 }
 
@@ -231,6 +257,16 @@ export function ReadingView({ item, neighbors, onNavigate, onBack }: {
     return () => { cancelled = true; };
   }, [item.id]);
 
+  // Inhaltsverzeichnis wie im Nachschlagewerk (KnowledgeReader): dieselbe
+  // extractToc/TocNav-Kombination, hier mobil einklappbar statt sticky-aside
+  // (der Lesesaal ist die Zeitungs-/Mobil-first-Metapher). Erst ab ≥3
+  // Überschriften — bei kürzeren Ausgaben lohnt ein Inhaltsverzeichnis nicht.
+  const toc: TocEntry[] = useMemo(() => (detail ? extractToc(detail.body_md) : []), [detail]);
+  const jumpToHeading = (slug: string) => {
+    const el = typeof document !== "undefined" ? document.getElementById(slug) : null;
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
     <FleetPanel eyebrow={item.series} meta={`${CATEGORY_LABEL[item.category] ?? item.category} · ${fmtClock(item.ts)} · ${item.source_ref}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -240,7 +276,18 @@ export function ReadingView({ item, neighbors, onNavigate, onBack }: {
       </div>
       <h3 className="mb-2 text-base font-semibold text-white">{item.title}</h3>
       {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {detail ? <ProseMarkdown>{detail.body_md}</ProseMarkdown> : error ? null : <SkeletonCard rows={5} />}
+      {toc.length >= 3 ? (
+        <details className="mb-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 hc-eyebrow">
+            <ListTree className="h-3.5 w-3.5" />
+            {t.toc}
+          </summary>
+          <div className="mt-2">
+            <TocNav entries={toc} onJump={jumpToHeading} />
+          </div>
+        </details>
+      ) : null}
+      {detail ? <ProseMarkdown slugHeadings>{detail.body_md}</ProseMarkdown> : error ? null : <SkeletonCard rows={5} />}
     </FleetPanel>
   );
 }
@@ -248,10 +295,18 @@ export function ReadingView({ item, neighbors, onNavigate, onBack }: {
 // Lesesaal (Ausgaben) — der bisherige Bibliothek-Inhalt, unverändert in Logik.
 // Der Hero lebt jetzt im Eltern-`BibliothekView`; die Filter (Kategorie-Chips +
 // Suche) sitzen darum in einer eigenen Filterleiste statt im Hero.
+const LESESAAL_PAGE_SIZE = 120;
+
 export function LesesaalBody() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  const [sort, setSort] = useState<LesesaalSort>("newest");
+  // `data` trägt die Meta der zuletzt geladenen Seite (categories/has_more/
+  // truncated/count); `items` akkumuliert über "Mehr laden" (S6) hinweg.
   const [data, setData] = useState<LibraryListResponse | null>(null);
+  const [items, setItems] = useState<LibraryItem[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [topics, setTopics] = useState<LibraryTopic[]>([]);
   const [savedSearches, setSavedSearches] = useState<LibrarySavedSearch[]>([]);
   const [pendingTopicId, setPendingTopicId] = useState<string | null>(null);
@@ -268,19 +323,60 @@ export function LesesaalBody() {
     try { window.localStorage.setItem(LAST_VISIT_KEY, String(Math.floor(Date.now() / 1000))); } catch { /* private mode */ }
   }, []);
 
+  // Deep-Links (S2): geöffnetes Dokument als `item`-Search-Param — öffnen ist
+  // ein push (Back-Button schließt das Dokument), schließen/Filterwechsel ist
+  // ein replace (kein Verlauf-Wachstum für reine Zustands-Aufräumarbeit).
+  const openItem = useCallback((next: LibraryItem) => {
+    setReading(next);
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set("item", next.id);
+      return p;
+    });
+  }, [setSearchParams]);
+
+  const closeItem = useCallback(() => {
+    setReading(null);
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.delete("item");
+      return p;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  const fetchPage = useCallback(async (offset: number) => {
+    const params = new URLSearchParams();
+    if (category) params.set("category", category);
+    if (q.trim()) params.set("q", q.trim());
+    params.set("limit", String(LESESAAL_PAGE_SIZE));
+    params.set("offset", String(offset));
+    return fetchJSON<LibraryListResponse>(`/api/library/items?${params.toString()}`);
+  }, [category, q]);
+
   const load = useCallback(async () => {
     try {
-      const params = new URLSearchParams();
-      if (category) params.set("category", category);
-      if (q.trim()) params.set("q", q.trim());
-      params.set("limit", "120");
-      const res = await fetchJSON<LibraryListResponse>(`/api/library/items?${params.toString()}`);
+      const res = await fetchPage(0);
       setData(res);
+      setItems(res.items ?? []);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [category, q]);
+  }, [fetchPage]);
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
+    try {
+      const res = await fetchPage(items.length);
+      setData(res);
+      setItems((current) => dedupeById([...current, ...(res.items ?? [])]));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [fetchPage, items.length]);
 
   const loadPreferences = useCallback(async () => {
     try {
@@ -313,9 +409,9 @@ export function LesesaalBody() {
 
   const applySavedSearch = useCallback((search: LibrarySavedSearch) => {
     setCategory(null);
-    setReading(null);
+    closeItem();
     setQ(search.query);
-  }, []);
+  }, [closeItem]);
 
   useEffect(() => {
     // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip): synchrones
@@ -334,21 +430,49 @@ export function LesesaalBody() {
     };
   }, [load, loadPreferences]);
 
-  const items = useMemo(() => data?.items ?? [], [data]);
+  // Deep-Link wiederherstellen (Reload/Link-Teilen, S2): das Item steht ggf.
+  // schon in den geladenen Seiten — sonst direkt nachladen (funktioniert auch,
+  // wenn das Ziel jenseits der aktuell geladenen Seiten liegt). Der "found"-
+  // Zweig löst setTimeout(0) statt synchronem setState im Effect-Body aus —
+  // Hauskonvention (TriageStrip/LesesaalBody-Erst-Load), siehe react-hooks/
+  // set-state-in-effect.
+  useEffect(() => {
+    const id = searchParams.get("item");
+    if (!id) return;
+    if (reading && reading.id === id) return;
+    const found = items.find((i) => i.id === id);
+    if (found) {
+      const handle = window.setTimeout(() => setReading(found), 0);
+      return () => window.clearTimeout(handle);
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const d = await fetchJSON<LibraryDetail>(`/api/library/item?id=${encodeURIComponent(id)}`);
+        if (!cancelled) setReading(d);
+      } catch {
+        // Deep-Link zeigt auf ein verschwundenes/ungültiges Item — Liste bleibt sichtbar.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [searchParams, items, reading]);
+
   const isFrontpage = !category && !q.trim();
 
   const frontpage = useMemo(() => newestPerCategory(items), [items]);
   const shelves = useMemo(() => groupBySeries(items), [items]);
+  const sortedItems = useMemo(() => sortItems(items, sort), [items, sort]);
   const neighbors = useMemo(() => seriesNeighbors(items, reading), [reading, items]);
   const counts = useMemo(() => countByCategory(items), [items]);
+  const hasMore = data?.has_more ?? false;
 
   return (
     <div className="space-y-4">
       <div className="hc-surface-card p-3">
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => { setCategory(null); setReading(null); }} className={`inline-flex min-h-9 items-center rounded-full border px-3 py-1 text-[0.78rem] ${!category ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>{t.frontpage}</button>
+          <button type="button" onClick={() => { setCategory(null); closeItem(); }} className={`inline-flex min-h-9 items-center rounded-full border px-3 py-1 text-[0.78rem] ${!category ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>{t.frontpage}</button>
           {(data?.categories ?? []).map((c) => (
-            <button key={c} type="button" onClick={() => { setCategory(c); setReading(null); }} className={`inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 py-1 text-[0.78rem] ${category === c ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>
+            <button key={c} type="button" onClick={() => { setCategory(c); closeItem(); }} className={`inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 py-1 text-[0.78rem] ${category === c ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>
               {CATEGORY_LABEL[c] ?? c}
               {counts[c] ? <span className="hc-mono text-[0.66rem] hc-dim">{counts[c]}</span> : null}
             </button>
@@ -362,24 +486,34 @@ export function LesesaalBody() {
             className="min-w-48 flex-1 rounded-md border border-[var(--hc-border)] bg-black/25 px-3 py-1.5 text-sm text-white placeholder:hc-dim"
           />
         </div>
+        <div className="mt-2 flex items-center gap-2">
+          <SortToggle sort={sort} onChange={setSort} />
+        </div>
       </div>
 
       <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
       <SavedSearchShelf searches={savedSearches} onApply={applySavedSearch} />
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
-      {data?.truncated ? <p className="text-xs text-amber-200">{t.truncated}</p> : null}
 
       {reading ? (
-        <ReadingView item={reading} neighbors={neighbors} onNavigate={setReading} onBack={() => setReading(null)} />
+        <ReadingView item={reading} neighbors={neighbors} onNavigate={openItem} onBack={closeItem} />
       ) : data === null && !error ? (
         <SkeletonCard rows={4} />
       ) : data !== null && items.length === 0 ? (
         <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
+      ) : sort !== "newest" ? (
+        <FleetPanel eyebrow={t.sortListEyebrow} meta={t.issues(sortedItems.length)}>
+          <ul className="space-y-1.5">
+            {sortedItems.map((item) => (
+              <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} />
+            ))}
+          </ul>
+        </FleetPanel>
       ) : isFrontpage ? (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {frontpage.map((item) => (
-            <button key={item.id} type="button" onClick={() => setReading(item)} className="hc-surface-card space-y-2 p-4 text-left hover:bg-white/5">
+            <button key={item.id} type="button" onClick={() => openItem(item)} className="hc-surface-card space-y-2 p-4 text-left hover:bg-white/5">
               <p className="hc-eyebrow">{CATEGORY_LABEL[item.category] ?? item.category}</p>
               <h3 className="text-[0.95rem] font-semibold leading-snug text-white">{item.title}</h3>
               <p className="line-clamp-3 text-[0.8rem] leading-relaxed hc-soft">{item.preview}</p>
@@ -396,13 +530,48 @@ export function LesesaalBody() {
             <FleetPanel key={shelf.seriesId} eyebrow={shelf.series} meta={`${shelf.meta ? `${shelf.meta} · ` : ""}${t.issues(shelf.items.length)} · zuletzt ${fmtClock(shelf.items[0]?.ts ?? 0)}`}>
               <ul className="space-y-1.5">
                 {shelf.items.map((item) => (
-                  <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={setReading} />
+                  <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} />
                 ))}
               </ul>
             </FleetPanel>
           ))}
         </div>
       )}
+
+      {!reading && hasMore ? (
+        <div className="flex justify-center pt-1">
+          <button
+            type="button"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            className="inline-flex min-h-9 items-center rounded-full border border-white/10 px-4 py-1.5 text-[0.78rem] hc-soft hover:bg-white/5 disabled:opacity-50"
+          >
+            {loadingMore ? t.loadingMore : t.loadMore}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SortToggle({ sort, onChange }: { sort: LesesaalSort; onChange: (sort: LesesaalSort) => void }) {
+  const opt = (value: LesesaalSort, label: string) => (
+    <button
+      type="button"
+      aria-pressed={sort === value}
+      onClick={() => onChange(value)}
+      className={`inline-flex min-h-8 items-center rounded-full border px-2.5 py-1 text-[0.74rem] ${
+        sort === value ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:bg-white/5"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div role="group" aria-label={t.sortLabel} className="flex items-center gap-1">
+      {opt("newest", t.sortNewest)}
+      {opt("oldest", t.sortOldest)}
+      {opt("az", t.sortAz)}
     </div>
   );
 }
@@ -436,8 +605,22 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
 }
 
 export function BibliothekView({ density }: { density?: Density }) {
-  const [mode, setMode] = useState<Mode>("wissen");
+  // Modus als URL-Search-Param (S2, Deep-Links): Reload/Link-Teilen stellt den
+  // Modus wieder her. Moduswechsel ist ein "Filterwechsel" → replace, kein
+  // Verlaufseintrag. Beide Panels bleiben IMMER gemountet (nur `hidden`
+  // umschaltet) — so verwirft der Wechsel wissen↔lesesaal weder Suchtext/
+  // Filter noch das offene Dokument des jeweils anderen Modus (S3).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const mode: Mode = searchParams.get("mode") === "lesesaal" ? "lesesaal" : "wissen";
   const wissen = mode === "wissen";
+  const setMode = useCallback((next: Mode) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      if (next === "wissen") p.delete("mode");
+      else p.set("mode", next);
+      return p;
+    }, { replace: true });
+  }, [setSearchParams]);
   return (
     <div className="space-y-4">
       <Hero
@@ -449,11 +632,8 @@ export function BibliothekView({ density }: { density?: Density }) {
       >
         <ModeSwitch mode={mode} onChange={setMode} />
       </Hero>
-      {wissen ? (
-        <div id="bibliothek-panel-wissen" role="tabpanel"><KnowledgeShelf /></div>
-      ) : (
-        <div id="bibliothek-panel-lesesaal" role="tabpanel"><LesesaalBody /></div>
-      )}
+      <div id="bibliothek-panel-wissen" role="tabpanel" hidden={!wissen}><KnowledgeShelf /></div>
+      <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={wissen}><LesesaalBody /></div>
     </div>
   );
 }

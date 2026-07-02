@@ -352,7 +352,11 @@ def _split_frontmatter_rich(raw: str) -> tuple[dict[str, Any], str]:
     return {}, raw
 
 
-def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> Optional[tuple[dict[str, Any], str]]:
+def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> tuple[dict[str, Any], str]:
+    """``---``-Frontmatter abtrennen. Fail-soft wie ``_split_frontmatter``, aber
+    mit Warnung: kaputtes YAML darf den Plan nie aus dem Regal werfen — er
+    bleibt gelistet, nur mit leeren Metadaten (Titel fällt dann über
+    ``_first_heading``/Dateiname zurück, s. ``_build_vault_plan``)."""
     lines = raw.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, raw
@@ -360,28 +364,30 @@ def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> Optional[tuple[dict[
         if lines[idx].strip() != "---":
             continue
         fm_text = "\n".join(lines[1:idx])
+        body = "\n".join(lines[idx + 1:]).lstrip("\n")
         import yaml
 
         try:
             data = yaml.safe_load(fm_text)
         except Exception as exc:
             logger.warning(
-                "knowledge: skipping vault plan with malformed frontmatter: %s (%s)",
+                "knowledge: vault plan has malformed frontmatter, listing with empty metadata: %s (%s)",
                 rel,
                 exc,
             )
-            return None
+            return {}, body
         if data is None:
             meta: dict[str, Any] = {}
         elif isinstance(data, dict):
             meta = {str(k).lower(): v for k, v in data.items()}
         else:
             logger.warning(
-                "knowledge: skipping vault plan with malformed frontmatter: %s (frontmatter is not a mapping)",
+                "knowledge: vault plan has malformed frontmatter, listing with empty metadata: "
+                "%s (frontmatter is not a mapping)",
                 rel,
             )
-            return None
-        return meta, "\n".join(lines[idx + 1:]).lstrip("\n")
+            return {}, body
+        return meta, body
     return {}, raw
 
 
@@ -469,6 +475,7 @@ def _llm_wiki_type(rel: str, meta: dict[str, Any]) -> str:
         "entities": "entity",
         "queries": "query",
         "sources": "source",
+        "models": "model",
         "lint": "lint",
         "overview.md": "overview",
         "synthesis.md": "synthesis",
@@ -525,10 +532,7 @@ def _build_vault_plan(rel: str, *, with_body: bool) -> Optional[_KbDoc]:
     raw = _read_text(target)
     if raw is None:
         return None
-    parsed = _split_vault_plan_frontmatter(raw, rel=rel)
-    if parsed is None:
-        return None
-    meta, body = parsed
+    meta, body = _split_vault_plan_frontmatter(raw, rel=rel)
     title = _meta_string(meta, "title") or _first_heading(body) or Path(rel).stem.replace("-", " ").title()
     summary = (
         _meta_string(meta, "summary")
@@ -710,7 +714,8 @@ def _scan_llm_wiki_rels() -> list[str]:
         "entities": 3,
         "queries": 4,
         "sources": 5,
-        "lint": 6,
+        "models": 6,
+        "lint": 7,
     }
 
     def sort_key(rel: str) -> tuple[int, str]:
@@ -739,6 +744,35 @@ def _scan_vault_plan_rels() -> list[str]:
         if _VAULT_PLAN_REL_RE.match(rel):
             rels.append(rel)
     return sorted(rels, key=str.casefold)
+
+
+# ---------------------------------------------------------------------------
+# Wissens-Puls: jüngste Einträge aus dem cron-gepflegten model-log fürs
+# llm-wiki-Regal ("Neu entdeckt: <Modell> · <Datum>").
+# ---------------------------------------------------------------------------
+
+# Zeilenformat laut model-log.md selbst: "- YYYY-MM-DD `model-id` (context Xk,
+# $Y/$Z per 1M)". Der Klammerteil ist optional (nur der Beleg-Text).
+_MODEL_LOG_LINE_RE = re.compile(
+    r"^-\s+(\d{4}-\d{2}-\d{2})\s+`([^`]+)`\s*(?:\((.*)\))?\s*$"
+)
+
+
+def _model_log_pulse(limit: int = 3) -> list[dict[str, str]]:
+    """Jüngste ``limit`` Discovery-Zeilen aus ``wiki/models/model-log.md``,
+    neuestes zuerst (Datei ist append-only, jüngstes steht unten)."""
+    path = _llm_wiki_root() / "models" / "model-log.md"
+    raw = _read_text(path)
+    if raw is None:
+        return []
+    entries: list[dict[str, str]] = []
+    for line in raw.splitlines():
+        m = _MODEL_LOG_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        date, model, detail = m.group(1), m.group(2), (m.group(3) or "").strip()
+        entries.append({"date": date, "model": model, "detail": detail})
+    return list(reversed(entries[-limit:]))
 
 
 def _collect_docs(*, with_bodies: bool) -> list[_KbDoc]:
@@ -818,14 +852,19 @@ def list_knowledge(q: Optional[str] = None) -> dict[str, Any]:
             continue  # bei aktiver Suche leere Regale ausblenden
         # Statische Docs in Registry-Reihenfolge, dynamische alphabetisch — das
         # garantiert _collect_docs schon (static zuerst, Slugs sortiert).
-        collections_out.append({
+        entry: dict[str, Any] = {
             "id": col.id,
             "title": col.title,
             "description": col.description,
             "accent": col.accent,
             "icon": col.icon,
+            "doc_count": len(members),
+            "updated_ts": max((d.updated_ts for d in members), default=0),
             "docs": [d.as_card() for d in members],
-        })
+        }
+        if col.id == "llm-wiki":
+            entry["pulse"] = _model_log_pulse()
+        collections_out.append(entry)
 
     return {
         "collections": collections_out,

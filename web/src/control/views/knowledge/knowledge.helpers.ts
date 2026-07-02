@@ -1,6 +1,7 @@
 // Bibliothek → Wissen/Kanon (Nachschlagewerk): Typen + kleine reine Helfer.
 // Ausgelagert aus den Komponentendateien (react-refresh/only-export-components)
 // und für Unit-Tests importierbar.
+import { PROSE_DEAD_LINK_SCHEME, PROSE_INTERNAL_LINK_SCHEME } from "../../components/ProseMarkdown";
 import type { ToneName } from "../../lib/types";
 
 export interface KnowledgeDoc {
@@ -18,12 +19,26 @@ export interface KnowledgeDoc {
   status?: string;
 }
 
+/** Ein Eintrag im "Wissens-Puls" — jüngste Zeile aus dem cron-gepflegten
+ *  llm-wiki model-log (siehe hermes_cli/library_knowledge.py `_model_log_pulse`). */
+export interface KnowledgePulseItem {
+  date: string;
+  model: string;
+  detail: string;
+}
+
 export interface KnowledgeCollection {
   id: string;
   title: string;
   description: string;
   accent: ToneName;
   icon: string;
+  /** Gesamtzahl Docs der Sammlung (Backend-Feld, unabhängig von Client-Filtern). */
+  doc_count: number;
+  /** jüngste mtime aller Docs der Sammlung, 0 = unbekannt/leer. */
+  updated_ts: number;
+  /** nur llm-wiki: die letzten Modell-Discovery-Einträge, neuestes zuerst. */
+  pulse?: KnowledgePulseItem[];
   docs: KnowledgeDoc[];
 }
 
@@ -74,6 +89,8 @@ export function knowledgeTypeLabel(type: string): string {
       return "Entitäten";
     case "source":
       return "Quellen";
+    case "model":
+      return "Modelle";
     case "query":
       return "Antworten";
     case "lint":
@@ -109,16 +126,17 @@ export function typeCounts(collections: KnowledgeCollection[]): KnowledgeTypeCou
     ["concept", 0],
     ["entity", 1],
     ["source", 2],
-    ["query", 3],
-    ["overview", 4],
-    ["synthesis", 5],
-    ["implementation", 6],
-    ["planspec", 7],
-    ["plan", 8],
-    ["skill", 9],
-    ["rolle", 10],
-    ["doc", 11],
-    ["lint", 12],
+    ["model", 3],
+    ["query", 4],
+    ["overview", 5],
+    ["synthesis", 6],
+    ["implementation", 7],
+    ["planspec", 8],
+    ["plan", 9],
+    ["skill", 10],
+    ["rolle", 11],
+    ["doc", 12],
+    ["lint", 13],
   ]);
   return Array.from(counts.entries())
     .map(([id, count]) => ({ id, label: knowledgeTypeLabel(id), count }))
@@ -142,4 +160,56 @@ export function filterCatalog(
     collections,
     count: totalDocs(collections),
   };
+}
+
+// --- Obsidian-Wikilinks (llm-wiki) → interne Navigation ---------------------
+// Seiten unter ~/llm-wiki/wiki verlinken sich per Obsidian-Wikilink:
+// `[[wiki/concepts/foo|Label]]` oder `[[wiki/concepts/foo]]`. rel-Format
+// spiegelt hermes_cli/library_knowledge.py `_LLM_WIKI_REL_RE`: pro Segment
+// Kleinbuchstaben/Ziffern/„-"/„_", endet auf `.md`. Nur `wiki/`-präfigierte
+// Ziele in diesem Format bilden eine gültige Doc-Id (`kb::llm::<rel>`) —
+// alles andere (`[[index]]`, `[[log]]`, kaputte Slugs) ist ein toter Link.
+const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+const LLM_WIKI_REL_RE = /^(?:[a-z0-9][a-z0-9_-]*\/)*[a-z0-9][a-z0-9_-]*\.md$/;
+
+/** "concepts/raw-wiki-schema.md" → "Raw Wiki Schema" (letztes Segment,
+ *  Bindestriche zu Leerzeichen, Titel-Case) — Fallback-Label ohne Alias,
+ *  spiegelt den Titel-Fallback im Backend (`Path(rel).stem…title()`). */
+function humanizeWikiSlug(relMd: string): string {
+  const stem = relMd.slice(relMd.lastIndexOf("/") + 1).replace(/\.md$/, "");
+  return stem
+    .split("-")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+/** Wikilinks im Markdown-Rohtext einer llm-wiki-Seite durch normale
+ *  Markdown-Links mit `internal-link:`/`dead-link:`-Schema ersetzen
+ *  (Preprocessing vor `ProseMarkdown`, siehe deren `onInternalLink`).
+ *  Fenced-Code-Blöcke (```) bleiben unangetastet. */
+export function resolveWikiLinks(bodyMd: string): string {
+  let fenced = false;
+  return bodyMd
+    .split("\n")
+    .map((line) => {
+      if (line.trimStart().startsWith("```")) {
+        fenced = !fenced;
+        return line;
+      }
+      if (fenced) return line;
+      return line.replace(WIKILINK_RE, (_full, rawTarget: string, rawLabel?: string) => {
+        const target = rawTarget.trim();
+        const rel = target.startsWith("wiki/") ? target.slice("wiki/".length) : target;
+        const relMd = rel.endsWith(".md") ? rel : `${rel}.md`;
+        if (target.startsWith("wiki/") && LLM_WIKI_REL_RE.test(relMd)) {
+          const label = (rawLabel ?? humanizeWikiSlug(relMd)).trim();
+          const id = `kb::llm::${relMd}`;
+          return `[${label}](${PROSE_INTERNAL_LINK_SCHEME}${encodeURIComponent(id)})`;
+        }
+        const label = (rawLabel ?? target).trim();
+        return `[${label}](${PROSE_DEAD_LINK_SCHEME}${encodeURIComponent(target)})`;
+      });
+    })
+    .join("\n");
 }

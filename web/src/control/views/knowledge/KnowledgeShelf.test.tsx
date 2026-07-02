@@ -65,16 +65,53 @@ describe("CollectionSection", () => {
     description: "Dauerhafte, agent-übergreifende Fakten.",
     accent: "cyan",
     icon: "Landmark",
+    doc_count: 2,
+    updated_ts: 1000,
     docs: [doc({ id: "a", title: "Doc A" }), doc({ id: "b", title: "Doc B" })],
   };
 
   it("rendert Titel, Beschreibung, Doc-Zahl und beide Karten", () => {
-    const html = renderToStaticMarkup(<CollectionSection collection={collection} onOpen={() => {}} />);
+    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={1000} onOpen={() => {}} />);
     expect(html).toContain("Kanon — Die geteilte Wahrheit");
     expect(html).toContain("Dauerhafte, agent-übergreifende Fakten.");
     expect(html).toContain("2 Dokumente");
     expect(html).toContain("Doc A");
     expect(html).toContain("Doc B");
+  });
+
+  it("zeigt einen „aktualisiert vor X“-Chip aus updated_ts/now", () => {
+    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={1000 + 3600} onOpen={() => {}} />);
+    expect(html).toContain("aktualisiert vor 1h");
+  });
+
+  it("blendet den Chip aus, wenn updated_ts 0 ist (leere Sammlung)", () => {
+    const html = renderToStaticMarkup(
+      <CollectionSection collection={{ ...collection, updated_ts: 0 }} now={1000} onOpen={() => {}} />,
+    );
+    expect(html).not.toContain("aktualisiert vor");
+  });
+
+  it("rendert den Wissens-Puls-Strip nur, wenn `pulse` gesetzt ist", () => {
+    const withoutPulse = renderToStaticMarkup(<CollectionSection collection={collection} now={1000} onOpen={() => {}} />);
+    expect(withoutPulse).not.toContain("Neu entdeckt:");
+
+    const withPulse = renderToStaticMarkup(
+      <CollectionSection
+        collection={{
+          ...collection,
+          pulse: [
+            { date: "2026-07-02", model: "x-ai/grok-build-0.1", detail: "context 256k, $1.00/$2.00 per 1M" },
+            { date: "2026-07-01", model: "google/gemini-3.5-flash", detail: "context 1M, $1.50/$9.00 per 1M" },
+          ],
+        }}
+        now={1000}
+        onOpen={() => {}}
+      />,
+    );
+    expect(withPulse).toContain("Neu entdeckt:");
+    expect(withPulse).toContain("x-ai/grok-build-0.1");
+    expect(withPulse).toContain("2026-07-02");
+    expect(withPulse).toContain("google/gemini-3.5-flash");
   });
 });
 
@@ -107,8 +144,8 @@ describe("helpers", () => {
 
   it("totalDocs summiert über Sammlungen", () => {
     expect(totalDocs([
-      { id: "a", title: "", description: "", accent: "cyan", icon: "", docs: [doc({}), doc({})] },
-      { id: "b", title: "", description: "", accent: "amber", icon: "", docs: [doc({})] },
+      { id: "a", title: "", description: "", accent: "cyan", icon: "", doc_count: 2, updated_ts: 0, docs: [doc({}), doc({})] },
+      { id: "b", title: "", description: "", accent: "amber", icon: "", doc_count: 1, updated_ts: 0, docs: [doc({})] },
     ])).toBe(3);
   });
 
@@ -118,6 +155,11 @@ describe("helpers", () => {
     expect(knowledgeType(doc({ collection: "skills", tags: [] }))).toBe("skill");
     expect(knowledgeTypeLabel("concept")).toBe("Konzepte");
     expect(knowledgeTypeLabel("implementation")).toBe("Implementierung");
+  });
+
+  it("knowledgeTypeLabel übersetzt den neuen models-Typ", () => {
+    expect(knowledgeType(doc({ tags: ["llm-wiki", "type:model"] }))).toBe("model");
+    expect(knowledgeTypeLabel("model")).toBe("Modelle");
   });
 
   it("akzeptiert das Vault-Plans-Backend-Schema inklusive Metadaten, Icon und Akzent", () => {
@@ -130,6 +172,8 @@ describe("helpers", () => {
           description: "Vault-Plan-Dokumente aus 03-Agents.",
           accent: "rose",
           icon: "Newspaper",
+          doc_count: 1,
+          updated_ts: plan.updated_ts,
           docs: [plan],
         },
       ],
@@ -155,15 +199,19 @@ describe("helpers", () => {
         description: "",
         accent: "indigo",
         icon: "Brain",
+        doc_count: 4,
+        updated_ts: 0,
         docs: [
           doc({ id: "query", tags: ["type:query"] }),
           doc({ id: "concept-a", tags: ["type:concept"] }),
           doc({ id: "concept-b", tags: ["type:concept"] }),
+          doc({ id: "model-a", tags: ["type:model"] }),
         ],
       },
     ];
     expect(typeCounts(collections)).toEqual([
       { id: "concept", label: "Konzepte", count: 2 },
+      { id: "model", label: "Modelle", count: 1 },
       { id: "query", label: "Antworten", count: 1 },
     ]);
   });
@@ -177,6 +225,8 @@ describe("helpers", () => {
           description: "",
           accent: "cyan",
           icon: "Landmark",
+          doc_count: 1,
+          updated_ts: 0,
           docs: [doc({ id: "canon", collection: "kanon", tags: [] })],
         },
         {
@@ -185,6 +235,8 @@ describe("helpers", () => {
           description: "",
           accent: "indigo",
           icon: "Brain",
+          doc_count: 2,
+          updated_ts: 0,
           docs: [
             doc({ id: "concept", collection: "llm-wiki", tags: ["type:concept"] }),
             doc({ id: "query", collection: "llm-wiki", tags: ["type:query"] }),

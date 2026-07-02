@@ -208,6 +208,52 @@ def test_list_items_search_and_category_filter(kanban_home):
     assert lv._list_items("briefings", None, 10)["count"] == 1
 
 
+def test_list_items_offset_pagination_and_has_more(kanban_home):
+    """S6 (Bibliothek-Lesesaal, "Mehr laden"): ``offset`` paginiert über die
+    bereits sortierte (neueste-zuerst) Liste, ``has_more`` zeigt an, ob nach
+    der aktuellen Seite noch weitere Treffer folgen."""
+    store = kanban_home / "cron"
+    store.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for n in range(5):
+        job_id = f"{n:012x}"
+        jobs.append({
+            "id": job_id, "name": f"Job {n}", "enabled": True,
+            "prompt": "GEHEIM", "script": None,
+            "schedule": {"kind": "cron", "expr": "0 7 * * *", "display": "0 7 * * *"},
+        })
+        out = store / "output" / job_id
+        out.mkdir(parents=True)
+        (out / f"2026-06-{10 + n:02d}_07-00-00.md").write_text(
+            f"## Response\n\nAusgabe {n}.\n", encoding="utf-8",
+        )
+    (store / "jobs.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+
+    first_page = lv._list_items(None, None, 2, offset=0)
+    assert first_page["count"] == 5
+    assert len(first_page["items"]) == 2
+    assert first_page["has_more"] is True
+    # Neueste zuerst (Job 4 wurde zuletzt geschrieben → höchstes Datum).
+    assert [i["series"] for i in first_page["items"]] == ["Job 4", "Job 3"]
+
+    second_page = lv._list_items(None, None, 2, offset=2)
+    assert second_page["has_more"] is True
+    assert [i["series"] for i in second_page["items"]] == ["Job 2", "Job 1"]
+    # Seiten überschneiden sich nicht — Ids aus Seite 1 und 2 sind disjunkt.
+    first_ids = {i["id"] for i in first_page["items"]}
+    second_ids = {i["id"] for i in second_page["items"]}
+    assert first_ids.isdisjoint(second_ids)
+
+    last_page = lv._list_items(None, None, 2, offset=4)
+    assert last_page["has_more"] is False
+    assert [i["series"] for i in last_page["items"]] == ["Job 0"]
+
+    beyond_end = lv._list_items(None, None, 2, offset=10)
+    assert beyond_end["items"] == []
+    assert beyond_end["has_more"] is False
+    assert beyond_end["count"] == 5
+
+
 def test_cron_collector_cache_and_per_job_cap(kanban_home):
     """Härtung (b): mtime-Cache liefert identische Ergebnisse, invalidiert
     bei Datei-Änderung, und pro Job werden nur die neuesten

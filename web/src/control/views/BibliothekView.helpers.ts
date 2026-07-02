@@ -62,3 +62,30 @@ export function seriesNeighbors(
     next: idx > 0 ? series[idx - 1] : null,
   };
 }
+
+/** Sortier-Kontrolle Lesesaal (S5): "Neueste" ist bereits die Server-
+ *  Reihenfolge (ts-absteigend) — die anderen Modi sortieren clientseitig über
+ *  die bislang geladenen Items. */
+export type LesesaalSort = "newest" | "oldest" | "az";
+
+export function sortItems(items: LibraryItem[], sort: LesesaalSort): LibraryItem[] {
+  if (sort === "newest") return items;
+  const copy = [...items];
+  if (sort === "oldest") copy.sort((a, b) => a.ts - b.ts);
+  else copy.sort((a, b) => a.title.localeCompare(b.title, "de"));
+  return copy;
+}
+
+/** "Mehr laden" (S6): angehängte Seiten nach `id` deduplizieren — der Server
+ *  liefert bei Rand-Overlaps (neue Items zwischen zwei Requests) sonst
+ *  doppelte Zeilen in der Liste. */
+export function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}

@@ -3,6 +3,7 @@ import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow
 import { fetchJSON } from "@/lib/api";
 import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ToneCallout } from "../../components/atoms";
+import { fmtAge, nowSec } from "../../lib/derive";
 import { toneClasses } from "../../lib/tones";
 import {
   filterCatalog,
@@ -53,6 +54,8 @@ const t = {
   collections: "Regale",
   types: "Typen",
   total: (n: number) => `${n} Dokumente`,
+  updatedAgo: (age: string) => `aktualisiert vor ${age}`,
+  pulsePrefix: "Neu entdeckt:",
 };
 
 function FilterButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
@@ -178,9 +181,32 @@ export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: Know
   );
 }
 
+/** Kompakter, mobil einzeilig scrollbarer Puls-Strip: die letzten
+ *  Modell-Discovery-Einträge des llm-wiki (siehe `_model_log_pulse`). */
+function PulseStrip({ pulse }: { pulse: NonNullable<KnowledgeCollection["pulse"]> }) {
+  return (
+    <div className="mt-2 flex items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5">
+      <span className="shrink-0 text-[0.68rem] hc-dim">{t.pulsePrefix}</span>
+      {pulse.map((item, i) => (
+        <span
+          key={`${item.model}-${i}`}
+          className="shrink-0 rounded-full border border-white/10 px-2 py-0.5 text-[0.66rem] hc-soft"
+        >
+          <span className="hc-mono">{item.model}</span> · {item.date}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** Eine Sammlung (ein Regal): Akzent-Icon, Titel, Beschreibung, Doc-Raster.
  *  Exportiert für Unit-Tests. */
-export function CollectionSection({ collection, onOpen }: { collection: KnowledgeCollection; onOpen: (doc: KnowledgeDoc) => void }) {
+export function CollectionSection({ collection, now, onOpen }: {
+  collection: KnowledgeCollection;
+  /** epoch-Sekunden "jetzt" (aus `catalog.now`) für den "aktualisiert vor X"-Chip. */
+  now: number;
+  onOpen: (doc: KnowledgeDoc) => void;
+}) {
   return (
     <section className="space-y-3">
       <header className="flex items-start gap-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
@@ -191,8 +217,12 @@ export function CollectionSection({ collection, onOpen }: { collection: Knowledg
           <div className="flex flex-wrap items-baseline gap-x-2">
             <h3 className="text-[1.02rem] font-semibold text-white">{collection.title}</h3>
             <span className="hc-mono text-[0.7rem] hc-dim">{t.docs(collection.docs.length)}</span>
+            {collection.updated_ts > 0 ? (
+              <span className="hc-mono text-[0.7rem] hc-dim">· {t.updatedAgo(fmtAge(collection.updated_ts, now))}</span>
+            ) : null}
           </div>
           <p className="mt-0.5 text-[0.8rem] leading-relaxed hc-soft">{collection.description}</p>
+          {collection.pulse && collection.pulse.length > 0 ? <PulseStrip pulse={collection.pulse} /> : null}
         </div>
       </header>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -243,6 +273,7 @@ export function KnowledgeShelf() {
 
   const collections = visibleCatalog?.collections ?? [];
   const searching = q.trim().length > 0;
+  const nowTs = visibleCatalog?.now ?? nowSec();
 
   return (
     <div className="space-y-4">
@@ -281,7 +312,7 @@ export function KnowledgeShelf() {
       ) : (
         <div className="space-y-4">
           {collections.map((collection) => (
-            <CollectionSection key={collection.id} collection={collection} onOpen={setReading} />
+            <CollectionSection key={collection.id} collection={collection} now={nowTs} onOpen={setReading} />
           ))}
         </div>
       )}
