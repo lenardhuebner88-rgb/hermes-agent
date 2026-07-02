@@ -1,0 +1,24 @@
+# test-stabiliser — Sweep gegen flaky Tests und Test-Isolation-Leaker.
+# Blaupause: Berman "Test Stabiliser"; adressiert unseren green-gate-Schmerz
+# (leaker_only-Nächte: sys.modules-Splits, Cross-File-Isolation).
+name: test-stabiliser
+type: sweep
+description: Pro Runde EINEN flaky/leaky Test stabilisieren (mit Stabilitäts-Beweis)
+stability: stable
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  fokus: "tests/ des hermes-agent; Prio: sys.modules-Restore, Cross-File-Leaks, Timing-Flakes"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

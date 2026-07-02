@@ -58,3 +58,5 @@ def get_engine(name: str) -> Callable:
 # Selbst-Registrierung der mitgelieferten Engines (am Modulende, damit
 # register/EngineResult beim Import der Untermodule bereits existieren).
 from . import claude_cli  # noqa: E402,F401
+from . import kimi_cli  # noqa: E402,F401
+from . import codex_cli  # noqa: E402,F401

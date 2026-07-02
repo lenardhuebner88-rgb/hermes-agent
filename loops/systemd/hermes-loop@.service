@@ -1,0 +1,14 @@
+# hermes-loop@<pack>.service — ein Nacht-Lauf des Loop-Runner-Packs <pack>.
+# Installation: loops/systemd/install.sh · Start: systemctl --user start hermes-loop@<pack>
+# Der Runner selbst hält Pack- und Repo-Locks; Doppel-Starts enden sauber (rc 3).
+[Unit]
+Description=Hermes Loop-Runner: Pack %i (night)
+
+[Service]
+Type=oneshot
+# Läuft im Live-Checkout; der Runner arbeitet in einem isolierten Worktree
+# unter ~/.hermes/loops/%i/wt und pusht/deployt nie selbst.
+ExecStart=%h/.hermes/hermes-agent/loops/shim.sh %i
+# Nacht-Budget: plan + run (max_hours default 7h) + Puffer.
+TimeoutStartSec=9h
+Nice=10

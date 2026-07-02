@@ -83,7 +83,13 @@ class Pack:
         return f"loop/{self.name}"
 
 
+_PACK_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+
 def load_pack(packs_dir: Path, name: str) -> Pack:
+    # Charset-Whitelist vor jedem Pfad-Join (CLI und HTTP teilen sich diesen Loader).
+    if not _PACK_NAME_RE.match(name):
+        raise ManifestError(f"Pack-Name ungültig: {name!r}")
     pack_dir = packs_dir / name
     manifest = pack_dir / "pack.yaml"
     if not manifest.is_file():
@@ -124,8 +130,12 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 f"Pack {name!r}: Phase {pname}: Engine {pcfg['engine']!r} unbekannt "
                 f"(registriert: {sorted(engines.ENGINES)})"
             )
-        if not isinstance(pcfg["timeout"], int) or pcfg["timeout"] <= 0:
+        # bool ist int-Subklasse: `timeout: true` wäre sonst ein 1s-Timeout.
+        if not isinstance(pcfg["timeout"], int) or isinstance(pcfg["timeout"], bool) \
+                or pcfg["timeout"] <= 0:
             raise ManifestError(f"Pack {name!r}: Phase {pname}: timeout muss positive Ganzzahl sein")
+        if pcfg["model"] is None or not str(pcfg["model"]).strip():
+            raise ManifestError(f"Pack {name!r}: Phase {pname}: model fehlt/leer")
         prompt_file = pack_dir / str(pcfg["prompt"])
         if not prompt_file.is_file():
             raise ManifestError(f"Pack {name!r}: Phase {pname}: Prompt-Datei fehlt: {prompt_file}")
@@ -134,11 +144,14 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
             timeout=pcfg["timeout"], prompt=str(pcfg["prompt"]),
         )
 
+    for section in ("stop", "params", "notify"):
+        if raw.get(section) is not None and not isinstance(raw[section], dict):
+            raise ManifestError(f"Pack {name!r}: {section} muss ein Mapping sein")
     stop = dict(DEFAULT_STOP)
     for key, val in (raw.get("stop") or {}).items():
         if key not in DEFAULT_STOP:
             raise ManifestError(f"Pack {name!r}: stop.{key} unbekannt (erlaubt: {sorted(DEFAULT_STOP)})")
-        if not isinstance(val, int) or val <= 0:
+        if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
             raise ManifestError(f"Pack {name!r}: stop.{key} muss positive Ganzzahl sein")
         stop[key] = val
 
@@ -167,10 +180,20 @@ def parse_retry(plan_text: str) -> int:
 
 
 def bump_retry(plan_path: Path) -> int:
-    """Erhöht `retry: N` (nur führende Ziffern) um 1; gibt neuen Wert zurück."""
+    """Erhöht `retry: N` um 1; gibt neuen Wert zurück.
+
+    Fehlt die retry-Zeile (Planner ist ein LLM, das Schema ist kein Garant),
+    wird sie EINGEFÜGT — sonst wäre der Bump ein stiller No-Op und der Plan
+    würde nie bouncen (Review-Blocker 2026-07-02).
+    """
     text = plan_path.read_text(encoding="utf-8")
     new = parse_retry(text) + 1
-    text = RETRY_RE.sub(f"retry: {new}", text, count=1)
+    if RETRY_RE.search(text):
+        text = RETRY_RE.sub(f"retry: {new}", text, count=1)
+    elif text.startswith("---\n"):
+        text = text.replace("---\n", f"---\nretry: {new}\n", 1)
+    else:
+        text = f"retry: {new}\n{text}"
     plan_path.write_text(text, encoding="utf-8")
     return new
 
@@ -270,8 +293,13 @@ class LoopRunner:
             self.git("worktree", "remove", "--force", str(self.wt), cwd=self.pack.repo)
             self.git("branch", "-D", self.pack.branch, cwd=self.pack.repo)
         listing = self.git("worktree", "list", "--porcelain", cwd=self.pack.repo)
-        if str(self.wt.resolve()) in parse_worktree_paths(listing.stdout):
+        registered = str(self.wt.resolve()) in parse_worktree_paths(listing.stdout)
+        if registered and self.wt.is_dir():
             return
+        if registered:
+            # Registriert, aber Verzeichnis weg (State manuell gelöscht) → Eintrag
+            # aufräumen, sonst schlägt das erneute add dauerhaft fehl.
+            self.git("worktree", "prune", cwd=self.pack.repo)
         self.wt.parent.mkdir(parents=True, exist_ok=True)
         res = self.git("worktree", "add", "-B", self.pack.branch, str(self.wt), "main", cwd=self.pack.repo)
         if res.returncode != 0:
@@ -279,6 +307,9 @@ class LoopRunner:
 
     def guard_clean(self) -> bool:
         """Loop-exklusiven Baum deterministisch säubern (Driver-Ebene, hook-frei)."""
+        if not self.wt.is_dir():
+            self.say(f"ABBRUCH: Worktree fehlt: {self.wt}")
+            return False
         if not self.git("status", "--porcelain").stdout.strip():
             return True
         self.say("Worktree dirty — räume Phase-Reste auf")
@@ -294,22 +325,35 @@ class LoopRunner:
         res = self.git("revert", "--no-edit", f"{prehead}..HEAD")
         if res.returncode != 0:
             self.say(f"Revert fehlgeschlagen: {res.stderr.strip()}")
+            self.ledger(f"⚠️ REVERT FEHLGESCHLAGEN ({prehead[:9]}..HEAD): {res.stderr.strip()[:200]}")
             return False
         return True
 
     # ── Phasen ──
+    def _int_override(self, key: str, fallback: int) -> int:
+        raw = self.overrides.get(key)
+        if raw is None:
+            return fallback
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            # overrides.env kommt u.a. vom Dashboard — kaputter Wert darf keine
+            # Runde crashen, nur zurückfallen und sichtbar sein.
+            self.say(f"WARN: Override {key}={raw!r} ist keine Zahl — nutze {fallback}")
+            return fallback
+
     def phase_cfg(self, name: str) -> PhaseCfg:
         cfg = self.pack.phases[name]
         up = name.upper()
         return PhaseCfg(
             engine=self.overrides.get(f"PHASE_{up}_ENGINE", cfg.engine),
             model=self.overrides.get(f"PHASE_{up}_MODEL", cfg.model),
-            timeout=int(self.overrides.get(f"PHASE_{up}_TIMEOUT", cfg.timeout)),
+            timeout=self._int_override(f"PHASE_{up}_TIMEOUT", cfg.timeout),
             prompt=cfg.prompt,
         )
 
     def stop_cfg(self, key: str) -> int:
-        return int(self.overrides.get(key.upper(), self.pack.stop[key]))
+        return self._int_override(key.upper(), self.pack.stop[key])
 
     def render_prompt(self, phase: str, **extra: str) -> str:
         text = (self.pack.pack_dir / self.pack.phases[phase].prompt).read_text(encoding="utf-8")
@@ -356,8 +400,11 @@ class LoopRunner:
         append_section(plan, "Loop-Fail", reason)
         if parse_retry(plan.read_text(encoding="utf-8")) >= 1:
             target = self.queue / "90-bounced" / plan.name
+            if target.exists():  # Namens-Wiederverwendung: alte Evidenz nicht überschreiben
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                target = target.with_name(f"{target.stem}.{stamp}.md")
             plan.rename(target)
-            self.ledger(f"bounced: {plan.name} ({reason})")
+            self.ledger(f"bounced: {target.name} ({reason})")
             return "bounced"
         bump_retry(plan)
         plan.rename(self.queue / "00-planned" / plan.name)
@@ -419,9 +466,18 @@ class LoopRunner:
 
             build = self.run_phase("build", PLAN_PATH=str(building))
             if build.usage_limit:
-                building.rename(self.queue / "00-planned" / building.name)
-                self.say("Usage-Limit — Stop.")
-                self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt ({verified} verified).")
+                # Invariante „Branch = nur verified-oder-reverted" auch hier halten:
+                # existiert schon ein Commit, MUSS er als UNVERIFIED ausgewiesen werden
+                # (Plan bleibt in 10-building); ohne Commit zurück in die Queue.
+                if self.rev_parse() != prehead:
+                    self.say("Usage-Limit im Build — Commit vorhanden, bleibt UNVERIFIZIERT (Plan in 10-building/).")
+                    self.ledger(f"R{rnd} ⚠️ {building.name} Commit vorhanden aber UNVERIFIED (usage-limit im Build)")
+                    self.notify(f"{self.pack.name}: Usage-Limit im Build — {building.name} unverifiziert, gestoppt.")
+                else:
+                    building.rename(self.queue / "00-planned" / building.name)
+                    self.say("Usage-Limit — Stop.")
+                    self.ledger(f"R{rnd} ⏸ {building.name} zurück in die Queue (usage-limit, kein Commit)")
+                    self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt ({verified} verified).")
                 break
             status = "TIMEOUT" if build.timed_out else self.last_status()
             if self.rev_parse() == prehead or not status.startswith("BUILT"):
@@ -478,6 +534,8 @@ class LoopRunner:
                 break
             if time.time() >= deadline:
                 self.say("Wall-Clock-Deadline erreicht.")
+                break
+            if not self.guard_clean():
                 break
             self.say(f"═══ Runde {rnd} ═══")
             result = self.run_phase("round")

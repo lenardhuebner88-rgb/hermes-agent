@@ -14994,6 +14994,9 @@ register_health_status_routes(app)
 from hermes_cli.pressure_status import register_pressure_status_routes  # noqa: E402
 register_pressure_status_routes(app)
 
+from hermes_cli.control_loops import register_loops_routes  # noqa: E402
+register_loops_routes(app)
+
 from hermes_cli.operator_inventory import register_operator_inventory_routes  # noqa: E402
 register_operator_inventory_routes(app)
 

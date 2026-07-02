@@ -460,6 +460,109 @@ def test_sweep_stops_on_usage_limit(tmp_path, fake_engine):
     assert calls == ["round"], "Usage-Limit muss sofort stoppen — kein Spinnen"
 
 
+# ── Regressionen aus der adversarialen Review 2026-07-02 ────────────────────
+
+def test_bump_retry_inserts_missing_retry_line(tmp_path):
+    # Blocker 2: Planner-LLM garantiert das Schema nicht — ohne retry-Zeile war
+    # der Bump ein stiller No-Op und der Plan bounct nie.
+    plan = tmp_path / "P1-ohne-retry.md"
+    plan.write_text("---\nid: fl-x\ntitle: t\n---\nBody\n", encoding="utf-8")
+    assert bump_retry(plan) == 1
+    text = plan.read_text(encoding="utf-8")
+    assert parse_retry(text) == 1
+    assert bump_retry(plan) == 2  # zweiter Bump zählt jetzt hoch, kein No-Op
+
+
+def test_build_usage_limit_with_commit_is_marked_unverified(tmp_path, fake_engine):
+    # Blocker 1: Commit + Usage-Limit im Build darf nicht spurlos bleiben —
+    # Plan bleibt in 10-building, Ledger weist UNVERIFIED aus.
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "ulimit", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "ulimit")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def build_commit_then_limit(kv, cwd):
+        commit_in(cwd, "teilarbeit")
+        return engines.EngineResult(
+            rc=1, output="You've hit your session limit · resets 9:50pm", usage_limit=True
+        )
+
+    behaviors["build"] = build_commit_then_limit
+    runner.cmd_run()
+
+    assert calls == ["build"], "nach Usage-Limit keine weitere Phase"
+    assert (runner.queue / "10-building" / "P1-beispiel.md").is_file()
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "UNVERIFIED" in ledger and "usage-limit" in ledger
+
+
+def test_ensure_wt_heals_stale_registration(tmp_path, fake_engine):
+    # Major 4: Worktree-Dir gelöscht, aber noch registriert → prune + neu anlegen.
+    import shutil
+
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "stale", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "stale")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_wt()
+    shutil.rmtree(runner.wt)
+    runner.ensure_wt()
+    assert runner.wt.is_dir()
+    assert g(runner.wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "loop/stale"
+
+
+def test_sweep_cleans_phase_leftovers_between_rounds(tmp_path, fake_engine):
+    # Major 3: Sweep muss wie die Pipeline vor jeder Runde guard_clean fahren.
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "muell", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "muell")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    seen_leftover = []
+
+    def round_leaves_mess(kv, cwd):
+        seen_leftover.append((cwd / "muell.tmp").exists())
+        (cwd / "muell.tmp").write_text("rest\n", encoding="utf-8")
+        (Path(kv["STATE"]) / "last-status").write_text("DRY\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["round"] = round_leaves_mess
+    runner.cmd_run()
+    assert seen_leftover == [False, False], "Reste der Vorrunde müssen weggeräumt sein"
+
+
+def test_bad_numeric_override_falls_back_instead_of_crashing(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "badov", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "badov")
+    state = tmp_path / "state" / "badov"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("PHASE_BUILD_TIMEOUT=abc\nMAX_ROUNDS=zwei\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    assert runner.phase_cfg("build").timeout == pack.phases["build"].timeout
+    assert runner.stop_cfg("max_rounds") == pack.stop["max_rounds"]
+
+
+# ── Pack-Lint: JEDES ausgelieferte Pack muss laden und den Konventionen genügen ─
+
+def test_all_shipped_packs_load_and_validate():
+    names = sorted(p.name for p in PACKS_DIR.iterdir() if p.is_dir())
+    assert "builder-reviewer" in names and "_blank" in names
+    for name in names:
+        pack = load_pack(PACKS_DIR, name)
+        assert pack.autoland is False, f"{name}: autoland ist in v1 verboten"
+        assert pack.stability in ("stable", "experimental"), f"{name}: stability ungültig"
+        assert pack.description, f"{name}: description fehlt"
+        for pname, phase in pack.phases.items():
+            text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
+            assert "{{STATE_DIR}}" in text, f"{name}/{pname}: STATE_DIR-Platzhalter fehlt"
+            assert "last-status" in text, f"{name}/{pname}: last-status-Protokoll fehlt"
+            assert "push" in text.lower(), f"{name}/{pname}: Verbote-Block fehlt (push)"
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def test_cli_status_is_readonly_on_fresh_state(tmp_path, capsys):
