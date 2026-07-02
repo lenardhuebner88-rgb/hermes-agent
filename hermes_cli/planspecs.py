@@ -1765,6 +1765,7 @@ def ingest_planspec(
             "children": spec.children,
             "freigabe": spec.freigabe,
             "live_test_depth": spec.live_test_depth,
+            "initial_child_status": "scheduled" if child_held_for_operator else "todo",
             "subtask_count": len(child_ids),
             "idempotency_key": idempotency_key,
             "superseded": superseded,

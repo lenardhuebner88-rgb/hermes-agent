@@ -676,6 +676,7 @@ def test_freigabe_complete_ui_real_children_stay_scheduled(kanban_home, tmp_path
     finally:
         monkeypatch.undo()
     assert statuses == ["scheduled", "scheduled"]
+    assert result["initial_child_status"] == "scheduled"
 
 
 def test_freigabe_operator_case_variant_holds_root_and_children(kanban_home, tmp_path: Path):

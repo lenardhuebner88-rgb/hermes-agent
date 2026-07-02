@@ -476,6 +476,7 @@ def test_ingest_planspec_creates_todo_children_for_complete_freigabe(kanban_home
 
     assert result["ok"] is True
     assert len(result["child_ids"]) == 2
+    assert result["initial_child_status"] == "todo"
     with kb.connect_closing() as conn:
         root = kb.get_task(conn, result["root_task_id"])
         child1 = kb.get_task(conn, result["child_ids"][0])
