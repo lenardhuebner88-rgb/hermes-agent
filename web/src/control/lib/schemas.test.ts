@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
 
@@ -943,6 +943,8 @@ describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/contr
     if (!isLoopPackError(pipeline)) {
       expect(pipeline.phases.build.model).toBe("claude-sonnet-5");
       expect(pipeline.queue).toEqual({ "00-planned": 0, "10-building": 0, "20-verified": 0, "90-bounced": 0 });
+      // Älterer Payload ohne "heartbeat"-Key (vor 646c06e5c) muss weiter parsen — .catch(null) fängt den fehlenden Key ab.
+      expect(pipeline.heartbeat).toBeNull();
     }
     expect(isLoopPackError(sweep)).toBe(false);
     if (!isLoopPackError(sweep)) {
@@ -956,6 +958,119 @@ describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/contr
     const parsed = parseOrThrow(LoopsResponseSchema, raw, "loops");
     expect(parsed.packs).toHaveLength(1);
     expect(isLoopPackError(parsed.packs[0])).toBe(true);
+  });
+
+  it("parses a REAL heartbeat payload harvested via TestClient(app).get('/api/loops') after writing state/<pack>/heartbeat.json (2026-07-02, Next-Level-Backend 646c06e5c)", () => {
+    const raw = {
+      packs: [
+        {
+          name: "nacht", type: "sweep",
+          description: "Testpack nacht", stability: "experimental",
+          phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 600 } },
+          stop: { max_rounds: 12, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+          params: { fokus: "standard-fokus" },
+          running: false,
+          heartbeat: {
+            current: {
+              phase: "round", engine: "claude", model: "claude-sonnet-5",
+              started_at: "2026-07-02T23:30:00", timeout: 2400,
+            },
+            last: [
+              { phase: "round", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00" },
+              { phase: "round", engine: "claude", model: "claude-sonnet-5", secs: 178, rc: 1, at: "2026-07-02T20:00:00" },
+            ],
+          },
+          stop_requested: false, queue: null,
+          commits_ahead: 0, timer_enabled: false,
+        },
+        {
+          name: "nacht-kopie", type: "sweep",
+          description: "(Kopie von nacht) Testpack nacht", stability: "experimental",
+          phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 600 } },
+          stop: { max_rounds: 12, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+          params: { fokus: "standard-fokus" },
+          running: false, heartbeat: null, stop_requested: false, queue: null,
+          commits_ahead: 0, timer_enabled: false,
+        },
+      ],
+    };
+    const parsed = parseOrThrow(LoopsResponseSchema, raw, "loops");
+    const [nacht, nachtKopie] = parsed.packs;
+    expect(isLoopPackError(nacht)).toBe(false);
+    if (!isLoopPackError(nacht)) {
+      expect(nacht.heartbeat?.current?.phase).toBe("round");
+      expect(nacht.heartbeat?.current?.started_at).toBe("2026-07-02T23:30:00");
+      expect(nacht.heartbeat?.last).toHaveLength(2);
+      expect(nacht.heartbeat?.last[0].secs).toBe(512);
+      expect(nacht.heartbeat?.last[1].rc).toBe(1);
+    }
+    expect(isLoopPackError(nachtKopie)).toBe(false);
+    if (!isLoopPackError(nachtKopie)) {
+      expect(nachtKopie.heartbeat).toBeNull();
+    }
+  });
+});
+
+describe("LoopFilesResponseSchema / LoopFileSaveResultSchema (Werkstatt, hermes_cli/control_loops.py)", () => {
+  it("parses a REAL repo-pack payload harvested via TestClient(app).get('/api/loops/nacht/files') — read-only (2026-07-02)", () => {
+    const raw = {
+      pack: "nacht", source: "repo",
+      files: [
+        {
+          name: "pack.yaml",
+          content: "description: Testpack nacht\nname: nacht\nparams:\n  fokus: standard-fokus\nphases:\n  round:\n    engine: claude\n    model: claude-sonnet-5\n    prompt: round.md\n    timeout: 600\nrepo: /tmp/kein-repo\nstability: experimental\ntype: sweep\n",
+          editable: false,
+        },
+        {
+          name: "round.md",
+          content: "PHASE=round STATE={{STATE_DIR}}\nSchreibe das Ergebnis nach last-status.\nVerbote: NIE push/merge/deploy.\n",
+          editable: false,
+        },
+      ],
+    };
+    const parsed = parseOrThrow(LoopFilesResponseSchema, raw, "loops/files");
+    expect(parsed.source).toBe("repo");
+    expect(parsed.files).toHaveLength(2);
+    expect(parsed.files.every((f) => f.editable === false)).toBe(true);
+    expect(parsed.files[0].name).toBe("pack.yaml");
+  });
+
+  it("parses a REAL custom-pack payload (editable) harvested the same way, and the PUT-save result", () => {
+    const raw = {
+      pack: "nacht-kopie", source: "custom",
+      files: [
+        { name: "pack.yaml", content: "description: (Kopie von nacht) Testpack nacht\nname: nacht-kopie\n", editable: true },
+        { name: "round.md", content: "PHASE=round STATE={{STATE_DIR}}\n", editable: true },
+      ],
+    };
+    const parsed = parseOrThrow(LoopFilesResponseSchema, raw, "loops/files");
+    expect(parsed.source).toBe("custom");
+    expect(parsed.files.every((f) => f.editable === true)).toBe(true);
+
+    const saveRaw = { saved: true, pack: "nacht-kopie", file: "round.md" };
+    const saved = parseOrThrow(LoopFileSaveResultSchema, saveRaw, "loops/files/save");
+    expect(saved).toEqual({ saved: true, pack: "nacht-kopie", file: "round.md" });
+  });
+});
+
+describe("LoopDuplicateResultSchema (POST /api/loops/duplicate, hermes_cli/control_loops.py)", () => {
+  it("parses the REAL 200 payload harvested via TestClient(app).post('/api/loops/duplicate', ...) (2026-07-02)", () => {
+    const raw = { created: "nacht-kopie", source: "nacht" };
+    const parsed = parseOrThrow(LoopDuplicateResultSchema, raw, "loops/duplicate");
+    expect(parsed).toEqual({ created: "nacht-kopie", source: "nacht" });
+  });
+});
+
+describe("LoopLandResultSchema (POST /api/loops/{pack}/land, hermes_cli/control_loops.py)", () => {
+  it("parses the REAL 200 payload harvested via TestClient(app).post('/api/loops/nacht/land') (2026-07-02)", () => {
+    const raw = {
+      land_started: true, pack: "nacht", log: "land-20260702-231746.log",
+      note: "läuft detached mit allen Schienen; Ergebnis im Ledger (LAND ✅ / rollback / Abbruch)",
+    };
+    const parsed = parseOrThrow(LoopLandResultSchema, raw, "loops/land");
+    expect(parsed.land_started).toBe(true);
+    expect(parsed.log).toBe("land-20260702-231746.log");
+    expect(parsed.note).toContain("LAND ✅");
   });
 });
 

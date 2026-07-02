@@ -55,6 +55,10 @@ import {
   LoopsResponseSchema,
   LoopModelsResponseSchema,
   LoopDetailResponseSchema,
+  LoopFilesResponseSchema,
+  LoopFileSaveResultSchema,
+  LoopDuplicateResultSchema,
+  LoopLandResultSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
@@ -65,7 +69,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, LoopDetailResponse, LoopModelsResponse, LoopsResponse, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -2383,4 +2387,76 @@ export function toggleLoopTimer(pack: string, enabled: boolean): Promise<LoopTim
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
+}
+
+export async function landLoop(pack: string): Promise<LoopLandResult> {
+  return parseOrThrow(
+    LoopLandResultSchema,
+    await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/land`, { method: "POST" }),
+    `loops/${pack}/land`,
+  );
+}
+
+// Werkstatt: Pack-Dateien fetch-once laden (wie usePlanSpecDetail — kein Polling,
+// die Dateien ändern sich nur durch die eigenen Save/Duplicate-Mutationen unten,
+// die selbst reload() aufrufen).
+export function useLoopFiles(pack: string | null): {
+  data: LoopFilesResponse | null;
+  loading: boolean;
+  error: string | null;
+  reload: () => Promise<void>;
+} {
+  const [data, setData] = useState<LoopFilesResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const load = useCallback(async (): Promise<void> => {
+    if (!pack) {
+      if (aliveRef.current) { setData(null); setError(null); setLoading(false); }
+      return;
+    }
+    if (aliveRef.current) { setLoading(true); setError(null); }
+    try {
+      const parsed = parseOrThrow(
+        LoopFilesResponseSchema,
+        await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/files`),
+        `loops/${pack}/files`,
+      );
+      if (aliveRef.current) setData(parsed);
+    } catch (e) {
+      if (aliveRef.current) setError(extractDetail(e));
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, [pack]);
+  useEffect(() => {
+    const initial = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(initial);
+  }, [load]);
+  return { data, loading, error, reload: load };
+}
+
+export async function saveLoopFile(pack: string, filename: string, content: string): Promise<LoopFileSaveResult> {
+  return parseOrThrow(
+    LoopFileSaveResultSchema,
+    await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/files/${encodeURIComponent(filename)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    }),
+    `loops/${pack}/files/${filename}`,
+  );
+}
+
+export async function duplicateLoop(source: string, name: string): Promise<LoopDuplicateResult> {
+  return parseOrThrow(
+    LoopDuplicateResultSchema,
+    await fetchJSON<unknown>("/api/loops/duplicate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, name }),
+    }),
+    "loops/duplicate",
+  );
 }

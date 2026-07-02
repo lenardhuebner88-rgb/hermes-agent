@@ -1637,6 +1637,28 @@ export const LoopPackErrorSchema = z.object({
   error: z.string(),
 });
 
+export const LoopHeartbeatCurrentSchema = z.object({
+  phase: z.string().catch(""),
+  engine: z.string().catch(""),
+  model: z.string().catch(""),
+  started_at: z.string().catch(""),
+  timeout: z.coerce.number().catch(0),
+});
+
+export const LoopHeartbeatHistoryEntrySchema = z.object({
+  phase: z.string().catch(""),
+  engine: z.string().catch(""),
+  model: z.string().catch(""),
+  secs: z.coerce.number().catch(0),
+  rc: z.coerce.number().catch(0),
+  at: z.string().catch(""),
+});
+
+export const LoopHeartbeatSchema = z.object({
+  current: LoopHeartbeatCurrentSchema.nullable().catch(null),
+  last: z.array(LoopHeartbeatHistoryEntrySchema).catch([]),
+});
+
 export const LoopPackSummarySchema = z.object({
   name: z.string(),
   type: z.enum(["pipeline", "sweep"]),
@@ -1646,6 +1668,7 @@ export const LoopPackSummarySchema = z.object({
   stop: z.record(z.string(), z.coerce.number()).catch({}),
   params: z.record(z.string(), z.string()).catch({}),
   running: z.boolean().catch(false),
+  heartbeat: LoopHeartbeatSchema.nullable().catch(null),
   stop_requested: z.boolean().catch(false),
   queue: z.record(z.string(), z.coerce.number()).nullable().catch(null),
   commits_ahead: z.coerce.number().catch(0),
@@ -1674,6 +1697,37 @@ export const LoopDetailResponseSchema = LoopPackSummarySchema.extend({
   queue_entries: z.record(z.string(), z.array(z.string())).nullable().catch(null),
   commits: z.array(z.string()).catch([]),
   overrides: z.record(z.string(), z.string()).catch({}),
+});
+
+// Werkstatt: Pack-Dateien lesen/schreiben + Pack duplizieren + landen.
+export const LoopFileSchema = z.object({
+  name: z.string(),
+  content: z.string().catch(""),
+  editable: z.boolean().catch(false),
+});
+
+export const LoopFilesResponseSchema = z.object({
+  pack: z.string(),
+  source: z.enum(["repo", "custom"]),
+  files: z.array(LoopFileSchema).catch([]),
+});
+
+export const LoopFileSaveResultSchema = z.object({
+  saved: z.boolean().catch(false),
+  pack: z.string(),
+  file: z.string(),
+});
+
+export const LoopDuplicateResultSchema = z.object({
+  created: z.string(),
+  source: z.string(),
+});
+
+export const LoopLandResultSchema = z.object({
+  land_started: z.boolean().catch(false),
+  pack: z.string(),
+  log: z.string().catch(""),
+  note: z.string().catch(""),
 });
 
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {

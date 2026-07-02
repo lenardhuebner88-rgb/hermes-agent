@@ -1,39 +1,52 @@
 import { useMemo, useState } from "react";
-import { Play, Square } from "lucide-react";
+import { Anchor, Play, Square, Wrench } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
+import { cn } from "@/lib/utils";
 import {
+  duplicateLoop,
   extractDetail,
+  landLoop,
+  saveLoopFile,
   startLoop,
   stopLoop,
   toggleLoopTimer,
   useLoopDetail,
+  useLoopFiles,
   useLoopModels,
   useLoops,
 } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { Led, StatusPill, ToneCallout } from "../components/atoms";
-import { Disclosure, Stat } from "../components/primitives";
+import { Disclosure } from "../components/primitives";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { toneClasses } from "../lib/tones";
 import {
   isLoopPackError,
   type LoopDetailResponse,
+  type LoopFile,
+  type LoopFilesResponse,
+  type LoopHeartbeatHistoryEntry,
   type LoopModelsResponse,
   type LoopPack,
   type LoopPackError,
   type LoopPackSummary,
+  type ToneName,
 } from "../lib/types";
+import { fmtDur, nowSec } from "../lib/derive";
 
 const t = de.loops;
 
 const CONTROL_CLASS =
   "min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:text-sm";
 
-const QUEUE_STAGES: Array<{ key: string; label: string }> = [
-  { key: "00-planned", label: t.queuePlanned },
-  { key: "10-building", label: t.queueBuilding },
-  { key: "20-verified", label: t.queueVerified },
-  { key: "90-bounced", label: t.queueBounced },
-];
+/** Reihenfolge der Queue-Stufenleiste; 90-bounced steht separat (rot) daneben. */
+const QUEUE_STAGE_KEYS = ["00-planned", "10-building", "20-verified", "30-landed"] as const;
+const QUEUE_STAGE_LABEL: Record<(typeof QUEUE_STAGE_KEYS)[number], string> = {
+  "00-planned": t.queuePlanned,
+  "10-building": t.queueBuilding,
+  "20-verified": t.queueVerified,
+  "30-landed": t.queueLanded,
+};
 
 /** Pro Phase gebaute overrides — nur Felder, die vom Manifest-Default abweichen. */
 function buildPhaseOverrides(
@@ -191,15 +204,104 @@ function LoopStartForm({
   );
 }
 
+/** Ledger-Zeilen tragen ihr Ergebnis als Marker (✅/❌/⚠️/⏸); LAND-Zeilen sind
+ *  eigene Meilensteine (nicht bloß eine Runde) und werden zusätzlich hervorgehoben. */
+function ledgerLineTone(line: string): ToneName | null {
+  if (line.includes("✅")) return "emerald";
+  if (line.includes("❌") || line.includes("⛔")) return "red";
+  if (line.includes("⚠️") || line.includes("⏸")) return "amber";
+  return null;
+}
+
+function LedgerFeed({ lines }: { lines: string[] }) {
+  return (
+    <div className="mt-1 max-h-48 space-y-0.5 overflow-auto rounded-lg border border-[var(--hc-border)] bg-black/25 p-2 leading-5 hc-mono">
+      {lines.map((line, idx) => {
+        const isLand = /^LAND\b/.test(line.trim());
+        const tone = ledgerLineTone(line) ?? (isLand ? "violet" : null);
+        return (
+          <div
+            key={`${idx}-${line}`}
+            className={cn("whitespace-pre-wrap break-words rounded px-1.5 py-0.5", tone ? toneClasses(tone) : "text-zinc-200", isLand && "font-semibold")}
+          >
+            {line}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Queue-Stufenleiste: 00-planned→10-building→20-verified→30-landed als Boxen,
+ *  90-bounced separat (rot). Stufen mit >0 heben sich hervor. */
+function LoopQueueStages({ queue }: { queue: Record<string, number> }) {
+  const bounced = queue["90-bounced"] ?? 0;
+  return (
+    <div className="mt-3 flex flex-wrap items-stretch gap-1.5">
+      {QUEUE_STAGE_KEYS.map((key) => {
+        const n = queue[key] ?? 0;
+        return (
+          <div
+            key={key}
+            className={cn(
+              "min-w-[4.25rem] flex-1 rounded-md border px-2 py-1.5 text-center",
+              n > 0 ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-black/20",
+            )}
+          >
+            <p className="hc-mono text-sm font-semibold text-white">{n}</p>
+            <p className="hc-type-label hc-dim">{QUEUE_STAGE_LABEL[key]}</p>
+          </div>
+        );
+      })}
+      <div className={cn("min-w-[4.25rem] rounded-md border px-2 py-1.5 text-center", bounced > 0 ? toneClasses("red") : "border-[var(--hc-border)] bg-black/20")}>
+        <p className="hc-mono text-sm font-semibold">{bounced}</p>
+        <p className="hc-type-label hc-dim">{t.queueBounced}</p>
+      </div>
+    </div>
+  );
+}
+
+/** Live-Phase-Chip: heartbeat.current → „phase · modell · seit Xm" mit pulsendem
+ *  Led-Dot (hc-led-live respektiert prefers-reduced-motion bereits, kein neues
+ *  CSS nötig). running ohne current → „zwischen Phasen" (Übergang gerade). */
+function LoopHeartbeatChip({ pack, nowMs }: { pack: LoopPackSummary; nowMs: number }) {
+  if (!pack.running) return null;
+  const current = pack.heartbeat?.current ?? null;
+  if (!current) {
+    return <StatusPill tone="cyan" dot="ready" label={t.heartbeatBetweenPhases} size="sm" />;
+  }
+  const startedMs = Date.parse(current.started_at);
+  const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
+  return (
+    <StatusPill tone="cyan" dot="live" label={t.heartbeatCurrent(current.phase, current.model, fmtDur(elapsedSec))} size="sm" />
+  );
+}
+
+/** Dauer-Historie: die letzten ≤5 Phasen als kleine Chips, jüngste zuerst. */
+function LoopHeartbeatHistory({ last }: { last: LoopHeartbeatHistoryEntry[] }) {
+  if (last.length === 0) return null;
+  const recent = last.slice(-5).reverse();
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {recent.map((entry, idx) => (
+        <span
+          key={`${entry.at}-${entry.phase}-${idx}`}
+          className={cn("hc-type-label rounded-full border px-2 py-0.5", toneClasses(entry.rc === 0 ? "emerald" : "red"))}
+        >
+          {entry.phase} {entry.secs}s {entry.rc === 0 ? "✓" : "✗"}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
   return (
     <div className="space-y-3 text-xs">
       <div>
         <p className="hc-type-label hc-dim">{t.detailLedger}</p>
         {detail.ledger_tail.length > 0 ? (
-          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--hc-border)] bg-black/25 p-2 leading-5 hc-mono text-zinc-200">
-            {detail.ledger_tail.join("\n")}
-          </pre>
+          <LedgerFeed lines={detail.ledger_tail} />
         ) : (
           <p className="hc-dim">{t.detailNoLedger}</p>
         )}
@@ -240,6 +342,117 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
   );
 }
 
+const WORKSHOP_TEXTAREA_CLASS =
+  "min-h-64 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs leading-5 text-white hc-mono disabled:opacity-70";
+
+/** Editor für genau eine Datei. Gemountet mit `key={file.name}` vom Elternteil —
+ *  ein Datei-/Reload-Wechsel remountet die Komponente statt den Entwurf per
+ *  Effect zurückzusetzen (React-Doku: "Resetting state with a key"), damit kein
+ *  Merge über Dateien hinweg entsteht und keine setState-in-Effect-Kaskade läuft. */
+function LoopWorkstationFileEditor({
+  file,
+  saveBusy,
+  saveError,
+  onSave,
+}: {
+  file: LoopFile;
+  saveBusy: boolean;
+  saveError: string | null;
+  onSave: (filename: string, content: string) => void;
+}) {
+  const [draft, setDraft] = useState(file.content);
+  return (
+    <div className="space-y-2">
+      {!file.editable ? <ToneCallout tone="amber">{t.workshopReadOnly}</ToneCallout> : null}
+      <textarea
+        value={draft}
+        disabled={!file.editable || saveBusy}
+        onChange={(e) => setDraft(e.target.value)}
+        rows={14}
+        spellCheck={false}
+        aria-label={`${t.workshopTitle} ${file.name}`}
+        className={WORKSHOP_TEXTAREA_CLASS}
+      />
+      {file.editable ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="xs" disabled={saveBusy || draft === file.content} onClick={() => onSave(file.name, draft)}>
+            {saveBusy ? "…" : t.workshopSave}
+          </Button>
+          {saveError ? <ToneCallout tone="red">{t.workshopSaveFailed}: {saveError}</ToneCallout> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Werkstatt-Panel: Datei-Tabs + Textarea + Speichern (nur editable Packs) +
+ *  Duplizieren (immer, egal ob repo/custom). Rein präsentational — Netzwerk-
+ *  Aufrufe laufen über die onSave/onDuplicate-Callbacks, wie LoopStartForm. */
+function LoopWorkstationPanel({
+  files,
+  loading,
+  error,
+  saveBusy,
+  saveError,
+  onSave,
+  duplicateBusy,
+  duplicateError,
+  onDuplicate,
+}: {
+  files: LoopFilesResponse | null;
+  loading: boolean;
+  error: string | null;
+  saveBusy: boolean;
+  saveError: string | null;
+  onSave: (filename: string, content: string) => void;
+  duplicateBusy: boolean;
+  duplicateError: string | null;
+  onDuplicate: (name: string) => void;
+}) {
+  const fileList = files?.files ?? [];
+  const [activeName, setActiveName] = useState<string | null>(null);
+  const active = fileList.find((f) => f.name === activeName) ?? fileList[0] ?? null;
+  const [dupName, setDupName] = useState("");
+
+  if (loading) return <p className="text-xs hc-dim">{t.loading}</p>;
+  if (error) return <ToneCallout tone="red">{t.workshopError}: {error}</ToneCallout>;
+  if (!files || fileList.length === 0) return <p className="text-xs hc-dim">{t.workshopEmpty}</p>;
+
+  return (
+    <div className="space-y-3 text-xs">
+      <p className="hc-type-label hc-dim">{t.workshopTitle}</p>
+      <div className="flex flex-wrap gap-1.5">
+        {fileList.map((f) => (
+          <Button key={f.name} size="xs" ghost={f.name !== active?.name} onClick={() => setActiveName(f.name)}>
+            {f.name}
+          </Button>
+        ))}
+      </div>
+      {active ? (
+        <LoopWorkstationFileEditor key={active.name} file={active} saveBusy={saveBusy} saveError={saveError} onSave={onSave} />
+      ) : null}
+      <div className="border-t border-[var(--hc-border)] pt-3">
+        <p className="hc-type-label hc-dim">{t.workshopDuplicateTitle}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={dupName}
+            disabled={duplicateBusy}
+            placeholder={t.workshopDuplicatePlaceholder}
+            aria-label={t.workshopDuplicateTitle}
+            onChange={(e) => setDupName(e.target.value)}
+            className="min-h-9 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-sm text-white placeholder:text-zinc-500"
+          />
+          <Button size="xs" disabled={duplicateBusy || !dupName.trim()} onClick={() => onDuplicate(dupName.trim())}>
+            {duplicateBusy ? "…" : t.workshopDuplicateSubmit}
+          </Button>
+        </div>
+        {duplicateError ? <div className="mt-2"><ToneCallout tone="red">{t.workshopDuplicateFailed}: {duplicateError}</ToneCallout></div> : null}
+      </div>
+    </div>
+  );
+}
+
 function LoopErrorCard({ pack }: { pack: LoopPackError }) {
   return (
     <FleetPanel
@@ -260,15 +473,31 @@ interface LoopCardProps {
   detailError: string | null;
   busy: boolean;
   actionError?: string;
+  landNote?: string;
   startOpen: boolean;
   pendingStop: boolean;
+  pendingLand: boolean;
+  workshopOpen: boolean;
+  files: LoopFilesResponse | null;
+  filesLoading: boolean;
+  filesError: string | null;
+  fileSaveBusy: boolean;
+  fileSaveError: string | null;
+  duplicateBusy: boolean;
+  duplicateError: string | null;
+  nowMs: number;
   onSetPendingStop: (name: string | null) => void;
+  onSetPendingLand: (name: string | null) => void;
   onToggleDetail: (name: string) => void;
+  onToggleWorkshop: (name: string) => void;
   onOpenStart: (name: string) => void;
   onCloseStart: () => void;
   onSubmitStart: (name: string, overrides: Record<string, string>) => void;
   onStop: (name: string) => void;
+  onLand: (name: string) => void;
   onToggleTimer: (name: string, enabled: boolean) => void;
+  onSaveFile: (pack: string, filename: string, content: string) => void;
+  onDuplicate: (source: string, name: string) => void;
 }
 
 function LoopCard({
@@ -280,19 +509,36 @@ function LoopCard({
   detailError,
   busy,
   actionError,
+  landNote,
   startOpen,
   pendingStop,
+  pendingLand,
+  workshopOpen,
+  files,
+  filesLoading,
+  filesError,
+  fileSaveBusy,
+  fileSaveError,
+  duplicateBusy,
+  duplicateError,
+  nowMs,
   onSetPendingStop,
+  onSetPendingLand,
   onToggleDetail,
+  onToggleWorkshop,
   onOpenStart,
   onCloseStart,
   onSubmitStart,
   onStop,
+  onLand,
   onToggleTimer,
+  onSaveFile,
+  onDuplicate,
 }: LoopCardProps) {
   const isStable = pack.stability === "stable";
   const statusLabel = pack.stop_requested ? t.stopRequested : pack.running ? t.statusRunning : t.statusIdle;
   const statusTone = pack.stop_requested ? "amber" : pack.running ? "cyan" : "zinc";
+  const canLand = !pack.running && pack.commits_ahead > 0;
 
   return (
     <FleetPanel
@@ -310,15 +556,11 @@ function LoopCard({
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <StatusPill tone={statusTone} label={statusLabel} size="sm" />
+        <LoopHeartbeatChip pack={pack} nowMs={nowMs} />
       </div>
+      {pack.heartbeat?.last.length ? <LoopHeartbeatHistory last={pack.heartbeat.last} /> : null}
 
-      {pack.queue ? (
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {QUEUE_STAGES.map((stage) => (
-            <Stat key={stage.key} label={stage.label} value={pack.queue?.[stage.key] ?? 0} />
-          ))}
-        </div>
-      ) : null}
+      {pack.queue ? <LoopQueueStages queue={pack.queue} /> : null}
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--hc-border)] pt-3">
         <label className="inline-flex items-center gap-2 text-xs hc-soft">
@@ -345,14 +587,33 @@ function LoopCard({
               </Button>
             )
           ) : (
-            <Button size="xs" disabled={busy} onClick={() => onOpenStart(pack.name)}>
-              <Play className="h-3.5 w-3.5" />{t.actions.start}
-            </Button>
+            <>
+              <Button size="xs" disabled={busy} onClick={() => onOpenStart(pack.name)}>
+                <Play className="h-3.5 w-3.5" />{t.actions.start}
+              </Button>
+              {canLand ? (
+                pendingLand ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <span className="hc-type-label hc-soft">{t.confirmLand}</span>
+                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)}>{busy ? "…" : t.confirmYes}</Button>
+                    <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(null)}>{t.confirmNo}</Button>
+                  </span>
+                ) : (
+                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)}>
+                    <Anchor className="h-3.5 w-3.5" />{t.actions.land}
+                  </Button>
+                )
+              ) : null}
+            </>
           )}
+          <Button size="xs" ghost disabled={busy} onClick={() => onToggleWorkshop(pack.name)}>
+            <Wrench className="h-3.5 w-3.5" />{t.actions.workshop}
+          </Button>
         </div>
       </div>
 
       {actionError ? <div className="mt-2"><ToneCallout tone="red">{actionError}</ToneCallout></div> : null}
+      {landNote ? <div className="mt-2"><ToneCallout tone="emerald">{landNote}</ToneCallout></div> : null}
 
       {startOpen ? (
         <div className="mt-3 border-t border-[var(--hc-border)] pt-3">
@@ -362,6 +623,22 @@ function LoopCard({
             busy={busy}
             onSubmit={(overrides) => onSubmitStart(pack.name, overrides)}
             onCancel={onCloseStart}
+          />
+        </div>
+      ) : null}
+
+      {workshopOpen ? (
+        <div className="mt-3 border-t border-[var(--hc-border)] pt-3">
+          <LoopWorkstationPanel
+            files={files}
+            loading={filesLoading}
+            error={filesError}
+            saveBusy={fileSaveBusy}
+            saveError={fileSaveError}
+            onSave={(filename, content) => onSaveFile(pack.name, filename, content)}
+            duplicateBusy={duplicateBusy}
+            duplicateError={duplicateError}
+            onDuplicate={(name) => onDuplicate(pack.name, name)}
           />
         </div>
       ) : null}
@@ -390,15 +667,32 @@ export interface LoopsGridProps {
   detailError: string | null;
   busyPack: string | null;
   actionErrorByPack: Record<string, string>;
+  landNoteByPack: Record<string, string>;
   startOpenPack: string | null;
   pendingStopPack: string | null;
+  pendingLandPack: string | null;
+  workshopOpenPack: string | null;
+  files: LoopFilesResponse | null;
+  filesLoading: boolean;
+  filesError: string | null;
+  fileSaveBusy: boolean;
+  fileSaveError: string | null;
+  duplicateBusy: boolean;
+  duplicateError: string | null;
+  /** Referenz-„jetzt" für die Heartbeat-Dauer — Default Date.now(), im Test injizierbar. */
+  nowMs?: number;
   onSetPendingStop: (name: string | null) => void;
+  onSetPendingLand: (name: string | null) => void;
   onToggleDetail: (name: string) => void;
+  onToggleWorkshop: (name: string) => void;
   onOpenStart: (name: string) => void;
   onCloseStart: () => void;
   onSubmitStart: (name: string, overrides: Record<string, string>) => void;
   onStop: (name: string) => void;
+  onLand: (name: string) => void;
   onToggleTimer: (name: string, enabled: boolean) => void;
+  onSaveFile: (pack: string, filename: string, content: string) => void;
+  onDuplicate: (source: string, name: string) => void;
 }
 
 /** Pure presentation grid — exported for tests (rendered with fixtures), mirrors
@@ -412,15 +706,31 @@ export function LoopsGrid({
   detailError,
   busyPack,
   actionErrorByPack,
+  landNoteByPack,
   startOpenPack,
   pendingStopPack,
+  pendingLandPack,
+  workshopOpenPack,
+  files,
+  filesLoading,
+  filesError,
+  fileSaveBusy,
+  fileSaveError,
+  duplicateBusy,
+  duplicateError,
+  nowMs = nowSec() * 1000,
   onSetPendingStop,
+  onSetPendingLand,
   onToggleDetail,
+  onToggleWorkshop,
   onOpenStart,
   onCloseStart,
   onSubmitStart,
   onStop,
+  onLand,
   onToggleTimer,
+  onSaveFile,
+  onDuplicate,
 }: LoopsGridProps) {
   if (packs.length === 0) {
     return <FleetEmptyState title={t.empty} desc={t.subtitle} />;
@@ -441,15 +751,31 @@ export function LoopsGrid({
             detailError={selectedPack === pack.name ? detailError : null}
             busy={busyPack === pack.name}
             actionError={actionErrorByPack[pack.name]}
+            landNote={landNoteByPack[pack.name]}
             startOpen={startOpenPack === pack.name}
             pendingStop={pendingStopPack === pack.name}
+            pendingLand={pendingLandPack === pack.name}
+            workshopOpen={workshopOpenPack === pack.name}
+            files={workshopOpenPack === pack.name ? files : null}
+            filesLoading={workshopOpenPack === pack.name ? filesLoading : false}
+            filesError={workshopOpenPack === pack.name ? filesError : null}
+            fileSaveBusy={fileSaveBusy}
+            fileSaveError={fileSaveError}
+            duplicateBusy={duplicateBusy}
+            duplicateError={duplicateError}
+            nowMs={nowMs}
             onSetPendingStop={onSetPendingStop}
+            onSetPendingLand={onSetPendingLand}
             onToggleDetail={onToggleDetail}
+            onToggleWorkshop={onToggleWorkshop}
             onOpenStart={onOpenStart}
             onCloseStart={onCloseStart}
             onSubmitStart={onSubmitStart}
             onStop={onStop}
+            onLand={onLand}
             onToggleTimer={onToggleTimer}
+            onSaveFile={onSaveFile}
+            onDuplicate={onDuplicate}
           />
         ),
       )}
@@ -463,9 +789,17 @@ export function LoopsView() {
   const [selectedPack, setSelectedPack] = useState<string | null>(null);
   const [startOpenPack, setStartOpenPack] = useState<string | null>(null);
   const [pendingStopPack, setPendingStopPack] = useState<string | null>(null);
+  const [pendingLandPack, setPendingLandPack] = useState<string | null>(null);
+  const [workshopOpenPack, setWorkshopOpenPack] = useState<string | null>(null);
   const [busyPack, setBusyPack] = useState<string | null>(null);
   const [actionErrorByPack, setActionErrorByPack] = useState<Record<string, string>>({});
+  const [landNoteByPack, setLandNoteByPack] = useState<Record<string, string>>({});
+  const [fileSaveBusy, setFileSaveBusy] = useState(false);
+  const [fileSaveError, setFileSaveError] = useState<string | null>(null);
+  const [duplicateBusy, setDuplicateBusy] = useState(false);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const detail = useLoopDetail(selectedPack);
+  const files = useLoopFiles(workshopOpenPack);
 
   const packs = loops.data?.packs ?? [];
 
@@ -525,6 +859,54 @@ export function LoopsView() {
     }
   };
 
+  const handleLand = async (name: string) => {
+    setBusyPack(name);
+    clearActionError(name);
+    try {
+      const result = await landLoop(name);
+      setLandNoteByPack((prev) => ({ ...prev, [name]: `${t.landStarted} (${result.log}): ${result.note}` }));
+      setSelectedPack(name); // Detail-Ledger nach Auslösen sichtbar machen
+      await loops.reload();
+    } catch (e) {
+      setActionErrorByPack((prev) => ({ ...prev, [name]: `${t.landFailed}: ${extractDetail(e)}` }));
+    } finally {
+      setBusyPack(null);
+      setPendingLandPack(null);
+    }
+  };
+
+  const handleToggleWorkshop = (name: string) => {
+    setWorkshopOpenPack((prev) => (prev === name ? null : name));
+    setFileSaveError(null);
+    setDuplicateError(null);
+  };
+
+  const handleSaveFile = async (pack: string, filename: string, content: string) => {
+    setFileSaveBusy(true);
+    setFileSaveError(null);
+    try {
+      await saveLoopFile(pack, filename, content);
+      await files.reload();
+    } catch (e) {
+      setFileSaveError(extractDetail(e));
+    } finally {
+      setFileSaveBusy(false);
+    }
+  };
+
+  const handleDuplicate = async (source: string, name: string) => {
+    setDuplicateBusy(true);
+    setDuplicateError(null);
+    try {
+      await duplicateLoop(source, name);
+      await loops.reload();
+    } catch (e) {
+      setDuplicateError(extractDetail(e));
+    } finally {
+      setDuplicateBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <header>
@@ -548,15 +930,30 @@ export function LoopsView() {
         detailError={detail.error}
         busyPack={busyPack}
         actionErrorByPack={actionErrorByPack}
+        landNoteByPack={landNoteByPack}
         startOpenPack={startOpenPack}
         pendingStopPack={pendingStopPack}
+        pendingLandPack={pendingLandPack}
+        workshopOpenPack={workshopOpenPack}
+        files={files.data}
+        filesLoading={files.loading}
+        filesError={files.error}
+        fileSaveBusy={fileSaveBusy}
+        fileSaveError={fileSaveError}
+        duplicateBusy={duplicateBusy}
+        duplicateError={duplicateError}
         onSetPendingStop={setPendingStopPack}
+        onSetPendingLand={setPendingLandPack}
         onToggleDetail={handleToggleDetail}
+        onToggleWorkshop={handleToggleWorkshop}
         onOpenStart={handleOpenStart}
         onCloseStart={handleCloseStart}
         onSubmitStart={(name, overrides) => void handleSubmitStart(name, overrides)}
         onStop={(name) => void handleStop(name)}
+        onLand={(name) => void handleLand(name)}
         onToggleTimer={(name, enabled) => void handleToggleTimer(name, enabled)}
+        onSaveFile={(pack, filename, content) => void handleSaveFile(pack, filename, content)}
+        onDuplicate={(source, name) => void handleDuplicate(source, name)}
       />
     </div>
   );
