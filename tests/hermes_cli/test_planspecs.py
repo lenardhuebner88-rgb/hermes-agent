@@ -468,7 +468,7 @@ def test_plan_shipped_cli_json(tmp_path: Path, capsys):
     assert '\"status\": \"shipped\"' in capsys.readouterr().out
 
 
-def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path):
+def test_ingest_planspec_creates_todo_children_for_complete_freigabe(kanban_home, tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
 
@@ -483,10 +483,10 @@ def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path)
         assert root is not None
         assert root.status == "todo"
         assert root.tenant == "planspec"
-        assert child1 is not None and child1.status == "scheduled"
+        assert child1 is not None and child1.status == "todo"
         assert child1.title == "Document schema"
         assert child1.assignee == "coder"
-        assert child2 is not None and child2.status == "scheduled"
+        assert child2 is not None and child2.status == "todo"
         # Phase A back-compat: a planspec naming lane `coder-claude` still ingests,
         # and the child routes to the canonical Claude coder lane `premium`.
         assert child2.assignee == "premium"
