@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { isLoopPackError } from "./types";
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -856,6 +857,60 @@ describe("CronObservabilityResponseSchema", () => {
   });
 });
 
+
+describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/control_loops.py)", () => {
+  it("parses a REAL payload harvested via TestClient(app).get('/api/loops') against the actual loops/packs/builder-reviewer + error-sweep manifests (2026-07-02)", () => {
+    const raw = {
+      packs: [
+        {
+          name: "builder-reviewer", type: "pipeline",
+          description: "Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial",
+          stability: "stable",
+          phases: {
+            plan: { engine: "claude", model: "claude-fable-5", timeout: 2400 },
+            build: { engine: "claude", model: "claude-sonnet-5", timeout: 3600 },
+            verify: { engine: "claude", model: "claude-fable-5", timeout: 2400 },
+          },
+          stop: { max_rounds: 12, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+          params: { max_plans: "8", focus: "Hermes-Board/Kanban-Robustheit + /control-Dashboard (Backend bevorzugt; Frontend nur wenn HAS_WEB=1)" },
+          running: false, stop_requested: false,
+          queue: { "00-planned": 0, "10-building": 0, "20-verified": 0, "90-bounced": 0 },
+          commits_ahead: 0, timer_enabled: false,
+        },
+        {
+          name: "error-sweep", type: "sweep",
+          description: "Pro Runde EINEN wiederkehrenden Log-Fehler root-causen und fixen",
+          stability: "stable",
+          phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 2700 } },
+          stop: { max_rounds: 10, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+          params: { services: "hermes-gateway hermes-dashboard hermes-prefilter", zeitraum: "-2 days" },
+          running: false, stop_requested: false, queue: null,
+          commits_ahead: 0, timer_enabled: false,
+        },
+      ],
+    };
+    const parsed = parseOrThrow(LoopsResponseSchema, raw, "loops");
+    expect(parsed.packs).toHaveLength(2);
+    const [pipeline, sweep] = parsed.packs;
+    expect(isLoopPackError(pipeline)).toBe(false);
+    if (!isLoopPackError(pipeline)) {
+      expect(pipeline.phases.build.model).toBe("claude-sonnet-5");
+      expect(pipeline.queue).toEqual({ "00-planned": 0, "10-building": 0, "20-verified": 0, "90-bounced": 0 });
+    }
+    expect(isLoopPackError(sweep)).toBe(false);
+    if (!isLoopPackError(sweep)) {
+      expect(sweep.queue).toBeNull();
+      expect(sweep.stop.dry_rounds).toBe(2);
+    }
+  });
+
+  it("resolves the ManifestError variant ({name, error}) distinctly from the full summary", () => {
+    const raw = { packs: [{ name: "kaputt", error: "ManifestError: phases fehlt in pack.yaml" }] };
+    const parsed = parseOrThrow(LoopsResponseSchema, raw, "loops");
+    expect(parsed.packs).toHaveLength(1);
+    expect(isLoopPackError(parsed.packs[0])).toBe(true);
+  });
+});
 
 describe("MetricsLiteResponseSchema", () => {
   it("parses a full payload and coerces numeric strings", () => {

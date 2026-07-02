@@ -52,6 +52,9 @@ import {
   type StrategistOutcomesResponse,
   DispositionListResponseSchema,
   WindowedRollupResponseSchema,
+  LoopsResponseSchema,
+  LoopModelsResponseSchema,
+  LoopDetailResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
@@ -62,7 +65,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, LoopDetailResponse, LoopModelsResponse, LoopsResponse, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -994,7 +997,9 @@ export function useVetoEscalation() {
 }
 
 // fetchJSON throws `Error("409: {\"detail\":\"…\"}")` — pull out the human detail.
-function extractDetail(e: unknown): string {
+// Exported so views (e.g. LoopsView) can surface the same readable text for
+// their own POST mutations without re-parsing fetchJSON's error format.
+export function extractDetail(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   const m = msg.match(/^\d+:\s*(.*)$/s);
   const body = m ? m[1] : msg;
@@ -2192,4 +2197,75 @@ export function useDispositionActions(reload: () => Promise<void>) {
   }, [reload]);
 
   return { busy, error, acceptDisposition, dismissDisposition, createFixTaskFromDisposition };
+}
+
+// ── Loop-Runner (/control Loops-Tab) — Vertrag: hermes_cli/control_loops.py ──
+export const loopsLoader = async () =>
+  parseOrThrow(LoopsResponseSchema, await fetchJSON<unknown>("/api/loops"), "loops");
+
+export function useLoops() {
+  return usePolling<LoopsResponse>("loops", loopsLoader, 5000);
+}
+
+export function useLoopModels() {
+  return usePolling<LoopModelsResponse>(
+    "loops/models",
+    async () => parseOrThrow(LoopModelsResponseSchema, await fetchJSON<unknown>("/api/loops/models"), "loops/models"),
+    60000,
+  );
+}
+
+// Detail pollt nur, solange ein Pack ausgewählt ist (Karte aufgeklappt) — Muster
+// wie useWorkerActivity: Intervall auf sehr groß setzen + null zurückgeben,
+// statt den Hook bedingt aufzurufen (Rules-of-Hooks).
+export function useLoopDetail(pack: string | null) {
+  const key = pack ? `loops/${pack}/detail` : "loops/detail/__none__";
+  const loader = useCallback(async (): Promise<LoopDetailResponse | null> => {
+    if (!pack) return null;
+    return parseOrThrow(
+      LoopDetailResponseSchema,
+      await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/detail`),
+      `loops/${pack}/detail`,
+    );
+  }, [pack]);
+  const result = usePolling<LoopDetailResponse | null>(key, loader, pack ? 5000 : 600_000);
+  if (!pack) return { ...result, data: null };
+  return result;
+}
+
+export interface LoopStartResult {
+  started: boolean;
+  pack: string;
+  overrides_written: number;
+}
+
+export interface LoopStopResult {
+  stop_requested: boolean;
+  pack: string;
+  note: string;
+}
+
+export interface LoopTimerResult {
+  pack: string;
+  timer_enabled: boolean;
+}
+
+export function startLoop(pack: string, overrides: Record<string, string | number>): Promise<LoopStartResult> {
+  return fetchJSON<LoopStartResult>(`/api/loops/${encodeURIComponent(pack)}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overrides }),
+  });
+}
+
+export function stopLoop(pack: string): Promise<LoopStopResult> {
+  return fetchJSON<LoopStopResult>(`/api/loops/${encodeURIComponent(pack)}/stop`, { method: "POST" });
+}
+
+export function toggleLoopTimer(pack: string, enabled: boolean): Promise<LoopTimerResult> {
+  return fetchJSON<LoopTimerResult>(`/api/loops/${encodeURIComponent(pack)}/timer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
 }

@@ -919,6 +919,61 @@ export interface ActivityEntry {
   tone: ToneName;
 }
 
+// ── Loop-Runner (/control Loops-Tab) ────────────────────────────────────────
+export interface LoopPhase {
+  engine: string;
+  model: string;
+  timeout: number;
+}
+
+/** Pack-Manifest ist kaputt (ManifestError) — Backend gibt nur name+error zurück. */
+export interface LoopPackError {
+  name: string;
+  error: string;
+}
+
+export interface LoopPackSummary {
+  name: string;
+  type: "pipeline" | "sweep";
+  description: string;
+  stability: string;
+  phases: Record<string, LoopPhase>;
+  stop: Record<string, number>;
+  params: Record<string, string>;
+  running: boolean;
+  stop_requested: boolean;
+  /** nur bei type=pipeline gefüllt (Stage → Anzahl Dateien); sweep hat keine Queue. */
+  queue: Record<string, number> | null;
+  commits_ahead: number;
+  timer_enabled: boolean;
+}
+
+export type LoopPack = LoopPackSummary | LoopPackError;
+
+export function isLoopPackError(pack: LoopPack): pack is LoopPackError {
+  return "error" in pack;
+}
+
+export interface LoopsResponse {
+  packs: LoopPack[];
+}
+
+export interface LoopEngineCatalog {
+  label: string;
+  models: string[];
+}
+
+export interface LoopModelsResponse {
+  engines: Record<string, LoopEngineCatalog>;
+}
+
+export interface LoopDetailResponse extends LoopPackSummary {
+  ledger_tail: string[];
+  queue_entries: Record<string, string[]> | null;
+  commits: string[];
+  overrides: Record<string, string>;
+}
+
 export interface NavItem {
   id: string;
   label: string;

@@ -51,6 +51,9 @@ const OrchestratorBacklogView = lazy(() =>
 const CronView = lazy(() =>
   import("./views/CronView").then((m) => ({ default: m.CronView })),
 );
+const LoopsView = lazy(() =>
+  import("./views/LoopsView").then((m) => ({ default: m.LoopsView })),
+);
 const LanesView = lazy(() =>
   import("./views/LanesView").then((m) => ({ default: m.LanesView })),
 );
@@ -92,6 +95,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
+  if (pathname.includes("/control/loops")) return "loops";
   if (pathname.includes("/control/lanes")) return "lanes";
   if (pathname.includes("/control/pressure")) return "pressure";
   if (pathname.includes("/control/ops")) return "ops";
@@ -123,6 +127,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   backlog: () => import("./views/BacklogView"),
   orchestrator: () => import("./views/OrchestratorBacklogView"),
   crons: () => import("./views/CronView"),
+  loops: () => import("./views/LoopsView"),
   lanes: () => import("./views/LanesView"),
   pressure: () => import("./views/PressureView"),
   ops: () => import("./views/OpsRadarView"),
@@ -151,6 +156,7 @@ const tabPath: Record<ControlTab, string> = {
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
+  loops: "/control/loops",
   lanes: "/control/lanes",
   pressure: "/control/pressure",
   ops: "/control/ops",
@@ -259,6 +265,7 @@ export default function ControlPage() {
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
+            <Route path="loops" element={<LoopsView />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="pressure" element={<PressureView />} />
             <Route path="ops" element={<OpsRadarView />} />
