@@ -28,6 +28,7 @@ function task(id: string, status: BoardTask["status"]): BoardTask {
 function detailWithRoot(rootId: string): TaskDetailResponse {
   return {
     task: null,
+    comments: [],
     runs: [],
     events: [{ id: 1, kind: "created", created_at: 1, run_id: null, payload: { from_decompose_of: rootId } }],
     deliverables: [],
@@ -38,6 +39,7 @@ function detailWithRoot(rootId: string): TaskDetailResponse {
 function rootDetail(childIds: string[]): TaskDetailResponse {
   return {
     task: null,
+    comments: [],
     runs: [],
     events: [{ id: 9, kind: "decomposed", created_at: 2, run_id: null, payload: { child_ids: childIds } }],
     deliverables: [],
@@ -74,7 +76,7 @@ describe("getHeldFlowDispatchGuard", () => {
     const selected = task("t_plain", "scheduled");
     const guard = getHeldFlowDispatchGuard(
       selected,
-      { task: null, runs: [], events: [], deliverables: [], links: { parents: [], children: [] } },
+      { task: null, comments: [], runs: [], events: [], deliverables: [], links: { parents: [], children: [] } },
       null,
       [selected],
     );

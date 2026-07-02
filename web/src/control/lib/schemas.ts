@@ -1261,12 +1261,51 @@ const TaskEventSchema = z.object({
   // (the subtask group) and `flow_plan.spec` (the Vault plan-spec link).
   payload: z.record(z.string(), z.unknown()).nullable().catch(null),
 });
+const TaskCommentSchema = z.object({
+  id: z.coerce.number().catch(0),
+  task_id: z.coerce.string().catch(""),
+  author: z.string().nullable().catch(null),
+  body: z.string().catch(""),
+  created_at: z.coerce.number().catch(0),
+  kind: z.string().nullable().catch(null),
+});
+const TaskDiagnosticActionSchema = z.object({
+  kind: z.string().catch(""),
+  label: z.string().catch(""),
+  payload: z.record(z.string(), z.unknown()).nullable().catch(null),
+  suggested: z.boolean().nullable().catch(null),
+}).passthrough();
+const TaskDiagnosticSchema = z.object({
+  kind: z.string().catch(""),
+  severity: z.string().nullable().catch(null),
+  title: z.string().catch(""),
+  detail: z.string().nullable().catch(null),
+  actions: z.array(TaskDiagnosticActionSchema).catch([]),
+  first_seen_at: z.coerce.number().nullable().catch(null),
+  last_seen_at: z.coerce.number().nullable().catch(null),
+  count: z.coerce.number().nullable().catch(null),
+  run_id: z.coerce.string().nullable().catch(null),
+  data: z.record(z.string(), z.unknown()).nullable().catch(null),
+}).passthrough();
+const TaskDiagnosticWarningsSchema = z.object({
+  count: z.coerce.number().catch(0),
+  kinds: z.record(z.string(), z.coerce.number()).catch({}),
+  latest_at: z.coerce.number().nullable().catch(null),
+  highest_severity: z.string().nullable().catch(null),
+}).passthrough();
 const TaskDetailTaskSchema = z.object({
   id: z.coerce.string().catch(""),
   title: z.string().catch(""),
+  body: z.string().nullable().catch(null),
   status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("todo"),
   assignee: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
+  result: z.string().nullable().catch(null),
+  summary: z.string().nullable().catch(null),
+  closure: z.string().nullable().catch(null),
+  block_reason: z.string().nullable().catch(null),
+  diagnostics: z.array(TaskDiagnosticSchema).catch([]),
+  warnings: TaskDiagnosticWarningsSchema.nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
 }).partial().catch({});
 const TaskLinksSchema = z.object({
@@ -1275,6 +1314,7 @@ const TaskLinksSchema = z.object({
 }).catch({ parents: [], children: [] });
 export const TaskDetailResponseSchema = z.object({
   task: TaskDetailTaskSchema.nullable().catch(null),
+  comments: z.array(TaskCommentSchema).catch([]),
   runs: z.array(TaskRunSchema).catch([]),
   events: z.array(TaskEventSchema).catch([]),
   deliverables: z.array(TaskDeliverableSchema).catch([]),
@@ -1282,6 +1322,8 @@ export const TaskDetailResponseSchema = z.object({
 });
 export type TaskRun = z.infer<typeof TaskRunSchema>;
 export type TaskEvent = z.infer<typeof TaskEventSchema>;
+export type TaskComment = z.infer<typeof TaskCommentSchema>;
+export type TaskDiagnostic = z.infer<typeof TaskDiagnosticSchema>;
 export type TaskDetailResponse = z.infer<typeof TaskDetailResponseSchema>;
 export type KanbanDecision = z.infer<typeof KanbanDecisionSchema>;
 export type KanbanDecisionKind = z.infer<typeof KanbanDecisionKindSchema>;

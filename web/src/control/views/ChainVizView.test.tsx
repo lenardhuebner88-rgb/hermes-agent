@@ -334,4 +334,12 @@ describe("ChainVizView als reine Live-Sicht", () => {
     expect(src).toContain("de.ketten.openInFlow");
     expect(de.ketten.openInFlow.length).toBeGreaterThan(0);
   });
+
+  it("uses chain-costs as the canonical summary cost source", () => {
+    expect(src).toMatch(/useHermesChainCosts\(rootId\)/);
+    expect(src).toMatch(/costs\?\.totals/);
+    expect(src).toMatch(/GET \/tasks\/:id\/chain-costs/);
+    expect(src).toMatch(/server-side canonical rollup/);
+    expect(src).toMatch(/summaryCostSource/);
+  });
 });

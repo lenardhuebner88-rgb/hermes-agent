@@ -134,9 +134,32 @@ describe("FlowView is live-wired, not mock", () => {
     // Ohne den One-Shot-Guard lief der Effekt bei jeder neuen Board-Identität
     // (8s-Poll) erneut: Scroll-Yank zur Karte, Re-Expand manuell eingeklappter
     // Ketten, Revert manuell gewählter Projekt-Filter.
-    expect(src).toMatch(/handledTaskParam !== taskParam && allTasks\.length > 0/);
+    expect(src).toMatch(/handledTaskParam !== taskParam/);
     expect(src).toMatch(/setHandledTaskParam\(taskParam\)/);
     expect(src).toMatch(/deepLinkScrolledRef\.current === taskParam\) return/);
+  });
+
+  it("opens archived or missing-board ?task= links through the detail fetch path", () => {
+    expect(src).toMatch(/if \(selectedId !== taskParam\) setSelectedId\(taskParam\)/);
+    expect(src).toMatch(/if \(!taskDetail\.detailById\[taskParam\]\) void fetchDetail\(taskParam\)/);
+    expect(src).toMatch(/selectedTask\?\.status \?\? selectedDetailTask\?\.status/);
+    expect(src).toMatch(/taskTitle=\{selectedTask\?\.title \?\? selectedDetailTask\?\.title\}/);
+  });
+
+  it("surfaces task body, comments, diagnostics and worker log in the receipt rail", () => {
+    expect(src).toMatch(/TaskBodyPanel/);
+    expect(src).toMatch(/<Markdown body=\{body\}/);
+    expect(src).toMatch(/TaskCommentsPanel/);
+    expect(src).toMatch(/TaskDiagnosticsPanel/);
+    expect(src).toMatch(/WorkerLogTail taskId=\{taskId\}/);
+    expect(src).toMatch(/const logOpen = logState\.taskId === taskId \? logState\.open : false/);
+  });
+
+  it("uses the server-side chain-costs rollup in the receipt rail", () => {
+    expect(src).toMatch(/useHermesChainCosts\(selectedId\)/);
+    expect(src).toMatch(/TaskCostTruthPanel/);
+    expect(src).toMatch(/chainCosts=\{selectedChainCosts\.data\}/);
+    expect(src).toMatch(/serverseitiges Chain-Costs-Rollup|taskCostTruthSource/);
   });
 
   it("anchors relative-time labels to the client clock, not the 304-frozen payload now", () => {

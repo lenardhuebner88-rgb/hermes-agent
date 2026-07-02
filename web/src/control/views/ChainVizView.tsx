@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { useBoard, useChainGraph, useHermesReviewVerdicts, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
+import { useBoard, useChainGraph, useHermesChainCosts, useHermesReviewVerdicts, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
 import { fmtAge, fmtTokens, formatEffectiveCost, nowSec, workerSortRank } from "../lib/derive";
 import { Hero } from "../components/Hero";
@@ -11,31 +11,30 @@ import { ChainListPanel } from "./ketten/ChainListPanel";
 import { KettenGraph } from "./ketten/KettenGraph";
 import type { ReviewRunState } from "./ketten/ChainNodeCard";
 import type { ChainGraphNode, Worker } from "../lib/types";
+import type { ChainCostsResponse } from "../lib/schemas";
 import type { WorkerActionKey } from "../components/WorkerCard";
 import { fetchJSON } from "@/lib/api";
 
-// ── Chain summary (derived from already-loaded graph nodes, no new endpoint) ──
+// ── Chain summary (progress from graph nodes, cost truth from chain-costs) ──
 
 interface ChainSummaryProps {
   nodes: ChainGraphNode[];
   rootId: string;
+  costs?: ChainCostsResponse | null;
+  costsLoading?: boolean;
+  costsError?: string;
 }
 
-function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
-  // Derive totals by folding over the already-loaded nodes.
+function ChainSummary({ nodes, rootId: _rootId, costs, costsLoading = false, costsError }: ChainSummaryProps) {
+  // Derive progress by folding over the already-loaded graph nodes. B5: money,
+  // tokens and run count come only from GET /tasks/:id/chain-costs, the
+  // server-side canonical rollup also used by the Flow receipt rail.
   const totals = useMemo(() => {
-    let costEffective = 0;
-    let tokens = 0;
-    let runs = 0;
     let done = 0;
     let running = 0;
     let waiting = 0;
 
     for (const n of nodes) {
-      costEffective += n.cost_effective_usd ?? 0;
-      tokens += (n.input_tokens ?? 0) + (n.output_tokens ?? 0);
-      // Count runs from latest_run presence as a proxy (each node ~ 1 run).
-      if (n.latest_run != null || n.cost_usd > 0 || n.input_tokens > 0) runs += 1;
       if (n.status === "done") done++;
       else if (n.status === "running") running++;
       else waiting++;
@@ -43,16 +42,20 @@ function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
 
     const total = nodes.length;
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return { costEffective, tokens, runs, done, running, waiting, total, pct };
+    return { done, running, waiting, total, pct };
   }, [nodes]);
 
   if (nodes.length === 0) return null;
 
-  const { text: costText } = formatEffectiveCost({
-    cost_usd: totals.costEffective,
-    cost_effective_usd: totals.costEffective,
-    tokens: totals.tokens,
-  });
+  const costTotals = costs?.totals;
+  const costTokens = costTotals ? costTotals.input_tokens + costTotals.output_tokens : 0;
+  const { text: costText } = costTotals
+    ? formatEffectiveCost({
+        cost_usd: costTotals.cost_usd,
+        cost_effective_usd: costTotals.cost_effective_usd,
+        tokens: costTokens,
+      })
+    : { text: costsLoading ? "…" : "—" };
 
   return (
     <div
@@ -90,16 +93,18 @@ function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
         <div className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow" style={{ fontSize: 9 }}>{de.ketten.summaryStatTokens}</p>
           <p className="hc-mono mt-1 text-[15px] font-semibold tabular-nums text-[var(--hc-text)]">
-            {totals.tokens > 0 ? fmtTokens(totals.tokens) : "—"}
+            {costTotals ? (costTokens > 0 ? fmtTokens(costTokens) : "—") : costsLoading ? "…" : "—"}
           </p>
         </div>
         <div className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow" style={{ fontSize: 9 }}>{de.ketten.summaryStatRuns}</p>
           <p className="hc-mono mt-1 text-[15px] font-semibold tabular-nums text-[var(--hc-text)]">
-            {totals.runs}
+            {costTotals ? costTotals.run_count : costsLoading ? "…" : "—"}
           </p>
         </div>
       </div>
+      <p className="hc-type-label mt-2 text-right text-[var(--hc-text-dim)]">{de.ketten.summaryCostSource}</p>
+      {costsError ? <p className="mt-1 text-right hc-type-label text-[var(--hc-red)]">{de.ketten.chainCostsLoadError} {costsError}</p> : null}
     </div>
   );
 }
@@ -134,6 +139,7 @@ function ChainPanel({
   resumeBusyId,
 }: ChainPanelProps) {
   const graph = useChainGraph(rootId);
+  const chainCosts = useHermesChainCosts(rootId);
   const now = nowSec();
 
   if (graph.error) {
@@ -151,8 +157,8 @@ function ChainPanel({
 
   return (
     <>
-      {/* Kette-Summary card — totals derived from loaded nodes, no new endpoint */}
-      <ChainSummary nodes={graph.data.nodes} rootId={graph.data.root_id} />
+      {/* Kette-Summary card: progress from graph nodes, cost truth from chain-costs. */}
+      <ChainSummary nodes={graph.data.nodes} rootId={graph.data.root_id} costs={chainCosts.data} costsLoading={chainCosts.loading} costsError={chainCosts.error} />
 
       <KettenGraph
         nodes={graph.data.nodes}

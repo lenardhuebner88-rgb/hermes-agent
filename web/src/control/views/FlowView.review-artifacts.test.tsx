@@ -130,6 +130,7 @@ describe("FlowView review gate and RESULT artifacts", () => {
   it("done artifact fixture shows a RESULT CTA target from metadata artifacts in the detail rail", () => {
     const detail: TaskDetailResponse = {
       task: { id: "t_result_artifact", title: "Spec-Draft fertig", status: "done", assignee: "coder", latest_summary: "RESULT.md gesichert" },
+      comments: [],
       runs: [],
       events: [],
       deliverables: [],
@@ -162,6 +163,7 @@ describe("FlowView review gate and RESULT artifacts", () => {
         task={{ ...baseTask, id: "t_flow_plan", title: "Plan root" }}
         detail={{
           task: { id: "t_flow_plan", title: "Plan root", status: "todo", assignee: "planner", latest_summary: null },
+          comments: [],
           runs: [],
           events: [{ id: 1, kind: "flow_plan", created_at: 190, run_id: null, payload: { spec: "/vault/plan.md" } }],
           deliverables: [],
@@ -183,7 +185,7 @@ describe("FlowView review gate and RESULT artifacts", () => {
       <FlowReceiptRail
         taskId="t_single_result"
         task={{ ...baseTask, id: "t_single_result", status: "done", title: "Single Task Result" }}
-        detail={{ task: null, runs: [], events: [], deliverables: [], links: { parents: [], children: [] } }}
+        detail={{ task: null, comments: [], runs: [], events: [], deliverables: [], links: { parents: [], children: [] } }}
         enriched={{ resultArtifactLinks: [resultArtifact], deliverableCount: 1 }}
         loading={false}
         now={200}
