@@ -22404,7 +22404,116 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         "today": totals_today,
         "window": totals_window,
         "profiles": profile_rows,
+        # S1B: Review-Wert je Stufe über dasselbe Fenster (window_start). Liest
+        # task_runs.verdict + metadata.review_findings zur Query-Zeit — kein
+        # Schema-Change. Altbestand ohne das Feld → NULL, nie Fehler.
+        "review_value": review_value_by_stage(conn, window_start=window_start),
     }
+
+
+# S1B: die kanonischen Review-Stufen (verifier → reviewer → critic). Muss mit
+# der Stufen-Reihenfolge in ``_review_stages_for_tier`` konsistent bleiben.
+_REVIEW_STAGE_PROFILES: tuple[str, ...] = ("verifier", "reviewer", "critic")
+
+
+def _review_findings_from_meta(
+    meta: dict[str, Any]
+) -> Optional[tuple[int, int]]:
+    """S1B/AC-1: extrahiert ``metadata.review_findings = {blocking, observations}``.
+
+    Gibt ``None`` zurück, wenn das Feld fehlt oder malformt ist (Altbestand →
+    NULL-Aggregat), niemals eine Exception. Bool wird bewusst verworfen
+    (``True``/``False`` sind keine gültigen Fund-Zähler), ebenso Negativwerte.
+    """
+    raw = meta.get("review_findings")
+    if not isinstance(raw, dict):
+        return None
+    blocking = raw.get("blocking")
+    observations = raw.get("observations")
+    if isinstance(blocking, bool) or isinstance(observations, bool):
+        return None
+    if not isinstance(blocking, int) or not isinstance(observations, int):
+        return None
+    if blocking < 0 or observations < 0:
+        return None
+    return (blocking, observations)
+
+
+def review_value_by_stage(
+    conn: sqlite3.Connection, *, window_start: int
+) -> list[dict]:
+    """S1B/AC-2: Review-Wert je Stufe (verifier/reviewer/critic) über dasselbe
+    Fenster wie :func:`runs_costs`.
+
+    Aggregiert ausschließlich lesend über bestehende ``task_runs``-Spalten:
+    ``verdict`` (B2, strukturierte Review-Verdikte) und
+    ``metadata.review_findings`` (AC-1). KEIN Schema-Change, KEINE Migration.
+
+    Pro Stufe: ``runs`` (alle beendeten Läufe des Profils im Fenster),
+    ``approved`` / ``request_changes`` (aus der Verdict-Spalte),
+    ``findings_blocking`` / ``findings_observations`` (Summe der Funde),
+    ``input_tokens`` und ``tokens_per_finding``.
+
+    NULL-Semantik: trägt KEIN Lauf der Stufe das ``review_findings``-Feld
+    (gesamter Altbestand), sind ``findings_*`` und ``tokens_per_finding``
+    ``None`` — nie ``0`` und nie ein Fehler. Trägt das Feld die Zahl 0
+    (nachweislich keine Funde), bleibt ``tokens_per_finding`` ``None``
+    (kein Fund → keine Kosten-pro-Fund), die Fund-Zähler stehen aber auf 0.
+    """
+    placeholders = ",".join("?" for _ in _REVIEW_STAGE_PROFILES)
+    acc: dict[str, dict[str, Any]] = {
+        stage: {
+            "profile": stage,
+            "runs": 0,
+            "approved": 0,
+            "request_changes": 0,
+            "findings_blocking": 0,
+            "findings_observations": 0,
+            "input_tokens": 0,
+            "_finding_runs": 0,
+        }
+        for stage in _REVIEW_STAGE_PROFILES
+    }
+    for row in conn.execute(
+        "SELECT profile, verdict, input_tokens, metadata FROM task_runs "
+        "WHERE ended_at IS NOT NULL AND ended_at >= ? "
+        f"AND profile IN ({placeholders})",
+        (window_start, *_REVIEW_STAGE_PROFILES),
+    ):
+        bucket = acc[row["profile"]]
+        bucket["runs"] += 1
+        if row["input_tokens"]:
+            bucket["input_tokens"] += int(row["input_tokens"])
+        verdict = row["verdict"]
+        if verdict == "APPROVED":
+            bucket["approved"] += 1
+        elif verdict == "REQUEST_CHANGES":
+            bucket["request_changes"] += 1
+        found = _review_findings_from_meta(_run_meta_dict(row["metadata"]))
+        if found is not None:
+            bucket["_finding_runs"] += 1
+            bucket["findings_blocking"] += found[0]
+            bucket["findings_observations"] += found[1]
+
+    out: list[dict] = []
+    for stage in _REVIEW_STAGE_PROFILES:
+        bucket = acc[stage]
+        finding_runs = bucket.pop("_finding_runs")
+        if finding_runs == 0:
+            bucket["findings_blocking"] = None
+            bucket["findings_observations"] = None
+            bucket["tokens_per_finding"] = None
+        else:
+            total_findings = (
+                bucket["findings_blocking"] + bucket["findings_observations"]
+            )
+            bucket["tokens_per_finding"] = (
+                round(bucket["input_tokens"] / total_findings)
+                if total_findings > 0
+                else None
+            )
+        out.append(bucket)
+    return out
 
 
 # F6 (night-sprint): Issue-Gruppierung — gleicher Fehlertyp + gleiches Profil

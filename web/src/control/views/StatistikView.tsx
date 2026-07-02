@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
+import { profileLabel } from "../lib/tones";
 import {
   useAccountUsage,
   useBoardStats,
@@ -36,6 +37,7 @@ import type {
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
+  ReviewValueRow,
   RunsDailyPoint,
   SubscriptionTokenBurnResponse,
   WindowedRollupRoot,
@@ -303,15 +305,19 @@ export function BudgetLedgerSection({ providers }: { providers: AccountUsageProv
 export function EffizienzSection({
   profiles,
   costs,
+  reviewValue,
   chainRate,
   queueWaitSeconds,
 }: {
   profiles: ReliabilityProfile[];
   costs: CostProfileRow[];
+  reviewValue: ReviewValueRow[];
   chainRate: number | null;
   queueWaitSeconds: number | null;
 }) {
   const lanes = useMemo(() => laneBurn(costs), [costs]);
+  // S1B: nur Stufen mit Läufen im Fenster zeigen; leere Stufen sind Rauschen.
+  const stages = useMemo(() => reviewValue.filter((r) => r.runs > 0), [reviewValue]);
   const gate = gateEffectiveness(profiles);
   return (
     <>
@@ -362,6 +368,43 @@ export function EffizienzSection({
                   )}
                   {" · "}
                   {de.stats.leaderRuns(l.runs)}
+                </>
+              }
+            />
+          );
+        })
+      )}
+      {/* S1B: Review-Wert je Stufe — Funde & Kosten je Fund. Ergänzt die
+          Kosten-Sicht ($/Lane) um den WERT je Review-Stufe. */}
+      <SectionRule title={de.stats.secReviewValue} meta={de.stats.secReviewValueMeta} />
+      {stages.length === 0 ? (
+        <Verdict tone="calm">{de.stats.reviewValueEmpty}</Verdict>
+      ) : (
+        stages.map((r, i) => {
+          const judged = r.approved + r.request_changes;
+          const quote = judged > 0 ? Math.round((r.approved / judged) * 100) : null;
+          // findings_* sind gekoppelt NULL (Altbestand): keine Fund-Erfassung.
+          const findings =
+            r.findings_blocking == null || r.findings_observations == null
+              ? null
+              : r.findings_blocking + r.findings_observations;
+          return (
+            <LeaderRow
+              key={r.profile}
+              rank={i + 1}
+              name={<LaneLabel profile={r.profile} label={profileLabel[r.profile] ?? r.profile} />}
+              score={findings == null ? "—" : String(findings)}
+              status={findings != null && findings > 0 ? "warn" : "neutral"}
+              latency={
+                <>
+                  {de.stats.leaderRuns(r.runs)}
+                  {" · "}
+                  {de.stats.reviewQuote}{" "}
+                  {quote == null ? "—" : `${quote} %`}
+                  {" · "}
+                  {r.tokens_per_finding == null
+                    ? "—"
+                    : `${fmtTokens(r.tokens_per_finding)} ${de.stats.reviewPerFinding}`}
                 </>
               }
             />
@@ -676,6 +719,7 @@ export function StatistikView() {
   const issueGroups = useMemo(() => issues.data?.issues ?? [], [issues.data]);
   const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
+  const reviewValue = useMemo(() => costs.data?.review_value ?? [], [costs.data]);
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
@@ -732,6 +776,7 @@ export function StatistikView() {
         <EffizienzSection
           profiles={profiles}
           costs={costProfiles}
+          reviewValue={reviewValue}
           chainRate={chain.data?.chain_completion_rate ?? null}
           queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
         />

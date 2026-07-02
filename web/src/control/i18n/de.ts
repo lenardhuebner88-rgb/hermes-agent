@@ -137,6 +137,12 @@ export const de = {
     secBurn: "Token-Burn je Lane",
     secBurnMeta: "7 Tage · In + Out",
     burnEmpty: "Noch kein Token-Burn im Fenster.",
+    // S1B: Review-Wert je Stufe (welche Stufe liefert Funde, was kostet ein Fund).
+    secReviewValue: "Review-Wert je Stufe",
+    secReviewValueMeta: "7 Tage · Funde & Kosten je Fund",
+    reviewValueEmpty: "Noch keine Review-Läufe im Fenster.",
+    reviewQuote: "Quote",
+    reviewPerFinding: "je Fund",
     secSubscriptionBurn: "Abo-Burn-Breakdown",
     secSubscriptionBurnMeta: "7 Tage · Lane × Wertklasse × Zeit",
     subscriptionBurnTrend: "Zeit-Trend",

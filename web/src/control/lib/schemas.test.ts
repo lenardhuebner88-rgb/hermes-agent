@@ -54,6 +54,49 @@ describe("Cost schemas", () => {
     expect(parsed.today.billing_neuralwatt_kwh).toBeCloseTo(0.02);
     expect(parsed.today.billing_neuralwatt_cost_usd).toBeCloseTo(0.1);
     expect(parsed.profiles[0].actual_cost_usd).toBeCloseTo(0.1);
+    // review_value is optional on the wire (Altbestand backends) → []
+    expect(parsed.review_value).toEqual([]);
+  });
+
+  it("parses the S1B review_value stages, keeping Altbestand findings NULL", () => {
+    const parsed = parseOrThrow(RunsCostsResponseSchema, {
+      days: 7,
+      now: 100,
+      today: { runs: 0 },
+      window: { runs: 0 },
+      profiles: [],
+      review_value: [
+        {
+          profile: "verifier",
+          runs: 4,
+          approved: 3,
+          request_changes: 1,
+          findings_blocking: 1,
+          findings_observations: 2,
+          input_tokens: 300000,
+          tokens_per_finding: 100000,
+        },
+        {
+          // Altbestand row: no run carried review_findings → NULL findings.
+          profile: "critic",
+          runs: 2,
+          approved: 2,
+          request_changes: 0,
+          findings_blocking: null,
+          findings_observations: null,
+          input_tokens: 90000,
+          tokens_per_finding: null,
+        },
+      ],
+    }, "runs-costs-review-value");
+
+    const byStage = Object.fromEntries(parsed.review_value.map((r) => [r.profile, r]));
+    expect(byStage.verifier.findings_blocking).toBe(1);
+    expect(byStage.verifier.tokens_per_finding).toBe(100000);
+    expect(byStage.critic.findings_blocking).toBeNull();
+    expect(byStage.critic.findings_observations).toBeNull();
+    expect(byStage.critic.tokens_per_finding).toBeNull();
+    expect(byStage.critic.runs).toBe(2);
   });
 
   it("preserves Neuralwatt cost basis on chain cost lanes and totals", () => {
