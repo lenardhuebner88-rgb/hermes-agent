@@ -92,6 +92,12 @@ export function createHermesXtermSurface({
     macOptionIsMeta: true,
     macOptionClickForcesSelection: true,
     rightClickSelectsWord: true,
+    // Agent TUIs (codex, kimi-code, claude) style secondary text with dark
+    // 256-color grays (38;5;240/241/244) and SGR dim — invisible against the
+    // dark terminal background because the theme defines no ANSI palette.
+    // 4.5 = WCAG AA; xterm lightens any foreground (16/256/truecolor, dim at
+    // half ratio by design) that falls below it. Powerline glyphs exempt.
+    minimumContrastRatio: 4.5,
     scrollback,
     theme,
     ...terminalOptions,
