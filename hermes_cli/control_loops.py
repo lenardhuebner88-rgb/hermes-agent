@@ -54,6 +54,29 @@ def _packs_dir() -> Path:
     return PACKS_DIR_OVERRIDE or loop_runner.PACKS_DIR
 
 
+def _dir_for(name: str) -> Path:
+    """Pack-Verzeichnis auflösen: Test-Override gewinnt, sonst Repo→Custom-Suchpfad."""
+    if PACKS_DIR_OVERRIDE is not None:
+        return PACKS_DIR_OVERRIDE
+    return loop_runner.resolve_packs_dir(name)
+
+
+def _all_pack_names() -> list[tuple[str, str]]:
+    """(name, source) über Repo- und Custom-Packs; Unterstrich-Vorlagen bleiben unsichtbar."""
+    if PACKS_DIR_OVERRIDE is not None:
+        dirs = [(PACKS_DIR_OVERRIDE, "repo")]
+    else:
+        dirs = [(loop_runner.PACKS_DIR, "repo"), (loop_runner.CUSTOM_PACKS_DIR, "custom")]
+    seen: dict[str, str] = {}
+    for base, source in dirs:
+        if not base.is_dir():
+            continue
+        for p in sorted(base.iterdir()):
+            if p.is_dir() and not p.name.startswith("_") and p.name not in seen:
+                seen[p.name] = source
+    return sorted(seen.items())
+
+
 def _state_root() -> Path:
     return STATE_ROOT_OVERRIDE or loop_runner.DEFAULT_STATE_ROOT
 
@@ -75,7 +98,7 @@ def _load_pack_or_404(name: str) -> loop_runner.Pack:
     if not _PACK_NAME_RE.match(name):
         raise HTTPException(status_code=404, detail=f"unbekanntes Pack: {name!r}")
     try:
-        return loop_runner.load_pack(_packs_dir(), name)
+        return loop_runner.load_pack(_dir_for(name), name)
     except loop_runner.ManifestError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -117,9 +140,9 @@ def _timer_enabled(name: str) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "enabled"
 
 
-def _pack_summary(name: str) -> dict[str, Any]:
+def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
     try:
-        pack = loop_runner.load_pack(_packs_dir(), name)
+        pack = loop_runner.load_pack(_dir_for(name), name)
     except loop_runner.ManifestError as exc:
         return {"name": name, "error": str(exc)}
     state = _state_root() / name
@@ -131,6 +154,7 @@ def _pack_summary(name: str) -> dict[str, Any]:
     return {
         "name": pack.name,
         "type": pack.type,
+        "source": source,
         "description": pack.description,
         "stability": pack.stability,
         "phases": {
@@ -160,12 +184,7 @@ def register_loops_routes(app: FastAPI) -> None:
 
     @app.get("/api/loops")
     def list_loops() -> dict[str, Any]:
-        packs_dir = _packs_dir()
-        names = sorted(
-            p.name for p in packs_dir.iterdir()
-            if p.is_dir() and not p.name.startswith("_")
-        ) if packs_dir.is_dir() else []
-        return {"packs": [_pack_summary(name) for name in names]}
+        return {"packs": [_pack_summary(name, source) for name, source in _all_pack_names()]}
 
     @app.get("/api/loops/models")
     def loop_models() -> dict[str, Any]:

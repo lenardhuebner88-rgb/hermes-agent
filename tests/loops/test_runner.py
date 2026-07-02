@@ -25,6 +25,7 @@ from loops.runner import (
     parse_overrides,
     parse_retry,
     parse_worktree_paths,
+    resolve_packs_dir,
 )
 
 # ── Helfer ───────────────────────────────────────────────────────────────────
@@ -544,6 +545,32 @@ def test_bad_numeric_override_falls_back_instead_of_crashing(tmp_path, fake_engi
     runner = LoopRunner(pack, state_root=tmp_path / "state")
     assert runner.phase_cfg("build").timeout == pack.phases["build"].timeout
     assert runner.stop_cfg("max_rounds") == pack.stop["max_rounds"]
+
+
+# ── Custom-Packs-Suchpfad (Werkstatt-Substrat v2.1) ──────────────────────────
+
+def test_resolve_packs_dir_prefers_repo_then_custom(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    primary = tmp_path / "primary"
+    custom = tmp_path / "custom"
+    write_pack(primary, "nur-repo", "sweep", repo)
+    write_pack(custom, "nur-custom", "sweep", repo)
+    assert resolve_packs_dir("nur-repo", primary, custom) == primary
+    assert resolve_packs_dir("nur-custom", primary, custom) == custom
+    # unbekannt → primary (load_pack liefert dann die klare Fehlermeldung)
+    assert resolve_packs_dir("gibtsnicht", primary, custom) == primary
+    with pytest.raises(ManifestError, match="ungültig"):
+        resolve_packs_dir("../boese", primary, custom)
+
+
+def test_resolve_packs_dir_rejects_collision(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    primary = tmp_path / "primary"
+    custom = tmp_path / "custom"
+    write_pack(primary, "doppelt", "sweep", repo)
+    write_pack(custom, "doppelt", "sweep", repo)
+    with pytest.raises(ManifestError, match="doppelt"):
+        resolve_packs_dir("doppelt", primary, custom)
 
 
 # ── Pack-Lint: JEDES ausgelieferte Pack muss laden und den Konventionen genügen ─

@@ -41,6 +41,9 @@ from loops import engines
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO_ROOT / "loops" / "packs"
+# Werkstatt-Substrat (v2.1): vom Operator/Dashboard angelegte Packs leben im State,
+# nie im Repo — Browser-Edits dürfen den Live-Checkout nicht dirty machen.
+CUSTOM_PACKS_DIR = Path("~/.hermes/loops/packs-custom").expanduser()
 DEFAULT_STATE_ROOT = Path("~/.hermes/loops").expanduser()
 NOTIFY_SCRIPT = Path("~/.hermes/scripts/discord-notify.py").expanduser()
 
@@ -84,6 +87,22 @@ class Pack:
 
 
 _PACK_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+
+def resolve_packs_dir(
+    name: str, primary: Path = PACKS_DIR, custom: Path = CUSTOM_PACKS_DIR
+) -> Path:
+    """Suchpfad Repo-Packs → Custom-Packs; Namens-Kollision ist ein harter Fehler
+    (sonst würde ein Custom-Pack still ein kuratiertes Repo-Pack verschatten)."""
+    if not _PACK_NAME_RE.match(name):
+        raise ManifestError(f"Pack-Name ungültig: {name!r}")
+    in_primary = (primary / name / "pack.yaml").is_file()
+    in_custom = (custom / name / "pack.yaml").is_file()
+    if in_primary and in_custom:
+        raise ManifestError(
+            f"Pack {name!r} existiert doppelt (Repo + packs-custom) — Custom-Pack umbenennen"
+        )
+    return custom if in_custom else primary
 
 
 def load_pack(packs_dir: Path, name: str) -> Pack:
@@ -234,6 +253,7 @@ class LoopRunner:
         self.status_path = self.state / "last-status"
         self.stop_path = self.state / "STOP"
         self.overrides = parse_overrides(self.state / "overrides.env")
+        self.phase_secs: dict[str, int] = {}
 
     # ── Infrastruktur ──
     def say(self, msg: str) -> None:
@@ -372,10 +392,16 @@ class LoopRunner:
         self.say(f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}, timeout={cfg.timeout}s)")
         self.status_path.write_text("", encoding="utf-8")
         prompt = self.render_prompt(phase, **extra)
+        started = time.time()
         result = engines.get_engine(cfg.engine)(cfg.model, prompt, self.wt, cfg.timeout)
+        self.phase_secs[phase] = int(time.time() - started)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
+        self.say(f"Phase {phase} fertig in {self.phase_secs[phase]}s (rc={result.rc})")
         return result
+
+    def _secs(self, *phases: str) -> str:
+        return " · ".join(f"{p} {self.phase_secs.get(p, 0)}s" for p in phases)
 
     def last_status(self) -> str:
         try:
@@ -509,7 +535,7 @@ class LoopRunner:
                 verified += 1
                 fails = 0
                 sha = self.rev_parse()[:9]
-                self.ledger(f"R{rnd} ✅ {building.name} verified ({sha})")
+                self.ledger(f"R{rnd} ✅ {building.name} verified ({sha}) [{self._secs('build', 'verify')}]")
                 self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")
             else:
                 self.say(f"VERIFY_FAIL [{status}] — revert + retry/bounce")
@@ -544,7 +570,7 @@ class LoopRunner:
                 self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt.")
                 break
             status = "TIMEOUT" if result.timed_out else self.last_status()
-            self.ledger(f"R{rnd} sweep status={status or '?'}")
+            self.ledger(f"R{rnd} sweep status={status or '?'} [{self._secs('round')}]")
             if status.startswith("DRY"):
                 dry, blocked = dry + 1, 0
             elif status.startswith("BLOCKED") or status == "TIMEOUT":
@@ -605,13 +631,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pack", required=True)
     parser.add_argument("--cmd", required=True, choices=["plan", "run", "night", "status"])
     parser.add_argument("--state-root", type=Path, default=None)
-    parser.add_argument("--packs-dir", type=Path, default=PACKS_DIR)
+    parser.add_argument("--packs-dir", type=Path, default=None,
+                        help="explizites Pack-Verzeichnis (default: Repo-Packs, dann ~/.hermes/loops/packs-custom)")
     parser.add_argument("--fresh", action="store_true", help="Worktree neu von main ziehen")
     parser.add_argument("--skip-plan", action="store_true", help="night: Planungsphase überspringen")
     args = parser.parse_args(argv)
 
     try:
-        pack = load_pack(args.packs_dir, args.pack)
+        packs_dir = args.packs_dir or resolve_packs_dir(args.pack)
+        pack = load_pack(packs_dir, args.pack)
     except ManifestError as exc:
         print(f"MANIFEST-FEHLER: {exc}", file=sys.stderr)
         return 2
