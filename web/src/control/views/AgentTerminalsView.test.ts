@@ -1,6 +1,32 @@
 import { describe, expect, it } from "vitest";
 import type { AgentTerminalWindow } from "@/lib/api";
-import { buildComposerPayload, classifyTerminalState, pickInitialTarget } from "./AgentTerminalsView";
+import { buildComposerPayload, chipLabel, classifyTerminalState, orderWindowsForStrip, pickInitialTarget } from "./AgentTerminalsView";
+
+// Echtes Datenformat: 9-Fenster-Inventar aus dem Live-System (tmux list-windows -a
+// -F 'session:window active pane_id pane_pid pane_current_command pane_current_path
+// pane_dead' auf dem Homeserver), Shape wie AgentTerminalWindow.to_dict() im Backend
+// (hermes_cli/agent_terminals.py). Reihenfolge entspricht tmux's Ausgabe-Reihenfolge —
+// "kimi-goal-test" vor "work".
+const LIVE_WINDOWS: AgentTerminalWindow[] = [
+  { session: "kimi-goal-test", window: "python3", active: true, pane_id: "%6", pid: 2773076, command: "python3", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+  { session: "work", window: "claude", active: true, pane_id: "%14", pid: 2903185, command: "claude", cwd: "/home/piet", dead: false },
+  { session: "work", window: "codex", active: false, pane_id: "%1", pid: 1296, command: "node", cwd: "/home/piet", dead: false },
+  { session: "work", window: "kimi", active: false, pane_id: "%2", pid: 1303, command: "kimi-code", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+  {
+    session: "work",
+    window: "kimi-dashboard-perf",
+    active: false,
+    pane_id: "%7",
+    pid: 2822229,
+    command: "python3",
+    cwd: "/home/piet/.hermes/hermes-agent/.worktrees/kimi/dashboard-polling-perf-20260630-000253 (deleted)",
+    dead: false,
+  },
+  { session: "work", window: "hermes-agent", active: false, pane_id: "%10", pid: 2670577, command: "python3", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+  { session: "work", window: "claude-agent", active: false, pane_id: "%11", pid: 2670591, command: "2.1.197", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+  { session: "work", window: "kimi-agent", active: false, pane_id: "%12", pid: 2672041, command: "kimi-code", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+  { session: "work", window: "codex-agent", active: false, pane_id: "%13", pid: 2692327, command: "node", cwd: "/home/piet/.hermes/hermes-agent", dead: false },
+];
 
 const running: AgentTerminalWindow = {
   session: "hermes-agents",
@@ -52,5 +78,39 @@ describe("AgentTerminalsView state helpers", () => {
     expect(pickInitialTarget(windows, "codex", { session: "hermes-agents", window: "hermes" })).toEqual({ session: "hermes-agents", window: "hermes" });
     expect(pickInitialTarget(windows, "codex", null)).toEqual({ session: "hermes-agents", window: "codex" });
     expect(pickInitialTarget([], "hermes", null)).toBeNull();
+  });
+});
+
+describe("orderWindowsForStrip", () => {
+  it("puts the work session first (stable) and keeps other sessions after it, against the live 9-window inventory", () => {
+    const ordered = orderWindowsForStrip(LIVE_WINDOWS);
+    expect(ordered.map((w) => `${w.session}:${w.window}`)).toEqual([
+      "work:claude",
+      "work:codex",
+      "work:kimi",
+      "work:kimi-dashboard-perf",
+      "work:hermes-agent",
+      "work:claude-agent",
+      "work:kimi-agent",
+      "work:codex-agent",
+      "kimi-goal-test:python3",
+    ]);
+  });
+
+  it("is a no-op when every window already belongs to work", () => {
+    const workOnly = LIVE_WINDOWS.filter((w) => w.session === "work");
+    expect(orderWindowsForStrip(workOnly)).toEqual(workOnly);
+  });
+
+  it("returns an empty list unchanged", () => {
+    expect(orderWindowsForStrip([])).toEqual([]);
+  });
+});
+
+describe("chipLabel", () => {
+  it("drops the session prefix for the work session but keeps it for other sessions", () => {
+    expect(chipLabel(LIVE_WINDOWS.find((w) => w.window === "claude")!)).toBe("claude");
+    expect(chipLabel(LIVE_WINDOWS.find((w) => w.window === "kimi-dashboard-perf")!)).toBe("kimi-dashboard-perf");
+    expect(chipLabel(LIVE_WINDOWS.find((w) => w.session === "kimi-goal-test")!)).toBe("kimi-goal-test:python3");
   });
 });

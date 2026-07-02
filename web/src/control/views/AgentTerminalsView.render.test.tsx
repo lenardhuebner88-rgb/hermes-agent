@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { AgentTerminalCapabilityState, AgentTerminalWindow } from "@/lib/api";
 
 // Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
@@ -11,6 +12,7 @@ const apiMock = {
   getAgentTerminalCapabilities: vi.fn(),
   getAgentTerminalWindows: vi.fn(),
   ensureAgentTerminalWindow: vi.fn(),
+  createAgentTerminalWindow: vi.fn(),
   respawnAgentTerminalWindow: vi.fn(),
   killDeadAgentTerminalWindow: vi.fn(),
   getSkills: vi.fn(),
@@ -141,6 +143,16 @@ function installDom(matches = false) {
   global.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 }
 
+/** Renders the view under a MemoryRouter — the "Zurück"-chip needs useNavigate() context. */
+async function renderView() {
+  const AgentTerminalsView = await loadView();
+  return render(
+    <MemoryRouter initialEntries={["/control/agent-terminals"]}>
+      <AgentTerminalsView />
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   websocketSends = [];
@@ -149,6 +161,7 @@ beforeEach(() => {
   apiMock.getAgentTerminalCapabilities.mockResolvedValue(capability);
   apiMock.getAgentTerminalWindows.mockResolvedValue({ windows });
   apiMock.ensureAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
+  apiMock.createAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -175,10 +188,9 @@ afterEach(() => {
   cleanup();
 });
 
-describe("AgentTerminalsView rendering", () => {
+describe("AgentTerminalsView desktop rendering", () => {
   it("renders the desktop three-column terminal shell and switches sessions", async () => {
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
     expect(screen.getByText("Terminal-Kontext")).not.toBeNull();
@@ -190,8 +202,7 @@ describe("AgentTerminalsView rendering", () => {
 
   it("pauses read-only context loading while hidden and resumes on visible", async () => {
     setDocumentHidden(true);
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
     expect(apiMock.getSkills).not.toHaveBeenCalled();
@@ -205,60 +216,8 @@ describe("AgentTerminalsView rendering", () => {
     expect(apiMock.getControlOverviewDecisionQueue).toHaveBeenCalledTimes(1);
   });
 
-  it("renders mobile switcher actions and the tools bottom sheet", async () => {
-    installDom(true);
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
-
-    expect((await screen.findAllByText("Agent Terminals")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getAllByRole("button", { name: /Tools/i })[0]);
-    expect(screen.getAllByText("Terminal-Kontext").length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("Fähigkeiten sichtbar")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Tageslage").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Firecrawl").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Kanban").length).toBeGreaterThan(0);
-  });
-
-  it("renders mobile terminal scroll and arrow controls", async () => {
-    installDom(true);
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
-
-    await waitFor(() => expect((screen.getByRole("button", { name: "Send arrow up" }) as HTMLButtonElement).disabled).toBe(false));
-
-    const pageUp = await screen.findByRole("button", { name: "Terminal scroll page up" });
-    fireEvent.click(pageUp);
-    expect(terminalScrollPagesMock).toHaveBeenCalledWith(-1);
-    expect(websocketSends).toContain("\x02\x1b[5~");
-
-    fireEvent.click(screen.getByRole("button", { name: "Terminal scroll up" }));
-    expect(terminalScrollLinesMock).toHaveBeenCalledWith(-5);
-    expect(websocketSends).toContain("\x1b[A".repeat(5));
-
-    fireEvent.click(screen.getByRole("button", { name: "Terminal scroll down" }));
-    expect(terminalScrollLinesMock).toHaveBeenCalledWith(5);
-    expect(websocketSends).toContain("\x1b[B".repeat(5));
-
-    fireEvent.click(screen.getByRole("button", { name: "Terminal scroll to bottom" }));
-    expect(terminalScrollToBottomMock).toHaveBeenCalled();
-    expect(websocketSends).toContain("q");
-
-    const arrowButtons = [
-      ["Send arrow left", "\x1b[D"],
-      ["Send arrow up", "\x1b[A"],
-      ["Send arrow down", "\x1b[B"],
-      ["Send arrow right", "\x1b[C"],
-    ] as const;
-    arrowButtons.forEach(([label, sequence]) => {
-      fireEvent.click(screen.getByRole("button", { name: label }));
-      expect(websocketSends).toContain(sequence);
-    });
-    expect(terminalFocusMock).not.toHaveBeenCalled();
-  });
-
   it("fits the terminal on mount and when its host is resized", async () => {
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
     await waitFor(() => expect(fitFitMock).toHaveBeenCalled());
@@ -270,8 +229,7 @@ describe("AgentTerminalsView rendering", () => {
   });
 
   it("sends composer input through the websocket and clears the field", async () => {
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     const textarea = (await screen.findByLabelText("Text an Terminal senden")) as HTMLTextAreaElement;
     await waitFor(() => expect(textarea.disabled).toBe(false));
@@ -286,23 +244,8 @@ describe("AgentTerminalsView rendering", () => {
     expect(websocketSends).toContain("\x1b[200~zeile 1\nzeile 2\x1b[201~\r");
   });
 
-  it("sends special keys from the mobile quick-key row", async () => {
-    installDom(true);
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
-
-    await waitFor(() => expect((screen.getByRole("button", { name: "Send Esc" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Send Esc" }));
-    expect(websocketSends).toContain("\x1b");
-    fireEvent.click(screen.getByRole("button", { name: "Send ^C" }));
-    expect(websocketSends).toContain("\x03");
-    fireEvent.click(screen.getByRole("button", { name: "Send ⏎" }));
-    expect(websocketSends).toContain("\r");
-  });
-
   it("toggles fullscreen mode and adjusts the terminal font size", async () => {
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Vollbild" }));
     expect(screen.getByRole("button", { name: "Vollbild verlassen" })).toBeTruthy();
@@ -317,32 +260,143 @@ describe("AgentTerminalsView rendering", () => {
     apiMock.respawnAgentTerminalWindow.mockResolvedValue({
       window: { session: "hermes-agents", window: "claude", active: false, pane_id: "%3", pid: 333, command: "claude", cwd: "/home/piet" },
     });
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
     await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
   });
 
-  it("resets a stale workdir localStorage key to home after capability load", async () => {
+  it("opens the create-session modal and resets a stale workdir localStorage key to home after capability load", async () => {
     window.localStorage.setItem("hermes-terminals-workdir", "gibt-es-nicht");
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
 
     await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("home"));
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
     expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
+  });
+
+  it("creates a new session via the desktop create modal", async () => {
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+    fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
+
+    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
   });
 
   it("renders empty and error states", async () => {
     apiMock.getAgentTerminalWindows.mockResolvedValueOnce({ windows: [] });
-    const AgentTerminalsView = await loadView();
-    render(<AgentTerminalsView />);
+    await renderView();
     expect(await screen.findByText(/Kein tmux-Fenster verfügbar/)).not.toBeNull();
 
     cleanup();
     apiMock.getAgentTerminalCapabilities.mockRejectedValueOnce(new Error("backend offline"));
     apiMock.getAgentTerminalWindows.mockResolvedValueOnce({ windows: [] });
-    render(<AgentTerminalsView />);
+    await renderView();
     await waitFor(() => expect(screen.getByText(/backend offline/)).not.toBeNull());
+  });
+});
+
+describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
+  it("renders an immersive chip strip with the fixture windows and a sticky + chip", async () => {
+    installDom(true);
+    await renderView();
+
+    // Chips hängen an geladenen Fenstern — als Erstes darauf warten, sonst sind
+    // die folgenden Sync-Assertions ein Race gegen den async getAgentTerminalWindows-Resolve.
+    expect(await screen.findByRole("button", { name: "hermes-agents:hermes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "hermes-agents:codex" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "hermes-agents:claude" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Zurück zum Dashboard" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Neue Session starten" })).toBeTruthy();
+    expect(screen.getByLabelText("Text an Terminal senden")).toBeTruthy();
+    // Kein Page-Header, keine Header-Karte auf compactLayout.
+    expect(screen.queryByText("Agent Terminals")).toBeNull();
+  });
+
+  it("navigates back to /control via the chip strip back button", async () => {
+    installDom(true);
+    const AgentTerminalsView = await loadView();
+    render(
+      <MemoryRouter initialEntries={["/control/agent-terminals"]}>
+        <Routes>
+          <Route path="/control/agent-terminals" element={<AgentTerminalsView />} />
+          <Route path="/control" element={<div>CONTROL_HOME</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Zurück zum Dashboard" }));
+    expect(await screen.findByText("CONTROL_HOME")).toBeTruthy();
+  });
+
+  it("switches windows by tapping an inactive chip, then opens its session sheet on a second tap", async () => {
+    installDom(true);
+    await renderView();
+
+    const codexChip = await screen.findByRole("button", { name: "hermes-agents:codex" });
+    fireEvent.click(codexChip);
+    fireEvent.click(codexChip);
+
+    // "Sitzung schließen" existiert nur im geöffneten Session-Sheet — eindeutiger
+    // Beleg dafür, dass der zweite Tap auf den (jetzt aktiven) Chip das Sheet öffnet.
+    expect(await screen.findByRole("button", { name: "Sitzung schließen" })).toBeTruthy();
+  });
+
+  it("opens the tools sheet from the session sheet", async () => {
+    installDom(true);
+    await renderView();
+
+    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    fireEvent.click(activeChip);
+    fireEvent.click(screen.getByRole("button", { name: "Tools / Tageslage" }));
+    expect((await screen.findAllByText("Terminal-Kontext")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Fähigkeiten sichtbar")).length).toBeGreaterThan(0);
+  });
+
+  it("refreshes the window list from the session sheet action grid", async () => {
+    installDom(true);
+    await renderView();
+
+    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    fireEvent.click(activeChip);
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Liste aktualisieren" }));
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the key row hidden by default and reveals it via the composer toggle", async () => {
+    installDom(true);
+    await renderView();
+
+    await screen.findByLabelText("Text an Terminal senden");
+    expect(screen.queryByRole("button", { name: "Terminal scroll page up" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send Esc" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Tastenleiste einblenden" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send Esc" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(window.localStorage.getItem("hermes-terminals-keysopen")).toBe("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal scroll page up" }));
+    expect(terminalScrollPagesMock).toHaveBeenCalledWith(-1);
+    expect(websocketSends).toContain("\x02\x1b[5~");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send ^C" }));
+    expect(websocketSends).toContain("\x03");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tastenleiste ausblenden" }));
+    expect(screen.queryByRole("button", { name: "Send Esc" })).toBeNull();
+  });
+
+  it("creates a new session via the mobile create sheet", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session starten" }));
+    fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
+
+    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
   });
 });

@@ -532,6 +532,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
     }),
+  createAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
+    fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
+    }),
   respawnAgentTerminalWindow: (session: string, window: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/respawn", {
       method: "POST",

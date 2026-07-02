@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
@@ -12,6 +13,7 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronUp,
   ChevronsDown,
   ChevronsUp,
@@ -19,10 +21,11 @@ import {
   CornerDownLeft,
   Gauge,
   Inbox,
+  Keyboard,
   Maximize2,
   Minimize2,
-  PanelLeft,
-  PanelRight,
+  PlugZap,
+  Plus,
   RefreshCw,
   RotateCcw,
   Server,
@@ -69,8 +72,10 @@ const TMUX_LINE_STEP = 5;
 
 const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
 const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
+const KEYS_STORAGE_KEY = "hermes-terminals-keysopen";
 const FONT_MIN = 8;
 const FONT_MAX = 20;
+const PRIMARY_SESSION = "work";
 
 // Fallback, falls capabilities noch nicht geladen sind — Wahrheit kommt vom Backend.
 const FALLBACK_WORKDIRS: AgentTerminalWorkdirOption[] = [
@@ -168,6 +173,18 @@ export function pickInitialTarget(
 
 function targetFromWindow(window: AgentTerminalWindow): { session: string; window: string } {
   return { session: window.session, window: window.window };
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function orderWindowsForStrip(windows: AgentTerminalWindow[]): AgentTerminalWindow[] {
+  const primary = windows.filter((w) => w.session === PRIMARY_SESSION);
+  const rest = windows.filter((w) => w.session !== PRIMARY_SESSION);
+  return [...primary, ...rest];
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function chipLabel(window: AgentTerminalWindow): string {
+  return window.session === PRIMARY_SESSION ? window.window : `${window.session}:${window.window}`;
 }
 
 function kindFromWindow(window: AgentTerminalWindow | null, fallback: AgentTerminalKind): AgentTerminalKind {
@@ -315,7 +332,7 @@ function MiniStat({
         ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
         : "border-white/10 bg-white/[0.03] text-white";
   return (
-    <div className={cn("min-w-0 rounded-lg border p-2", toneClass)}>
+    <div className={cn("min-w-0 rounded-lg border p-1.5", toneClass)}>
       <div className="text-[10px] uppercase tracking-normal text-white/45">{label}</div>
       <div className="mt-1 truncate text-sm font-semibold">{value}</div>
     </div>
@@ -342,7 +359,7 @@ function TerminalControlButton({
       onPointerDown={(event) => event.preventDefault()}
       onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
-      className="grid h-10 w-full min-w-0 place-items-center rounded-md border border-white/10 bg-white/[0.04] text-white/75 transition hover:border-cyan-300/40 hover:bg-cyan-300/10 hover:text-cyan-100 active:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-35"
+      className="grid h-9 w-full min-w-0 place-items-center rounded-md border border-white/10 bg-white/[0.04] text-white/75 transition hover:border-cyan-300/40 hover:bg-cyan-300/10 hover:text-cyan-100 active:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-35"
     >
       {children}
     </button>
@@ -350,6 +367,7 @@ function TerminalControlButton({
 }
 
 export function AgentTerminalsView() {
+  const navigate = useNavigate();
   const mobile = useIsMobile();
   const compactLayout = useIsCompactTerminalLayout();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -364,14 +382,26 @@ export function AgentTerminalsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
+  const [createSheetOpen, setCreateSheetOpen] = useState(false);
+  const [createKind, setCreateKind] = useState<AgentTerminalKind>("hermes");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [attachNonce, setAttachNonce] = useState(0);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
   const [controlContext, setControlContext] = useState<ReadOnlyControlContext>(EMPTY_CONTROL_CONTEXT);
   const [composerText, setComposerText] = useState("");
   const [zen, setZen] = useState(false);
-  const [zenHeight, setZenHeight] = useState<number | null>(null);
+  const [immersiveHeight, setImmersiveHeight] = useState<number | null>(null);
+  const [keysOpen, setKeysOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(KEYS_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [workdir, setWorkdir] = useState<string>(() => {
     try {
       return window.localStorage.getItem(WORKDIR_STORAGE_KEY) ?? "home";
@@ -393,6 +423,7 @@ export function AgentTerminalsView() {
   }, [target, windows]);
 
   const sessions = useMemo(() => Array.from(new Set(windows.map((w) => w.session))), [windows]);
+  const orderedWindows = useMemo(() => orderWindowsForStrip(windows), [windows]);
   const state = classifyTerminalState({ window: selectedWindow, socketReady, socketConnecting, mobile });
 
   const refresh = useCallback(async () => {
@@ -557,6 +588,9 @@ export function AgentTerminalsView() {
   useEffect(() => {
     const term = termRef.current;
     if (!term || !target) return;
+    // attachNonce is intentionally unused here beyond forcing a re-attach —
+    // "Neu verbinden" bumps it to reopen the socket for the same target.
+    void attachNonce;
     let disposed = false;
     let dataDisposable: { dispose: () => void } | null = null;
     wsRef.current?.close();
@@ -617,19 +651,23 @@ export function AgentTerminalsView() {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [target]);
+  }, [target, attachNonce]);
 
-  const ensureAgent = async (kind: AgentTerminalKind) => {
-    setSelectedKind(kind);
-    setError(null);
+  const submitCreateSession = useCallback(async () => {
+    setCreateBusy(true);
+    setCreateError(null);
     try {
-      const response = await api.ensureAgentTerminalWindow(kind, workdir);
+      const response = await api.createAgentTerminalWindow(createKind, workdir);
+      setSelectedKind(createKind);
       setTarget(targetFromWindow(response.window));
       await refresh();
+      setCreateSheetOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreateBusy(false);
     }
-  };
+  }, [createKind, workdir, refresh]);
 
   const respawnWindow = useCallback(
     async (win: { session: string; window: string }) => {
@@ -770,20 +808,35 @@ export function AgentTerminalsView() {
 
   const toggleZen = useCallback(() => {
     setZen((current) => !current);
-    setZenHeight(null);
+    setImmersiveHeight(null);
   }, []);
 
-  // Zen/Vollbild: Höhe an den Visual Viewport koppeln, damit die Composer-Zeile
+  const toggleKeysOpen = useCallback(() => {
+    setKeysOpen((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(KEYS_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        /* storage optional */
+      }
+      return next;
+    });
+  }, []);
+
+  // compactLayout ist IMMER immersiv (fixed inset-0), Zen bleibt der Desktop-Vollbild-Toggle.
+  const immersive = compactLayout || zen;
+
+  // Immersiv: Höhe an den Visual Viewport koppeln, damit die Composer-Zeile
   // auf Mobile über der eingeblendeten Tastatur bleibt.
   useEffect(() => {
-    if (!zen) return;
+    if (!immersive) return;
     const viewport = window.visualViewport;
     if (!viewport) return;
-    const update = () => setZenHeight(Math.round(viewport.height));
+    const update = () => setImmersiveHeight(Math.round(viewport.height));
     update();
     viewport.addEventListener("resize", update);
     return () => viewport.removeEventListener("resize", update);
-  }, [zen]);
+  }, [immersive]);
 
   const enabledSkills = useMemo(() => controlContext.skills.filter((skill) => skill.enabled), [controlContext.skills]);
   const enabledToolsets = useMemo(() => controlContext.toolsets.filter((toolset) => toolset.enabled), [controlContext.toolsets]);
@@ -830,7 +883,7 @@ export function AgentTerminalsView() {
                 const dead = isDeadWindow(win);
                 return (
                   <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
-                    <button type="button" onClick={() => { setTarget(targetFromWindow(win)); setSessionsOpen(false); }} className={cn("min-w-0 flex-1 rounded-md border px-2 py-2 text-left text-xs transition", active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-transparent text-white/65 hover:border-white/10 hover:bg-white/5")}>
+                    <button type="button" onClick={() => setTarget(targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-md border px-2 py-2 text-left text-xs transition", active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-transparent text-white/65 hover:border-white/10 hover:bg-white/5")}>
                       <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-red-300" : "bg-emerald-300")} /></span>
                       <span className="mt-0.5 block truncate text-[10px] text-white/40">{dead ? "dead pane" : win.command || "—"}</span>
                     </button>
@@ -859,7 +912,7 @@ export function AgentTerminalsView() {
       <div className="flex items-center gap-2">
         <Sparkles className="h-4 w-4 text-cyan-200" />
         <div>
-          <p className="hc-eyebrow">Skills / Tools</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/60">Skills / Tools</p>
           <h3 className="text-sm font-semibold text-white">Fähigkeiten sichtbar</h3>
         </div>
       </div>
@@ -868,28 +921,27 @@ export function AgentTerminalsView() {
         <MiniStat label="Toolsets aktiv" value={enabledToolsets.length} tone={enabledToolsets.length > 0 ? "ok" : "neutral"} />
         <MiniStat label="Setup offen" value={setupNeeds.length} tone={setupNeeds.length > 0 ? "warn" : "ok"} />
       </div>
-      <div className="grid gap-1.5 text-xs">
+      <div className="grid gap-1 text-xs">
         {capabilityRows.map(({ capability, state }) => (
-          <div key={capability.label} className="grid gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-white">{capability.label}</span>
-              <span
-                title={state.detail}
-                className={cn(
-                  "shrink-0 rounded-full border px-2 py-0.5 text-[10px]",
-                  state.tone === "ok"
-                    ? "border-emerald-300/35 text-emerald-200"
-                    : state.tone === "warn"
-                      ? "border-amber-300/35 text-amber-100"
-                      : "border-white/15 text-white/50",
-                )}
-              >
-                {state.label}
-              </span>
-            </div>
-            <code className="truncate rounded bg-black/30 px-1.5 py-1 text-[10px] text-white/55" title={capability.command}>
-              {capability.command}
-            </code>
+          <div
+            key={capability.label}
+            title={capability.command}
+            className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5"
+          >
+            <span className="min-w-0 truncate font-medium text-white">{capability.label}</span>
+            <span
+              title={state.detail}
+              className={cn(
+                "shrink-0 rounded-full border px-2 py-0.5 text-[10px]",
+                state.tone === "ok"
+                  ? "border-emerald-300/35 text-emerald-200"
+                  : state.tone === "warn"
+                    ? "border-amber-300/35 text-amber-100"
+                    : "border-white/15 text-white/50",
+              )}
+            >
+              {state.label}
+            </span>
           </div>
         ))}
       </div>
@@ -917,7 +969,7 @@ export function AgentTerminalsView() {
       <div className="flex items-center gap-2">
         <Gauge className="h-4 w-4 text-emerald-200" />
         <div>
-          <p className="hc-eyebrow">Tageslage</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/60">Tageslage</p>
           <h3 className="text-sm font-semibold text-white">Was läuft / was ist belegt</h3>
         </div>
       </div>
@@ -1007,7 +1059,7 @@ export function AgentTerminalsView() {
     <div className="grid gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
         <div><p className="hc-eyebrow">Tools / Handoff</p><h2 className="font-semibold text-white">Terminal-Kontext</h2></div>
-        {mobile && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>}
+        {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>}
       </div>
       <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
         <div className="flex justify-between"><span>Target</span><span className="text-white">{target ? `${target.session}:${target.window}` : "—"}</span></div>
@@ -1033,8 +1085,29 @@ export function AgentTerminalsView() {
   );
 
   const composer = (
-    <div className="shrink-0 border-t border-white/10 bg-[#06191b] px-2 py-1.5 sm:px-3">
+    <div
+      className={cn(
+        "shrink-0 border-t border-white/10 bg-[#06191b] px-2 py-1.5 sm:px-3",
+        compactLayout && !keysOpen && "pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]",
+      )}
+    >
       <div className="flex items-end gap-1.5">
+        {compactLayout && (
+          <button
+            type="button"
+            aria-label={keysOpen ? "Tastenleiste ausblenden" : "Tastenleiste einblenden"}
+            aria-pressed={keysOpen}
+            title={keysOpen ? "Tastenleiste ausblenden" : "Tastenleiste einblenden"}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={toggleKeysOpen}
+            className={cn(
+              "grid h-10 w-10 shrink-0 place-items-center rounded-lg border transition",
+              keysOpen ? "border-cyan-300/50 bg-cyan-300/15 text-cyan-100" : "border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10",
+            )}
+          >
+            <Keyboard className="h-4 w-4" />
+          </button>
+        )}
         <textarea
           aria-label="Text an Terminal senden"
           value={composerText}
@@ -1068,8 +1141,8 @@ export function AgentTerminalsView() {
     </div>
   );
 
-  const terminalControls = compactLayout ? (
-    <div className={cn("shrink-0 border-t border-white/10 bg-[#06191b] px-2 pt-1.5", zen ? "pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]" : "pb-[calc(2.25rem+env(safe-area-inset-bottom,0px))] md:pb-2 md:pt-2")}>
+  const keysBar = compactLayout && keysOpen ? (
+    <div className="shrink-0 border-t border-white/10 bg-[#06191b] px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]">
       <div className="grid gap-1.5">
         <div className="grid grid-cols-2 gap-1.5">
           <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal scroll controls">
@@ -1112,67 +1185,221 @@ export function AgentTerminalsView() {
     </div>
   ) : null;
 
-  return (
-    <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-white sm:gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#071b1d]/90 p-2 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:rounded-2xl sm:p-3">
-        <div className="min-w-0">
-          <p className="hc-eyebrow">Agent Terminals</p>
-          <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-white/50">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-red-200"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
-        </div>
-        <div className="flex w-full flex-col gap-1.5 md:w-auto md:items-end">
-          <div className="grid w-full grid-cols-4 gap-1.5 sm:grid-cols-2 md:flex md:w-auto md:flex-wrap">
-            {AGENTS.map((agent) => (
-              <button key={agent.kind} type="button" onClick={() => void ensureAgent(agent.kind)} className={cn("rounded-lg border px-1.5 py-2 text-center text-[11px] sm:px-2.5 sm:text-left sm:text-xs", selectedKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]")}>
-                <span className="flex min-w-0 items-center justify-center gap-1.5 sm:justify-start sm:gap-2"><TerminalSquare className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{agent.label}</span><span className="hidden sm:inline-flex"><CapabilityPill capability={capability} agent={agent} /></span></span>
-              </button>
-            ))}
-          </div>
-          <label className="flex items-center gap-1.5 text-[11px] text-white/50">
-            <span className="shrink-0">Neue Fenster starten in</span>
-            <select
-              aria-label="Arbeitsverzeichnis für neue Terminals"
-              value={workdir}
-              onChange={(event) => selectWorkdir(event.target.value)}
-              className="min-w-0 max-w-[12rem] rounded-lg border border-white/10 bg-[#0a2427] px-2 py-1.5 text-xs text-white/85 focus:border-cyan-300/50 focus:outline-none"
+  const sessionSheetKind = kindFromWindow(selectedWindow, selectedKind);
+  const sessionSheetDead = selectedWindow ? isDeadWindow(selectedWindow) : false;
+
+  const chipStrip = (
+    <div className="flex h-11 shrink-0 items-stretch border-b border-white/10 bg-[#06191b]">
+      <button
+        type="button"
+        aria-label="Zurück zum Dashboard"
+        onClick={() => navigate("/control")}
+        className="grid shrink-0 place-items-center border-r border-white/10 px-3 text-white/70 hover:bg-white/10"
+      >
+        <ChevronLeft className="h-4 w-4" />
+      </button>
+      <div className="flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto px-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {orderedWindows.map((win) => {
+          const active = target?.session === win.session && target.window === win.window;
+          const dead = isDeadWindow(win);
+          return (
+            <button
+              key={`${win.session}:${win.window}`}
+              type="button"
+              onClick={() => (active ? setSessionSheetOpen(true) : setTarget(targetFromWindow(win)))}
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition",
+                active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/65",
+              )}
             >
-              {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
-                <option key={option.key} value={option.key}>{option.label}</option>
-              ))}
-            </select>
-          </label>
+              <span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-red-400" : "bg-emerald-400")} />
+              <span className="max-w-[8rem] truncate">{chipLabel(win)}</span>
+            </button>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        aria-label="Neue Session starten"
+        onClick={() => setCreateSheetOpen(true)}
+        className="grid shrink-0 place-items-center border-l border-white/10 px-3 text-cyan-100 hover:bg-cyan-300/10"
+      >
+        <Plus className="h-4 w-4" />
+      </button>
+    </div>
+  );
+
+  const sessionSheet = compactLayout && sessionSheetOpen && selectedWindow && (
+    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+      <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">{AGENT_LABELS[sessionSheetKind] ?? sessionSheetKind}</p>
+          <h2 className="truncate font-mono text-sm font-semibold text-white">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
+        </div>
+        <button type="button" onClick={() => setSessionSheetOpen(false)} aria-label="Sitzung schließen" className="shrink-0 rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>
+      </div>
+      <div className="mt-3 grid gap-1.5 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
+        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-white/85">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-white/85">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Status</span><StatusPill state={state} /></div>
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+        <button type="button" onClick={() => setAttachNonce((n) => n + 1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <PlugZap className="h-4 w-4" /><span>Neu verbinden</span>
+        </button>
+        <button type="button" disabled={!socketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-35">
+          <span className="font-mono text-sm">^C</span><span>^C senden</span>
+        </button>
+        {sessionSheetDead && (
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+            <RotateCcw className="h-4 w-4" /><span>Neu starten</span>
+          </button>
+        )}
+        {sessionSheetDead && (
+          <button type="button" onClick={() => { void killWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-red-400/25 px-2 py-2.5 text-center leading-tight text-red-100 hover:bg-red-400/10">
+            <Trash2 className="h-4 w-4" /><span>Fenster entfernen</span>
+          </button>
+        )}
+        <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
+        </button>
+        <button type="button" onClick={() => adjustFont(-1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <span className="font-mono text-sm">A−</span><span>Schrift kleiner</span>
+        </button>
+        <button type="button" onClick={() => adjustFont(1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <span className="font-mono text-sm">A+</span><span>Schrift größer</span>
+        </button>
+        <button type="button" onClick={() => { setToolsOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <Wrench className="h-4 w-4" /><span>Tools / Tageslage</span>
+        </button>
+        <button type="button" onClick={() => void refresh()} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <RefreshCw className="h-4 w-4" /><span>Liste aktualisieren</span>
+        </button>
+      </div>
+    </div>
+  );
+
+  const createSessionForm = (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        {AGENTS.map((agent) => (
+          <button
+            key={agent.kind}
+            type="button"
+            onClick={() => setCreateKind(agent.kind)}
+            className={cn(
+              "rounded-lg border px-2 py-2 text-left text-xs transition",
+              createKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]",
+            )}
+          >
+            <span className="flex min-w-0 items-center justify-between gap-1.5">
+              <span className="flex min-w-0 items-center gap-1.5"><TerminalSquare className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{agent.label}</span></span>
+              <CapabilityPill capability={capability} agent={agent} />
+            </span>
+          </button>
+        ))}
+      </div>
+      <label className="grid gap-1 text-xs text-white/60">
+        <span>Arbeitsverzeichnis</span>
+        <select
+          aria-label="Arbeitsverzeichnis für neue Terminals"
+          value={workdir}
+          onChange={(event) => selectWorkdir(event.target.value)}
+          className="rounded-lg border border-white/10 bg-[#0a2427] px-2 py-2 text-xs text-white/85 focus:border-cyan-300/50 focus:outline-none"
+        >
+          {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
+            <option key={option.key} value={option.key}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+      {createError && <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-2 text-xs text-red-100">{createError}</div>}
+      <button
+        type="button"
+        onClick={() => void submitCreateSession()}
+        disabled={createBusy}
+        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/15 px-3 py-2.5 text-sm font-medium text-cyan-100 hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {createBusy ? "Startet…" : "Session starten"}
+      </button>
+    </div>
+  );
+
+  const createSheetHeader = (
+    <div className="mb-3 flex items-center justify-between gap-2">
+      <div><p className="hc-eyebrow">Neue Session</p><h2 className="text-sm font-semibold text-white">Agent wählen</h2></div>
+      <button type="button" onClick={() => setCreateSheetOpen(false)} aria-label="Schließen" className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>
+    </div>
+  );
+
+  const createSheet = createSheetOpen && (
+    compactLayout ? (
+      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+        <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />
+        {createSheetHeader}
+        {createSessionForm}
+      </div>
+    ) : (
+      <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4">
+        <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl">
+          {createSheetHeader}
+          {createSessionForm}
         </div>
       </div>
+    )
+  );
+
+  return (
+    <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-white sm:gap-3">
+      {!compactLayout && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#071b1d]/90 p-2 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:rounded-2xl sm:p-3">
+          <div className="min-w-0">
+            <p className="hc-eyebrow">Agent Terminals</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-white/50">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-red-200"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCreateSheetOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-300/20"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Neue Session
+          </button>
+        </div>
+      )}
 
       <div className="grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
         <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 lg:block">{sessionList}</aside>
         <section
-          style={zen && zenHeight ? { height: `${zenHeight}px` } : undefined}
+          style={immersive && immersiveHeight ? { height: `${immersiveHeight}px` } : undefined}
           className={cn(
             "overflow-hidden border-white/10 bg-[#041113]",
-            zen ? "fixed inset-0 z-[45] flex flex-col" : "rounded-2xl border md:min-h-[640px] lg:min-h-[540px]",
+            immersive ? "fixed inset-0 z-[45] flex flex-col" : "rounded-2xl border md:min-h-[640px] lg:min-h-[540px]",
           )}
         >
-          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-white/65">
-            <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{target ? `${target.session}:${target.window}` : "missing window"}</span></div>
-            <div className="flex shrink-0 items-center gap-1">
-              <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A−</button>
-              <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A+</button>
-              <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 text-white/70 hover:bg-white/10">
-                {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-              </button>
-              {compactLayout && (
-                <>
-                  <button type="button" onClick={() => setSessionsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelLeft className="mr-1 h-3.5 w-3.5" />Sessions</button>
-                  <button type="button" onClick={() => setToolsOpen(true)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-2 text-white/70 hover:bg-white/10"><PanelRight className="mr-1 h-3.5 w-3.5" />Tools</button>
-                </>
-              )}
+          {compactLayout ? chipStrip : (
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-white/65">
+              <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{target ? `${target.session}:${target.window}` : "missing window"}</span></div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A−</button>
+                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A+</button>
+                <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 text-white/70 hover:bg-white/10">
+                  {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
+          {compactLayout && error && (
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-red-400/25 bg-red-400/10 px-3 py-1.5 text-[11px] text-red-100">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 truncate">{error}</span>
+            </div>
+          )}
           {!target && !loading ? (
-            <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Agent oben wählen, um eins anzulegen.</div>
+            <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Neue Session über „+" anlegen.</div>
           ) : (
-            <div className={cn("flex w-full flex-col", zen ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
-              <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />
+            <div className={cn("flex w-full flex-col", immersive ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
+              {!compactLayout && <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />}
               {state === "dead pane" && selectedWindow && (
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-[11px] text-amber-100">
                   <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
@@ -1186,14 +1413,15 @@ export function AgentTerminalsView() {
                 className="min-h-0 min-w-0 flex-1 w-full overflow-hidden [&_.xterm]:box-border [&_.xterm]:px-2 [&_.xterm]:py-1 [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:touch-pan-y"
               />
               {composer}
-              {terminalControls}
+              {keysBar}
             </div>
           )}
         </section>
         <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 xl:block">{toolsDrawer}</aside>
       </div>
 
-      {compactLayout && sessionsOpen && <div className="fixed inset-0 z-50 bg-black/55 p-3"><div className="h-full overflow-auto rounded-2xl border border-white/10 bg-[#071b1d] p-3"><div className="mb-2 flex justify-end"><button type="button" onClick={() => setSessionsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button></div>{sessionList}</div></div>}
+      {sessionSheet}
+      {createSheet}
       {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
 
       {handoffOpen && (
