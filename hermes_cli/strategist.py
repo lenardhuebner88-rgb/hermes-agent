@@ -1031,7 +1031,7 @@ def propose(
             outcomes_path=Path(outcomes_path),
             ingested=ingested,
             capped=capped,
-            flat_metrics=_flatten_numeric(context.get("metrics") or {}),
+            flat_metrics=_flatten_numeric(_metrics_payload(context.get("metrics"))),
         )
 
     return {
@@ -1289,6 +1289,23 @@ def _flatten_numeric(d: Any, prefix: str = "") -> dict[str, float]:
         elif isinstance(v, dict):
             out.update(_flatten_numeric(v, key))
     return out
+
+
+def _metrics_payload(metrics: Any) -> dict[str, Any]:
+    """Unwrap the H1 snapshot wrapper before flattening.
+
+    ``vision-metrics.json`` is ``{schema_version, generated_at, generated_epoch,
+    window_days, metrics: {...}}`` — flattening the wrapper would prefix every
+    key with ``metrics.`` and drag meta fields (schema_version, window_days) in
+    as fake metrics. Injected test dicts without a ``metrics`` child pass
+    through unchanged.
+    """
+    if isinstance(metrics, dict):
+        inner = metrics.get("metrics")
+        if isinstance(inner, dict):
+            return inner
+        return metrics
+    return {}
 
 
 def _lever_metric_key(lever: "Lever", flat: dict[str, float]) -> Optional[str]:
@@ -1579,7 +1596,7 @@ def reflect(
                     if _current_metrics is None:
                         _current_metrics = strategist_surface.read_vision_metrics()
                     if _current_metrics is not None:
-                        flat_current = _flatten_numeric(_current_metrics)
+                        flat_current = _flatten_numeric(_metrics_payload(_current_metrics))
                         flat_baseline = rec.get("baseline") or {}
                         delta = {
                             k: round(flat_current[k] - float(flat_baseline[k]), 9)

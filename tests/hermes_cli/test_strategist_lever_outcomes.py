@@ -657,6 +657,53 @@ def test_verdict_resolves_fully_qualified_flat_metric_key():
     assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unknown"
 
 
+def test_flatten_unwraps_h1_wrapper_shape():
+    """Das echte vision-metrics.json ist ein Wrapper {schema_version, generated_at,
+    generated_epoch, window_days, metrics: {...}} — Flatten muss die inneren
+    Metrik-Pfade ohne 'metrics.'-Präfix und ohne Meta-Felder liefern (Regression:
+    Wrapper-Flatten ergab metrics.autonomy.autonomy_pct + schema_version-Müll)."""
+    wrapper = {
+        "schema_version": 3,
+        "generated_at": "2026-07-02T04:00:50+00:00",
+        "generated_epoch": 1_782_957_650,
+        "window_days": 14,
+        "metrics": {"autonomy": {"autonomy_pct": 81.1}, "green_gate_streak": {"streak": 0}},
+    }
+    flat = strategist._flatten_numeric(strategist._metrics_payload(wrapper))
+    assert flat == {"autonomy.autonomy_pct": 81.1, "green_gate_streak.streak": 0.0}
+
+
+def test_measurement_with_h1_wrapper_yields_delta_and_verdict(board_home, tmp_path):
+    """E2E über reflect(): Wrapper-förmige Metriken → Delta auf sauberem Pfad
+    + verdict via Richtungs-Map (improved bei autonomy-Anstieg)."""
+    now_ts = int(time.time())
+    shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
+    outcomes_path = tmp_path / "lever-outcomes.json"
+    notes_path = tmp_path / "reflections.jsonl"
+
+    record = _shipped_record(
+        "X", {"autonomy.autonomy_pct": 70.0},
+        metric_key="autonomy.autonomy_pct", shipped_at=shipped_at,
+    )
+    outcomes_path.write_text(json.dumps([record]), encoding="utf-8")
+
+    wrapper = {
+        "schema_version": 3,
+        "generated_at": now_ts - 3600,
+        "metrics": {"autonomy": {"autonomy_pct": 81.5}},
+    }
+    with kb.connect() as conn:
+        strategist.reflect(
+            conn, since=0, notes_path=notes_path, outcomes_path=outcomes_path,
+            metrics=wrapper, now=float(now_ts),
+        )
+
+    rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
+    assert rec["status"] == "measured"
+    assert rec["delta"]["autonomy.autonomy_pct"] == pytest.approx(11.5)
+    assert rec["verdict"] == "improved"
+
+
 def test_unparseable_generated_at_measures_without_flag(board_home, tmp_path):
     """Unparsebares generated_at → Messung läuft durch, stale-Flag wird nur übersprungen."""
     now_ts = int(time.time())
