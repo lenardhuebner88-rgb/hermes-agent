@@ -21449,6 +21449,14 @@ def build_worker_context(
         lines.append("If complete, call kanban_complete. If blocked, call kanban_block.")
     lines.append("")
 
+    # Knowledge pointers — static pointers to external resources workers may
+    # consult on demand. No content is inlined here; workers read on-disk files
+    # only when the pointer is relevant to their specific task.
+    lines.append("## Knowledge pointers")
+    lines.append("- Current model landscape (cron-maintained, ~30min fresh): /home/piet/llm-wiki/wiki/models/model-landscape.md — read it only when a model/routing/pricing question arises.")
+    lines.append("- Canonical cross-agent facts: /home/piet/vault/00-Canon/ (start at _index.md)")
+    lines.append("")
+
     if task.body and task.body.strip():
         # PlanSpec B: when the body references a known contract_profile (and
         # carries no inline scope_contract block), render the expanded template

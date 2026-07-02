@@ -152,6 +152,14 @@ class TestChildSystemPrompt(unittest.TestCase):
         self.assertIn("WORKSPACE PATH", _STANDING_BRIEF)
         self.assertIn("wins", _STANDING_BRIEF)
 
+    def test_standing_brief_contains_model_landscape_pointer(self):
+        """The model-landscape pointer must be present so workers know where
+        to look when a model/routing/pricing question arises."""
+        self.assertIn(
+            "/home/piet/llm-wiki/wiki/models/model-landscape.md",
+            _STANDING_BRIEF,
+        )
+
     def test_goal_only(self):
         prompt = _build_child_system_prompt("Fix the tests")
         self.assertIn("Fix the tests", prompt)
