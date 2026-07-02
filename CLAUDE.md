@@ -31,7 +31,10 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
   prüft Login-Cookie → `/api/health-status`; Script loggt keine Passwörter, Tokens oder Cookies.
 
 ## Gates (vor Deploy/Push)
-- Frontend: `cd web && npm run lint:control && npx tsc -b --noEmit && npx vitest run && npm run build`
+- Frontend: `scripts/gate-frontend.sh` (lint:control → tsc -b --noEmit → vitest → build; pipet
+  nichts, Exit-Code ist die Wahrheit — nie freihändig mit `| tail` gaten, das schluckt ohne
+  pipefail den Exit-Code. `--skip-build`, wenn `web_dist` nicht überschrieben werden darf,
+  z. B. bei fremdem dirty `web/`-Stand.)
   (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
   Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
 - Python: `scripts/run_tests.sh` (mit pytest-timeout) + `ruff`
