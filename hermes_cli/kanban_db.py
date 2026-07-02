@@ -8919,6 +8919,47 @@ def _worker_gate_config() -> dict:
     }
 
 
+def _worker_gate_commands_for_workspace(_wg: dict, workspace: str) -> list[str]:
+    """Return worker-gate commands for *workspace*.
+
+    Direct workspace-path matches keep precedence. If no direct match exists,
+    resolve the git common-dir so an isolated worktree can inherit the command
+    list configured for its main checkout. Non-git workspaces and git failures
+    deliberately fall back to the configured default, matching the previous
+    no-match behavior.
+    """
+    repos = _wg.get("repos") if isinstance(_wg.get("repos"), dict) else {}
+    default = _wg.get("default") or []
+    try:
+        workspace_key = str(Path(workspace).resolve())
+    except Exception:
+        workspace_key = workspace
+    if workspace_key in repos:
+        return repos[workspace_key]
+    if repos:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        common_dir = (proc.stdout or "").strip() if proc and proc.returncode == 0 else ""
+        if common_dir:
+            try:
+                common_path = Path(common_dir).resolve()
+                repo_key = str(common_path.parent if common_path.name == ".git" else common_path)
+            except Exception:
+                repo_key = ""
+            if repo_key in repos:
+                return repos[repo_key]
+    return default
+
+
 def _run_originated_from_review(
     conn: sqlite3.Connection, task_id: str, run_id: Optional[int]
 ) -> bool:
@@ -9316,11 +9357,7 @@ def _submit_for_review(
         _wg_assignee = (_wg_row["assignee"] or "").strip().lower() if _wg_row else ""
         _wg_ws = _wg_row["workspace_path"] if _wg_row else None
         if _wg_assignee in _wg["code_roles"] and _wg_ws and os.path.isdir(_wg_ws):
-            try:
-                _wg_key = str(Path(_wg_ws).resolve())
-            except Exception:
-                _wg_key = _wg_ws
-            _wg_cmds = _wg["repos"].get(_wg_key, _wg["default"])
+            _wg_cmds = _worker_gate_commands_for_workspace(_wg, _wg_ws)
             if _wg_cmds:
                 # Gate will run — initialize stamp as passed (flip on failure)
                 _wg_run_ts = _dt.datetime.now(_dt.timezone.utc).strftime(
@@ -22367,7 +22404,116 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         "today": totals_today,
         "window": totals_window,
         "profiles": profile_rows,
+        # S1B: Review-Wert je Stufe über dasselbe Fenster (window_start). Liest
+        # task_runs.verdict + metadata.review_findings zur Query-Zeit — kein
+        # Schema-Change. Altbestand ohne das Feld → NULL, nie Fehler.
+        "review_value": review_value_by_stage(conn, window_start=window_start),
     }
+
+
+# S1B: die kanonischen Review-Stufen (verifier → reviewer → critic). Muss mit
+# der Stufen-Reihenfolge in ``_review_stages_for_tier`` konsistent bleiben.
+_REVIEW_STAGE_PROFILES: tuple[str, ...] = ("verifier", "reviewer", "critic")
+
+
+def _review_findings_from_meta(
+    meta: dict[str, Any]
+) -> Optional[tuple[int, int]]:
+    """S1B/AC-1: extrahiert ``metadata.review_findings = {blocking, observations}``.
+
+    Gibt ``None`` zurück, wenn das Feld fehlt oder malformt ist (Altbestand →
+    NULL-Aggregat), niemals eine Exception. Bool wird bewusst verworfen
+    (``True``/``False`` sind keine gültigen Fund-Zähler), ebenso Negativwerte.
+    """
+    raw = meta.get("review_findings")
+    if not isinstance(raw, dict):
+        return None
+    blocking = raw.get("blocking")
+    observations = raw.get("observations")
+    if isinstance(blocking, bool) or isinstance(observations, bool):
+        return None
+    if not isinstance(blocking, int) or not isinstance(observations, int):
+        return None
+    if blocking < 0 or observations < 0:
+        return None
+    return (blocking, observations)
+
+
+def review_value_by_stage(
+    conn: sqlite3.Connection, *, window_start: int
+) -> list[dict]:
+    """S1B/AC-2: Review-Wert je Stufe (verifier/reviewer/critic) über dasselbe
+    Fenster wie :func:`runs_costs`.
+
+    Aggregiert ausschließlich lesend über bestehende ``task_runs``-Spalten:
+    ``verdict`` (B2, strukturierte Review-Verdikte) und
+    ``metadata.review_findings`` (AC-1). KEIN Schema-Change, KEINE Migration.
+
+    Pro Stufe: ``runs`` (alle beendeten Läufe des Profils im Fenster),
+    ``approved`` / ``request_changes`` (aus der Verdict-Spalte),
+    ``findings_blocking`` / ``findings_observations`` (Summe der Funde),
+    ``input_tokens`` und ``tokens_per_finding``.
+
+    NULL-Semantik: trägt KEIN Lauf der Stufe das ``review_findings``-Feld
+    (gesamter Altbestand), sind ``findings_*`` und ``tokens_per_finding``
+    ``None`` — nie ``0`` und nie ein Fehler. Trägt das Feld die Zahl 0
+    (nachweislich keine Funde), bleibt ``tokens_per_finding`` ``None``
+    (kein Fund → keine Kosten-pro-Fund), die Fund-Zähler stehen aber auf 0.
+    """
+    placeholders = ",".join("?" for _ in _REVIEW_STAGE_PROFILES)
+    acc: dict[str, dict[str, Any]] = {
+        stage: {
+            "profile": stage,
+            "runs": 0,
+            "approved": 0,
+            "request_changes": 0,
+            "findings_blocking": 0,
+            "findings_observations": 0,
+            "input_tokens": 0,
+            "_finding_runs": 0,
+        }
+        for stage in _REVIEW_STAGE_PROFILES
+    }
+    for row in conn.execute(
+        "SELECT profile, verdict, input_tokens, metadata FROM task_runs "
+        "WHERE ended_at IS NOT NULL AND ended_at >= ? "
+        f"AND profile IN ({placeholders})",
+        (window_start, *_REVIEW_STAGE_PROFILES),
+    ):
+        bucket = acc[row["profile"]]
+        bucket["runs"] += 1
+        if row["input_tokens"]:
+            bucket["input_tokens"] += int(row["input_tokens"])
+        verdict = row["verdict"]
+        if verdict == "APPROVED":
+            bucket["approved"] += 1
+        elif verdict == "REQUEST_CHANGES":
+            bucket["request_changes"] += 1
+        found = _review_findings_from_meta(_run_meta_dict(row["metadata"]))
+        if found is not None:
+            bucket["_finding_runs"] += 1
+            bucket["findings_blocking"] += found[0]
+            bucket["findings_observations"] += found[1]
+
+    out: list[dict] = []
+    for stage in _REVIEW_STAGE_PROFILES:
+        bucket = acc[stage]
+        finding_runs = bucket.pop("_finding_runs")
+        if finding_runs == 0:
+            bucket["findings_blocking"] = None
+            bucket["findings_observations"] = None
+            bucket["tokens_per_finding"] = None
+        else:
+            total_findings = (
+                bucket["findings_blocking"] + bucket["findings_observations"]
+            )
+            bucket["tokens_per_finding"] = (
+                round(bucket["input_tokens"] / total_findings)
+                if total_findings > 0
+                else None
+            )
+        out.append(bucket)
+    return out
 
 
 # F6 (night-sprint): Issue-Gruppierung — gleicher Fehlertyp + gleiches Profil

@@ -19,6 +19,7 @@ import type {
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
+  ReviewValueRow,
   RunsDailyPoint,
   WindowedRollupResponse,
   WindowedRollupRoot,
@@ -222,6 +223,20 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
     billing_neuralwatt_cost_usd: null,
     input_tokens: null,
     output_tokens: null,
+    ...over,
+  };
+}
+
+function reviewRow(over: Partial<ReviewValueRow> = {}): ReviewValueRow {
+  return {
+    profile: "reviewer",
+    runs: 0,
+    approved: 0,
+    request_changes: 0,
+    findings_blocking: null,
+    findings_observations: null,
+    input_tokens: null,
+    tokens_per_finding: null,
     ...over,
   };
 }
@@ -649,6 +664,7 @@ describe("EffizienzSection (ST5)", () => {
           costRow({ profile: "coder", input_tokens: 1_200_000, output_tokens: 0, runs: 12 }),
           costRow({ profile: "w", input_tokens: 9_000_000, output_tokens: 0, runs: 1 }), // phantom → dropped
         ]}
+        reviewValue={[]}
         chainRate={0.75}
         queueWaitSeconds={240}
       />,
@@ -672,9 +688,50 @@ describe("EffizienzSection (ST5)", () => {
 
   it("stays calm with em-dashes and an empty-burn note when nothing ran", () => {
     const html = renderToStaticMarkup(
-      <EffizienzSection profiles={[]} costs={[]} chainRate={null} queueWaitSeconds={null} />,
+      <EffizienzSection profiles={[]} costs={[]} reviewValue={[]} chainRate={null} queueWaitSeconds={null} />,
     );
     expect(html).toContain("Noch kein Token-Burn im Fenster.");
+    expect(html).toContain("Noch keine Review-Läufe im Fenster.");
     expect(html).toContain("—");
+  });
+
+  it("shows a review-value row per active stage with quote, findings and tokens/finding", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[]}
+        costs={[]}
+        reviewValue={[
+          // verifier: field present, 1 blocker + 2 obs = 3 findings, 300 K in →
+          // 100 K / finding; quote 3/4 = 75 %.
+          reviewRow({
+            profile: "verifier",
+            runs: 4,
+            approved: 3,
+            request_changes: 1,
+            findings_blocking: 1,
+            findings_observations: 2,
+            input_tokens: 300_000,
+            tokens_per_finding: 100_000,
+          }),
+          // reviewer: Altbestand — findings/tokens NULL despite runs; quote —.
+          reviewRow({ profile: "reviewer", runs: 5, approved: 0, request_changes: 0 }),
+          // critic: 0 runs → filtered out entirely.
+          reviewRow({ profile: "critic", runs: 0 }),
+        ]}
+        chainRate={null}
+        queueWaitSeconds={null}
+      />,
+    );
+    expect(html).toContain("Review-Wert je Stufe");
+    // verifier row: 3 findings (score), 75 % quote, 100 K je Fund, 4 Läufe.
+    expect(html).toContain("Verifier");
+    expect(html).toContain("75 %");
+    expect(html).toContain("100 k je Fund");
+    expect(html).toContain("4 Läufe");
+    // reviewer NULL row: quote/findings/tokens all em-dash, still 5 Läufe.
+    expect(html).toContain("Reviewer");
+    expect(html).toContain("5 Läufe");
+    // critic (0 runs) is not rendered.
+    expect(html).not.toContain("Critic");
   });
 });

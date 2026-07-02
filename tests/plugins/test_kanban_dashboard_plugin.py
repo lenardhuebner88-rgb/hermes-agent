@@ -1829,6 +1829,151 @@ def test_runs_costs_today_window_and_profiles(client):
     assert all("subscription" in p for p in data["profiles"])
 
 
+def test_runs_costs_review_value_real_metadata(client):
+    """S1B/AC-2+AC-4: Review-Wert je Stufe aus dem ECHTEN
+    ``task_runs.metadata``-Format. Die Fixtures sind aus realen Live-DB-Run-
+    Datensätzen destilliert — verifier/reviewer tragen
+    ``review_findings = {"blocking": <int>, "observations": <int>}`` neben den
+    üblichen acceptance/cost/provider-Feldern (Form von Live-Runs 6011/6013),
+    nicht synthetisch erfunden."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="reviewed work")
+        with kb.write_txn(conn):
+            # verifier — APPROVED, 1 Blocker + 2 Anmerkungen. Metadata-Form aus
+            # Live-Run 6011 destilliert: review_findings neben
+            # acceptance/cost/provider-Feldern.
+            _insert_run(
+                conn, t, profile="verifier", outcome="completed",
+                started_at=now - 900, ended_at=now - 800,
+                verdict="APPROVED", tokens_in=175738, tokens_out=8350,
+                metadata={
+                    "review_findings": {"blocking": 1, "observations": 2},
+                    "acceptance_checklist": [
+                        {"item": "AC-1", "verdict": "MET", "evidence": "…"},
+                    ],
+                    "caller_grep": "done",
+                    "changed_files": ["hermes_cli/kanban_db.py"],
+                    "cost_usd_equivalent": 2.1,
+                    "model": "claude-opus-4-8",
+                    "provider": "anthropic",
+                    "subscription": "claude",
+                    "tests_run": 3,
+                    "worker_session_id": "20260702_x",
+                },
+            )
+            # reviewer — APPROVED, nur eine Anmerkung (Live-Run 6013-Form).
+            _insert_run(
+                conn, t, profile="reviewer", outcome="completed",
+                started_at=now - 700, ended_at=now - 600,
+                verdict="APPROVED", tokens_in=30105, tokens_out=11231,
+                metadata={
+                    "review_findings": {"blocking": 0, "observations": 1},
+                    "independent_finding": "one nit",
+                    "checked_files": ["a.py"],
+                    "verdict": "APPROVED",
+                    "worker_session_id": "20260702_y",
+                },
+            )
+            # reviewer — REQUEST_CHANGES mit 2 Blockern.
+            _insert_run(
+                conn, t, profile="reviewer", outcome="completed",
+                started_at=now - 500, ended_at=now - 400,
+                verdict="REQUEST_CHANGES", tokens_in=42000, tokens_out=6000,
+                metadata={"review_findings": {"blocking": 2, "observations": 0},
+                          "verdict": "REQUEST_CHANGES"},
+            )
+            # critic — Feld vorhanden, aber nachweislich KEINE Funde (0/0):
+            # Fund-Zähler stehen auf 0, tokens_per_finding bleibt None.
+            _insert_run(
+                conn, t, profile="critic", outcome="completed",
+                started_at=now - 300, ended_at=now - 200,
+                verdict="APPROVED", tokens_in=48931, tokens_out=2170,
+                metadata={"review_findings": {"blocking": 0, "observations": 0},
+                          "action": "uphold", "critic_checks": {}},
+            )
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/costs?days=7").json()
+    stages = {s["profile"]: s for s in data["review_value"]}
+    assert set(stages) == {"verifier", "reviewer", "critic"}
+
+    verifier = stages["verifier"]
+    assert verifier["runs"] == 1
+    assert verifier["approved"] == 1
+    assert verifier["request_changes"] == 0
+    assert verifier["findings_blocking"] == 1
+    assert verifier["findings_observations"] == 2
+    assert verifier["input_tokens"] == 175738
+    assert verifier["tokens_per_finding"] == round(175738 / 3)
+
+    reviewer = stages["reviewer"]
+    assert reviewer["runs"] == 2
+    assert reviewer["approved"] == 1
+    assert reviewer["request_changes"] == 1
+    assert reviewer["findings_blocking"] == 2  # 0 + 2
+    assert reviewer["findings_observations"] == 1  # 1 + 0
+    assert reviewer["input_tokens"] == 30105 + 42000
+    assert reviewer["tokens_per_finding"] == round((30105 + 42000) / 3)
+
+    # critic: Feld vorhanden mit 0 Funden → Zähler 0, aber keine Kosten-pro-Fund.
+    critic = stages["critic"]
+    assert critic["runs"] == 1
+    assert critic["approved"] == 1
+    assert critic["findings_blocking"] == 0
+    assert critic["findings_observations"] == 0
+    assert critic["tokens_per_finding"] is None
+    assert critic["input_tokens"] == 48931
+
+
+def test_runs_costs_review_value_legacy_without_field_is_null(client):
+    """S1B/AC-1+AC-4: Altbestand ohne ``metadata.review_findings`` ergibt ein
+    NULL-Fund-Aggregat je Stufe — Läufe und Verdikte werden weiter gezählt, die
+    Fund-Felder und tokens_per_finding bleiben None, niemals 0 und niemals ein
+    Fehler. Eine Stufe ganz ohne Läufe ist ebenfalls NULL."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="legacy review")
+        with kb.write_txn(conn):
+            _insert_run(conn, t, profile="verifier", outcome="completed",
+                        started_at=now - 600, ended_at=now - 500,
+                        verdict="APPROVED", tokens_in=90000, tokens_out=4000,
+                        metadata={"cost_usd_equivalent": 1.0, "model": "x"})
+            _insert_run(conn, t, profile="reviewer", outcome="completed",
+                        started_at=now - 400, ended_at=now - 300,
+                        verdict="REQUEST_CHANGES", tokens_in=50000,
+                        tokens_out=3000, metadata={"verdict": "REQUEST_CHANGES"})
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/costs?days=7").json()
+    stages = {s["profile"]: s for s in data["review_value"]}
+
+    verifier = stages["verifier"]
+    assert verifier["runs"] == 1
+    assert verifier["approved"] == 1
+    assert verifier["findings_blocking"] is None
+    assert verifier["findings_observations"] is None
+    assert verifier["tokens_per_finding"] is None
+    assert verifier["input_tokens"] == 90000
+
+    reviewer = stages["reviewer"]
+    assert reviewer["runs"] == 1
+    assert reviewer["request_changes"] == 1
+    assert reviewer["findings_blocking"] is None
+    assert reviewer["tokens_per_finding"] is None
+
+    # critic: keine Läufe im Fenster → leere Stufe, ebenfalls NULL, kein Fehler.
+    critic = stages["critic"]
+    assert critic["runs"] == 0
+    assert critic["findings_blocking"] is None
+    assert critic["findings_observations"] is None
+    assert critic["tokens_per_finding"] is None
+
+
 def test_profile_subscription_grounded_in_provider(monkeypatch):
     """Abo-Lane für den Statistik-Panel wird aus Runtime/Provider aufgelöst,
     NICHT aus dem Profilnamen — so kann eine umbenannte/umgewidmete Lane (Kimi

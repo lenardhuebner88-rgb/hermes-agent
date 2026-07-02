@@ -1396,15 +1396,31 @@ const CostProfileRowSchema = CostBucketSchema.extend({
   // lanes (openrouter, gemini, …). Drives the Abo-Tokenverbrauch panel.
   subscription: z.enum(["chatgpt", "claude", "kimi"]).nullable().catch(null),
 });
+// S1B: Review-Wert je Stufe (verifier/reviewer/critic) über dasselbe Fenster
+// wie die Kosten-Sicht. findings_* / tokens_per_finding sind NULL, wenn kein
+// Lauf der Stufe das metadata.review_findings-Feld trägt (gesamter Altbestand);
+// tokens_per_finding bleibt auch bei nachweislich 0 Funden NULL.
+const ReviewValueRowSchema = z.object({
+  profile: z.string().catch("unbekannt"),
+  runs: z.coerce.number().catch(0),
+  approved: z.coerce.number().catch(0),
+  request_changes: z.coerce.number().catch(0),
+  findings_blocking: nullableNumber,
+  findings_observations: nullableNumber,
+  input_tokens: nullableNumber,
+  tokens_per_finding: nullableNumber,
+});
 export const RunsCostsResponseSchema = z.object({
   days: z.coerce.number().catch(7),
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
   today: CostBucketSchema,
   window: CostBucketSchema,
   profiles: z.array(CostProfileRowSchema).catch([]),
+  review_value: z.array(ReviewValueRowSchema).catch([]),
 });
 export type CostBucket = z.infer<typeof CostBucketSchema>;
 export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
+export type ReviewValueRow = z.infer<typeof ReviewValueRowSchema>;
 export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
 
 const TokenBurnBucketSchema = z.object({
