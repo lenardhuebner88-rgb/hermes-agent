@@ -206,6 +206,101 @@ def test_disposition_digest_etag_304_roundtrip(client):
 
 
 # ---------------------------------------------------------------------------
+# GET /strategist/outcomes (Ziel-4) — lever-outcomes.json read-through
+# ---------------------------------------------------------------------------
+
+
+def _write_outcomes(records: list[dict]) -> None:
+    from hermes_cli import strategist
+
+    path = strategist.default_state_dir() / "lever-outcomes.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+
+def _outcome_record(*, lever_key: str, proposed_at: int, **overrides) -> dict:
+    record = {
+        "schema_version": 1,
+        "lever_key": lever_key,
+        "root_task_id": f"t_{lever_key}",
+        "proposed_at": proposed_at,
+        "baseline": {"autonomy_pct": 62},
+        "metric_key": "autonomy_pct",
+        "shipped_at": proposed_at + 100,
+        "measured_at": proposed_at + 200,
+        "current": {"autonomy_pct": 68},
+        "delta": {"autonomy_pct": 6},
+        "verdict": "improved",
+        "status": "measured",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_outcomes_empty_when_no_ledger(client):
+    r = client.get(f"{PREFIX}/strategist/outcomes")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["outcomes"] == []
+    assert isinstance(data["generated_at"], int)
+
+
+def test_outcomes_returns_records_sorted_desc_unmodified(client):
+    older = _outcome_record(lever_key="lever-a", proposed_at=1000)
+    newer = _outcome_record(lever_key="lever-b", proposed_at=2000, verdict="worsened")
+    _write_outcomes([older, newer])
+    r = client.get(f"{PREFIX}/strategist/outcomes")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert [o["lever_key"] for o in data["outcomes"]] == ["lever-b", "lever-a"]
+    # Records are a read-through of the writer's schema — unchanged.
+    assert data["outcomes"][0] == newer
+    assert data["outcomes"][1] == older
+
+
+def test_outcomes_limit_query_param(client):
+    records = [_outcome_record(lever_key=f"lever-{i}", proposed_at=i) for i in range(5)]
+    _write_outcomes(records)
+    r = client.get(f"{PREFIX}/strategist/outcomes", params={"limit": 2})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert len(data["outcomes"]) == 2
+    assert [o["lever_key"] for o in data["outcomes"]] == ["lever-4", "lever-3"]
+
+
+def test_outcomes_default_limit_is_twenty(client):
+    records = [_outcome_record(lever_key=f"lever-{i}", proposed_at=i) for i in range(25)]
+    _write_outcomes(records)
+    r = client.get(f"{PREFIX}/strategist/outcomes")
+    assert r.status_code == 200, r.text
+    assert len(r.json()["outcomes"]) == 20
+
+
+def test_outcomes_covers_all_four_verdicts(client):
+    verdicts = ["improved", "worsened", "unchanged", "unknown"]
+    records = [
+        _outcome_record(lever_key=f"lever-{v}", proposed_at=idx, verdict=v)
+        for idx, v in enumerate(verdicts)
+    ]
+    _write_outcomes(records)
+    r = client.get(f"{PREFIX}/strategist/outcomes")
+    assert r.status_code == 200, r.text
+    got = {o["lever_key"]: o["verdict"] for o in r.json()["outcomes"]}
+    assert got == {f"lever-{v}": v for v in verdicts}
+
+
+def test_outcomes_malformed_ledger_degrades_to_empty_list(client):
+    from hermes_cli import strategist
+
+    path = strategist.default_state_dir() / "lever-outcomes.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+    r = client.get(f"{PREFIX}/strategist/outcomes")
+    assert r.status_code == 200, r.text
+    assert r.json()["outcomes"] == []
+
+
+# ---------------------------------------------------------------------------
 # POST approve / veto
 # ---------------------------------------------------------------------------
 

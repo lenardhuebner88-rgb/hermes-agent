@@ -265,6 +265,42 @@ def read_disposition_digest() -> Optional[dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def outcomes_path() -> Path:
+    """Resolve the lever-outcomes ledger path (Ziel-2), delegating to the writer
+    (:func:`strategist.default_state_dir`) so reader and writer agree — no
+    separate override exists today because only the strategist CLI writes it."""
+    try:
+        from hermes_cli import strategist as _strat
+
+        return _strat.default_state_dir() / "lever-outcomes.json"
+    except Exception:
+        return get_hermes_home() / "state" / "strategist" / "lever-outcomes.json"
+
+
+def read_lever_outcomes(*, limit: int = 20) -> list[dict[str, Any]]:
+    """Read the lever-outcomes ledger (Ziel-2), newest ``proposed_at`` first,
+    capped at *limit*.
+
+    Defensive on purpose (mirrors :func:`read_vision_metrics`): a missing file
+    (no lever shipped yet), a partial write or malformed JSON degrades to an
+    empty list, never raises into the poll path. Records are returned
+    unmodified — the surface is a read-through of the writer's schema."""
+    path = outcomes_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    records = [r for r in data if isinstance(r, dict)]
+    records.sort(key=lambda r: r.get("proposed_at") or 0, reverse=True)
+    return records[:limit]
+
+
 def held_operator_proposals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return the held ``freigabe: operator`` proposal roots for the surface.
 

@@ -48,6 +48,8 @@ import {
   VaultProvenanceResponseSchema,
   StrategistCountSchema,
   StrategistLastRunsSchema,
+  StrategistOutcomesResponseSchema,
+  type StrategistOutcomesResponse,
   DispositionListResponseSchema,
   WindowedRollupResponseSchema,
   parseOrThrow,
@@ -2078,6 +2080,16 @@ export function useStrategistLastRuns() {
     "strategist/last-runs",
     async () => parseOrThrow(StrategistLastRunsSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/last-runs"), "strategist-last-runs"),
     15000,
+  );
+}
+
+// Ziel-4: Wirkungs-Historie geshippter Lever (lever-outcomes.json read-through).
+// 30s-Poll — nichts, was schneller als der propose-/reflect-Takt ändert.
+export function useStrategistOutcomes() {
+  return usePolling<StrategistOutcomesResponse>(
+    "strategist/outcomes",
+    async () => parseOrThrow(StrategistOutcomesResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/outcomes"), "strategist-outcomes"),
+    30000,
   );
 }
 

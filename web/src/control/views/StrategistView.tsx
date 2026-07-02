@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Gauge, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
+import { Activity, Gauge, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
-import { fmtClock } from "../lib/derive";
+import { fmtAge, fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
-import { useStrategistLastRuns } from "../hooks/useControlData";
+import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/useControlData";
+import type { LeverOutcome } from "../lib/schemas";
 import {
+  formatSignedDelta,
   metricSnapshotRows,
+  outcomeDeltaValue,
+  outcomeStatusLabel,
+  outcomeVerdictLabel,
+  outcomeVerdictToneClass,
   partitionProposals,
   runSummaryText,
   sourceLabel,
@@ -67,6 +73,13 @@ const t = {
   lastRun: (s: string) => `zuletzt: ${s}`,
   neverRun: "noch nicht gelaufen",
   triggerStarted: "Lauf gestartet — das Ergebnis erscheint, sobald er durch ist.",
+  // Wirkungs-Historie (Ziel-4): hat ein geshippter Lever gewirkt?
+  outcomesEyebrow: "Wirkung",
+  outcomesMeta: "geshippte Lever — Auftrag → Wirkung",
+  outcomesEmpty: "Noch keine gemessenen Outcomes",
+  outcomesEmptyDesc: "Sobald ein freigegebener Lever gebaut und die Reifezeit verstrichen ist, misst der Reflect-Schritt hier die Wirkung.",
+  outcomesLoadError: "Wirkungs-Historie konnte nicht geladen werden.",
+  noMetric: "kein Metrik-Key",
 };
 
 type PendingAction = { id: string; kind: "approve" | "veto" } | null;
@@ -212,7 +225,66 @@ export function StrategistView({ density }: { density: Density }) {
           </div>
         )}
       </FleetPanel>
+
+      <OutcomesPanel />
     </div>
+  );
+}
+
+/** Wirkungs-Historie (Ziel-4): liest die lever-outcomes.json (Ziel-2) über den
+ *  Reflect-Schritt gemessenen Levern — Auftrag → Wirkung rückverfolgbar, ohne
+ *  JSON-Dateien zu lesen. Rein lesend, kein Approve/Veto. Polling/fetch lebt
+ *  hier; die reine Liste ist als `OutcomeList` separat exportiert (statischer
+ *  Render-Test, kein Netzwerk — ProposalList-Muster). */
+function OutcomesPanel() {
+  const { data, error } = useStrategistOutcomes();
+  const outcomes = data?.outcomes ?? [];
+  return (
+    <FleetPanel eyebrow={t.outcomesEyebrow} meta={t.outcomesMeta}>
+      {error ? <ToneCallout tone="red">{t.outcomesLoadError}</ToneCallout> : null}
+      <OutcomeList outcomes={outcomes} />
+    </FleetPanel>
+  );
+}
+
+// Pure list render — separately exported for the static render test (no
+// polling), mirroring `ProposalList` above. Owns the empty state too since
+// the Auftrag calls for a Leerzustand assertion in the component test.
+export function OutcomeList({ outcomes }: { outcomes: LeverOutcome[] }) {
+  if (outcomes.length === 0) {
+    return <FleetEmptyState title={t.outcomesEmpty} desc={t.outcomesEmptyDesc} />;
+  }
+  return (
+    <ul className="space-y-1.5">
+      {outcomes.map((o, idx) => (
+        <OutcomeRow key={`${o.root_task_id ?? o.lever_key ?? "outcome"}-${idx}`} outcome={o} />
+      ))}
+    </ul>
+  );
+}
+
+function OutcomeRow({ outcome }: { outcome: LeverOutcome }) {
+  const delta = outcomeDeltaValue(outcome);
+  return (
+    <li className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 px-3 py-2">
+      <Activity className="h-3.5 w-3.5 shrink-0 hc-dim" />
+      <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">
+        {outcome.lever_key ?? "—"}
+      </span>
+      <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
+        {outcomeStatusLabel(outcome.status)}
+      </span>
+      <span className={`hc-mono shrink-0 rounded-full border px-2 py-0.5 text-[0.68rem] ${outcomeVerdictToneClass(outcome.verdict)}`}>
+        {outcomeVerdictLabel(outcome.verdict)}
+      </span>
+      <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{outcome.metric_key ?? t.noMetric}</span>
+      {delta !== null ? (
+        <span className="hc-mono shrink-0 text-[0.78rem] text-white">{formatSignedDelta(delta)}</span>
+      ) : null}
+      {outcome.proposed_at != null ? (
+        <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtAge(outcome.proposed_at)}</span>
+      ) : null}
+    </li>
   );
 }
 

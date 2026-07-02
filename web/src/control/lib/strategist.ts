@@ -5,6 +5,9 @@
 // and shows the distilled Vision metric snapshot (H1) as triage context. These
 // helpers are pure so they can be unit-tested without the polling/render path.
 
+import type { LeverOutcome } from "./schemas";
+import { toneClasses } from "./tones";
+
 /** One held strategist proposal (a `freigabe:operator` root awaiting triage). */
 export interface StrategistProposal {
   id: string;
@@ -161,4 +164,64 @@ export function partitionProposals(proposals: StrategistProposal[]): Partitioned
     (isStrategistAuthored(p.created_by) ? strategist : manual).push(p);
   }
   return { strategist, manual };
+}
+
+// ── Wirkungs-Historie (Ziel-4) ──────────────────────────────────────────────
+// Shipped levers get measured MATURITY_DAYS after release (reflect step); the
+// verdict compares the metric_key's delta against its direction. `verdict` is
+// `null` on records not measured yet (status "proposed"/"shipped") — the
+// surface treats that the same as the writer's own "unknown" string, since
+// both mean "no evidence yet" to the operator.
+
+const OUTCOME_STATUS_LABELS: Record<string, string> = {
+  proposed: "Vorgeschlagen",
+  shipped: "Geshippt",
+  measured: "Gemessen",
+};
+
+/** Human label for a lever-outcome's lifecycle `status`. */
+export function outcomeStatusLabel(status: string | null | undefined): string {
+  if (!status) return "Unbekannt";
+  return OUTCOME_STATUS_LABELS[status] ?? status;
+}
+
+const OUTCOME_VERDICT_LABELS: Record<string, string> = {
+  improved: "verbessert",
+  worsened: "verschlechtert",
+  unchanged: "unverändert",
+  unknown: "unbekannt",
+};
+
+/** Human label for a lever-outcome's `verdict` — `null`/unrecognised → "unbekannt". */
+export function outcomeVerdictLabel(verdict: string | null | undefined): string {
+  return OUTCOME_VERDICT_LABELS[verdict ?? ""] ?? OUTCOME_VERDICT_LABELS.unknown;
+}
+
+/** Tone classes for the verdict chip: improved emerald / worsened red /
+ *  unchanged zinc / unknown (incl. `null`, not measured yet) dim — no tint. */
+export function outcomeVerdictToneClass(verdict: string | null | undefined): string {
+  switch (verdict) {
+    case "improved": return toneClasses("emerald");
+    case "worsened": return toneClasses("red");
+    case "unchanged": return toneClasses("zinc");
+    default: return "border-white/10 bg-white/[.03] hc-dim";
+  }
+}
+
+/** Extract the signed delta for an outcome's own `metric_key` from its
+ *  `delta` map — `null` when unmeasured, the key is missing, or the value
+ *  isn't a finite number. */
+export function outcomeDeltaValue(outcome: LeverOutcome): number | null {
+  const key = outcome.metric_key;
+  if (!key) return null;
+  const delta = outcome.delta;
+  if (!delta || typeof delta !== "object") return null;
+  const value = delta[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Format a delta value with an explicit sign: "+6", "-3.2", "0". */
+export function formatSignedDelta(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return rounded > 0 ? `+${rounded}` : String(rounded);
 }

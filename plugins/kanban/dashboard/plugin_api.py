@@ -4830,6 +4830,21 @@ def strategist_last_runs() -> dict:
     return strategist.read_last_runs(strategist.default_state_dir())
 
 
+@router.get("/strategist/outcomes")
+def get_strategist_outcomes(limit: int = Query(20, ge=1, le=200)) -> dict:
+    """Wirkungs-Historie geshippter Lever (Ziel-2 ``lever-outcomes.json``).
+
+    Auftrag → Wirkung rückverfolgbar: reads the outcome records the strategist
+    reflect step measures and appends to, newest ``proposed_at`` first, capped
+    at ``limit`` (default 20). Records are returned unmodified — same schema
+    the writer persists (``lever_key``/``root_task_id``/``proposed_at``/
+    ``baseline``/``metric_key``/``shipped_at``/``measured_at``/``current``/
+    ``delta``/``verdict``/``status``). Empty list when no ledger has been
+    written yet, never a 404 — consistent with the proposals/digest surfaces."""
+    outcomes = strategist_surface.read_lever_outcomes(limit=limit)
+    return {"outcomes": outcomes, "generated_at": int(time.time())}
+
+
 @router.get("/runs/daily")
 def get_runs_daily(
     days: int = Query(30, ge=1, le=365),

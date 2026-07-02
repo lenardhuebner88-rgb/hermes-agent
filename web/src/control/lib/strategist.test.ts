@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatSignedDelta,
   humanizeMetricKey,
   isStrategistAuthored,
   metricSnapshotRows,
+  outcomeDeltaValue,
+  outcomeStatusLabel,
+  outcomeVerdictLabel,
+  outcomeVerdictToneClass,
   partitionProposals,
   proposalSource,
   runSummaryText,
   sourceLabel,
   type StrategistProposal,
 } from "./strategist";
+import type { LeverOutcome } from "./schemas";
 
 // Realistic nested snapshot shape matching the live vision-metrics.json envelope.
 const NESTED_SNAPSHOT = {
@@ -173,6 +179,89 @@ describe("partitionProposals", () => {
 
   it("returns two empty groups for an empty input", () => {
     expect(partitionProposals([])).toEqual({ strategist: [], manual: [] });
+  });
+});
+
+describe("outcomeStatusLabel", () => {
+  it("maps the three lifecycle statuses", () => {
+    expect(outcomeStatusLabel("proposed")).toBe("Vorgeschlagen");
+    expect(outcomeStatusLabel("shipped")).toBe("Geshippt");
+    expect(outcomeStatusLabel("measured")).toBe("Gemessen");
+  });
+
+  it("falls back to the raw value for unknown statuses, and null → Unbekannt", () => {
+    expect(outcomeStatusLabel("weird-status")).toBe("weird-status");
+    expect(outcomeStatusLabel(null)).toBe("Unbekannt");
+    expect(outcomeStatusLabel(undefined)).toBe("Unbekannt");
+  });
+});
+
+describe("outcomeVerdictLabel / outcomeVerdictToneClass", () => {
+  it("labels all four verdicts", () => {
+    expect(outcomeVerdictLabel("improved")).toBe("verbessert");
+    expect(outcomeVerdictLabel("worsened")).toBe("verschlechtert");
+    expect(outcomeVerdictLabel("unchanged")).toBe("unverändert");
+    expect(outcomeVerdictLabel("unknown")).toBe("unbekannt");
+  });
+
+  it("treats null/unrecognised verdicts as unknown", () => {
+    expect(outcomeVerdictLabel(null)).toBe("unbekannt");
+    expect(outcomeVerdictLabel(undefined)).toBe("unbekannt");
+    expect(outcomeVerdictLabel("weird")).toBe("unbekannt");
+  });
+
+  it("tones improved green, worsened red, unchanged zinc — distinct from each other", () => {
+    const improved = outcomeVerdictToneClass("improved");
+    const worsened = outcomeVerdictToneClass("worsened");
+    const unchanged = outcomeVerdictToneClass("unchanged");
+    expect(improved).toContain("emerald");
+    expect(worsened).toContain("red");
+    expect(unchanged).toContain("zinc");
+    expect(new Set([improved, worsened, unchanged]).size).toBe(3);
+  });
+
+  it("dims null/unknown verdicts without tinting emerald/red/zinc", () => {
+    const unknown = outcomeVerdictToneClass("unknown");
+    const nullish = outcomeVerdictToneClass(null);
+    expect(unknown).toContain("hc-dim");
+    expect(unknown).not.toMatch(/emerald|red|zinc/);
+    expect(nullish).toBe(unknown);
+  });
+});
+
+describe("outcomeDeltaValue / formatSignedDelta", () => {
+  const mk = (overrides: Partial<LeverOutcome> = {}): LeverOutcome => ({
+    lever_key: "lever-x",
+    root_task_id: "t_1",
+    proposed_at: 1000,
+    baseline: { autonomy_pct: 62 },
+    metric_key: "autonomy_pct",
+    shipped_at: 1100,
+    measured_at: 1200,
+    current: { autonomy_pct: 68 },
+    delta: { autonomy_pct: 6 },
+    verdict: "improved",
+    status: "measured",
+    ...overrides,
+  });
+
+  it("extracts the metric_key's own delta value", () => {
+    expect(outcomeDeltaValue(mk())).toBe(6);
+  });
+
+  it("returns null when metric_key is unset", () => {
+    expect(outcomeDeltaValue(mk({ metric_key: null }))).toBeNull();
+  });
+
+  it("returns null when delta is missing or the key isn't present", () => {
+    expect(outcomeDeltaValue(mk({ delta: null }))).toBeNull();
+    expect(outcomeDeltaValue(mk({ delta: {} }))).toBeNull();
+  });
+
+  it("formats a positive/negative/zero delta with an explicit sign", () => {
+    expect(formatSignedDelta(6)).toBe("+6");
+    expect(formatSignedDelta(-3.2)).toBe("-3.2");
+    expect(formatSignedDelta(0)).toBe("0");
   });
 });
 
