@@ -755,20 +755,31 @@ _ANTI_SCOPE_MAX_LINES = 6
 _ANTI_SCOPE_MAX_LINE_LEN = 160
 
 
+def _negation_constraint_lines(body: str) -> list[str]:
+    """Return CRITICAL/MANDATORY/MUST/NEVER lines from ``body`` that are
+    themselves a prohibition (NEVER / MUST NOT / DO NOT / NICHT), verbatim,
+    unfiltered — no truncation, dedup, or cap. Shared raw material for
+    :func:`_collect_negation_lines` (anti_scope) and :func:`_collect_allowed_paths`
+    (allowed_paths exclusion), so both stay in lock-step on what counts as a
+    negation line.
+    """
+    out: list[str] = []
+    for line in _collect_constraint_lines(body):
+        upper = line.upper()
+        if any(marker in upper for marker in _NEGATION_MARKERS):
+            out.append(line)
+    return out
+
+
 def _collect_negation_lines(body: str) -> list[str]:
     """Return negating CRITICAL/MANDATORY/MUST/NEVER lines from ``body``.
 
-    Filters :func:`_collect_constraint_lines` down to the lines whose wording
-    is itself a prohibition (NEVER / MUST NOT / DO NOT / NICHT), verbatim,
-    deduplicated, capped to ``_ANTI_SCOPE_MAX_LINES`` lines each truncated to
+    Deduplicated, capped to ``_ANTI_SCOPE_MAX_LINES`` lines each truncated to
     ``_ANTI_SCOPE_MAX_LINE_LEN`` chars.
     """
     out: list[str] = []
     seen: set[str] = set()
-    for line in _collect_constraint_lines(body):
-        upper = line.upper()
-        if not any(marker in upper for marker in _NEGATION_MARKERS):
-            continue
+    for line in _negation_constraint_lines(body):
         truncated = _truncate(line, _ANTI_SCOPE_MAX_LINE_LEN)
         if truncated in seen:
             continue
@@ -777,6 +788,28 @@ def _collect_negation_lines(body: str) -> list[str]:
         if len(out) >= _ANTI_SCOPE_MAX_LINES:
             break
     return out
+
+
+def _collect_allowed_paths(body: str) -> list[str]:
+    """Absolute paths mentioned in ``body``, excluding any path that
+    appears ONLY inside a negation line (NEVER / MUST NOT / DO NOT / NICHT —
+    see :func:`_negation_constraint_lines`).
+
+    A worker's ``allowed_paths`` must not list a path the parent explicitly
+    forbids touching (e.g. ``NEVER: touch /home/piet/.hermes/config.yaml``)
+    — that would ship a contract that is simultaneously allowed (allowed_paths)
+    and forbidden (anti_scope) for the same path. If the same path is ALSO
+    mentioned outside a negation line elsewhere in the body it stays allowed;
+    the prohibition remains visible via ``anti_scope``.
+    """
+    negation_lines = _negation_constraint_lines(body)
+    if not negation_lines:
+        return _collect_absolute_paths(body)
+    negation_stripped = {line.strip() for line in negation_lines}
+    rest_body = "\n".join(
+        line for line in body.splitlines() if line.strip() not in negation_stripped
+    )
+    return _collect_absolute_paths(rest_body)
 
 
 def _anti_scope_for_child(parent_task: object | None) -> list[str]:
@@ -805,7 +838,7 @@ def _default_worker_scope_contract(
             "version": 2,
             "objective": objective[:280],
             "allowed_systems": ["hermes-agent", "hermes-kanban"],
-            "allowed_paths": _collect_absolute_paths(
+            "allowed_paths": _collect_allowed_paths(
                 getattr(parent_task, "body", "") or ""
             ) if parent_task is not None else [],
             "allowed_tools": list(_allowed_tools_for_assignee(assignee_text)),
@@ -925,6 +958,56 @@ def _normalize_allowed_tools_block(body: str, *, assignee: str = "") -> str:
     return "\n".join(out)
 
 
+def _ensure_anti_scope_block(body: str, *, parent_task: object | None = None) -> str:
+    """Backfill a missing ``anti_scope:`` key into an LLM-authored
+    ``scope_contract:`` block.
+
+    The decomposer LLM sometimes writes its own structured ``scope_contract:``
+    block and simply omits ``anti_scope`` — :func:`validate_worker_scope_contracts`
+    doesn't (and, for backward compatibility with existing bodies, shouldn't)
+    require the key, so a missing anti_scope silently ships a worker contract
+    with no explicit prohibitions attested. This inserts the SAME defaults +
+    verbatim parent-body negation lines used by the deterministic path
+    (:func:`_anti_scope_for_child`), directly after the ``allowed_tools:``
+    block. Existing ``anti_scope:`` content is left untouched. Must run AFTER
+    :func:`_normalize_allowed_tools_block`, which always leaves
+    ``allowed_tools`` in block form (header + ``- item`` lines) regardless of
+    the model's original inline/block shape — this relies on that shape.
+    """
+    if "anti_scope:" in body or "allowed_tools:" not in body:
+        return body
+    anti_scope = _anti_scope_for_child(parent_task)
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    inserted = False
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        out.append(line)
+        i += 1
+        if inserted or stripped != "allowed_tools:":
+            continue
+        base_indent = len(line) - len(line.lstrip())
+        indent = " " * base_indent
+        while i < n:
+            item = lines[i]
+            item_indent = len(item) - len(item.lstrip())
+            if item.strip().startswith("- ") and item_indent > base_indent:
+                out.append(item)
+                i += 1
+                continue
+            break
+        out.extend(_render_yaml_list("anti_scope", anti_scope, indent=indent))
+        inserted = True
+    if not inserted:
+        # allowed_tools wasn't in the expected block form — leave untouched
+        # rather than risk corrupting an unknown structure.
+        return body
+    return "\n".join(out)
+
+
 def _ensure_worker_scope_contract(
     child: dict,
     *,
@@ -939,6 +1022,7 @@ def _ensure_worker_scope_contract(
     body = raw_body if isinstance(raw_body, str) else ""
     if _body_has_scope_contract(body):
         normalized = _normalize_allowed_tools_block(body, assignee=assignee)
+        normalized = _ensure_anti_scope_block(normalized, parent_task=parent_task)
         if normalized != body:
             enriched = dict(child)
             enriched["body"] = normalized
