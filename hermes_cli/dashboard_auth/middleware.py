@@ -49,6 +49,14 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/api/auth/providers",
     "/assets/",
     "/favicon.ico",
+    "/manifest.webmanifest",
+    "/icons/",
+    # PWA service-worker scripts: a redirect on a SW script fetch invalidates
+    # the registration (spec: script responses must not be redirects), so the
+    # update check after cookie expiry would silently kill the installed app.
+    "/sw.js",
+    "/registerSW.js",
+    "/workbox-",
     "/ds-assets/",
     "/fonts/",
     "/fonts-terminal/",
@@ -458,4 +466,3 @@ def _attempt_refresh(request: Request, *, refresh_token):
         if new_session is not None:
             return new_session, provider.name
     return None
-

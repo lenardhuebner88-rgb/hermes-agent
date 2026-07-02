@@ -141,6 +141,33 @@ def test_gated_static_asset_path_is_public(gated_app):
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("path", [
+    "/manifest.webmanifest",
+    "/icons/icon-192.png",
+    "/sw.js",
+    "/registerSW.js",
+])
+def test_gated_pwa_static_paths_are_public(gated_app, path):
+    """PWA install metadata must load before login in gated deployments."""
+    r = gated_app.get(path, follow_redirects=False)
+    assert r.status_code == 200, (
+        f"{path} should bypass the OAuth gate for installability, got "
+        f"{r.status_code}: {r.text[:200]}"
+    )
+
+
+def test_gated_workbox_chunk_passes_the_gate(gated_app):
+    """Workbox chunks carry a build hash in the filename, so assert the
+    prefix passes the middleware instead of pinning a hash that changes
+    every build. Unknown non-API paths land on the SPA fallback (200);
+    the gate would answer 302 — so any 200 proves the gate was bypassed."""
+    r = gated_app.get("/workbox-0000dead.js", follow_redirects=False)
+    assert r.status_code == 200, (
+        f"/workbox-* should bypass the OAuth gate (SW imports it), got "
+        f"{r.status_code}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # OAuth round trip
 # ---------------------------------------------------------------------------

@@ -83,7 +83,7 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
       title={enabled ? "Browser-Benachrichtigungen aus" : "Browser-Benachrichtigungen an"}
       aria-pressed={enabled}
       className={cn(
-        "grid h-9 w-9 shrink-0 place-items-center rounded-lg border text-xs transition",
+        "grid h-11 w-11 shrink-0 place-items-center rounded-lg border text-xs transition",
         enabled ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:bg-white/5",
       )}
     >
