@@ -3938,9 +3938,16 @@ class TestRunConversation:
             patch.object(agent, "_emit_status", side_effect=_capture_status),
         ):
             result = agent.run_conversation("ask me")
-        # Should recover partial streamed content, not fall through to (empty)
+        # Should recover partial streamed content, not fall through to (empty).
+        # #34452: a partial_stream_recovery turn now appends the turn-completion
+        # explainer ("⚠️ No reply: streaming stopped early …") so the user knows
+        # the reply is partial and can send `continue`. The recovered content is
+        # preserved as the leading text (matches the empty-retry precedent at
+        # test_empty_response_emits_status_for_gateway, which asserts
+        # "No reply:" in final_response rather than an exact match).
         assert result["completed"] is True
-        assert result["final_response"] == "The answer to your question is that"
+        assert result["final_response"].startswith("The answer to your question is that")
+        assert "No reply:" in result["final_response"]
         assert result["api_calls"] == 1  # No wasted retries
         # Should emit the stream-interrupted status, NOT the empty-retry status
         recovery_msgs = [m for m in status_messages if "stream interrupted" in m.lower()]
@@ -3969,8 +3976,13 @@ class TestRunConversation:
             patch.object(agent, "_cleanup_task_resources"),
         ):
             result = agent.run_conversation("question")
-        # Should use the streamed content, not the old prior-turn fallback
-        assert result["final_response"] == "Fresh partial content from this turn"
+        # Should use the streamed content, not the old prior-turn fallback. The
+        # fresh partial content leads the response; #34452 appends the
+        # partial_stream_recovery explainer after it. The old prior-turn
+        # fallback must not appear at all.
+        assert result["final_response"].startswith("Fresh partial content from this turn")
+        assert "Old content from prior turn with tools" not in result["final_response"]
+        assert "No reply:" in result["final_response"]
         assert result["api_calls"] == 1
 
     def test_nous_401_refreshes_after_remint_and_retries(self, agent):
