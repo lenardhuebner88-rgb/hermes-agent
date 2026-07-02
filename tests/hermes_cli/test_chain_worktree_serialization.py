@@ -326,3 +326,196 @@ def test_conflict_fixer_exempt_from_chain_guard(
     # The fixer should NOT appear in chain-worktree-serialized
     skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
     assert fixer not in skipped_ids, "conflict-fixer must not be chain-serialized"
+
+
+# ---------------------------------------------------------------------------
+# Review-path tests (Befund 4, Codex-Review gap): the ready-column guard
+# above does NOT cover the review-dispatch path — two dir siblings of the
+# same chain both sitting unclaimed in 'review' were spawned into the same
+# worktree in one tick (incident 2026-07-02 09:22). These tests exercise the
+# same guard mirrored into the ``# ---- review column dispatch ----`` block.
+# ---------------------------------------------------------------------------
+
+def _set_review_unclaimed(conn, task_id: str) -> None:
+    """Move *task_id* straight to ``status='review'`` with ``claim_lock``
+    left ``NULL`` — the exact state review-dispatch's SELECT targets, without
+    going through the real submit-for-review flow (not under test here)."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'review' WHERE id = ?", (task_id,)
+        )
+
+
+def test_review_same_tick_two_dir_siblings_only_one_dispatched(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch,
+):
+    """Two unclaimed dir review siblings of the same chain, same tick.
+
+    The self-counting trap: ``chain_worktree_inflight_counts`` counts a
+    ``review`` status task unconditionally (regardless of ``claim_lock``),
+    so each candidate is already counted against its own chain before the
+    review loop even starts. A naive ``count >= 1`` check would defer BOTH
+    siblings forever. The first sibling processed must dispatch; the second
+    must be deferred via the same-tick counter.
+    """
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        _root, child_ids = _make_decompose_chain(conn, repo, n_dir_siblings=2)
+        s2, s3 = child_ids
+        _set_review_unclaimed(conn, s2)
+        _set_review_unclaimed(conn, s3)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert len(res.spawned) == 1, f"expected 1 spawn, got {res.spawned}"
+    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
+    assert len(skipped_ids) == 1, (
+        f"expected 1 chain-worktree-serialized skip, got "
+        f"{res.skipped_chain_worktree_serialized}"
+    )
+    dispatched_id = res.spawned[0][0]
+    assert set([dispatched_id] + skipped_ids) == {s2, s3}
+    assert set([dispatched_id] + skipped_ids) & set(spawned) == {dispatched_id}
+
+
+def test_review_sibling_running_deferred(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch,
+):
+    """Sibling A running (claimed), sibling B unclaimed in review → B deferred."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        _root, child_ids = _make_decompose_chain(conn, repo, n_dir_siblings=2)
+        s2, s3 = child_ids
+
+        # s2 actively running (claimed — genuinely occupies the worktree).
+        claimed = kb.claim_task(conn, s2)
+        assert claimed is not None
+
+        # s3 unclaimed in review.
+        _set_review_unclaimed(conn, s3)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert s3 not in spawned, "s3 must be deferred while s2 (running) holds the chain slot"
+    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
+    assert s3 in skipped_ids, (
+        f"s3 must appear in skipped_chain_worktree_serialized; got {res.skipped_chain_worktree_serialized}"
+    )
+
+
+def test_review_single_task_not_self_blocked(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch,
+):
+    """A lone unclaimed review task in a chain must NOT defer itself.
+
+    This is the self-counting trap in isolation: with no other in-flight
+    sibling, the candidate is the only contributor to
+    ``chain_worktree_inflight_counts`` for its chain root — the guard must
+    still let it spawn.
+    """
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        _root, child_ids = _make_decompose_chain(conn, repo, n_dir_siblings=1)
+        (s1,) = child_ids
+        _set_review_unclaimed(conn, s1)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert s1 in spawned, "lone unclaimed review sibling must not self-block"
+    assert res.skipped_chain_worktree_serialized == []
+
+
+def test_review_non_chain_dir_task_unaffected(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch,
+):
+    """A standalone (non-chain) dir task in review dispatches normally."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        task = kb.create_task(
+            conn,
+            title="standalone review task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        _set_review_unclaimed(conn, task)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert task in spawned, "standalone dir review task must dispatch"
+    assert res.skipped_chain_worktree_serialized == []
+
+
+def test_review_conflict_fixer_exempt(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch,
+):
+    """A conflict-fixer review candidate is exempt from the review guard.
+
+    A blocked sibling holds the chain slot (would defer any normal
+    candidate). The fixer must still dispatch — otherwise fixer and blocked
+    parent deadlock (respawn-guard-stall pattern, burn-dashboard 2026-06-20),
+    mirrored from the ready-path exemption.
+    """
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        _root, child_ids = _make_decompose_chain(conn, repo, n_dir_siblings=1)
+        (dir_child,) = child_ids
+
+        # Simulate dir_child blocked (in-flight, holds a chain slot).
+        claimed = kb.claim_task(conn, dir_child)
+        assert claimed is not None
+        assert kb.block_task(conn, dir_child, reason="integration parked")
+
+        # Create a conflict-fixer, in unclaimed review status.
+        fixer = kb.create_task(
+            conn,
+            title="conflict fixer review",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            idempotency_key=f"conflict-fixer:{dir_child}:1",
+        )
+        _set_review_unclaimed(conn, fixer)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert fixer in spawned, (
+        "conflict-fixer review must dispatch despite a belegter chain slot"
+    )
+    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
+    assert fixer not in skipped_ids, "conflict-fixer review must not be chain-serialized"

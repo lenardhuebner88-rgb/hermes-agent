@@ -19490,10 +19490,31 @@ def _dispatch_once_locked(
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
     review_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, workspace_kind, idempotency_key FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    # Befund 4 review-path gap (Codex-Review, verified High): the initial
+    # ``_chain_count`` snapshot above (``chain_worktree_inflight_counts``)
+    # counts every ``dir`` task with ``status NOT IN ('done', 'archived',
+    # 'todo', 'ready', 'scheduled')`` — that includes ``review`` status
+    # UNCONDITIONALLY, regardless of ``claim_lock``. Every row in
+    # ``review_rows`` (``status='review' AND claim_lock IS NULL``) is
+    # therefore already counted once against its own chain root — the
+    # candidate would self-block (or two unclaimed siblings would block each
+    # other forever) if we checked ``_chain_count`` as-is. Correct the
+    # snapshot ONCE, upfront, by removing exactly the self-counts
+    # contributed by THIS tick's unclaimed review candidates, leaving only
+    # genuinely active occupants (claimed tasks, running, blocked). The
+    # per-candidate guard below then re-occupies the slot via the same
+    # same-tick counter the ready path uses, so the first of several
+    # unclaimed siblings to spawn blocks the rest within this tick.
+    for _rr in review_rows:
+        if _rr["workspace_kind"] != "dir":
+            continue
+        _rr_root = _chain_root_for_task(_rr["id"])
+        if _rr_root is not None:
+            _chain_count[_rr_root] = _chain_count.get(_rr_root, 0) - 1
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -19532,9 +19553,50 @@ def _dispatch_once_locked(
                             {"assignee": row["assignee"]},
                         )
             continue
+        # Befund 4 review-path gap — chain-worktree-serialization guard
+        # mirrored from the ready path above: a ``dir`` review candidate
+        # whose chain root already has another occupant this tick (a
+        # genuinely active sibling, or an earlier same-tick spawn) is
+        # deferred rather than claimed+spawned into the shared provisioned
+        # worktree (incident: two dir siblings both sitting in review,
+        # 2026-07-02 09:22). ``_chain_count`` was corrected for review
+        # self-counting above; the exemption mirrors the ready-path
+        # conflict-fixer exemption for the identical deadlock reason (a
+        # fixer must be able to review inside a worktree a blocked parent
+        # still holds the slot for).
+        _is_conflict_fixer = bool(
+            row["idempotency_key"]
+            and str(row["idempotency_key"]).startswith(CONFLICT_FIXER_IDEM_PREFIX)
+        )
+        if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
+            _cand_chain_root = _chain_root_for_task(row["id"])
+            if _cand_chain_root is not None and _chain_count.get(_cand_chain_root, 0) >= 1:
+                result.skipped_chain_worktree_serialized.append(
+                    (row["id"], _cand_chain_root)
+                )
+                if not dry_run:
+                    latest = conn.execute(
+                        "SELECT kind FROM task_events WHERE task_id = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (row["id"],),
+                    ).fetchone()
+                    if latest is None or latest["kind"] != "chain_worktree_serialized":
+                        with write_txn(conn):
+                            _append_event(
+                                conn, row["id"], "chain_worktree_serialized",
+                                {"chain_root_id": _cand_chain_root},
+                            )
+                continue
         if dry_run:
             result.spawned.append((row["id"], _spawn_profile, ""))
             spawned += 1
+            # Befund 4 same-tick race: occupy the chain slot so a
+            # subsequent same-chain dir sibling in this tick's review_rows
+            # is deferred (dry_run mirrors the real-spawn increment below).
+            if row["workspace_kind"] == "dir":
+                _ctr = _chain_root_for_task(row["id"])
+                if _ctr is not None:
+                    _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
             continue
         claimed = claim_review_task(
             conn, row["id"], ttl_seconds=ttl_seconds, reviewer_profile=_spawn_profile,
@@ -19585,6 +19647,13 @@ def _dispatch_once_locked(
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            # Befund 4 same-tick race: occupy the chain slot so a
+            # subsequent same-chain dir sibling in this tick's review_rows
+            # is deferred.
+            if claimed.workspace_kind == "dir":
+                _ctr = _chain_root_for_task(claimed.id)
+                if _ctr is not None:
+                    _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
