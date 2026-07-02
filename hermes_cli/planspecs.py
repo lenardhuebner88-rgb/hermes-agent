@@ -1739,7 +1739,7 @@ def ingest_planspec(
         )
         if not kanban_db.schedule_task(conn, root_id, reason="Planspec ingest: held before release"):
             raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])
-        child_held_for_operator = spec.freigabe == "operator" or spec.live_test_depth == "ui-real"
+        child_held_for_operator = spec.freigabe.strip().lower() == "operator" or spec.live_test_depth == "ui-real"
         try:
             child_ids = kanban_db.decompose_triage_task(
                 conn,
