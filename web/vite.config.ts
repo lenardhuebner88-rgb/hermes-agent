@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
 
 const BACKEND = process.env.HERMES_DASHBOARD_URL ?? "http://127.0.0.1:9119";
@@ -64,7 +65,21 @@ function hermesDevToken(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), hermesDevToken()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    VitePWA({
+      registerType: "autoUpdate",
+      injectRegister: "auto",
+      manifest: false,
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
+        navigateFallbackDenylist: [/^\/api\//, /^\/auth\//],
+        runtimeCaching: [],
+      },
+    }),
+    hermesDevToken(),
+  ],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

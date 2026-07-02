@@ -49,6 +49,8 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/api/auth/providers",
     "/assets/",
     "/favicon.ico",
+    "/manifest.webmanifest",
+    "/icons/",
     "/ds-assets/",
     "/fonts/",
     "/fonts-terminal/",
@@ -458,4 +460,3 @@ def _attempt_refresh(request: Request, *, refresh_token):
         if new_session is not None:
             return new_session, provider.name
     return None
-

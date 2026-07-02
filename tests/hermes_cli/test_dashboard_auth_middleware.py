@@ -141,6 +141,19 @@ def test_gated_static_asset_path_is_public(gated_app):
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("path", [
+    "/manifest.webmanifest",
+    "/icons/icon-192.png",
+])
+def test_gated_pwa_static_paths_are_public(gated_app, path):
+    """PWA install metadata must load before login in gated deployments."""
+    r = gated_app.get(path, follow_redirects=False)
+    assert r.status_code == 200, (
+        f"{path} should bypass the OAuth gate for installability, got "
+        f"{r.status_code}: {r.text[:200]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # OAuth round trip
 # ---------------------------------------------------------------------------

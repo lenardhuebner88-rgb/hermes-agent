@@ -2627,7 +2627,7 @@ export function FlowView() {
         action={
           <div className="flex flex-wrap items-center justify-end gap-2">
             <StaleBadge isStale={board.isStale} lastUpdated={board.lastUpdated} errorObj={board.errorObj} error={board.error} now={now} />
-            <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-4 w-4" /></button>
+            <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-4 w-4" /></button>
             <EpicCreate onCreated={() => void epicsReload()} />
             <FlowCapture onCreated={onCaptured} />
           </div>
