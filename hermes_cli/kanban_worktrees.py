@@ -1780,6 +1780,227 @@ def _auto_complete_decompose_root(
         )
 
 
+def _direct_complete_decompose_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    children: list[tuple[str, str]],
+) -> None:
+    """Finalize a COMMITLESS decompose root directly (AC-2b).
+
+    Used when the chain left no provisioned worktree branch to integrate — all
+    children ran (and committed, if at all) outside a chain worktree, so there
+    is nothing for ``integrate_chain`` to merge. ``children`` is the list of
+    ``(child_id, status)`` — all terminal-``done`` per the caller's contract —
+    recorded as completion evidence. Emits the same
+    ``decompose_root_auto_completed`` + ``completed`` events as the integrated
+    path so downstream telemetry is uniform, plus an integrator comment listing
+    the children as evidence.
+    """
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time())
+    branch = chain_branch(root_id)
+    child_ids = [cid for cid, _ in children]
+    summary = (
+        f"auto-completed decomposed root: all {len(children)} child task(s) "
+        f"terminal-done, commitless chain (no `{branch}` branch to integrate)"
+    )
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET status = 'done', result = ?, completed_at = ?, "
+            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+            (summary, now, root_id),
+        )
+        if cur.rowcount != 1:
+            return
+        run_id = kb._end_run(
+            conn,
+            root_id,
+            outcome="completed",
+            status="done",
+            summary=summary,
+            metadata={
+                "auto_completed_by": "decompose_root_finalizer_commitless",
+                "children": child_ids,
+            },
+        )
+        kb._append_event(
+            conn,
+            root_id,
+            "decompose_root_auto_completed",
+            {
+                "completed_by": "dispatch_finalizer",
+                "integration_action": "commitless",
+                "branch": branch,
+                "children": child_ids,
+            },
+        )
+        kb._append_event(
+            conn,
+            root_id,
+            "completed",
+            {"result_len": len(summary), "summary": summary},
+            run_id=run_id,
+        )
+    # Evidence comment is written OUTSIDE the txn above — add_comment opens its
+    # own write_txn (nesting would fail).
+    evidence = "\n".join(f"- `{cid}` — {status}" for cid, status in children)
+    try:
+        kb.add_comment(
+            conn,
+            root_id,
+            "integrator",
+            "✅ Decompose-root finalized without integration (commitless chain — "
+            "the children left no chain worktree branch to merge). Children "
+            f"(all terminal):\n{evidence}",
+        )
+    except Exception:
+        _log.debug("commitless finalize receipt comment failed", exc_info=True)
+
+
+def _block_decompose_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    reason: str,
+    outcome: Optional[dict],
+) -> None:
+    """Park a decompose root whose integration did NOT complete (missing branch
+    evidence / red post-merge gate / conflict). Moving it out of ``ready`` stops
+    it re-entering the dispatch loop every tick, and surfaces it to the operator
+    on the board — never silently completed (AC-5 spirit: a chain with lost or
+    unmergeable commits must be parked, not auto-closed)."""
+    from hermes_cli import kanban_db as kb
+
+    try:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status IN ('todo', 'ready', 'running')",
+                (root_id,),
+            )
+            if cur.rowcount == 1:
+                kb._append_event(
+                    conn,
+                    root_id,
+                    "blocked",
+                    {
+                        "reason": f"decompose-root finalize: {reason}",
+                        "source": "decompose_root_finalizer",
+                        "integration_action": (outcome or {}).get("action"),
+                    },
+                )
+    except Exception:
+        _log.warning(
+            "could not block decompose root %s after failed finalize",
+            root_id, exc_info=True,
+        )
+
+
+def finalize_decompose_root_at_dispatch(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    dry_run: bool = False,
+    gate_runner=None,
+) -> str:
+    """Dispatch-time finalizer for a decomposed chain root (Befund 6, 2026-07-02).
+
+    Called by the dispatcher when a decompose root (``_is_decompose_root``)
+    reaches ``ready``. A decompose root must NEVER be spawned as a worker — a
+    spawn re-runs the whole chain. The completion-side integrator
+    (:func:`maybe_integrate_on_complete`) auto-completes the root only when the
+    LAST child completes FROM the provisioned worktree; a chain whose last
+    completion came from a scratch workspace (the deferred branch at
+    :func:`maybe_integrate_on_complete`) leaves the root stranded in ``ready``.
+    This closes that gap without touching the happy path.
+
+    Returns a short action string for telemetry:
+
+    * ``"children_pending"`` — a child is still non-done → leave the chain
+      visible, do NOT complete (AC-3). ``recompute_ready`` only promotes the
+      root when all children are ``done``, so this is a defensive net.
+    * ``"integrated"`` — a provisioned child exists → the EXISTING integrator
+      (``maybe_integrate_on_complete`` → ``integrate_chain`` /
+      ``_auto_complete_decompose_root``) ran and completed the root (AC-2a),
+      byte-identical to the happy path.
+    * ``"parked"`` — integration did not complete (missing branch evidence /
+      red gate / conflict) → the root is blocked so it stops re-entering
+      ``ready`` (AC-5 spirit).
+    * ``"auto_completed_commitless"`` — no provisioned child / no chain branch
+      → the root is directly completed with children evidence (AC-2b).
+    * ``"would_integrate"`` / ``"would_complete_commitless"`` — dry-run
+      preview, no side effects.
+    """
+    # Chain members via the SAME helper the integrator uses, so membership is
+    # consistent. For a decompose root this yields {root} ∪ {build children}
+    # (links are inverted: child=parent_id, root=child_id).
+    members = _chain_member_ids(conn, root_id)
+    members.discard(root_id)
+    if members:
+        placeholders = ",".join("?" for _ in members)
+        child_rows = conn.execute(
+            f"SELECT id, status, workspace_path FROM tasks "
+            f"WHERE id IN ({placeholders})",
+            tuple(members),
+        ).fetchall()
+    else:
+        child_rows = []
+    children = [(r["id"], r["status"]) for r in child_rows]
+
+    # AC-3: any non-done child (open, blocked, gave_up, failed, …) — or no
+    # children at all — means the chain is not finished. Leave it visible on
+    # the board; never complete or spawn.
+    if not child_rows or any(r["status"] != "done" for r in child_rows):
+        return "children_pending"
+
+    # A provisioned child committed into <repo>/.worktrees/kanban/<root_id>.
+    # Its workspace_path survives completion (the done-UPDATE never clears it),
+    # so a done child still points at the shared chain worktree — that lets the
+    # existing integrator run byte-identically.
+    prov_child = None
+    for r in child_rows:
+        sp = split_provisioned_path(r["workspace_path"])
+        if sp is not None and sp[1] == root_id:
+            prov_child = r["id"]
+            break
+
+    if dry_run:
+        return "would_integrate" if prov_child else "would_complete_commitless"
+
+    if prov_child is not None:
+        # AC-2a: run the EXISTING integration path. Re-invoking the hook on the
+        # (already-done) provisioned child recomputes chain membership, finds
+        # the root as the single remaining open member, integrates the shared
+        # branch and calls _auto_complete_decompose_root — the exact happy-path
+        # code, unchanged.
+        outcome = maybe_integrate_on_complete(
+            conn, prov_child, gate_runner=gate_runner,
+        )
+        root_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (root_id,)
+        ).fetchone()
+        if root_row is not None and root_row["status"] == "done":
+            return "integrated"
+        # Integration parked / conflict / red gate (or the branch vanished after
+        # commits → missing-branch-evidence park). Block the root so it stops
+        # re-entering ready; never silently complete a chain with lost commits.
+        reason = (outcome or {}).get("reason") or (
+            f"integration did not complete (action={(outcome or {}).get('action')})"
+        )
+        _block_decompose_root(conn, root_id=root_id, reason=reason, outcome=outcome)
+        return "parked"
+
+    # AC-2b: commitless chain — no provisioned child, so no chain branch was
+    # ever created. Complete the root directly with children evidence.
+    _direct_complete_decompose_root(conn, root_id=root_id, children=children)
+    return "auto_completed_commitless"
+
+
 def provision_for_task(
     conn: sqlite3.Connection,
     task,

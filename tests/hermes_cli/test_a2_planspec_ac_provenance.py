@@ -630,6 +630,83 @@ def test_phase4_ui_real_planspec_root_stays_scheduled_until_uireal_release(kanba
     assert "uireal_released" in events
 
 
+def test_freigabe_complete_children_without_deps_are_ready_after_recompute(kanban_home, tmp_path: Path):
+    """A non-held freigabe:complete chain becomes dispatchable without unblock."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root, name="2026-06-18-complete-child-ready.md")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            assert kb.recompute_ready(conn) == 1
+            rows = {
+                row["id"]: row["status"]
+                for row in conn.execute(
+                    "SELECT id, status FROM tasks WHERE id IN (?, ?)",
+                    tuple(result["child_ids"]),
+                ).fetchall()
+            }
+    finally:
+        monkeypatch.undo()
+    first_child, second_child = result["child_ids"]
+    assert rows[first_child] == "ready"
+    assert rows[second_child] == "todo"
+
+
+def test_freigabe_complete_ui_real_children_stay_scheduled(kanban_home, tmp_path: Path):
+    """ui-real holds children even when freigabe is already complete."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root, name="2026-06-18-complete-uireal-children.md")
+    text = path.read_text(encoding="utf-8").replace("live_test_depth: contract", "live_test_depth: ui-real")
+    path.write_text(text, encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            assert kb.recompute_ready(conn) == 0
+            statuses = [
+                row["status"]
+                for row in conn.execute(
+                    "SELECT status FROM tasks WHERE id IN (?, ?) ORDER BY id",
+                    tuple(result["child_ids"]),
+                ).fetchall()
+            ]
+    finally:
+        monkeypatch.undo()
+    assert statuses == ["scheduled", "scheduled"]
+
+
+def test_freigabe_operator_case_variant_holds_root_and_children(kanban_home, tmp_path: Path):
+    """Operator hold is case-insensitive for root and child initial status."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root, name="2026-06-18-capital-operator-children.md")
+    text = path.read_text(encoding="utf-8").replace("freigabe: complete", "freigabe: Operator")
+    path.write_text(text, encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            assert kb.recompute_ready(conn) == 0
+            root_status = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?",
+                (result["root_task_id"],),
+            ).fetchone()["status"]
+            statuses = [
+                row["status"]
+                for row in conn.execute(
+                    "SELECT status FROM tasks WHERE id IN (?, ?) ORDER BY id",
+                    tuple(result["child_ids"]),
+                ).fetchall()
+            ]
+    finally:
+        monkeypatch.undo()
+    assert root_status == "scheduled"
+    assert statuses == ["scheduled", "scheduled"]
+
+
 def test_phase4_planspec_source_for_task_reads_child_row_directly(kanban_home, tmp_path: Path):
     """Phase4 C: card→spec resolves from the child row, no root hop needed."""
     plans_root = tmp_path / "vault" / "03-Agents"
