@@ -349,7 +349,7 @@ def test_non_reviewer_worker_cli_toolsets_are_not_caged(monkeypatch, tmp_path):
 
     from hermes_cli import kanban_db as kb
 
-    for profile_name in ("coder", "researcher", "critic"):
+    for profile_name in ("coder", "researcher"):
         profile = root / "profiles" / profile_name
         profile.mkdir(parents=True)
         profile.joinpath("config.yaml").write_text(
@@ -403,6 +403,74 @@ agent:
     resolved = kb._resolve_worker_cli_toolsets(str(profile))
 
     assert resolved == ["kanban"]
+
+
+def test_critic_worker_cli_toolsets_are_verdict_only(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "critic"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - file
+    - code_execution
+    - delegation
+    - skills
+    - memory
+    - session_search
+toolsets:
+  - hermes-cli
+agent:
+  disabled_toolsets: []
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved == ["kanban"]
+
+
+def test_verdict_read_only_profiles_are_all_caged_via_hermes_native_spawn(
+    monkeypatch, tmp_path
+):
+    """Guards parity between the claude-cli and hermes-native spawn paths.
+
+    ``_resolve_worker_cli_toolsets`` must cage every profile name in
+    ``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES`` to the verdict-only surface,
+    so the two spawn paths can't drift apart if that set grows.
+    """
+    from hermes_cli import kanban_db as kb
+
+    for profile_name in kb._CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES:
+        root = tmp_path / f".hermes-{profile_name}"
+        profile = root / "profiles" / profile_name
+        profile.mkdir(parents=True)
+        profile.joinpath("config.yaml").write_text(
+            """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - file
+    - code_execution
+    - delegation
+toolsets:
+  - hermes-cli
+""".lstrip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(root))
+
+        resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+        assert resolved == ["kanban"], profile_name
 
 
 def test_reviewer_verdict_only_toolsets_keep_completion_without_execution_tools(

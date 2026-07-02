@@ -53,6 +53,40 @@ def repo_inflight_counts(
     return counts
 
 
+def chain_worktree_inflight_counts(
+    conn: sqlite3.Connection,
+    chain_root_for_task: Callable[[str], Optional[str]],
+) -> dict[str, int]:
+    """Count in-flight ``dir`` tasks per chain root.
+
+    Used by the chain-worktree-serialization guard to enforce at-most-one
+    running ``dir`` sibling per chain (Befund 4, 2026-07-02).  Only
+    ``workspace_kind='dir'`` tasks participate — scratch/worktree tasks share
+    neither the same provisioned git worktree nor the same conflict surface.
+
+    In-flight definition: ``status NOT IN ('done', 'archived', 'todo', 'ready',
+    'scheduled')``.  Excludes ``todo`` (task is waiting on a predecessor, not
+    occupying a worker slot) and the other non-running terminal/parked states.
+    Includes ``running``, ``review``, and ``blocked`` — a ``review``-state task
+    is running gates inside the worktree; a ``blocked`` task's auto-retry will
+    re-enter the same worktree.  Using a different set from
+    :func:`repo_inflight_counts` (which includes ``todo``) is intentional: the
+    repo guard's semantics require counting every non-terminal branch holder,
+    whereas the chain guard only needs to hold back a NEW dispatch while a
+    worktree worker is actually active or gating.
+    """
+    counts: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT id FROM tasks "
+        "WHERE workspace_kind = 'dir' "
+        "AND status NOT IN ('done', 'archived', 'todo', 'ready', 'scheduled')"
+    ):
+        root = chain_root_for_task(row["id"])
+        if root is not None:
+            counts[root] = counts.get(root, 0) + 1
+    return counts
+
+
 def capped_profiles_for_window(
     conn: sqlite3.Connection,
     *,

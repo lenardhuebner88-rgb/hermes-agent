@@ -448,9 +448,10 @@ def _format_roster(roster: list[dict]) -> str:
 
 _CONSTRAINT_PREFIXES: tuple[str, ...] = ("CRITICAL:", "MANDATORY:", "MUST:", "NEVER:")
 
-# Absolute filesystem paths: starts with `/` or `~/`, not part of a URL.
-# Match at least 4 chars after the leading marker so we don't grab "/" alone.
-_ABS_PATH_RE = re.compile(r"(?<![:/\w])(?:~/|/)(?:[\w.\-/]+)")
+# Tilde-home paths (`~/…`): kb._absolute_paths_from_text (below) only matches
+# a leading `/`, so `~/` tokens are extracted here with the SAME hardening
+# (rstrip trailing prose punctuation, reject single-segment tokens).
+_TILDE_PATH_RE = re.compile(r"(?<![\w.-])~/(?:[^\s`'\"<>|;$]+)")
 
 # Canonical kanban task ids: `t_` + at least 6 hex chars.
 _TASK_ID_RE = re.compile(r"\bt_[0-9a-f]{6,}\b")
@@ -474,20 +475,39 @@ def _collect_constraint_lines(body: str) -> list[str]:
 
 
 def _collect_absolute_paths(body: str) -> list[str]:
-    """Return absolute filesystem paths mentioned in ``body``."""
+    """Return absolute filesystem paths (``/…`` and ``~/…``) mentioned in
+    ``body``.
+
+    ``/…`` extraction mirrors kanban_db._absolute_paths_from_text (B2.1
+    hardening) by delegating to it directly — this module already imports
+    ``kanban_db`` as ``kb`` at the top, so there is no circular-import
+    concern. That hardening rstrips trailing prose punctuation
+    (``vision.md.`` -> ``vision.md``) and rejects single-segment slash
+    tokens scooped out of prose (a body mentioning the dispatcher action
+    ``action=="merged"/integration_merged`` must NOT infer
+    ``/integration_merged`` as an allowed path — a genuine absolute path is
+    always multi-segment). Keeping this logic in one place means this
+    module's constraint-preservation validator / scope-contract inference
+    and kanban_db's code-task contract inference never drift on what
+    "looks like an allowed path". ``~/`` paths are collected here with the
+    same hardening (kb's regex only matches a leading ``/``).
+    """
     if not body:
         return []
-    seen: list[str] = []
-    in_seen: set[str] = set()
-    for match in _ABS_PATH_RE.findall(body):
-        # Heuristic: ignore short hits ("/", "/a") and very-likely URLs
-        # ("//example.com" was already excluded by the negative lookbehind).
-        if len(match) < 4:
+    seen: set[str] = set()
+    paths: list[str] = []
+    for raw in kb._absolute_paths_from_text(body):
+        if raw not in seen:
+            seen.add(raw)
+            paths.append(raw)
+    for match in _TILDE_PATH_RE.findall(body):
+        raw = match.rstrip(".,);:]")
+        if raw.count("/") < 2:
             continue
-        if match not in in_seen:
-            in_seen.add(match)
-            seen.append(match)
-    return seen
+        if raw not in seen:
+            seen.add(raw)
+            paths.append(raw)
+    return paths
 
 
 def _collect_task_ids(body: str) -> list[str]:
@@ -589,6 +609,15 @@ _WORKER_SCOPE_LANES: frozenset[str] = frozenset({
     "scout",
 })
 
+# Read-only worker lanes: never assigned kind=code / implementation work (see
+# the lane routing table in _SYSTEM_PROMPT), so their scope-contract attestation
+# must not grant write_file/patch — granting write tools to a lane that never
+# edits is a needless privilege the worker could (mis)use.
+_READ_ONLY_WORKER_LANES: frozenset[str] = frozenset({
+    "scout",
+    "research",
+})
+
 _BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (
     "kanban_show",
     "kanban_complete",
@@ -608,6 +637,18 @@ _BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (
     "search_files",
     "terminal",
 )
+
+# Same set, minus the write tools — for _READ_ONLY_WORKER_LANES.
+_READ_ONLY_WORKER_ALLOWED_TOOLS: tuple[str, ...] = tuple(
+    tool for tool in _BASE_WORKER_ALLOWED_TOOLS if tool not in {"write_file", "patch"}
+)
+
+
+def _allowed_tools_for_assignee(assignee: str) -> tuple[str, ...]:
+    if assignee.strip() in _READ_ONLY_WORKER_LANES:
+        return _READ_ONLY_WORKER_ALLOWED_TOOLS
+    return _BASE_WORKER_ALLOWED_TOOLS
+
 
 _BROAD_ALLOWED_TOOL_MARKERS: frozenset[str] = frozenset({
     "all",
@@ -696,6 +737,58 @@ def _count_scope_contract_blocks(body: str) -> int:
     )
 
 
+# Static anti_scope defaults for every worker lane — mirrors System B's
+# code-task contract (kanban_db._code_task_contract_payload's "anti_scope").
+_DEFAULT_ANTI_SCOPE: tuple[str, ...] = (
+    "no unrelated cleanup",
+    "no git push",
+    "no deploy or runtime restart",
+    "no DB schema migration",
+)
+
+# Negation markers that flag a CRITICAL/MANDATORY/MUST/NEVER parent-body line
+# as an explicit prohibition worth surfacing in anti_scope (as opposed to a
+# positive MUST/MANDATORY instruction, which belongs in the body, not here).
+_NEGATION_MARKERS: tuple[str, ...] = ("NEVER", "MUST NOT", "DO NOT", "NICHT")
+
+_ANTI_SCOPE_MAX_LINES = 6
+_ANTI_SCOPE_MAX_LINE_LEN = 160
+
+
+def _collect_negation_lines(body: str) -> list[str]:
+    """Return negating CRITICAL/MANDATORY/MUST/NEVER lines from ``body``.
+
+    Filters :func:`_collect_constraint_lines` down to the lines whose wording
+    is itself a prohibition (NEVER / MUST NOT / DO NOT / NICHT), verbatim,
+    deduplicated, capped to ``_ANTI_SCOPE_MAX_LINES`` lines each truncated to
+    ``_ANTI_SCOPE_MAX_LINE_LEN`` chars.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in _collect_constraint_lines(body):
+        upper = line.upper()
+        if not any(marker in upper for marker in _NEGATION_MARKERS):
+            continue
+        truncated = _truncate(line, _ANTI_SCOPE_MAX_LINE_LEN)
+        if truncated in seen:
+            continue
+        seen.add(truncated)
+        out.append(truncated)
+        if len(out) >= _ANTI_SCOPE_MAX_LINES:
+            break
+    return out
+
+
+def _anti_scope_for_child(parent_task: object | None) -> list[str]:
+    """Static defaults + verbatim negation lines from the parent body."""
+    anti_scope = list(_DEFAULT_ANTI_SCOPE)
+    parent_body = getattr(parent_task, "body", "") if parent_task is not None else ""
+    for line in _collect_negation_lines(parent_body or ""):
+        if line not in anti_scope:
+            anti_scope.append(line)
+    return anti_scope
+
+
 def _default_worker_scope_contract(
     child: dict,
     *,
@@ -705,6 +798,8 @@ def _default_worker_scope_contract(
     title = (child.get("title") or "worker task").strip()
     parent_id = getattr(parent_task, "id", "") if parent_task is not None else ""
     objective = title if not parent_id else f"[{parent_id}] {title}"
+    assignee = child.get("assignee")
+    assignee_text = assignee if isinstance(assignee, str) else ""
     return {
         "scope_contract": {
             "version": 2,
@@ -713,7 +808,7 @@ def _default_worker_scope_contract(
             "allowed_paths": _collect_absolute_paths(
                 getattr(parent_task, "body", "") or ""
             ) if parent_task is not None else [],
-            "allowed_tools": list(_BASE_WORKER_ALLOWED_TOOLS),
+            "allowed_tools": list(_allowed_tools_for_assignee(assignee_text)),
             "forbidden_systems": list(_DEFAULT_FORBIDDEN_SYSTEMS),
             "forbidden_paths": list(_DEFAULT_FORBIDDEN_PATHS),
             "forbidden_tools": [
@@ -724,6 +819,7 @@ def _default_worker_scope_contract(
                 "mcp_linear_save_document",
                 "clarify",
             ],
+            "anti_scope": _anti_scope_for_child(parent_task),
             "ambiguity_policy": "fail_closed_and_ask",
         },
         "completion_policy": {
@@ -762,6 +858,7 @@ def _render_scope_contract_yaml(contract: dict) -> str:
         "forbidden_systems",
         "forbidden_paths",
         "forbidden_tools",
+        "anti_scope",
     ):
         vals = scope.get(key) or []
         lines.extend(_render_yaml_list(key, [str(v) for v in vals]))
@@ -776,9 +873,9 @@ def _render_scope_contract_yaml(contract: dict) -> str:
     return "\n".join(lines)
 
 
-def _normalize_allowed_tools_block(body: str) -> str:
+def _normalize_allowed_tools_block(body: str, *, assignee: str = "") -> str:
     """Force the worker scope contract's ``allowed_tools`` to the canonical
-    kanban-lifecycle set.
+    kanban-lifecycle set for ``assignee``'s lane.
 
     ``allowed_tools`` is a declarative attestation field — the worker's real
     tools come from its profile config, NOT from this list (it is not
@@ -790,9 +887,13 @@ def _normalize_allowed_tools_block(body: str) -> str:
     while preserving every other field the model produced. Handles both block
     (``allowed_tools:`` + ``- item`` lines) and inline (``allowed_tools: [..]``)
     forms. Only the first occurrence (the scope_contract's) is rewritten.
+    ``assignee`` picks the write-tool-free set for a read-only lane (scout,
+    research) so an LLM-authored contract for those lanes can't be normalized
+    back into carrying write_file/patch.
     """
     if "allowed_tools:" not in body:
         return body
+    allowed_tools = _allowed_tools_for_assignee(assignee)
     lines = body.splitlines()
     out: list[str] = []
     i = 0
@@ -805,7 +906,7 @@ def _normalize_allowed_tools_block(body: str) -> str:
             base_indent = len(line) - len(line.lstrip())
             indent = " " * base_indent
             out.append(f"{indent}allowed_tools:")
-            for tool in _BASE_WORKER_ALLOWED_TOOLS:
+            for tool in allowed_tools:
                 out.append(f"{indent}  - {tool}")
             replaced = True
             i += 1
@@ -837,7 +938,7 @@ def _ensure_worker_scope_contract(
     raw_body = child.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     if _body_has_scope_contract(body):
-        normalized = _normalize_allowed_tools_block(body)
+        normalized = _normalize_allowed_tools_block(body, assignee=assignee)
         if normalized != body:
             enriched = dict(child)
             enriched["body"] = normalized
@@ -887,7 +988,9 @@ def _extract_allowed_tools(body: str) -> list[str]:
 def validate_worker_scope_contracts(children: list[dict]) -> WorkerScopeContractReport:
     """Fail-closed validation for worker-lane child body contracts."""
     issues: list[WorkerScopeContractIssue] = []
-    known_tools = set(_BASE_WORKER_ALLOWED_TOOLS)
+    # Union of every role's allowed_tools list is "known" — a read-only lane's
+    # narrower set must not false-reject, and neither must the full set.
+    known_tools = set(_BASE_WORKER_ALLOWED_TOOLS) | set(_READ_ONLY_WORKER_ALLOWED_TOOLS)
     for idx, child in enumerate(children):
         assignee = child.get("assignee")
         assignee_text = assignee if isinstance(assignee, str) else ""
@@ -930,6 +1033,15 @@ def validate_worker_scope_contracts(children: list[dict]) -> WorkerScopeContract
                     idx, assignee_text, f"unknown allowed_tool {tool!r}",
                 ))
                 break
+        if assignee_text.strip() in _READ_ONLY_WORKER_LANES:
+            write_tools_present = sorted(
+                {"write_file", "patch"} & {t.strip() for t in allowed_tools}
+            )
+            if write_tools_present:
+                issues.append(WorkerScopeContractIssue(
+                    idx, assignee_text,
+                    f"write tool granted to read-only lane: {write_tools_present!r}",
+                ))
         if "completion_policy:" not in body or "require_scope_attestation: true" not in body:
             issues.append(WorkerScopeContractIssue(
                 idx,

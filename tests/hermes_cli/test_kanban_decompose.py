@@ -837,7 +837,11 @@ def test_scout_is_a_worker_scope_lane_and_gets_a_contract():
     assert decomp._is_worker_lane("scout")
     child = {"title": "recon the area", "body": "Read the affected code.", "assignee": "scout", "parents": []}
     out = decomp._ensure_worker_scope_contract(child)
-    _assert_worker_scope_contract(out["body"] or "")
+    body = out["body"] or ""
+    _assert_worker_scope_contract(body)
+    # Befund 7 / Fix 2: scout is read-only — no write tools in the attestation.
+    assert "write_file" not in body
+    assert "patch" not in body
 
 
 def test_decompose_prompt_requires_verifiable_acceptance_criteria():
@@ -1568,3 +1572,113 @@ def test_p5_prompt_says_none_without_open_epics(kanban_home):
     assert outcome.ok, outcome.reason
     user_msg = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "(none)" in user_msg
+
+
+# ---------------------------------------------------------------------------
+# Befund 7 — scope-contract inference hardening: path extraction parity,
+# role-scoped tool grants, anti_scope
+# ---------------------------------------------------------------------------
+
+def test_collect_absolute_paths_drops_prosa_slash_token():
+    """B2.1 hardening (kanban_decompose._collect_absolute_paths delegates to
+    kanban_db._absolute_paths_from_text): a single-segment slash token
+    scooped out of prose — e.g. the dispatcher's own action check
+    'action=="merged"/integration_merged' — is never a real allowed path."""
+    body = 'Guard the action=="merged"/integration_merged branch before merging.'
+    paths = decomp._collect_absolute_paths(body)
+    assert "/integration_merged" not in paths
+    assert not any(p.endswith("integration_merged") for p in paths)
+
+
+def test_collect_absolute_paths_strips_trailing_sentence_punctuation():
+    body = "Read /home/piet/vault/00-Canon/vision.md. Then act on it."
+    paths = decomp._collect_absolute_paths(body)
+    assert "/home/piet/vault/00-Canon/vision.md" in paths
+    assert "/home/piet/vault/00-Canon/vision.md." not in paths
+
+
+def test_collect_absolute_paths_still_handles_tilde_paths():
+    """Regression: kb._absolute_paths_from_text only matches a leading '/',
+    so '~/' paths must still be recognised by this module's wrapper."""
+    body = "CRITICAL: copy artifacts to ~/.hermes/reports/sprint/. Then finish."
+    paths = decomp._collect_absolute_paths(body)
+    assert "~/.hermes/reports/sprint/" in paths
+
+
+def test_default_scope_contract_scout_child_has_no_write_tools():
+    parent = _task_stub("t_parent", "Recon the area.")
+    child = {"title": "recon", "body": "", "assignee": "scout"}
+    out = decomp._ensure_worker_scope_contract(child, parent_task=parent)
+    body = out["body"]
+    _assert_worker_scope_contract(body)
+    assert "write_file" not in body
+    assert "patch" not in body
+    assert "read_file" in body
+    assert "search_files" in body
+    assert "terminal" in body
+    report = decomp.validate_worker_scope_contracts([{**child, "body": body}])
+    assert report.ok is True, report.issues
+
+
+def test_default_scope_contract_coder_child_keeps_write_tools():
+    """Regression: the read-only carve-out must not touch code lanes."""
+    parent = _task_stub("t_parent", "Write the code.")
+    child = {"title": "implement", "body": "", "assignee": "coder"}
+    out = decomp._ensure_worker_scope_contract(child, parent_task=parent)
+    body = out["body"]
+    _assert_worker_scope_contract(body)
+    assert "write_file" in body
+    assert "patch" in body
+
+
+def test_validator_rejects_scout_contract_with_write_file():
+    children = [{
+        "title": "unsafe scout",
+        "assignee": "scout",
+        "body": (
+            "scope_contract:\n"
+            "  version: 2\n"
+            "  allowed_tools:\n"
+            "    - kanban_show\n"
+            "    - kanban_complete\n"
+            "    - kanban_block\n"
+            "    - kanban_comment\n"
+            "    - read_file\n"
+            "    - write_file\n"
+            "completion_policy:\n"
+            "  require_scope_attestation: true\n"
+        ),
+    }]
+    report = decomp.validate_worker_scope_contracts(children)
+    assert report.ok is False
+    assert any("read-only lane" in issue.reason for issue in report.issues)
+
+
+def test_default_scope_contract_anti_scope_has_static_defaults():
+    parent = _task_stub("t_parent", "Build the thing.")
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    anti_scope = contract["scope_contract"]["anti_scope"]
+    for expected in (
+        "no unrelated cleanup",
+        "no git push",
+        "no deploy or runtime restart",
+        "no DB schema migration",
+    ):
+        assert expected in anti_scope
+
+
+def test_default_scope_contract_anti_scope_includes_parent_negation_line():
+    parent = _task_stub(
+        "t_parent",
+        "NEVER: touch /home/piet/.hermes/config.yaml — read only.",
+    )
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    anti_scope = contract["scope_contract"]["anti_scope"]
+    assert any(
+        "NEVER: touch /home/piet/.hermes/config.yaml" in line for line in anti_scope
+    )
+    rendered = decomp._render_scope_contract_yaml(contract)
+    assert "anti_scope:" in rendered
+    assert "no unrelated cleanup" in rendered

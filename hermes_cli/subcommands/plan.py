@@ -112,9 +112,15 @@ def plan_command(args: argparse.Namespace) -> int:
                     if superseded
                     else ""
                 )
+                child_status = result.get("initial_child_status") or "scheduled"
+                child_note = (
+                    "scheduled children (held for operator)"
+                    if child_status == "scheduled"
+                    else "dispatchable children"
+                )
                 print(
                     f"Ingested {result['path']} → root {result['root_task_id']} "
-                    f"with {len(result['child_ids'])} scheduled children{supersede_note}"
+                    f"with {len(result['child_ids'])} {child_note}{supersede_note}"
                 )
             return 0
         if action == "validate":
