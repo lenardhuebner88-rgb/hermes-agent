@@ -1,0 +1,25 @@
+# loop-tuner — Meta-Pack: optimiert die bestehenden Loop-Packs evidenzbasiert.
+# „Optimiere die Loops" als Loop (Operator-Wunsch 2026-07-02): eine systematische
+# Schwäche pro Runde, belegt aus Ledger/Logs/Bounces, Fix = Prompt-/Manifest-Edit
+# in loops/packs/** IM WORKTREE → Commit → landet über die normale Morgen-Review.
+# Schutz: Verbote/Schienen dürfen nur SCHÄRFER werden, nie schwächer.
+name: loop-tuner
+type: sweep
+description: Pro Runde EINE belegte Pack-Schwäche fixen (Prompts/Manifeste, nie Runner-Code)
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-fable-5
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 6
+  max_hours: 5
+  fail_streak: 2
+  dry_rounds: 1
+params: {}
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

@@ -919,6 +919,120 @@ export interface ActivityEntry {
   tone: ToneName;
 }
 
+// ── Loop-Runner (/control Loops-Tab) ────────────────────────────────────────
+export interface LoopPhase {
+  engine: string;
+  model: string;
+  timeout: number;
+}
+
+/** Pack-Manifest ist kaputt (ManifestError) — Backend gibt nur name+error zurück. */
+export interface LoopPackError {
+  name: string;
+  error: string;
+}
+
+/** Aktuell laufende Phase (heartbeat.json, best effort — Telemetrie kostet nie eine Runde). */
+export interface LoopHeartbeatCurrent {
+  phase: string;
+  engine: string;
+  model: string;
+  /** lokale ISO-Zeit ohne Zone (Runner-Host = Backend-Host). */
+  started_at: string;
+  timeout: number;
+}
+
+/** Ein abgeschlossener Phasen-Eintrag der 20er-Historie. */
+export interface LoopHeartbeatHistoryEntry {
+  phase: string;
+  engine: string;
+  model: string;
+  secs: number;
+  rc: number;
+  at: string;
+}
+
+export interface LoopHeartbeat {
+  current: LoopHeartbeatCurrent | null;
+  last: LoopHeartbeatHistoryEntry[];
+}
+
+export interface LoopPackSummary {
+  name: string;
+  type: "pipeline" | "sweep";
+  description: string;
+  stability: string;
+  phases: Record<string, LoopPhase>;
+  stop: Record<string, number>;
+  params: Record<string, string>;
+  running: boolean;
+  /** null = noch nie ein Heartbeat geschrieben (kein Lauf bisher). */
+  heartbeat: LoopHeartbeat | null;
+  stop_requested: boolean;
+  /** nur bei type=pipeline gefüllt (Stage → Anzahl Dateien); sweep hat keine Queue. */
+  queue: Record<string, number> | null;
+  commits_ahead: number;
+  timer_enabled: boolean;
+}
+
+export type LoopPack = LoopPackSummary | LoopPackError;
+
+export function isLoopPackError(pack: LoopPack): pack is LoopPackError {
+  return "error" in pack;
+}
+
+export interface LoopsResponse {
+  packs: LoopPack[];
+}
+
+export interface LoopEngineCatalog {
+  label: string;
+  models: string[];
+}
+
+export interface LoopModelsResponse {
+  engines: Record<string, LoopEngineCatalog>;
+}
+
+export interface LoopDetailResponse extends LoopPackSummary {
+  ledger_tail: string[];
+  queue_entries: Record<string, string[]> | null;
+  commits: string[];
+  overrides: Record<string, string>;
+}
+
+/** Werkstatt: eine Pack-Datei (pack.yaml oder ein Prompt-*.md). */
+export interface LoopFile {
+  name: string;
+  content: string;
+  /** Repo-Packs sind kuratiert (nur via Git) — nur custom-Packs sind editierbar. */
+  editable: boolean;
+}
+
+export interface LoopFilesResponse {
+  pack: string;
+  source: "repo" | "custom";
+  files: LoopFile[];
+}
+
+export interface LoopFileSaveResult {
+  saved: boolean;
+  pack: string;
+  file: string;
+}
+
+export interface LoopDuplicateResult {
+  created: string;
+  source: string;
+}
+
+export interface LoopLandResult {
+  land_started: boolean;
+  pack: string;
+  log: string;
+  note: string;
+}
+
 export interface NavItem {
   id: string;
   label: string;

@@ -1,0 +1,24 @@
+# doc-sweep — Sweep gegen Doku-Drift zwischen Repo-Doku und tatsächlichem Code-Verhalten.
+# Blaupause: Berman "Doc Sweep"; korrigiert AGENTS.md/README/CLAUDE.md/docs/plugins-Doku,
+# NIE umgekehrt (Code wird nie an die Doku angepasst).
+name: doc-sweep
+type: sweep
+description: Pro Runde EINE Doku-Drift zwischen Repo-Doku und Code-Verhalten finden und die Doku korrigieren
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 2400
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  fokus: "AGENTS.md, README*, CLAUDE.md (Repo), docs/, plugins/*/README"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

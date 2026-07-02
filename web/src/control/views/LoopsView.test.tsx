@@ -1,0 +1,267 @@
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
+import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { de } from "../i18n/de";
+import type { LoopFilesResponse, LoopModelsResponse, LoopPack } from "../lib/types";
+
+const t = de.loops;
+
+// Manifest-Felder (phases/stop/params/description/stability/type) sind aus dem
+// ECHTEN Payload geerntet — via TestClient(app).get("/api/loops") gegen die
+// tatsächlichen loops/packs/builder-reviewer + loops/packs/doc-sweep Manifeste
+// (2026-07-02). Nur die Laufzeit-Felder (running/queue/commits_ahead/heartbeat)
+// sind für die Szenarien hier überschrieben, weil aktuell live kein Loop läuft.
+// Die heartbeat-Form selbst (current/last-Felder) ist gegen den ECHTEN
+// TestClient(app).get("/api/loops")-Payload nach dem Schreiben von
+// state/heartbeat.json geerntet (siehe schemas.test.ts).
+const runningPipeline: LoopPack = {
+  name: "builder-reviewer",
+  type: "pipeline",
+  description: "Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial",
+  stability: "stable",
+  phases: {
+    plan: { engine: "claude", model: "claude-fable-5", timeout: 2400 },
+    build: { engine: "claude", model: "claude-sonnet-5", timeout: 3600 },
+    verify: { engine: "claude", model: "claude-fable-5", timeout: 2400 },
+  },
+  stop: { max_rounds: 12, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+  params: { max_plans: "8", focus: "Hermes-Board/Kanban-Robustheit" },
+  running: true,
+  heartbeat: {
+    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00", timeout: 3600 },
+    last: [
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00" },
+      { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00" },
+    ],
+  },
+  stop_requested: false,
+  queue: { "00-planned": 1, "10-building": 2, "20-verified": 7, "30-landed": 3, "90-bounced": 0 },
+  commits_ahead: 0,
+  timer_enabled: true,
+};
+
+// Gleiches Manifest, aber zwischen zwei Phasen (heartbeat.current == null,
+// obwohl running=true) — der Übergangs-Zustand aus der Aufgabenbeschreibung.
+const betweenPhasesPipeline: LoopPack = {
+  ...runningPipeline,
+  name: "builder-reviewer-between",
+  heartbeat: { current: null, last: runningPipeline.heartbeat!.last },
+};
+
+const idleSweepWithCommits: LoopPack = {
+  name: "doc-sweep",
+  type: "sweep",
+  description: "Pro Runde EINE Doku-Drift zwischen Repo-Doku und Code-Verhalten finden und die Doku korrigieren",
+  stability: "experimental",
+  phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 2400 } },
+  stop: { max_rounds: 10, max_hours: 7, fail_streak: 2, dry_rounds: 2 },
+  params: { fokus: "AGENTS.md, README*, CLAUDE.md (Repo), docs/, plugins/*/README" },
+  running: false,
+  heartbeat: null,
+  stop_requested: false,
+  queue: null,
+  commits_ahead: 4,
+  timer_enabled: false,
+};
+
+// Läuft UND hat unverdaute Commits — Land darf trotzdem nicht auftauchen
+// (running unterdrückt es, egal was commits_ahead sagt).
+const runningWithCommits: LoopPack = {
+  ...runningPipeline,
+  name: "running-with-commits",
+  commits_ahead: 2,
+};
+
+// Idle, aber ohne Commits — Land darf nicht auftauchen.
+const idleNoCommits: LoopPack = {
+  ...idleSweepWithCommits,
+  name: "idle-no-commits",
+  commits_ahead: 0,
+};
+
+const brokenPack: LoopPack = {
+  name: "broken-pack",
+  error: "ManifestError: phases fehlt in pack.yaml",
+};
+
+const models: LoopModelsResponse = {
+  engines: {
+    claude: { label: "Claude (Abo)", models: ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"] },
+    kimi: { label: "Kimi (Coding-Abo)", models: ["kimi-code/kimi-for-coding"] },
+    codex: { label: "Codex (ChatGPT-Abo)", models: ["gpt-5.5", "gpt-5.3-codex"] },
+    neuralwatt: { label: "NeuralWatt (Abo) — geplant, kein Adapter", models: [] },
+  },
+};
+
+const noopHandlers = {
+  onSetPendingStop: vi.fn(),
+  onSetPendingLand: vi.fn(),
+  onToggleDetail: vi.fn(),
+  onToggleWorkshop: vi.fn(),
+  onOpenStart: vi.fn(),
+  onCloseStart: vi.fn(),
+  onSubmitStart: vi.fn(),
+  onStop: vi.fn(),
+  onLand: vi.fn(),
+  onToggleTimer: vi.fn(),
+  onSaveFile: vi.fn(),
+  onDuplicate: vi.fn(),
+};
+
+function renderGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) {
+  return renderToStaticMarkup(
+    <LoopsGrid
+      packs={packs}
+      models={models}
+      selectedPack={null}
+      detail={null}
+      detailLoading={false}
+      detailError={null}
+      busyPack={null}
+      actionErrorByPack={{}}
+      landNoteByPack={{}}
+      startOpenPack={null}
+      pendingStopPack={null}
+      pendingLandPack={null}
+      workshopOpenPack={null}
+      files={null}
+      filesLoading={false}
+      filesError={null}
+      fileSaveBusy={false}
+      fileSaveError={null}
+      duplicateBusy={false}
+      duplicateError={null}
+      {...noopHandlers}
+      {...overrides}
+    />,
+  );
+}
+
+describe("LoopsGrid", () => {
+  it("renders a running pipeline pack with live status, stability/type badges and queue counts", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain("builder-reviewer");
+    expect(html).toContain(t.stabilityStable);
+    expect(html).toContain(t.typePipeline);
+    expect(html).toContain(t.statusRunning);
+    expect(html).toContain(t.queuePlanned);
+    expect(html).toContain(t.queueBuilding);
+    expect(html).toContain(t.queueVerified);
+    expect(html).toContain(t.queueLanded);
+    expect(html).toContain(t.queueBounced);
+    // 20-verified count (7) und 30-landed count (3) muessen sichtbar sein, nicht nur das Label.
+    expect(html).toMatch(/>7</);
+    expect(html).toMatch(/>3</);
+  });
+
+  it("renders an idle experimental sweep pack with an 'unverdaute Commits' badge", () => {
+    const html = renderGrid([idleSweepWithCommits]);
+    expect(html).toContain("doc-sweep");
+    expect(html).toContain(t.stabilityExperimental);
+    expect(html).toContain(t.typeSweep);
+    expect(html).toContain(t.statusIdle);
+    expect(html).toContain(t.commitsAhead(4));
+    // sweep hat keine Queue → keine Queue-Stat-Kacheln fuer dieses Pack.
+    expect(html).not.toContain(t.queueBuilding);
+  });
+
+  it("renders a manifest-error pack as an error card, not a crash", () => {
+    const html = renderGrid([brokenPack]);
+    expect(html).toContain("broken-pack");
+    expect(html).toContain(t.manifestError);
+    expect(html).toContain("ManifestError: phases fehlt in pack.yaml");
+  });
+
+  it("renders all three scenarios together without throwing", () => {
+    const html = renderGrid([runningPipeline, idleSweepWithCommits, brokenPack]);
+    expect(html).toContain("builder-reviewer");
+    expect(html).toContain("doc-sweep");
+    expect(html).toContain("broken-pack");
+  });
+
+  it("shows the empty state when no packs are configured", () => {
+    const html = renderGrid([]);
+    expect(html).toContain(t.empty);
+  });
+});
+
+describe("LoopsGrid — Live-Phase-Chip (heartbeat)", () => {
+  it("shows the current phase/model/elapsed duration for a running pack with heartbeat.current", () => {
+    const startedMs = Date.parse(runningPipeline.heartbeat!.current!.started_at);
+    const nowMs = startedMs + 8 * 60_000; // 8 Minuten seit Phasenstart
+    const html = renderGrid([runningPipeline], { nowMs });
+    expect(html).toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "8m"));
+  });
+
+  it("shows 'zwischen Phasen' when running but heartbeat.current is null", () => {
+    const html = renderGrid([betweenPhasesPipeline]);
+    expect(html).toContain(t.heartbeatBetweenPhases);
+    expect(html).not.toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "8m"));
+  });
+
+  it("renders the last ≤5 phases as duration-history chips, most recent first, marked by rc", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain("build 512s ✓");
+    expect(html).toContain("verify 178s ✗");
+  });
+
+  it("shows no heartbeat chip for an idle pack", () => {
+    const html = renderGrid([idleSweepWithCommits]);
+    expect(html).not.toContain(t.heartbeatBetweenPhases);
+  });
+});
+
+describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
+  it("shows Land for an idle pack with unverdaute commits", () => {
+    const html = renderGrid([idleSweepWithCommits]);
+    expect(html).toContain(t.actions.land);
+  });
+
+  it("hides Land while the pack is running, even with commits_ahead > 0", () => {
+    const html = renderGrid([runningWithCommits]);
+    expect(html).not.toContain(t.actions.land);
+  });
+
+  it("hides Land for an idle pack without commits_ahead", () => {
+    const html = renderGrid([idleNoCommits]);
+    expect(html).not.toContain(t.actions.land);
+  });
+});
+
+describe("LoopsGrid — Werkstatt-Panel", () => {
+  const repoFiles: LoopFilesResponse = {
+    pack: "builder-reviewer",
+    source: "repo",
+    files: [
+      { name: "pack.yaml", content: "name: builder-reviewer\ntype: pipeline\n", editable: false },
+      { name: "build.md", content: "PHASE=build STATE={{STATE_DIR}}\n", editable: false },
+    ],
+  };
+  const customFiles: LoopFilesResponse = {
+    pack: "doc-sweep",
+    source: "custom",
+    files: [
+      { name: "pack.yaml", content: "name: doc-sweep\ntype: sweep\n", editable: true },
+      { name: "round.md", content: "PHASE=round STATE={{STATE_DIR}}\n", editable: true },
+    ],
+  };
+
+  it("renders repo-pack files read-only with the 'via Git ändern' hint, no Save button", () => {
+    const html = renderGrid([runningPipeline], { workshopOpenPack: "builder-reviewer", files: repoFiles });
+    expect(html).toContain(t.workshopReadOnly);
+    expect(html).not.toContain(t.workshopSave);
+    expect(html).toContain("pack.yaml");
+  });
+
+  it("renders custom-pack files editable with a Save button, no read-only hint", () => {
+    const html = renderGrid([idleSweepWithCommits], { workshopOpenPack: "doc-sweep", files: customFiles });
+    expect(html).toContain(t.workshopSave);
+    expect(html).not.toContain(t.workshopReadOnly);
+  });
+
+  it("does not render the Werkstatt panel for a pack whose workshop isn't open", () => {
+    const html = renderGrid([runningPipeline], { workshopOpenPack: null, files: repoFiles });
+    expect(html).not.toContain(t.workshopReadOnly);
+    expect(html).not.toContain("build.md");
+  });
+});

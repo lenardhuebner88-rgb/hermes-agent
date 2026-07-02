@@ -1,0 +1,24 @@
+# error-sweep — Sweep über die Service-Logs: einen wiederkehrenden Fehler fixen.
+# Blaupause: Berman "Production Error Sweep".
+name: error-sweep
+type: sweep
+description: Pro Runde EINEN wiederkehrenden Log-Fehler root-causen und fixen
+stability: stable
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  services: "hermes-gateway hermes-dashboard hermes-prefilter"
+  zeitraum: "-2 days"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

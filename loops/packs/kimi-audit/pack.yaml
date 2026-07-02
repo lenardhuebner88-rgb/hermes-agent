@@ -1,0 +1,25 @@
+# kimi-audit — Migration der Kimi-Nachtloop-Familie (v2.5) in den Runner.
+# Kimi K2.7 (Coding-Abo, $0/Token) auditiert ein Backend-Subsystem und fixt einen
+# Fund pro Runde. Ersetzt perspektivisch ~/.hermes/kimi-loop/ (nach erstem
+# begleitetem Lauf dort deprecaten).
+name: kimi-audit
+type: sweep
+description: Kimi auditiert ein Subsystem und fixt einen Fund pro Runde (Per-Funktions-Scope)
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: kimi
+    model: kimi-code/kimi-for-coding
+    timeout: 3000
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 12
+  max_hours: 7
+  fail_streak: 3   # Kimi-Loop-Erfahrungswert: 3× BLOCKED, nicht 2
+  dry_rounds: 2
+params:
+  fokus: "hermes_cli PlanSpec-/Kanban-LESEpfade (Parser, Validierung, Formatierung)"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

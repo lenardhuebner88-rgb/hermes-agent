@@ -1,0 +1,23 @@
+# repo-housekeeper — Hygiene-Sweep mit minimalem Fix-Mandat (melden > löschen).
+# Blaupause: Berman "House Keeper/Repo Cleanup"; destruktives FS bleibt Operator-Sache.
+name: repo-housekeeper
+type: sweep
+description: Pro Runde EINEN Hygiene-Fund melden und nur additiv-trivial fixen
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 1800
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  fokus: "verwaiste Debug-Skripte, erledigte TODO-Marker, .gitignore-Lücken, doppelte/obsolete Hilfsskripte"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

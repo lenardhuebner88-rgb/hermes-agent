@@ -1,0 +1,23 @@
+# promise-to-proof — Sweep gegen unbelegte Verhaltens-Behauptungen in Doku/Docstrings/
+# Kommentaren. Blaupause: Berman "Promise-to-Proof".
+name: promise-to-proof
+type: sweep
+description: Pro Runde EINE unbelegte, testbare Verhaltens-Behauptung mit einem Beweis-Test absichern oder widerlegen
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  fokus: "Repo-Doku/Docstrings/Kommentare; Signalwörter: immer, garantiert, thread-safe, nie, automatisch"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

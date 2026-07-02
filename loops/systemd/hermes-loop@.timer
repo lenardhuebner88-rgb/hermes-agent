@@ -1,0 +1,15 @@
+# hermes-loop@<pack>.timer — nächtliches Fenster für Pack <pack>.
+# Toggle (auch via Dashboard): systemctl --user enable|disable --now hermes-loop@<pack>.timer
+# Pack-eigene Zeit: systemctl --user edit hermes-loop@<pack>.timer
+#   → Drop-in mit [Timer] OnCalendar= (erst leeren, dann neu setzen).
+[Unit]
+Description=Nachtfenster für Hermes Loop-Runner Pack %i
+
+[Timer]
+# Off-Minute mit Absicht (kein :00/:30-Herdenstart); Persistent=false:
+# verpasste Nächte NICHT tagsüber nachholen.
+OnCalendar=*-*-* 23:37:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

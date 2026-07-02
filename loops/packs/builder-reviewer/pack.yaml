@@ -1,0 +1,35 @@
+# builder-reviewer — Referenz-Pack (migrierter Fable-Nachtloop).
+# Fable plant Schwachstellen-Fixes als Plan-Dateien, Sonnet baut einen Plan pro
+# Runde, Fable verifiziert adversarial. Design-Doc:
+# vault/03-Agents/Claude-Code/plans/2026-07-02-loop-runner-v1-v2.md
+name: builder-reviewer
+type: pipeline
+description: Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial
+stability: stable
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  plan:
+    engine: claude
+    model: claude-fable-5
+    timeout: 2400
+    prompt: PLANNER-PROMPT.md
+  build:
+    engine: claude
+    model: claude-sonnet-5
+    timeout: 3600
+    prompt: BUILDER-PROMPT.md
+  verify:
+    engine: claude
+    model: claude-fable-5
+    timeout: 2400
+    prompt: VERIFIER-PROMPT.md
+stop:
+  max_rounds: 12
+  max_hours: 7
+  fail_streak: 2
+params:
+  max_plans: "8"
+  focus: "Hermes-Board/Kanban-Robustheit + /control-Dashboard (Backend bevorzugt; Frontend nur wenn HAS_WEB=1)"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false
