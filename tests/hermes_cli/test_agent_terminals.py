@@ -230,7 +230,7 @@ def test_respawn_and_kill_refuse_unparsable_pid_when_pane_not_marked_dead(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t{home}\n"
+    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t1751500000\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     with pytest.raises(CapabilityError, match="not marked dead"):
@@ -349,7 +349,7 @@ def test_list_windows_parses_real_tab_separated_format_matches_create_new_base_n
     fo_dir.mkdir(parents=True)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
 
-    fixture = f"work\tclaude-fo\t1\t%9\t9999\t0\tclaude\t{fo_dir}\n"
+    fixture = f"work\tclaude-fo\t1\t%9\t9999\t0\tclaude\t1751500000\t{fo_dir}\n"
     calls = _patch_list_windows_output(monkeypatch, fixture)
     windows = service.list_windows("work")
 
@@ -363,6 +363,7 @@ def test_list_windows_parses_real_tab_separated_format_matches_create_new_base_n
     assert parsed.command == "claude"
     assert parsed.cwd == str(fo_dir)
     assert parsed.dead is False
+    assert parsed.activity == 1751500000
     assert parsed.window == service.window_name_for("claude", "family-organizer")
 
     first = service.create_new("claude", "family-organizer")
@@ -383,10 +384,158 @@ def test_kill_dead_kills_when_pane_dead_flag_set_even_with_pid_present(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t{home}\n"
+    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     service.kill_dead("work", "claude")
 
     assert any(call and call[0] == "kill-window" for call in calls)
     assert not service.window_exists("work", "claude")
+
+
+def test_spawn_sets_hermes_kind_and_workdir_window_options(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    fo_dir = home / "projects" / "family-organizer"
+    fo_dir.mkdir(parents=True)
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    service.ensure("claude", "family-organizer")
+
+    target = service._cmd_target("work", "claude-fo")
+    kind_proc = service._run("show-options", "-w", "-v", "-t", target, "@hermes_kind")
+    workdir_proc = service._run("show-options", "-w", "-v", "-t", target, "@hermes_workdir")
+    assert kind_proc.stdout.strip() == "claude"
+    assert workdir_proc.stdout.strip() == "family-organizer"
+
+
+def test_identity_for_prefers_window_options_over_name_parsing(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    assert service.identity_for("work", "claude") == ("claude", "home")
+
+
+def test_identity_for_falls_back_to_name_parsing_without_window_options(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    """A window created before @hermes_* options existed (no options ever
+    set on it) must still resolve via the old name-based parsing."""
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service._run("new-session", "-d", "-s", "work", "-n", "codex", "sh -c 'sleep 60'")
+    time.sleep(0.2)
+
+    assert service.identity_for("work", "codex") == ("codex", "home")
+
+
+def test_identity_for_falls_back_when_option_values_are_invalid(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    target = service._cmd_target("work", "claude")
+    service._run("set-option", "-w", "-t", target, "@hermes_kind", "not-a-real-kind")
+    service._run("set-option", "-w", "-t", target, "@hermes_workdir", "not-a-real-workdir")
+
+    assert service.identity_for("work", "claude") == ("claude", "home")
+
+
+def test_rename_happy_path_returns_window_with_new_name(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    renamed = service.rename("work", "claude", "my-claude")
+    assert renamed.session == "work"
+    assert renamed.window == "my-claude"
+    assert service.window_exists("work", "my-claude")
+    assert not service.window_exists("work", "claude")
+    assert service.identity_for("work", "my-claude") == ("claude", "home")
+
+
+def test_rename_rejects_collision_with_existing_window(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    _fake_agent_cli(home, "codex")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+    service.ensure("codex")
+
+    with pytest.raises(CapabilityError, match="already exists"):
+        service.rename("work", "claude", "codex")
+
+
+def test_rename_refuses_foreign_window(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service._run("new-session", "-d", "-s", "kimi-goal-test", "-n", "python3", "sh -c 'sleep 60'")
+    time.sleep(0.2)
+
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service.rename("kimi-goal-test", "python3", "hijacked")
+
+
+def test_rename_rejects_invalid_name(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    with pytest.raises(InvalidTarget):
+        service.rename("work", "claude", "bad name!")
+
+
+def test_respawn_dead_after_rename_uses_window_option_identity(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead window renamed to a custom name no longer matches
+    `_identity_from_window`'s name parsing — respawn must still work because
+    rename() stamps @hermes_* options that identity_for() reads back."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    _fake_agent_cli(home, "codex")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    # Start the "work" session via a live agent window, then create the dead
+    # window directly (bypassing _spawn_window) so it starts with no
+    # @hermes_* options — mirrors a window from before this patch.
+    service.ensure("claude")
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-window", "-d", "-t", "work:", "-n", "codex", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    dead = service.show("work", "codex")
+    assert dead.dead or not dead.pid
+
+    renamed = service.rename("work", "codex", "my-custom-codex")
+    assert renamed.window == "my-custom-codex"
+    assert renamed.dead or not renamed.pid
+
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        TmuxAgentSessionService._identity_from_window("my-custom-codex")
+
+    respawned = service.respawn_dead("work", "my-custom-codex")
+    assert respawned.window == "my-custom-codex"
+    assert respawned.pid
+    assert not respawned.dead

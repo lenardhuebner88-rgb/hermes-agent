@@ -78,6 +78,7 @@ class AgentWindowDefinition:
     argv: tuple[str, ...]
     cwd: Path
     env: Mapping[str, str]
+    workdir_key: str
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ class TmuxWindow:
     command: str
     cwd: str | None = None
     dead: bool = False
+    activity: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -101,6 +103,7 @@ class TmuxWindow:
             "command": self.command,
             "cwd": self.cwd,
             "dead": self.dead,
+            "activity": self.activity,
         }
 
 
@@ -312,6 +315,24 @@ class TmuxAgentSessionService:
                     return kind, key
         raise CapabilityError(f"window {window!r} is not a dashboard-managed agent window")
 
+    def identity_for(self, session: str, window: str) -> tuple[str, str]:
+        """Resolve (kind, workdir key) for a window, preferring window options.
+
+        `@hermes_kind`/`@hermes_workdir` are set at spawn time and survive a
+        `rename()`, unlike `_identity_from_window`'s name-based parsing.
+        Windows created before this option was introduced have neither set,
+        so we fall back to name parsing for them.
+        """
+        target = self._cmd_target(session, window)
+        kind_proc = self._run("show-options", "-w", "-v", "-t", target, "@hermes_kind", check=False)
+        workdir_proc = self._run("show-options", "-w", "-v", "-t", target, "@hermes_workdir", check=False)
+        if kind_proc.returncode == 0 and workdir_proc.returncode == 0:
+            kind = kind_proc.stdout.strip()
+            workdir_key = workdir_proc.stdout.strip()
+            if kind in _AGENT_KINDS and workdir_key in _WORKDIR_BY_KEY:
+                return kind, workdir_key
+        return self._identity_from_window(window)
+
     def capabilities(self) -> CapabilityState:
         tmux_available = shutil.which(self.tmux_binary) is not None or Path(self.tmux_binary).exists()
         agents: dict[str, dict[str, object]] = {}
@@ -344,7 +365,9 @@ class TmuxAgentSessionService:
         else:
             argv = (str(binary),)
             env = self._safe_env()
-        return AgentWindowDefinition(kind=kind, session="work", window=window, argv=argv, cwd=cwd, env=env)
+        return AgentWindowDefinition(
+            kind=kind, session="work", window=window, argv=argv, cwd=cwd, env=env, workdir_key=workdir_key
+        )
 
     # ----- inventory ------------------------------------------------------
     def list_sessions(self) -> list[str]:
@@ -356,12 +379,13 @@ class TmuxAgentSessionService:
     def list_windows(self, session: str | None = None) -> list[TmuxWindow]:
         # pane_current_path stays LAST: it is the only field a pane process can
         # steer (cd into a crafted dir) — trailing position keeps injected tabs
-        # from shifting pid/dead into the wrong columns.
+        # from shifting pid/dead into the wrong columns. window_activity goes
+        # right before it, so it's still bounded by the trailing-cwd rule.
         args = [
             "list-windows",
             "-a",
             "-F",
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
         ]
         if session:
             args.insert(1, "-t")
@@ -376,8 +400,9 @@ class TmuxAgentSessionService:
                 continue
             pid = int(parts[4]) if parts[4].isdigit() else None
             dead = parts[5] == "1"
-            cwd = ("\t".join(parts[7:]) or None) if len(parts) > 7 else None
-            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead))
+            activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+            cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead, activity))
         return windows
 
     def window_exists(self, session: str, window: str) -> bool:
@@ -408,6 +433,12 @@ class TmuxAgentSessionService:
             *env_args,
             shlex.join(definition.argv),
         )
+        # Window options survive rename() — unlike the name-based parsing in
+        # `_identity_from_window`, they let identity_for() recover kind/workdir
+        # for a window whose name a user has since changed.
+        target = self._cmd_target(definition.session, definition.window)
+        self._run("set-option", "-w", "-t", target, "@hermes_kind", definition.kind)
+        self._run("set-option", "-w", "-t", target, "@hermes_workdir", definition.workdir_key)
         return self.show(definition.session, definition.window)
 
     def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
@@ -467,7 +498,7 @@ class TmuxAgentSessionService:
         info = self.show(session, window)
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing respawn")
-        kind, workdir_key = self._identity_from_window(info.window)
+        kind, workdir_key = self.identity_for(session, info.window)
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
         definition = self.definition_for(kind, workdir_key)
@@ -488,6 +519,24 @@ class TmuxAgentSessionService:
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("kill_dead", session=session, window=window)
 
+    def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
+        """Rename a dashboard-managed window, preserving its respawn identity."""
+        new_name = self.validate_name(new_name, field="window")
+        # identity_for raises CapabilityError for windows this service doesn't
+        # manage — renaming a foreign tmux window is refused, not allowlisted.
+        kind, workdir_key = self.identity_for(session, window)
+        if self.window_exists(session, new_name):
+            raise CapabilityError(f"window {session}:{new_name} already exists")
+        target = self._cmd_target(session, window)
+        # Old windows resolved via the name-based fallback have no @hermes_*
+        # options yet — set them now so the rename doesn't strand the window
+        # without a respawn identity.
+        self._run("set-option", "-w", "-t", target, "@hermes_kind", kind)
+        self._run("set-option", "-w", "-t", target, "@hermes_workdir", workdir_key)
+        self._run("rename-window", "-t", target, new_name)
+        self._log_event("rename", session=session, window=window, new_window=new_name, kind=kind, workdir=workdir_key)
+        return self.show(session, new_name)
+
     def show(self, session: str, window: str) -> TmuxWindow:
         target = self._cmd_target(session, window)
         if not self.window_exists(session, window):
@@ -497,13 +546,16 @@ class TmuxAgentSessionService:
             "-p",
             "-t",
             target,
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
         )
         parts = proc.stdout.rstrip("\n").split("\t")
         pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
         dead = len(parts) > 5 and parts[5] == "1"
-        cwd = ("\t".join(parts[7:]) or None) if len(parts) > 7 else None
-        return TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead)
+        activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+        cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+        return TmuxWindow(
+            parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead, activity
+        )
 
     def capture(self, session: str, window: str, *, start: int = -200) -> str:
         target = self._cmd_target(session, window)

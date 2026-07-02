@@ -42,6 +42,10 @@ class FakeAgentTerminalService:
         assert (session, window) == ("work", "hermes")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
 
+    def rename(self, session, window, name):
+        assert (session, window, name) == ("work", "hermes", "hermes-renamed")
+        return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes-renamed"})
+
     def kill_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
 
@@ -81,6 +85,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/create", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes-2"
     assert client.post("/api/agent-terminals/create", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes-2"
     assert client.post("/api/agent-terminals/respawn", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
+    assert client.post("/api/agent-terminals/rename", json={"session": "work", "window": "hermes", "name": "hermes-renamed"}, headers=headers).json()["window"]["window"] == "hermes-renamed"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
     assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
@@ -93,6 +98,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     names = {
         "AgentTerminalEnsureRequest",
         "AgentTerminalTargetRequest",
+        "AgentTerminalRenameRequest",
         "AgentTerminalCaptureRequest",
         "AgentTerminalHandoffDraftRequest",
         "AgentTerminalSendKeysRequest",
