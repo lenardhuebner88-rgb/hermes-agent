@@ -476,7 +476,7 @@ function FleetCard({
       )}
       <div className="flex min-w-0 items-center gap-1.5 pr-5">
         <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium", meta.className)}>{meta.label}</span>
-        <span className="min-w-0 truncate font-mono text-xs text-white/85">{chipLabel(win)}</span>
+        <span className="min-w-0 truncate font-mono text-xs text-white/75">{chipLabel(win)}</span>
       </div>
       <div className="text-[10px] text-white/45">{formatActivityAge(now, win.activity ?? null)}</div>
       <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-lg bg-black/30 p-1.5 font-mono text-[10px] leading-tight text-white/70">
@@ -1682,8 +1682,8 @@ export function AgentTerminalsView() {
       </div>
       {renameError && <div className="mt-1.5 rounded-lg border border-red-400/30 bg-red-400/10 p-2 text-[11px] text-red-100">{renameError}</div>}
       <div className="mt-3 grid gap-1.5 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
-        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-white/85">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
-        <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-white/85">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-white/75">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-white/75">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Status</span><StatusPill state={state} /></div>
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
@@ -1748,7 +1748,7 @@ export function AgentTerminalsView() {
           aria-label="Arbeitsverzeichnis für neue Terminals"
           value={workdir}
           onChange={(event) => selectWorkdir(event.target.value)}
-          className="rounded-lg border border-white/10 bg-[#0a2427] px-2 py-2 text-xs text-white/85 focus:border-cyan-300/50 focus:outline-none"
+          className="rounded-lg border border-white/10 bg-[#0a2427] px-2 py-2 text-xs text-white/75 focus:border-cyan-300/50 focus:outline-none"
         >
           {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
             <option key={option.key} value={option.key}>{option.label}</option>
