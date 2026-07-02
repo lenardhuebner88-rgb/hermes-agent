@@ -144,7 +144,9 @@ export function buildComposerPayload(text: string, submit: boolean): string | nu
   if (!text) return null;
   // Mehrzeiliges als Bracketed Paste, damit CLIs (claude/codex) es als EINE
   // Eingabe nehmen statt jede Zeile einzeln zu submitten.
-  const body = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
+  // Eingebettete End-Sequenzen entfernen — sonst schließt der Text selbst den Paste-Modus
+  // vorzeitig und der Rest würde als Live-Keystrokes (inkl. \r) ausgeführt.
+  const body = text.includes("\n") ? `\x1b[200~${text.split("\x1b[201~").join("")}\x1b[201~` : text;
   return submit ? `${body}\r` : body;
 }
 
@@ -701,6 +703,18 @@ export function AgentTerminalsView() {
       /* storage optional */
     }
   }, []);
+
+  useEffect(() => {
+    // Stale localStorage-Key (z. B. entferntes Verzeichnis) gegen die aktuell gültigen
+    // Optionen validieren — sonst spawnt "Neue Fenster starten in" mit totem Key.
+    // Erst nach Capability-Load: der FALLBACK-Liste könnten legitime Backend-Keys fehlen.
+    if (!capability) return;
+    const options = capability.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
+    if (!options.some((option) => option.key === workdir)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- korrigiert Stale-Key nach Capability-Load, "home" ist immer gültig
+      selectWorkdir("home");
+    }
+  }, [capability, workdir, selectWorkdir]);
 
   const scrollTerminal = useCallback(
     (action: "pageUp" | "lineUp" | "lineDown" | "bottom") => {

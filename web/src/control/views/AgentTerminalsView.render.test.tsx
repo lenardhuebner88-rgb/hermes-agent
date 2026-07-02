@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AgentTerminalCapabilityState, AgentTerminalWindow } from "@/lib/api";
+
+// Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
+// waitFor-Default-Timeout (1s) zurück — Timeout hochsetzen, um das Gate-Flake zu härten.
+configure({ asyncUtilTimeout: 5000 });
 
 const apiMock = {
   getAgentTerminalCapabilities: vi.fn(),
@@ -318,6 +322,15 @@ describe("AgentTerminalsView rendering", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
     await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
+  });
+
+  it("resets a stale workdir localStorage key to home after capability load", async () => {
+    window.localStorage.setItem("hermes-terminals-workdir", "gibt-es-nicht");
+    const AgentTerminalsView = await loadView();
+    render(<AgentTerminalsView />);
+
+    await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("home"));
+    expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
   });
 
   it("renders empty and error states", async () => {

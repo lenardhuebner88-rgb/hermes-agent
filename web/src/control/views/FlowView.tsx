@@ -298,8 +298,10 @@ function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
   const [planspecSearch, setPlanspecSearch] = useState("");
-  const [openOnly, setOpenOnly] = useState(false);
-  const plans = usePlanSpecs({ scope: openOnly ? "open" : "all", limit: 8, search: planspecSearch });
+  // Nur OFFENE PlanSpecs: dieser Hub ist die Entscheidungsfläche (einsteuern /
+  // verwerfen), kein Archiv. Geschlossene Pläne wohnen in der Bibliothek
+  // (vault-plans-Collection) — Operator-Entscheid 2026-07-02.
+  const plans = usePlanSpecs({ scope: "open", limit: 8, search: planspecSearch });
   const [plansOpen, setPlansOpen] = useState(true);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
@@ -307,8 +309,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   const [detailItem, setDetailItem] = useState<PlanSpecRecord | null>(null);
   const detail = usePlanSpecDetail(detailItem?.path ?? null);
   const items = plans.data?.planspecs ?? [];
-  const openCount = items.filter((item) => item.open).length;
-  const hasFilters = Boolean(planspecSearch.trim()) || openOnly;
+  const hasFilters = Boolean(planspecSearch.trim());
 
   const setRowError = useCallback((path: string, message: string | null) => {
     setErrorByPath((current) => {
@@ -379,14 +380,31 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
     }
   }, [plans, setRowError]);
 
-  if (!plans.loading && !plans.error && items.length === 0 && !hasFilters) return null;
+  // Nichts offen und keine Suche: eine schlanke Zeile statt Karten-Wand —
+  // mit Absprung ins Archiv (Bibliothek), wo die alten Pläne wohnen.
+  if (!plans.loading && !plans.error && items.length === 0 && !hasFilters) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-3 shadow-[var(--hc-elev-1)]">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="hc-eyebrow">PlanSpec-Hub</span>
+          <span className="hc-type-label hc-dim">Keine offenen PlanSpecs</span>
+        </div>
+        <Link to="/control/bibliothek" className="hc-mono shrink-0 rounded-[7px] border border-[var(--hc-border)] px-2 py-0.5 text-[10px] hc-soft transition hover:border-[var(--hc-border-strong)]">
+          Archiv: Bibliothek
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <span className="hc-eyebrow">PlanSpec-Hub</span>
-          <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{openCount}/{items.length} offen · Vault</span>
+          <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{items.length} offen · Vault</span>
+          <Link to="/control/bibliothek" className="hc-mono hidden shrink-0 rounded-[7px] border border-[var(--hc-border)] px-2 py-0.5 text-[10px] hc-soft transition hover:border-[var(--hc-border-strong)] sm:inline-flex">
+            Archiv: Bibliothek
+          </Link>
         </div>
         <button
           type="button"
@@ -399,7 +417,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
         </button>
       </div>
-      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="mt-3">
         <label className="min-w-0" htmlFor="PlanSpecSearch">
           <span className="sr-only">PlanSpec-Suche</span>
           <input
@@ -407,18 +425,9 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
             type="search"
             value={planspecSearch}
             onChange={(event) => setPlanspecSearch(event.target.value)}
-            placeholder="PlanSpecs suchen…"
+            placeholder="Offene PlanSpecs suchen…"
             className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-sm outline-none placeholder:text-[var(--hc-text-dim)] focus:border-[var(--hc-accent-border)]"
           />
-        </label>
-        <label className="inline-flex min-h-11 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 text-sm hc-soft">
-          <input
-            type="checkbox"
-            checked={openOnly}
-            onChange={(event) => setOpenOnly(event.target.checked)}
-            className="h-4 w-4 accent-[var(--hc-accent-text)]"
-          />
-          Nur offene
         </label>
       </div>
       {plans.error ? <ToneCallout tone="amber">{plans.error}</ToneCallout> : null}
@@ -450,12 +459,14 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 </div>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 overflow-hidden">
-                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.freigabe || "ohne Freigabe"}</span>
+                {/* "Freigabe:"-Präfix: der nackte Wert „offen" las sich wie
+                    ein Plan-Status und kollidierte mit dem offen-Zähler. */}
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">Freigabe: {item.freigabe || "ohne"}</span>
                 <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.live_test_depth || "smoke"}</span>
                 <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.subtask_count} Subtasks</span>
                 {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full truncate rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
                 {kanbanProgress ? <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{kanbanProgress}</span> : null}
-                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{closedDisposition}</span>
+                {closed ? <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{closedDisposition}</span> : null}
                 <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-dim)]">{item.agent}</span>
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
@@ -2502,13 +2513,7 @@ export function FlowView() {
         </ToneCallout>
       ) : null}
 
-      <FleetPipeline
-        tasks={filteredTasks}
-        workers={workerList}
-        now={now}
-        reload={board.reload}
-        onSelectTask={selectTask}
-      />
+      <FleetPipeline tasks={filteredTasks} />
 
       {/* ── Stufe 1 · Planung ─────────────────────────────────────────────
           PlanSpec-Ingest, Trichter-Freigaben und wartende Strategen-Vorschläge:

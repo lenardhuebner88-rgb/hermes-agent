@@ -219,13 +219,18 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2 rounded-md border/);
   });
 
-  it("keeps the PlanSpec hub default all-scoped with open-filter and readable on phones", () => {
+  it("keeps the PlanSpec hub open-scoped with Bibliothek archive link and readable on phones", () => {
     expect(src).toMatch(/PlanSpec-Hub/);
     expect(src).toMatch(/offen · Vault/);
     expect(src).toMatch(/PlanSpecSearch/);
-    expect(src).toMatch(/Nur offene/);
-    expect(src).toMatch(/usePlanSpecs\(\{ scope: openOnly \? "open" : "all", limit: 8, search: planspecSearch \}\)/);
-    expect(src).toMatch(/items\.filter\(\(item\) => item\.open\)\.length/);
+    // Nur offene PlanSpecs im Hub (Entscheidungsfläche); Archiv = Bibliothek.
+    expect(src).toMatch(/usePlanSpecs\(\{ scope: "open", limit: 8, search: planspecSearch \}\)/);
+    expect(src).not.toMatch(/Nur offene/);
+    expect(src).toMatch(/Keine offenen PlanSpecs/);
+    expect(src).toMatch(/to="\/control\/bibliothek"/);
+    expect(src).toMatch(/Archiv: Bibliothek/);
+    // Freigabe-Chip trägt sein Präfix, damit „offen" nicht wie ein Plan-Status liest.
+    expect(src).toMatch(/Freigabe: \{item\.freigabe \|\| "ohne"\}/);
     expect(src).toMatch(/planSpecClosedDispositionLabel\(item\)/);
     expect(src).toMatch(/planSpecIsClosed\(item\)/);
     expect(src).toMatch(/disabled=\{closed \|\| !item\.valid \|\| ingestBlocked \|\| ingestBusy \|\| promptBusy \|\| closeBusy\}/);
