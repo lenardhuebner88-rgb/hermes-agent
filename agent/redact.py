@@ -76,7 +76,8 @@ _PREFIX_PATTERNS = [
     r"ghu_[A-Za-z0-9]{10,}",            # GitHub user-to-server token
     r"ghs_[A-Za-z0-9]{10,}",            # GitHub server-to-server token
     r"ghr_[A-Za-z0-9]{10,}",            # GitHub refresh token
-    r"xox[baprs]-[A-Za-z0-9-]{10,}",    # Slack tokens
+    r"xapp-\d+-[A-Za-z0-9-]{10,}",      # Slack app-Level token
+    r"xox[baprs]-[A-Za-z0-9-]{10,}",    # Slack bot/app/user tokens
     r"AIza[A-Za-z0-9_-]{30,}",          # Google API keys
     r"pplx-[A-Za-z0-9]{10,}",           # Perplexity
     r"fal_[A-Za-z0-9_-]{10,}",          # Fal.ai
@@ -106,12 +107,61 @@ _PREFIX_PATTERNS = [
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
     r"ntn_[A-Za-z0-9]{10,}",            # Notion internal integration token
+    r"fw_[A-Za-z0-9]{30,}",             # Fireworks AI API key
 ]
 
-# ENV assignment patterns: KEY=value where KEY contains a secret-like name
+# ENV assignment patterns: KEY=value where KEY contains a secret-like name.
+# Uppercase keys tolerate spaces around "=" (e.g. ``FOO_SECRET = bar``) because
+# an all-caps key is almost never prose/code.
 _SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
+)
+
+# Lowercase / dotted / hyphenated config keys from config files
+# (application.properties, .env, YAML-ish dumps): ``spring.datasource.password=secret``,
+# ``app.api.key=xyz``, ``password=secret``. The uppercase _ENV_ASSIGN_RE above
+# never matched these, so config-file passwords leaked verbatim (issue #16413).
+#
+# These run only in a config-file context, NOT in prose, code, or URLs — three
+# carve-outs preserved from the original design (#4367 + the documented
+# web-URL passthrough below):
+#   1. The value is bounded by ``[^\s&]`` (stops at whitespace AND ``&``) so
+#      form-urlencoded bodies are handled pair-by-pair (by _redact_form_body),
+#      not greedily swallowed.
+#   2. _CFG_DOTTED_RE only matches when the key is NAMESPACED (contains a dot),
+#      which is unambiguously a config key — never a prose word.
+#   3. _CFG_ANCHORED_RE matches a bare secret-word key only at line start
+#      (optionally after ``export``), so conversational ``I have password=foo``
+#      mid-sentence is left alone.
+# The colon-form URL guard (skip when ``://`` present) lives at the call site.
+_SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
+_CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
+# Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
+_CFG_DOTTED_RE = re.compile(
+    rf"((?:[A-Za-z0-9_\-]+\.)+[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*"
+    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+)"
+    rf"={_CFG_VALUE}",
+    re.IGNORECASE,
+)
+# Line-anchored bare key: ``password=…`` / ``export api_key=…`` at start of line.
+_CFG_ANCHORED_RE = re.compile(
+    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Unquoted YAML / colon config (e.g. ``password: secret``,
+# ``spring.datasource.password: hunter2``). The secret keyword must be part of
+# the KEY (anchored to the start of the line/indent), and the value is a single
+# whitespace-free token — so prose like ``note: secret meeting`` (keyword in the
+# value) and ``error: token expired`` are left alone. Bare ``auth`` is excluded
+# from the key set so ``Authorization:`` / ``author:`` don't match (the former
+# is masked by _AUTH_HEADER_RE); ``auth_token``/``auth-token`` still match via
+# the ``token`` keyword. Quoted values defer to _JSON_FIELD_RE via the lookahead.
+_YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
+_YAML_ASSIGN_RE = re.compile(
+    rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)(:[ \t]*)(?!['\"])([^\s&]+)",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
@@ -162,9 +212,37 @@ _PRIVATE_KEY_RE = re.compile(
 )
 
 # Database connection strings: protocol://user:PASSWORD@host
-# Catches postgres, mysql, mongodb, redis, amqp URLs and redacts the password
+# Catches postgres, mysql, mongodb, redis, amqp URLs and redacts the password.
+# The userinfo and password groups forbid whitespace ([^:\s]+ / [^@\s]+) so the
+# match can never span a line break. A real DSN password never contains
+# whitespace; without this bound the greedy [^@]+ would scan past the end of a
+# code line to the next stray "@" (e.g. a Python decorator), swallowing
+# intervening lines and corrupting tool OUTPUT for any source containing a
+# postgresql:// f-string template. See issue #33801.
 _DB_CONNSTR_RE = re.compile(
-    r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\r\n]+:)([^@\r\n]+)(@)",
+    r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]+:)([^@\s]+)(@)",
+    re.IGNORECASE,
+)
+
+# Bare-token credential in a web/transport URL: ``scheme://TOKEN@host``.
+# This is the ``git remote set-url origin https://PASSWORD@github.com/...``
+# shape from issue #6396 — a single opaque credential in the userinfo position
+# with NO ``user:pass`` colon. It is unambiguously a secret: legitimate
+# round-trip URLs (OAuth callbacks, magic links, pre-signed shares — see the
+# "Web-URL redaction is intentionally OFF" note in redact_sensitive_text) carry
+# their tokens in the QUERY STRING, never in bare userinfo. The colon form
+# ``user:pass@`` is deliberately left to pass through (commit "pass web URLs
+# through unchanged", #34029) and is NOT matched here — the token class forbids
+# ``:``. DB schemes are handled by _DB_CONNSTR_RE above and excluded here.
+#
+# Guards against false positives:
+#   - 8+ char floor skips short usernames (git, admin, root, deploy, ubuntu).
+#   - The token class ``[^\s:@/]`` cannot cross ``/``, so an ``@`` sitting in a
+#     path or query (e.g. ``?q=user@example.com``) is never treated as userinfo.
+_URL_BARE_TOKEN_RE = re.compile(
+    r"((?:https?|wss?|git|ssh|ftp|ftps|sftp)://)"  # scheme
+    r"([^\s:@/]{8,})"                               # bare token (no colon/slash/@), 8+ chars
+    r"(@[^\s]+)",                                   # @host...
     re.IGNORECASE,
 )
 
@@ -323,6 +401,31 @@ def _redact_url_userinfo(text: str) -> str:
     )
 
 
+def redact_cdp_url(value: object) -> str:
+    """Mask secrets in a CDP/browser endpoint URL before it is logged.
+
+    The global ``redact_sensitive_text`` deliberately passes web-URL query
+    params and ``user:pass@`` userinfo through unmasked (OAuth callbacks,
+    magic-link / pre-signed URLs the agent is meant to follow -- see the
+    web-URL note above). CDP discovery endpoints are NOT such a workflow:
+    their query-string tokens and userinfo passwords are pure credentials
+    that must never reach the logs. So for CDP URLs we opt INTO the two URL
+    redactors that the global pass leaves off.
+
+    This is the single source of truth for redacting a CDP URL that is passed
+    *directly* to a log or error message. Callers that instead need to redact an
+    exception whose text embeds the URL (e.g. a ``websockets`` connect error)
+    should route that through their own error-text helper, which delegates here
+    -- see ``tools.browser_supervisor._redact_cdp_error_text``.
+    """
+    text = redact_sensitive_text("" if value is None else str(value))
+    if not text:
+        return text
+    text = _redact_url_query_params(text)
+    text = _redact_url_userinfo(text)
+    return text
+
+
 def _redact_http_request_target_query_params(text: str) -> str:
     """Redact sensitive query params in HTTP access-log request targets."""
     def _sub(m: re.Match) -> str:
@@ -440,6 +543,13 @@ def redact_sensitive_text(
                 name, quote, value = m.group(1), m.group(2), m.group(3)
                 return f"{name}={quote}{_mask_token(value)}{quote}"
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
+            # Lowercase/dotted config keys (issue #16413). Skip URLs entirely —
+            # web-URL query params are intentionally passed through (see note
+            # near the bottom of this function); _DB_CONNSTR_RE still guards
+            # connection-string passwords.
+            if "://" not in text:
+                text = _CFG_DOTTED_RE.sub(_redact_env, text)
+                text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
         # JSON fields: "apiKey": "***"  (skip for code files — false positives)
         if ":" in text and '"' in text:
@@ -447,6 +557,15 @@ def redact_sensitive_text(
                 key, value = m.group(1), m.group(2)
                 return f'{key}: "{_mask_token(value)}"'
             text = _JSON_FIELD_RE.sub(_redact_json, text)
+
+        # Unquoted YAML / colon config: password: ***  (after JSON so quoted
+        # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
+        # quotes). Skip URLs — web-URL query params pass through by design.
+        if ":" in text and "://" not in text:
+            def _redact_yaml(m):
+                key, sep, value = m.group(1), m.group(2), m.group(3)
+                return f"{key}{sep}{_mask_token(value)}"
+            text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
 
     # Authorization headers — _AUTH_HEADER_RE matches any scheme after
     # "[Proxy-]Authorization:" case-insensitively, so "uthorization" is the
@@ -477,15 +596,32 @@ def redact_sensitive_text(
     if "BEGIN" in text and "-----" in text:
         text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
 
-    # Database connection string passwords
+    # Database connection string passwords. With code_file=True, a password
+    # group that is a pure ``{...}`` brace expression is an f-string template
+    # reference (e.g. f"postgresql://{user}:{pass}@{host}"), not a literal
+    # credential — preserve it. Literal passwords are still redacted. The regex
+    # forbids whitespace in the password group, so a single-line template's
+    # group(2) is exactly the brace expression. See issue #33801.
     if "://" in text:
-        def _redact_db_connstr(m: re.Match[str]) -> str:
-            password = m.group(2)
-            if code_file and "{" in password and "}" in password:
-                return m.group(0)
-            return f"{m.group(1)}***{m.group(3)}"
+        if code_file:
+            def _redact_db(m):
+                pw = m.group(2)
+                if pw.startswith("{") and pw.endswith("}"):
+                    return m.group(0)
+                return f"{m.group(1)}***{m.group(3)}"
+            text = _DB_CONNSTR_RE.sub(_redact_db, text)
+        else:
+            text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
 
-        text = _DB_CONNSTR_RE.sub(_redact_db_connstr, text)
+        # Bare-token userinfo in web/transport URLs: ``scheme://TOKEN@host``.
+        # The git-remote-with-embedded-password shape from #6396. Only the
+        # colon-less bare-token form is redacted — ``user:pass@`` and
+        # query-string tokens are left to pass through (see the web-URL note
+        # below). See _URL_BARE_TOKEN_RE for the false-positive guards.
+        text = _URL_BARE_TOKEN_RE.sub(
+            lambda m: f"{m.group(1)}{_mask_token(m.group(2))}{m.group(3)}",
+            text,
+        )
 
     # JWT tokens (eyJ... — base64-encoded JSON headers)
     if "eyJ" in text:
@@ -498,7 +634,12 @@ def redact_sensitive_text(
     # blanket-redacting param values by name breaks those skills mid-flow.
     # Known credential shapes (sk-, ghp_, JWTs, etc.) inside URLs are still
     # caught by _PREFIX_RE and _JWT_RE above. DB connection-string passwords
-    # are still caught by _DB_CONNSTR_RE.
+    # are still caught by _DB_CONNSTR_RE. The ONE userinfo case still redacted
+    # is the colon-less bare-token form ``scheme://TOKEN@host`` (#6396, handled
+    # by _URL_BARE_TOKEN_RE in the ``://`` block above): a bare credential in
+    # userinfo is never a round-trip workflow token (those live in the query
+    # string), so masking it can't break a skill. The ``user:pass@`` form is
+    # left to pass through per #34029.
 
     # Form-urlencoded bodies (only triggers on clean k=v&k=v inputs).
     if "&" in text and "=" in text:

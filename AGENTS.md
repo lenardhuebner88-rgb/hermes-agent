@@ -47,6 +47,7 @@ Avoid:
 - Mitigations that destroy the feature they are supposed to secure.
 - Outbound telemetry, usage attribution, or third-party identifiers without explicit opt-in gating.
 - Plugins modifying core files. Expand generic plugin surfaces instead.
+- Third-party products (observability backends, vendor SaaS connectors, analytics dashboards) integrated into the core tree. Ship as a standalone plugin repo instead.
 
 Before calling something a bug, verify both the premise and the original intent with live code/history. Intentional omissions can be load-bearing.
 

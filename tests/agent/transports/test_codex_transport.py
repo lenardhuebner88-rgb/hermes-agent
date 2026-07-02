@@ -83,63 +83,34 @@ class TestCodexBuildKwargs:
         )
         assert "reasoning" not in kw or kw.get("include") == []
 
-    def test_session_id_sets_cache_key(self, transport):
+    def test_cache_key_is_content_addressed_not_session_id(self, transport):
+        """prompt_cache_key is content-addressed from the static prefix
+        (instructions + tools), not the session_id. This keeps recurring cron
+        jobs — whose session_id carries a per-fire timestamp — on a stable warm
+        cache key. The key is a 'pck_' hash and must NOT equal session_id."""
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
             model="gpt-5.4", messages=messages, tools=[],
-            session_id="test-session-123",
+            session_id="cron_job42_20260624_143000",
         )
-        assert kw.get("prompt_cache_key") == "test-session-123"
+        pck = kw.get("prompt_cache_key", "")
+        assert pck.startswith("pck_")
+        assert pck != "cron_job42_20260624_143000"
 
-    def test_cron_session_id_strips_timestamp_for_cache_key(self, transport):
-        """Cron session ids are ``cron_{job_id}_{YYYYMMDD_HHMMSS}`` (see
-        cron/scheduler.py). The timestamp must be stripped from
-        ``prompt_cache_key`` so successive runs of the same job hit the
-        OpenAI prompt cache. Without this, the ~21k-token system prompt is
-        re-billed at the uncached rate on every cron tick."""
+    def test_cache_key_stable_across_session_ids(self, transport):
+        """Same static prefix + different session_id (e.g. two cron fires of the
+        same job) must yield the same prompt_cache_key — the whole point of the
+        fix: repeated fires reuse the warm prefix instead of going cold."""
         messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-5.5", messages=messages, tools=[],
-            session_id="cron_bf56b17edd1a_20260527_082953",
+        kw1 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="cron_job42_20260624_143000",
         )
-        assert kw.get("prompt_cache_key") == "cron_bf56b17edd1a"
-
-    def test_cron_session_id_collapses_to_stable_prompt_cache_key(self, transport):
-        """The cron session_id collapses to the stable cron-stripped
-        ``prompt_cache_key`` so cache hits survive across cron ticks. On the
-        codex backend NO body-level ``extra_headers`` are sent — that backend
-        400s on them (see test_codex_backend_does_not_set_extra_headers); the
-        fork's earlier session_id/x-client-request-id trace headers were
-        dropped in the 2026-06-14 upstream sync for exactly that reason."""
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-5.5", messages=messages, tools=[],
-            session_id="cron_bf56b17edd1a_20260527_082953",
-            is_codex_backend=True,
+        kw2 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="cron_job42_20260624_143500",
         )
-        assert kw["prompt_cache_key"] == "cron_bf56b17edd1a"
-        assert "extra_headers" not in kw
-
-    def test_cron_jobid_with_digits_not_truncated(self, transport):
-        """Job ids are hex (may include digits) — the strip pattern must
-        only match the 8+6-digit timestamp tail, not eat into the id."""
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-5.5", messages=messages, tools=[],
-            session_id="cron_784cc5959be9_20260527_183040",
-        )
-        assert kw.get("prompt_cache_key") == "cron_784cc5959be9"
-
-    def test_non_cron_session_id_unchanged(self, transport):
-        """Chat session ids (timestamp + random hex) must pass through
-        unchanged — those sessions already cache correctly via per-session
-        prefix sharing across turns."""
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-5.5", messages=messages, tools=[],
-            session_id="20260527_185131_e7ffe2a5",
-        )
-        assert kw.get("prompt_cache_key") == "20260527_185131_e7ffe2a5"
+        assert kw1["prompt_cache_key"] == kw2["prompt_cache_key"]
 
     def test_github_responses_no_cache_key(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -168,7 +139,12 @@ class TestCodexBuildKwargs:
             is_xai_responses=True,
         )
         assert "prompt_cache_key" not in kw
-        assert kw.get("extra_body", {}).get("prompt_cache_key") == "conv-xai-1"
+        # Body-level prompt_cache_key is content-addressed (pck_ hash), not the
+        # raw session_id, so recurring cron fires stay on a stable warm key.
+        eb_pck = kw.get("extra_body", {}).get("prompt_cache_key", "")
+        assert eb_pck.startswith("pck_")
+        assert eb_pck != "conv-xai-1"
+        # x-grok-conv-id stays the session/transcript id, not the cache key.
         assert kw.get("extra_headers", {}).get("x-grok-conv-id") == "conv-xai-1"
 
     def test_xai_responses_extra_body_preserves_caller_fields(self, transport):

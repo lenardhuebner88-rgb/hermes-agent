@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover - non-Windows
 from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
-from typing import Optional, Dict, List, Any, Union
+from typing import Optional, Dict, List, Any, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -744,6 +744,109 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _resolve_default_model_snapshot() -> Optional[str]:
+    """Resolve the global default model the same way the cron ticker does.
+
+    Mirrors the unpinned-model resolution in ``cron/scheduler.py`` ``run_job``:
+    read ``config.yaml`` ``model.default`` (or the ``model`` alias / bare string
+    form), applying the managed-scope overlay and env expansion. Used by
+    ``create_job`` to snapshot the default model for unpinned jobs so a later
+    swap of the global default is detected at fire time (#44585).
+
+    Returns the resolved model string, or ``None`` if config is missing/empty
+    or resolution fails (fail-open — caller treats ``None`` as "no snapshot").
+    """
+    try:
+        import yaml
+        from hermes_cli.config import _expand_env_vars
+
+        cfg_path = get_hermes_home() / "config.yaml"
+        if not cfg_path.exists():
+            return None
+        with cfg_path.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        try:
+            from hermes_cli import managed_scope
+            cfg = managed_scope.apply_managed_overlay(cfg)
+        except Exception:
+            pass
+        cfg = _expand_env_vars(cfg)
+        model_cfg = cfg.get("model") or {}
+        if isinstance(model_cfg, str):
+            return model_cfg.strip() or None
+        if isinstance(model_cfg, dict):
+            default = model_cfg.get("default") or model_cfg.get("model")
+            if isinstance(default, str):
+                return default.strip() or None
+        return None
+    except Exception:
+        return None
+
+
+def _normalize_job_optional_text(value: Any, *, strip_trailing_slash: bool = False) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if strip_trailing_slash:
+        text = text.rstrip("/")
+    return text or None
+
+
+def _compute_provider_model_snapshots(
+    *,
+    provider: Any,
+    model: Any,
+    base_url: Any,
+    no_agent: Any,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Snapshot unpinned inference axes for the provider/model drift guard.
+
+    Agent cron jobs with unpinned provider/model follow global config at fire
+    time. Capture the current resolution for each unpinned axis so a later
+    global switch fails closed instead of silently changing spend. Pinned axes
+    and no-agent script jobs intentionally carry no snapshot.
+    """
+    normalized_provider = _normalize_job_optional_text(provider)
+    normalized_model = _normalize_job_optional_text(model)
+    normalized_base_url = _normalize_job_optional_text(
+        base_url,
+        strip_trailing_slash=True,
+    )
+    if bool(no_agent):
+        return None, None
+
+    provider_snapshot: Optional[str] = None
+    model_snapshot: Optional[str] = None
+    if normalized_provider is None:
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            runtime_kwargs = {"requested": None}
+            if normalized_base_url:
+                runtime_kwargs["explicit_base_url"] = normalized_base_url
+            snap = resolve_runtime_provider(**runtime_kwargs)
+            snap_provider = str(snap.get("provider") or "").strip().lower()
+            provider_snapshot = snap_provider or None
+        except Exception:
+            provider_snapshot = None
+    if normalized_model is None:
+        try:
+            model_snapshot = _resolve_default_model_snapshot() or None
+        except Exception:
+            model_snapshot = None
+    return provider_snapshot, model_snapshot
+
+
+def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+    """Return the stored inference-routing fields in their semantic form."""
+    return (
+        _normalize_job_optional_text(job.get("provider")),
+        _normalize_job_optional_text(job.get("model")),
+        _normalize_job_optional_text(job.get("base_url"), strip_trailing_slash=True),
+        bool(job.get("no_agent")),
+    )
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -761,6 +864,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    attach_to_session: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -827,18 +931,16 @@ def create_job(
     now = _hermes_now().isoformat()
 
     normalized_skills = _normalize_skill_list(skill, skills)
-    normalized_model = str(model).strip() if isinstance(model, str) else None
-    normalized_provider = str(provider).strip() if isinstance(provider, str) else None
-    normalized_base_url = str(base_url).strip().rstrip("/") if isinstance(base_url, str) else None
-    normalized_model = normalized_model or None
-    normalized_provider = normalized_provider or None
-    normalized_base_url = normalized_base_url or None
+    normalized_model = _normalize_job_optional_text(model)
+    normalized_provider = _normalize_job_optional_text(provider)
+    normalized_base_url = _normalize_job_optional_text(base_url, strip_trailing_slash=True)
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+    normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -858,7 +960,24 @@ def create_job(
         context_from = None
 
     prompt_text = _coerce_job_text(prompt)
+
+    # Reject cron jobs that schedule gateway-lifecycle commands. Prevents
+    # agent-driven SIGTERM-respawn loops under launchd/systemd KeepAlive
+    # (#30719). Enforced here (not only in the CLI layer) so the agent's
+    # `cronjob` model tool — which calls create_job directly — is also
+    # covered, not just `hermes cron create`.
+    from cron.lifecycle_guard import check_gateway_lifecycle
+    check_gateway_lifecycle(prompt_text, normalized_script)
+
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
+
+    provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
+        provider=normalized_provider,
+        model=normalized_model,
+        base_url=normalized_base_url,
+        no_agent=normalized_no_agent,
+    )
+
     job = {
         "id": job_id,
         "name": name or label_source[:50].strip(),
@@ -867,6 +986,11 @@ def create_job(
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
         "provider": normalized_provider,
+        # Provider/model resolution captured at creation for unpinned jobs
+        # (#44585). None for pinned axes, no_agent jobs, resolution failures, and
+        # any pre-existing job written before these fields existed (back-compat).
+        "provider_snapshot": provider_snapshot,
+        "model_snapshot": model_snapshot,
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
@@ -893,6 +1017,11 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
     }
+    # Only persist attach_to_session when explicitly set, so existing jobs and
+    # the common case stay byte-identical (absent key => fall back to the
+    # global cron.mirror_delivery config, default off).
+    if normalized_attach is not None:
+        job["attach_to_session"] = normalized_attach
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -983,8 +1112,12 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
 
+            previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
             schedule_changed = "schedule" in updates
+            inference_fields_changed = bool(
+                {"provider", "model", "base_url", "no_agent"}.intersection(updates)
+            ) and _normalized_inference_axes(updated) != previous_inference_axes
 
             if "skills" in updates or "skill" in updates:
                 normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
@@ -1005,6 +1138,16 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 )
                 if updated.get("state") != "paused":
                     updated["next_run_at"] = compute_next_run(updated_schedule)
+
+            if inference_fields_changed:
+                provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
+                    provider=updated.get("provider"),
+                    model=updated.get("model"),
+                    base_url=updated.get("base_url"),
+                    no_agent=updated.get("no_agent"),
+                )
+                updated["provider_snapshot"] = provider_snapshot
+                updated["model_snapshot"] = model_snapshot
 
             if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
                 updated["next_run_at"] = compute_next_run(updated["schedule"])
@@ -1115,13 +1258,27 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None
                 
-                # Increment completed count
+                # Increment completed count.  Finite one-shot jobs are
+                # pre-claimed by claim_dispatch() BEFORE the side effect runs
+                # (issue #38758), which already incremented completed — do not
+                # double-count them here.  Recurring jobs and direct callers
+                # with no pre-run claim still get the legacy increment.
                 if job.get("repeat"):
-                    job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
+                    repeat = job["repeat"]
+                    times = repeat.get("times")
+                    completed = repeat.get("completed", 0)
+                    kind = job.get("schedule", {}).get("kind")
+                    preclaimed_oneshot = (
+                        kind == "once"
+                        and times is not None
+                        and times > 0
+                        and completed > 0
+                    )
+                    if not preclaimed_oneshot:
+                        completed += 1
+                        repeat["completed"] = completed
+
                     # Check if we've hit the repeat limit
-                    times = job["repeat"].get("times")
-                    completed = job["repeat"]["completed"]
                     if times is not None and times > 0 and completed >= times:
                         # Remove the job (limit reached)
                         jobs.pop(i)
@@ -1164,6 +1321,69 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 return
 
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
+
+
+def claim_dispatch(job_id: str) -> bool:
+    """Atomically claim a finite one-shot job dispatch BEFORE execution.
+
+    Increments ``repeat.completed`` under the cross-process jobs lock and
+    persists the claim immediately, so that if the tick dies mid-execution
+    (gateway kill, OOM, segfault, hard-timeout) the dispatch is not lost.
+    This converts finite one-shot jobs from *at-least-once* to *at-most-times*
+    semantics — a job that self-destructs fires at most ``repeat.times`` times
+    instead of infinitely (issue #38758).
+
+    Returns ``True`` if the caller may proceed to run the job, ``False`` if the
+    dispatch limit is already reached (in which case the stale job is removed).
+
+    Only claims jobs with ``schedule.kind == "once"`` and ``repeat.times > 0``.
+    Recurring jobs (they use ``advance_next_run``) and infinite-repeat / no-repeat
+    jobs are left unchanged and always allowed to proceed.
+    """
+    with _jobs_lock():
+        jobs = load_jobs()
+        for i, job in enumerate(jobs):
+            if job["id"] != job_id:
+                continue
+            if job.get("schedule", {}).get("kind") != "once":
+                return True  # recurring jobs use advance_next_run(), not dispatch claims
+            repeat = job.get("repeat")
+            if not repeat:
+                return True  # no repeat limit — always dispatch
+            times = repeat.get("times")
+            if times is None or times <= 0:
+                return True  # infinite — always dispatch
+            completed = repeat.get("completed", 0)
+            if completed >= times:
+                # Already dispatched the max number of times (e.g. a prior
+                # tick claimed then died before mark_job_run could remove it).
+                # Clean up so it stops appearing as due on every tick.
+                jobs.pop(i)
+                save_jobs(jobs)
+                logger.info(
+                    "Job '%s': dispatch limit reached (%d/%d) — removing",
+                    job.get("name", job["id"]),
+                    completed,
+                    times,
+                )
+                return False
+            # Claim this dispatch before the side effect runs.
+            repeat["completed"] = completed + 1
+            save_jobs(jobs)
+            logger.debug(
+                "Job '%s': claimed dispatch %d/%d",
+                job.get("name", job["id"]),
+                repeat["completed"],
+                times,
+            )
+            return True
+
+        logger.debug(
+            "claim_dispatch: job_id %s not in store — proceeding without claim "
+            "(handed-in job dict; nothing to persist a claim against)",
+            job_id,
+        )
+        return True
 
 
 def advance_next_run(job_id: str) -> bool:
@@ -1409,6 +1629,31 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             break
                     # Fall through to due.append(job) — execute once now
 
+            # One-shot dispatch-limit guard (issue #38758): a finite one-shot
+            # claimed via claim_dispatch() but whose tick died before
+            # mark_job_run could remove it will have completed >= times while
+            # still looking due (last_run_at was never written, so the
+            # recovery helper re-armed it). Remove it instead of re-firing.
+            if kind == "once":
+                repeat = job.get("repeat")
+                if repeat:
+                    times = repeat.get("times")
+                    completed = repeat.get("completed", 0)
+                    if times is not None and times > 0 and completed >= times:
+                        logger.info(
+                            "Job '%s': one-shot dispatch limit reached (%d/%d) "
+                            "— removing stale due entry",
+                            job.get("name", job["id"]),
+                            completed,
+                            times,
+                        )
+                        for rj in raw_jobs:
+                            if rj["id"] == job["id"]:
+                                raw_jobs.remove(rj)
+                                needs_save = True
+                                break
+                        continue
+
             due.append(job)
 
     if needs_save:
@@ -1623,6 +1868,35 @@ def read_output_file(
 # =============================================================================
 # Skill reference rewriting (curator integration)
 # =============================================================================
+
+def referenced_skill_names() -> Set[str]:
+    """Return the set of skill names referenced by ANY cron job.
+
+    Includes paused and disabled jobs deliberately: a paused job never
+    fires, so its skills never get a ``bump_use`` from the scheduler, yet
+    resuming it must still find its skills present. The curator uses this
+    set to protect referenced skills from inactivity archival — a skill a
+    live job depends on is "in use" regardless of when it was last loaded.
+
+    Best-effort: a corrupt/unreadable jobs store returns an empty set
+    rather than raising, so a cron issue can never break the curator.
+    """
+    try:
+        jobs = load_jobs()
+    except Exception:
+        logger.debug("referenced_skill_names: failed to load cron jobs", exc_info=True)
+        return set()
+
+    names: Set[str] = set()
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        for name in _normalize_skill_list(job.get("skill"), job.get("skills")):
+            cleaned = str(name).strip().lstrip("/")
+            if cleaned:
+                names.add(cleaned)
+    return names
+
 
 def rewrite_skill_refs(
     consolidated: Optional[Dict[str, str]] = None,
