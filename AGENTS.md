@@ -219,6 +219,8 @@ scripts/run-affected.sh
 
 `tests/conftest.py` and the wrapper isolate credentials, HOME/HERMES_HOME, timezone, locale, and subprocess state. Avoid direct `pytest` unless debugging a narrow issue and you understand the isolation tradeoff.
 
+Frontend gate: `scripts/gate-frontend.sh` (lint:control → `tsc -b --noEmit` → vitest → build). Two proven traps it exists to prevent: (1) bare `tsc --noEmit`/`npm run typecheck` are no-ops here — `web/` is a solution config with `files: []`, only `tsc -b` type-checks (masked a real type drift 2026-06-16); (2) hand-rolled pipe chains swallow exit codes — `npx vitest run | tail` reported green on 3 failing tests 2026-07-01 (without pipefail the exit code is tail's). Use `--skip-build` when `web_dist` must not be overwritten (build writes straight into the served assets; check `git status` for foreign dirty `web/` state first).
+
 Do not write change-detector tests for expected-to-change data (model lists, config version literals, enumeration counts). Prefer behavior and invariants: plumbing works, migrations converge to the current version, catalogs have required metadata, mutually-exclusive sets do not overlap.
 
 ## Important Pitfalls
