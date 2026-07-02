@@ -8,7 +8,8 @@
 
 import type { Proposal, ToneName } from "./types";
 import type { BacklogItem, KanbanDecision, KanbanDecisionKind } from "./schemas";
-import { getProposalSeverity, isActionable } from "./autoresearch";
+import { isActionable } from "./autoresearch";
+import { groupAutoresearchProposals } from "./proposalGroups";
 import {
   FO_REASON_LABELS,
   isFoItemStale,
@@ -153,16 +154,20 @@ export function buildDecisionInbox(input: {
 }): InboxItem[] {
   const items: InboxItem[] = [];
 
-  // 1) Autoresearch — every open, actionable proposal is a decision.
-  for (const p of input.proposals) {
-    if (!isActionable(p)) continue;
-    const severity = getProposalSeverity(p);
+  // 1) Autoresearch — duplicate proposal streams collapse to operator groups.
+  for (const group of groupAutoresearchProposals(input.proposals.filter(isActionable))) {
+    const p = group.proposals[0];
+    const severity = group.severity;
     items.push({
-      key: `ar:${p.id}`,
+      key: group.count === 1 ? `ar:${p.id}` : `ar-group:${group.key}`,
       surface: "autoresearch",
-      title: p.title?.trim() || p.target,
-      why: [p.category ?? (p.mode === "code" ? "Code-Änderung" : "Skill"), severity].filter(Boolean).join(" · "),
-      nextAction: "Prüfen & entscheiden",
+      title: group.count === 1 ? (p.title?.trim() || p.target) : group.title,
+      why: [
+        group.category ?? (group.mode === "code" ? "Code-Änderung" : group.mode === "test" ? "Test-Härtung" : "Skill"),
+        severity,
+        group.count > 1 ? `${group.count} Vorschläge` : null,
+      ].filter(Boolean).join(" · "),
+      nextAction: group.count > 1 ? "Gruppe prüfen & entscheiden" : "Prüfen & entscheiden",
       tone: proposalTone(severity),
       // Deep-link to the exact proposal card, not the whole tab — AutoresearchView
       // reads ?focus and scrolls/focuses `autoresearch-proposal-${id}`.

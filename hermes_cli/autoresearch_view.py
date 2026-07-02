@@ -523,6 +523,10 @@ class ConfirmBatchBody(BaseModel):
     confirm: bool = True
 
 
+class SkipBatchBody(BaseModel):
+    ids: list[str]
+
+
 class SkipProposalBody(BaseModel):
     id: str
 
@@ -617,6 +621,43 @@ def confirm_batch_proposals(ids: list[str], *, confirm: bool = True) -> dict[str
 
     return {
         "ok": all(item["status"] == "applied" for item in results) if results else True,
+        "results": results,
+    }
+
+
+def skip_batch_proposals(ids: list[str]) -> dict[str, Any]:
+    """Skip open proposals by id without apply-mode restrictions."""
+    results: list[dict[str, Any]] = []
+    for pid in ids:
+        proposal = _proposals.load_proposal(pid)
+        if proposal is None:
+            results.append({
+                "id": pid,
+                "ok": False,
+                "reason": f"no such proposal: {pid}",
+            })
+            continue
+        if proposal.get("status") != "proposed":
+            results.append({
+                "id": pid,
+                "ok": False,
+                "reason": f"proposal is '{proposal.get('status')}', not actionable",
+            })
+            continue
+        skipped = _proposals.skip_proposal(pid)
+        if skipped.get("ok") is True:
+            results.append({
+                "id": pid,
+                "ok": True,
+            })
+        else:
+            results.append({
+                "id": pid,
+                "ok": False,
+                "reason": str(skipped.get("detail") or skipped.get("reason") or "skip failed"),
+            })
+    return {
+        "ok": all(item["ok"] for item in results) if results else True,
         "results": results,
     }
 
@@ -1414,3 +1455,26 @@ def register_autoresearch_routes(app: Any) -> None:
         if denied is not None:
             return denied
         return _proposals.skip_proposal(body.id)
+
+    @app.post("/api/autoresearch/skip-batch")
+    async def autoresearch_skip_batch(request: Request) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        if isinstance(payload, list):
+            try:
+                body = SkipBatchBody(ids=payload)
+            except ValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        elif isinstance(payload, dict):
+            try:
+                body = SkipBatchBody(**payload)
+            except ValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            raise HTTPException(status_code=400, detail="body must be an id list or {ids:[...]}")
+        return skip_batch_proposals(body.ids)

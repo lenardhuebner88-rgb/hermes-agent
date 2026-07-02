@@ -7518,6 +7518,41 @@ def _resolve_chain_root(conn: sqlite3.Connection, task_id: str) -> str:
         current = nxt
 
 
+class ChainCancelBody(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/tasks/{root_id}/cancel-chain")
+def cancel_chain_endpoint(
+    root_id: str,
+    payload: ChainCancelBody,
+    board: Optional[str] = Query(None),
+):
+    if not payload.confirm:
+        return {"ok": False, "detail": "confirm required"}
+
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if kanban_db.get_task(conn, root_id) is None:
+            raise HTTPException(status_code=404, detail=f"task {root_id} not found")
+        chain_root = _resolve_chain_root(conn, root_id)
+        if kanban_db.get_task(conn, chain_root) is None:
+            raise HTTPException(status_code=404, detail=f"task {chain_root} not found")
+        result = kanban_db.cancel_chain(conn, chain_root)
+        log.info(
+            "control chain-cancel board=%s root=%s held=%d terminated=%d skipped=%d",
+            board,
+            chain_root,
+            len(result["held"]),
+            len(result["terminated"]),
+            len(result["skipped"]),
+        )
+        return {"ok": True, "root_id": chain_root, **result}
+    finally:
+        conn.close()
+
+
 @router.get("/tasks/{task_id}/chain-costs")
 def get_chain_costs(task_id: str, board: Optional[str] = Query(None)):
     """Return token/$ aggregates for the chain that contains ``task_id``.

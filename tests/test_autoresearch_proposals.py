@@ -685,6 +685,31 @@ def test_routes_generate_list_apply_skip(client, tmp_home, scaffold_enabled):
     assert sk.json()["ok"] is False
 
 
+def test_route_skip_batch_skips_multiple_ids_and_never_filters_by_mode(client, tmp_home):
+    _store_minimal_proposal("skill-open", mode="skill")
+    _store_minimal_proposal("test-open", mode="test")
+    _store_minimal_proposal("already-closed", status="applied", mode="code")
+
+    response = client.post(
+        "/api/autoresearch/skip-batch",
+        json={"ids": ["skill-open", "test-open", "missing-id", "already-closed"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    by_id = {item["id"]: item for item in body["results"]}
+    assert by_id["skill-open"] == {"id": "skill-open", "ok": True}
+    assert by_id["test-open"] == {"id": "test-open", "ok": True}
+    assert by_id["missing-id"]["ok"] is False
+    assert "no such proposal" in by_id["missing-id"]["reason"]
+    assert by_id["already-closed"]["ok"] is False
+    assert "not actionable" in by_id["already-closed"]["reason"]
+    assert proposals.load_proposal("skill-open")["status"] == "skipped"
+    assert proposals.load_proposal("test-open")["status"] == "skipped"
+    assert proposals.load_proposal("already-closed")["status"] == "applied"
+
+
 def test_route_generate_code_weaknesses_creates_code_proposal(client, tmp_home, monkeypatch):
     target = _REPO / "hermes_cli" / "model_normalize.py"
     old_snippet = (

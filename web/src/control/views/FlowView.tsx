@@ -56,6 +56,7 @@ import {
   useStrategistCount,
   useSystemHealth,
   useHermesWorkers,
+  useHermesChainCosts,
   useRunInspect,
   useTaskAction,
   useTaskDetail,
@@ -64,7 +65,7 @@ import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
 import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./flow/planSpecKanban";
 import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName, VaultMemoryLink } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
-import type { Epic, KanbanDecision, TaskDetailResponse } from "../lib/schemas";
+import type { ChainCostsResponse, Epic, KanbanDecision, TaskComment, TaskDetailResponse, TaskDiagnostic } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
 import { FunnelFreigaben } from "../components/FunnelFreigaben";
@@ -75,7 +76,8 @@ import { FleetPod, FleetEmptyState, FleetPanel, RoleChip } from "../components/f
 import { EpicCreate } from "../components/fleet/EpicCreate";
 import { FleetPipeline } from "../components/fleet/FleetPipeline";
 import { FlowCapture } from "../components/fleet/FlowCapture";
-import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
+import { WorkerCard, WorkerLogTail, type WorkerActionKey } from "../components/WorkerCard";
+import { Markdown } from "../components/Markdown";
 import { useClientNowSeconds } from "../lib/clock";
 
 const MAX_CARDS = 12;
@@ -1540,10 +1542,161 @@ function TaskCommentComposer({ taskId, onPosted }: { taskId: string; onPosted?: 
   );
 }
 
-export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
+function firstText(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const text = value?.trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function TaskBodyPanel({ body, open, onToggle }: { body: string; open: boolean; onToggle: () => void }) {
+  return (
+    <section aria-label={de.flow.taskBody} className="mt-4 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+      <button type="button" aria-expanded={open} onClick={onToggle} className="flex w-full items-center justify-between gap-2 text-left">
+        <Eyebrow>{de.flow.taskBody}</Eyebrow>
+        <span className="inline-flex items-center gap-1 hc-type-label hc-dim">
+          {open ? de.flow.taskBodyHide : de.flow.taskBodyShow}
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        </span>
+      </button>
+      {open ? (
+        <div className="mt-3 max-h-[32rem] overflow-y-auto rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+          <Markdown body={body} className="text-[0.78rem]" />
+        </div>
+      ) : (
+        <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-[0.78rem] hc-soft">{body}</p>
+      )}
+    </section>
+  );
+}
+
+function TaskResultPanel({ result }: { result: string }) {
+  return (
+    <section aria-label={de.flow.taskResult} className="mt-4 rounded-lg border border-emerald-400/25 bg-emerald-500/[.06] p-3">
+      <Eyebrow>{de.flow.taskResult}</Eyebrow>
+      <p className="mt-2 whitespace-pre-wrap break-words text-[0.8rem] leading-relaxed text-emerald-50">{result}</p>
+    </section>
+  );
+}
+
+function TaskDiagnosticsPanel({ diagnostics, now }: { diagnostics: TaskDiagnostic[]; now: number }) {
+  if (!diagnostics.length) return null;
+  return (
+    <section aria-label={de.flow.taskDiagnostics} className="mt-4">
+      <Eyebrow>{de.flow.taskDiagnostics}</Eyebrow>
+      <div className="mt-2 space-y-2">
+        {diagnostics.map((diag, index) => {
+          const severity = (diag.severity ?? "").toLowerCase();
+          const tone: ToneName = severity === "error" ? "red" : severity === "warning" ? "amber" : "zinc";
+          const title = diag.title || diag.kind || "Diagnostic";
+          return (
+            <div key={`${diag.kind}-${diag.last_seen_at ?? index}`} className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] p-2.5 shadow-[var(--hc-elev-1)]">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <StatusPill tone={tone} label={severity || "info"} size="sm" />
+                <span className="min-w-0 flex-1 break-words text-[0.78rem] font-semibold text-[var(--hc-text)]">{title}</span>
+              </div>
+              {diag.detail ? <p className="mt-1 break-words text-[0.74rem] hc-soft">{diag.detail}</p> : null}
+              {diag.last_seen_at ? <p className="mt-1 hc-type-label hc-dim">zuletzt vor {fmtAge(diag.last_seen_at, now)}</p> : null}
+              {diag.actions.length ? (
+                <ul className="mt-2 space-y-1">
+                  {diag.actions.map((action, actionIndex) => (
+                    <li key={`${action.kind}-${action.label}-${actionIndex}`} className="break-words hc-type-label hc-dim">
+                      {action.suggested ? "→ " : ""}{action.label || action.kind}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function TaskCommentsPanel({ comments, now }: { comments: TaskComment[]; now: number }) {
+  if (!comments.length) return null;
+  const sorted = [...comments].sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+  return (
+    <section aria-label={de.flow.taskComments} className="mt-4">
+      <Eyebrow>{de.flow.taskComments}</Eyebrow>
+      <ol className="mt-2 space-y-2">
+        {sorted.map((comment, index) => (
+          <li key={`${comment.id}-${index}`} className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] p-2.5 shadow-[var(--hc-elev-1)]">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="min-w-0 truncate text-[0.78rem] font-semibold text-[var(--hc-text)]">{comment.author || "unbekannt"}</span>
+              <span className="hc-mono hc-type-label hc-dim">{comment.created_at ? `vor ${fmtAge(comment.created_at, now)}` : "Zeit unbekannt"}</span>
+            </div>
+            <p className="mt-1 whitespace-pre-wrap break-words text-[0.78rem] hc-soft">{comment.body}</p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function TaskLogPanel({ taskId, open, onToggle }: { taskId: string; open: boolean; onToggle: () => void }) {
+  return (
+    <section aria-label={de.flow.taskLog} className="mt-4 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+      <button type="button" aria-expanded={open} onClick={onToggle} className="flex w-full items-center justify-between gap-2 text-left">
+        <Eyebrow>{de.flow.taskLog}</Eyebrow>
+        <span className="inline-flex items-center gap-1 hc-type-label hc-dim">
+          {open ? de.worker.logHide : de.worker.logShow}
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        </span>
+      </button>
+      {open ? <div className="mt-3"><WorkerLogTail taskId={taskId} /></div> : null}
+    </section>
+  );
+}
+
+function TaskCostTruthPanel({ costs, loading, error }: { costs?: ChainCostsResponse | null; loading: boolean; error?: string }) {
+  const totals = costs?.totals;
+  const totalTokens = totals ? totals.input_tokens + totals.output_tokens : 0;
+  const costText = totals
+    ? formatEffectiveCost({
+        cost_usd: totals.cost_usd,
+        cost_effective_usd: totals.cost_effective_usd,
+        tokens: totalTokens,
+      }).text
+    : loading ? "…" : "—";
+  return (
+    <section aria-label={de.flow.taskCostTruth} className="mt-4 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Eyebrow>{de.flow.taskCostTruth}</Eyebrow>
+        <span className="hc-type-label hc-dim">{de.flow.taskCostTruthSource}</span>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-2 py-1.5">
+          <p className="hc-eyebrow text-[9px]">{de.ketten.summaryStatCost}</p>
+          <p className="hc-mono mt-1 text-[0.78rem] font-semibold tabular-nums text-[var(--hc-emerald)]">{costText}</p>
+        </div>
+        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-2 py-1.5">
+          <p className="hc-eyebrow text-[9px]">{de.ketten.summaryStatTokens}</p>
+          <p className="hc-mono mt-1 text-[0.78rem] font-semibold tabular-nums text-[var(--hc-text)]">{totals ? (totalTokens > 0 ? fmtTokens(totalTokens) : "—") : loading ? "…" : "—"}</p>
+        </div>
+        <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-2 py-1.5">
+          <p className="hc-eyebrow text-[9px]">{de.ketten.summaryStatRuns}</p>
+          <p className="hc-mono mt-1 text-[0.78rem] font-semibold tabular-nums text-[var(--hc-text)]">{totals ? totals.run_count : loading ? "…" : "—"}</p>
+        </div>
+      </div>
+      {error ? <p className="mt-2 flex items-start gap-1.5 hc-type-label text-[var(--hc-red)]"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{de.flow.taskCostLoadError} {error}</p> : null}
+    </section>
+  );
+}
+
+export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, chainCosts, chainCostsLoading = false, chainCostsError, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
   taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; enriched?: Enriched; loading: boolean; error?: string; now: number;
-  boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
+  boardTasks: BoardTask[]; snapshotLabel: string; chainCosts?: ChainCostsResponse | null; chainCostsLoading?: boolean; chainCostsError?: string;
+  onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
 }) {
+  const [bodyState, setBodyState] = useState<{ taskId: string | null; open: boolean }>(() => ({ taskId, open: true }));
+  const [logState, setLogState] = useState<{ taskId: string | null; open: boolean }>(() => ({ taskId, open: false }));
+  const bodyOpen = bodyState.taskId === taskId ? bodyState.open : true;
+  const logOpen = logState.taskId === taskId ? logState.open : false;
+  const toggleBodyOpen = () => setBodyState({ taskId, open: !bodyOpen });
+  const toggleLogOpen = () => setLogState({ taskId, open: !logOpen });
   if (!taskId) {
     return (
       <aside className="hc-surface-card min-w-0 overflow-hidden h-fit p-4 xl:sticky xl:top-4">
@@ -1552,14 +1705,23 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
       </aside>
     );
   }
+  const detailTask = detail?.task ?? null;
   const runs = detail?.runs ?? [];
+  const comments = detail?.comments ?? [];
   const events = (detail?.events ?? []).slice(-12).reverse();
   const deliverables = detail?.deliverables ?? [];
   const resultArtifactLinks = enriched.resultArtifactLinks ?? [];
   const artifactLinksOnly = resultArtifactLinks.filter((link) => !deliverables.some((deliverable) => artifactKey(deliverable) === artifactKey(link)));
-  const vaultMemoryLinks = detail?.task?.vault_memory_links ?? task?.vault_memory_links ?? [];
+  const vaultMemoryLinks = detailTask?.vault_memory_links ?? task?.vault_memory_links ?? [];
   const detailUnavailable = Boolean(error && !detail);
-  const empty = !loading && !error && runs.length === 0 && events.length === 0 && deliverables.length === 0 && artifactLinksOnly.length === 0 && vaultMemoryLinks.length === 0;
+  const taskTitle = detailTask?.title ?? task?.title ?? "";
+  const taskStatus = detailTask?.status ?? task?.status ?? null;
+  const taskAssignee = detailTask?.assignee ?? task?.assignee ?? null;
+  const taskBody = firstText(detailTask?.body);
+  const resultText = firstText(detailTask?.result, detailTask?.summary, detailTask?.closure, detailTask?.latest_summary, runs.find((run) => run.summary?.trim())?.summary);
+  const blockReason = firstText(detailTask?.block_reason, task?.block_reason, enriched.blockedReason);
+  const diagnostics = detailTask?.diagnostics ?? [];
+  const empty = !loading && !error && runs.length === 0 && comments.length === 0 && events.length === 0 && deliverables.length === 0 && artifactLinksOnly.length === 0 && vaultMemoryLinks.length === 0 && !taskBody && !resultText && !blockReason && diagnostics.length === 0;
   return (
     <aside className="hc-surface-card h-fit p-4 xl:sticky xl:top-4">
       <Eyebrow>{de.flow.selectedChain}</Eyebrow>
@@ -1567,16 +1729,30 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
         <p className="hc-mono hc-type-label hc-dim">{taskId}</p>
         {/* Root-Titel sind oft ganze PlanSpec-Sätze — auf 3 Zeilen clampen statt
             17-Zeilen-Wand (Sicht-Audit 2026-06-19 G); Volltext via title-Attribut. */}
-        <p title={detail?.task?.title ?? task?.title ?? ""} className="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-[var(--hc-text)]">{detail?.task?.title ?? task?.title ?? ""}</p>
-        {task ? (
+        <p title={taskTitle} className="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-[var(--hc-text)]">{taskTitle}</p>
+        {taskStatus ? (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <RoleChip role={roleChip(task.assignee, task.status === "review" ? "verification" : null)} />
-            <StatusPill tone={task.status === "done" ? "emerald" : task.status === "blocked" ? "red" : "zinc"} label={taskStatusLabel[task.status] ?? task.status} />
+            <RoleChip role={roleChip(taskAssignee, taskStatus === "review" ? "verification" : null)} />
+            <StatusPill tone={taskStatus === "done" ? "emerald" : taskStatus === "blocked" ? "red" : "zinc"} label={taskStatusLabel[taskStatus] ?? taskStatus} />
           </div>
         ) : null}
       </div>
 
       <TaskCommentComposer taskId={taskId} onPosted={onGateChanged} />
+
+      {blockReason ? (
+        <div className="mt-3">
+          <ToneCallout tone="red"><AlertTriangle className="mr-2 inline h-4 w-4" />{de.flow.taskBlockReason}: {blockReason}</ToneCallout>
+        </div>
+      ) : null}
+
+      <TaskCostTruthPanel costs={chainCosts} loading={chainCostsLoading} error={chainCostsError} />
+
+      {taskBody ? <TaskBodyPanel body={taskBody} open={bodyOpen} onToggle={toggleBodyOpen} /> : null}
+      {resultText ? <TaskResultPanel result={resultText} /> : null}
+      <TaskDiagnosticsPanel diagnostics={diagnostics} now={now} />
+      <TaskCommentsPanel comments={comments} now={now} />
+      <TaskLogPanel taskId={taskId} open={logOpen} onToggle={toggleLogOpen} />
 
       {taskId ? (
         <FlowPlanPanel
@@ -2041,6 +2217,8 @@ export function FlowView() {
   const clientNow = useClientNowSeconds();
   const now = Math.max(board.data?.now ?? 0, clientNow);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // B5: Flow rail and Ketten summary use the same server-side chain-costs rollup.
+  const selectedChainCosts = useHermesChainCosts(selectedId);
   // Unter xl öffnet die Task-Auswahl die Receipt-Kette als Bottom-Sheet
   // (Desktop behält die sticky Seitenleiste; dort bleibt das Sheet unsichtbar).
   const [detailSheetOpen, setDetailSheetOpen] = useState(false);
@@ -2373,7 +2551,8 @@ export function FlowView() {
   }, [dispatchChoice, busyId, checkingDispatchId, flowRelease.busyId, enrichmentById, selectedId, errorById, now, manualReviewFallbackById, selectTask, onReleaseChain, onDispatchSingle, clearDispatchChoice, onAct]);
 
   const selectedTask = selectedId ? allTasks.find((t) => t.id === selectedId) : undefined;
-  const selectedStatus = selectedTask?.status;
+  const selectedDetailTask = selectedId ? taskDetail.detailById[selectedId]?.task ?? null : null;
+  const selectedStatus = selectedTask?.status ?? selectedDetailTask?.status;
   const loadingFirst = board.loading && board.data == null;
   const hasAnyRun = allTasks.length > 0;
   const boardSourceErrors = board.data?.source_errors ?? [];
@@ -2384,11 +2563,11 @@ export function FlowView() {
   // identity on every 8s board poll, and re-running the filter/expand block
   // on each tick yanked the page back to the card, re-expanded a manually
   // collapsed chain and reverted manual project-filter choices.
-  if (taskParam && handledTaskParam !== taskParam && allTasks.length > 0) {
+  if (taskParam && handledTaskParam !== taskParam) {
     const task = allTasks.find((item) => item.id === taskParam);
+    setHandledTaskParam(taskParam);
+    if (selectedId !== taskParam) setSelectedId(taskParam);
     if (task) {
-      setHandledTaskParam(taskParam);
-      if (selectedId !== taskParam) setSelectedId(taskParam);
       const targetProject = projectKey(task.tenant);
       if (projectFilter !== "all" && projectFilter !== targetProject) {
         setProjectFilter(targetProject);
@@ -2397,11 +2576,11 @@ export function FlowView() {
         (chain) => chain.rootId === taskParam || chain.members.some((member) => member.id === taskParam),
       );
       if (targetChain && expandedRoot !== targetChain.rootId) setExpandedRoot(targetChain.rootId);
-      // Echte Deep-Links (z.B. aus dem Inbox-Tab) sollen das Detail auf
-      // Handy/Tablet direkt zeigen — gleiche Mechanik wie ein Tap.
-      if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches && !detailSheetOpen) {
-        setDetailSheetOpen(true);
-      }
+    }
+    // Echte Deep-Links (auch archivierte/fertige Tasks ohne Board-Karte) sollen
+    // die Receipt-Rail öffnen; der Effekt darunter lädt Detaildaten per /tasks/:id.
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches && !detailSheetOpen) {
+      setDetailSheetOpen(true);
     }
   }
 
@@ -2752,6 +2931,9 @@ export function FlowView() {
               now={now}
               boardTasks={allTasks}
               snapshotLabel={board.lastUpdated ? (fresh.stale ? de.flow.paused : fresh.label) : "unbekannt"}
+              chainCosts={selectedChainCosts.data}
+              chainCostsLoading={selectedChainCosts.loading}
+              chainCostsError={selectedChainCosts.error}
               onRelease={onReleasePlan}
               releaseBusy={flowRelease.busyId === selectedId}
               releaseError={selectedId ? flowRelease.errorById[selectedId] : undefined}
@@ -2763,7 +2945,7 @@ export function FlowView() {
       )}
 
       {detailSheetOpen && selectedId ? (
-        <FlowDetailSheet taskId={selectedId} taskTitle={selectedTask?.title} onClose={() => setDetailSheetOpen(false)}>
+        <FlowDetailSheet taskId={selectedId} taskTitle={selectedTask?.title ?? selectedDetailTask?.title} onClose={() => setDetailSheetOpen(false)}>
           <FlowReceiptRail
             taskId={selectedId}
             task={selectedTask}
@@ -2774,6 +2956,9 @@ export function FlowView() {
             now={now}
             boardTasks={allTasks}
             snapshotLabel={board.lastUpdated ? (fresh.stale ? de.flow.paused : fresh.label) : "unbekannt"}
+            chainCosts={selectedChainCosts.data}
+            chainCostsLoading={selectedChainCosts.loading}
+            chainCostsError={selectedChainCosts.error}
             onRelease={onReleasePlan}
             releaseBusy={flowRelease.busyId === selectedId}
             releaseError={flowRelease.errorById[selectedId]}

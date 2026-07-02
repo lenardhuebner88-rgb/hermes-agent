@@ -74,7 +74,7 @@ const LOG_MAX_LINES = 100;
 
 // A3: Live-Log-Tail über den existierenden GET /tasks/{id}/log — gepollt NUR
 // solange das Panel offen ist, letzte ~100 Zeilen, monospace.
-function WorkerLogTail({ taskId }: { taskId: string }) {
+export function WorkerLogTail({ taskId }: { taskId: string }) {
   const [log, setLog] = useState<TaskLogResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
+import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -778,10 +779,25 @@ describe("DecisionQueueResponseSchema", () => {
 
 
 describe("TaskDetailResponseSchema", () => {
+  it("parses the real task-detail payload shape with body, comments, runs and links", () => {
+    const parsed = parseOrThrow(TaskDetailResponseSchema, taskDetailRealPayloadFixture, "kanban/task-detail-real");
+
+    expect(parsed.task?.id).toBe("t_1e29abc5");
+    expect(parsed.task?.body).toContain("PlanSpec source:");
+    expect(parsed.task?.result).toContain("auto-completed decomposed root");
+    expect(parsed.comments[0]).toMatchObject({
+      author: "planspec-ingest",
+      body: "Decomposed into t_92528385. Root will wake when all children complete.",
+    });
+    expect(parsed.runs[0].summary).toBe("Planspec ingest: held before release");
+    expect(parsed.links.parents).toEqual(["t_92528385"]);
+  });
+
   it("keeps dependency links from /tasks/:id so Flow can explain the selected chain", () => {
     const parsed = parseOrThrow(TaskDetailResponseSchema, {
       task: { id: "t_child", title: "Dependent", status: "todo", assignee: "coder", latest_summary: null },
       links: { parents: ["t_parent_a", "t_parent_b"], children: ["t_next"] },
+      comments: [],
       runs: [],
       events: [],
       deliverables: [],
@@ -801,6 +817,37 @@ describe("TaskDetailResponseSchema", () => {
 
     expect(parsed.links.parents).toEqual([]);
     expect(parsed.links.children).toEqual([]);
+    expect(parsed.comments).toEqual([]);
+  });
+
+  it("accepts optional block reason and diagnostics without requiring older tasks to carry them", () => {
+    const parsed = parseOrThrow(TaskDetailResponseSchema, {
+      task: {
+        id: "t_blocked",
+        title: "Blocked detail",
+        status: "blocked",
+        block_reason: "needs operator input",
+        diagnostics: [{
+          kind: "superseded_blocked_review_artifact",
+          severity: "warning",
+          title: "Blocked review artifact has superseded/audit marker",
+          detail: "Operator-visible diagnostic",
+          actions: [{ kind: "cli_hint", label: "Inspect task before acting", payload: { command: "hermes kanban show t_blocked" }, suggested: true }],
+          first_seen_at: 1783006285,
+          last_seen_at: 1783009882,
+          count: 1,
+          run_id: null,
+          data: { audit_only_marker_present: true },
+        }],
+      },
+      comments: [],
+      runs: [],
+      events: [],
+      deliverables: [],
+    }, "kanban/task-detail-diagnostics");
+
+    expect(parsed.task?.block_reason).toBe("needs operator input");
+    expect(parsed.task?.diagnostics?.[0]?.actions[0].payload).toMatchObject({ command: "hermes kanban show t_blocked" });
   });
 });
 
