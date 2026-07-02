@@ -1,0 +1,25 @@
+# loop-schmiede — Meta-Pack: schmiedet neue Loop-Packs aus EIGENER System-Evidenz.
+# Eigenes Konzept statt Katalog-Knopf (Operator-Entscheid 2026-07-02): die Quelle
+# guter Loops ist unsere Telemetrie (Ledger, Bounces, Board-Schmerzen), nicht ein
+# fremder Katalog — Bermans Library dient nur als Offline-Inspirationsbibliothek.
+# Output geht nach ~/.hermes/loops/packs-custom/ (nie ins Repo), kein Auto-Start.
+name: loop-schmiede
+type: sweep
+description: Schmiedet pro Runde höchstens EIN neues Loop-Pack aus eigener Evidenz (nach packs-custom)
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude
+    model: claude-fable-5
+    timeout: 3000
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 3     # Schmieden ist Urteils-Arbeit — wenige, gute Runden
+  max_hours: 4
+  fail_streak: 2
+  dry_rounds: 1     # eine ehrliche DRY-Runde genügt: nichts erzwingen
+params: {}
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

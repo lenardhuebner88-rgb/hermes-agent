@@ -47,7 +47,7 @@ CUSTOM_PACKS_DIR = Path("~/.hermes/loops/packs-custom").expanduser()
 DEFAULT_STATE_ROOT = Path("~/.hermes/loops").expanduser()
 NOTIFY_SCRIPT = Path("~/.hermes/scripts/discord-notify.py").expanduser()
 
-QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "90-bounced")
+QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
 DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
 
 PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
@@ -291,10 +291,16 @@ class LoopRunner:
         with self.state.joinpath(".lock").open("w", encoding="utf-8") as pack_fh, \
                 repo_lock_path.open("w", encoding="utf-8") as repo_fh:
             for fh, what in ((pack_fh, "Pack"), (repo_fh, "Repo")):
-                try:
-                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    raise RuntimeError(f"{what}-Lock belegt — läuft schon ein Loop?") from None
+                # Einmal-Retry: die Dashboard-Running-Probe hält das Lock für µs —
+                # ein Start exakt in dem Fenster soll nicht die Nacht kosten.
+                for attempt in (1, 2):
+                    try:
+                        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if attempt == 2:
+                            raise RuntimeError(f"{what}-Lock belegt — läuft schon ein Loop?") from None
+                        time.sleep(1.0)
             yield
 
     # ── Git ──
@@ -608,6 +614,101 @@ class LoopRunner:
         self.say(msg)
         self.notify(msg)
 
+    # ── Landung (v2.3 Stufe 1 — operator-getriggert, mit Schienen) ──────────
+    # Automatisiert die Morgen-Review-Mechanik; das URTEIL über die Commits bleibt
+    # beim Menschen/Hauptagenten (Ledger + git log lesen kommt VOR dem land-Aufruf).
+
+    def _land_gates(self, repo: Path, base: str) -> tuple[bool, str]:
+        """Beweis nach dem ff-Merge: Collection-Sweep + affected Tests (+ Frontend,
+        wenn web/ berührt). Seam für Tests."""
+        py = repo / "venv" / "bin" / "python"
+        steps: list[tuple[str, list[str], Path]] = [
+            ("collection", [str(py), "-m", "pytest", "--co", "-q", "-p", "no:cacheprovider", "tests/"], repo),
+            ("affected", ["bash", str(repo / "scripts" / "run-affected.sh"), base], repo),
+        ]
+        touched_web = bool(
+            self.git("diff", "--name-only", f"{base}..HEAD", "--", "web/", cwd=repo).stdout.strip()
+        )
+        if touched_web:
+            steps += [
+                ("lint:control", ["npm", "run", "lint:control"], repo / "web"),
+                ("tsc", ["npx", "tsc", "-b", "--noEmit"], repo / "web"),
+                ("vitest", ["npx", "vitest", "run"], repo / "web"),
+            ]
+        for label, cmd, cwd in steps:
+            try:
+                res = subprocess.run(
+                    cmd, cwd=str(cwd), capture_output=True,
+                    encoding="utf-8", errors="replace", timeout=2400, check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                return False, f"{label}: {exc}"
+            if res.returncode != 0:
+                tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
+                return False, f"{label} rot (rc={res.returncode}):\n{tail}"
+        return True, "collection + affected" + (" + frontend" if touched_web else "") + " grün"
+
+    def _push(self, repo: Path) -> tuple[bool, str]:
+        """Push NUR piet-fork, nur ff (kein --force). Seam für Tests."""
+        res = self.git("push", "piet-fork", "main", cwd=repo)
+        return res.returncode == 0, (res.stderr.strip() or res.stdout.strip())
+
+    def cmd_land(self, push: bool = True) -> bool:
+        repo = self.pack.repo
+        ahead = self.git("rev-list", "--count", f"main..{self.pack.branch}", cwd=repo).stdout.strip()
+        if not ahead or ahead == "0":
+            self.say("Nichts zu landen (Branch ist nicht vor main).")
+            return True
+        if self.qcount("10-building") > 0:
+            self.say("ABBRUCH: 10-building/ ist nicht leer — UNVERIFIZIERTE Arbeit zuerst klären.")
+            return False
+        cur = self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
+        if cur != "main":
+            self.say(f"ABBRUCH: Live-Checkout steht auf {cur!r}, nicht auf main.")
+            return False
+        dirty = self.git("status", "--porcelain", cwd=repo).stdout.strip()
+        if dirty:
+            self.say("ABBRUCH: Live-Checkout ist dirty (parallele Arbeit?) — Landung braucht einen sauberen Baum:\n"
+                     + "\n".join(dirty.splitlines()[:10]))
+            return False
+        base = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+        tag = f"loop-land/{self.pack.name}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        if self.git("tag", tag, "main", cwd=repo).returncode != 0:
+            self.say("ABBRUCH: Rollback-Anker-Tag konnte nicht gesetzt werden.")
+            return False
+        merge = self.git("merge", "--ff-only", self.pack.branch, cwd=repo)
+        if merge.returncode != 0:
+            self.git("tag", "-d", tag, cwd=repo)
+            self.say(f"ABBRUCH: kein ff-Merge möglich (main ist weitergelaufen) — KEIN Auto-Rebase.\n{merge.stderr.strip()}")
+            self.ledger(f"LAND abgebrochen: nicht ff-fähig (base {base[:9]})")
+            return False
+        ok, report = self._land_gates(repo, base)
+        if not ok:
+            # Baum war sauber, Merge war reiner ff → --keep rollt den Ref zurück,
+            # ohne irgendetwas zu verwerfen (verweigert sonst; bewusst NICHT --hard).
+            self.git("reset", "--keep", base, cwd=repo)
+            self.say(f"LAND zurückgerollt auf {base[:9]} — Gates rot:\n{report}")
+            self.ledger(f"LAND rollback (Anker {tag}): {report.splitlines()[0]}")
+            self.notify(f"⛔ {self.pack.name} LAND: Gates rot → rollback auf {base[:9]} (Anker {tag}).")
+            return False
+        pushed = ""
+        if push:
+            p_ok, p_msg = self._push(repo)
+            pushed = " · piet-fork gepusht" if p_ok else f" · PUSH FEHLGESCHLAGEN (Merge bleibt lokal): {p_msg}"
+        # Verdaute Pläne archivieren + Pack frisch von neuem main ziehen
+        landed_dir = self.queue / "30-landed"
+        landed_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for plan in sorted((self.queue / "20-verified").glob("*.md")):
+            plan.rename(landed_dir / plan.name)
+            moved += 1
+        self.ensure_wt(fresh=True)
+        new_main = self.git("rev-parse", "--short", "main", cwd=repo).stdout.strip()
+        self.ledger(f"LAND ✅ {ahead} Commits → main {new_main} (Anker {tag}, {moved} Pläne archiviert){pushed}")
+        self.say(f"LAND ✅ main={new_main} · Gates: {report}{pushed}")
+        self.notify(f"🛬 {self.pack.name} LAND: {ahead} Commits auf main ({new_main}); {report}{pushed}")
+        return True
+
     def cmd_status(self) -> None:
         print(f"{self.pack.name} [{self.pack.type}/{self.pack.stability}] @ {self.state}")
         if self.pack.type == "pipeline":
@@ -629,7 +730,8 @@ class LoopRunner:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Loop-Runner (pipeline|sweep Packs)")
     parser.add_argument("--pack", required=True)
-    parser.add_argument("--cmd", required=True, choices=["plan", "run", "night", "status"])
+    parser.add_argument("--cmd", required=True, choices=["plan", "run", "night", "status", "land"])
+    parser.add_argument("--no-push", action="store_true", help="land: nur lokal mergen, nicht piet-fork pushen")
     parser.add_argument("--state-root", type=Path, default=None)
     parser.add_argument("--packs-dir", type=Path, default=None,
                         help="explizites Pack-Verzeichnis (default: Repo-Packs, dann ~/.hermes/loops/packs-custom)")
@@ -651,13 +753,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with runner.locked():
             runner.say(f"START cmd={args.cmd} {datetime.now().strftime('%F %H:%M:%S')}")
+            rc = 0
             if args.cmd == "plan":
                 runner.cmd_plan(fresh=args.fresh)
             elif args.cmd == "run":
                 runner.cmd_run(fresh=args.fresh)
+            elif args.cmd == "land":
+                rc = 0 if runner.cmd_land(push=not args.no_push) else 4
             else:
                 runner.cmd_night(fresh=args.fresh, skip_plan=args.skip_plan)
             runner.say(f"ENDE cmd={args.cmd}")
+            if rc:
+                return rc
     except RuntimeError as exc:
         print(f"ABBRUCH: {exc}", file=sys.stderr)
         return 3

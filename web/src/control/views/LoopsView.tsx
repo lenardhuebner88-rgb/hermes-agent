@@ -72,7 +72,10 @@ function LoopStartForm({
   const defaultMaxHours = String(pack.stop.max_hours ?? "");
   const [maxRounds, setMaxRounds] = useState(defaultMaxRounds);
   const [maxHours, setMaxHours] = useState(defaultMaxHours);
-  const [focus, setFocus] = useState("");
+  // Pack-Params dynamisch (focus/fokus/services/…): ein Feld pro Manifest-Param.
+  // Ein hartkodiertes FOCUS-Feld wäre für Packs ohne diesen Param ein stiller No-Op.
+  const paramNames = useMemo(() => Object.keys(pack.params), [pack]);
+  const [paramValues, setParamValues] = useState<Record<string, string>>(() => ({ ...pack.params }));
 
   const engines = models?.engines ?? {};
   const engineNames = Object.keys(engines);
@@ -81,7 +84,10 @@ function LoopStartForm({
     const overrides = buildPhaseOverrides(pack, phaseValues);
     if (maxRounds.trim() && maxRounds !== defaultMaxRounds) overrides.MAX_ROUNDS = maxRounds.trim();
     if (maxHours.trim() && maxHours !== defaultMaxHours) overrides.MAX_HOURS = maxHours.trim();
-    if (focus.trim()) overrides.FOCUS = focus.trim();
+    for (const name of paramNames) {
+      const value = (paramValues[name] ?? "").trim();
+      if (value && value !== pack.params[name]) overrides[name.toUpperCase()] = value;
+    }
     onSubmit(overrides);
   };
 
@@ -162,16 +168,19 @@ function LoopStartForm({
           />
         </label>
       </div>
-      <label className="block min-w-0">
-        <span className="hc-type-label hc-dim">{t.focusLabel}</span>
-        <textarea
-          value={focus}
-          disabled={busy}
-          rows={2}
-          onChange={(e) => setFocus(e.target.value)}
-          className="mt-1 min-h-16 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white placeholder:text-zinc-500 sm:text-sm"
-        />
-      </label>
+      {paramNames.map((name) => (
+        <label key={name} className="block min-w-0">
+          <span className="hc-type-label hc-dim">{t.paramLabel} · {name}</span>
+          <textarea
+            value={paramValues[name] ?? ""}
+            disabled={busy}
+            rows={2}
+            aria-label={`${t.paramLabel} ${name}`}
+            onChange={(e) => setParamValues((prev) => ({ ...prev, [name]: e.target.value }))}
+            className="mt-1 min-h-16 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white placeholder:text-zinc-500 sm:text-sm"
+          />
+        </label>
+      ))}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={busy} onClick={handleSubmit}>
           {busy ? "…" : t.submitStart}

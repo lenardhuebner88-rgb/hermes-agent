@@ -39,15 +39,18 @@ STATE_ROOT_OVERRIDE: Path | None = None
 MODELS_PATH_OVERRIDE: Path | None = None
 
 # Mutationen nur für reguläre Packs — Unterstrich-Packs (_blank) sind Vorlagen.
-_PACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# Muss dieselben Namen zulassen wie runner._PACK_NAME_RE (minus führenden Unterstrich),
+# sonst sind Packs sichtbar, aber nicht bedienbar.
+_PACK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
-# overrides.env-Whitelist: genau die Knobs, die der Runner versteht. Werte bleiben
-# einzeilig und kurz — die Datei wird vom Runner als KEY=VALUE geparst.
+# overrides.env-Whitelist: die festen Runner-Knobs; Pack-PARAMS werden dynamisch
+# gegen das Manifest validiert (siehe start_loop) — so funktioniert jeder Pack-
+# Parameter (focus/fokus/services/…) statt eines hartkodierten FOCUS-Felds.
 _OVERRIDE_KEY_RE = re.compile(
-    r"^(PHASE_[A-Z]+_(MODEL|ENGINE|TIMEOUT)"
-    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|MAX_PLANS|FOCUS|DISCORD_CHANNEL)$"
+    r"(PHASE_[A-Z]+_(MODEL|ENGINE|TIMEOUT)"
+    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL)"
 )
-_OVERRIDE_VALUE_RE = re.compile(r"^[^\r\n\x00]{0,400}$")
+_OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
 
 
 def _packs_dir() -> Path:
@@ -197,6 +200,7 @@ def register_loops_routes(app: FastAPI) -> None:
     @app.get("/api/loops/{pack}/detail")
     def loop_detail(pack: str) -> dict[str, Any]:
         loaded = _load_pack_or_404(pack)
+        source = "custom" if _dir_for(loaded.name) == loop_runner.CUSTOM_PACKS_DIR else "repo"
         state = _state_root() / loaded.name
         ledger_path = state / "LEDGER.md"
         ledger_tail = (
@@ -211,7 +215,7 @@ def register_loops_routes(app: FastAPI) -> None:
         }
         overrides_path = state / "overrides.env"
         return {
-            **_pack_summary(loaded.name),
+            **_pack_summary(loaded.name, source),
             "ledger_tail": ledger_tail,
             "queue_entries": queue_entries if loaded.type == "pipeline" else None,
             "commits": _commits_ahead(loaded),
@@ -224,12 +228,17 @@ def register_loops_routes(app: FastAPI) -> None:
         state = _state_root() / loaded.name
         if _is_running(state):
             raise HTTPException(status_code=409, detail="Loop läuft bereits")
+        param_keys = {p.upper() for p in loaded.params}
         lines = []
         for key, val in body.overrides.items():
             sval = str(val).strip()
-            if not _OVERRIDE_KEY_RE.match(key):
-                raise HTTPException(status_code=400, detail=f"Override-Key nicht erlaubt: {key!r}")
-            if not _OVERRIDE_VALUE_RE.match(sval):
+            # fullmatch statt match: "$" ließe ein trailing \n im Key durch (Review-Nit).
+            if not (_OVERRIDE_KEY_RE.fullmatch(key) or key in param_keys):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Override-Key nicht erlaubt: {key!r} (Pack-Params: {sorted(loaded.params) or '—'})",
+                )
+            if not _OVERRIDE_VALUE_RE.fullmatch(sval):
                 raise HTTPException(status_code=400, detail=f"Override-Wert ungültig für {key}")
             if sval:
                 lines.append(f"{key}={sval}")
@@ -238,7 +247,9 @@ def register_loops_routes(app: FastAPI) -> None:
             "# geschrieben vom /control-Dashboard\n" + "\n".join(lines) + "\n",
             encoding="utf-8",
         )
-        res = _systemctl("start", f"hermes-loop@{loaded.name}.service")
+        # --no-block: oneshot-Units halten den systemctl-Client sonst bis zum
+        # Prozessende (Stunden) — empirisch bewiesen, Review-Blocker 2026-07-02.
+        res = _systemctl("start", "--no-block", f"hermes-loop@{loaded.name}.service")
         if res.returncode != 0:
             raise HTTPException(
                 status_code=502,

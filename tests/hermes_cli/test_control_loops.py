@@ -37,6 +37,7 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path) -> None:
             "name": name, "type": ptype, "repo": str(repo),
             "description": f"Testpack {name}", "stability": "experimental",
             "phases": phases,
+            "params": {"fokus": "standard-fokus"},
         }),
         encoding="utf-8",
     )
@@ -87,7 +88,7 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["commits_ahead"] == 0
     assert nacht["timer_enabled"] is False
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
-    assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "90-bounced")}
+    assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
 
 
@@ -107,14 +108,25 @@ def test_unknown_and_invalid_pack_names_404(api):
 def test_start_writes_overrides_and_starts_unit(api):
     client, calls, tmp = api
     resp = client.post("/api/loops/nacht/start", json={
-        "overrides": {"PHASE_ROUND_MODEL": "claude-haiku-4-5", "MAX_ROUNDS": 3},
+        "overrides": {"PHASE_ROUND_MODEL": "claude-haiku-4-5", "MAX_ROUNDS": 3,
+                      "FOKUS": "auth.py Token-Refresh"},
     })
     assert resp.status_code == 200, resp.text
     assert resp.json()["started"] is True
     env = (tmp / "state" / "nacht" / "overrides.env").read_text(encoding="utf-8")
     assert "PHASE_ROUND_MODEL=claude-haiku-4-5" in env
     assert "MAX_ROUNDS=3" in env
-    assert ("start", "hermes-loop@nacht.service") in calls
+    assert "FOKUS=auth.py Token-Refresh" in env  # Pack-Param dynamisch erlaubt
+    # --no-block ist Pflicht: oneshot-Units halten den Client sonst stundenlang
+    assert ("start", "--no-block", "hermes-loop@nacht.service") in calls
+
+
+def test_start_rejects_override_for_foreign_param(api):
+    client, calls, _tmp = api
+    # FOCUS ist KEIN Param des Packs (es heißt fokus) → 400 statt stillem No-Op
+    resp = client.post("/api/loops/nacht/start", json={"overrides": {"FOCUSX": "x"}})
+    assert resp.status_code == 400
+    assert "Pack-Params" in resp.json()["detail"]
 
 
 def test_start_rejects_bad_override_keys_and_values(api):

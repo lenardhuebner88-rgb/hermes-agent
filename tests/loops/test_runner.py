@@ -590,6 +590,85 @@ def test_all_shipped_packs_load_and_validate():
             assert "push" in text.lower(), f"{name}/{pname}: Verbote-Block fehlt (push)"
 
 
+# ── Landung (v2.3 Stufe 1) — Schienen gegen echte temp-Repos ─────────────────
+
+def make_landable(tmp_path, name="landeplatz"):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", name, "sweep", repo)
+    pack = load_pack(tmp_path / "packs", name)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_in(runner.wt, "l1")  # Branch 1 Commit vor main
+    runner._land_gates = lambda repo, base: (True, "seamed grün")  # Seam
+    pushes = []
+    runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
+    return repo, runner, pushes
+
+
+def test_land_happy_path_merges_tags_archives_and_freshens(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    assert runner.cmd_land(push=True) is True
+    assert "loop(test): l1" in g(repo, "log", "--oneline", "-3", "main").stdout
+    assert g(repo, "tag", "-l", "loop-land/landeplatz/*").stdout.strip()
+    assert (runner.queue / "30-landed" / "P1-fertig.md").is_file()
+    assert runner.qcount("20-verified") == 0
+    assert pushes, "piet-fork-Push muss versucht werden"
+    # FRESH: Branch neu von neuem main gezogen → nichts mehr ahead
+    assert g(repo, "rev-list", "--count", f"main..{runner.pack.branch}").stdout.strip() == "0"
+    assert "LAND ✅" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_land_aborts_on_dirty_live_checkout(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    (repo / "README.md").write_text("fremde parallele arbeit\n", encoding="utf-8")
+    before = g(repo, "rev-parse", "main").stdout
+    assert runner.cmd_land() is False
+    assert g(repo, "rev-parse", "main").stdout == before
+    assert not pushes
+
+
+def test_land_aborts_without_ff_and_removes_anchor(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    # main läuft weiter → Branch ist kein Nachfahre mehr → kein ff
+    (repo / "anders.py").write_text("x = 1\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "parallel auf main")
+    before = g(repo, "rev-parse", "main").stdout
+    assert runner.cmd_land() is False
+    assert g(repo, "rev-parse", "main").stdout == before
+    assert g(repo, "tag", "-l", "loop-land/*").stdout.strip() == "", "Anker muss bei ff-Abbruch weg"
+    assert not pushes
+
+
+def test_land_rolls_back_when_gates_fail(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    base = g(repo, "rev-parse", "main").stdout.strip()
+    runner._land_gates = lambda repo, b: (False, "affected rot (rc=1):\nboom")
+    assert runner.cmd_land() is False
+    assert g(repo, "rev-parse", "main").stdout.strip() == base, "reset --keep auf Anker-Stand"
+    assert not pushes
+    assert "rollback" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_land_aborts_on_unverified_work(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    (runner.queue / "10-building" / "P1-offen.md").write_text(PLAN_BODY, encoding="utf-8")
+    before = g(repo, "rev-parse", "main").stdout
+    assert runner.cmd_land() is False
+    assert g(repo, "rev-parse", "main").stdout == before
+
+
+def test_land_noop_when_nothing_ahead(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "leer", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "leer")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    assert runner.cmd_land() is True  # nichts zu tun ist kein Fehler
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def test_cli_status_is_readonly_on_fresh_state(tmp_path, capsys):

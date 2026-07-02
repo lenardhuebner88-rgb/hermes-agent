@@ -525,7 +525,7 @@ export const de = {
     startPanelTitle: "Loop starten",
     phaseEngine: "Engine",
     phaseModel: "Modell",
-    focusLabel: "Fokus (optional)",
+    paramLabel: "Pack-Parameter",
     maxRoundsLabel: "Max. Runden",
     maxHoursLabel: "Max. Stunden",
     submitStart: "Loop starten",
