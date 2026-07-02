@@ -406,6 +406,26 @@ class TestAutoSsoRedirect:
         assert r.headers["location"].startswith("/login")
         assert "/auth/login" not in r.headers["location"]
 
+    def test_single_password_only_provider_renders_login_not_auto_sso(self, gated_app):
+        """A password-only provider (supports_password=True, e.g. basic) has
+        no OAuth start_login — auto-SSO must fall through to the /login form
+        instead of 302→/auth/login, which would 500 with NotImplementedError
+        (real-world hit: basic-only dashboards on session expiry/deep-link)."""
+        from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+        from hermes_cli.dashboard_auth import clear_providers, register_provider
+
+        class _PasswordOnlyStub(StubAuthProvider):
+            name = "pwonly"
+            display_name = "Password Only"
+            supports_password = True
+
+        clear_providers()
+        register_provider(_PasswordOnlyStub())
+        r = gated_app.get("/sessions", follow_redirects=False)
+        assert r.status_code == 302
+        assert r.headers["location"].startswith("/login")
+        assert "/auth/login" not in r.headers["location"]
+
 
 # ---------------------------------------------------------------------------
 # Gate middleware: same-origin next= validation
