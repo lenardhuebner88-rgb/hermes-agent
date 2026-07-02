@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildDecisionInbox, inboxSummary } from "./decisionInbox";
+import { liveAutoresearchMutationFixture } from "./proposalGroups.live.fixture";
 import type { Proposal } from "./types";
 import type { BacklogItem } from "./schemas";
 import { KanbanDecisionKindSchema } from "./schemas";
@@ -120,15 +121,16 @@ describe("buildDecisionInbox", () => {
       ],
     });
     const summary = inboxSummary(items);
-    // 2 proposals + 1 real orchestrator summary = 3, NOT 4.
-    expect(summary).toEqual({ total: 3, autoresearch: 2, family: 0, orchestrator: 1, kanban: 0 });
+    // 2 duplicate proposals collapse to 1 Autoresearch group + 1 real
+    // orchestrator summary = 2, NOT 3/4.
+    expect(summary).toEqual({ total: 2, autoresearch: 1, family: 0, orchestrator: 1, kanban: 0 });
     expect(items.some((i) => i.key === "orch:open-proposals")).toBe(false);
     expect(items.some((i) => i.key === "orch:blocked-items")).toBe(true);
   });
 
   it("is deterministic for equal weights (stable key tiebreak)", () => {
     const input = {
-      proposals: [proposal({ id: "b", severity: "high" }), proposal({ id: "a", severity: "high" })],
+      proposals: [proposal({ id: "b", target: "docs/b.md", severity: "high" }), proposal({ id: "a", target: "docs/a.md", severity: "high" })],
       foItems: [],
       foNowSec: NOW,
       interventions: [],
@@ -144,13 +146,27 @@ describe("inboxSummary", () => {
   it("counts per surface", () => {
     const summary = inboxSummary(
       buildDecisionInbox({
-        proposals: [proposal({ id: "p1", severity: "high" }), proposal({ id: "p2", severity: "low" })],
+        proposals: [proposal({ id: "p1", severity: "high" }), proposal({ id: "p2", target: "docs/y.md", severity: "low" })],
         foItems: [foItem({ id: "0001", status: "blocked" })],
         foNowSec: NOW,
         interventions: [intervention({ id: "iv1" })],
       }),
     );
     expect(summary).toEqual({ total: 4, autoresearch: 2, family: 1, orchestrator: 1, kanban: 0 });
+  });
+
+  it("counts Autoresearch groups instead of cards against the live fixture", () => {
+    const items = buildDecisionInbox({
+      proposals: liveAutoresearchMutationFixture,
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+    });
+    const summary = inboxSummary(items);
+
+    expect(liveAutoresearchMutationFixture).toHaveLength(30);
+    expect(summary).toEqual({ total: 2, autoresearch: 2, family: 0, orchestrator: 0, kanban: 0 });
+    expect(items.some((item) => item.title.includes("28 Vorschläge"))).toBe(true);
   });
 
   it("counts the kanban surface", () => {

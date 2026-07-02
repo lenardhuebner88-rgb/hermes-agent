@@ -249,6 +249,11 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
             <span className="font-semibold">Entscheidung:</span> {guide.consequence}
           </ToneCallout>
           {requiresReviewConfirmation ? (
+            <p className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">
+              {de.autoresearch.batchManualReviewHint}
+            </p>
+          ) : null}
+          {requiresReviewConfirmation ? (
             <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
               <input
                 type="checkbox"

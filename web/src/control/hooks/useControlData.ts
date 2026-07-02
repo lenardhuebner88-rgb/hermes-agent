@@ -75,6 +75,8 @@ type BatchConfirmResponse = {
   confirmed?: string[];
   failed?: string[];
 };
+type BatchSkipItem = { id?: string; ok?: boolean; reason?: string };
+type BatchSkipResponse = { ok?: boolean; results?: BatchSkipItem[] };
 export interface DeepAuditFinding {
   fileline: string;
   severity: "critical" | "high" | "medium" | "low";
@@ -431,7 +433,32 @@ export function useProposals() {
     }
   }, [log, state]);
 
-  return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, generateCodeWeaknesses, apply, skip, applyAll, confirmBatch };
+  const skipBatch = useCallback(async (ids: string[]) => {
+    const selectedIds = Array.from(new Set(ids)).filter(Boolean);
+    if (selectedIds.length === 0) return;
+    setBusy("skip-batch");
+    state.updateData((current) => current ? {
+      ...current,
+      proposals: current.proposals.map((proposal) => selectedIds.includes(proposal.id) ? { ...proposal, status: "skipped", result: "übersprungen" } : proposal),
+    } : current);
+    try {
+      const result = await fetchJSON<BatchSkipResponse>("/api/autoresearch/skip-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      const failed = (result.results ?? []).filter((item) => item.ok === false).length;
+      log(`${selectedIds.length - failed}/${selectedIds.length} Vorschläge verworfen`, failed > 0 ? "amber" : "emerald");
+      await state.reload();
+    } catch (e) {
+      log(`Gruppe verwerfen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
+      await state.reload();
+    } finally {
+      setBusy(null);
+    }
+  }, [log, state]);
+
+  return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, generateCodeWeaknesses, apply, skip, skipBatch, applyAll, confirmBatch };
 }
 
 export function useDeepAudit() {

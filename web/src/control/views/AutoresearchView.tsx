@@ -15,6 +15,7 @@ import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, getTestFoundryGuidance, type ResearchLoopPresetId } from "../lib/autoresearchRunGuidance";
 import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
+import { rankAutoresearchProposalGroups } from "../lib/proposalGroups";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import { StaleBadge, ToneCallout } from "../components/atoms";
@@ -50,6 +51,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const emptyQueueModeGuidance = useMemo(() => getAutoresearchEmptyQueueModeGuidance(queueModeSummary), [queueModeSummary]);
   const filteredDistribution = useMemo(() => severityDistribution(filteredOpen), [filteredOpen]);
   const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
+  const proposalGroupQueue = useMemo(() => rankAutoresearchProposalGroups(filteredOpen, 10), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
   // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
   // operator actually sees, never the backlog hidden in the collapsed disclosure.
@@ -520,6 +522,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         canConfirmSelection={canConfirmSelection}
         distribution={distribution}
         relevanceQueue={relevanceQueue}
+        proposalGroupQueue={proposalGroupQueue}
         queueModeSummary={queueModeSummary}
         queueMode={queueMode}
         emptyQueueModeGuidance={emptyQueueModeGuidance}
@@ -535,6 +538,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onToggleSelection={toggleSelection}
         onApply={store.apply}
         onSkip={store.skip}
+        onSkipBatch={store.skipBatch}
+        onConfirmBatch={store.confirmBatch}
       />
 
       <LoopControls

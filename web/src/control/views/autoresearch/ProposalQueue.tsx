@@ -1,4 +1,5 @@
-import { CheckCheck, FlaskConical, ListChecks, X } from "lucide-react";
+import { useState } from "react";
+import { CheckCheck, FlaskConical, ListChecks, Trash2, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import type { rankAutoresearchReviewQueue, severityDistribution } from "../../lib/autoresearch";
@@ -6,6 +7,7 @@ import type { getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary } 
 import { proposalNeedsManualReview } from "../../lib/autoresearchDecisionGuide";
 import type { getAutoresearchReviewFlow } from "../../lib/autoresearchReviewFlow";
 import type { getAutoresearchQueueModeSummary, AutoresearchEmptyQueueModeGuidance, AutoresearchQueueMode } from "../../lib/autoresearchQueueMode";
+import type { ProposalGroup, RankedProposalGroupQueue } from "../../lib/proposalGroups";
 import { de } from "../../i18n/de";
 import type { Density } from "../../hooks/useDensity";
 import type { useProposals } from "../../hooks/useControlData";
@@ -41,6 +43,7 @@ export function ProposalQueue({
   canConfirmSelection,
   distribution,
   relevanceQueue,
+  proposalGroupQueue,
   queueModeSummary,
   queueMode,
   emptyQueueModeGuidance,
@@ -56,6 +59,8 @@ export function ProposalQueue({
   onToggleSelection,
   onApply,
   onSkip,
+  onSkipBatch,
+  onConfirmBatch,
   focusId,
 }: {
   density: Density;
@@ -75,6 +80,7 @@ export function ProposalQueue({
   canConfirmSelection: boolean;
   distribution: Distribution;
   relevanceQueue: RelevanceQueue;
+  proposalGroupQueue: RankedProposalGroupQueue;
   queueModeSummary: QueueModeSummary;
   queueMode: AutoresearchQueueMode;
   emptyQueueModeGuidance: AutoresearchEmptyQueueModeGuidance | null;
@@ -90,9 +96,11 @@ export function ProposalQueue({
   onToggleSelection: (proposalId: string, selected: boolean) => void;
   onApply: (proposal: Proposal) => void;
   onSkip: (proposal: Proposal) => void;
+  onSkipBatch: (ids: string[]) => void;
+  onConfirmBatch: (ids: string[]) => void;
   focusId?: string | null;
 }) {
-  const decisionHeading = openCount === 0 ? "Keine offenen Entscheidungen" : `${relevanceQueue.summary.shown} ${relevanceQueue.summary.shown === 1 ? "wichtige Karte" : "wichtige Karten"} in dieser Ansicht`;
+  const decisionHeading = openCount === 0 ? "Keine offenen Entscheidungen" : `${proposalGroupQueue.summary.shown} ${proposalGroupQueue.summary.shown === 1 ? "wichtige Gruppe" : "wichtige Gruppen"} in dieser Ansicht`;
   const selectionBusy = batchBusy || bulkRevertedBusy || !!storeBusy;
   // Deep-links (Decision Inbox → ?focus=<id>) can target a proposal that lives in the
   // collapsed backlog. Force that disclosure open so the card is mounted before the
@@ -136,48 +144,140 @@ export function ProposalQueue({
       {openCount > 0 && filteredOpenCount === 0 && !storeLoading && emptyQueueModeGuidance ? <EmptyQueueModePanel guidance={emptyQueueModeGuidance} onChangeMode={onQueueModeChange} /> : null}
 
       <Stagger className="grid gap-4">
-        {relevanceQueue.shortlist.map((item) => (
-          <StaggerItem key={item.proposal.id}>
-            <ProposalCard
-              proposal={item.proposal}
-              priorityGroup={item.group}
+        {proposalGroupQueue.shortlist.map((group) => (
+          <StaggerItem key={group.key}>
+            <ProposalGroupCard
+              group={group}
               density={density}
-              busy={storeBusy === item.proposal.id}
-              selectable
-              batchSelectable={!proposalNeedsManualReview(item.proposal)}
-              selected={selectedProposalIds.has(item.proposal.id)}
-              batchStatus={batchConfirmById[item.proposal.id]}
-              onSelectedChange={(proposal, selected) => onToggleSelection(proposal.id, selected)}
+              storeBusy={storeBusy}
+              selectedProposalIds={selectedProposalIds}
+              batchConfirmById={batchConfirmById}
+              focusId={focusId}
+              onToggleSelection={onToggleSelection}
               onApply={onApply}
               onSkip={onSkip}
+              onSkipBatch={onSkipBatch}
+              onConfirmBatch={onConfirmBatch}
             />
           </StaggerItem>
         ))}
       </Stagger>
 
-      {relevanceQueue.backlog.length > 0 ? (
-        <Disclosure open={backlogFocused || undefined} className="hc-card p-4" summary={<span className="text-sm font-medium text-white">Weitere Entscheidungen ({relevanceQueue.summary.remaining}) anzeigen</span>}>
+      {proposalGroupQueue.backlog.length > 0 ? (
+        <Disclosure open={backlogFocused || undefined} className="hc-card p-4" summary={<span className="text-sm font-medium text-white">Weitere Gruppen ({proposalGroupQueue.summary.remaining}) anzeigen</span>}>
           <div className="grid gap-4">
-            {relevanceQueue.backlog.map((item) => (
-              <ProposalCard
-                key={item.proposal.id}
-                proposal={item.proposal}
-                priorityGroup={item.group}
+            {proposalGroupQueue.backlog.map((group) => (
+              <ProposalGroupCard
+                key={group.key}
+                group={group}
                 density={density}
-                busy={storeBusy === item.proposal.id}
-                selectable
-                batchSelectable={!proposalNeedsManualReview(item.proposal)}
-                selected={selectedProposalIds.has(item.proposal.id)}
-                batchStatus={batchConfirmById[item.proposal.id]}
-                onSelectedChange={(proposal, selected) => onToggleSelection(proposal.id, selected)}
+                storeBusy={storeBusy}
+                selectedProposalIds={selectedProposalIds}
+                batchConfirmById={batchConfirmById}
+                focusId={focusId}
+                onToggleSelection={onToggleSelection}
                 onApply={onApply}
                 onSkip={onSkip}
+                onSkipBatch={onSkipBatch}
+                onConfirmBatch={onConfirmBatch}
               />
             ))}
           </div>
         </Disclosure>
       ) : null}
     </section>
+  );
+}
+
+function ProposalGroupCard({
+  group,
+  density,
+  storeBusy,
+  selectedProposalIds,
+  batchConfirmById,
+  focusId,
+  onToggleSelection,
+  onApply,
+  onSkip,
+  onSkipBatch,
+  onConfirmBatch,
+}: {
+  group: ProposalGroup;
+  density: Density;
+  storeBusy: string | null;
+  selectedProposalIds: Set<string>;
+  batchConfirmById: ProposalStore["batchConfirmById"];
+  focusId?: string | null;
+  onToggleSelection: (proposalId: string, selected: boolean) => void;
+  onApply: (proposal: Proposal) => void;
+  onSkip: (proposal: Proposal) => void;
+  onSkipBatch: (ids: string[]) => void;
+  onConfirmBatch: (ids: string[]) => void;
+}) {
+  const [confirmSkip, setConfirmSkip] = useState(false);
+  const focused = !!focusId && group.ids.includes(focusId);
+  const busy = !!storeBusy;
+  const canBatchApply = group.mode === "skill" && group.proposals.every((proposal) => !proposalNeedsManualReview(proposal));
+  const showBatchReason = group.mode !== "skill";
+  return (
+    <article className="rounded-lg border border-white/10 bg-white/[.025] p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusPill tone={group.tone} label={group.severity} />
+            <StatusPill tone={group.priorityGroup.tone} label={group.priorityGroup.label} />
+            <StatusPill tone="cyan" label={`${group.count} ${group.count === 1 ? "Vorschlag" : "Vorschläge"}`} />
+          </div>
+          <h3 className="mt-2 break-words text-base font-semibold leading-snug text-white">{group.title}</h3>
+          <p className="mt-1 text-sm leading-6 hc-soft">{group.categoryLabel} · {group.target}</p>
+          {showBatchReason ? <p className="mt-2 text-xs leading-5 text-amber-100">{de.autoresearch.batchManualReviewHint}</p> : null}
+        </div>
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col xl:flex-row">
+          {group.mode === "skill" ? (
+            <Button className="hc-hit justify-center" onClick={() => onConfirmBatch(group.ids)} disabled={!canBatchApply || busy} title={canBatchApply ? undefined : "Riskante Skill-Vorschläge einzeln prüfen."} prefix={storeBusy === "confirm-batch" ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+              {de.autoresearch.groupApply}
+            </Button>
+          ) : null}
+          <Button outlined className="hc-hit justify-center" onClick={() => setConfirmSkip(true)} disabled={busy} prefix={storeBusy === "skip-batch" ? <Spinner /> : <Trash2 className="h-4 w-4" />}>
+            {de.autoresearch.groupSkip}
+          </Button>
+        </div>
+      </div>
+      {confirmSkip ? (
+        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-amber-100">{de.autoresearch.groupSkipConfirmTitle}</p>
+              <p className="mt-1 text-xs leading-5 text-amber-100/80">{de.autoresearch.groupSkipConfirmBody(group.count)}</p>
+            </div>
+            <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+              <Button outlined className="hc-hit justify-center" onClick={() => setConfirmSkip(false)} disabled={busy} prefix={<X className="h-4 w-4" />}>{de.autoresearch.groupSkipCancel}</Button>
+              <Button className="hc-hit justify-center" onClick={() => onSkipBatch(group.ids)} disabled={busy} prefix={storeBusy === "skip-batch" ? <Spinner /> : <Trash2 className="h-4 w-4" />}>{de.autoresearch.groupSkipConfirmAction}</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      <Disclosure open={focused || undefined} className="mt-3" summary={<span className="text-sm font-medium text-white">{de.autoresearch.groupExpand(group.count)}</span>}>
+        <div className="grid gap-4">
+          {group.proposals.map((proposal) => (
+            <ProposalCard
+              key={proposal.id}
+              proposal={proposal}
+              priorityGroup={group.priorityGroup}
+              density={density}
+              busy={storeBusy === proposal.id}
+              selectable
+              batchSelectable={!proposalNeedsManualReview(proposal)}
+              selected={selectedProposalIds.has(proposal.id)}
+              batchStatus={batchConfirmById[proposal.id]}
+              onSelectedChange={(selectedProposal, selected) => onToggleSelection(selectedProposal.id, selected)}
+              onApply={onApply}
+              onSkip={onSkip}
+            />
+          ))}
+        </div>
+      </Disclosure>
+    </article>
   );
 }
 

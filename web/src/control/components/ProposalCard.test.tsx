@@ -157,6 +157,7 @@ describe("ProposalCard", () => {
 
     expect(manual).toContain("Diff geprüft");
     expect(manual).toContain("Erst Diff geprüft bestätigen.");
+    expect(manual).toContain(de.autoresearch.batchManualReviewHint);
     expect(manual).toContain("disabled");
     expect(manual).toContain(de.autoresearch.skip);
   });
