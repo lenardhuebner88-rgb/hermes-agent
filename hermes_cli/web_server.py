@@ -13266,6 +13266,14 @@ async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, obj
     return {"windows": [window.to_dict() for window in windows]}
 
 
+@app.get("/api/agent-terminals/overview")
+async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
+    try:
+        return _agent_terminal_service().overview(tail_lines=tail_lines)
+    except AgentTerminalError as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
 @app.post("/api/agent-terminals/show")
 async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:

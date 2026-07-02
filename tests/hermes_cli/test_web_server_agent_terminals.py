@@ -70,6 +70,28 @@ class FakeAgentTerminalService:
     def detach_client(self, client_id):
         assert client_id == "client1"
 
+    def overview(self, *, tail_lines=10):
+        assert tail_lines == 10
+        return {
+            "now": 1751500000,
+            "windows": [
+                {
+                    "session": "work",
+                    "window": "hermes",
+                    "active": True,
+                    "pane_id": "%1",
+                    "pid": 123,
+                    "command": "hermes",
+                    "cwd": "/home/user",
+                    "dead": False,
+                    "activity": 1751499990,
+                    "tail": "─ ready │ gpt 5.5\n❯ Try \"write a test for…\"",
+                    "state": "wartet",
+                    "state_source": "heuristic",
+                }
+            ],
+        }
+
 
 def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_fields(monkeypatch):
     monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: FakeAgentTerminalService())
@@ -79,6 +101,12 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.get("/api/agent-terminals/capabilities", headers=headers).json()["tmux_available"] is True
     assert client.get("/api/agent-terminals/sessions", headers=headers).json() == {"sessions": ["work"]}
     assert client.get("/api/agent-terminals/windows", params={"session": "work"}, headers=headers).json()["windows"][0]["window"] == "hermes"
+    overview = client.get("/api/agent-terminals/overview", headers=headers).json()
+    assert overview["now"] == 1751500000
+    assert overview["windows"][0]["window"] == "hermes"
+    assert overview["windows"][0]["state"] == "wartet"
+    assert overview["windows"][0]["state_source"] == "heuristic"
+    assert "ready" in overview["windows"][0]["tail"]
     assert client.post("/api/agent-terminals/show", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["session"] == "work"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes"

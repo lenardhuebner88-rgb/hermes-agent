@@ -26,6 +26,94 @@ _MAX_NUMBERED_WINDOWS = 9
 
 _AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi")
 
+# ----- ANSI stripping --------------------------------------------------------
+# Order matters: OSC sequences also start with ESC, so they must be stripped
+# before the generic single-ESC catch-all would otherwise mangle them.
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_ANSI_ESC_RE = re.compile(r"\x1b.")
+
+
+def strip_ansi(text: str) -> str:
+    """Strip CSI/OSC/simple ESC sequences from captured tmux pane text."""
+    text = _ANSI_OSC_RE.sub("", text)
+    text = _ANSI_CSI_RE.sub("", text)
+    text = _ANSI_ESC_RE.sub("", text)
+    return text
+
+
+# ----- agent pane classification ---------------------------------------------
+# Precedence order matches the numbered rules this function implements below;
+# do not reorder without re-checking the fixtures in test_agent_terminals.py.
+_QUESTION_YN_RE = re.compile(r"y/n", re.IGNORECASE)
+_QUESTION_ALLOW_RE = re.compile(r"\ballow\b", re.IGNORECASE)
+_QUESTION_DO_YOU_WANT_RE = re.compile(r"do you want", re.IGNORECASE)
+_QUESTION_PRESS_ENTER_RE = re.compile(r"press enter to", re.IGNORECASE)
+_QUESTION_NUMBERED_RE = re.compile(r"[❯›]\s*\d+\.")
+
+
+def _is_question_window(lines: Sequence[str], last_non_empty: str) -> bool:
+    window = "\n".join(lines)
+    if _QUESTION_YN_RE.search(window):
+        return True
+    if _QUESTION_DO_YOU_WANT_RE.search(window):
+        return True
+    if _QUESTION_ALLOW_RE.search(window):
+        return True
+    if _QUESTION_NUMBERED_RE.search(window):
+        return True
+    if _QUESTION_PRESS_ENTER_RE.search(window):
+        return True
+    return last_non_empty.rstrip().endswith("?")
+
+
+def _is_running_window(lines: Sequence[str], activity_age_s: float | None) -> bool:
+    window = "\n".join(lines)
+    if "esc to interrupt" in window.lower():
+        return True
+    if "Working (" in window:
+        return True
+    return activity_age_s is not None and activity_age_s < 15
+
+
+def _is_prompt_marker_line(line: str) -> bool:
+    stripped = line.lstrip()
+    if stripped.startswith("❯") or stripped.startswith("›"):
+        return True
+    if "│ >" in line:
+        return True
+    return "─ ready │" in line
+
+
+def classify_agent_pane(tail: str, activity_age_s: float | None, dead: bool) -> str:
+    """Heuristische Zustands-Klassifikation eines Agent-Panes.
+
+    Rückgabe: "dead" | "frage" | "laeuft" | "wartet" | "idle".
+    """
+    if dead:
+        return "dead"
+
+    lines = (tail or "").splitlines()
+    non_empty = [line for line in lines if line.strip()]
+    last_non_empty = non_empty[-1] if non_empty else ""
+    recent_window = lines[-8:]
+
+    if _is_question_window(recent_window, last_non_empty):
+        return "frage"
+
+    if _is_running_window(recent_window, activity_age_s):
+        return "laeuft"
+
+    if any(_is_prompt_marker_line(line) for line in non_empty[-3:]):
+        if activity_age_s is None or activity_age_s < 1800:
+            return "wartet"
+        return "idle"
+
+    if activity_age_s is not None and activity_age_s < 60:
+        return "laeuft"
+    return "idle"
+
+
 # Workdir allowlist: browser clients pick a key, the path is resolved here.
 # (key, German label, path parts under $HOME, window-name suffix or None)
 _WORKDIR_DEFS: tuple[tuple[str, str, tuple[str, ...], str | None], ...] = (
@@ -557,12 +645,45 @@ class TmuxAgentSessionService:
             parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead, activity
         )
 
-    def capture(self, session: str, window: str, *, start: int = -200) -> str:
+    def capture(self, session: str, window: str, *, start: int = -200, log: bool = True) -> str:
         target = self._cmd_target(session, window)
         start = max(-5000, min(0, int(start)))
         proc = self._run("capture-pane", "-p", "-t", target, "-S", str(start))
-        self._log_event("capture", session=session, window=window, lines=abs(start))
+        if log:
+            self._log_event("capture", session=session, window=window, lines=abs(start))
         return proc.stdout
+
+    def overview(self, *, tail_lines: int = 10) -> dict[str, object]:
+        """Fleet snapshot: every tmux window plus a best-effort live tail and
+        an honest heuristic state — one call for the dashboard control room.
+
+        Pane contents never reach `_log_event` (same rule as elsewhere in this
+        module); only the window count is logged.
+        """
+        now = self._now()
+        entries: list[dict[str, object]] = []
+        for window in self.list_windows():
+            tail: str | None
+            try:
+                raw = self.capture(window.session, window.window, start=-tail_lines, log=False)
+            except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+                tail = None
+            else:
+                cleaned = strip_ansi(raw)
+                lines = cleaned.splitlines()
+                # A pane whose output hasn't filled its screen yet still
+                # captures padded with blank rows down to the pane height
+                # (tmux has no scrollback to clip against) — drop that
+                # trailing padding before keeping the last tail_lines so we
+                # tail real content, not empty screen rows.
+                while lines and not lines[-1].strip():
+                    lines.pop()
+                tail = "\n".join(lines[-tail_lines:])[-600:]
+            age = (now - window.activity) if window.activity is not None else None
+            state = classify_agent_pane(tail or "", age, window.dead)
+            entries.append({**window.to_dict(), "tail": tail, "state": state, "state_source": "heuristic"})
+        self._log_event("overview", windows=len(entries))
+        return {"now": int(now), "windows": entries}
 
     def send_keys(self, session: str, window: str, text: str) -> None:
         target = self._cmd_target(session, window)

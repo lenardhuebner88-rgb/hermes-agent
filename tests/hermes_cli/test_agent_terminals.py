@@ -10,7 +10,13 @@ from collections.abc import Generator
 
 import pytest
 
-from hermes_cli.agent_terminals import CapabilityError, InvalidTarget, TmuxAgentSessionService
+from hermes_cli.agent_terminals import (
+    CapabilityError,
+    InvalidTarget,
+    TmuxAgentSessionService,
+    classify_agent_pane,
+    strip_ansi,
+)
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
@@ -539,3 +545,156 @@ def test_respawn_dead_after_rename_uses_window_option_identity(
     assert respawned.window == "my-custom-codex"
     assert respawned.pid
     assert not respawned.dead
+
+
+# ----- classify_agent_pane / strip_ansi -------------------------------------
+# Fixtures below are copied VERBATIM from real `tmux capture-pane` output on
+# the production system — do not "clean up" whitespace, it is load-bearing
+# for the prompt-marker regexes.
+
+_FIXTURE_A = (
+    "──────────────────────────────────────────────────────────────────────────\n"
+    "  [Fable 5] 30% verbraucht · 70% frei · 304k/1000k tok\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n"
+    "\n"
+    "  ● main\n"
+    "  ◯ builder  S5b Mobile-Dichte bauen             15m 13s · ↓ 283.0k tokens"
+)
+
+_FIXTURE_B = (
+    "• Model changed to gpt-5.5 xhigh for Default mode.\n"
+    "\n"
+    "\n"
+    "› Explain this codebase\n"
+    "\n"
+    "  gpt-5.5 xhigh · ~ · Main [default]"
+)
+
+_FIXTURE_C = (
+    '   MCP server "vault-qmd" connected · 6 tools (stdio)\n'
+    " ╭─────────────────────────────────────────────────────────────╮\n"
+    " │ >                                                           │\n"
+    " ╰─────────────────────────────────────────────────────────────╯\n"
+    " yolo  K2.7 Code thinking  ~/.hermes/hermes-agent  main"
+)
+
+_FIXTURE_D = (
+    " ─ ready │ gpt 5.5 │ 0 tok        ─ ….hermes/hermes-agent (main)\n"
+    ' ❯ Try "write a test for…"'
+)
+
+_FIXTURE_E = "• Working (6m 27s • esc to interrupt) · 1 background terminal running"
+
+_FIXTURE_F = "  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do differently"
+
+
+def test_strip_ansi_removes_csi_sgr_and_osc_title_sequences() -> None:
+    raw = "\x1b]0;window title\x07\x1b[1;32mgreen bold\x1b[0m plain \x1b[2Ktail"
+    assert strip_ansi(raw) == "green bold plain tail"
+
+
+def test_classify_agent_pane_dead_precedence_beats_running_signal() -> None:
+    assert classify_agent_pane(_FIXTURE_E, 0.0, True) == "dead"
+    assert classify_agent_pane(_FIXTURE_E, None, True) == "dead"
+
+
+def test_classify_agent_pane_claude_permission_question_beats_everything() -> None:
+    # "frage" is the strongest needs-me signal — it must win even paired with
+    # a running-style signal in the same tail, at any age.
+    assert classify_agent_pane(_FIXTURE_F, None, False) == "frage"
+    assert classify_agent_pane(_FIXTURE_F, 5.0, False) == "frage"
+    assert classify_agent_pane(_FIXTURE_F + "\n" + _FIXTURE_E, 5.0, False) == "frage"
+
+
+def test_classify_agent_pane_codex_working_is_laeuft_regardless_of_age() -> None:
+    assert classify_agent_pane(_FIXTURE_E, None, False) == "laeuft"
+    assert classify_agent_pane(_FIXTURE_E, 9999.0, False) == "laeuft"
+
+
+def test_classify_agent_pane_claude_subagent_fresh_activity_is_laeuft() -> None:
+    # Regel 3: activity_age_s < 15 triggers "laeuft" regardless of markers;
+    # the "◯ builder …" line alone is explicitly NOT a marker.
+    assert classify_agent_pane(_FIXTURE_A, 5.0, False) == "laeuft"
+
+
+def test_classify_agent_pane_claude_subagent_without_marker_falls_back_to_age() -> None:
+    """Fixture A has no Regel-4-Marker: neither "● main" nor "◯ builder …"
+    starts with ❯/›, contains "│ >" or "─ ready │". Without a marker, Regel 4/5
+    ("wartet"/"idle" bei vorhandenem Marker) cannot fire — only Regel 6 (reines
+    Alter) entscheidet. Ergebnis ist daher "laeuft"/"idle" je nach Alter, NICHT
+    "wartet" (die Auftrags-Fixture-Notiz nannte "wartet" für den "sonst"-Fall;
+    das ist ohne einen Marker in Fixture A nicht erreichbar — siehe Rückgabe)."""
+    assert classify_agent_pane(_FIXTURE_A, 30.0, False) == "laeuft"
+    assert classify_agent_pane(_FIXTURE_A, 300.0, False) == "idle"
+
+
+def test_classify_agent_pane_codex_prompt_wartet_then_idle_by_age() -> None:
+    assert classify_agent_pane(_FIXTURE_B, 120.0, False) == "wartet"
+    assert classify_agent_pane(_FIXTURE_B, None, False) == "wartet"
+    assert classify_agent_pane(_FIXTURE_B, 1800.0, False) == "idle"
+
+
+def test_classify_agent_pane_kimi_box_prompt_wartet_then_idle_by_age() -> None:
+    assert classify_agent_pane(_FIXTURE_C, 120.0, False) == "wartet"
+    assert classify_agent_pane(_FIXTURE_C, 5000.0, False) == "idle"
+
+
+def test_classify_agent_pane_hermes_tui_ready_wartet_then_idle_by_age() -> None:
+    assert classify_agent_pane(_FIXTURE_D, 120.0, False) == "wartet"
+    assert classify_agent_pane(_FIXTURE_D, 5000.0, False) == "idle"
+
+
+def test_classify_agent_pane_empty_tail_falls_back_to_age_only_rule() -> None:
+    assert classify_agent_pane("", 10.0, False) == "laeuft"
+    assert classify_agent_pane("", 200.0, False) == "idle"
+    assert classify_agent_pane("", None, False) == "idle"
+
+
+def test_overview_returns_tail_state_ansi_stripped_for_multiple_windows(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    _fake_agent_cli(home, "codex")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    service.ensure("claude")
+    service.ensure("codex")
+    time.sleep(0.2)
+
+    overview = service.overview(tail_lines=10)
+    assert isinstance(overview["now"], int)
+    windows = overview["windows"]
+    assert isinstance(windows, list)
+    assert len(windows) >= 2
+
+    by_window = {entry["window"]: entry for entry in windows}
+    assert {"claude", "codex"} <= set(by_window)
+    for entry in windows:
+        assert entry["state_source"] == "heuristic"
+        assert entry["state"] in {"dead", "frage", "laeuft", "wartet", "idle"}
+        assert "\x1b" not in (entry["tail"] or "")
+
+    assert "fake claude cli" in (by_window["claude"]["tail"] or "")
+    assert "fake codex cli" in (by_window["codex"]["tail"] or "")
+
+    log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
+    assert "fake claude cli" not in log
+    assert '"event": "overview"' in log
+
+
+def test_overview_capture_does_not_log_per_window_capture_events(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    service.overview()
+
+    log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
+    assert '"event": "capture"' not in log
+    assert '"event": "overview"' in log
