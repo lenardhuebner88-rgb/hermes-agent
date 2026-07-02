@@ -1,0 +1,582 @@
+"""Loop-Runner — führt Loop-Packs aus (Archetypen: pipeline | sweep).
+
+CLI:
+    python -m loops.runner --pack <name> --cmd plan|run|night|status
+                           [--state-root PFAD] [--fresh] [--skip-plan]
+
+Ein Pack (loops/packs/<name>/) beschreibt in pack.yaml WAS läuft (Phasen mit
+Engine/Modell/Timeout/Prompt, Stop-Kriterien); der Runner liefert das WIE:
+Worktree-Isolation, Datei-Queue, Ledger, deterministische Disposition
+(Retry/Revert/Bounce), Locks, Usage-Limit-Stop, Discord-Notify.
+
+Laufzeit-State: ~/.hermes/loops/<pack>/ (Override: --state-root, für Tests).
+Der Runner pusht/deployt/merged NIE — Landung ist ein bewusster Morgen-Schritt.
+
+Portiert vom bewiesenen Bash-Harness ~/.hermes/fable-loop/ (2026-07-02); die
+dort teuer gelernten Fallen sind hier Invarianten:
+  * `git clean` nur auf Driver-Ebene (guard-Hook blockt es headless in-session)
+  * Worktree-Checks über geparste Porcelain-Ausgabe (kein grep -q an
+    pipefail-Pipes — SIGPIPE-Race)
+  * Usage-/Session-Limit stoppt sofort (Regex in loops.engines)
+  * Status-Wahrheit = last-status-Datei + Git-HEAD, nie Agent-Prosa
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import re
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+
+from loops import engines
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PACKS_DIR = REPO_ROOT / "loops" / "packs"
+DEFAULT_STATE_ROOT = Path("~/.hermes/loops").expanduser()
+NOTIFY_SCRIPT = Path("~/.hermes/scripts/discord-notify.py").expanduser()
+
+QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "90-bounced")
+DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
+
+PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
+
+RETRY_RE = re.compile(r"^retry:\s*(\d+)", re.MULTILINE)
+
+
+class ManifestError(ValueError):
+    """pack.yaml ist unbrauchbar — Meldung nennt Pack und Feld."""
+
+
+@dataclass
+class PhaseCfg:
+    engine: str
+    model: str
+    timeout: int
+    prompt: str  # Dateiname relativ zum Pack-Ordner
+
+
+@dataclass
+class Pack:
+    name: str
+    type: str
+    repo: Path
+    pack_dir: Path
+    phases: dict[str, PhaseCfg]
+    stop: dict[str, int]
+    description: str = ""
+    stability: str = "experimental"
+    notify: dict[str, str] = field(default_factory=dict)
+    params: dict[str, str] = field(default_factory=dict)
+    autoland: bool = False  # v1: hart False (Design-Entscheid #8)
+
+    @property
+    def branch(self) -> str:
+        return f"loop/{self.name}"
+
+
+def load_pack(packs_dir: Path, name: str) -> Pack:
+    pack_dir = packs_dir / name
+    manifest = pack_dir / "pack.yaml"
+    if not manifest.is_file():
+        available = sorted(p.name for p in packs_dir.iterdir() if p.is_dir()) if packs_dir.is_dir() else []
+        raise ManifestError(f"Pack {name!r}: {manifest} fehlt — vorhanden: {available}")
+    try:
+        raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ManifestError(f"Pack {name!r}: pack.yaml ist kein gültiges YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ManifestError(f"Pack {name!r}: pack.yaml muss ein Mapping sein")
+
+    if raw.get("name") != name:
+        raise ManifestError(f"Pack {name!r}: name-Feld ({raw.get('name')!r}) muss dem Ordnernamen entsprechen")
+    ptype = raw.get("type")
+    if ptype not in PHASES_BY_TYPE:
+        raise ManifestError(f"Pack {name!r}: type muss pipeline|sweep sein, ist {ptype!r}")
+    repo = raw.get("repo")
+    if not isinstance(repo, str) or not repo.strip():
+        raise ManifestError(f"Pack {name!r}: repo (Pfad zum Git-Repo) fehlt")
+
+    phases_raw = raw.get("phases")
+    required = PHASES_BY_TYPE[ptype]
+    if not isinstance(phases_raw, dict) or set(phases_raw) != set(required):
+        raise ManifestError(
+            f"Pack {name!r}: type={ptype} braucht genau die Phasen {sorted(required)}, "
+            f"hat {sorted(phases_raw) if isinstance(phases_raw, dict) else phases_raw!r}"
+        )
+    phases: dict[str, PhaseCfg] = {}
+    for pname, pcfg in phases_raw.items():
+        if not isinstance(pcfg, dict):
+            raise ManifestError(f"Pack {name!r}: Phase {pname} muss ein Mapping sein")
+        missing = {"engine", "model", "timeout", "prompt"} - set(pcfg)
+        if missing:
+            raise ManifestError(f"Pack {name!r}: Phase {pname} fehlt {sorted(missing)}")
+        if pcfg["engine"] not in engines.ENGINES:
+            raise ManifestError(
+                f"Pack {name!r}: Phase {pname}: Engine {pcfg['engine']!r} unbekannt "
+                f"(registriert: {sorted(engines.ENGINES)})"
+            )
+        if not isinstance(pcfg["timeout"], int) or pcfg["timeout"] <= 0:
+            raise ManifestError(f"Pack {name!r}: Phase {pname}: timeout muss positive Ganzzahl sein")
+        prompt_file = pack_dir / str(pcfg["prompt"])
+        if not prompt_file.is_file():
+            raise ManifestError(f"Pack {name!r}: Phase {pname}: Prompt-Datei fehlt: {prompt_file}")
+        phases[pname] = PhaseCfg(
+            engine=pcfg["engine"], model=str(pcfg["model"]),
+            timeout=pcfg["timeout"], prompt=str(pcfg["prompt"]),
+        )
+
+    stop = dict(DEFAULT_STOP)
+    for key, val in (raw.get("stop") or {}).items():
+        if key not in DEFAULT_STOP:
+            raise ManifestError(f"Pack {name!r}: stop.{key} unbekannt (erlaubt: {sorted(DEFAULT_STOP)})")
+        if not isinstance(val, int) or val <= 0:
+            raise ManifestError(f"Pack {name!r}: stop.{key} muss positive Ganzzahl sein")
+        stop[key] = val
+
+    autoland = bool(raw.get("autoland", False))
+    if autoland:
+        # Design-Entscheid #8: v1 ist Review-only; Auto-Land kommt in v2 mit Schutzschienen.
+        print(f"[{name}] WARN: autoland ist in v1 deaktiviert — erzwinge false", file=sys.stderr)
+        autoland = False
+
+    params = {str(k): str(v) for k, v in (raw.get("params") or {}).items()}
+    notify = {str(k): str(v) for k, v in (raw.get("notify") or {}).items()}
+
+    return Pack(
+        name=name, type=ptype, repo=Path(repo).expanduser(), pack_dir=pack_dir,
+        phases=phases, stop=stop, description=str(raw.get("description", "")),
+        stability=str(raw.get("stability", "experimental")), notify=notify,
+        params=params, autoland=autoland,
+    )
+
+
+# ── reine Helfer (test-direkt) ───────────────────────────────────────────────
+
+def parse_retry(plan_text: str) -> int:
+    m = RETRY_RE.search(plan_text)
+    return int(m.group(1)) if m else 0
+
+
+def bump_retry(plan_path: Path) -> int:
+    """Erhöht `retry: N` (nur führende Ziffern) um 1; gibt neuen Wert zurück."""
+    text = plan_path.read_text(encoding="utf-8")
+    new = parse_retry(text) + 1
+    text = RETRY_RE.sub(f"retry: {new}", text, count=1)
+    plan_path.write_text(text, encoding="utf-8")
+    return new
+
+
+def append_section(plan_path: Path, title: str, body: str) -> None:
+    stamp = datetime.now().strftime("%F %H:%M")
+    with plan_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n## {title} ({stamp})\n{body}\n")
+
+
+def parse_worktree_paths(porcelain: str) -> list[str]:
+    return [line[len("worktree "):] for line in porcelain.splitlines() if line.startswith("worktree ")]
+
+
+def parse_overrides(path: Path) -> dict[str, str]:
+    """overrides.env: KEY=VALUE pro Zeile; #-Kommentare und Leerzeilen erlaubt."""
+    if not path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+# ── Runner ───────────────────────────────────────────────────────────────────
+
+class LoopRunner:
+    def __init__(self, pack: Pack, state_root: Path | None = None):
+        self.pack = pack
+        self.state = (state_root or DEFAULT_STATE_ROOT) / pack.name
+        self.wt = self.state / "wt"
+        self.queue = self.state / "queue"
+        self.ledger_path = self.state / "LEDGER.md"
+        self.status_path = self.state / "last-status"
+        self.stop_path = self.state / "STOP"
+        self.overrides = parse_overrides(self.state / "overrides.env")
+
+    # ── Infrastruktur ──
+    def say(self, msg: str) -> None:
+        print(f"[{self.pack.name}] {msg}", flush=True)
+
+    def ledger(self, msg: str) -> None:
+        stamp = datetime.now().strftime("%F %H:%M")
+        with self.ledger_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"- {stamp} {msg}\n")
+
+    def notify(self, msg: str) -> None:
+        channel = self.overrides.get("DISCORD_CHANNEL") or self.pack.notify.get("discord_channel", "")
+        if not channel or not NOTIFY_SCRIPT.is_file():
+            return
+        try:
+            subprocess.run(
+                ["python3", str(NOTIFY_SCRIPT), "--channel", channel, "--stdin"],
+                input=msg, encoding="utf-8", timeout=20, check=False,
+                capture_output=True,
+            )
+        except Exception:  # noqa: BLE001 — Notify ist nie lauf-kritisch
+            pass
+
+    def ensure_dirs(self) -> None:
+        for stage in QUEUE_STAGES:
+            (self.queue / stage).mkdir(parents=True, exist_ok=True)
+        (self.state / "logs").mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def locked(self):
+        """Pack-Lock + globaler Repo-Lock: nie zwei Loops aufs selbe Repo."""
+        self.state.mkdir(parents=True, exist_ok=True)
+        repo_key = hashlib.md5(str(self.pack.repo.resolve()).encode("utf-8")).hexdigest()[:8]
+        repo_lock_path = self.state.parent / f".repo-{repo_key}.lock"
+        with self.state.joinpath(".lock").open("w", encoding="utf-8") as pack_fh, \
+                repo_lock_path.open("w", encoding="utf-8") as repo_fh:
+            for fh, what in ((pack_fh, "Pack"), (repo_fh, "Repo")):
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError(f"{what}-Lock belegt — läuft schon ein Loop?") from None
+            yield
+
+    # ── Git ──
+    def git(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(cwd or self.wt), *args],
+            capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
+
+    def rev_parse(self, ref: str = "HEAD") -> str:
+        return self.git("rev-parse", ref).stdout.strip()
+
+    def ensure_wt(self, fresh: bool = False) -> None:
+        if fresh:
+            self.say("FRESH → Worktree neu von main")
+            self.git("worktree", "remove", "--force", str(self.wt), cwd=self.pack.repo)
+            self.git("branch", "-D", self.pack.branch, cwd=self.pack.repo)
+        listing = self.git("worktree", "list", "--porcelain", cwd=self.pack.repo)
+        if str(self.wt.resolve()) in parse_worktree_paths(listing.stdout):
+            return
+        self.wt.parent.mkdir(parents=True, exist_ok=True)
+        res = self.git("worktree", "add", "-B", self.pack.branch, str(self.wt), "main", cwd=self.pack.repo)
+        if res.returncode != 0:
+            raise RuntimeError(f"worktree add fehlgeschlagen: {res.stderr.strip()}")
+
+    def guard_clean(self) -> bool:
+        """Loop-exklusiven Baum deterministisch säubern (Driver-Ebene, hook-frei)."""
+        if not self.git("status", "--porcelain").stdout.strip():
+            return True
+        self.say("Worktree dirty — räume Phase-Reste auf")
+        self.git("checkout", "--", ".")
+        self.git("clean", "-fd")
+        left = self.git("status", "--porcelain").stdout.strip()
+        if left:
+            self.say(f"ABBRUCH: Worktree lässt sich nicht säubern:\n{left}")
+            return False
+        return True
+
+    def revert_range(self, prehead: str) -> bool:
+        res = self.git("revert", "--no-edit", f"{prehead}..HEAD")
+        if res.returncode != 0:
+            self.say(f"Revert fehlgeschlagen: {res.stderr.strip()}")
+            return False
+        return True
+
+    # ── Phasen ──
+    def phase_cfg(self, name: str) -> PhaseCfg:
+        cfg = self.pack.phases[name]
+        up = name.upper()
+        return PhaseCfg(
+            engine=self.overrides.get(f"PHASE_{up}_ENGINE", cfg.engine),
+            model=self.overrides.get(f"PHASE_{up}_MODEL", cfg.model),
+            timeout=int(self.overrides.get(f"PHASE_{up}_TIMEOUT", cfg.timeout)),
+            prompt=cfg.prompt,
+        )
+
+    def stop_cfg(self, key: str) -> int:
+        return int(self.overrides.get(key.upper(), self.pack.stop[key]))
+
+    def render_prompt(self, phase: str, **extra: str) -> str:
+        text = (self.pack.pack_dir / self.pack.phases[phase].prompt).read_text(encoding="utf-8")
+        params = dict(self.pack.params)
+        for key in params:
+            if key.upper() in self.overrides:
+                params[key] = self.overrides[key.upper()]
+        params_line = " ".join(f"{k.upper()}={v}" for k, v in sorted(params.items()))
+        subst = {"STATE_DIR": str(self.state), "WT": str(self.wt), "PARAMS": params_line, **extra}
+        for key, val in subst.items():
+            text = text.replace("{{" + key + "}}", str(val))
+        return text
+
+    def run_phase(self, phase: str, **extra: str) -> engines.EngineResult:
+        cfg = self.phase_cfg(phase)
+        self.say(f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}, timeout={cfg.timeout}s)")
+        self.status_path.write_text("", encoding="utf-8")
+        prompt = self.render_prompt(phase, **extra)
+        result = engines.get_engine(cfg.engine)(cfg.model, prompt, self.wt, cfg.timeout)
+        log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
+        log_file.write_text(result.output, encoding="utf-8")
+        return result
+
+    def last_status(self) -> str:
+        try:
+            return self.status_path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (FileNotFoundError, IndexError):
+            return ""
+
+    def stop_requested(self) -> bool:
+        return self.stop_path.exists()
+
+    # ── Queue-Disposition (pipeline) ──
+    def qcount(self, stage: str) -> int:
+        stage_dir = self.queue / stage
+        return len(list(stage_dir.glob("*.md"))) if stage_dir.is_dir() else 0
+
+    def pick_plan(self) -> Path | None:
+        plans = sorted((self.queue / "00-planned").glob("*.md"))
+        return plans[0] if plans else None
+
+    def handle_fail(self, plan: Path, reason: str) -> str:
+        """1 Retry (mit Feedback in der Plan-Datei), danach 90-bounced."""
+        append_section(plan, "Loop-Fail", reason)
+        if parse_retry(plan.read_text(encoding="utf-8")) >= 1:
+            target = self.queue / "90-bounced" / plan.name
+            plan.rename(target)
+            self.ledger(f"bounced: {plan.name} ({reason})")
+            return "bounced"
+        bump_retry(plan)
+        plan.rename(self.queue / "00-planned" / plan.name)
+        return "retry"
+
+    # ── Kommandos ──
+    def cmd_plan(self, fresh: bool = False) -> bool:
+        self.stop_path.unlink(missing_ok=True)
+        self.ensure_dirs()
+        self.ensure_wt(fresh=fresh)
+        if not self.guard_clean():
+            return False
+        has_web = "1" if (self.wt / "web" / "node_modules").is_dir() else "0"
+        result = self.run_phase("plan", HAS_WEB=has_web)
+        if result.usage_limit:
+            self.say("Usage-Limit im Planner — Stop.")
+            self.notify(f"{self.pack.name}: Usage-Limit beim Planen — gestoppt.")
+            return False
+        n = self.qcount("00-planned")
+        status = "TIMEOUT" if result.timed_out else self.last_status()
+        self.say(f"Planner fertig: status=[{status}], {n} Pläne in der Queue")
+        self.ledger(f"PLAN: {n} Pläne (status={status})")
+        self.notify(f"🌀 {self.pack.name} PLAN: {n} Pläne in der Queue (status={status})")
+        return True
+
+    def cmd_run(self, fresh: bool = False) -> None:
+        self.stop_path.unlink(missing_ok=True)
+        self.ensure_dirs()
+        self.ensure_wt(fresh=fresh)
+        if self.pack.type == "pipeline":
+            self._run_pipeline()
+        else:
+            self._run_sweep()
+        self.report()
+
+    def _deadline(self) -> float:
+        return time.time() + self.stop_cfg("max_hours") * 3600
+
+    def _run_pipeline(self) -> None:
+        deadline = self._deadline()
+        fails = verified = 0
+        for rnd in range(1, self.stop_cfg("max_rounds") + 1):
+            if self.stop_requested():
+                self.say("STOP-Datei — sauberes Ende.")
+                break
+            if time.time() >= deadline:
+                self.say("Wall-Clock-Deadline erreicht.")
+                break
+            if not self.guard_clean():
+                break
+            plan = self.pick_plan()
+            if plan is None:
+                self.say("Queue leer — fertig.")
+                break
+            building = self.queue / "10-building" / plan.name
+            plan.rename(building)
+            self.say(f"═══ Runde {rnd}: {building.name} ═══")
+            prehead = self.rev_parse()
+
+            build = self.run_phase("build", PLAN_PATH=str(building))
+            if build.usage_limit:
+                building.rename(self.queue / "00-planned" / building.name)
+                self.say("Usage-Limit — Stop.")
+                self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt ({verified} verified).")
+                break
+            status = "TIMEOUT" if build.timed_out else self.last_status()
+            if self.rev_parse() == prehead or not status.startswith("BUILT"):
+                self.say(f"BUILD_FAIL [{status}]")
+                if not self.guard_clean():
+                    break
+                if self.rev_parse() != prehead and not self.revert_range(prehead):
+                    break
+                self.handle_fail(building, f"build: {status or 'kein Status'}")
+                self.ledger(f"R{rnd} ❌ {building.name} build-fail: {status or '?'}")
+                fails += 1
+                if fails >= self.stop_cfg("fail_streak"):
+                    self.say("Fail-Streak — Stop für Human-Review.")
+                    self.notify(f"{self.pack.name}: {fails}× Fail in Folge — gestoppt.")
+                    break
+                continue
+
+            verify = self.run_phase("verify", PLAN_PATH=str(building), RANGE=f"{prehead}..HEAD")
+            if verify.usage_limit:
+                self.say("Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT (Plan in 10-building/).")
+                self.ledger(f"R{rnd} ⚠️ {building.name} BUILT aber UNVERIFIED (usage-limit)")
+                self.notify(f"{self.pack.name}: Usage-Limit im Verifier — {building.name} unverifiziert, gestoppt.")
+                break
+            status = "TIMEOUT" if verify.timed_out else self.last_status()
+            if not self.guard_clean():
+                break
+            if status.startswith("PASS"):
+                building.rename(self.queue / "20-verified" / building.name)
+                verified += 1
+                fails = 0
+                sha = self.rev_parse()[:9]
+                self.ledger(f"R{rnd} ✅ {building.name} verified ({sha})")
+                self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")
+            else:
+                self.say(f"VERIFY_FAIL [{status}] — revert + retry/bounce")
+                if not self.revert_range(prehead):
+                    self.notify(f"{self.pack.name}: Revert fehlgeschlagen bei {building.name} — gestoppt.")
+                    break
+                self.handle_fail(building, f"verify: {status}")
+                self.ledger(f"R{rnd} ❌ {building.name} verify-fail: {status} (reverted)")
+                self.notify(f"❌ {self.pack.name} R{rnd}: {building.name} verify-fail — {status}")
+                fails += 1
+                if fails >= self.stop_cfg("fail_streak"):
+                    self.say("Fail-Streak — Stop für Human-Review.")
+                    self.notify(f"{self.pack.name}: {fails}× Fail in Folge — gestoppt.")
+                    break
+
+    def _run_sweep(self) -> None:
+        deadline = self._deadline()
+        dry = blocked = 0
+        for rnd in range(1, self.stop_cfg("max_rounds") + 1):
+            if self.stop_requested():
+                self.say("STOP-Datei — sauberes Ende.")
+                break
+            if time.time() >= deadline:
+                self.say("Wall-Clock-Deadline erreicht.")
+                break
+            self.say(f"═══ Runde {rnd} ═══")
+            result = self.run_phase("round")
+            if result.usage_limit:
+                self.say("Usage-Limit — Stop.")
+                self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt.")
+                break
+            status = "TIMEOUT" if result.timed_out else self.last_status()
+            self.ledger(f"R{rnd} sweep status={status or '?'}")
+            if status.startswith("DRY"):
+                dry, blocked = dry + 1, 0
+            elif status.startswith("BLOCKED") or status == "TIMEOUT":
+                blocked, dry = blocked + 1, 0
+            else:
+                dry = blocked = 0
+            if dry >= self.stop_cfg("dry_rounds"):
+                self.say("DRY-Konvergenz — Stop.")
+                break
+            if blocked >= self.stop_cfg("fail_streak"):
+                self.say("Blocked-Streak — Stop für Human-Review.")
+                self.notify(f"{self.pack.name}: {blocked}× BLOCKED in Folge — gestoppt.")
+                break
+
+    def cmd_night(self, fresh: bool = False, skip_plan: bool = False) -> None:
+        if self.pack.type == "pipeline" and not skip_plan:
+            if not self.cmd_plan(fresh=fresh):
+                return
+            fresh = False  # Worktree steht jetzt
+            if self.qcount("00-planned") == 0:
+                self.say("Keine Pläne — nichts zu bauen.")
+                self.report()
+                return
+        self.cmd_run(fresh=fresh)
+
+    def report(self) -> None:
+        commits = self.git("log", "--oneline", f"main..{self.pack.branch}").stdout.strip()
+        counts = " · ".join(f"{self.qcount(s)} {s[3:]}" for s in QUEUE_STAGES) \
+            if self.pack.type == "pipeline" else "(sweep)"
+        msg = (
+            f"🌙 {self.pack.name} Bilanz: {counts}\n"
+            f"Commits (main..{self.pack.branch}):\n{commits or '—'}\n"
+            f"Landung: Morgen-Review (Design-Doc → Landung)."
+        )
+        self.say(msg)
+        self.notify(msg)
+
+    def cmd_status(self) -> None:
+        print(f"{self.pack.name} [{self.pack.type}/{self.pack.stability}] @ {self.state}")
+        if self.pack.type == "pipeline":
+            print("  Queue: " + " · ".join(f"{self.qcount(s)} {s}" for s in QUEUE_STAGES))
+        branch = self.git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() if self.wt.is_dir() else ""
+        print(f"  Worktree: {self.wt} ({branch or 'fehlt'})")
+        if branch:
+            for line in self.git("log", "--oneline", f"main..{self.pack.branch}").stdout.splitlines():
+                print(f"    {line}")
+        if self.stop_path.exists():
+            print("  ⚠️ STOP-Datei gesetzt")
+        if self.ledger_path.is_file():
+            tail = self.ledger_path.read_text(encoding="utf-8").splitlines()[-8:]
+            print("  Ledger (letzte 8):")
+            for line in tail:
+                print(f"  {line}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Loop-Runner (pipeline|sweep Packs)")
+    parser.add_argument("--pack", required=True)
+    parser.add_argument("--cmd", required=True, choices=["plan", "run", "night", "status"])
+    parser.add_argument("--state-root", type=Path, default=None)
+    parser.add_argument("--packs-dir", type=Path, default=PACKS_DIR)
+    parser.add_argument("--fresh", action="store_true", help="Worktree neu von main ziehen")
+    parser.add_argument("--skip-plan", action="store_true", help="night: Planungsphase überspringen")
+    args = parser.parse_args(argv)
+
+    try:
+        pack = load_pack(args.packs_dir, args.pack)
+    except ManifestError as exc:
+        print(f"MANIFEST-FEHLER: {exc}", file=sys.stderr)
+        return 2
+
+    runner = LoopRunner(pack, state_root=args.state_root)
+    if args.cmd == "status":
+        runner.cmd_status()
+        return 0
+    try:
+        with runner.locked():
+            runner.say(f"START cmd={args.cmd} {datetime.now().strftime('%F %H:%M:%S')}")
+            if args.cmd == "plan":
+                runner.cmd_plan(fresh=args.fresh)
+            elif args.cmd == "run":
+                runner.cmd_run(fresh=args.fresh)
+            else:
+                runner.cmd_night(fresh=args.fresh, skip_plan=args.skip_plan)
+            runner.say(f"ENDE cmd={args.cmd}")
+    except RuntimeError as exc:
+        print(f"ABBRUCH: {exc}", file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

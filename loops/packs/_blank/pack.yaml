@@ -1,0 +1,32 @@
+# _blank — Kopiervorlage für neue Loop-Packs.
+#
+# Neues Pack anlegen:
+#   cp -r loops/packs/_blank loops/packs/<name>   # name: kebab-case, = name-Feld unten
+#   pack.yaml + Prompt(s) anpassen, dann:
+#   python -m loops.runner --pack <name> --cmd status
+#
+# Archetypen:
+#   sweep    — EINE round-Phase pro Runde: finden + fixen + committen (Kimi-Muster).
+#              Rundenstatus in {{STATE_DIR}}/last-status: DRY (nichts gefunden),
+#              BLOCKED <grund>, oder freier Erfolgsstatus.
+#   pipeline — Phasen plan/build/verify mit Datei-Queue (siehe builder-reviewer).
+name: _blank
+type: sweep
+description: Kopiervorlage — eine Runde = ein Fund fixen, mit Gate und Commit
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: claude            # Engines: siehe loops/engines/ (claude, …)
+    model: claude-sonnet-5
+    timeout: 2400
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 12              # harte Rundengrenze
+  max_hours: 7                # Wall-Clock-Deadline
+  fail_streak: 2              # Stop nach N BLOCKED/Fails in Folge
+  dry_rounds: 2               # Stop nach N DRY-Runden in Folge (konvergiert)
+params: {}                    # frei; landet als KEY=VALUE in {{PARAMS}} im Prompt
+notify:
+  discord_channel: ""         # leer = keine Discord-Meldungen
+autoland: false               # v1: immer false (Landung = Morgen-Review)
