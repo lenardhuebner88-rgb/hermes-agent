@@ -13,7 +13,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -21,6 +21,8 @@ from hermes_cli.config import get_hermes_home
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
+_TRAILING_NUMBER_RE = re.compile(r"-\d+$")
+_MAX_NUMBERED_WINDOWS = 9
 
 _AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi")
 
@@ -292,12 +294,19 @@ class TmuxAgentSessionService:
 
     @staticmethod
     def _identity_from_window(window: str) -> tuple[str, str]:
-        """Map a dashboard-managed window name back to (kind, workdir key)."""
+        """Map a dashboard-managed window name back to (kind, workdir key).
+
+        `create_new` numbers collisions as `{base}-2`, `{base}-3`, … — strip a
+        trailing `-<digits>` suffix before matching so those windows still
+        resolve. Workdir suffixes (agent/fo/orch) never end in digits, so the
+        strip is unambiguous.
+        """
+        base = _TRAILING_NUMBER_RE.sub("", window)
         for kind in _AGENT_KINDS:
-            if window == kind:
+            if base == kind:
                 return kind, "home"
-            if window.startswith(f"{kind}-"):
-                suffix = window[len(kind) + 1 :]
+            if base.startswith(f"{kind}-"):
+                suffix = base[len(kind) + 1 :]
                 key = _WORKDIR_KEY_BY_SUFFIX.get(suffix)
                 if key:
                     return kind, key
@@ -378,20 +387,8 @@ class TmuxAgentSessionService:
         return self._run("list-panes", "-t", target, "-F", "#{window_name}", check=False).returncode == 0
 
     # ----- lifecycle / IO -------------------------------------------------
-    def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
-        kind = self.validate_name(kind, field="kind")
-        if kind not in _AGENT_KINDS:
-            raise InvalidTarget(f"unknown agent kind: {kind}")
-        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
-            raise InvalidTarget(f"unknown workdir: {workdir!r}")
-        workdir_key = workdir or "home"
-        # Attach path first: an existing window stays reachable even if the
-        # CLI binary or workdir is currently unresolvable.
-        window = self.window_name_for(kind, workdir_key)
-        if self.window_exists("work", window):
-            self._log_event("ensure_existing", kind=kind, session="work", window=window)
-            return self.show("work", window)
-        definition = self.definition_for(kind, workdir_key)
+    def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
+        """Create a tmux window from a resolved definition and return it."""
         if not definition.argv:
             raise CapabilityError(f"baseline window {definition.session}:{definition.window} is missing")
         if definition.session not in self.list_sessions():
@@ -411,8 +408,59 @@ class TmuxAgentSessionService:
             *env_args,
             shlex.join(definition.argv),
         )
-        self._log_event("ensure_created", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
         return self.show(definition.session, definition.window)
+
+    def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+        kind = self.validate_name(kind, field="kind")
+        if kind not in _AGENT_KINDS:
+            raise InvalidTarget(f"unknown agent kind: {kind}")
+        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
+            raise InvalidTarget(f"unknown workdir: {workdir!r}")
+        workdir_key = workdir or "home"
+        # Attach path first: an existing window stays reachable even if the
+        # CLI binary or workdir is currently unresolvable.
+        window = self.window_name_for(kind, workdir_key)
+        if self.window_exists("work", window):
+            self._log_event("ensure_existing", kind=kind, session="work", window=window)
+            return self.show("work", window)
+        definition = self.definition_for(kind, workdir_key)
+        result = self._spawn_window(definition)
+        self._log_event("ensure_created", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        return result
+
+    def create_new(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+        """Always create a fresh window, never reuse an existing one.
+
+        Unlike `ensure` (get-or-create), a collision with the base window
+        name is resolved by numbering: `{base}-2`, `{base}-3`, … up to
+        `_MAX_NUMBERED_WINDOWS`.
+        """
+        kind = self.validate_name(kind, field="kind")
+        if kind not in _AGENT_KINDS:
+            raise InvalidTarget(f"unknown agent kind: {kind}")
+        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
+            raise InvalidTarget(f"unknown workdir: {workdir!r}")
+        workdir_key = workdir or "home"
+        base_name = self.window_name_for(kind, workdir_key)
+        window_name = base_name
+        if self.window_exists("work", window_name):
+            window_name = None
+            for suffix in range(2, _MAX_NUMBERED_WINDOWS + 1):
+                candidate = f"{base_name}-{suffix}"
+                if not self.window_exists("work", candidate):
+                    window_name = candidate
+                    break
+            if window_name is None:
+                raise CapabilityError(
+                    f"too many open {base_name!r} windows (max {_MAX_NUMBERED_WINDOWS}); "
+                    "close one before creating another"
+                )
+        definition = self.definition_for(kind, workdir_key)
+        if window_name != definition.window:
+            definition = replace(definition, window=window_name)
+        result = self._spawn_window(definition)
+        self._log_event("create_new", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        return result
 
     def respawn_dead(self, session: str, window: str) -> TmuxWindow:
         """Kill a dead agent pane and recreate its window — never live processes."""
@@ -422,10 +470,15 @@ class TmuxAgentSessionService:
         kind, workdir_key = self._identity_from_window(info.window)
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
-        self.definition_for(kind, workdir_key)
+        definition = self.definition_for(kind, workdir_key)
+        # Recreate under the SAME name: a dead `claude-2` kommt als `claude-2`
+        # zurück — ensure() würde stattdessen still das lebende Basis-Fenster
+        # zurückgeben und das nummerierte Fenster verschwinden lassen.
+        if definition.window != info.window:
+            definition = replace(definition, window=info.window)
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
-        return self.ensure(kind, workdir_key)
+        return self._spawn_window(definition)
 
     def kill_dead(self, session: str, window: str) -> None:
         """Remove a dead pane's window — guarded so live sessions cannot be killed."""

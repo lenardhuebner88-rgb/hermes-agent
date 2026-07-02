@@ -13278,6 +13278,14 @@ async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, ob
         raise _agent_terminal_error(exc) from exc
 
 
+@app.post("/api/agent-terminals/create")
+async def agent_terminal_create(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
+    try:
+        return {"window": _agent_terminal_service().create_new(req.kind, req.workdir).to_dict()}
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+
 @app.post("/api/agent-terminals/respawn")
 async def agent_terminal_respawn(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:

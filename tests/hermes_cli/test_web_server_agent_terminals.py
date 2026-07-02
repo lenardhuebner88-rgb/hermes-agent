@@ -33,6 +33,11 @@ class FakeAgentTerminalService:
         assert workdir in (None, "hermes-agent")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
 
+    def create_new(self, kind, workdir=None):
+        assert kind == "hermes"
+        assert workdir in (None, "hermes-agent")
+        return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes-2"})
+
     def respawn_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
@@ -73,6 +78,8 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/show", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["session"] == "work"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes"
+    assert client.post("/api/agent-terminals/create", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes-2"
+    assert client.post("/api/agent-terminals/create", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes-2"
     assert client.post("/api/agent-terminals/respawn", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
