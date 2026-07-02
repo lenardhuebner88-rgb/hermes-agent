@@ -60,3 +60,4 @@ def get_engine(name: str) -> Callable:
 from . import claude_cli  # noqa: E402,F401
 from . import kimi_cli  # noqa: E402,F401
 from . import codex_cli  # noqa: E402,F401
+from . import hermes_profile  # noqa: E402,F401

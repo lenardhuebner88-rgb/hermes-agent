@@ -14,6 +14,11 @@ engines:
   codex:
     label: "Codex (ChatGPT-Abo)"
     models: [gpt-5.5, gpt-5.3-codex]
+  hermes:
+    # "Modell" = Hermes-PROFIL; das Profil trägt die Provider-/Modell-Bindung.
+    # reviewer → glm-5.2 @ NeuralWatt · coder → Codex-Pool (live verifiziert 2026-07-02).
+    label: "Hermes-Profil (NeuralWatt/Codex-Pool via Abo)"
+    models: [reviewer, coder]
   neuralwatt:
-    label: "NeuralWatt (Abo) — geplant, kein Adapter"
+    label: "NeuralWatt (Abo) — erreichbar via Engine hermes, Profil reviewer"
     models: []

@@ -14,8 +14,57 @@ from loops.engines import claude_cli, codex_cli, kimi_cli
 
 def test_registry_contains_claude_and_rejects_unknown():
     assert "claude" in engines.ENGINES
+    assert "hermes" in engines.ENGINES
     with pytest.raises(KeyError, match="warpantrieb"):
         engines.get_engine("warpantrieb")
+
+
+def test_hermes_profile_builds_oneshot_command_with_sandbox(monkeypatch, tmp_path):
+    from loops.engines import hermes_profile
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["cwd"] = kwargs.get("cwd")
+        seen["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Antwort", stderr="")
+
+    monkeypatch.setattr(hermes_profile.subprocess, "run", fake_run)
+    result = hermes_profile.run("reviewer", "sag OK", tmp_path, 60)
+    assert result.rc == 0 and result.output == "Antwort"
+    cmd = seen["cmd"]
+    assert cmd[0].endswith("hermes")
+    assert cmd[cmd.index("-p") + 1] == "reviewer"  # "model" = Hermes-PROFIL
+    assert cmd[cmd.index("-z") + 1] == "sag OK"
+    assert seen["cwd"] == str(tmp_path)
+    # kanban.db ist bewusst profil-übergreifend → Sandbox-Mode ist Pflicht
+    assert seen["env"]["HERMES_SANDBOX_MODE"] == "1"
+
+
+def test_hermes_profile_codex_quota_wortlaut_is_usage_limit(monkeypatch, tmp_path):
+    from loops.engines import hermes_profile
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="",
+            stderr="hermes -z: agent failed: Codex provider quota exhausted (429); retry after 1200s.",
+        )
+
+    monkeypatch.setattr(hermes_profile.subprocess, "run", fake_run)
+    result = hermes_profile.run("coder", "x", tmp_path, 60)
+    assert result.usage_limit is True
+
+
+def test_hermes_profile_timeout_maps_to_timed_out(monkeypatch, tmp_path):
+    from loops.engines import hermes_profile
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60, output=b"teil", stderr=None)
+
+    monkeypatch.setattr(hermes_profile.subprocess, "run", fake_run)
+    result = hermes_profile.run("reviewer", "x", tmp_path, 60)
+    assert result.timed_out is True and result.rc == 124
 
 
 @pytest.mark.parametrize(
