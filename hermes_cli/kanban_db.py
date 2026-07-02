@@ -20392,13 +20392,16 @@ def _resolve_worker_cli_toolsets(
                     toolsets.append(toolset)
         finally:
             reset_hermes_home_override(token)
-        if Path(hermes_home).name == "reviewer":
-            # Reviewer workers are a verdict-only lane: they judge submitted
+        if Path(hermes_home).name in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES:
+            # Verdict-only lanes (reviewer, critic, ...) judge submitted
             # evidence and write a verdict, but must not run commands, inspect
             # arbitrary files, execute code, or delegate. Profile config can
             # still drift (for example via ``toolsets: [hermes-cli]``), so keep
-            # a dispatcher-side backstop that pins reviewer Kanban workers to
-            # the lifecycle/verdict surface only.
+            # a dispatcher-side backstop that pins these Kanban workers to the
+            # lifecycle/verdict surface only. Sourced from the same set the
+            # claude-cli path uses (``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES``)
+            # so a lane flip (e.g. critic -> worker_runtime hermes) can't lose
+            # its cage by only being known to one of the two spawn paths.
             return ["kanban"]
         scope_contract = task.scope_contract if task else None
         denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
