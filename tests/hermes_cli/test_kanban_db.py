@@ -2781,6 +2781,18 @@ def test_branch_name_requires_worktree_workspace(kanban_home):
         )
 
 
+def test_build_worker_context_includes_knowledge_pointers(kanban_home):
+    """build_worker_context must include the static knowledge-pointer section
+    so workers know where to look for model-landscape and canonical facts."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="test knowledge pointers")
+        ctx = kb.build_worker_context(conn, tid)
+
+    assert "Knowledge pointers" in ctx
+    assert "/home/piet/llm-wiki/wiki/models/model-landscape.md" in ctx
+    assert "/home/piet/vault/00-Canon/" in ctx
+
+
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------
