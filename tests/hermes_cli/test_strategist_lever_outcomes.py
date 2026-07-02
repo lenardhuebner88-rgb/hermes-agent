@@ -645,6 +645,18 @@ def test_stale_metrics_with_iso_generated_at_regression(board_home, tmp_path):
     assert rec.get("stale_metrics") is True
 
 
+def test_verdict_resolves_fully_qualified_flat_metric_key():
+    """Echte geflattete Pfade (autonomy.autonomy_pct etc.) müssen via
+    Basename-Fallback auf die Richtungs-Map aufgelöst werden — sonst wären
+    4 von 5 Kern-Metriken immer 'unknown' (Regression)."""
+    assert strategist._compute_verdict(2.0, "autonomy.autonomy_pct") == "improved"
+    assert strategist._compute_verdict(3.0, "escalation_rate.escalations_per_week") == "worsened"
+    assert strategist._compute_verdict(1.0, "green_gate_streak.streak") == "improved"
+    assert strategist._compute_verdict(-2.0, "green_gate_streak.fail_nights") == "improved"
+    assert strategist._compute_verdict(-0.01, "cost_per_task.recent_avg_cost_per_task") == "improved"
+    assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unknown"
+
+
 def test_unparseable_generated_at_measures_without_flag(board_home, tmp_path):
     """Unparsebares generated_at → Messung läuft durch, stale-Flag wird nur übersprungen."""
     now_ts = int(time.time())

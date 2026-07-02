@@ -1335,6 +1335,10 @@ def _compute_verdict(delta_val: float, metric_key: str) -> str:
     ↓ is better.  Unknown keys yield ``"unknown"`` regardless of direction.
     """
     direction = _VERDICT_DIRECTION.get(metric_key)
+    if direction is None and "." in metric_key:
+        # Geflattete Pfade sind voll qualifiziert (autonomy.autonomy_pct);
+        # die Richtungs-Map kennt die Kurz-Keys — Basename-Fallback.
+        direction = _VERDICT_DIRECTION.get(metric_key.rsplit(".", 1)[-1])
     if direction is None:
         return "unknown"
     if abs(delta_val) < 1e-9:
