@@ -169,9 +169,9 @@ def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(
 
     live = service.ensure("claude")
     assert live.window == "claude"
-    with pytest.raises(CapabilityError, match="live process"):
+    with pytest.raises(CapabilityError, match="not marked dead"):
         service.respawn_dead("work", "claude")
-    with pytest.raises(CapabilityError, match="live process"):
+    with pytest.raises(CapabilityError, match="not marked dead"):
         service.kill_dead("work", "claude")
 
     # Dead pane: remain-on-exit keeps the window around after the process exits.
@@ -196,3 +196,66 @@ def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(
         service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sh -c 'exit 0'")
         time.sleep(0.3)
         service.respawn_dead("work", "scratch-thing")
+
+
+def _patch_display_message(
+    monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> list[tuple[str, ...]]:
+    """Force `show()`'s display-message call to return a crafted, tab-separated
+    line (the real tmux output format) while every other tmux invocation still
+    runs against the live socket. Returns the list of recorded `_run` calls so
+    callers can assert kill-window was (not) reached."""
+    calls: list[tuple[str, ...]] = []
+    real_run = TmuxAgentSessionService._run
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args and args[0] == "display-message":
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    return calls
+
+
+def test_respawn_and_kill_refuse_unparsable_pid_when_pane_not_marked_dead(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane whose pid field tmux can't be trusted to parse (blank/injected
+    text) must still be refused if pane_dead never flipped to 1 — dead must be
+    decided by the pane_dead flag, not by whether pid parsed as an int."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t{home}\n"
+    calls = _patch_display_message(monkeypatch, stdout)
+
+    with pytest.raises(CapabilityError, match="not marked dead"):
+        service.respawn_dead("work", "claude")
+    with pytest.raises(CapabilityError, match="not marked dead"):
+        service.kill_dead("work", "claude")
+
+    assert not any(call and call[0] == "kill-window" for call in calls)
+
+
+def test_kill_dead_kills_when_pane_dead_flag_set_even_with_pid_present(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pane_dead=1 is authoritative: a stale/racy pid field must not block the
+    kill once tmux itself has flagged the pane dead."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t{home}\n"
+    calls = _patch_display_message(monkeypatch, stdout)
+
+    service.kill_dead("work", "claude")
+
+    assert any(call and call[0] == "kill-window" for call in calls)
+    assert not service.window_exists("work", "claude")

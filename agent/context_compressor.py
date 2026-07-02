@@ -179,7 +179,7 @@ _MAX_TAIL_MESSAGE_FLOOR = 8
 
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
-_SUMMARY_SIGNAL_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{3,}")
+_SUMMARY_SIGNAL_TOKEN_RE = re.compile(r"[\w./:-]{3,}")
 _SUMMARY_SIGNAL_STOPWORDS = frozenset(
     {
         "about",

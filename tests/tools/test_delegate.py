@@ -140,6 +140,13 @@ class TestDelegateRequirements(unittest.TestCase):
 
 
 class TestChildSystemPrompt(unittest.TestCase):
+    def test_standing_brief_defers_to_workspace_path(self):
+        """Bullet 1 hardcodes the Hermes checkout path, but a WORKSPACE PATH
+        section (appended later for tasks targeting other repos, e.g.
+        family-organizer) must be the acknowledged source of truth."""
+        self.assertIn("WORKSPACE PATH", _STANDING_BRIEF)
+        self.assertIn("wins", _STANDING_BRIEF)
+
     def test_goal_only(self):
         prompt = _build_child_system_prompt("Fix the tests")
         self.assertIn("Fix the tests", prompt)

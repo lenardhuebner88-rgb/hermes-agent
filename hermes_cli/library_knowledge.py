@@ -360,9 +360,9 @@ def _split_vault_plan_frontmatter(raw: str, *, rel: str) -> Optional[tuple[dict[
         if lines[idx].strip() != "---":
             continue
         fm_text = "\n".join(lines[1:idx])
-        try:
-            import yaml
+        import yaml
 
+        try:
             data = yaml.safe_load(fm_text)
         except Exception as exc:
             logger.warning(

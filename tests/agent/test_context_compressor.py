@@ -8,6 +8,7 @@ from agent.context_compressor import (
     ContextCompressor,
     HISTORICAL_TASK_HEADING,
     SUMMARY_PREFIX,
+    _tokenize_summary_signal,
 )
 
 
@@ -62,6 +63,16 @@ class TestUpdateFromResponse:
     def test_missing_fields_default_zero(self, compressor):
         compressor.update_from_response({})
         assert compressor.last_prompt_tokens == 0
+
+
+class TestTokenizeSummarySignal:
+    def test_umlaut_word_tokenizes_correctly(self):
+        """German terms with umlauts (\\w is a superset of the old ASCII-only
+        class) must survive tokenization intact rather than getting split at
+        the umlaut."""
+        terms = _tokenize_summary_signal("Vorschläge prüfen")
+        assert "vorschläge" in terms
+        assert "prüfen" in terms
 
 
 class TestSerializeForSummaryRelevanceTruncation:

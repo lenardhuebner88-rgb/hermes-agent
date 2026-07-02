@@ -53,7 +53,7 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
 )
 
 _STANDING_BRIEF = """STANDING BRIEF:
-- Hermes checkout: /home/piet/.hermes/hermes-agent; venv .venv; run tests via scripts/run_tests.sh.
+- Hermes checkout (only when the task targets it): /home/piet/.hermes/hermes-agent; venv .venv; tests via scripts/run_tests.sh. If a WORKSPACE PATH section appears below, that path is the task's working root and wins.
 - Canonical facts are read-only under /home/piet/vault/00-Canon/.
 - Evidence before claims: say "green" or "done" only with the command run and quoted output.
 - Return distilled conclusions with file:line evidence; do not paste raw dumps.

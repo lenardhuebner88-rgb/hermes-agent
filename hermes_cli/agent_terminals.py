@@ -417,8 +417,8 @@ class TmuxAgentSessionService:
     def respawn_dead(self, session: str, window: str) -> TmuxWindow:
         """Kill a dead agent pane and recreate its window — never live processes."""
         info = self.show(session, window)
-        if info.pid and not info.dead:
-            raise CapabilityError(f"window {session}:{window} has a live process; refusing respawn")
+        if not info.dead:
+            raise CapabilityError(f"window {session}:{window} is not marked dead; refusing respawn")
         kind, workdir_key = self._identity_from_window(info.window)
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
@@ -430,8 +430,8 @@ class TmuxAgentSessionService:
     def kill_dead(self, session: str, window: str) -> None:
         """Remove a dead pane's window — guarded so live sessions cannot be killed."""
         info = self.show(session, window)
-        if info.pid and not info.dead:
-            raise CapabilityError(f"window {session}:{window} has a live process; refusing kill")
+        if not info.dead:
+            raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("kill_dead", session=session, window=window)
 

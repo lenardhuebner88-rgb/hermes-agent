@@ -11330,8 +11330,10 @@ def promote_task(
 
     Mirrors the automatic promotion done by ``recompute_ready`` but
     drives it from a deliberate operator action with an audit-trail
-    entry. Refuses to promote if any parent dep is not ``done`` unless
-    ``force=True``. Does NOT change
+    entry. Refuses to promote if any parent dep is not ``done``. A
+    ``blocked`` task with unsatisfied parent deps is NEVER promotable,
+    not even with ``force=True`` — force only overrides the dependency
+    check for a ``todo`` task. Does NOT change
     assignee or claim state. Returns ``(True, None)`` on success and
     ``(False, reason)`` if refused. ``dry_run=True`` validates the
     promotion would succeed without mutating state.
@@ -11362,7 +11364,9 @@ def promote_task(
     if unsatisfied and cur_status == "blocked":
         return False, (
             f"dependency wait: unsatisfied parent dependencies: "
-            f"{', '.join(unsatisfied)}"
+            f"{', '.join(unsatisfied)} "
+            f"(blocked tasks cannot be force-promoted; finish the parent "
+            f"task or respec this task)"
         )
     if unsatisfied and not force:
         return False, (
