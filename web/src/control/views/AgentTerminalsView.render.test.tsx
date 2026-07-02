@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import type { AgentTerminalCapabilityState, AgentTerminalWindow } from "@/lib/api";
+import type { AgentTerminalCapabilityState, AgentTerminalOverviewResponse, AgentTerminalWindow } from "@/lib/api";
 
 // Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
 // waitFor-Default-Timeout (1s) zurück — Timeout hochsetzen, um das Gate-Flake zu härten.
@@ -15,6 +15,9 @@ const apiMock = {
   createAgentTerminalWindow: vi.fn(),
   respawnAgentTerminalWindow: vi.fn(),
   killDeadAgentTerminalWindow: vi.fn(),
+  renameAgentTerminalWindow: vi.fn(),
+  getAgentTerminalOverview: vi.fn(),
+  sendAgentTerminalKeys: vi.fn(),
   getSkills: vi.fn(),
   getToolsets: vi.fn(),
   getControlOverviewHealth: vi.fn(),
@@ -92,6 +95,56 @@ const windows: AgentTerminalWindow[] = [
   { session: "hermes-agents", window: "claude", active: false, pane_id: "%3", pid: null, command: "", cwd: null, dead: true },
 ];
 
+// Echtes Response-Shape von GET /api/agent-terminals/overview (TmuxAgentSessionService.overview()
+// in hermes_cli/agent_terminals.py): now = Unix-Sekunden, tail = ANSI-bereinigte letzte Zeilen.
+const overviewFixture: AgentTerminalOverviewResponse = {
+  now: 1783025500,
+  windows: [
+    {
+      session: "hermes-agents",
+      window: "hermes",
+      active: true,
+      pane_id: "%1",
+      pid: 111,
+      command: "hermes",
+      cwd: "/home/piet",
+      dead: false,
+      activity: 1783025480,
+      tail: "Working (5s · esc to interrupt)\n▌ Analysiere PlanSpec …",
+      state: "laeuft",
+      state_source: "heuristic",
+    },
+    {
+      session: "hermes-agents",
+      window: "codex",
+      active: false,
+      pane_id: "%2",
+      pid: 222,
+      command: "node",
+      cwd: "/home/piet/.hermes/hermes-agent",
+      dead: false,
+      activity: 1783020000,
+      tail: "Allow this action? (y/n)",
+      state: "frage",
+      state_source: "heuristic",
+    },
+    {
+      session: "hermes-agents",
+      window: "claude",
+      active: false,
+      pane_id: "%3",
+      pid: null,
+      command: "",
+      cwd: null,
+      dead: true,
+      activity: 1783000000,
+      tail: null,
+      state: "dead",
+      state_source: "heuristic",
+    },
+  ],
+};
+
 async function loadView() {
   const module = await import("./AgentTerminalsView");
   return module.AgentTerminalsView;
@@ -162,6 +215,9 @@ beforeEach(() => {
   apiMock.getAgentTerminalWindows.mockResolvedValue({ windows });
   apiMock.ensureAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
   apiMock.createAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
+  apiMock.getAgentTerminalOverview.mockResolvedValue(overviewFixture);
+  apiMock.sendAgentTerminalKeys.mockResolvedValue({ ok: true });
+  apiMock.renameAgentTerminalWindow.mockResolvedValue({ window: windows[0] });
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -398,5 +454,75 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
     await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
+  });
+
+  it("renames the active window from the session sheet and refreshes the window list", async () => {
+    installDom(true);
+    apiMock.renameAgentTerminalWindow.mockResolvedValue({
+      window: { session: "hermes-agents", window: "hermes-2", active: true, pane_id: "%1", pid: 111, command: "hermes", cwd: "/home/piet" },
+    });
+    await renderView();
+
+    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    fireEvent.click(activeChip);
+
+    const input = (await screen.findByLabelText("Neuer Fenstername")) as HTMLInputElement;
+    expect(input.value).toBe("hermes");
+    fireEvent.change(input, { target: { value: "hermes-2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Umbenennen" }));
+
+    await waitFor(() => expect(apiMock.renameAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", "hermes-2"));
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows the fleet overview toggle in the chip strip and renders cards from the fetched overview", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Flotten-Übersicht" }));
+    await waitFor(() => expect(apiMock.getAgentTerminalOverview).toHaveBeenCalled());
+
+    expect(await screen.findByText("Braucht dich")).toBeTruthy();
+    expect(screen.getByText("Läuft")).toBeTruthy();
+    expect(screen.getByText("Tot")).toBeTruthy();
+    expect(screen.getByText(/Allow this action\?/)).toBeTruthy();
+    expect(screen.getByText("Zustände: Heuristik aus Terminal-Ausgabe")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal-Ansicht" }));
+    expect(screen.queryByText("Zustände: Heuristik aus Terminal-Ausgabe")).toBeNull();
+  });
+
+  it("jumps back into the terminal view when a fleet card is tapped outside broadcast mode", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Flotten-Übersicht" }));
+    const codexCard = await screen.findByText(/Allow this action\?/);
+    fireEvent.click(codexCard);
+
+    expect(screen.queryByText("Zustände: Heuristik aus Terminal-Ausgabe")).toBeNull();
+    expect(screen.getAllByText("hermes-agents:codex").length).toBeGreaterThan(0);
+  });
+
+  it("requires a confirmation step before broadcasting to selected sessions", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Flotten-Übersicht" }));
+    await screen.findByText("Braucht dich");
+    fireEvent.click(screen.getByRole("button", { name: "Senden an mehrere" }));
+
+    // Nur lebende Karten sind auswählbar — Klick auf die "laeuft"-Karte selektiert sie.
+    fireEvent.click(screen.getByText("Läuft"));
+
+    const textarea = screen.getByLabelText("Text an mehrere Terminals senden");
+    fireEvent.change(textarea, { target: { value: "status" } });
+    fireEvent.click(screen.getByRole("button", { name: "An 1 senden" }));
+
+    expect(await screen.findByText("Wirklich an 1 Sessions senden?")).toBeTruthy();
+    expect(apiMock.sendAgentTerminalKeys).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ja" }));
+    await waitFor(() => expect(apiMock.sendAgentTerminalKeys).toHaveBeenCalledWith("hermes-agents", "hermes", "status\r"));
   });
 });
