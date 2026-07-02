@@ -1682,3 +1682,116 @@ def test_default_scope_contract_anti_scope_includes_parent_negation_line():
     rendered = decomp._render_scope_contract_yaml(contract)
     assert "anti_scope:" in rendered
     assert "no unrelated cleanup" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Codex review of ad9cbe8f1 — negation-only paths must not leak into
+# allowed_paths; LLM-authored contracts must get anti_scope backfilled.
+# ---------------------------------------------------------------------------
+
+def test_allowed_paths_excludes_negation_only_path():
+    """T1: a path that ONLY appears in a NEVER: line must not be granted in
+    allowed_paths, even though the same negation line surfaces in anti_scope."""
+    parent = _task_stub(
+        "t_parent",
+        "NEVER: touch /home/piet/.hermes/config.yaml — read only.",
+    )
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    scope = contract["scope_contract"]
+    assert "/home/piet/.hermes/config.yaml" not in scope["allowed_paths"]
+    assert any(
+        "NEVER: touch /home/piet/.hermes/config.yaml" in line
+        for line in scope["anti_scope"]
+    )
+
+
+def test_allowed_paths_keeps_path_mentioned_both_positively_and_negated():
+    """T2: a path mentioned BOTH positively and in a NEVER: line stays in
+    allowed_paths — the prohibition remains visible via anti_scope."""
+    parent = _task_stub(
+        "t_parent",
+        "Read /home/piet/.hermes/config.yaml for context.\n"
+        "NEVER: touch /home/piet/.hermes/config.yaml — read only.",
+    )
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    scope = contract["scope_contract"]
+    assert "/home/piet/.hermes/config.yaml" in scope["allowed_paths"]
+    assert any(
+        "NEVER: touch /home/piet/.hermes/config.yaml" in line
+        for line in scope["anti_scope"]
+    )
+
+
+def test_allowed_paths_excludes_negation_only_tilde_path():
+    """T3: same rule for ~/-style paths."""
+    parent = _task_stub(
+        "t_parent",
+        "NEVER: touch ~/.hermes/config.yaml — read only.",
+    )
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    scope = contract["scope_contract"]
+    assert "~/.hermes/config.yaml" not in scope["allowed_paths"]
+    assert any(
+        "NEVER: touch ~/.hermes/config.yaml" in line for line in scope["anti_scope"]
+    )
+
+
+def test_normalize_backfills_missing_anti_scope_on_llm_contract():
+    """T4a: an LLM-authored scope_contract block without anti_scope gets the
+    static defaults + parent negation lines backfilled on normalization."""
+    parent = _task_stub(
+        "t_parent",
+        "NEVER: touch /home/piet/.hermes/config.yaml — read only.",
+    )
+    child = {
+        "title": "build",
+        "assignee": "coder",
+        "body": (
+            "scope_contract:\n"
+            "  version: 2\n"
+            "  allowed_tools:\n"
+            "    - kanban_show\n"
+            "    - kanban_complete\n"
+            "    - kanban_block\n"
+            "    - kanban_comment\n"
+            "completion_policy:\n"
+            "  require_scope_attestation: true\n"
+        ),
+    }
+    out = decomp._ensure_worker_scope_contract(child, parent_task=parent)
+    body = out["body"]
+    assert "anti_scope:" in body
+    assert "no unrelated cleanup" in body
+    assert "NEVER: touch /home/piet/.hermes/config.yaml" in body
+    report = decomp.validate_worker_scope_contracts([{**child, "body": body}])
+    assert report.ok is True, report.issues
+
+
+def test_normalize_leaves_existing_anti_scope_untouched():
+    """T4b: an LLM-authored contract that already carries anti_scope is left
+    exactly as the model wrote it."""
+    child = {
+        "title": "build",
+        "assignee": "coder",
+        "body": (
+            "scope_contract:\n"
+            "  version: 2\n"
+            "  allowed_tools:\n"
+            "    - kanban_show\n"
+            "    - kanban_complete\n"
+            "    - kanban_block\n"
+            "    - kanban_comment\n"
+            "  anti_scope:\n"
+            "    - only touch the payment module\n"
+            "completion_policy:\n"
+            "  require_scope_attestation: true\n"
+        ),
+    }
+    out = decomp._ensure_worker_scope_contract(child)
+    body = out["body"]
+    assert body.count("anti_scope:") == 1
+    assert "only touch the payment module" in body
+    assert "no unrelated cleanup" not in body
