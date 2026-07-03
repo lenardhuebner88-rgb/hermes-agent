@@ -3388,12 +3388,15 @@ def _append_openrouter_extra_model_options(
 _LANE_INVENTORY_CACHE: list[dict] = []
 
 
-def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
+def _lane_model_catalog(profiles: list[dict], active_lane: Optional[dict] = None) -> list[dict]:
     """Provider-aware model list for Lanes.
 
     Hermes-runtime rows come from the shared inventory/model-catalog substrate
     used by the main picker. Claude-CLI rows are explicit Cloud Max choices;
     selecting them must route through ``claude -p`` rather than an API provider.
+    ``active_lane`` (a ``kanban_db.get_active_lane``/``list_lanes`` row) adds a
+    resilience source for models the lane currently pins per profile — see the
+    lane-pinned block below.
     """
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None, str]] = set()
@@ -3492,6 +3495,36 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
                 label=model,
                 locked=runtime == "claude-cli",
                 source="profile-default",
+            )
+        except Exception:
+            continue
+
+    # Resilience: a model the ACTIVE LANE currently pins per profile must stay
+    # representable even if it fell out of every other catalog source
+    # (provider outage, removed from extra_models, general catalog drift) —
+    # otherwise a single stale pin 400s the ENTIRE /persist call, including
+    # unrelated corrections riding along in the same payload (2026-06-27
+    # incident: a metered lane could not be turned off via the dashboard
+    # because its own current pin was unrepresentable).
+    for entry in ((active_lane or {}).get("profiles") or {}).values():
+        try:
+            model = (entry.get("model") or "").strip()
+            if not model:
+                continue
+            runtime = "claude-cli" if entry.get("worker_runtime") == "claude-cli" else "hermes"
+            if runtime == "hermes" and model in _LANE_CLAUDE_CLI_MODEL_IDS:
+                continue
+            group = "Claude (Max-Abo)" if runtime == "claude-cli" else "API-Modelle"
+            _append_lane_model_option(
+                out,
+                seen,
+                model=model,
+                runtime=runtime,
+                group=group,
+                provider=entry.get("provider") if runtime == "hermes" else None,
+                label=model,
+                locked=runtime == "claude-cli",
+                source="lane-pinned",
             )
         except Exception:
             continue
@@ -3600,8 +3633,9 @@ def list_lanes_endpoint(
     conn = _conn(board=board)
     try:
         lanes = kanban_db.list_lanes(conn)
+        active_lane = next((l for l in lanes if l["active"]), None)
         profiles = _lane_profile_catalog()
-        models = _lane_model_catalog(profiles)
+        models = _lane_model_catalog(profiles, active_lane)
         profiles = [
             {**p, "kanban_spawn_health": _profile_spawn_health(p, profiles, models)}
             for p in profiles
@@ -4511,7 +4545,8 @@ def persist_lane_models_endpoint(
 
         catalog_profiles = _lane_profile_catalog()
         known_profiles = {p["name"] for p in catalog_profiles}
-        models = _lane_model_catalog(catalog_profiles)
+        active_lane_for_catalog = kanban_db.get_active_lane(conn)
+        models = _lane_model_catalog(catalog_profiles, active_lane_for_catalog)
         known_models = {m["id"] for m in models}
 
         unknown_profiles = [name for name in payload.profiles if name not in known_profiles]

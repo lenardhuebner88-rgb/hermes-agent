@@ -61,7 +61,7 @@ def client(kanban_home, plugin_module, monkeypatch):
     monkeypatch.setattr(
         plugin_module,
         "_lane_model_catalog",
-        lambda _profiles: [
+        lambda _profiles, _active_lane=None: [
             {
                 "id": "gpt-5.5",
                 "label": "GPT-5.5",
@@ -430,6 +430,94 @@ def test_persist_succeeds_with_no_active_lane(kanban_home, client):
     assert cfg["model"]["default"] == "gpt-5.5"
     assert cfg["model"]["provider"] == "openai-codex"
     assert cfg["worker_runtime"] == "hermes"
+
+
+def test_lane_model_catalog_includes_lane_pinned_model_missing_from_all_other_sources(
+    kanban_home, plugin_module, monkeypatch,
+):
+    """Incident 2026-06-27: the active lane pinned ``verifier`` to a model that
+    later fell out of every other catalog source (provider outage, removed
+    from extra_models). The catalog must still surface it — marked
+    ``lane-pinned`` — so the dashboard can represent the Ist-Zustand at all.
+    """
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", lambda _out, _seen: None)
+
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="incident-lane",
+            profiles={
+                "verifier": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "openrouter/gpt-5-mini",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+        active_lane = kb.get_active_lane(conn)
+
+    models = plugin_module._lane_model_catalog([], active_lane)
+
+    by_id = {row["id"]: row for row in models}
+    assert by_id["openrouter/gpt-5-mini"]["source"] == "lane-pinned"
+    assert by_id["openrouter/gpt-5-mini"]["provider"] == "openrouter"
+    assert by_id["openrouter/gpt-5-mini"]["runtime"] == "hermes"
+
+
+def test_persist_succeeds_when_unchanged_profile_still_carries_a_stale_lane_pin(
+    kanban_home, plugin_module, monkeypatch,
+):
+    """Regression for the 2026-06-27 persist-400 deadlock: the active lane
+    pins ``verifier`` to a model that is not in any other catalog source. A
+    persist call that corrects ``coder`` while sending ``verifier`` UNCHANGED
+    (still carrying its stale pin) must not 400 the entire save — otherwise
+    the operator can never fix anything while one profile's pin has drifted.
+    """
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", lambda _o, _s: None)
+    plugin_module._lane_profile_cache = None
+
+    _write_profile_config(
+        kanban_home, "coder",
+        "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    _write_profile_config(
+        kanban_home, "verifier",
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="incident-lane",
+            profiles={
+                "verifier": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "openrouter/gpt-5-mini",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+
+    app = FastAPI()
+    app.include_router(plugin_module.router, prefix="/api/plugins/kanban")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {"worker_runtime": "claude-cli", "provider": None, "model": "claude-opus-4-8"},
+                "verifier": {"worker_runtime": "hermes", "provider": "openrouter", "model": "openrouter/gpt-5-mini"},
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert set(data["written"]) == {"coder", "verifier"}
+    assert data["failed"] == []
 
 
 def test_lane_model_catalog_reuses_last_good_inventory_on_failure(plugin_module, monkeypatch):
