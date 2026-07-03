@@ -1,7 +1,8 @@
 # Hermes Agent — Arbeits-Einstieg für Claude Code
 
-Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
-`AGENTS.md` (groß — nur bei Bedarf lesen).
+Schlanker Auto-Load-Einstieg. `AGENTS.md` bündelt die 7 wichtigsten Pitfalls; die
+volle Tiefe (Architektur + alle Known Pitfalls) steht in `docs/agent-dev-guide.md`
+(groß — nur bei Bedarf lesen).
 
 ## Live-Checkout (kritisch)
 - Mehrere Agent-Sessions editieren dieses Verzeichnis **parallel**. IMMER zuerst
