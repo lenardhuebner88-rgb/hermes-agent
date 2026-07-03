@@ -419,6 +419,54 @@ def test_veto_already_released_chain_is_rejected(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /strategist/proposals/{id}/complete — done-elsewhere disposition
+# ---------------------------------------------------------------------------
+
+
+def test_complete_archives_root_and_children(client):
+    root_id, child_id = _make_held_chain()
+    r = client.post(
+        f"{PREFIX}/strategist/proposals/{root_id}/complete",
+        json={"note": "Superseded: operator reviewed directly."},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["completed"] is True
+    assert _status(root_id) == "archived"
+    assert _status(child_id) == "archived"
+    # Closed proposal no longer appears in the list.
+    listing = client.get(f"{PREFIX}/strategist/proposals").json()
+    assert listing["count"] == 0
+
+
+def test_complete_requires_note(client):
+    root_id, _ = _make_held_chain()
+    r = client.post(f"{PREFIX}/strategist/proposals/{root_id}/complete", json={})
+    assert r.status_code == 422
+    assert _status(root_id) == "scheduled"
+
+
+def test_complete_non_root_child_is_rejected(client):
+    _root_id, child_id = _make_held_chain()
+    r = client.post(
+        f"{PREFIX}/strategist/proposals/{child_id}/complete",
+        json={"note": "n/a"},
+    )
+    assert r.status_code == 409
+    assert _status(child_id) == "scheduled"
+
+
+def test_complete_already_released_chain_is_rejected(client):
+    root_id, _ = _make_held_chain()
+    assert client.post(f"{PREFIX}/strategist/proposals/{root_id}/approve").status_code == 200
+    r = client.post(
+        f"{PREFIX}/strategist/proposals/{root_id}/complete",
+        json={"note": "n/a"},
+    )
+    assert r.status_code == 409
+    assert _status(root_id) == "todo"
+
+
+# ---------------------------------------------------------------------------
 # POST /tasks/{id}/veto-escalation — Autoresearch escalation veto (Naht 3)
 # ---------------------------------------------------------------------------
 

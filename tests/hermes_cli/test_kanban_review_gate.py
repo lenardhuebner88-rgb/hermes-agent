@@ -34,6 +34,7 @@ def _write_profile(home: Path, name: str) -> None:
 
 import hermes_cli.profiles as profiles_mod
 from hermes_cli import kanban_db as kb
+from hermes_cli import strategist_surface as ss
 
 
 @pytest.fixture
@@ -1581,6 +1582,95 @@ def test_release_freigabe_hold_recouples_scout_for_critical_child(
         # idempotent: a second release does not spawn a second scout
         kb.release_freigabe_hold(conn, root)
         assert len(_scout_parents(conn, kids[0])) == 1
+
+
+def test_complete_freigabe_hold_archives_root_and_children(kanban_home):
+    """The third disposition sibling (release=build, dismiss=veto, complete=
+    done-elsewhere): closes a held freigabe:operator root whose work was
+    ANDERWEITIG erledigt. Root and every still-held child move to archived,
+    task_links stay intact, and the root carries a freigabe_completed event
+    plus the mandatory rationale comment."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder"}],
+            initial_child_status="scheduled", expected_root_status="triage",
+        )
+        assert kids is not None
+        assert kb.complete_freigabe_hold(
+            conn, root, author="pytest",
+            note="Superseded: operator reviewed directly, chain not needed.",
+        ) is True
+        assert kb.get_task(conn, root).status == "archived"
+        assert kb.get_task(conn, kids[0]).status == "archived"
+        # task_links stay intact (decompose link direction: root is the child).
+        links = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?", (root,)
+        ).fetchall()
+        assert [r["parent_id"] for r in links] == kids
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (root,)
+            ).fetchall()
+        ]
+        assert "freigabe_completed" in kinds
+        comments = kb.list_comments(conn, root)
+        assert any("Superseded" in c.body for c in comments)
+
+
+def test_complete_freigabe_hold_requires_author_and_note(kanban_home):
+    """anti_scope: this is exclusively operator-/API-triggered — author and
+    note are mandatory, unlike the auto-defaulted siblings."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder"}],
+            initial_child_status="scheduled",
+        )
+        with pytest.raises(ValueError):
+            kb.complete_freigabe_hold(conn, root, author="", note="done elsewhere")
+        with pytest.raises(ValueError):
+            kb.complete_freigabe_hold(conn, root, author="pytest", note="")
+        assert kb.get_task(conn, root).status == "scheduled"
+
+
+def test_complete_freigabe_hold_noop_on_non_operator_root(kanban_home):
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="plain", assignee="coder")
+        assert kb.complete_freigabe_hold(
+            conn, root, author="pytest", note="n/a",
+        ) is False
+        assert kb.get_task(conn, root).status != "archived"
+
+
+def test_complete_freigabe_hold_drops_from_proposals_and_avoids_silent_block_sweep(
+    kanban_home,
+):
+    """done_when #2: the closed root disappears from held_operator_proposals,
+    and the silent-block sweep never escalates it — its status leaves
+    'scheduled' straight for 'archived' and never passes through 'blocked',
+    the sweep's only predicate (:func:`kb.silent_block_task_ids`)."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder"}],
+            initial_child_status="scheduled",
+        )
+        assert any(p["id"] == root for p in ss.held_operator_proposals(conn))
+        assert kb.complete_freigabe_hold(
+            conn, root, author="pytest", note="done elsewhere",
+        ) is True
+        assert not any(p["id"] == root for p in ss.held_operator_proposals(conn))
+        kb.escalate_silent_blocks_sweep(conn)
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (root,)
+            ).fetchall()
+        ]
+        assert kb.OPERATOR_ESCALATION_EVENT not in kinds
 
 
 # ---------------------------------------------------------------------------

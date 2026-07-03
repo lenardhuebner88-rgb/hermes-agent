@@ -12358,6 +12358,84 @@ def dismiss_freigabe_hold(
     return True
 
 
+def complete_freigabe_hold(
+    conn: sqlite3.Connection, task_id: str, *, author: str, note: str
+) -> bool:
+    """Close a held ``freigabe: operator`` PlanSpec root as done-elsewhere —
+    the third disposition sibling of :func:`release_freigabe_hold` (build) and
+    :func:`dismiss_freigabe_hold` (veto).
+
+    Where release promotes the held chain and dismiss vetoes it outright,
+    this closes it when the work was ANDERWEITIG erledigt (done outside the
+    chain — e.g. the operator reviewed the change directly instead of
+    dispatching the Kanban reviewer). The held root AND every still-held
+    child (the subtasks linked as the root's parents, see
+    ``decompose_triage_task``) move to ``archived`` — same terminal status as
+    a veto, but distinguished by the ``freigabe_completed`` event and the
+    mandatory rationale comment recorded below. ``task_links`` are untouched.
+
+    Unlike the two siblings, ``author`` and ``note`` carry no default: this
+    verb is exclusively operator-/API-triggered (never auto-invoked by a
+    sweep/heiler), so both must be supplied explicitly.
+
+    Returns ``True`` when ``task_id`` is a held (``scheduled``) operator root
+    and was archived. Returns ``False`` (touching nothing) for a non-operator
+    root, an unknown id, or a root that is no longer held (already released/
+    building/done/archived).
+    """
+    if not author or not author.strip():
+        raise ValueError("complete_freigabe_hold requires a non-empty author")
+    if not note or not note.strip():
+        raise ValueError("complete_freigabe_hold requires a non-empty note")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+            return False
+        if row["status"] != "scheduled":
+            return False
+        # The chain's children are linked as the root's parents (mirror of the
+        # decompose link direction), same lookup as dismiss_freigabe_hold.
+        child_rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (task_id,),
+        ).fetchall()
+        archived_children: list[str] = []
+        for child_row in child_rows:
+            child_id = child_row["parent_id"]
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status = 'scheduled'",
+                (child_id,),
+            )
+            if cur.rowcount == 1:
+                archived_children.append(child_id)
+                _append_event(
+                    conn, child_id, "archived",
+                    {"by": author, "via": "freigabe_completed"},
+                )
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "freigabe_completed",
+            {"author": author, "archived_children": archived_children, "note": note},
+        )
+    # add_comment opens its own write_txn (nested write_txn is a documented
+    # pitfall) — call it outside, mirroring release_freigabe_hold's post-txn
+    # child loop.
+    add_comment(conn, task_id, author, note)
+    return True
+
+
 def veto_operator_escalation(
     conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
 ) -> bool:

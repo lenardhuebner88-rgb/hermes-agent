@@ -5029,6 +5029,41 @@ def veto_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
+class CompleteFreigabeBody(BaseModel):
+    note: FreeText
+
+
+@router.post("/strategist/proposals/{task_id}/complete")
+def complete_strategist_proposal(
+    task_id: str, body: CompleteFreigabeBody, board: Optional[str] = Query(None),
+):
+    """Close a held proposal as done-elsewhere → archive the chain (the third
+    disposition sibling of approve/veto: the work was done outside the
+    chain, e.g. an operator-requested direct review).
+
+    Wraps :func:`kanban_db.complete_freigabe_hold`. Same root-guard as
+    approve/veto: 409 unless ``task_id`` is a held ``freigabe: operator``
+    root. ``note`` (mandatory) records why the chain closed without
+    building and is stored as a task comment."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            completed = kanban_db.complete_freigabe_hold(
+                conn, task_id, author="operator", note=body.note,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not completed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{task_id} ist kein schließbarer freigabe:operator-Root",
+            )
+        return {"ok": True, "task_id": task_id, "completed": True}
+    finally:
+        conn.close()
+
+
 @router.post("/tasks/{task_id}/veto-escalation")
 def veto_operator_escalation_route(task_id: str, board: Optional[str] = Query(None)):
     """Veto an Autoresearch operator-escalation → archive it AND record the
