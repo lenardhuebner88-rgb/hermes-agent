@@ -14157,6 +14157,49 @@ def test_s4_strong_outcome_mapping_still_wins_over_text():
     assert ev["signal_source"] == "outcome"
 
 
+def test_release_gate_red_outcome_is_real_bug():
+    """ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: a persistent-red release gate,
+    carried as the structural ``release_gate_red`` trigger_outcome, classifies
+    real-bug even when the gate output text (opaque / visual-gate / empty) matches
+    no free-text signal — closing the ``unclassified`` gap that starved by_class."""
+    for err in ("", "still broken", "visual-gate: scrollWidth exceeds viewport",
+                "visual-gate: dashboard unreachable: Connection refused",
+                "error TS2304: Cannot find name Foo"):
+        cls, ev = kb._classify_failure(outcome="release_gate_red", error=err)
+        assert cls == kb.HEILER_CLASS_REAL_BUG, err
+        assert ev["signal_source"] == "outcome_fallback"
+        assert ev["matched"] == "release_gate_red"
+
+
+def test_release_gate_infra_outcome_is_transient():
+    """ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: a gate the runner could not
+    complete (timeout / launch error, carried as ``release_gate_infra``) is
+    operational, not a candidate defect → transient, not real-bug."""
+    for err in ("release-gate timed out after 1800s",
+                "release-gate command error: [Errno 2] No such file"):
+        cls, ev = kb._classify_failure(outcome="release_gate_infra", error=err)
+        assert cls == kb.HEILER_CLASS_TRANSIENT, err
+        assert ev["signal_source"] == "outcome_fallback"
+
+
+def test_release_gate_outcome_fallback_yields_to_real_text_signal():
+    """AC-2 over-mapping guard: the release_gate_* outcome mappings are WEAK
+    fallbacks, so a genuine free-text signal in the gate output still classifies
+    first — a red gate whose log carries a merge conflict / flaky / reviewer
+    finding is NOT force-labelled real-bug by the structural default."""
+    cls, ev = kb._classify_failure(
+        outcome="release_gate_red",
+        error="CONFLICT (content): merge conflict in web/src/App.tsx",
+    )
+    assert cls == kb.HEILER_CLASS_CONFLICT
+    assert ev["signal_source"] == "text"
+
+    cls, _ = kb._classify_failure(
+        outcome="release_gate_red", error="flaky: passed on retry",
+    )
+    assert cls == kb.HEILER_CLASS_FLAKY
+
+
 def test_s4_crashed_reclassify_stays_bounded(kanban_home):
     """AC-2: crashed->transient is a relabel only — repeated crashes of the same
     task still trip the consecutive-failure breaker and escalate (the bounded

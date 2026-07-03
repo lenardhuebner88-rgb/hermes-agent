@@ -2466,6 +2466,97 @@ def test_release_gate_escalation_writes_inline_heiler_classification(kanban_home
     assert summary["classified"] == []
 
 
+def test_release_gate_trigger_outcome_helper():
+    """ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1 (pure): the structural failure-mode
+    label reads our own runner sentinels as infra (transient) and treats every
+    other red gate — incl. empty output — as a candidate defect (real-bug)."""
+    assert kwt._release_gate_trigger_outcome("") == "release_gate_red"
+    assert kwt._release_gate_trigger_outcome("still broken") == "release_gate_red"
+    assert (
+        kwt._release_gate_trigger_outcome("visual-gate: scrollWidth exceeds")
+        == "release_gate_red"
+    )
+    assert (
+        kwt._release_gate_trigger_outcome("release-gate timed out after 1800s")
+        == "release_gate_infra"
+    )
+    assert (
+        kwt._release_gate_trigger_outcome("release-gate command error: boom")
+        == "release_gate_infra"
+    )
+
+
+def test_release_gate_blind_escalation_classifies_real_bug(kanban_home):
+    """ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1 (AC-1): a persistent-red gate whose
+    output carries NO free-text signal (the live blind case: opaque / visual-gate /
+    empty ``last_error``) now escalates with a structural ``trigger_outcome`` and
+    its paired heiler_classification lands in the real cause class (real-bug),
+    OUT of the unclassified bucket that drove up unclassified_share."""
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "visual-gate: scrollWidth exceeds viewport"),
+            fixer_runner=lambda **kw: None,
+            max_retries=0,
+        )
+        events = kb.list_events(conn, child_id)
+        escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+        heilers = [e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
+
+    assert result["status"] == "escalated"
+    assert len(escalations) == 1
+    assert escalations[0].payload["evidence"]["trigger_outcome"] == "release_gate_red"
+    assert len(heilers) == 1
+    assert heilers[0].payload["class"] == kb.HEILER_CLASS_REAL_BUG
+    assert heilers[0].payload["class"] != kb.HEILER_CLASS_UNCLASSIFIED
+
+
+def test_release_gate_infra_escalation_classifies_transient(kanban_home):
+    """ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: a gate the runner could not
+    complete (timeout sentinel) escalates as infra → transient, not real-bug —
+    the failure mode, not the wording, drives the class."""
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "release-gate timed out after 1800s"),
+            fixer_runner=lambda **kw: None,
+            max_retries=0,
+        )
+        events = kb.list_events(conn, child_id)
+        escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+        heilers = [e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
+
+    assert result["status"] == "escalated"
+    assert escalations[0].payload["evidence"]["trigger_outcome"] == "release_gate_infra"
+    assert heilers[0].payload["class"] == kb.HEILER_CLASS_TRANSIENT
+
+
+def test_release_gate_enrichment_leaves_escalation_behavior_unchanged(kanban_home):
+    """AC-2 guardrail: pure context enrichment — the secondary action is
+    unchanged. Exactly one escalation (count does not rise), the child stays
+    blocked, and the fixer ran the full retry budget, same as before the
+    trigger_outcome was added."""
+    fixer_calls = []
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "still broken"),
+            fixer_runner=lambda **kw: fixer_calls.append(kw),
+            max_retries=2,
+        )
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "escalated"
+    assert result["fixer_attempts"] == 2
+    assert len(fixer_calls) == 2
+    assert len(escalations) == 1  # count did not rise
+    assert child.status == "blocked"  # block decision unchanged
+
+
 def test_release_gate_executor_max_retries_zero_immediate_escalation(kanban_home):
     """max_retries=0 -> red gate escalates immediately, no fixer."""
     fixer_calls = []
