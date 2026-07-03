@@ -476,3 +476,80 @@ def test_inject_scout_no_duplicate_when_scout_deep_in_chain(client):
     assert len(scout_parents) == 0, (
         "entry_id must have no new scout predecessor — global dedup must prevent injection"
     )
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1 (atomicity): a late release failure must roll back overrides + scout
+# ---------------------------------------------------------------------------
+
+
+def test_release_failure_rolls_back_overrides_and_scout(client, monkeypatch):
+    """Guard-recheck, overrides, scout injection and the freigabe-root release
+    share ONE transaction — if the release step fails deep inside it, the
+    overrides and the scout must roll back too. Before the fix they ran in their
+    own already-committed transactions, so a late release failure left an
+    orphaned model_override + scout on a chain that was never actually
+    released."""
+    root_id, child_id = _make_held_chain(assignee="coder")
+
+    class _BoomError(Exception):
+        pass
+
+    def _boom(*_args, **_kwargs):
+        raise _BoomError("simulated release failure")
+
+    monkeypatch.setattr(kb, "_release_freigabe_hold_root_in_txn", _boom)
+
+    with pytest.raises(_BoomError):
+        client.post(
+            f"{PREFIX}/planspecs/approve",
+            json={
+                "root_task_id": root_id,
+                "lane_models": {"coder": "claude-opus-4-5"},
+                "inject_scout": True,
+            },
+        )
+
+    # Root untouched — still the held 'scheduled' state, no partial release.
+    assert _status(root_id) == "scheduled"
+    assert _status(child_id) == "scheduled"
+    # Overrides rolled back — nothing persisted on either chain member.
+    assert _model_override(root_id) is None
+    assert _model_override(child_id) is None
+    # Scout rolled back — no scout predecessor of the entry child.
+    assert _scout_parent_id(child_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2 (idempotency): re-approve after a successful first call is a clean
+# no-op — never a second scout
+# ---------------------------------------------------------------------------
+
+
+def test_second_approve_after_success_is_clean_noop_no_second_scout(client):
+    """A second approve on the SAME root after a successful first approve (with
+    inject_scout) must not create a second scout — clean 409, not a duplicate
+    mutation."""
+    root_id, child_id = _make_held_chain(assignee="coder")
+
+    r1 = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={"root_task_id": root_id, "inject_scout": True},
+    )
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["scout_injected"] is True
+
+    r2 = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={"root_task_id": root_id, "inject_scout": True},
+    )
+    assert r2.status_code == 409, r2.text
+
+    # Exactly one scout predecessor of the entry child — no duplicate.
+    with kb.connect() as conn:
+        scout_preds = [
+            pid
+            for pid in kb.parent_ids(conn, child_id)
+            if (t := kb.get_task(conn, pid)) is not None and t.assignee == "scout"
+        ]
+    assert len(scout_preds) == 1

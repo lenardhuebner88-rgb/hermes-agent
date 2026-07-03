@@ -11,12 +11,14 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
 import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
-import { FleetView } from "./views/FleetView";
 
 // The Decision-Inbox is the /control landing → keep it eager. Every other tab is
 // lazy-loaded (its own chunk, fetched on first visit) so opening /control no
 // longer ships all 10 views up front — FlowView + AutoresearchView are the
 // fattest, and most visits never open them.
+const FleetView = lazy(() =>
+  import("./views/FleetView").then((m) => ({ default: m.FleetView })),
+);
 const OverviewView = lazy(() =>
   import("./views/OverviewView").then((m) => ({ default: m.OverviewView })),
 );

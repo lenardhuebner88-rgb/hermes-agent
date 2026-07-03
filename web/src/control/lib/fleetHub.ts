@@ -469,3 +469,23 @@ export function derivePendingItems(
 export function pendingCount(items: PendingItem[]): number {
   return items.length;
 }
+
+/**
+ * Leitet den effektiv selektierten PlanSpec-Pfad ab.
+ *
+ * Invariante: selectedPath bleibt gültig, solange der Pfad noch in
+ * pendingPaths enthalten ist. Fehlt er (nach Approve, Reload oder
+ * verspätetem Laden), fällt die Auswahl auf den ersten wartenden Eintrag.
+ * Bei leerer Liste → null.
+ *
+ * Wird als pure Funktion gehalten, damit sie im PlanTab direkt inline
+ * nutzbar ist und in Tests ohne DOM laufen kann.
+ */
+export function deriveEffectivePlanPath(
+  selectedPath: string | null,
+  pendingPaths: string[],
+): string | null {
+  if (pendingPaths.length === 0) return null;
+  if (selectedPath !== null && pendingPaths.includes(selectedPath)) return selectedPath;
+  return pendingPaths[0];
+}

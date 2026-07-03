@@ -8179,45 +8179,110 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                 "planned_actions": planned,
             }
 
-        # --- Apply lane-model overrides -------------------------------------------
+        # --- Apply overrides + scout + release atomically --------------------------
+        # Blocker 1 (Codex review): model_override writes and scout creation used to
+        # run in their own committed transactions BEFORE release_freigabe_hold. A
+        # late release failure (409/race/exception) left orphaned overrides/scout on
+        # a chain that was never actually released. Fix: guard recheck, overrides,
+        # scout injection and the freigabe-root release now share ONE write_txn —
+        # any failure path rolls back everything. create_task/link_tasks/
+        # release_freigabe_hold each open their own write_txn internally (nesting
+        # raises — "cannot start a transaction within a transaction"), so this uses
+        # their *_in_txn cores instead (established pattern, see
+        # _release_freigabe_hold_root_in_txn).
         overrides_applied = 0
-        for tid in override_targets:
-            task = kanban_db.get_task(conn, tid)
-            if task is None:
-                continue
-            assignee = str(task.assignee or "").strip()
-            model_id = lane_models[assignee]
-            if kanban_db.set_task_model_override(conn, tid, model_id):
-                overrides_applied += 1
-
-        # --- Inject scout ---------------------------------------------------------
         scout_injected = False
-        if should_inject_scout and scout_entry_children:
-            # Create exactly ONE scout that covers all entry children (same pattern
-            # as _release_flow_gate: a single scout title=root.title, body from
-            # _scout_recon_body, linked as parent of each entry child).
-            entry_tasks = [kanban_db.get_task(conn, cid) for cid in scout_entry_children]
-            scout_id = kanban_db.create_task(
-                conn,
-                title=f"Scout: {root.title}",
-                body=kanban_db._scout_recon_body(entry_tasks),
-                assignee="scout",
-                created_by="planspec-approve",
-                priority=root.priority,
-                tenant=root.tenant,
-                max_runtime_seconds=kanban_db._scout_max_runtime_seconds(),
-            )
-            for cid in scout_entry_children:
-                kanban_db.link_tasks(conn, scout_id, cid)
-            scout_injected = True
+        with kanban_db.write_txn(conn):
+            # Recheck the hold guard INSIDE the transaction: write_txn's
+            # BEGIN IMMEDIATE serializes writers, so a second approve that raced
+            # past the pre-txn read above (same status='scheduled' snapshot) is
+            # caught here before any write lands — closes the concurrent
+            # double-approve window (Blocker 1/2), on top of the ordinary
+            # already-released 409 the top-of-function guard already covers.
+            guard_row = conn.execute(
+                "SELECT status, freigabe FROM tasks WHERE id = ?",
+                (root_task_id,),
+            ).fetchone()
+            if guard_row is None or str(guard_row["freigabe"] or "").strip().lower() != "operator":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": f"{root_task_id} ist kein freigabe:operator-Root"},
+                )
+            if guard_row["status"] != "scheduled":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": f"{root_task_id} hat Status {guard_row['status']!r} und ist nicht freigabefähig (erwartet: scheduled)"},
+                )
 
-        # --- Release the freigabe hold -------------------------------------------
-        released = kanban_db.release_freigabe_hold(conn, root_task_id, author="operator")
-        if not released:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
-            )
+            for tid in override_targets:
+                task = kanban_db.get_task(conn, tid)
+                if task is None:
+                    continue
+                assignee = str(task.assignee or "").strip()
+                model_id = lane_models[assignee]
+                if kanban_db._set_task_model_override_in_txn(conn, tid, model_id):
+                    overrides_applied += 1
+
+            if should_inject_scout and scout_entry_children:
+                # Blocker 2: dedup recheck immediately before creation, inside this
+                # same transaction — a second racing approve only reaches this
+                # point after the first one committed (BEGIN IMMEDIATE serializes
+                # writers), so it now sees the just-created scout and skips.
+                chain_already_scouted = any(
+                    (t := kanban_db.get_task(conn, tid)) is not None
+                    and str(t.assignee or "").strip() == "scout"
+                    for tid in chain_ids
+                )
+                if not chain_already_scouted:
+                    # Create exactly ONE scout that covers all entry children (same
+                    # pattern as _release_flow_gate: a single scout title=root.title,
+                    # body from _scout_recon_body, linked as parent of each entry
+                    # child). Deterministic idempotency_key: a retried/duplicate
+                    # approve call for this root re-finds the same scout instead of
+                    # creating a second one, even outside the write-lock race window.
+                    entry_tasks = [kanban_db.get_task(conn, cid) for cid in scout_entry_children]
+                    scout_id = kanban_db._create_scout_task_in_txn(
+                        conn,
+                        title=f"Scout: {root.title}",
+                        body=kanban_db._scout_recon_body(entry_tasks),
+                        created_by="planspec-approve",
+                        priority=root.priority,
+                        tenant=root.tenant,
+                        max_runtime_seconds=kanban_db._scout_max_runtime_seconds(),
+                        idempotency_key=f"planspec-approve-scout:{root_task_id}",
+                    )
+                    for cid in scout_entry_children:
+                        kanban_db._link_tasks_in_txn(conn, scout_id, cid)
+                    scout_injected = True
+
+            # --- Release the freigabe hold (root flip only — see below) -----------
+            released = kanban_db._release_freigabe_hold_root_in_txn(conn, root_task_id, author="operator")
+            if not released:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
+                )
+
+        # --- Post-commit follow-ups (children + auto-scout) ------------------------
+        # release_freigabe_hold's own child-unblock/recompute_ready/auto-scout tail
+        # runs OUTSIDE its root write_txn (unblock_task/recompute_ready open their
+        # own write_txns — nested write_txn is the same documented pitfall as
+        # above). Duplicated here (not a call to release_freigabe_hold) because the
+        # root flip already happened in our transaction above; calling the public
+        # wrapper again would just re-stamp a redundant idempotent
+        # 'freigabe_released' event for every approve. Mirrors
+        # release_freigabe_hold's tail exactly.
+        for child_id in kanban_db.parent_ids(conn, root_task_id):
+            child = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (child_id,)
+            ).fetchone()
+            if child is not None and child["status"] == "scheduled":
+                kanban_db.unblock_task(conn, child_id)
+        kanban_db.recompute_ready(conn)
+        _rg_cfg = kanban_db._review_gate_config()
+        if _rg_cfg.get("auto_scout_on_critical", False):
+            for child_id in kanban_db.parent_ids(conn, root_task_id):
+                kanban_db._maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
 
         return {
             "released": True,

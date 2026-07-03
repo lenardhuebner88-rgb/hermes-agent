@@ -33,6 +33,7 @@ import {
   buildApproveRequest,
   fmtResetAt,
   derivePendingItems,
+  deriveEffectivePlanPath,
   type PendingItem,
   type ChainChipDef,
   type SegmentKind,
@@ -50,6 +51,24 @@ import "./fleet/fleet.css";
 
 type PlanSpecRecord = PlanSpecsResponse["planspecs"][number];
 
+// ─── Viewport-Hook ───────────────────────────────────────────────────────────
+
+/** true wenn Viewport ≥ lg (1024 px) — analog zu AgentTerminalsView-Muster. */
+function useIsLg(): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1024px)").matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+  return matches;
+}
+
 // ─── Subtab-Definition ───────────────────────────────────────────────────────
 
 type FleetSubtab = "heute" | "worker" | "ketten" | "plan" | "risiko";
@@ -65,6 +84,7 @@ interface SubtabDef {
 
 export function FleetView() {
   const [subtab, setSubtab] = useState<FleetSubtab>("heute");
+  const isLg = useIsLg();
   const [drawerWorker, setDrawerWorker] = useState<Worker | null>(null);
   // rootId für den Ketten-Subtab: wird beim "Kette öffnen"-Klick im Worker-Drawer gesetzt.
   const [kettenRootId, setKettenRootId] = useState<string | null>(null);
@@ -257,27 +277,31 @@ export function FleetView() {
           ) : null}
         </div>
 
-        {/* Rechte Spalte: persistente Kette (ab lg, Ketten-Subtab kollabiert hierhin) */}
-        <aside className="fleet-tablet-aside" aria-label="Aktive Kette">
-          {kettenChipsForAside.length > 0 ? (
-            <>
-              <div className="fleet-aside-head">Aktive Kette</div>
-              <KettenTab
-                board={board.data}
-                initialRootId={kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
-                now={now}
-                onOpenNodeDetail={(id, chainNodes) => {
-                  setNodeDetailId(id);
-                  setNodeDetailChainNodes(chainNodes ?? []);
-                }}
-              />
-            </>
-          ) : (
-            <div className="fleet-aside-head" style={{ color: "var(--fleet-t3)", fontStyle: "italic" }}>
-              Keine aktiven Ketten
-            </div>
-          )}
-        </aside>
+        {/* Rechte Spalte: persistente Kette — nur rendern wenn (a) Viewport ≥ lg
+            UND (b) Ketten-Subtab nicht aktiv ist. Verhindert unsichtbares Polling
+            auf Mobil und Doppel-Poll wenn Ketten-Subtab bereits KettenTab hält. */}
+        {isLg && subtab !== "ketten" ? (
+          <aside className="fleet-tablet-aside" aria-label="Aktive Kette">
+            {kettenChipsForAside.length > 0 ? (
+              <>
+                <div className="fleet-aside-head">Aktive Kette</div>
+                <KettenTab
+                  board={board.data}
+                  initialRootId={kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
+                  now={now}
+                  onOpenNodeDetail={(id, chainNodes) => {
+                    setNodeDetailId(id);
+                    setNodeDetailChainNodes(chainNodes ?? []);
+                  }}
+                />
+              </>
+            ) : (
+              <div className="fleet-aside-head" style={{ color: "var(--fleet-t3)", fontStyle: "italic" }}>
+                Keine aktiven Ketten
+              </div>
+            )}
+          </aside>
+        ) : null}
       </div>
     </div>
   );
@@ -1322,9 +1346,9 @@ function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Uebersicht
           <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
             {de.fleet.detailDeliverables}
           </div>
-          {deliverables.map((d, i) => (
+          {deliverables.map((d) => (
             <button
-              key={i}
+              key={d.url || d.filename}
               type="button"
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-puls)", background: "none", border: "none", cursor: "pointer", width: "100%", textAlign: "left", borderBottom: "1px solid var(--fleet-linie)" }}
@@ -1414,8 +1438,8 @@ function ErgebnisTab({
           <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
             Review-Verdicts
           </div>
-          {verdicts.map((v, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--fleet-linie)", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-t2)" }}>
+          {verdicts.map((v) => (
+            <div key={`${v.task_id}-${v.reviewer_profile ?? "reviewer"}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--fleet-linie)", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-t2)" }}>
               <span style={{ flex: 1 }}>{v.reviewer_profile ?? "reviewer"}</span>
               <span style={{
                 fontFamily: "var(--hc-font-mono)", fontSize: 10,
@@ -1436,9 +1460,9 @@ function ErgebnisTab({
           <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
             {de.fleet.detailDeliverables}
           </div>
-          {deliverables.map((d, i) => (
+          {deliverables.map((d) => (
             <button
-              key={i}
+              key={d.url || d.filename}
               type="button"
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-puls)", background: "none", border: "none", cursor: "pointer", width: "100%", textAlign: "left", borderBottom: "1px solid var(--fleet-linie)" }}
@@ -1478,10 +1502,14 @@ interface PlanTabProps {
 function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess }: PlanTabProps) {
   // Nur PlanSpecs die auf Operator-Freigabe warten
   const pendingSpecs = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
+  const pendingPaths = pendingSpecs.map((ps) => ps.path);
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(() => pendingSpecs[0]?.path ?? null);
-
-  const selectedSpec = pendingSpecs.find((ps) => ps.path === selectedPath) ?? null;
+  // selectedPath hält nur die aktive User-Wahl; effectivePath wird ABGELEITET:
+  // fällt der gespeicherte Pfad nach Approve/Reload aus pendingPaths heraus,
+  // springt die Auswahl automatisch auf den nächsten wartenden Eintrag.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const effectivePath = deriveEffectivePlanPath(selectedPath, pendingPaths);
+  const selectedSpec = pendingSpecs.find((ps) => ps.path === effectivePath) ?? null;
 
   if (pendingSpecs.length === 0) {
     return (
@@ -1501,9 +1529,9 @@ function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuc
             <button
               key={ps.path}
               type="button"
-              className={`fleet-kchip${selectedPath === ps.path ? " fleet-kchip-on" : ""}`}
+              className={`fleet-kchip${effectivePath === ps.path ? " fleet-kchip-on" : ""}`}
               onClick={() => setSelectedPath(ps.path)}
-              aria-pressed={selectedPath === ps.path}
+              aria-pressed={effectivePath === ps.path}
             >
               {(ps.topic || ps.filename).length > 22
                 ? (ps.topic || ps.filename).slice(0, 22) + "…"
@@ -1515,11 +1543,17 @@ function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuc
 
       {selectedSpec ? (
         <PlanSpecCockpit
+          // key remountet das Cockpit pro Spec — sonst überlebt lokaler State
+          // (approveState='success', injectScout, Lane-Wahl) den Sprung auf den
+          // nächsten wartenden Spec und sperrt dessen Freigabe-Button.
+          key={selectedSpec.path}
           ps={selectedSpec}
           costs={costs}
           lanesCatalog={lanesCatalog}
           accountUsage={accountUsage}
           onApproveSuccess={() => {
+            // Nach Approve: gespeicherten Pfad zurücksetzen → Ableitung
+            // springt automatisch auf den nächsten wartenden Eintrag.
             setSelectedPath(null);
             onApproveSuccess();
           }}

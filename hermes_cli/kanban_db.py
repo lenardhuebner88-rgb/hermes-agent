@@ -4844,34 +4844,42 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
 # ---------------------------------------------------------------------------
 
 
+def _link_tasks_in_txn(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
+    """Core of :func:`link_tasks` — callable from within an already-open write
+    transaction (e.g. composed with other writes so a single caller-owned
+    transaction covers all of them; see :func:`_release_freigabe_hold_root_in_txn`
+    for the same pattern)."""
+    missing = _find_missing_parents(conn, [parent_id, child_id])
+    if missing:
+        raise ValueError(f"unknown task(s): {', '.join(missing)}")
+    if _would_cycle(conn, parent_id, child_id):
+        raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
+    conn.execute(
+        "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+        (parent_id, child_id),
+    )
+    # If child was ready but parent is not yet done, demote child to todo.
+    parent_status = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (parent_id,)
+    ).fetchone()["status"]
+    if parent_status != "done":
+        conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+            (child_id,),
+        )
+    _append_event(
+        conn,
+        child_id,
+        "linked",
+        {"parent": parent_id, "child": child_id},
+    )
+
+
 def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     with write_txn(conn):
-        missing = _find_missing_parents(conn, [parent_id, child_id])
-        if missing:
-            raise ValueError(f"unknown task(s): {', '.join(missing)}")
-        if _would_cycle(conn, parent_id, child_id):
-            raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
-        conn.execute(
-            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-            (parent_id, child_id),
-        )
-        # If child was ready but parent is not yet done, demote child to todo.
-        parent_status = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (parent_id,)
-        ).fetchone()["status"]
-        if parent_status != "done":
-            conn.execute(
-                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
-                (child_id,),
-            )
-        _append_event(
-            conn,
-            child_id,
-            "linked",
-            {"parent": parent_id, "child": child_id},
-        )
+        _link_tasks_in_txn(conn, parent_id, child_id)
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -12377,6 +12385,51 @@ def release_uireal_root(
         return True
 
 
+def _release_freigabe_hold_root_in_txn(
+    conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
+) -> bool:
+    """Flip a ``freigabe: operator`` root from ``scheduled`` to ``todo``.
+
+    **Must be called from within an already-open write transaction** — it
+    executes plain SQL against ``conn`` without opening a new ``write_txn``.
+    Use this when the caller needs to combine the root-flip atomically with
+    other writes (e.g. model-override updates) in a single transaction.
+
+    Returns ``True`` when the root was flipped (or was already ``todo``).
+    Returns ``False`` when ``task_id`` is unknown, not a ``freigabe: operator``
+    root, or its status is neither ``scheduled`` nor ``todo``.
+
+    Child unblocking and ``recompute_ready`` are NOT done here — the caller
+    must trigger them after the transaction commits (same pattern as
+    :func:`release_freigabe_hold`, which calls :func:`unblock_task` outside
+    its own ``write_txn`` to avoid nested-transaction errors).
+    """
+    row = conn.execute(
+        "SELECT status, freigabe FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+        return False
+    if row["status"] == "todo":
+        _append_event(
+            conn,
+            task_id,
+            "freigabe_released",
+            {"author": author, "idempotent": True},
+        )
+    elif row["status"] != "scheduled":
+        return False
+    else:
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "freigabe_released", {"author": author})
+    return True
+
+
 def release_freigabe_hold(
     conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
 ) -> bool:
@@ -12396,29 +12449,8 @@ def release_freigabe_hold(
     or a root that is neither ``scheduled`` nor ``todo``.
     """
     with write_txn(conn):
-        row = conn.execute(
-            "SELECT status, freigabe FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+        if not _release_freigabe_hold_root_in_txn(conn, task_id, author=author):
             return False
-        if row["status"] == "todo":
-            _append_event(
-                conn,
-                task_id,
-                "freigabe_released",
-                {"author": author, "idempotent": True},
-            )
-        elif row["status"] != "scheduled":
-            return False
-        else:
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
-                (task_id,),
-            )
-            if cur.rowcount != 1:
-                return False
-            _append_event(conn, task_id, "freigabe_released", {"author": author})
     # Release the held children OUTSIDE the root write_txn — unblock_task and
     # recompute_ready open their own write_txns (nested write_txn is a
     # documented pitfall). Mirrors plugin_api._release_flow_gate's child loop:
@@ -25754,6 +25786,25 @@ def supersede_disposition_item(
     return new_id
 
 
+def _set_task_model_override_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    model: Optional[str],
+) -> bool:
+    """Core of :func:`set_task_model_override` — callable from within an
+    already-open write transaction (see :func:`_release_freigabe_hold_root_in_txn`
+    for the same composed-transaction pattern)."""
+    value = (model or "").strip() or None
+    cur = conn.execute(
+        "UPDATE tasks SET model_override = ? WHERE id = ?",
+        (value, task_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(conn, task_id, "model_override_set", {"model": value})
+    return True
+
+
 def set_task_model_override(
     conn: sqlite3.Connection,
     task_id: str,
@@ -25766,16 +25817,8 @@ def set_task_model_override(
 
     Returns False if the task doesn't exist.
     """
-    value = (model or "").strip() or None
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET model_override = ? WHERE id = ?",
-            (value, task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        _append_event(conn, task_id, "model_override_set", {"model": value})
-        return True
+        return _set_task_model_override_in_txn(conn, task_id, model)
 
 
 _SCOUT_PREDECESSOR_PRERUN_STATUSES = frozenset({"scheduled", "todo", "ready"})
@@ -25797,6 +25840,90 @@ def _scout_max_runtime_seconds(cfg: Optional[dict] = None) -> int:
     except (TypeError, ValueError):
         val = _SCOUT_MAX_RUNTIME_SECONDS
     return val if val > 0 else _SCOUT_MAX_RUNTIME_SECONDS
+
+
+def _create_scout_task_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body: Optional[str],
+    created_by: Optional[str],
+    priority: int,
+    tenant: Optional[str],
+    max_runtime_seconds: Optional[int],
+    idempotency_key: Optional[str] = None,
+) -> str:
+    """Insert one ``assignee='scout'`` recon task, callable from within an
+    already-open write transaction — the scout-injection sibling of
+    :func:`_release_freigabe_hold_root_in_txn` and :func:`_link_tasks_in_txn`.
+
+    :func:`create_task` cannot be composed into a caller-owned transaction (it
+    opens its own ``write_txn`` — nesting raises, see that function's
+    docstring), so callers that need scout creation to share a single atomic
+    transaction with other writes (PlanSpec-approve: guard recheck + lane
+    overrides + scout + freigabe release must all-or-nothing) use this
+    instead. It intentionally covers only the parentless, no-workspace,
+    non-code-role shape every scout-injection call site actually passes
+    (mirrors :func:`create_task`'s behaviour for those args exactly: status
+    ``ready``, ``workspace_kind='scratch'``, no project/branch, no code-task
+    contract since ``scout`` is never a configured code role by default) — it
+    is NOT a general ``create_task`` replacement. Links are added separately
+    via :func:`_link_tasks_in_txn`.
+
+    ``idempotency_key`` re-checks (and returns the existing task id) exactly
+    like :func:`create_task` — safe under concurrent writers because
+    ``write_txn``'s ``BEGIN IMMEDIATE`` serializes them.
+    """
+    if idempotency_key:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if row:
+            return row["id"]
+    now = int(time.time())
+    for attempt in range(2):
+        task_id = _new_task_id()
+        try:
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    id, title, body, assignee, status, priority,
+                    created_by, created_at, workspace_kind, tenant,
+                    idempotency_key, max_runtime_seconds
+                ) VALUES (?, ?, ?, 'scout', 'ready', ?, ?, ?, 'scratch', ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    title.strip(),
+                    body,
+                    priority,
+                    created_by,
+                    now,
+                    tenant,
+                    idempotency_key,
+                    int(max_runtime_seconds) if max_runtime_seconds is not None else None,
+                ),
+            )
+            break
+        except sqlite3.IntegrityError:
+            # Same id-collision retry as create_task: one fresh id, then give up.
+            if attempt == 1:
+                raise
+    _append_event(
+        conn,
+        task_id,
+        "created",
+        {
+            "assignee": "scout",
+            "status": "ready",
+            "parents": [],
+            "tenant": tenant,
+        },
+    )
+    return task_id
 
 
 # --- Auto-scout body: inherit the target task's scope (source of truth) -----

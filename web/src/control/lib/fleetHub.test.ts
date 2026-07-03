@@ -20,6 +20,7 @@ import {
   fmtResetAt,
   derivePendingItems,
   pendingCount,
+  deriveEffectivePlanPath,
   type ChainChipState,
 } from "./fleetHub";
 import type { Worker, ChainGraphResponse } from "./types";
@@ -783,5 +784,38 @@ describe("pendingCount", () => {
       [{ id: "t1", title: "Halt", block_reason: "operator hold" }],
     );
     expect(pendingCount(items)).toBe(2);
+  });
+});
+
+// ─── deriveEffectivePlanPath ──────────────────────────────────────────────────
+
+describe("deriveEffectivePlanPath", () => {
+  const paths = ["specs/a.md", "specs/b.md", "specs/c.md"];
+
+  it("leere pendingPaths → null", () => {
+    expect(deriveEffectivePlanPath(null, [])).toBeNull();
+    expect(deriveEffectivePlanPath("specs/a.md", [])).toBeNull();
+  });
+
+  it("selectedPath null → erster Eintrag (verspätetes Laden)", () => {
+    expect(deriveEffectivePlanPath(null, paths)).toBe("specs/a.md");
+  });
+
+  it("selectedPath noch gültig → bleibt erhalten", () => {
+    expect(deriveEffectivePlanPath("specs/b.md", paths)).toBe("specs/b.md");
+  });
+
+  it("selectedPath nach Approve aus Liste rausgefallen → fällt auf ersten zurück", () => {
+    // "specs/a.md" wurde approved und ist weg; b + c warten noch
+    const remaining = ["specs/b.md", "specs/c.md"];
+    expect(deriveEffectivePlanPath("specs/a.md", remaining)).toBe("specs/b.md");
+  });
+
+  it("genau ein Eintrag, selectedPath null → dieser Eintrag aktiv ohne Chip-Klick", () => {
+    expect(deriveEffectivePlanPath(null, ["specs/only.md"])).toBe("specs/only.md");
+  });
+
+  it("genau ein Eintrag, selectedPath zeigt auf ihn → stabil", () => {
+    expect(deriveEffectivePlanPath("specs/only.md", ["specs/only.md"])).toBe("specs/only.md");
   });
 });
