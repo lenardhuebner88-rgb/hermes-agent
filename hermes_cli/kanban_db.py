@@ -3786,6 +3786,21 @@ HEILER_CLASS_CAPACITY = "capacity"
 # defect either — same "pure observability, not a real problem" rationale as
 # capacity above, so also NOT in vision_metrics._NON_TRANSIENT_HEILER_CLASSES.
 HEILER_CLASS_OPERATOR_INTENT = "operator-intent"
+# ESCALATION-OPERATOR-GATE-DECLASSIFY-S1: a task deliberately parked awaiting an
+# OPERATOR gate — a ``freigabe``/held-before-release chain the operator must
+# release, a manual ``operator hold``, or an explicit "answer/decision needed"
+# park — is not a heiler defect: nothing is broken, the operator simply has to
+# act. Before this class such escalations fell through ``_classify_failure`` to
+# the opaque ``unclassified`` default (the dominant live unclassified cluster,
+# ~22% of classifications), which polluted the Stratege's ``by_class`` trust
+# signal and made the escalation rate read as if operator gates were errors.
+# Its own TERMINAL non-error class, so it is measured distinctly and — like
+# capacity/operator-intent — is NOT in
+# ``vision_metrics._NON_TRANSIENT_HEILER_CLASSES`` (pure observability: an
+# operator gate is not a "should-have-escalated-but-didnt" autonomy defect,
+# because it DID escalate to the operator). The operator-facing escalation event
+# is untouched (AC-2): only the error CLASSIFICATION changes.
+HEILER_CLASS_OPERATOR_GATED = "operator-gated"
 HEILER_CLASSES = (
     HEILER_CLASS_TRANSIENT,
     HEILER_CLASS_FLAKY,
@@ -3795,6 +3810,7 @@ HEILER_CLASSES = (
     HEILER_CLASS_UNCLASSIFIED,
     HEILER_CLASS_CAPACITY,
     HEILER_CLASS_OPERATOR_INTENT,
+    HEILER_CLASS_OPERATOR_GATED,
 )
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
@@ -15412,6 +15428,28 @@ _HEILER_TEXT_SIGNALS = (
         "git",
         "branch",
     )),
+    # ESCALATION-OPERATOR-GATE-DECLASSIFY-S1: an operator gate (a held-before-
+    # release freigabe chain, a manual operator hold, an explicit human-input /
+    # manual-completion park) — the operator must release/answer, nothing is
+    # broken. Placed DELIBERATELY LAST, below every real-defect AND transient
+    # signal, so it fires ONLY when no error signal matched: an escalation that
+    # merely mentions an operator gate but also carries a genuine defect (red
+    # gate, bad spec, merge conflict, transient infra) stays in its real class.
+    # This makes the reclassification a pure "declassify what would otherwise be
+    # unclassified" — it can never pull a task OUT of a real-error class, so the
+    # AC-2 guardrail (real-bug/bad-spec/transient must not decrease) holds by
+    # construction. Phrases kept precise (specific gate wording, no bare
+    # "operator"/"freigabe"/"release") so a defect that incidentally names the
+    # operator is not hijacked. Mirrors the freigabe hold reason emitted by
+    # ``planspecs.py`` ("Planspec ingest: held before release") and the
+    # ``hold_task`` summary ("operator hold").
+    (HEILER_CLASS_OPERATOR_GATED, (
+        "held before release",
+        "operator hold",
+        "operator manual completion",
+        "awaiting operator",
+        "human input",
+    )),
 )
 # Strong structural mappings, independent of free-text error wording.
 _HEILER_OUTCOME_CLASS = {
@@ -15500,7 +15538,11 @@ def _classify_failure(
       2. STRONG structural ``stall_class`` mapping (config/spec/transient by
          construction)
       3. STRONG structural ``outcome`` mapping (provisioning / quota = transient)
-      4. free-text signals: bad-spec, flaky, real-bug, transient
+      4. free-text signals: bad-spec, flaky, real-bug, transient, and — LAST,
+         below every error signal — operator-gated (a held-before-release /
+         operator-hold gate, ESCALATION-OPERATOR-GATE-DECLASSIFY-S1). Being last
+         makes it a pure declassify-the-otherwise-unclassified: it never steals a
+         real-error class, so the AC-2 guardrail holds by construction.
       5. WEAK structural fallbacks (HEILER-OUTCOME-RECLASSIFY-S1): crashed ->
          transient, iteration_budget_exhausted -> capacity. Below the text
          signals on purpose, so a crash / budget-exhaustion whose error text

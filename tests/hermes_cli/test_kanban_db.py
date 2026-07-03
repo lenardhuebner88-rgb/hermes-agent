@@ -13967,6 +13967,99 @@ def test_operator_intent_class_registered_but_not_non_transient():
     assert kb.HEILER_CLASS_OPERATOR_INTENT not in vm._NON_TRANSIENT_HEILER_CLASSES
 
 
+# ESCALATION-OPERATOR-GATE-DECLASSIFY-S1 -------------------------------------
+
+def test_operator_gated_class_registered_but_not_non_transient():
+    """A held-before-release / operator-question gate (the operator must
+    release/answer) is a deliberate operator state, not a product defect — like
+    capacity/operator-intent it is a terminal NON-error class and must NOT be a
+    non-transient 'real problem' signal (else it would inflate the autonomy
+    counter)."""
+    assert kb.HEILER_CLASS_OPERATOR_GATED == "operator-gated"
+    assert kb.HEILER_CLASS_OPERATOR_GATED in kb.HEILER_CLASSES
+    from hermes_cli import vision_metrics as vm
+    assert kb.HEILER_CLASS_OPERATOR_GATED not in vm._NON_TRANSIENT_HEILER_CLASSES
+
+
+def test_classify_operator_gate_held_before_release_is_operator_gated():
+    """The canonical freigabe hold reason (planspecs.py:
+    'Planspec ingest: held before release') classifies as operator-gated, not
+    the opaque default — it is the dominant live unclassified cluster (AC-1)."""
+    cls, ev = kb._classify_failure(error="Planspec ingest: held before release")
+    assert cls == kb.HEILER_CLASS_OPERATOR_GATED
+    assert ev["signal_source"] == "text"
+    assert ev["matched"] == "held before release"
+
+
+def test_classify_operator_gate_operator_hold_and_human_input():
+    """A manual operator hold (hold_task synthesizes summary='operator hold')
+    and an explicit human-input/manual-completion park are operator gates, not
+    defaults."""
+    for reason in (
+        "operator hold",
+        "Operator manual completion in progress; do not redispatch",
+        "need human input on the credential rotation",
+        "awaiting operator decision before proceeding",
+    ):
+        cls, _ = kb._classify_failure(error=reason)
+        assert cls == kb.HEILER_CLASS_OPERATOR_GATED, reason
+
+
+def test_classify_operator_gate_does_not_mask_real_defect():
+    """AC-2 guardrail: the operator-gate signals sit BELOW every real-defect
+    signal, so an escalation that mentions an operator gate but also carries a
+    genuine defect signal stays in its real class — no masking of real defects
+    as operator-gated."""
+    # red gate wins over an operator-hold mention
+    cls, _ = kb._classify_failure(
+        error="operator hold pending; but gate failed: 3 tests failed"
+    )
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+    # bad-spec wins over a held-before-release mention
+    cls, _ = kb._classify_failure(
+        error="held before release; acceptance criteria cannot be met"
+    )
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+    # a plain opaque failure is still unclassified (no over-firing)
+    cls, _ = kb._classify_failure(error="something entirely opaque happened")
+    assert cls == kb.HEILER_CLASS_UNCLASSIFIED
+
+
+def test_classify_escalation_held_before_release_silent_block_is_operator_gated():
+    """End-to-end via the silent-block escalation payload shape: a settled
+    freigabe hold (last_error='Planspec ingest: held before release',
+    trigger_outcome='scheduled', blocked_kind='operator_question') classifies as
+    operator-gated instead of unclassified."""
+    cls, _ = kb._classify_escalation_payload({
+        "why_now": "settled block (last run outcome: scheduled) with no "
+                   "operator_escalation — the self-healing retry lane will not "
+                   "(further) act on it",
+        "evidence": {
+            "trigger_outcome": "scheduled",
+            "last_error": "Planspec ingest: held before release",
+            "blocked_kind": "operator_question",
+        },
+    })
+    assert cls == kb.HEILER_CLASS_OPERATOR_GATED
+
+
+def test_classify_escalation_operator_question_with_real_defect_stays_defect():
+    """AC-2: an operator_question-kind escalation whose real reason is a genuine
+    defect (a placeholder/null-body spec gap that also trips the question regex)
+    stays bad-spec — the block kind does NOT override the defect signal."""
+    cls, _ = kb._classify_escalation_payload({
+        "why_now": "settled block (last run outcome: blocked) with no "
+                   "operator_escalation",
+        "evidence": {
+            "trigger_outcome": "blocked",
+            "last_error": "Task body is a placeholder: it contains only the "
+                          "generic Hermes Coder Contract template",
+            "blocked_kind": "operator_question",
+        },
+    })
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+
+
 def test_classify_nonspawnable_assignee_is_bad_spec():
     """A ready-stage mis-assignment (outcome='nonspawnable_assignee') is a
     structural config/spec gap, not the opaque default (live: t_23415f60,

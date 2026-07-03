@@ -73,6 +73,19 @@ _NON_TRANSIENT_HEILER_CLASSES = (
     kb.HEILER_CLASS_CONFLICT,
 )
 
+# ESCALATION-OPERATOR-GATE-DECLASSIFY-S1: terminal NON-error Heiler classes — a
+# deliberate operator gate (the operator must release/answer) or a pure
+# observability signal (budget capacity, an operator-intent supersede/green-run).
+# None is a product defect, so the ``error`` escalation rate (the AC-1 "escalation
+# rate relieved of the false-positive operator gates") excludes them. ``unclassified``
+# is intentionally NOT here: an opaque failure is an unknown that may still be a
+# real error, so it stays counted as a (potential) error escalation.
+_NON_ERROR_HEILER_CLASSES = (
+    kb.HEILER_CLASS_OPERATOR_GATED,
+    kb.HEILER_CLASS_OPERATOR_INTENT,
+    kb.HEILER_CLASS_CAPACITY,
+)
+
 
 # ---------------------------------------------------------------------------
 # State-path resolution (env-overridable for tests / sandboxes)
@@ -824,7 +837,12 @@ def _escalation_rate_metric(
     """Eskalations-Rate (per week) ↔ counter 'silent_blocks'.
 
     Headline = count of distinct tasks with ``operator_escalation`` events
-    inside the window.
+    inside the window. ``error_escalations_per_week`` reports the same rate
+    relieved of the false-positive operator gates (held-before-release /
+    operator-hold / human-input parks classified ``operator-gated`` or the other
+    terminal non-error classes) — the AC-1 "escalation rate entlastet" number,
+    while the raw headline still counts every escalated task (AC-2: the
+    operator-facing escalation is preserved).
     Counter = *settled* blocked tasks (the self-healing retry lane is done with
     them) that have NO escalation event — blocks that bypass the operator while
     looking like progress from outside (SILENT-BLOCK-GUARD-S1). Transient blocks
@@ -835,12 +853,38 @@ def _escalation_rate_metric(
     converges to 0 within one dispatcher tick and the two cannot drift.
     """
     window = window_days * DAY_SECONDS
+    cutoff = now - window
     row = conn.execute(
         "SELECT COUNT(DISTINCT task_id) AS n FROM task_events "
         "WHERE kind = ? AND created_at >= ?",
-        (kb.OPERATOR_ESCALATION_EVENT, now - window),
+        (kb.OPERATOR_ESCALATION_EVENT, cutoff),
     ).fetchone()
     escalations = int(row["n"] or 0) if row else 0
+
+    # ESCALATION-OPERATOR-GATE-DECLASSIFY-S1: the raw headline counts EVERY
+    # escalated task (the operator-facing escalation is preserved, AC-2), but a
+    # held-before-release / operator-hold gate is not an error. Derive each
+    # escalation's Heiler class from its own persisted evidence (the same
+    # deterministic function the classifier + sweep use) and report the
+    # error-only rate — distinct tasks with at least one escalation whose class
+    # is NOT a terminal non-error class — so the escalation rate can be read
+    # relieved of the false-positive operator gates.
+    error_tasks: set[str] = set()
+    for r in conn.execute(
+        "SELECT task_id, payload FROM task_events "
+        "WHERE kind = ? AND created_at >= ?",
+        (kb.OPERATOR_ESCALATION_EVENT, cutoff),
+    ).fetchall():
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        cls, _ = kb._classify_escalation_payload(
+            payload if isinstance(payload, dict) else {}
+        )
+        if cls not in _NON_ERROR_HEILER_CLASSES:
+            error_tasks.add(r["task_id"])
+    error_escalations = len(error_tasks)
 
     # Uses the auto-retry defaults (== live config: failure_limit/backoff/
     # retry_limit), so the settled set matches what the dispatcher sweep
@@ -851,6 +895,7 @@ def _escalation_rate_metric(
     silent = len(kb.silent_block_task_ids(conn, now=now))
     return {
         "escalations_per_week": escalations,
+        "error_escalations_per_week": error_escalations,
         "window_days": window_days,
         "counter": {
             "name": "silent_blocks",
@@ -1231,6 +1276,7 @@ def render_snapshot_summary(snapshot: dict) -> str:
         ),
         (
             f"  escalations/wk:  {e.get('escalations_per_week')}  "
+            f"(error={e.get('error_escalations_per_week')})  "
             f"↔ {e.get('counter', {}).get('name')}="
             f"{e.get('counter', {}).get('value')}"
         ),

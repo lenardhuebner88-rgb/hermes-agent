@@ -1546,3 +1546,108 @@ def test_classification_coverage_unclassified_share_null_when_no_events(conn):
     c = snap["metrics"]["classification_coverage"]
     assert c["unclassified_share"] is None
     assert c["classified_total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# ESCALATION-OPERATOR-GATE-DECLASSIFY-S1: operator gates get a terminal
+# non-error class instead of landing in unclassified (AC-1/AC-2).
+# ---------------------------------------------------------------------------
+
+def _add_operator_escalation(conn, tid, *, last_error, trigger_outcome="blocked",
+                             created_at):
+    """An operator_escalation event shaped like the silent-block sweep writes,
+    so classify_escalations_sweep can derive its Heiler class from evidence."""
+    payload = {
+        "why_now": f"settled block (last run outcome: {trigger_outcome}) with "
+                   "no operator_escalation",
+        "evidence": {"trigger_outcome": trigger_outcome, "last_error": last_error},
+    }
+    cur = conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (tid, kb.OPERATOR_ESCALATION_EVENT, json.dumps(payload), created_at),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def test_operator_gates_declassified_cuts_unclassified_share(conn, state_dir):
+    """AC-1: operator-gated holds (held-before-release / operator hold) get their
+    own terminal non-error class via classify_escalations_sweep, so the
+    unclassified_share drops by >=30% vs the pre-change behaviour (where they all
+    fell through to unclassified). AC-2: the real-error classes (real-bug /
+    bad-spec / transient) are untouched — their counts do not drop."""
+    from collections import Counter
+
+    now = 100 * DAY
+    specs = (
+        # 6 held-before-release freigabe holds -> operator-gated (were unclassified)
+        [("Planspec ingest: held before release", "scheduled")] * 6
+        # 2 genuinely-opaque -> stay unclassified (before AND after)
+        + [("something entirely opaque happened", "blocked")] * 2
+        # 5 real-bug / 4 bad-spec / 3 transient -> must be preserved (AC-2)
+        + [("gate failed: 3 tests failed", "blocked")] * 5
+        + [("acceptance criteria cannot be met", "blocked")] * 4
+        + [("dirty worktree overlap on branch X", "blocked")] * 3
+    )
+    for i, (last_error, outcome) in enumerate(specs):
+        _add_task(conn, f"E{i}", status="blocked", created_at=now - DAY)
+        _add_operator_escalation(conn, f"E{i}", last_error=last_error,
+                                 trigger_outcome=outcome, created_at=now - DAY)
+
+    kb.classify_escalations_sweep(conn, now=now)
+
+    cls_counts: Counter = Counter()
+    for r in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (kb.HEILER_CLASSIFICATION_EVENT,),
+    ).fetchall():
+        cls_counts[json.loads(r["payload"])["class"]] += 1
+
+    # AC-1: the 6 operator gates are declassified out of unclassified.
+    assert cls_counts[kb.HEILER_CLASS_OPERATOR_GATED] == 6
+    assert cls_counts[kb.HEILER_CLASS_UNCLASSIFIED] == 2
+    # AC-2: real-error classes preserved, not masked as operator-gated.
+    assert cls_counts[kb.HEILER_CLASS_REAL_BUG] == 5
+    assert cls_counts[kb.HEILER_CLASS_BAD_SPEC] == 4
+    assert cls_counts[kb.HEILER_CLASS_TRANSIENT] == 3
+
+    total = sum(cls_counts.values())
+    old_share = 100.0 * (6 + 2) / total   # pre-change: the 6 gates were unclassified too
+    new_share = 100.0 * cls_counts[kb.HEILER_CLASS_UNCLASSIFIED] / total
+    assert (old_share - new_share) / old_share >= 0.30, (
+        f"expected >=30% reduction, old={old_share} new={new_share}"
+    )
+
+    # The metric surfaces the reduced share.
+    c = vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+        "metrics"]["classification_coverage"]
+    assert c["classified_total"] == total
+    assert c["unclassified_share"] == new_share
+
+
+def test_escalation_rate_relieved_of_operator_gates(conn):
+    """AC-1: escalation_rate exposes error_escalations_per_week — the headline
+    relieved of the false-positive operator gates. The operator-facing
+    escalation is preserved (AC-2), so operator gates still count in the raw
+    escalations_per_week; they are only excluded from the error rate."""
+    now = 100 * DAY
+    for i, err in enumerate((
+        "gate failed: 3 tests failed",
+        "acceptance criteria cannot be met",
+        "dirty worktree overlap on branch X",
+    )):
+        _add_task(conn, f"R{i}", status="blocked", created_at=now - DAY)
+        _add_operator_escalation(conn, f"R{i}", last_error=err, created_at=now - DAY)
+    for i, (err, outcome) in enumerate((
+        ("Planspec ingest: held before release", "scheduled"),
+        ("operator hold", "blocked"),
+    )):
+        _add_task(conn, f"G{i}", status="blocked", created_at=now - DAY)
+        _add_operator_escalation(conn, f"G{i}", last_error=err,
+                                 trigger_outcome=outcome, created_at=now - DAY)
+
+    e = vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+        "metrics"]["escalation_rate"]
+    assert e["escalations_per_week"] == 5          # all distinct tasks (preserved)
+    assert e["error_escalations_per_week"] == 3    # relieved of the 2 operator gates
