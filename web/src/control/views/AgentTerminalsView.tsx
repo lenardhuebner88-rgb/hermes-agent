@@ -434,6 +434,7 @@ function FleetCard({
   onOpen,
   onRespawn,
   onKill,
+  onTerminate,
 }: {
   win: AgentTerminalOverviewWindow;
   now: number;
@@ -443,6 +444,7 @@ function FleetCard({
   onOpen: () => void;
   onRespawn: () => void;
   onKill: () => void;
+  onTerminate: () => void;
 }) {
   const meta = fleetStateMeta(win.state);
   const dead = win.state === "dead";
@@ -503,6 +505,21 @@ function FleetCard({
             className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-white/10 px-2 py-1.5 text-[11px] text-white/70 hover:border-red-300/40 hover:text-red-200"
           >
             <Trash2 className="h-3 w-3" />Entfernen
+          </button>
+        </div>
+      )}
+      {!dead && (
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onTerminate();
+            }}
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-red-500/30 px-2 py-1.5 text-[11px] text-red-200 hover:border-red-300/60 hover:bg-red-950/20"
+            aria-label={`Session beenden ${win.session}:${win.window}`}
+          >
+            <Trash2 className="h-3 w-3" />Session beenden
           </button>
         </div>
       )}
@@ -970,6 +987,21 @@ export function AgentTerminalsView() {
     [refresh],
   );
 
+  const terminateWindow = useCallback(
+    async (win: { session: string; window: string }) => {
+      const label = `${win.session}:${win.window}`;
+      if (!window.confirm(`Session ${label} wirklich beenden? Laufende Agent-Arbeit wird beendet.`)) return;
+      setError(null);
+      try {
+        await api.terminateAgentTerminalWindow(win.session, win.window);
+        await refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refresh],
+  );
+
   const renameWindow = useCallback(async () => {
     if (!selectedWindow) return;
     const name = renameValue.trim();
@@ -1321,6 +1353,11 @@ export function AgentTerminalsView() {
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </>
+                    )}
+                    {!dead && (
+                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-red-500/20 text-red-200/70 hover:border-red-300/50 hover:text-red-100">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     )}
                   </div>
                 );
@@ -1721,6 +1758,11 @@ export function AgentTerminalsView() {
             <Trash2 className="h-4 w-4" /><span>Fenster entfernen</span>
           </button>
         )}
+        {!sessionSheetDead && (
+          <button type="button" onClick={() => { void terminateWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-red-400/25 px-2 py-2.5 text-center leading-tight text-red-100 hover:bg-red-400/10">
+            <Trash2 className="h-4 w-4" /><span>Session beenden</span>
+          </button>
+        )}
         <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
           <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
         </button>
@@ -1857,6 +1899,7 @@ export function AgentTerminalsView() {
                 onOpen={() => openFromFleet(win)}
                 onRespawn={() => void respawnWindow(win)}
                 onKill={() => void killWindow(win)}
+                onTerminate={() => void terminateWindow(win)}
               />
             );
           })}

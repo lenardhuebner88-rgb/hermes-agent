@@ -607,6 +607,17 @@ class TmuxAgentSessionService:
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("kill_dead", session=session, window=window)
 
+    def terminate_live(self, session: str, window: str) -> None:
+        """Terminate a live dashboard-managed agent window."""
+        info = self.show(session, window)
+        if info.dead:
+            raise CapabilityError(f"window {session}:{window} is marked dead; use kill_dead instead")
+        if info.session != "work":
+            raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
+        kind, _workdir = self.identity_for(info.session, info.window)
+        self._run("kill-window", "-t", self._cmd_target(session, window))
+        self._log_event("terminate", kind=kind, session=session, window=window)
+
     def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
         """Rename a dashboard-managed window, preserving its respawn identity."""
         new_name = self.validate_name(new_name, field="window")

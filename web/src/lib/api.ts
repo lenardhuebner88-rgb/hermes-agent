@@ -568,6 +568,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window }),
     }),
+  terminateAgentTerminalWindow: (session: string, window: string) =>
+    fetchJSON<{ ok: boolean }>("/api/agent-terminals/terminate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, window }),
+    }),
   captureAgentTerminalWindow: (session: string, window: string, start?: number) =>
     fetchJSON<AgentTerminalCaptureResponse>("/api/agent-terminals/capture", {
       method: "POST",
