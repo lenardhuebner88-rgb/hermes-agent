@@ -280,15 +280,19 @@ export async function getWsTicket(): Promise<{ ticket: string; ttl_seconds: numb
 
 /**
  * Resolve the auth query-param pair (``[name, value]``) for a WebSocket
- * connect. In gated mode mints a fresh single-use ticket; in loopback
- * mode returns the injected session token.
+ * connect. In gated mode mints a fresh single-use ticket; in loopback mode
+ * returns the injected session token — but also falls back to a minted
+ * ticket if that token is missing/empty (e.g. a service-worker serving a
+ * stale precached ``index.html`` without the server's bootstrap script;
+ * incident 2026-07-03), instead of silently sending an empty token that the
+ * server would deterministically reject.
  */
 export async function buildWsAuthParam(): Promise<[string, string]> {
-  if (window.__HERMES_AUTH_REQUIRED__) {
+  const token = window.__HERMES_SESSION_TOKEN__;
+  if (window.__HERMES_AUTH_REQUIRED__ || !token) {
     const { ticket } = await getWsTicket();
     return ["ticket", ticket];
   }
-  const token = window.__HERMES_SESSION_TOKEN__ ?? "";
   return ["token", token];
 }
 
