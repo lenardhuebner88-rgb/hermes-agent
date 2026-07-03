@@ -757,12 +757,13 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     # Mock the judge to reject the completion. The gate only runs when a
     # judge is reachable, so force the availability probe True as well.
     # The fork's judge_goal returns a 4-tuple (verdict, reason, parse_failed,
-    # wait_directive); exercise that shape here.
+    # wait_directive); exercise that shape here. Patched at hermes_cli.goals
+    # — the shared gate module both kanban_tools and the CLI verb call into.
     def mock_judge_goal(goal, last_response, **kwargs):
         return "continue", "missing verification evidence", False, None
 
-    monkeypatch.setattr("tools.kanban_tools.judge_goal", mock_judge_goal)
-    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
 
     out = kt._handle_complete({"summary": "I did some stuff but not X"})
     d = json.loads(out)
@@ -815,8 +816,8 @@ def test_complete_goal_mode_allows_when_judge_unavailable(monkeypatch, tmp_path)
     def fail_if_called(goal, last_response, **kwargs):
         raise AssertionError("judge_goal must not run when no judge is available")
 
-    monkeypatch.setattr("tools.kanban_tools.judge_goal", fail_if_called)
-    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: False)
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: False)
 
     out = kt._handle_complete({"summary": "done enough"})
     d = json.loads(out)

@@ -964,6 +964,87 @@ def judge_goal(
     return verdict, reason, parse_failed, wait_directive
 
 
+def goal_judge_available() -> bool:
+    """True when an auxiliary client is configured for the goal judge.
+
+    ``judge_goal`` is fail-open at the source: when no auxiliary model can
+    be reached it returns a ``"continue"`` verdict that is indistinguishable
+    from a real "not done yet" judgment. A completion gate must not treat
+    that as a rejection, or an unconfigured/degraded auxiliary model would
+    wedge every ``goal_mode`` worker (it could never close its own task).
+
+    So callers probe availability first and only enforce a gate when a judge
+    is actually reachable. This mirrors the same client lookup ``judge_goal``
+    performs internally.
+    """
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+        client, model = get_text_auxiliary_client("goal_judge")
+    except Exception:
+        return False
+    return client is not None and bool(model)
+
+
+def check_goal_mode_completion(
+    *,
+    task_id: str,
+    task_title: str,
+    task_body: Optional[str],
+    handoff_text: str,
+) -> Optional[str]:
+    """Pre-completion judge gate for ``goal_mode`` tasks (Issue #38367).
+
+    Shared by the two ``kanban_complete`` surfaces so they can't diverge:
+    the ``kanban_complete`` model tool (``tools/kanban_tools.py``) and the
+    CLI ``hermes kanban complete`` verb (``hermes_cli/kanban.py``, the same
+    path the documented worker completion instructions invoke). Both callers
+    are responsible for deciding WHEN to invoke this (goal_mode task, and for
+    the CLI additionally: only when the caller is the task's own scoped
+    worker, not an operator override) — this function only implements the
+    judge call + verdict handling once both have decided to gate.
+
+    Returns ``None`` when completion may proceed (judge unreachable — fail
+    open, matching ``judge_goal``'s own fail-open contract — or verdict is
+    ``"done"``), or a human-readable rejection message when the judge says
+    the goal isn't satisfied yet.
+    """
+    if not goal_judge_available():
+        return None
+    verdict = "done"
+    reason = ""
+    try:
+        judge_result = judge_goal(
+            goal=f"{task_title}\n\n{task_body or ''}".strip(),
+            last_response=(handoff_text or "").strip(),
+        )
+        # judge_goal's return arity grew from 3 to 4 fields (added
+        # wait_directive); accept both so a future arity change doesn't
+        # silently break the gate — mirrors the same compat shim in
+        # run_kanban_goal_loop (below in this module).
+        if len(judge_result) == 3:
+            verdict, reason, _parse_failed = judge_result
+        else:
+            verdict, reason, _parse_failed, _wait = judge_result
+    except Exception as judge_exc:
+        # Defensive: judge_goal swallows its own errors, but if it ever
+        # raises, fail open rather than wedge the worker.
+        logger.warning(
+            "goal judge check failed, allowing completion: %s",
+            judge_exc,
+            exc_info=True,
+        )
+        return None
+    if verdict != "done":
+        return (
+            f"Goal completion rejected by judge: {reason}. "
+            f"To proceed, either: (1) provide explicit acceptance "
+            f"evidence in your summary matching the task's criteria, "
+            f"or (2) create continuation tasks with parents=[{task_id}] "
+            f"and keep this task alive."
+        )
+    return None
+
+
 def gather_background_processes(task_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return the live background-process snapshot for the goal judge.
 

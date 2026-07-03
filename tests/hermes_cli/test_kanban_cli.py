@@ -281,6 +281,86 @@ def test_run_slash_block_with_dependency_kind_routes_to_todo(kanban_home):
     assert task.block_kind == "dependency"
 
 
+def _goal_mode_worker_task(conn):
+    tid = kb.create_task(
+        conn, title="goal-mode-cli-test", assignee="test-worker",
+        body="Must achieve X with verified evidence.", goal_mode=True,
+    )
+    kb.claim_task(conn, tid)
+    return tid
+
+
+def test_run_slash_complete_goal_mode_worker_rejected_by_judge(monkeypatch, kanban_home):
+    """The CLI `complete` verb is the documented worker completion path
+    (kb.create_task -> kb.claim_task -> `hermes kanban complete
+    "$HERMES_KANBAN_TASK"`); it must hit the SAME judge gate as the
+    kanban_complete model tool when the caller is the task's own scoped
+    worker. Regression: the CLI path previously called kb.complete_task
+    directly, bypassing the gate entirely."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    def mock_judge_goal(goal, last_response, **kwargs):
+        return "continue", "missing verification evidence", False, None
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    out = kc.run_slash(f"complete {tid} --summary 'I did some stuff but not X'")
+    assert "Goal completion rejected by judge" in out
+    assert "missing verification evidence" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "running"
+
+
+def test_run_slash_complete_goal_mode_operator_override_ungated(monkeypatch, kanban_home):
+    """An operator running `hermes kanban complete` by hand (no
+    HERMES_KANBAN_TASK env marker) must NOT be gated by the judge — even for
+    a goal_mode task. The judge stub raises if consulted, so reaching 'done'
+    proves the gate was skipped entirely (not just fail-open on the
+    verdict)."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    def fail_if_called(goal, last_response, **kwargs):
+        raise AssertionError("judge_goal must not run for an operator override")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    out = kc.run_slash(f"complete {tid} --summary 'dispositioned done-elsewhere'")
+    assert "Completed" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "done"
+
+
+def test_run_slash_complete_goal_mode_worker_fail_open_when_judge_unavailable(
+    monkeypatch, kanban_home
+):
+    """Fail-open: a scoped worker completing a goal_mode task must not be
+    wedged when no judge is configured — the gate probes availability first
+    (same contract as the kanban_complete model tool)."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    def fail_if_called(goal, last_response, **kwargs):
+        raise AssertionError("judge_goal must not run when no judge is available")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: False)
+
+    out = kc.run_slash(f"complete {tid} --summary 'done enough'")
+    assert "Completed" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "done"
+
+
 def test_run_slash_json_output(kanban_home):
     out = kc.run_slash("create 'jsontask' --assignee alice --json")
     payload = json.loads(out)

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.goals import check_goal_mode_completion
 from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name
@@ -2698,6 +2699,34 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            # Goal-mode pre-completion judge gate (Issue #38367), the CLI
+            # side of the SAME gate the kanban_complete model tool enforces
+            # (tools/kanban_tools.py:_handle_complete) — the documented
+            # worker completion path invokes `hermes kanban complete` (or
+            # the equivalent claude-CLI lifecycle bridge) directly against
+            # kb.complete_task, bypassing the tool entirely, so a goal_mode
+            # worker could self-certify without ever hitting the tool gate.
+            # SHARED with the tool via hermes_cli.goals.check_goal_mode_completion
+            # so the two enforcement points can't diverge.
+            #
+            # Scoped NARROWLY to a worker closing its OWN task
+            # (HERMES_KANBAN_TASK == tid): an operator running `hermes kanban
+            # complete` by hand (e.g. dispositioning a task as done-elsewhere)
+            # has no worker-env marker and must stay ungated — the judge is a
+            # guard against a worker self-certifying, not an operator override.
+            if os.environ.get("HERMES_KANBAN_TASK") == tid:
+                task_for_gate = kb.get_task(conn, tid)
+                if task_for_gate and task_for_gate.goal_mode:
+                    rejection = check_goal_mode_completion(
+                        task_id=tid,
+                        task_title=task_for_gate.title,
+                        task_body=task_for_gate.body,
+                        handoff_text=(summary or args.result or ""),
+                    )
+                    if rejection:
+                        failed.append(tid)
+                        print(f"kanban: {rejection}", file=sys.stderr)
+                        continue
             # Worker-context completions (the claude-CLI lifecycle bridge
             # reports back via this verb) must hit the same review gate as the
             # in-process kanban_complete tool — otherwise a claude-cli worker

@@ -225,6 +225,83 @@ class TestJudgeGoal:
         assert reason == "not yet"
 
 
+class TestCheckGoalModeCompletion:
+    """``check_goal_mode_completion`` (Issue #38367) is the pre-completion
+    judge gate shared by the kanban_complete model tool
+    (tools/kanban_tools.py) and the CLI ``hermes kanban complete`` verb
+    (hermes_cli/kanban.py) — the two places a goal_mode worker's completion
+    is enforced. These tests exercise the shared function directly (real
+    judge_goal/goal_judge_available, only the aux client is mocked), so a
+    regression in either caller shows up here even if a caller-specific test
+    happens to monkeypatch judge_goal/goal_judge_available away."""
+
+    def test_fail_open_when_no_aux_client(self):
+        from hermes_cli import goals
+
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(None, None),
+        ):
+            rejection = goals.check_goal_mode_completion(
+                task_id="t_abc123",
+                task_title="ship the thing",
+                task_body="do X",
+                handoff_text="did some stuff",
+            )
+        assert rejection is None
+
+    def test_rejects_when_judge_says_continue(self):
+        from hermes_cli import goals
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content='{"done": false, "reason": "missing evidence"}'
+                    )
+                )
+            ]
+        )
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            rejection = goals.check_goal_mode_completion(
+                task_id="t_abc123",
+                task_title="ship the thing",
+                task_body="do X",
+                handoff_text="did some stuff but not X",
+            )
+        assert rejection is not None
+        assert "Goal completion rejected by judge" in rejection
+        assert "missing evidence" in rejection
+        assert "parents=[t_abc123]" in rejection
+
+    def test_allows_when_judge_says_done(self):
+        from hermes_cli import goals
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(content='{"done": true, "reason": "achieved"}')
+                )
+            ]
+        )
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            rejection = goals.check_goal_mode_completion(
+                task_id="t_abc123",
+                task_title="ship the thing",
+                task_body="do X",
+                handoff_text="did X with verified evidence",
+            )
+        assert rejection is None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # GoalManager lifecycle + persistence
 # ──────────────────────────────────────────────────────────────────────
