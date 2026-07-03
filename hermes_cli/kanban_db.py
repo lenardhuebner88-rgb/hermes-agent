@@ -15500,6 +15500,17 @@ _HEILER_OUTCOME_FALLBACK_CLASS = {
     # genuine defect (e.g. a reviewer finding surfaced afterwards) stays
     # real-bug via the text signals above.
     "completed": HEILER_CLASS_OPERATOR_INTENT,
+    # ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: a persistent-red release gate is
+    # a blocking defect on the release candidate (real-bug), while a gate the
+    # runner could not complete (timeout / launch error) is operational
+    # (transient). Carried as a structural ``trigger_outcome`` by
+    # ``kanban_worktrees._escalate_release_gate`` so a blind escalation (opaque /
+    # visual-gate / empty gate output that matches no free-text signal) lands in
+    # its real cause class instead of ``unclassified``. WEAK (below the text
+    # signals) so a genuine free-text signal in the gate output still classifies
+    # first — no over-claiming (AC-2).
+    "release_gate_red": HEILER_CLASS_REAL_BUG,
+    "release_gate_infra": HEILER_CLASS_TRANSIENT,
 }
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,

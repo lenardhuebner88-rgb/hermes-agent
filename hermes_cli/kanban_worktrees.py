@@ -1494,6 +1494,42 @@ def _finish_release_gate_green(
                          task_id, exc_info=True)
 
 
+# ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: sentinels the release-gate runner
+# emits when it could not COMPLETE a clean gate run (the gate never produced a
+# pass/fail verdict — an operational fault, not a candidate defect). Matched as a
+# prefix on our own code-defined output strings (``_default_release_gate_runner``
+# timeout / OSError branches), so parsing them is robust, not free-text guessing.
+_RELEASE_GATE_INFRA_SENTINELS = (
+    "release-gate timed out",
+    "release-gate command error",
+)
+
+
+def _release_gate_trigger_outcome(last_error: str) -> str:
+    """Structural failure-MODE label for a persistent-red release-gate escalation.
+
+    The gate output text (build log, ``visual-gate: …`` message, subprocess
+    sentinel, or empty) rarely contains one of the Heiler free-text signals, so a
+    release-gate escalation used to fall through to ``unclassified`` and starve
+    the Stratege's ``by_class`` input. This derives a structural ``trigger_outcome``
+    from the failure mode instead of the exact wording:
+
+    * a gate the runner could not complete (our own timeout / command-error
+      sentinels) is infrastructure → mapped to ``transient``;
+    * any other red gate (build/artifact/smoke/visual failure, incl. empty
+      output) is a genuine blocking defect on the release candidate → ``real-bug``.
+
+    Read by :func:`kanban_db._classify_escalation_payload` and mapped by the WEAK
+    outcome fallback in ``kanban_db`` — WEAK so a genuine free-text signal in the
+    gate output still classifies first (no over-claiming, AC-2). Pure/deterministic.
+    """
+    low = (last_error or "").lstrip().lower()
+    for sentinel in _RELEASE_GATE_INFRA_SENTINELS:
+        if low.startswith(sentinel):
+            return "release_gate_infra"
+    return "release_gate_red"
+
+
 def _escalate_release_gate(
     conn: sqlite3.Connection, task_id: str, root_id: str, *,
     attempts: int, last_error: str,
@@ -1509,6 +1545,11 @@ def _escalate_release_gate(
         "attempts_already_made": attempts,
         "evidence": {
             "last_error": (last_error or "")[-2000:],
+            # ESCALATION-RELEASE-GATE-ERROR-CONTEXT-S1: structural failure-mode
+            # context so a blind (opaque/visual-gate/empty) red gate classifies
+            # into its real cause class instead of ``unclassified``. Pure context
+            # enrichment — the block/escalation decision below is unchanged (AC-2).
+            "trigger_outcome": _release_gate_trigger_outcome(last_error),
             "root_id": root_id,
         },
         "recommended_human_action": (
