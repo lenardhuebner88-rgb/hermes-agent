@@ -9,9 +9,10 @@ The sidecar:
 - runs `Spectrum({ projectId, projectSecret, providers: [imessage.config()] })`
 - exposes a loopback-only HTTP control channel for the Python adapter
   to push send/typing requests (auth via `X-Hermes-Sidecar-Token`)
-- drains the inbound message stream so `spectrum-ts` keeps its
-  reconnect/heartbeat machinery alive (real inbound delivery is via
-  Photon's signed webhook hitting our Python aiohttp server)
+- drains the inbound message stream and serves it to the Python
+  adapter over a loopback `GET /inbound` (NDJSON) — this is itself
+  the only inbound delivery path; there is no webhook and no public
+  HTTP server
 
 ## Install
 
