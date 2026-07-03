@@ -1662,6 +1662,8 @@ export const LoopHeartbeatSchema = z.object({
 export const LoopPackSummarySchema = z.object({
   name: z.string(),
   type: z.enum(["pipeline", "sweep"]),
+  // "repo" = kuratiertes Manifest, "custom" = per Werkstatt dupliziert (control_loops.py:220).
+  source: z.enum(["repo", "custom"]).optional(),
   description: z.string().catch(""),
   stability: z.string().catch("experimental"),
   phases: z.record(z.string(), LoopPhaseSchema).catch({}),
