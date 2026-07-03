@@ -15022,6 +15022,35 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
+def _count_same_cause_runs(
+    conn: sqlite3.Connection,
+    task_id: str,
+    fingerprint: str,
+    *,
+    exclude_run_id: Optional[int] = None,
+) -> int:
+    """How many of this task's failures — including the current occurrence —
+    share ``fingerprint`` (FAILURE-FINGERPRINT-S1).
+
+    Counts committed ``task_runs`` rows stamped with the same
+    ``worker_failure_fingerprint`` (``exclude_run_id`` skips the run the
+    caller itself just closed, so it isn't double-counted against the +1
+    below), plus the current occurrence. The +1 keeps this correct even when
+    the caller never persists a run row for the current failure
+    (``end_run=False``), since only the DB-recorded prior runs are queried.
+    """
+    query = (
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = ? "
+        "AND json_extract(metadata, '$.worker_failure_fingerprint') = ?"
+    )
+    params: list = [task_id, fingerprint]
+    if exclude_run_id is not None:
+        query += " AND id != ?"
+        params.append(int(exclude_run_id))
+    prior = conn.execute(query, params).fetchone()[0]
+    return int(prior) + 1
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -15729,6 +15758,7 @@ def _operator_escalation_payload(
     error: str,
     outcome: str,
     event_payload_extra: Optional[dict],
+    same_cause_count: Optional[int] = None,
 ) -> dict:
     evidence = {
         "trigger_outcome": outcome,
@@ -15736,6 +15766,8 @@ def _operator_escalation_payload(
         "effective_limit": effective_limit,
         "limit_source": limit_source,
     }
+    if same_cause_count is not None:
+        evidence["same_cause_count"] = same_cause_count
     if event_payload_extra:
         evidence["context"] = dict(event_payload_extra)
     return {
@@ -15887,6 +15919,11 @@ def _record_task_failure(
             failures += 1
         cur_status = row["status"]
 
+        # FAILURE-FINGERPRINT-S1: normalized cause, stamped onto the closed
+        # run's metadata below and used to count same-cause recurrence for the
+        # operator_escalation evidence (see ``_count_same_cause_runs``).
+        exit_fingerprint = _error_fingerprint(error)
+
         # Per-task override wins over both caller-supplied and default
         # thresholds. None (the common case) falls through.
         task_override = row["max_retries"] if "max_retries" in row.keys() else None
@@ -15938,6 +15975,8 @@ def _record_task_failure(
                         "trigger_outcome": outcome,
                         "effective_limit": effective_limit,
                         "limit_source": limit_source,
+                        "worker_exit_kind": outcome,
+                        "worker_failure_fingerprint": exit_fingerprint,
                     },
                 )
             payload = {
@@ -15982,6 +16021,9 @@ def _record_task_failure(
                 error=error,
                 outcome=outcome,
                 event_payload_extra=event_payload_extra,
+                same_cause_count=_count_same_cause_runs(
+                    conn, task_id, exit_fingerprint, exclude_run_id=run_id,
+                ),
             )
             new_class, _ = _classify_escalation_payload(esc_payload)
             escalation_coalesced = new_class in _escalated_classes_for_task(
@@ -16031,7 +16073,11 @@ def _record_task_failure(
                     outcome=outcome,
                     status=outcome,
                     error=error[:500],
-                    metadata={"failures": failures},
+                    metadata={
+                        "failures": failures,
+                        "worker_exit_kind": outcome,
+                        "worker_failure_fingerprint": exit_fingerprint,
+                    },
                 )
                 _append_event(
                     conn,
