@@ -960,6 +960,8 @@ export interface LoopHeartbeat {
 export interface LoopPackSummary {
   name: string;
   type: "pipeline" | "sweep";
+  /** "repo" = kuratiertes Manifest aus loops/packs/, "custom" = per Werkstatt dupliziert. */
+  source?: "repo" | "custom";
   description: string;
   stability: string;
   phases: Record<string, LoopPhase>;

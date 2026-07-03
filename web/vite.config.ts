@@ -73,9 +73,17 @@ export default defineConfig({
       injectRegister: "auto",
       manifest: false,
       workbox: {
-        globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
+        // `index.html` is rendered per-request by the Python server, which
+        // injects auth bootstrap flags (`__HERMES_SESSION_TOKEN__` /
+        // `__HERMES_AUTH_REQUIRED__`) that the SPA needs for its WebSocket
+        // auth. The service worker must never answer navigations from the
+        // precache instead — that would serve a static build HTML with
+        // neither flag set, silently breaking WS auth (incident
+        // 2026-07-03). Keep `html` out of the precache glob and disable the
+        // navigate fallback outright.
+        globPatterns: ["**/*.{js,css,svg,png,woff2}"],
+        navigateFallback: null,
         importScripts: ["hermes-push-sw.js"],
-        navigateFallbackDenylist: [/^\/api\//, /^\/auth\//],
         runtimeCaching: [],
       },
     }),

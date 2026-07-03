@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, fetchJSON, openAuthedApiFile } from "./api";
+import { api, buildWsAuthParam, fetchJSON, openAuthedApiFile } from "./api";
 
 // Regression coverage for the loopback stale-token auto-reload (commit
 // fe5c8ec4a). The bug: /api/auth/me answers 401 on every call in non-gated
@@ -207,6 +207,60 @@ describe("fetchJSON GET timeout", () => {
   });
 });
 
+
+describe("buildWsAuthParam", () => {
+  // Regression coverage for the SW-poisoning incident 2026-07-03: a stale
+  // service worker (vite-plugin-pwa's Workbox precache) answered navigations
+  // with the static build `index.html` instead of letting the server render
+  // it, which strips both `__HERMES_AUTH_REQUIRED__` and
+  // `__HERMES_SESSION_TOKEN__`. Before the fix, the loopback branch sent
+  // `["token", ""]` unconditionally, which the server's
+  // `_ws_auth_reason` rejects as `no_credential` on every WebSocket connect
+  // (Terminal-Attach, Kanban-Live-Events) while REST kept working via the
+  // cookie — a confusing partial outage.
+
+  it("gated mode mints a fresh ticket", async () => {
+    vi.stubGlobal("window", {
+      __HERMES_AUTH_REQUIRED__: true,
+      __HERMES_SESSION_TOKEN__: undefined,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => mockResponse(200, { jsonBody: { ticket: "tix-1", ttl_seconds: 30 } })),
+    );
+
+    await expect(buildWsAuthParam()).resolves.toEqual(["ticket", "tix-1"]);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/ws-ticket",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
+  it("loopback mode with an injected token returns it unchanged", async () => {
+    vi.stubGlobal("window", {
+      __HERMES_AUTH_REQUIRED__: false,
+      __HERMES_SESSION_TOKEN__: "tok-123",
+    });
+    vi.stubGlobal("fetch", vi.fn());
+
+    await expect(buildWsAuthParam()).resolves.toEqual(["token", "tok-123"]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("regression: both auth flags missing (SW-poisoned client) falls back to a minted ticket instead of an empty token", async () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => mockResponse(200, { jsonBody: { ticket: "tix-2", ttl_seconds: 30 } })),
+    );
+
+    await expect(buildWsAuthParam()).resolves.toEqual(["ticket", "tix-2"]);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/ws-ticket",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+});
 
 describe("agent terminal worker contract", () => {
   it("posts JSON bodies with an application/json content type", async () => {

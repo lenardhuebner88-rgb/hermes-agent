@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
 import { de } from "../i18n/de";
-import type { LoopFilesResponse, LoopModelsResponse, LoopPack } from "../lib/types";
+import type { LoopDetailResponse, LoopFilesResponse, LoopHeartbeatCurrent, LoopModelsResponse, LoopPack, LoopPackSummary } from "../lib/types";
 
 const t = de.loops;
 
@@ -17,6 +18,9 @@ const t = de.loops;
 const runningPipeline: LoopPack = {
   name: "builder-reviewer",
   type: "pipeline",
+  // "source" ist ein neueres Feld (control_loops.py:220, Nachtschicht-Redesign) —
+  // beide Fixture-Packs sind reale kuratierte Manifeste unter loops/packs/.
+  source: "repo",
   description: "Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial",
   stability: "stable",
   phases: {
@@ -51,6 +55,7 @@ const betweenPhasesPipeline: LoopPack = {
 const idleSweepWithCommits: LoopPack = {
   name: "doc-sweep",
   type: "sweep",
+  source: "repo",
   description: "Pro Runde EINE Doku-Drift zwischen Repo-Doku und Code-Verhalten finden und die Doku korrigieren",
   stability: "experimental",
   phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 2400 } },
@@ -76,6 +81,14 @@ const runningWithCommits: LoopPack = {
 const idleNoCommits: LoopPack = {
   ...idleSweepWithCommits,
   name: "idle-no-commits",
+  commits_ahead: 0,
+};
+
+// Per Werkstatt dupliziertes Pack (source="custom") — für den Source-Badge.
+const customPack: LoopPack = {
+  ...idleSweepWithCommits,
+  name: "doc-sweep-copy",
+  source: "custom",
   commits_ahead: 0,
 };
 
@@ -148,10 +161,22 @@ describe("LoopsGrid", () => {
     expect(html).toContain(t.queueBuilding);
     expect(html).toContain(t.queueVerified);
     expect(html).toContain(t.queueLanded);
-    expect(html).toContain(t.queueBounced);
+    // 90-bounced ist 0 in dieser Fixture — der rote "n abgeprallt"-Chip zeigt
+    // sich erst bei bounced>0 (kein Alarm-Chip fuer "nichts ist passiert"),
+    // siehe eigener Test unten.
+    expect(html).not.toContain(t.queueBounced);
     // 20-verified count (7) und 30-landed count (3) muessen sichtbar sein, nicht nur das Label.
     expect(html).toMatch(/>7</);
     expect(html).toMatch(/>3</);
+  });
+
+  it("shows the red 'n abgeprallt' chip only when the bounced stage is non-empty", () => {
+    const withBounced: LoopPack = {
+      ...runningPipeline,
+      queue: { "00-planned": 1, "10-building": 2, "20-verified": 7, "30-landed": 3, "90-bounced": 2 },
+    };
+    const html = renderGrid([withBounced]);
+    expect(html).toContain(`2 ${t.queueBounced}`);
   });
 
   it("renders an idle experimental sweep pack with an 'unverdaute Commits' badge", () => {
@@ -263,5 +288,180 @@ describe("LoopsGrid — Werkstatt-Panel", () => {
     const html = renderGrid([runningPipeline], { workshopOpenPack: null, files: repoFiles });
     expect(html).not.toContain(t.workshopReadOnly);
     expect(html).not.toContain("build.md");
+  });
+});
+
+describe("LoopsGrid — Nachtschicht-Redesign: Loop-Ring (Signatur-Element)", () => {
+  it("renders a running-state ring for a running pipeline pack", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toMatch(/data-testid="loop-ring"[^>]*data-state="running"/);
+  });
+
+  it("renders an idle-state ring for an idle pack", () => {
+    const html = renderGrid([idleSweepWithCommits]);
+    expect(html).toMatch(/data-testid="loop-ring"[^>]*data-state="idle"/);
+  });
+
+  it("renders an error-state ring for a manifest-error pack", () => {
+    const html = renderGrid([brokenPack]);
+    expect(html).toMatch(/data-testid="loop-ring"[^>]*data-state="error"/);
+  });
+});
+
+describe("LoopsGrid — Nachtschicht-Redesign: Source-Badge (control_loops.py:220)", () => {
+  it("shows the Repo badge for a curated pack", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain(t.sourceRepo);
+  });
+
+  it("shows the Custom badge for a duplicated pack", () => {
+    const html = renderGrid([customPack]);
+    expect(html).toContain(t.sourceCustom);
+  });
+});
+
+describe("LoopsGrid — Nachtschicht-Redesign: Lagebild-Hero", () => {
+  it("shows the sleeping-crew statement when no pack is running", () => {
+    const html = renderGrid([idleSweepWithCommits, idleNoCommits]);
+    expect(html).toContain(t.heroSleeping);
+    expect(html).toMatch(/data-testid="loops-hero"[^>]*data-state="sleeping"/);
+  });
+
+  it("shows the running pack's name and phase in the hero when a pack is running", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toMatch(/data-testid="loops-hero"[^>]*data-state="running"/);
+    // Pack-Name erscheint doppelt (Hero + Karte) — mindestens einmal reicht als Beleg.
+    expect(html).toContain("builder-reviewer");
+    expect(html).not.toContain(t.heroSleeping);
+  });
+
+  it("shows a '+n weitere laufen' chip when more than one pack is running", () => {
+    const secondRunning: LoopPack = { ...runningPipeline, name: "second-runner" };
+    const html = renderGrid([runningPipeline, secondRunning]);
+    expect(html).toContain(t.heroMoreRunning(1));
+  });
+
+  it("reports the timer count in the sleeping hero from timer_enabled packs", () => {
+    const withTimer: LoopPack = { ...idleSweepWithCommits, timer_enabled: true };
+    const html = renderGrid([withTimer]);
+    expect(html).toContain(t.heroTimerActive(1));
+  });
+
+  it("shows 'Kein Timer aktiv' when no idle pack has its timer enabled", () => {
+    const html = renderGrid([idleNoCommits]);
+    expect(html).toContain(t.heroTimerNone);
+  });
+});
+
+describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () => {
+  // Zeile 1:1 aus loops/runner.py::LoopRunner.ledger() rekonstruiert (siehe
+  // loopLedger.ts-Kommentar) — verifiziert der Parser hier im UI-Kontext.
+  const detail: LoopDetailResponse = {
+    ...(runningPipeline as LoopPackSummary),
+    ledger_tail: [
+      "- 2026-07-03 07:14 R1 ✅ P1-repo-housekeeper-dead-code-sweep.md verified (a1b2c3d4e) [build 812s · verify 340s]",
+      "# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf",
+    ],
+    queue_entries: null,
+    commits: [],
+    overrides: {},
+  };
+
+  it("renders a parsed ledger line's raw text and round/phase chips inside the open Logbuch disclosure", () => {
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).toContain("P1-repo-housekeeper-dead-code-sweep.md verified (a1b2c3d4e)");
+    expect(html).toContain("R1");
+    expect(html).toContain("verify");
+  });
+
+  it("renders an unparsable ledger line verbatim instead of crashing", () => {
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).toContain("# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf");
+  });
+});
+
+// ── Runden-Fenster der Ring-Ableitung (Codex-Review-Befund 2026-07-03) ───────
+// `heartbeat.last` ist ein rollierendes 20er-Fenster OHNE Runden-IDs — alte
+// build/verify/round-Einträge früherer Runden dürfen nicht als Fortschritt der
+// aktuellen Runde erscheinen. Runden-Grenze Pipeline: der letzte `plan`-Eintrag.
+describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
+  const hbEntry = (phase: string, rc: number, at: string) =>
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at });
+
+  const withHeartbeat = (current: LoopHeartbeatCurrent | null, last: ReturnType<typeof hbEntry>[]): LoopPackSummary => ({
+    ...(runningPipeline as LoopPackSummary),
+    heartbeat: { current, last },
+  });
+
+  const NOW = Date.parse("2026-07-03T08:00:00");
+
+  it("zählt verify der VORHERIGEN Runde nicht als done, wenn Runde 2 in build steht", () => {
+    const pack = withHeartbeat(
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00", timeout: 3600 },
+      [
+        // Runde 1 (komplett, alles grün):
+        hbEntry("plan", 0, "2026-07-03T06:00:00"),
+        hbEntry("build", 0, "2026-07-03T06:20:00"),
+        hbEntry("verify", 0, "2026-07-03T06:40:00"),
+        // Runde 2 (nur plan bisher):
+        hbEntry("plan", 0, "2026-07-03T07:50:00"),
+      ],
+    );
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.find((s) => s.key === "plan")?.state).toBe("done");
+    expect(segs.find((s) => s.key === "build")?.state).toBe("current");
+    expect(segs.find((s) => s.key === "verify")?.state).toBe("pending");
+  });
+
+  it("startet mit leerem Ring, wenn gerade eine neue Runde plant (History = Vergangenheit)", () => {
+    const pack = withHeartbeat(
+      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00", timeout: 2400 },
+      [hbEntry("plan", 0, "2026-07-03T06:00:00"), hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")],
+    );
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.find((s) => s.key === "plan")?.state).toBe("current");
+    expect(segs.find((s) => s.key === "build")?.state).toBe("pending");
+    expect(segs.find((s) => s.key === "verify")?.state).toBe("pending");
+  });
+
+  it("zeigt im Leerlauf das Ergebnis der LETZTEN Runde (Fenster ab letztem plan)", () => {
+    const pack = withHeartbeat(null, [
+      hbEntry("verify", 1, "2026-07-03T05:00:00"), // ältere, rote Runde — zählt nicht
+      hbEntry("plan", 0, "2026-07-03T06:00:00"),
+      hbEntry("build", 0, "2026-07-03T06:20:00"),
+      hbEntry("verify", 0, "2026-07-03T06:40:00"),
+    ]);
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.every((s) => s.state === "done")).toBe(true);
+  });
+
+  it("bleibt konservativ pending, wenn kein plan-Eintrag im Fenster liegt", () => {
+    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")]);
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.every((s) => s.state === "pending")).toBe(true);
+  });
+});
+
+describe("deriveRingTicks — nur der hintere zusammenhängende round-Block", () => {
+  const hbEntry = (phase: string, rc: number) =>
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00" });
+
+  it("zählt rounds vor einer Pipeline-Phase nicht mit", () => {
+    const pack: LoopPackSummary = {
+      ...(idleSweepWithCommits as LoopPackSummary),
+      heartbeat: {
+        current: null,
+        last: [hbEntry("round", 0), hbEntry("plan", 0), hbEntry("round", 0), hbEntry("round", 0)],
+      },
+    };
+    expect(deriveRingTicks(pack).done).toBe(2);
+  });
+
+  it("zählt fehlgeschlagene rounds im Block nicht als done, bricht den Block aber nicht ab", () => {
+    const pack: LoopPackSummary = {
+      ...(idleSweepWithCommits as LoopPackSummary),
+      heartbeat: { current: null, last: [hbEntry("round", 0), hbEntry("round", 1), hbEntry("round", 0)] },
+    };
+    expect(deriveRingTicks(pack).done).toBe(2);
   });
 });

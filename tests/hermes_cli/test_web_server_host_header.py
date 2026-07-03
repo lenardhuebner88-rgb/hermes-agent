@@ -215,3 +215,63 @@ class TestWebSocketHostOriginGuard:
             },
         ):
             pass
+
+    def test_extra_allowed_host_websocket_is_accepted(self, monkeypatch):
+        """A loopback bind fronted by Tailscale Serve (which preserves the
+        inbound Host/Origin as the tailnet hostname) must be accepted when
+        that hostname is operator-declared via extra_allowed_hosts — mirrors
+        the HTTP host_header_middleware's extra_allowed check. Regression for
+        the terminal-attach WS being rejected while HTTP passed (the two
+        checks previously used different allowlists)."""
+        from fastapi.testclient import TestClient
+
+        import hermes_cli.web_server as ws
+
+        tailnet_host = "huebners.tail50819a.ts.net"
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setattr(
+            ws.app.state, "extra_allowed_hosts", frozenset({tailnet_host}), raising=False
+        )
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(ws.app)
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": f"{tailnet_host}:9443",
+                "Origin": f"https://{tailnet_host}:9443",
+            },
+        ):
+            pass
+
+    def test_extra_allowed_hosts_does_not_widen_rejection_of_other_hosts(self, monkeypatch):
+        """extra_allowed_hosts must only whitelist the declared hostname —
+        an unrelated attacker Host must still be rejected."""
+        from fastapi.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setattr(
+            ws.app.state,
+            "extra_allowed_hosts",
+            frozenset({"huebners.tail50819a.ts.net"}),
+            raising=False,
+        )
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(ws.app)
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                url,
+                headers={
+                    "Host": "evil.example",
+                    "Origin": "http://evil.example",
+                },
+            ):
+                pass
+
+        assert exc.value.code == 4403
