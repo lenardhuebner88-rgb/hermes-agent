@@ -89,16 +89,36 @@ describe("Cost schemas", () => {
           input_tokens: 90000,
           tokens_per_finding: null,
         },
+        {
+          // scout: read-only Recon carries read-evidence, not verdict findings.
+          profile: "scout",
+          runs: 6,
+          approved: 0,
+          request_changes: 0,
+          findings_blocking: null,
+          findings_observations: null,
+          input_tokens: 120000,
+          tokens_per_finding: null,
+          read_items: 40,
+          tokens_per_read_item: 3000,
+        },
       ],
     }, "runs-costs-review-value");
 
     const byStage = Object.fromEntries(parsed.review_value.map((r) => [r.profile, r]));
     expect(byStage.verifier.findings_blocking).toBe(1);
     expect(byStage.verifier.tokens_per_finding).toBe(100000);
+    // verdict rows omit the scout read-metrics on the wire → NULL, never a throw.
+    expect(byStage.verifier.read_items).toBeNull();
+    expect(byStage.verifier.tokens_per_read_item).toBeNull();
     expect(byStage.critic.findings_blocking).toBeNull();
     expect(byStage.critic.findings_observations).toBeNull();
     expect(byStage.critic.tokens_per_finding).toBeNull();
     expect(byStage.critic.runs).toBe(2);
+    // scout row keeps its read-evidence metrics through the schema.
+    expect(byStage.scout.read_items).toBe(40);
+    expect(byStage.scout.tokens_per_read_item).toBe(3000);
+    expect(byStage.scout.findings_blocking).toBeNull();
   });
 
   it("preserves Neuralwatt cost basis on chain cost lanes and totals", () => {

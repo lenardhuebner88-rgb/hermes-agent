@@ -381,6 +381,31 @@ export function EffizienzSection({
         <Verdict tone="calm">{de.stats.reviewValueEmpty}</Verdict>
       ) : (
         stages.map((r, i) => {
+          const name = <LaneLabel profile={r.profile} label={profileLabel[r.profile] ?? r.profile} />;
+          // Scout ist read-only Recon, keine Verdikt-Stufe: sein Wert ist die
+          // gelesene Evidenz (read_items als Score) plus Kosten je Item — es
+          // gibt weder Quote noch Funde. read_items ist NULL, wenn kein Lauf
+          // Read-Metadaten trug (Altbestand) → "—".
+          if (r.profile === "scout") {
+            return (
+              <LeaderRow
+                key={r.profile}
+                rank={i + 1}
+                name={name}
+                score={r.read_items == null ? "—" : String(r.read_items)}
+                status="neutral"
+                latency={
+                  <>
+                    {de.stats.leaderRuns(r.runs)}
+                    {" · "}
+                    {r.tokens_per_read_item == null
+                      ? "—"
+                      : `${fmtTokens(r.tokens_per_read_item)} ${de.stats.reviewPerRead}`}
+                  </>
+                }
+              />
+            );
+          }
           const judged = r.approved + r.request_changes;
           const quote = judged > 0 ? Math.round((r.approved / judged) * 100) : null;
           // findings_* sind gekoppelt NULL (Altbestand): keine Fund-Erfassung.
@@ -392,7 +417,7 @@ export function EffizienzSection({
             <LeaderRow
               key={r.profile}
               rank={i + 1}
-              name={<LaneLabel profile={r.profile} label={profileLabel[r.profile] ?? r.profile} />}
+              name={name}
               score={findings == null ? "—" : String(findings)}
               status={findings != null && findings > 0 ? "warn" : "neutral"}
               latency={
