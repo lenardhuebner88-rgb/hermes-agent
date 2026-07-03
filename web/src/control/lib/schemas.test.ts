@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
 
@@ -17,6 +17,46 @@ describe("FlowReleaseResponseSchema", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.released).toBe(2);
     expect(parsed.released_ids).toEqual(["t_a", "t_b"]);
+  });
+});
+
+describe("StrategistOutcomesResponseSchema", () => {
+  it("preserves scalar current/delta and new verdict vocabulary", () => {
+    const parsed = parseOrThrow(StrategistOutcomesResponseSchema, {
+      generated_at: 1781800000,
+      outcomes: [{
+        lever_key: "lever-heal-timeouts",
+        root_task_id: "t_xyz789",
+        proposed_at: 1781000000,
+        baseline: { autonomy_pct: 62 },
+        metric_key: "autonomy_pct",
+        shipped_at: 1781100000,
+        measured_at: 1781800000,
+        current: 68,
+        delta: 6,
+        verdict: "neutral",
+        status: "measured",
+      }, {
+        lever_key: "lever-unmeasurable",
+        root_task_id: "t_unmeasurable",
+        proposed_at: 1781000000,
+        baseline: null,
+        metric_key: null,
+        shipped_at: 1781100000,
+        measured_at: 1781800000,
+        current: null,
+        delta: null,
+        verdict: "unmeasurable",
+        status: "measured",
+      }],
+    }, "strategist-outcomes");
+
+    expect(parsed.outcomes[0].current).toBe(68);
+    expect(parsed.outcomes[0].delta).toBe(6);
+    expect(parsed.outcomes[0].verdict).toBe("neutral");
+    expect(parsed.outcomes[1].current).toBeNull();
+    expect(parsed.outcomes[1].delta).toBeNull();
+    expect(parsed.outcomes[1].verdict).toBe("unmeasurable");
   });
 });
 
