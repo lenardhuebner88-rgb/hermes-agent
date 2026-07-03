@@ -184,32 +184,59 @@ function humanizeWikiSlug(relMd: string): string {
     .join(" ");
 }
 
+function resolveWikiLinkMatch(_full: string, rawTarget: string, rawLabel?: string): string {
+  const target = rawTarget.trim().replace(/\s+/g, " ");
+  const rel = target.startsWith("wiki/") ? target.slice("wiki/".length) : target;
+  const relMd = rel.endsWith(".md") ? rel : `${rel}.md`;
+  if (target.startsWith("wiki/") && LLM_WIKI_REL_RE.test(relMd)) {
+    const label = (rawLabel ?? humanizeWikiSlug(relMd)).trim().replace(/\s+/g, " ");
+    const id = `kb::llm::${relMd}`;
+    return `[${label}](${PROSE_INTERNAL_LINK_SCHEME}${encodeURIComponent(id)})`;
+  }
+  const label = (rawLabel ?? target).trim().replace(/\s+/g, " ");
+  return `[${label}](${PROSE_DEAD_LINK_SCHEME}${encodeURIComponent(target)})`;
+}
+
 /** Wikilinks im Markdown-Rohtext einer llm-wiki-Seite durch normale
  *  Markdown-Links mit `internal-link:`/`dead-link:`-Schema ersetzen
  *  (Preprocessing vor `ProseMarkdown`, siehe deren `onInternalLink`).
- *  Fenced-Code-Blöcke (```) bleiben unangetastet. */
+ *  Fenced-Code-Blöcke (```) bleiben unangetastet. Innerhalb eines Absatzes
+ *  (durch Leerzeilen begrenzt) wird über Zeilenumbrüche hinweg gematcht,
+ *  damit ein hart umgebrochenes Alias (`[[ziel|label\nfortsetzung]]`) — wie
+ *  in llm-wiki-Quelltext, der bei ~80 Spalten umbricht — noch aufgelöst
+ *  wird, statt als rohes `[[...]]` stehen zu bleiben. */
 export function resolveWikiLinks(bodyMd: string): string {
+  const lines = bodyMd.split("\n");
+  const out: string[] = [];
   let fenced = false;
-  return bodyMd
-    .split("\n")
-    .map((line) => {
-      if (line.trimStart().startsWith("```")) {
-        fenced = !fenced;
-        return line;
-      }
-      if (fenced) return line;
-      return line.replace(WIKILINK_RE, (_full, rawTarget: string, rawLabel?: string) => {
-        const target = rawTarget.trim();
-        const rel = target.startsWith("wiki/") ? target.slice("wiki/".length) : target;
-        const relMd = rel.endsWith(".md") ? rel : `${rel}.md`;
-        if (target.startsWith("wiki/") && LLM_WIKI_REL_RE.test(relMd)) {
-          const label = (rawLabel ?? humanizeWikiSlug(relMd)).trim();
-          const id = `kb::llm::${relMd}`;
-          return `[${label}](${PROSE_INTERNAL_LINK_SCHEME}${encodeURIComponent(id)})`;
-        }
-        const label = (rawLabel ?? target).trim();
-        return `[${label}](${PROSE_DEAD_LINK_SCHEME}${encodeURIComponent(target)})`;
-      });
-    })
-    .join("\n");
+  let paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    const resolved = paragraph.join("\n").replace(WIKILINK_RE, resolveWikiLinkMatch);
+    out.push(...resolved.split("\n"));
+    paragraph = [];
+  };
+
+  for (const line of lines) {
+    if (line.trimStart().startsWith("```")) {
+      flushParagraph();
+      out.push(line);
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) {
+      out.push(line);
+      continue;
+    }
+    if (line.trim() === "") {
+      flushParagraph();
+      out.push(line);
+      continue;
+    }
+    paragraph.push(line);
+  }
+  flushParagraph();
+
+  return out.join("\n");
 }
