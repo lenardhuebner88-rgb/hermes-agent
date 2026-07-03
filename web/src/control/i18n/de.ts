@@ -256,6 +256,7 @@ export const de = {
     kpiKosten: "Kosten 24h",
     // PlanSpec-Badge
     psWaitsForOperator: "wartet auf dich",
+    kartenGeplant: (n: number) => `${n} ${n === 1 ? "Karte" : "Karten"} geplant`,
     // Worker-Drawer
     drawerModell: "Modell",
     drawerHeartbeat: "Heartbeat",

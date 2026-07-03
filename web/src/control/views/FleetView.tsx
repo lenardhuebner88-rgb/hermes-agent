@@ -32,6 +32,7 @@ import {
   derivePlanLanes,
   buildApproveRequest,
   fmtResetAt,
+  normalizeUsageWindowLabel,
   derivePendingItems,
   deriveEffectivePlanPath,
   type PendingItem,
@@ -1675,9 +1676,9 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
         ) : null}
         <div className="fleet-plan-kopf-meta">
           {ps.kanban_child_total > 0 ? (
-            <span>{ps.kanban_child_total} Karten geplant</span>
+            <span>{de.fleet.kartenGeplant(ps.kanban_child_total)}</span>
           ) : ps.subtask_count > 0 ? (
-            <span>{ps.subtask_count} Karten geplant</span>
+            <span>{de.fleet.kartenGeplant(ps.subtask_count)}</span>
           ) : null}
           {ps.binding ? <span>binding</span> : null}
           {ps.freigabe ? <span>freigabe: {ps.freigabe}</span> : null}
@@ -1868,54 +1869,76 @@ function TokenBudgetBlock({
 }) {
   const providers = accountUsage?.providers ?? [];
 
-  // Alle Fenster aus allen Providern mit used_percent
-  const allWindows = providers.flatMap((prov) =>
-    prov.windows
-      .filter((w) => w.used_percent != null)
-      .map((w) => ({ ...w, providerTitle: prov.title || prov.provider }))
-  );
+  // Pro Provider eine Gruppe — nur Fenster mit verwertbarem used_percent;
+  // Provider ohne einen einzigen solchen Fenster fallen ganz raus.
+  const groups = providers
+    .map((prov) => ({
+      title: prov.title || prov.provider,
+      plan: prov.plan,
+      windows: prov.windows.filter((w) => w.used_percent != null),
+    }))
+    .filter((g) => g.windows.length > 0);
 
   return (
     <div className="fleet-budget-g">
       <div className="fleet-bg-head">
         <span className="fleet-bg-t">{de.fleet.planTokenBudget}</span>
-        {allWindows.length > 0 ? (
-          <code style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>
-            {allWindows.slice(0, 2).map((w, i) => (
-              <span key={i}>
-                {i > 0 ? " · " : ""}
-                {de.fleet.planTokenReset(fmtResetAt(w.reset_at))}
-              </span>
-            ))}
-          </code>
-        ) : null}
       </div>
 
-      {allWindows.length === 0 ? (
+      {groups.length === 0 ? (
         <p style={{ font: "400 11px/1.4 var(--hc-font-sans)", color: "var(--fleet-t3)" }}>
           {de.fleet.planBudgetNichtVerfuegbar}
         </p>
       ) : (
-        allWindows.map((w, i) => {
-          const pct = w.used_percent ?? 0;
-          const tone = budgetTone(w.used_percent);
-          const barColor = tone === "danger"
-            ? "linear-gradient(90deg,rgba(255,93,115,.5),#ff5d73)"
-            : tone === "warn"
-            ? "linear-gradient(90deg,rgba(245,168,60,.4),var(--fleet-signal))"
-            : "linear-gradient(90deg,rgba(67,214,154,.5),var(--fleet-gruen))";
+        groups.map((group, gi) => {
+          // Frühester reset_at dieser Gruppe (Provider kann mehrere Fenster mit
+          // unterschiedlichen Reset-Zeiten haben, z.B. Session + Woche).
+          const validResets = group.windows
+            .map((w) => w.reset_at)
+            .filter((r): r is string => Boolean(r))
+            .map((r) => ({ raw: r, t: new Date(r).getTime() }))
+            .filter((x) => !isNaN(x.t));
+          const earliestReset = validResets.length > 0
+            ? validResets.reduce((min, x) => (x.t < min.t ? x : min)).raw
+            : null;
 
           return (
-            <div key={i} className="fleet-bg-row">
-              <span className="fleet-bg-bl">{w.label || w.providerTitle}</span>
-              <div className="fleet-bg-bar">
-                <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
+            <div key={gi} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: gi > 0 ? 4 : 0 }}>
+              <div className="fleet-bg-head">
+                <span style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                  {group.title}
+                  {group.plan ? <span style={{ textTransform: "none", letterSpacing: 0, opacity: 0.75 }}> · {group.plan}</span> : null}
+                </span>
+                {earliestReset ? (
+                  <code style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>
+                    {de.fleet.planTokenReset(fmtResetAt(earliestReset))}
+                  </code>
+                ) : null}
               </div>
-              <span className="fleet-bg-bv" style={{
-                color: tone === "danger" ? "#ff7d90" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
-              }}>
-                {Math.round(pct)} %
-              </span>
+
+              {group.windows.map((w, i) => {
+                const pct = w.used_percent ?? 0;
+                const tone = budgetTone(w.used_percent);
+                const barColor = tone === "danger"
+                  ? "linear-gradient(90deg,rgba(255,93,115,.5),#ff5d73)"
+                  : tone === "warn"
+                  ? "linear-gradient(90deg,rgba(245,168,60,.4),var(--fleet-signal))"
+                  : "linear-gradient(90deg,rgba(67,214,154,.5),var(--fleet-gruen))";
+
+                return (
+                  <div key={i} className="fleet-bg-row">
+                    <span className="fleet-bg-bl">{normalizeUsageWindowLabel(w.label, w.window_key)}</span>
+                    <div className="fleet-bg-bar">
+                      <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
+                    </div>
+                    <span className="fleet-bg-bv" style={{
+                      color: tone === "danger" ? "#ff7d90" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
+                    }}>
+                      {Math.round(pct)} %
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           );
         })
@@ -2056,7 +2079,7 @@ function RisikoTab({
               </div>
               {ps.freigabe ? (
                 <div className="fleet-plan-kopf-meta" style={{ marginTop: 2 }}>
-                  {ps.kanban_child_total > 0 ? <span>{ps.kanban_child_total} Karten geplant</span> : null}
+                  {ps.kanban_child_total > 0 ? <span>{de.fleet.kartenGeplant(ps.kanban_child_total)}</span> : null}
                   {ps.binding ? <span>binding</span> : null}
                 </div>
               ) : null}

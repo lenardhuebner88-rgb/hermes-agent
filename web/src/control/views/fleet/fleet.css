@@ -30,6 +30,48 @@
 
 /* Kein body:has override nötig — nur der View-Inhalt ist dunkel */
 
+/* ── Full-Bleed-Shell (Fleet-Tab) ─────────────────────────────────────────────
+ * Der ShellAiry/ShellCompact-Wrapper (.hc-page) rendert das helle Instrument-
+ * papier — ControlShell setzt `.fleet-bleed` nur, während der Fleet-Tab aktiv
+ * ist. Custom Properties aus [data-fleet-theme] vererben sich nicht nach oben
+ * an .hc-page (Vorfahr, kein Nachfahre) — deshalb hier dieselben Werte wie
+ * [data-fleet-theme] literal wiederholt statt referenziert. */
+.hc-page.fleet-bleed {
+  background: radial-gradient(140% 50% at 50% -12%, #0a1526 0%, #05090f 55%);
+}
+.hc-page.fleet-bleed::before {
+  opacity: 0;
+}
+/* Hinter .hc-page malen control-tokens.css body:has([data-control]) und der
+ * [data-layout-variant]-Wrapper Papier-Beige (#f0eee7) — das leckte als heller
+ * Streifen zwischen Panel-Ende und Bottom-Nav sowie im scrollbar-gutter am
+ * rechten Rand durch. Höhere :has()-Spezifität (2 Klassen > 1 Attribut)
+ * gewinnt gegen die Token-Regeln. */
+body:has(.hc-page.fleet-bleed) {
+  background: #05090f;
+}
+body:has(.hc-page.fleet-bleed) [data-layout-variant] {
+  background: #05090f;
+}
+/* Der [data-control]-Wrapper malt selbst var(--hc-bg) (#f2f0ea) und ist 2rem
+ * höher als .hc-page (100dvh-5rem vs. -7rem) — ohne diese Regel schimmert er
+ * als heller Streifen zwischen Panel-Ende und Bottom-Nav durch. */
+body:has(.hc-page.fleet-bleed) [data-control] {
+  background: #05090f;
+}
+/* Der Shell-Header (Navigation) bleibt über dem dunklen Fleet-Grund stehen —
+ * Airy ab lg, Compact immer (dort liegt er in der zweiten Grid-Spalte, daher
+ * Nachfahren- statt Kind-Selektor). Papier-Theme-Tinte wäre dort unlesbar:
+ * .text-white ist via [data-control] auf var(--hc-text) (dunkel) umgemappt
+ * (Titel maß 1,14:1), .hc-soft (#555c6e) nur 2,9:1. */
+.hc-page.fleet-bleed header .hc-soft,
+.hc-page.fleet-bleed header .hc-eyebrow {
+  color: #94a0b8;
+}
+.hc-page.fleet-bleed header h1 {
+  color: #e8ecf4;
+}
+
 /* ── Chips (Subtabs) ──────────────────────────────────────────────────────── */
 .fleet-chip {
   font-size: 11.5px;

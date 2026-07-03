@@ -21,6 +21,7 @@ import {
   derivePendingItems,
   pendingCount,
   deriveEffectivePlanPath,
+  normalizeUsageWindowLabel,
   type ChainChipState,
 } from "./fleetHub";
 import type { Worker, ChainGraphResponse } from "./types";
@@ -681,6 +682,43 @@ describe("fmtResetAt", () => {
     const result = fmtResetAt("2026-07-06T03:00:00Z");
     expect(result).not.toBe("—");
     expect(result.length).toBeGreaterThan(3);
+  });
+});
+
+// ─── normalizeUsageWindowLabel ─────────────────────────────────────────────────
+// Label/window_key-Paare sind aus agent/account_usage.py geerntet (echte
+// Upstream-Provider-Fenster: Anthropic OAuth-Usage-API, OpenAI-Codex-Usage-API,
+// Kimi-Kanban-Subscription-Zähler) — keine erfundenen Beispiele.
+
+describe("normalizeUsageWindowLabel", () => {
+  it("Anthropic 'Current session' (window_key session) → Sitzung", () => {
+    expect(normalizeUsageWindowLabel("Current session", "session")).toBe("Sitzung");
+  });
+
+  it("Anthropic 'Current week' (window_key weekly) → Woche", () => {
+    expect(normalizeUsageWindowLabel("Current week", "weekly")).toBe("Woche");
+  });
+
+  it("Codex 'Session' (window_key session) → Sitzung", () => {
+    expect(normalizeUsageWindowLabel("Session", "session")).toBe("Sitzung");
+  });
+
+  it("Codex 'Weekly' (window_key weekly) → Woche", () => {
+    expect(normalizeUsageWindowLabel("Weekly", "weekly")).toBe("Woche");
+  });
+
+  it("Anthropic 'Opus week' / 'Sonnet week' (Lane-spezifische Wochenfenster) → Woche", () => {
+    expect(normalizeUsageWindowLabel("Opus week", "opus_week")).toBe("Woche");
+    expect(normalizeUsageWindowLabel("Sonnet week", "sonnet_week")).toBe("Woche");
+  });
+
+  it("Kimi 'Kimi 5h' (window_key session, kein 'sess' im Label) → über den Key erkannt", () => {
+    expect(normalizeUsageWindowLabel("Kimi 5h", "session")).toBe("Sitzung");
+  });
+
+  it("Label ohne bekanntes Muster (window_key null) bleibt unverändert", () => {
+    expect(normalizeUsageWindowLabel("Subscription", null)).toBe("Subscription");
+    expect(normalizeUsageWindowLabel("API key quota", null)).toBe("API key quota");
   });
 });
 

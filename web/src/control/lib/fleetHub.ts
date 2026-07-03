@@ -240,6 +240,20 @@ export function fmtResetAt(resetAt: string | null | undefined): string {
   }
 }
 
+/**
+ * normalizeUsageWindowLabel: normalisiert die providerübergreifend uneinheitlichen
+ * Upstream-Fenster-Labels ("Current session", "Weekly" …) auf ein knappes deutsches
+ * Vokabular fürs Token-Budget — statt sie wörtlich (englisch) durchzureichen.
+ */
+export function normalizeUsageWindowLabel(label: string, windowKey: string | null): string {
+  const key = (windowKey ?? "").toLowerCase();
+  if (/sess/i.test(label) || key.includes("session") || key.includes("5h")) return "Sitzung";
+  if (/week/i.test(label)) return "Woche";
+  if (/month/i.test(label)) return "Monat";
+  if (/day|24h/i.test(label)) return "24h";
+  return label;
+}
+
 // ─── Ketten-Subtab Hilfsfunktionen ───────────────────────────────────────────
 
 /**
