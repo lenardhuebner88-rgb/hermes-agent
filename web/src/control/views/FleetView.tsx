@@ -1816,8 +1816,14 @@ interface ModelSelectProps {
 }
 
 function ModelSelect({ value, options, changed, onChange }: ModelSelectProps) {
+  // Der Lanes-Katalog listet dieselbe Modell-ID mehrfach (je Provider) —
+  // fürs <select> zählt nur die ID: erste Nennung gewinnt, sonst doppelte
+  // Einträge + React-duplicate-key-Errors bei jedem Poll.
+  const uniqueOptions = (options ?? []).filter(
+    (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
+  );
   // Fallback: wenn keine Optionen, zeige freies Textfeld-ähnliches Display
-  if (!options || options.length === 0) {
+  if (uniqueOptions.length === 0) {
     return (
       <span className="fleet-sel" style={{ opacity: 0.6 }}>{value || "—"}</span>
     );
@@ -1841,10 +1847,10 @@ function ModelSelect({ value, options, changed, onChange }: ModelSelectProps) {
       }}
       aria-label={`Modell für Lane ${value}`}
     >
-      {value && !options.find((o) => o.id === value) ? (
+      {value && !uniqueOptions.find((o) => o.id === value) ? (
         <option value={value}>{value}</option>
       ) : null}
-      {options.map((o) => (
+      {uniqueOptions.map((o) => (
         <option key={o.id} value={o.id}>{o.label || o.id}</option>
       ))}
     </select>
