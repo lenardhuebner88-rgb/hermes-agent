@@ -57,7 +57,7 @@ display:
   platforms:
     discord:
       tool_progress: new           # auto-applied by gateway when at HUB
-      tool_preview_length: 80      # auto-applied by gateway when at HUB
+      tool_preview_length: 40      # auto-applied by gateway when at HUB
       interim_assistant_messages: true
 
 # Move heavy fallbacks to named profiles:
