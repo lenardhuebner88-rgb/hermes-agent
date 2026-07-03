@@ -86,13 +86,13 @@ services:
     networks:
       - internal
       - egress              # needs outbound for Telegram, LLM APIs
-    ports:
-      - "127.0.0.1:9119:9119"   # dashboard proxy, localhost only
 
   dashboard:
     network_mode: ""
     networks:
       - internal            # internal only, no egress needed
+    ports:
+      - "127.0.0.1:9119:9119"   # dashboard web UI, localhost only
 ```
 
 ### With an Egress Proxy (Recommended)
