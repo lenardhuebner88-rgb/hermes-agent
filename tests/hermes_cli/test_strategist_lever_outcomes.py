@@ -1080,6 +1080,36 @@ def test_backfill_lever_outcomes_recalculates_existing_measured_rows(tmp_path: P
     assert json.loads(path.read_text(encoding="utf-8")) == updated_records
 
 
+def test_backfill_lever_outcomes_does_not_measure_before_maturity(tmp_path: Path) -> None:
+    now_ts = int(time.time())
+    shipped_at = now_ts - 3600
+    path = tmp_path / "lever-outcomes.json"
+    record = _shipped_record(
+        "HEILER-TRANSIENT",
+        {"autonomy_pct": 75.0},
+        metric_key="autonomy_pct",
+        shipped_at=shipped_at,
+    )
+    path.write_text(json.dumps([record]), encoding="utf-8")
+
+    result = strategist.backfill_lever_outcomes(
+        outcomes_path=path,
+        metrics={"generated_at": now_ts, "autonomy_pct": 80.0},
+        now=float(now_ts),
+        apply=True,
+    )
+
+    assert result["matched"] == 0
+    assert result["updated"] == 0
+    rec = json.loads(path.read_text(encoding="utf-8"))[0]
+    assert rec == record
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
 # --------------------------------------------------------------------------- #
 # 8. Existing reflect() tests must still pass (non-regression)
 # --------------------------------------------------------------------------- #
