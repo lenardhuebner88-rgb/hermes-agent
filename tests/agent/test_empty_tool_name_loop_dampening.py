@@ -31,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from tests._module_isolation import preserve_sys_modules
+
 # Repo root = three levels up from tests/agent/<file>.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
@@ -119,23 +121,26 @@ def agent_env():
     os.environ["HERMES_HOME"] = os.path.join(test_home, ".hermes")
 
     # Import fresh so the patched conversation_loop is exercised even when the
-    # module was imported earlier in the same worker.
-    for mod in list(sys.modules):
-        if mod == "run_agent" or mod.startswith("agent.") or mod.startswith("tools.") or mod.startswith("hermes_"):
-            del sys.modules[mod]
-    from run_agent import AIAgent
-
-    agent = AIAgent(
-        api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1",
-        provider="openai-compat", model="test-model",
-        max_iterations=10, enabled_toolsets=[],
-        quiet_mode=True, skip_context_files=True, skip_memory=True,
-        save_trajectories=False, platform="cli",
-    )
-    agent.valid_tool_names = {"terminal", "read_file", "write_file", "execute_code", "session_search"}
-
+    # module was imported earlier in the same worker. Wrap the purge in
+    # preserve_sys_modules() so the re-imported run_agent/agent/tools/hermes_*
+    # modules do not leak into later test files in the same worker.
     try:
-        yield agent, _MockHandler
+        with preserve_sys_modules():
+            for mod in list(sys.modules):
+                if mod == "run_agent" or mod.startswith("agent.") or mod.startswith("tools.") or mod.startswith("hermes_"):
+                    del sys.modules[mod]
+            from run_agent import AIAgent
+
+            agent = AIAgent(
+                api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1",
+                provider="openai-compat", model="test-model",
+                max_iterations=10, enabled_toolsets=[],
+                quiet_mode=True, skip_context_files=True, skip_memory=True,
+                save_trajectories=False, platform="cli",
+            )
+            agent.valid_tool_names = {"terminal", "read_file", "write_file", "execute_code", "session_search"}
+
+            yield agent, _MockHandler
     finally:
         srv.shutdown()
         shutil.rmtree(test_home, ignore_errors=True)
