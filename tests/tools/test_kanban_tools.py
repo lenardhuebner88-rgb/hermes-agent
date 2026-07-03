@@ -1035,6 +1035,34 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_project_passthrough(worker_env):
+    """Regression for the v0.18 upstream merge (413638a28) dropping
+    kanban_create's ``project`` arg: kb.create_task has taken ``project_id``
+    since e2bb46738, but the worker-facing kanban_create tool had no arg to
+    reach it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+    from tools import kanban_tools as kt
+
+    with pdb.connect_closing() as pconn:
+        pid = pdb.create_project(pconn, name="Web App", folders=["/tmp/webapp"])
+        proj = pdb.get_project(pconn, pid)
+
+    out = kt._handle_create({
+        "title": "linked child",
+        "assignee": "peer",
+        "project": proj.slug,
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.project_id == proj.id
+    finally:
+        conn.close()
+
+
 def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
     """A worker scoped to a dir: task that spawns a child without a
     workspace arg inherits the dir, not scratch (so follow-up code-gen

@@ -991,6 +991,7 @@ def _handle_create(args: dict, **kw) -> str:
     # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
     # CLI / dashboard paths and on legacy hosts that don't set the env.
     session_id = args.get("session_id") or os.environ.get("HERMES_SESSION_ID")
+    project_id = args.get("project") or args.get("project_id")
     priority = args.get("priority")
     # Resolve workspace. If the caller passed one explicitly, honor it.
     # Otherwise, a dispatcher-spawned worker (HERMES_KANBAN_TASK set)
@@ -1054,6 +1055,7 @@ def _handle_create(args: dict, **kw) -> str:
                 priority=int(priority) if priority is not None else 0,
                 workspace_kind=str(workspace_kind),
                 workspace_path=workspace_path,
+                project_id=project_id,
                 triage=triage,
                 idempotency_key=idempotency_key,
                 max_runtime_seconds=(
@@ -1721,6 +1723,15 @@ KANBAN_CREATE_SCHEMA = {
                 "description": (
                     "Absolute path for 'dir' or 'worktree' workspace. "
                     "Relative paths are rejected at dispatch."
+                ),
+            },
+            "project": {
+                "type": "string",
+                "description": (
+                    "Optional project id or slug to link the task to. When "
+                    "set, the task becomes a git worktree under the project's "
+                    "primary repo with a deterministic branch (project slug + "
+                    "task id), instead of a random branch."
                 ),
             },
             "triage": {
