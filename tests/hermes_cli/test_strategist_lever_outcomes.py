@@ -320,6 +320,50 @@ def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(boar
     assert rec["verdict"] is None
 
 
+def test_auto_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
+    board_home, monkeypatch
+):
+    """Ship stamps are post-commit: a failed DB finalizer must not update JSON."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: failed integrated root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    def fail_end_run(*args, **kwargs):
+        raise RuntimeError("forced db failure after root update")
+
+    monkeypatch.setattr(kb, "_end_run", fail_end_run)
+    with kb.connect() as conn:
+        with pytest.raises(RuntimeError, match="forced db failure"):
+            kwt._auto_complete_decompose_root(
+                conn,
+                root_id=root,
+                completed_task_id=completed_child,
+                outcome={"action": "integrated", "branch": "kanban/test-root"},
+            )
+        row = conn.execute(
+            "SELECT status, completed_at FROM tasks WHERE id=?",
+            (root,),
+        ).fetchone()
+
+    assert row["status"] != "done"
+    assert row["completed_at"] is None
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
+
+
 def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
     """The commitless decompose-root finalizer stamps strategist shipments."""
     outcomes_path = _canonical_outcomes_path(board_home)
@@ -352,6 +396,49 @@ def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(bo
     assert rec["current"] is None
     assert rec["delta"] is None
     assert rec["verdict"] is None
+
+
+def test_direct_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
+    board_home, monkeypatch
+):
+    """Commitless finalizer also stamps only after the DB transaction commits."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: failed commitless root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        child = kb.create_task(conn, title="scratch child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    def fail_end_run(*args, **kwargs):
+        raise RuntimeError("forced db failure after root update")
+
+    monkeypatch.setattr(kb, "_end_run", fail_end_run)
+    with kb.connect() as conn:
+        with pytest.raises(RuntimeError, match="forced db failure"):
+            kwt._direct_complete_decompose_root(
+                conn,
+                root_id=root,
+                children=[(child, "done")],
+            )
+        row = conn.execute(
+            "SELECT status, completed_at FROM tasks WHERE id=?",
+            (root,),
+        ).fetchone()
+
+    assert row["status"] != "done"
+    assert row["completed_at"] is None
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
 
 
 def test_ingest_skips_duplicate_for_already_ingested_lever(board_home, monkeypatch, tmp_path):
