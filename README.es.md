@@ -170,7 +170,7 @@ Qué se importa:
 - **Habilidades** — habilidades creadas por el usuario → `~/.hermes/skills/openclaw-imports/`
 - **Lista de comandos permitidos** — patrones de aprobación
 - **Configuración de mensajería** — configuración de plataformas, usuarios permitidos, directorio de trabajo
-- **Claves API** — secretos en lista de permitidos (Telegram, OpenRouter, OpenAI, Anthropic, ElevenLabs)
+- **Claves API** — secretos en lista de permitidos (Telegram, OpenRouter, OpenAI, Anthropic, ElevenLabs) — requiere `--migrate-secrets`; no se importa por defecto, incluso con `--preset full`
 - **Assets de TTS** — archivos de audio del espacio de trabajo
 - **Instrucciones del espacio de trabajo** — AGENTS.md (con `--workspace-target`)
 
