@@ -35,6 +35,8 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
+from hermes_cli.goals import check_goal_mode_completion
+from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -633,6 +635,24 @@ def _handle_complete(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # Goal-mode pre-completion judge gate (Issue #38367).
+            # Prevent workers from bypassing the auxiliary judge by
+            # calling kanban_complete before acceptance criteria are met.
+            # Shared with the CLI `kanban complete` verb via
+            # hermes_cli.goals.check_goal_mode_completion so the two
+            # enforcement points can't diverge (SYNC NOTE in
+            # hermes_cli/kanban.py:_cmd_complete points back here).
+            task = kb.get_task(conn, tid)
+            if task and task.goal_mode:
+                rejection = check_goal_mode_completion(
+                    task_id=tid,
+                    task_title=task.title,
+                    task_body=task.body,
+                    handoff_text=(summary or result or ""),
+                )
+                if rejection:
+                    return tool_error(rejection)
+
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -929,6 +949,7 @@ def _handle_create(args: dict, **kw) -> str:
     # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
     # CLI / dashboard paths and on legacy hosts that don't set the env.
     session_id = args.get("session_id") or os.environ.get("HERMES_SESSION_ID")
+    project_id = args.get("project") or args.get("project_id")
     priority = args.get("priority")
     # Resolve workspace. If the caller passed one explicitly, honor it.
     # Otherwise, a dispatcher-spawned worker (HERMES_KANBAN_TASK set)
@@ -992,6 +1013,7 @@ def _handle_create(args: dict, **kw) -> str:
                 priority=int(priority) if priority is not None else 0,
                 workspace_kind=str(workspace_kind),
                 workspace_path=workspace_path,
+                project_id=project_id,
                 triage=triage,
                 idempotency_key=idempotency_key,
                 max_runtime_seconds=(
@@ -1661,6 +1683,15 @@ KANBAN_CREATE_SCHEMA = {
                     "Relative paths are rejected at dispatch."
                 ),
             },
+            "project": {
+                "type": "string",
+                "description": (
+                    "Optional project id or slug to link the task to. When "
+                    "set, the task becomes a git worktree under the project's "
+                    "primary repo with a deterministic branch (project slug + "
+                    "task id), instead of a random branch."
+                ),
+            },
             "triage": {
                 "type": "boolean",
                 "description": (
@@ -1671,12 +1702,17 @@ KANBAN_CREATE_SCHEMA = {
             },
             "kind": {
                 "type": "string",
-                "enum": ["code", "research", "review", "ops", "text"],
+                # Derived from _VALID_TASK_KINDS (hermes_cli/kanban_decompose.py)
+                # instead of hard-coded, so this schema can't silently drift from
+                # the CLI's `--kind` choices (regression: this enum previously
+                # omitted 'analysis', the read-only counter-class to 'code').
+                "enum": sorted(_VALID_TASK_KINDS),
                 "description": (
                     "Coarse task lane. Use 'code' only for implementation "
                     "work assigned to code lanes such as coder, coder-claude, "
                     "or premium; reviewer/critic/research lanes are "
-                    "verdict/research-only."
+                    "verdict/research-only. 'analysis' is the read-only "
+                    "counter-class to 'code'."
                 ),
             },
             "idempotency_key": {

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.goals import check_goal_mode_completion
 from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name
@@ -88,6 +89,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "workspace_kind": t.workspace_kind,
         "workspace_path": t.workspace_path,
         "branch_name": t.branch_name,
+        "project_id": t.project_id,
         "created_by": t.created_by,
         "created_at": t.created_at,
         "started_at": t.started_at,
@@ -341,6 +343,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "(default: scratch)")
     p_create.add_argument("--branch", default=None,
                           help="Branch name for worktree tasks, e.g. wt/t6-wire")
+    p_create.add_argument("--project", default=None,
+                          help="Link to a project (id or slug). Anchors the task's "
+                               "worktree under the project's primary repo with a "
+                               "deterministic branch. See `hermes project list`.")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
     p_create.add_argument("--triage", action="store_true",
@@ -676,6 +682,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("reason", nargs="*", help="Reason (also appended as a comment)")
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
+    p_block.add_argument(
+        "--kind", default=None, choices=sorted(kb.VALID_BLOCK_KINDS),
+        help=(
+            "Typed block reason. 'dependency' waits in todo (auto-promoted "
+            "when parents finish, no human); 'needs_input'/'capability' go to "
+            "blocked for a human; 'transient' marks a maybe-flaky failure. "
+            "Repeated same-kind re-blocks after unblock route the task to "
+            "triage to break unblock loops. Omit for a generic block."
+        ),
+    )
 
     p_set_wf = sub.add_parser("set-workflow", help="Assign a workflow template to a task (seeds the first step)")
     p_set_wf.add_argument("task_id")
@@ -1879,6 +1895,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             workspace_kind=ws_kind,
             workspace_path=ws_path,
             branch_name=branch_name,
+            project_id=getattr(args, "project", None),
             tenant=args.tenant,
             priority=args.priority,
             parents=tuple(args.parent or ()),
@@ -2682,6 +2699,34 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            # Goal-mode pre-completion judge gate (Issue #38367), the CLI
+            # side of the SAME gate the kanban_complete model tool enforces
+            # (tools/kanban_tools.py:_handle_complete) — the documented
+            # worker completion path invokes `hermes kanban complete` (or
+            # the equivalent claude-CLI lifecycle bridge) directly against
+            # kb.complete_task, bypassing the tool entirely, so a goal_mode
+            # worker could self-certify without ever hitting the tool gate.
+            # SHARED with the tool via hermes_cli.goals.check_goal_mode_completion
+            # so the two enforcement points can't diverge.
+            #
+            # Scoped NARROWLY to a worker closing its OWN task
+            # (HERMES_KANBAN_TASK == tid): an operator running `hermes kanban
+            # complete` by hand (e.g. dispositioning a task as done-elsewhere)
+            # has no worker-env marker and must stay ungated — the judge is a
+            # guard against a worker self-certifying, not an operator override.
+            if os.environ.get("HERMES_KANBAN_TASK") == tid:
+                task_for_gate = kb.get_task(conn, tid)
+                if task_for_gate and task_for_gate.goal_mode:
+                    rejection = check_goal_mode_completion(
+                        task_id=tid,
+                        task_title=task_for_gate.title,
+                        task_body=task_for_gate.body,
+                        handoff_text=(summary or args.result or ""),
+                    )
+                    if rejection:
+                        failed.append(tid)
+                        print(f"kanban: {rejection}", file=sys.stderr)
+                        continue
             # Worker-context completions (the claude-CLI lifecycle bridge
             # reports back via this verb) must hit the same review gate as the
             # in-process kanban_complete tool — otherwise a claude-cli worker
@@ -2765,6 +2810,7 @@ def _cmd_respec(args: argparse.Namespace) -> int:
 
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
+    kind = getattr(args, "kind", None)
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
@@ -2776,12 +2822,28 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 conn,
                 tid,
                 reason=reason,
+                kind=kind,
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
             else:
-                print(f"Blocked {tid}" + (f": {reason}" if reason else ""))
+                # Report where the task actually landed — a 'dependency'
+                # kind routes to todo, and a tripped unblock-loop breaker
+                # (see kb.block_task / BLOCK_RECURRENCE_LIMIT) routes to
+                # triage — so 'Blocked' alone would misreport those cases.
+                landed = kb.get_task(conn, tid)
+                where = landed.status if landed else "blocked"
+                suffix = f": {reason}" if reason else ""
+                if where == "todo":
+                    print(f"{tid} → todo (dependency wait){suffix}")
+                elif where == "triage":
+                    print(
+                        f"{tid} → triage (unblock loop detected — needs a "
+                        f"human decision){suffix}"
+                    )
+                else:
+                    print(f"Blocked {tid}{suffix}")
     return 0 if not failed else 1
 
 

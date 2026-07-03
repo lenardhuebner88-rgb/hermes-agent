@@ -642,6 +642,41 @@ class TestLifecycleGuardModule:
         with pytest.raises(GatewayLifecycleBlocked):
             check_gateway_lifecycle("daily", "restart.sh")
 
+    # -------------------------------------------------------------------
+    # Regex parity with hermes_cli.cron (Codex cross-review follow-up,
+    # fix/merge-losses-20260703): the agent-tool guard had drifted from the
+    # CLI guard's regex structure in three ways — under-block (i)+(ii),
+    # over-block (iii).
+    # -------------------------------------------------------------------
+
+    def test_under_block_flags_between_hermes_and_gateway(self):
+        """(i) `\\bhermes\\b` + lookahead must match flags between the two
+        tokens, not just an immediate `hermes gateway` — a literal-adjacency
+        Branch A previously missed this shape entirely."""
+        from cron.lifecycle_guard import contains_gateway_lifecycle_command
+        assert contains_gateway_lifecycle_command(
+            "hermes --profile coder gateway restart"
+        )
+
+    def test_under_block_command_split_across_newline(self):
+        """(ii) A command split across a literal newline within one scanned
+        blob (e.g. a cron script) must still be caught — whitespace is
+        normalized to a single space before matching, same as the CLI guard."""
+        from cron.lifecycle_guard import contains_gateway_lifecycle_command
+        assert contains_gateway_lifecycle_command(
+            "python3 -m hermes_cli.main\ngateway restart"
+        )
+
+    def test_over_block_stops_at_command_separator(self):
+        """(iii) A `;`-separated benign second command must NOT trip the
+        guard just because the string also contains the words 'gateway
+        restart' — the lookahead is separator-limited (`[^;&|<>\\`]*`), not
+        `[^\\n]*`, so it cannot cross a shell command boundary."""
+        from cron.lifecycle_guard import contains_gateway_lifecycle_command
+        assert not contains_gateway_lifecycle_command(
+            "python3 -m hermes_cli.main cron list; echo gateway restart"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Defense 2 (chokepoint): cron.jobs.create_job blocks the AGENT model-tool path
@@ -682,6 +717,35 @@ class TestCreateJobBlocksLifecycleCommands:
         ))
         assert result.get("success") is False
         assert "#30719" in result.get("error", "")
+
+    @pytest.mark.parametrize("prompt", [
+        "python3 -m hermes_cli.main gateway restart",
+        "python3 /opt/hermes/hermes_cli/main.py gateway restart",
+        "pkill -f hermes",
+    ])
+    def test_create_job_blocks_cli_guard_parity_commands(self, prompt):
+        """Regression: the agent-tool path (cron.jobs.create_job) must block
+        the same command shapes the CLI guard (hermes_cli/cron.py) hardened
+        in e2bb46738 — `python -m hermes_cli(.main)`, a direct
+        `hermes_cli/main.py` invocation, and a bare `pkill -f hermes`. Before
+        this fix, cron.lifecycle_guard only recognized the `hermes gateway
+        restart|stop` shell-entrypoint form and let these through."""
+        from cron.jobs import create_job
+        from cron.lifecycle_guard import GatewayLifecycleBlocked
+        with pytest.raises(GatewayLifecycleBlocked):
+            create_job(prompt=prompt, schedule="30m")
+
+    @pytest.mark.parametrize("prompt", [
+        "hermes gateway start",
+        "systemctl restart hermes-meta.service",
+    ])
+    def test_create_job_allows_benign_lifecycle_lookalikes(self, prompt):
+        """Counter-proof for the parity fix above: the `start` exception and
+        the hermes-gateway service-name narrowing must still allow benign
+        commands through on the agent-tool path, same as the CLI guard."""
+        from cron.jobs import create_job
+        job = create_job(prompt=prompt, schedule="30m")
+        assert job["id"]
 
 
 # ---------------------------------------------------------------------------

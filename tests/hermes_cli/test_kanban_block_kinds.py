@@ -200,3 +200,17 @@ def test_block_without_kind_is_backward_compatible(kanban_home: Path) -> None:
         t = kb.get_task(conn, tid)
         assert t.status == "blocked"
         assert t.block_kind is None
+
+
+def test_transient_is_a_valid_kind(kanban_home: Path) -> None:
+    """Regression: VALID_BLOCK_KINDS must include 'transient' — dropped by the
+    v0.18 upstream merge (413638a28) alongside project_id/block_kind access
+    paths. 'transient' marks a maybe-flaky failure and lands in 'blocked'
+    like needs_input/capability (only 'dependency' routes to 'todo')."""
+    assert "transient" in kb.VALID_BLOCK_KINDS
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="flaky network", kind="transient")
+        t = kb.get_task(conn, tid)
+        assert t.status == "blocked"
+        assert t.block_kind == "transient"

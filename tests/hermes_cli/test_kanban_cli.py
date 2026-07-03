@@ -249,6 +249,118 @@ def test_run_slash_block_unblock_cycle(kanban_home):
     assert "Unblocked" in kc.run_slash(f"unblock {tid}")
 
 
+def test_run_slash_block_with_kind_sets_block_kind_column(kanban_home):
+    """Regression for the v0.18 upstream merge (413638a28) dropping the CLI's
+    ``--kind`` flag on ``block``: kb.block_task has taken a typed ``kind``
+    since e2bb46738 (dependency/needs_input/capability/transient), but
+    `hermes kanban block` had no flag to reach it."""
+    out = kc.run_slash("create 'x' --assignee alice")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    kc.run_slash(f"claim {tid}")
+    assert "Blocked" in kc.run_slash(f"block {tid} 'no access' --kind capability")
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "blocked"
+    assert task.block_kind == "capability"
+
+
+def test_run_slash_block_with_dependency_kind_routes_to_todo(kanban_home):
+    """A ``--kind dependency`` block routes to ``todo`` (parent-gated,
+    auto-resumed) instead of the human ``blocked`` bucket — and the CLI
+    reports where it actually landed."""
+    out = kc.run_slash("create 'x' --assignee alice")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    kc.run_slash(f"claim {tid}")
+    result = kc.run_slash(f"block {tid} 'waiting on sibling' --kind dependency")
+    assert "todo" in result
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "todo"
+    assert task.block_kind == "dependency"
+
+
+def _goal_mode_worker_task(conn):
+    tid = kb.create_task(
+        conn, title="goal-mode-cli-test", assignee="test-worker",
+        body="Must achieve X with verified evidence.", goal_mode=True,
+    )
+    kb.claim_task(conn, tid)
+    return tid
+
+
+def test_run_slash_complete_goal_mode_worker_rejected_by_judge(monkeypatch, kanban_home):
+    """The CLI `complete` verb is the documented worker completion path
+    (kb.create_task -> kb.claim_task -> `hermes kanban complete
+    "$HERMES_KANBAN_TASK"`); it must hit the SAME judge gate as the
+    kanban_complete model tool when the caller is the task's own scoped
+    worker. Regression: the CLI path previously called kb.complete_task
+    directly, bypassing the gate entirely."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    def mock_judge_goal(goal, last_response, **kwargs):
+        return "continue", "missing verification evidence", False, None
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    out = kc.run_slash(f"complete {tid} --summary 'I did some stuff but not X'")
+    assert "Goal completion rejected by judge" in out
+    assert "missing verification evidence" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "running"
+
+
+def test_run_slash_complete_goal_mode_operator_override_ungated(monkeypatch, kanban_home):
+    """An operator running `hermes kanban complete` by hand (no
+    HERMES_KANBAN_TASK env marker) must NOT be gated by the judge — even for
+    a goal_mode task. The judge stub raises if consulted, so reaching 'done'
+    proves the gate was skipped entirely (not just fail-open on the
+    verdict)."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    def fail_if_called(goal, last_response, **kwargs):
+        raise AssertionError("judge_goal must not run for an operator override")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    out = kc.run_slash(f"complete {tid} --summary 'dispositioned done-elsewhere'")
+    assert "Completed" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "done"
+
+
+def test_run_slash_complete_goal_mode_worker_fail_open_when_judge_unavailable(
+    monkeypatch, kanban_home
+):
+    """Fail-open: a scoped worker completing a goal_mode task must not be
+    wedged when no judge is configured — the gate probes availability first
+    (same contract as the kanban_complete model tool)."""
+    with kb.connect() as conn:
+        tid = _goal_mode_worker_task(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    def fail_if_called(goal, last_response, **kwargs):
+        raise AssertionError("judge_goal must not run when no judge is available")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: False)
+
+    out = kc.run_slash(f"complete {tid} --summary 'done enough'")
+    assert "Completed" in out
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "done"
+
+
 def test_run_slash_json_output(kanban_home):
     out = kc.run_slash("create 'jsontask' --assignee alice --json")
     payload = json.loads(out)
@@ -277,6 +389,28 @@ def test_run_slash_create_with_kind_analysis_sets_column(kanban_home):
     with kb.connect() as conn:
         task = kb.get_task(conn, payload["id"])
     assert task.kind == "analysis"
+
+
+def test_run_slash_create_with_project_links_task(kanban_home):
+    """Regression for the v0.18 upstream merge (413638a28) dropping the CLI's
+    ``--project`` flag: kanban_db.create_task has taken ``project_id`` since
+    e2bb46738, but `hermes kanban create` had no flag to reach it. Also
+    guards ``project_id`` surfacing on ``_task_to_dict``."""
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing() as pconn:
+        pid = pdb.create_project(pconn, name="Web App", folders=["/tmp/webapp"])
+        proj = pdb.get_project(pconn, pid)
+
+    out = kc.run_slash(f"create 'linked task' --assignee alice --project {proj.slug} --json")
+    payload = json.loads(out)
+    assert payload["project_id"] == proj.id
+    with kb.connect() as conn:
+        task = kb.get_task(conn, payload["id"])
+    assert task.project_id == proj.id
+    # project linkage also switches an unspecified workspace to a worktree
+    # anchored under the project's primary repo (see kb.create_task).
+    assert task.workspace_kind == "worktree"
 
 
 def test_create_kind_argparse_choices_include_analysis():

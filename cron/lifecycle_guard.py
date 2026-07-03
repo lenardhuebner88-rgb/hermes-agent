@@ -45,24 +45,66 @@ class GatewayLifecycleBlocked(ValueError):
 # Shell-level command shapes that target the gateway lifecycle. Each branch
 # is anchored on a concrete command identifier so a match can only fire on
 # actual shell-command-shaped strings, not on prose.
+#
+# SYNC NOTE: this mirrors the STRUCTURE of ``_GATEWAY_LIFECYCLE_PATTERNS`` in
+# ``hermes_cli/cron.py`` 1:1 (same constants, same separator-limited
+# lookaheads, same whitespace normalization in
+# :func:`contains_gateway_lifecycle_command` below) — that module is the
+# guard for the CLI subcommand path (``hermes cron create``/``edit``) and is
+# the more-hardened, canonical source for these command shapes (reviewed and
+# extended first). This module additionally guards the agent's ``cronjob``
+# tool path (``cron.jobs.create_job``, called directly — no CLI involved).
+# When a new gateway-lifecycle command shape is added to either guard,
+# mirror it in the other (same branch shape, same character classes) or the
+# two enforcement points diverge and one path lets a foot-gun through that
+# the other blocks. Diverged once already (Codex cross-review,
+# fix/merge-losses-20260703): a bare `\bhermes\b` here matched only
+# `hermes gateway` immediately (missed `hermes --profile coder gateway
+# restart`), `[^\n]*` lookaheads crossed shell separators like `;` (over-block
+# risk) yet didn't cross literal newlines the way the CLI's whitespace
+# normalization does (under-block risk on a script with the command split
+# across lines) — hence copying the CLI's exact constants below instead of
+# hand-tuning parallel ones.
+_HERMES_GATEWAY_ACTION = (
+    r"\bgateway\b"
+    r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"
+    r"\s+(?:restart|stop)\b"
+)
+_SERVICE_GATEWAY_NAME = r"(?:ai\.)?hermes[.-]gateway(?:\.(?:plist|service))?\b"
 _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
-    # Branch A: `hermes gateway restart|stop` — the canonical foot-gun.
-    # `start` is intentionally excluded: starting a gateway from inside a
-    # gateway is benign (a no-op or "already running" error), and a
-    # legitimate cron job might start a sibling profile's gateway.
-    r"(?:hermes\s+gateway\s+(?:restart|stop))"
-    # Branch B: launchctl ops on a hermes-gateway label. macOS launchd
+    # Branch A: `hermes ... gateway restart|stop` — the canonical foot-gun.
+    # Lookahead (not a literal `hermes gateway`) so flags between the two
+    # tokens (`hermes --profile coder gateway restart`) still match.
+    # Separator-limited (`[^;&|<>`]*`, not `[^\n]*`) so it does NOT cross a
+    # shell command boundary — `hermes cron list; echo gateway restart` must
+    # NOT match. `start` is intentionally excluded from the action: starting
+    # a gateway from inside a gateway is benign (no-op / "already running"),
+    # and a legitimate cron job might start a sibling profile's gateway.
+    r"(?:\bhermes\b(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
+    # Branch B: `python -m hermes_cli[.main]` invoking a gateway
+    # restart/stop — the module-invocation equivalent of Branch A, for cron
+    # scripts/prompts that shell to a venv interpreter directly instead of
+    # the `hermes` console-script entrypoint. Same restart/stop-only scope
+    # as Branch A via `_HERMES_GATEWAY_ACTION`, same separator-limited scan.
+    r"|(?:\bpython(?:3(?:\.\d+)?)?\s+-m\s+hermes_cli(?:\.main)?\b(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
+    # Branch C: `python .../hermes_cli/main.py` — the direct-script-path
+    # equivalent of Branch B (no `-m`, absolute/relative path to main.py).
+    r"|(?:\bpython(?:3(?:\.\d+)?)?\s+\S*hermes_cli/main\.py\b(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
+    # Branch D: launchctl ops on a hermes-gateway label. macOS launchd
     # labels look like `ai.hermes.gateway` / `hermes-gateway`. Requiring the
     # gateway identifier prevents blocking unrelated hermes services (e.g.
     # `launchctl unload ai.hermes.update-checker.plist`).
-    r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart)\b[^\n]*\bhermes[.\-]?gateway)"
-    # Branch C: systemctl ops on a hermes-gateway unit.
-    r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^\n]*\bhermes[.\-]?gateway)"
-    # Branch D: pkill / kill targeting the hermes gateway process. Both
-    # token orders because real reproductions show both.
-    r"|(?:p?kill\b[^\n]*\bhermes\b[^\n]*\bgateway)"
-    r"|(?:p?kill\b[^\n]*\bgateway\b[^\n]*\bhermes)"
+    r"|(?:\blaunchctl\s+(?:kickstart|unload|load|stop|restart)\b[^;&|<>`]*" + _SERVICE_GATEWAY_NAME + r")"
+    # Branch E: systemctl ops on a hermes-gateway unit.
+    r"|(?:\bsystemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^;&|<>`]*" + _SERVICE_GATEWAY_NAME + r")"
+    # Branch F: pkill/pgrep targeting any hermes process. Broader than the
+    # gateway-scoped branches above deliberately (mirrors the CLI guard): a
+    # `pkill -f hermes` kills the whole process tree including the gateway,
+    # with no gateway-specific token left to anchor on. Not separator-limited
+    # (matches the CLI exactly) — a kill command's own args commonly carry
+    # patterns like `hermes.*gateway`.
+    r"|(?:(?:p?kill|pgrep)\s+.*hermes)"
 )
 
 
@@ -70,7 +112,14 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     """Return True if *text* contains a gateway lifecycle command pattern."""
     if not text:
         return False
-    return bool(_GATEWAY_LIFECYCLE_PATTERN.search(text))
+    # Collapse all whitespace so regex gaps match across newlines — mirrors
+    # hermes_cli.cron._contains_gateway_lifecycle_command exactly. Without
+    # this, a command split across lines in a cron script (`python3 -m
+    # hermes_cli.main\ngateway restart`) would slip past the `[^;&|<>\`]*`
+    # lookaheads above (they stop at neither a real shell separator nor a
+    # newline is required to join the split token pair back together).
+    normalized = re.sub(r"\s+", " ", text)
+    return bool(_GATEWAY_LIFECYCLE_PATTERN.search(normalized))
 
 
 def _resolve_script_path(script_path: str) -> Path:

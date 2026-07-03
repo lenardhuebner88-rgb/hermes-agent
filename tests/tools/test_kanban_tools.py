@@ -727,6 +727,109 @@ def test_complete_retry_with_corrected_created_cards_succeeds(worker_env):
         conn.close()
 
 
+def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
+    """Goal-mode tasks must pass the auxiliary judge before completion.
+    Regression for #38367: workers bypassing the judge via early kanban_complete."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True,
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # Mock the judge to reject the completion. The gate only runs when a
+    # judge is reachable, so force the availability probe True as well.
+    # The fork's judge_goal returns a 4-tuple (verdict, reason, parse_failed,
+    # wait_directive); exercise that shape here. Patched at hermes_cli.goals
+    # — the shared gate module both kanban_tools and the CLI verb call into.
+    def mock_judge_goal(goal, last_response, **kwargs):
+        return "continue", "missing verification evidence", False, None
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    out = kt._handle_complete({"summary": "I did some stuff but not X"})
+    d = json.loads(out)
+    assert "error" in d
+    assert "Goal completion rejected by judge" in d["error"]
+    assert "missing verification evidence" in d["error"]
+    assert f"parents=[{goal_task_id}]" in d["error"]
+
+    conn2 = kb.connect()
+    try:
+        task = kb.get_task(conn2, goal_task_id)
+        assert task.status == "running"  # Should still be running, not done
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_allows_when_judge_unavailable(monkeypatch, tmp_path):
+    """Fail-open: an unreachable judge must not wedge a goal_mode worker.
+
+    judge_goal returns a "continue" verdict when no auxiliary model is
+    configured, which is indistinguishable from a real "not done" judgment.
+    The gate probes availability first, so completion proceeds rather than
+    being rejected forever when no judge can be reached."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True,
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # No judge reachable. judge_goal must not even be consulted; if it were,
+    # this stub would reject — so reaching "done" proves the probe short-circuit.
+    def fail_if_called(goal, last_response, **kwargs):
+        raise AssertionError("judge_goal must not run when no judge is available")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: False)
+
+    out = kt._handle_complete({"summary": "done enough"})
+    d = json.loads(out)
+    assert d.get("ok") is True
+
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status == "done"
+    finally:
+        conn2.close()
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
@@ -929,6 +1032,34 @@ def test_create_happy_path(worker_env):
         child = kb.get_task(conn, d["task_id"])
         assert child.title == "child task"
         assert child.assignee == "peer"
+    finally:
+        conn.close()
+
+
+def test_create_project_passthrough(worker_env):
+    """Regression for the v0.18 upstream merge (413638a28) dropping
+    kanban_create's ``project`` arg: kb.create_task has taken ``project_id``
+    since e2bb46738, but the worker-facing kanban_create tool had no arg to
+    reach it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+    from tools import kanban_tools as kt
+
+    with pdb.connect_closing() as pconn:
+        pid = pdb.create_project(pconn, name="Web App", folders=["/tmp/webapp"])
+        proj = pdb.get_project(pconn, pid)
+
+    out = kt._handle_create({
+        "title": "linked child",
+        "assignee": "peer",
+        "project": proj.slug,
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.project_id == proj.id
     finally:
         conn.close()
 
@@ -1148,6 +1279,42 @@ def test_create_rejects_code_kind_for_verdict_only_role(worker_env, monkeypatch)
     err = d.get("error", "")
     assert "role_misuse" in err
     assert "verdict" in err
+
+
+def test_create_kind_schema_enum_matches_valid_task_kinds():
+    """Regression (Codex cross-review, fix/merge-losses-20260703): the
+    kanban_create tool schema's ``kind`` enum previously hard-coded
+    ["code", "research", "review", "ops", "text"], silently omitting
+    "analysis" (the read-only counter-class to "code" the CLI's --kind
+    accepts, hermes_cli/kanban_decompose.py:_VALID_TASK_KINDS). Derive it
+    from the same source of truth so the two surfaces can't drift again."""
+    from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
+    from tools import kanban_tools as kt
+
+    assert set(kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["kind"]["enum"]) == set(
+        _VALID_TASK_KINDS
+    )
+    assert "analysis" in kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["kind"]["enum"]
+
+
+def test_create_accepts_analysis_kind(worker_env):
+    """End-to-end: kanban_create must accept kind='analysis', not just
+    advertise it in the schema."""
+    from tools import kanban_tools as kt
+
+    d = json.loads(kt._handle_create({
+        "title": "analysis task",
+        "assignee": "peer",
+        "kind": "analysis",
+    }))
+    assert d.get("ok") is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, d["task_id"])
+        assert task.kind == "analysis"
+    finally:
+        conn.close()
 
 
 def test_create_rejects_legacy_openclaw_assignee(worker_env, monkeypatch):

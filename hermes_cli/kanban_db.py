@@ -120,7 +120,7 @@ VALID_STATUSES = {
 TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
-VALID_BLOCK_KINDS = frozenset({"needs_input", "capability", "dependency"})
+VALID_BLOCK_KINDS = frozenset({"needs_input", "capability", "dependency", "transient"})
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
