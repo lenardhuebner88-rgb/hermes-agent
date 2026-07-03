@@ -9386,6 +9386,71 @@ def test_decompose_genuine_defect_still_parks_bad_spec(kanban_home):
     assert kb.HEILER_CLASS_TRANSIENT not in heiler
 
 
+def test_decompose_bad_spec_park_reason_carries_cause(kanban_home):
+    # The bad-spec park used to discard the already-read latest_reason,
+    # escalating with an ursachenlose "auto_decompose failed N times" signature
+    # (11x identical signatures on the live board in one week — the operator had
+    # to open events every time to triage). _latest_decompose_failure_reason is
+    # already read in this block for the transient check just above; surface it
+    # in reason + evidence for the (non-transient) bad-spec park too.
+    now = 1_900_000_000
+    cause = "decomposer returned fanout=false with no title/body"
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="vague triage cause", assignee="coder", triage=True,
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(conn, tid, reason=cause)
+        s = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        heiler = [
+            (e.payload or {}).get("class")
+            for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+
+    assert {"task_id": tid, "class": "triage_decompose_failed"} in s["parked"]
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+    why_now = escalations[0].payload["why_now"]
+    assert f"auto_decompose failed 3 times ({cause})" in why_now
+    assert escalations[0].payload["evidence"]["latest_reason"] == cause
+    # Classification stays bad-spec: the stall_class STRONG mapping (checked
+    # before free-text signals in _classify_failure) wins regardless of what
+    # the now-enriched reason text says.
+    assert kb.HEILER_CLASS_BAD_SPEC in heiler
+    assert kb.HEILER_CLASS_TRANSIENT not in heiler
+
+
+def test_decompose_bad_spec_park_reason_truncates_long_cause(kanban_home):
+    # done_when requires the surfaced cause to be truncated (~200 chars) so a
+    # verbose decomposer error can't blow up the reason/evidence text.
+    now = 1_900_000_000
+    long_cause = (
+        "decomposer returned fanout=false with no title/body: " + "x" * 250
+    )
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="vague triage long cause", assignee="coder", triage=True,
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(conn, tid, reason=long_cause)
+        s = kb.no_silent_stall_sweep(conn, now=now)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert {"task_id": tid, "class": "triage_decompose_failed"} in s["parked"]
+    excerpt = escalations[0].payload["evidence"]["latest_reason"]
+    assert excerpt == long_cause[:200]
+    assert len(excerpt) == 200
+
+
 def test_decompose_no_reason_event_preserves_bad_spec_park(kanban_home):
     # Back-compat: a decompose_failed counter bumped WITHOUT a reason (older code
     # path / direct counter use) has no decompose_attempt_failed event, so the

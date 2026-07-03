@@ -17026,12 +17026,19 @@ def no_silent_stall_sweep(
             ):
                 summary["parked"].append({"task_id": row["id"], "class": t_class})
             continue
+        bad_spec_evidence = {"attempts": attempts}
+        if latest_reason:
+            latest_reason_excerpt = latest_reason[:200]
+            reason = (
+                f"auto_decompose failed {attempts} times ({latest_reason_excerpt})"
+            )
+            bad_spec_evidence["latest_reason"] = latest_reason_excerpt
         if _park_stall_once(
             conn,
             row,
             stall_class=stall_class,
             reason=reason,
-            evidence={"attempts": attempts},
+            evidence=bad_spec_evidence,
             now=ts,
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
