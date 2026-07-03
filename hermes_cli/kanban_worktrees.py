@@ -1792,6 +1792,7 @@ def _auto_complete_decompose_root(
         )
         if cur.rowcount != 1:
             return
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
         run_id = kb._end_run(
             conn,
             root_id,
@@ -1857,6 +1858,7 @@ def _direct_complete_decompose_root(
         )
         if cur.rowcount != 1:
             return
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
         run_id = kb._end_run(
             conn,
             root_id,

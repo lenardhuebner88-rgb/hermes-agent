@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
 from hermes_cli import strategist
 
 
@@ -273,6 +274,75 @@ def test_complete_freigabe_hold_stamps_matching_lever_outcome_shipped(board_home
             author="pytest",
             note="Superseded: operator reviewed directly.",
         ) is True
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
+    """The integrated decompose-root finalizer stamps strategist shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: integrated root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=completed_child,
+            outcome={"action": "integrated", "branch": "kanban/test-root"},
+        )
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
+    """The commitless decompose-root finalizer stamps strategist shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: commitless root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        child = kb.create_task(conn, title="scratch child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kwt._direct_complete_decompose_root(
+            conn,
+            root_id=root,
+            children=[(child, "done")],
+        )
 
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert rec["root_task_id"] == root
