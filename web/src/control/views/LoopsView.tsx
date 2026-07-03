@@ -45,6 +45,8 @@ import {
 } from "../lib/types";
 import { parseLedgerLine } from "../lib/loopLedger";
 import type { LedgerVerdict } from "../lib/loopLedger";
+import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
+import type { LoopRingSegment, LoopRingTicks } from "../lib/loopRing";
 import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 
 const t = de.loops;
@@ -160,21 +162,6 @@ function buildPhaseOverrides(
 // Idle: dünner Ring. Error: rot gestrichelt. Running: weicher Amber-Atem-Glow
 // (motion, reduced-motion-safe). Geometrie über SVG `pathLength=100` (Browser
 // normiert stroke-dasharray/-offset auf Prozent, unabhängig vom Radius).
-
-export interface LoopRingSegment {
-  key: string;
-  state: "current" | "done" | "pending";
-  /** nur bei state==="current": 0..1 Anteil von heartbeat.current.timeout;
-   *  null = kein Timeout bekannt → unbestimmt (Segment füllt sich ganz, der
-   *  Atem-Glow trägt die "läuft noch"-Aussage). */
-  progress?: number | null;
-}
-
-export interface LoopRingTicks {
-  total: number;
-  done: number;
-  currentActive: boolean;
-}
 
 function RingSegment({
   index,
@@ -329,36 +316,6 @@ function LoopRing({
       </svg>
     </span>
   );
-}
-
-/** Pipeline-Phasen sind vom Runner fest verdrahtet (`loops/runner.py::_run_pipeline`
- *  ruft immer genau plan→build→verify auf) — deshalb hier als feste Reihenfolge,
- *  nicht aus `pack.phases`-Keys abgeleitet. */
-const PIPELINE_PHASE_ORDER = ["plan", "build", "verify"] as const;
-
-function deriveRingSegments(pack: LoopPackSummary, nowMs: number): LoopRingSegment[] {
-  const current = pack.heartbeat?.current ?? null;
-  const last = pack.heartbeat?.last ?? [];
-  return PIPELINE_PHASE_ORDER.map((phase): LoopRingSegment => {
-    if (current && current.phase === phase) {
-      const startedMs = Date.parse(current.started_at);
-      const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, (nowMs - startedMs) / 1000) : 0;
-      const progress = current.timeout > 0 ? Math.min(1, elapsedSec / current.timeout) : null;
-      return { key: phase, state: "current", progress };
-    }
-    const found = [...last].reverse().find((e) => e.phase === phase);
-    if (found) return { key: phase, state: found.rc === 0 ? "done" : "pending" };
-    return { key: phase, state: "pending" };
-  });
-}
-
-function deriveRingTicks(pack: LoopPackSummary): LoopRingTicks {
-  const maxRounds = pack.stop.max_rounds ?? 0;
-  const total = Math.max(1, Math.min(24, maxRounds || 1));
-  const last = pack.heartbeat?.last ?? [];
-  const doneRounds = last.filter((e) => e.phase === "round" && e.rc === 0).length;
-  const currentActive = pack.heartbeat?.current?.phase === "round";
-  return { total, done: Math.min(doneRounds, total), currentActive };
 }
 
 // ── kleine Night-Atome (Badges, Chips) ──────────────────────────────────────

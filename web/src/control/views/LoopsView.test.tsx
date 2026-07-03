@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
 import { de } from "../i18n/de";
-import type { LoopDetailResponse, LoopFilesResponse, LoopModelsResponse, LoopPack, LoopPackSummary } from "../lib/types";
+import type { LoopDetailResponse, LoopFilesResponse, LoopHeartbeatCurrent, LoopModelsResponse, LoopPack, LoopPackSummary } from "../lib/types";
 
 const t = de.loops;
 
@@ -376,5 +377,91 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
   it("renders an unparsable ledger line verbatim instead of crashing", () => {
     const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
     expect(html).toContain("# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf");
+  });
+});
+
+// ── Runden-Fenster der Ring-Ableitung (Codex-Review-Befund 2026-07-03) ───────
+// `heartbeat.last` ist ein rollierendes 20er-Fenster OHNE Runden-IDs — alte
+// build/verify/round-Einträge früherer Runden dürfen nicht als Fortschritt der
+// aktuellen Runde erscheinen. Runden-Grenze Pipeline: der letzte `plan`-Eintrag.
+describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
+  const hbEntry = (phase: string, rc: number, at: string) =>
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at });
+
+  const withHeartbeat = (current: LoopHeartbeatCurrent | null, last: ReturnType<typeof hbEntry>[]): LoopPackSummary => ({
+    ...(runningPipeline as LoopPackSummary),
+    heartbeat: { current, last },
+  });
+
+  const NOW = Date.parse("2026-07-03T08:00:00");
+
+  it("zählt verify der VORHERIGEN Runde nicht als done, wenn Runde 2 in build steht", () => {
+    const pack = withHeartbeat(
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00", timeout: 3600 },
+      [
+        // Runde 1 (komplett, alles grün):
+        hbEntry("plan", 0, "2026-07-03T06:00:00"),
+        hbEntry("build", 0, "2026-07-03T06:20:00"),
+        hbEntry("verify", 0, "2026-07-03T06:40:00"),
+        // Runde 2 (nur plan bisher):
+        hbEntry("plan", 0, "2026-07-03T07:50:00"),
+      ],
+    );
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.find((s) => s.key === "plan")?.state).toBe("done");
+    expect(segs.find((s) => s.key === "build")?.state).toBe("current");
+    expect(segs.find((s) => s.key === "verify")?.state).toBe("pending");
+  });
+
+  it("startet mit leerem Ring, wenn gerade eine neue Runde plant (History = Vergangenheit)", () => {
+    const pack = withHeartbeat(
+      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00", timeout: 2400 },
+      [hbEntry("plan", 0, "2026-07-03T06:00:00"), hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")],
+    );
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.find((s) => s.key === "plan")?.state).toBe("current");
+    expect(segs.find((s) => s.key === "build")?.state).toBe("pending");
+    expect(segs.find((s) => s.key === "verify")?.state).toBe("pending");
+  });
+
+  it("zeigt im Leerlauf das Ergebnis der LETZTEN Runde (Fenster ab letztem plan)", () => {
+    const pack = withHeartbeat(null, [
+      hbEntry("verify", 1, "2026-07-03T05:00:00"), // ältere, rote Runde — zählt nicht
+      hbEntry("plan", 0, "2026-07-03T06:00:00"),
+      hbEntry("build", 0, "2026-07-03T06:20:00"),
+      hbEntry("verify", 0, "2026-07-03T06:40:00"),
+    ]);
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.every((s) => s.state === "done")).toBe(true);
+  });
+
+  it("bleibt konservativ pending, wenn kein plan-Eintrag im Fenster liegt", () => {
+    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")]);
+    const segs = deriveRingSegments(pack, NOW);
+    expect(segs.every((s) => s.state === "pending")).toBe(true);
+  });
+});
+
+describe("deriveRingTicks — nur der hintere zusammenhängende round-Block", () => {
+  const hbEntry = (phase: string, rc: number) =>
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00" });
+
+  it("zählt rounds vor einer Pipeline-Phase nicht mit", () => {
+    const pack: LoopPackSummary = {
+      ...(idleSweepWithCommits as LoopPackSummary),
+      heartbeat: {
+        current: null,
+        last: [hbEntry("round", 0), hbEntry("plan", 0), hbEntry("round", 0), hbEntry("round", 0)],
+      },
+    };
+    expect(deriveRingTicks(pack).done).toBe(2);
+  });
+
+  it("zählt fehlgeschlagene rounds im Block nicht als done, bricht den Block aber nicht ab", () => {
+    const pack: LoopPackSummary = {
+      ...(idleSweepWithCommits as LoopPackSummary),
+      heartbeat: { current: null, last: [hbEntry("round", 0), hbEntry("round", 1), hbEntry("round", 0)] },
+    };
+    expect(deriveRingTicks(pack).done).toBe(2);
   });
 });
