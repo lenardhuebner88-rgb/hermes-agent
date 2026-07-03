@@ -1595,8 +1595,8 @@ export const LeverOutcomeSchema = z.object({
   metric_key: z.string().nullable().catch(null),
   shipped_at: z.number().nullable().catch(null),
   measured_at: z.number().nullable().catch(null),
-  current: z.record(z.string(), z.unknown()).nullable().catch(null),
-  delta: z.record(z.string(), z.unknown()).nullable().catch(null),
+  current: z.number().nullable(),
+  delta: z.number().nullable(),
   verdict: z.string().nullable().catch(null),
   status: z.string().nullable().catch(null),
 }).passthrough();

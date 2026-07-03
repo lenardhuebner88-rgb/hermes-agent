@@ -209,6 +209,8 @@ export function outcomeStatusLabel(status: string | null | undefined): string {
 const OUTCOME_VERDICT_LABELS: Record<string, string> = {
   improved: "verbessert",
   worsened: "verschlechtert",
+  neutral: "neutral",
+  unmeasurable: "nicht messbar",
   unchanged: "unverändert",
   unknown: "unbekannt",
 };
@@ -219,26 +221,24 @@ export function outcomeVerdictLabel(verdict: string | null | undefined): string 
 }
 
 /** Tone classes for the verdict chip: improved emerald / worsened red /
- *  unchanged zinc / unknown (incl. `null`, not measured yet) dim — no tint. */
+ *  neutral/unchanged zinc / unmeasurable amber / unknown (incl. `null`, not
+ *  measured yet) dim — no tint. */
 export function outcomeVerdictToneClass(verdict: string | null | undefined): string {
   switch (verdict) {
     case "improved": return toneClasses("emerald");
     case "worsened": return toneClasses("red");
+    case "unmeasurable": return toneClasses("amber");
+    case "neutral":
     case "unchanged": return toneClasses("zinc");
     default: return "border-white/10 bg-white/[.03] hc-dim";
   }
 }
 
-/** Extract the signed delta for an outcome's own `metric_key` from its
- *  `delta` map — `null` when unmeasured, the key is missing, or the value
- *  isn't a finite number. */
+/** Return the scalar signed `delta` written by the backend — `null` when
+ *  unmeasured or the value isn't finite. */
 export function outcomeDeltaValue(outcome: LeverOutcome): number | null {
-  const key = outcome.metric_key;
-  if (!key) return null;
   const delta = outcome.delta;
-  if (!delta || typeof delta !== "object") return null;
-  const value = delta[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return typeof delta === "number" && Number.isFinite(delta) ? delta : null;
 }
 
 /** Format a delta value with an explicit sign: "+6", "-3.2", "0". */

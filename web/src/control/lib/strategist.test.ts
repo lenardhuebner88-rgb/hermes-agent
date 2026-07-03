@@ -199,9 +199,11 @@ describe("outcomeStatusLabel", () => {
 });
 
 describe("outcomeVerdictLabel / outcomeVerdictToneClass", () => {
-  it("labels all four verdicts", () => {
+  it("labels all emitted verdicts", () => {
     expect(outcomeVerdictLabel("improved")).toBe("verbessert");
     expect(outcomeVerdictLabel("worsened")).toBe("verschlechtert");
+    expect(outcomeVerdictLabel("neutral")).toBe("neutral");
+    expect(outcomeVerdictLabel("unmeasurable")).toBe("nicht messbar");
     expect(outcomeVerdictLabel("unchanged")).toBe("unverändert");
     expect(outcomeVerdictLabel("unknown")).toBe("unbekannt");
   });
@@ -212,14 +214,19 @@ describe("outcomeVerdictLabel / outcomeVerdictToneClass", () => {
     expect(outcomeVerdictLabel("weird")).toBe("unbekannt");
   });
 
-  it("tones improved green, worsened red, unchanged zinc — distinct from each other", () => {
+  it("tones improved green, worsened red, neutral/unchanged zinc and unmeasurable amber", () => {
     const improved = outcomeVerdictToneClass("improved");
     const worsened = outcomeVerdictToneClass("worsened");
+    const neutral = outcomeVerdictToneClass("neutral");
     const unchanged = outcomeVerdictToneClass("unchanged");
+    const unmeasurable = outcomeVerdictToneClass("unmeasurable");
     expect(improved).toContain("emerald");
     expect(worsened).toContain("red");
+    expect(neutral).toContain("zinc");
     expect(unchanged).toContain("zinc");
-    expect(new Set([improved, worsened, unchanged]).size).toBe(3);
+    expect(unmeasurable).toContain("amber");
+    expect(neutral).toBe(unchanged);
+    expect(new Set([improved, worsened, neutral, unmeasurable]).size).toBe(4);
   });
 
   it("dims null/unknown verdicts without tinting emerald/red/zinc", () => {
@@ -240,24 +247,19 @@ describe("outcomeDeltaValue / formatSignedDelta", () => {
     metric_key: "autonomy_pct",
     shipped_at: 1100,
     measured_at: 1200,
-    current: { autonomy_pct: 68 },
-    delta: { autonomy_pct: 6 },
+    current: 68,
+    delta: 6,
     verdict: "improved",
     status: "measured",
     ...overrides,
   });
 
-  it("extracts the metric_key's own delta value", () => {
+  it("returns a scalar delta value", () => {
     expect(outcomeDeltaValue(mk())).toBe(6);
   });
 
-  it("returns null when metric_key is unset", () => {
-    expect(outcomeDeltaValue(mk({ metric_key: null }))).toBeNull();
-  });
-
-  it("returns null when delta is missing or the key isn't present", () => {
+  it("returns null when delta is missing", () => {
     expect(outcomeDeltaValue(mk({ delta: null }))).toBeNull();
-    expect(outcomeDeltaValue(mk({ delta: {} }))).toBeNull();
   });
 
   it("formats a positive/negative/zero delta with an explicit sign", () => {

@@ -167,8 +167,8 @@ const outcome = (over: Partial<LeverOutcome> = {}): LeverOutcome => ({
   metric_key: "autonomy_pct",
   shipped_at: 1781100000,
   measured_at: 1781800000,
-  current: { autonomy_pct: 68 },
-  delta: { autonomy_pct: 6 },
+  current: 68,
+  delta: 6,
   verdict: "improved",
   status: "measured",
   ...over,
@@ -199,20 +199,22 @@ describe("OutcomeList", () => {
     expect(html).not.toContain("+6");
   });
 
-  it("renders all four verdicts with distinct labels", () => {
+  it("renders emitted verdicts with explicit labels", () => {
     const html = renderToStaticMarkup(
       <OutcomeList
         outcomes={[
           outcome({ lever_key: "l-improved", verdict: "improved" }),
           outcome({ lever_key: "l-worsened", verdict: "worsened" }),
-          outcome({ lever_key: "l-unchanged", verdict: "unchanged" }),
+          outcome({ lever_key: "l-neutral", verdict: "neutral" }),
+          outcome({ lever_key: "l-unmeasurable", verdict: "unmeasurable" }),
           outcome({ lever_key: "l-unknown", verdict: "unknown" }),
         ]}
       />,
     );
     expect(html).toContain("verbessert");
     expect(html).toContain("verschlechtert");
-    expect(html).toContain("unverändert");
+    expect(html).toContain("neutral");
+    expect(html).toContain("nicht messbar");
     expect(html).toContain("unbekannt");
   });
 
