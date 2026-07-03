@@ -13,8 +13,11 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
 - Remote-Sessions spawnen in `.claude/worktrees/bridge-cse_*` (Branch `worktree-bridge-…`,
   abgezweigt von lokalem HEAD). Fertige Arbeit per Merge zurück auf den Live-Branch —
   kein Direkt-Edit am Live-Checkout.
-- Worktrees haben **kein** `web/node_modules` → Frontend-Gates/Builds im Live-Checkout
-  (`~/.hermes/hermes-agent/web`) über `.bin/` laufen lassen, nicht via npx im Worktree.
+- Worktrees haben anfangs **kein** `web/node_modules` → im Worktree `cd <wt>/web && npm ci`
+  (sicher; verboten ist nur Symlink/Install gegen das LIVE-web), dann Gates über die
+  gehoisteten Root-Binaries `<wt>/node_modules/.bin/{tsc,vitest}` fahren — **nie** `npx
+  tsc/vitest` im Worktree (Stub-Trap `ENOWORKSPACES`). NIE einen Worktree-Diff im Live-
+  Checkout gaten (fremde Sessions halten ihn dirty). Details: Skill `hermes-dashboard-dev`.
 
 ## Dashboard (Haupt-Bauziel)
 - `/control`-SPA (FastAPI + React/TS), Port **9119** (loopback), via Tailscale Serve
