@@ -35,7 +35,8 @@ def _load_plugin_router():
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
 
     spec = importlib.util.spec_from_file_location(
-        "hermes_dashboard_plugin_kanban_test", plugin_file,
+        "hermes_dashboard_plugin_kanban_test",
+        plugin_file,
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -51,7 +52,8 @@ def _load_plugin_module_for_lanes_auth_smoke():
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
 
     spec = importlib.util.spec_from_file_location(
-        "hermes_dashboard_plugin_kanban_lanes_auth_smoke_test", plugin_file,
+        "hermes_dashboard_plugin_kanban_lanes_auth_smoke_test",
+        plugin_file,
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -60,12 +62,15 @@ def _load_plugin_module_for_lanes_auth_smoke():
     return mod
 
 
-
-def _configure_dashboard_ws(monkeypatch, *, token="secret-xyz", bound_host=None, auth_required=False):
+def _configure_dashboard_ws(
+    monkeypatch, *, token="secret-xyz", bound_host=None, auth_required=False
+):
     from hermes_cli import web_server
 
     monkeypatch.setattr(web_server, "_SESSION_TOKEN", token)
-    monkeypatch.setattr(web_server.app.state, "auth_required", auth_required, raising=False)
+    monkeypatch.setattr(
+        web_server.app.state, "auth_required", auth_required, raising=False
+    )
     monkeypatch.setattr(web_server.app.state, "bound_host", bound_host, raising=False)
     monkeypatch.setattr(
         web_server.app.state,
@@ -83,8 +88,20 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     profiles = home / "profiles"
     for name in [
-        "default", "coder", "premium", "research", "ops", "x", "a", "b", "old", "new", "worker", "linguist",
-        "alice", "bob",
+        "default",
+        "coder",
+        "premium",
+        "research",
+        "ops",
+        "x",
+        "a",
+        "b",
+        "old",
+        "new",
+        "worker",
+        "linguist",
+        "alice",
+        "bob",
     ]:
         d = profiles / name
         d.mkdir(parents=True, exist_ok=True)
@@ -137,10 +154,14 @@ def _install_fake_webpush(monkeypatch, mod, calls, *, status_code=None):
     def fake_webpush(**kwargs):
         calls.append(kwargs)
         if status_code is not None:
-            raise FakeWebPushException("push failed", response=FakeResponse(status_code))
+            raise FakeWebPushException(
+                "push failed", response=FakeResponse(status_code)
+            )
         return None
 
-    monkeypatch.setattr(mod, "_load_pywebpush", lambda: (fake_webpush, FakeWebPushException))
+    monkeypatch.setattr(
+        mod, "_load_pywebpush", lambda: (fake_webpush, FakeWebPushException)
+    )
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "test-private-key")
     monkeypatch.setenv("VAPID_PUBLIC_KEY", "test-public-key")
     monkeypatch.setenv("VAPID_CLAIMS_SUB", "mailto:test@example.invalid")
@@ -197,7 +218,9 @@ def test_push_subscribe_unsubscribe_routes_are_idempotent(kanban_home):
     assert _push_rows() == []
 
 
-def test_push_send_path_sends_once_and_deletes_expired_subscription(kanban_home, monkeypatch):
+def test_push_send_path_sends_once_and_deletes_expired_subscription(
+    kanban_home, monkeypatch
+):
     mod = _load_plugin_module_for_lanes_auth_smoke()
     mod._PUSH_DISABLED_REASONS_LOGGED.clear()
     _add_push_sub("https://push.example/sub-1")
@@ -265,7 +288,9 @@ def test_push_missing_vapid_env_disables_without_crash(kanban_home, monkeypatch)
     assert len(_push_rows()) == 1
 
 
-def test_push_hook_filters_only_operator_blocks_and_chain_roots(kanban_home, monkeypatch):
+def test_push_hook_filters_only_operator_blocks_and_chain_roots(
+    kanban_home, monkeypatch
+):
     mod = _load_plugin_module_for_lanes_auth_smoke()
     mod._PUSH_DISABLED_REASONS_LOGGED.clear()
     _add_push_sub()
@@ -319,14 +344,16 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
 
     assert response.status_code == 200
     assert response.json()["count"] == 1
-    assert calls == [{
-        "scope": "open",
-        "valid": True,
-        "limit": 8,
-        "search": None,
-        "include_kanban_status": True,
-        "board": None,
-    }]
+    assert calls == [
+        {
+            "scope": "open",
+            "valid": True,
+            "limit": 8,
+            "search": None,
+            "include_kanban_status": True,
+            "board": None,
+        }
+    ]
 
 
 def test_planspecs_endpoint_surfaces_ingest_precheck_fields(monkeypatch, client):
@@ -336,16 +363,18 @@ def test_planspecs_endpoint_surfaces_ingest_precheck_fields(monkeypatch, client)
     from hermes_cli import planspecs
 
     def fake_list_planspecs(**kwargs):
-        return [{
-            "path": "/tmp/binding.md",
-            "valid": True,
-            "open": True,
-            "binding": True,
-            "ingest_disposition": "invalid",
-            "ingest_would_block": True,
-            "ingest_findings": ["placeholder residue in section B1-S2"],
-            "errors": [],
-        }]
+        return [
+            {
+                "path": "/tmp/binding.md",
+                "valid": True,
+                "open": True,
+                "binding": True,
+                "ingest_disposition": "invalid",
+                "ingest_would_block": True,
+                "ingest_findings": ["placeholder residue in section B1-S2"],
+                "errors": [],
+            }
+        ]
 
     monkeypatch.setattr(planspecs, "list_planspecs", fake_list_planspecs)
 
@@ -488,14 +517,32 @@ def test_lanes_auth_smoke_selects_effective_catalog_roles_and_skips_claude_runti
     lane = {
         "id": "lane_1",
         "profiles": {
-            "reviewer": {"worker_runtime": "hermes", "provider": "openrouter", "model": "z-ai/glm-5.2"},
+            "reviewer": {
+                "worker_runtime": "hermes",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.2",
+            },
             "premium": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
         },
     }
     catalog = [
-        {"name": "coder", "worker_runtime": "hermes", "default_provider": "openai-codex", "default_model": "gpt-5.4-mini"},
-        {"name": "reviewer", "worker_runtime": "hermes", "default_provider": "openai-codex", "default_model": "gpt-5.5"},
-        {"name": "premium", "worker_runtime": "claude-cli", "default_model": "claude-opus-4-8"},
+        {
+            "name": "coder",
+            "worker_runtime": "hermes",
+            "default_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+        {
+            "name": "reviewer",
+            "worker_runtime": "hermes",
+            "default_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+        },
+        {
+            "name": "premium",
+            "worker_runtime": "claude-cli",
+            "default_model": "claude-opus-4-8",
+        },
     ]
 
     results = plugin_api._select_lanes_auth_smoke_roles(lane, [], catalog)
@@ -513,7 +560,11 @@ def test_lanes_auth_smoke_builds_blocking_summary_and_scope_counts():
     plugin_api = _load_plugin_module_for_lanes_auth_smoke()
     results = [
         {"role": "coder", "status": "ok", "fallback_activated": False},
-        {"role": "research", "status": "quota_or_rate_limit", "fallback_activated": True},
+        {
+            "role": "research",
+            "status": "quota_or_rate_limit",
+            "fallback_activated": True,
+        },
         {"role": "premium", "status": "skipped", "fallback_activated": False},
     ]
 
@@ -621,7 +672,15 @@ def test_board_empty(client):
     # All canonical columns present (triage + the rest), each empty.
     names = [c["name"] for c in data["columns"]]
     assert set(names) == kb.VALID_STATUSES - {"archived"}
-    for expected in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
+    for expected in (
+        "triage",
+        "todo",
+        "scheduled",
+        "ready",
+        "running",
+        "blocked",
+        "done",
+    ):
         assert expected in names, f"missing column {expected}: {names}"
     assert all(len(c["tasks"]) == 0 for c in data["columns"])
     assert data["tenants"] == []
@@ -632,10 +691,6 @@ def test_board_empty(client):
 # ---------------------------------------------------------------------------
 # POST /tasks then GET /board sees it
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 def test_dashboard_create_normalizes_legacy_assignee_alias(client):
@@ -677,8 +732,6 @@ def test_create_task_rejects_non_spawnable_assignee(client):
 
     assert r.status_code == 400
     assert "not spawnable" in r.json()["detail"]
-
-
 
 
 def test_patch_task_preserves_unchanged_off_disk_assignee_for_repair(client):
@@ -773,12 +826,18 @@ def test_board_surfaces_active_review_stage_only_while_in_review(client):
     never shows the field (no stale stage)."""
     with kb.connect() as conn:
         reviewing = kb.create_task(conn, title="in review", assignee="coder")
-        done_once = kb.create_task(conn, title="was reviewed, now done", assignee="coder")
+        done_once = kb.create_task(
+            conn, title="was reviewed, now done", assignee="coder"
+        )
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (reviewing,))
-            kb._append_event(conn, reviewing, "submitted_for_review", {"target_profile": "reviewer"})
+            kb._append_event(
+                conn, reviewing, "submitted_for_review", {"target_profile": "reviewer"}
+            )
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (done_once,))
-            kb._append_event(conn, done_once, "submitted_for_review", {"target_profile": "verifier"})
+            kb._append_event(
+                conn, done_once, "submitted_for_review", {"target_profile": "verifier"}
+            )
 
     r = client.get("/api/plugins/kanban/board")
     assert r.status_code == 200, r.text
@@ -786,10 +845,14 @@ def test_board_surfaces_active_review_stage_only_while_in_review(client):
     review_card = next(t for t in cols["review"] if t["id"] == reviewing)
     assert review_card["active_review_stage"] == "reviewer"
     done_card = next(t for t in cols["done"] if t["id"] == done_once)
-    assert done_card.get("active_review_stage") is None   # not in review → no stale stage
+    assert (
+        done_card.get("active_review_stage") is None
+    )  # not in review → no stale stage
 
 
-def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(client, monkeypatch):
+def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(
+    client, monkeypatch
+):
     """A transient corrupt-open signal must not make the Flow board vanish.
 
     Runtime evidence for the Discord-vorfilter incident showed a dashboard
@@ -845,7 +908,9 @@ def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(client
     assert card["status"] == "triage"
 
 
-def test_flow_lean_auto_capture_stays_triage_without_planspec(client, tmp_path, monkeypatch):
+def test_flow_lean_auto_capture_stays_triage_without_planspec(
+    client, tmp_path, monkeypatch
+):
     """Characterize the no-PlanSpec Flow path used by lean+AUTO capture.
 
     The UI routes lean+AUTO through the plain ``POST /tasks`` endpoint, not
@@ -901,7 +966,8 @@ def test_board_card_diagnostics_summary_omits_detail(client, monkeypatch):
     ``warnings`` badge; the default (``full``) still embeds the list for the
     kanban dashboard drawer."""
     task_id = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "Diagnose me"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "Diagnose me"},
     ).json()["task"]["id"]
 
     # The rule engine needs a specific event history to fire; here we only test
@@ -961,7 +1027,9 @@ def test_board_card_body_none_preserves_review_tier(client):
     """Phase C: the Flow-Tab Stage-Pill reads review_tier from the /board poll —
     card_body=none must NOT strip it (it only drops body+result)."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="tiered", assignee="coder", review_tier="critical")
+        tid = kb.create_task(
+            conn, title="tiered", assignee="coder", review_tier="critical"
+        )
     data = client.get(
         "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"
     ).json()
@@ -989,13 +1057,15 @@ def test_board_etag_304_roundtrip(client):
     # (per-card "age" is derived from hashed timestamps and excluded from
     # the ETag basis; otherwise the tag would change every second).
     r2 = client.get(
-        "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+        "/api/plugins/kanban/board",
+        headers={"If-None-Match": etag},
     )
     assert r2.status_code == 304
     assert r2.headers.get("etag") == etag
 
     with unittest.mock.patch.object(
-        kb, "task_age",
+        kb,
+        "task_age",
         return_value={
             "created_age_seconds": 99999,
             "started_age_seconds": None,
@@ -1003,14 +1073,16 @@ def test_board_etag_304_roundtrip(client):
         },
     ):
         r2b = client.get(
-            "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+            "/api/plugins/kanban/board",
+            headers={"If-None-Match": etag},
         )
     assert r2b.status_code == 304
 
     # A mutation (new task) invalidates the tag.
     client.post("/api/plugins/kanban/tasks", json={"title": "etag buster"})
     r3 = client.get(
-        "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+        "/api/plugins/kanban/board",
+        headers={"If-None-Match": etag},
     )
     assert r3.status_code == 200
     assert r3.headers.get("etag") != etag
@@ -1053,7 +1125,8 @@ def test_board_payload_cache_reuses_unchanged_payload(client, monkeypatch):
 
     # A board-visible mutation bumps the DB stamp → fresh payload next poll.
     new_id = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "invalidate cache"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "invalidate cache"},
     ).json()["task"]["id"]
     r4 = client.get(url)
     assert r4.status_code == 200
@@ -1223,17 +1296,13 @@ def test_board_query_param_default_overrides_current_board_pointer(client):
 
     current_board = client.get("/api/plugins/kanban/board").json()
     current_ids = {
-        task["id"]
-        for column in current_board["columns"]
-        for task in column["tasks"]
+        task["id"] for column in current_board["columns"] for task in column["tasks"]
     }
     assert default_task["id"] not in current_ids
 
     pinned_default = client.get("/api/plugins/kanban/board?board=default").json()
     pinned_ids = {
-        task["id"]
-        for column in pinned_default["columns"]
-        for task in column["tasks"]
+        task["id"] for column in pinned_default["columns"] for task in column["tasks"]
     }
     assert pinned_ids == {default_task["id"]}
 
@@ -1287,7 +1356,7 @@ def test_dashboard_initial_board_uses_backend_current_when_unpinned():
     bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
     js = bundle.read_text()
 
-    assert 'useState(() => readSelectedBoard() || null)' in js
+    assert "useState(() => readSelectedBoard() || null)" in js
     assert "const storedBoard = readSelectedBoard();" in js
     assert "if (!storedBoard && !board && data && data.current)" in js
     assert "setBoard(data.current);" in js
@@ -1303,8 +1372,11 @@ def test_dashboard_markdown_html_is_sanitized_before_render():
 
     assert "function sanitizeMarkdownHtml(html)" in js
     assert "MARKDOWN_ALLOWED_TAGS" in js
-    assert "sanitizeMarkdownHtml(renderMarkdown(props.source || \"\"))" in js
-    assert "dangerouslySetInnerHTML: { __html: renderMarkdown(props.source || \"\") }" not in js
+    assert 'sanitizeMarkdownHtml(renderMarkdown(props.source || ""))' in js
+    assert (
+        'dangerouslySetInnerHTML: { __html: renderMarkdown(props.source || "") }'
+        not in js
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1314,7 +1386,8 @@ def test_dashboard_markdown_html_is_sanitized_before_render():
 
 def test_task_detail_includes_links_and_events(client):
     parent = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "parent"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "parent"},
     ).json()["task"]
     child = client.post(
         "/api/plugins/kanban/tasks",
@@ -1337,7 +1410,9 @@ def test_task_detail_includes_links_and_events(client):
     assert len(data["events"]) >= 1
 
 
-def test_task_detail_and_board_surface_vault_memory_links(client, tmp_path, monkeypatch):
+def test_task_detail_and_board_surface_vault_memory_links(
+    client, tmp_path, monkeypatch
+):
     vault = tmp_path / "vault"
     note = vault / "00-Canon" / "vision.md"
     note.parent.mkdir(parents=True)
@@ -1368,7 +1443,9 @@ def test_task_detail_and_board_surface_vault_memory_links(client, tmp_path, monk
         for task in col["tasks"]
         if task["id"] == created["id"]
     )
-    assert [(link["kind"], link["display_path"]) for link in card["vault_memory_links"]] == [
+    assert [
+        (link["kind"], link["display_path"]) for link in card["vault_memory_links"]
+    ] == [
         ("vault", "00-Canon/vision.md"),
         ("vault", "00-Canon/brief.pdf"),
         ("memory", "MEMORY.md"),
@@ -1376,9 +1453,13 @@ def test_task_detail_and_board_surface_vault_memory_links(client, tmp_path, monk
     assert all(link["path"] != str(vault) for link in card["vault_memory_links"])
     card_links = {link["display_path"]: link for link in card["vault_memory_links"]}
     assert card_links["00-Canon/vision.md"]["url"]
-    assert card_links["00-Canon/vision.md"]["obsidian_url"].startswith("obsidian://open?")
+    assert card_links["00-Canon/vision.md"]["obsidian_url"].startswith(
+        "obsidian://open?"
+    )
     assert card_links["00-Canon/brief.pdf"]["url"] is None
-    assert card_links["00-Canon/brief.pdf"]["obsidian_url"].startswith("obsidian://open?")
+    assert card_links["00-Canon/brief.pdf"]["obsidian_url"].startswith(
+        "obsidian://open?"
+    )
     assert card_links["MEMORY.md"]["url"]
 
     detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()
@@ -1402,7 +1483,8 @@ def test_task_detail_includes_cost_usd_field(client):
     """K6: GET /tasks/:id surfaces a per-task cost_usd (sum over runs).
     Pre-K5a there is no cost recorded, so the field is present but None."""
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "costed"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "costed"},
     ).json()["task"]
     data = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()
     assert "cost_usd" in data["task"]
@@ -1413,18 +1495,23 @@ def test_stats_includes_k6_throughput_and_cost_keys(client):
     """K6: GET /stats additively exposes throughput/cycle-time/cost keys
     alongside the pre-existing per-status/per-assignee counts."""
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "done-one", "assignee": "x"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "done-one", "assignee": "x"},
     ).json()["task"]
     client.patch(
-        f"/api/plugins/kanban/tasks/{t['id']}", json={"status": "done"},
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "done"},
     )
     stats = client.get("/api/plugins/kanban/stats").json()
     # Pre-existing keys still present.
     assert "by_status" in stats and "by_assignee" in stats
     # New additive keys.
     for key in (
-        "completed_last_24h", "completed_last_7d",
-        "cycle_time_p50_seconds", "cycle_time_p90_seconds", "total_cost_usd_24h",
+        "completed_last_24h",
+        "completed_last_7d",
+        "cycle_time_p50_seconds",
+        "cycle_time_p90_seconds",
+        "total_cost_usd_24h",
     ):
         assert key in stats
     assert stats["completed_last_24h"] >= 1
@@ -1434,7 +1521,9 @@ def test_stats_includes_k6_throughput_and_cost_keys(client):
 def test_stats_autonomy_endpoint_counts_operator_escalations(client):
     conn = kb.connect()
     try:
-        tasks = [kb.create_task(conn, title=f"task {i}", assignee="coder") for i in range(4)]
+        tasks = [
+            kb.create_task(conn, title=f"task {i}", assignee="coder") for i in range(4)
+        ]
         conn.execute(
             "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'operator_escalation', NULL, ?)",
             (tasks[0], int(time.time())),
@@ -1457,16 +1546,29 @@ def test_stats_chain_completion_endpoint_counts_done_roots_with_all_leaves_done(
         full_root = kb.create_task(conn, title="full root", assignee="orchestrator")
         full_leaf_a = kb.create_task(conn, title="full leaf a", assignee="coder")
         full_leaf_b = kb.create_task(conn, title="full leaf b", assignee="coder")
-        partial_root = kb.create_task(conn, title="partial root", assignee="orchestrator")
-        partial_leaf_done = kb.create_task(conn, title="partial leaf done", assignee="coder")
-        partial_leaf_open = kb.create_task(conn, title="partial leaf open", assignee="coder")
+        partial_root = kb.create_task(
+            conn, title="partial root", assignee="orchestrator"
+        )
+        partial_leaf_done = kb.create_task(
+            conn, title="partial leaf done", assignee="coder"
+        )
+        partial_leaf_open = kb.create_task(
+            conn, title="partial leaf open", assignee="coder"
+        )
         for leaf in (full_leaf_a, full_leaf_b):
             kb.link_tasks(conn, leaf, full_root)
         for leaf in (partial_leaf_done, partial_leaf_open):
             kb.link_tasks(conn, leaf, partial_root)
         conn.execute(
             "UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?, ?, ?, ?)",
-            (int(time.time()), full_root, full_leaf_a, full_leaf_b, partial_root, partial_leaf_done),
+            (
+                int(time.time()),
+                full_root,
+                full_leaf_a,
+                full_leaf_b,
+                partial_root,
+                partial_leaf_done,
+            ),
         )
         conn.commit()
     finally:
@@ -1484,9 +1586,16 @@ def test_stats_payload_includes_queue_wait_p50(client, monkeypatch):
     monkeypatch.setattr(kb.time, "time", lambda: 1_000)
     conn = kb.connect()
     try:
-        task_ids = [kb.create_task(conn, title=f"queued {i}", assignee="coder") for i in range(3)]
-        for task_id, created_at, started_at in zip(task_ids, (100, 200, 300), (110, 230, 390)):
-            conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (created_at, task_id))
+        task_ids = [
+            kb.create_task(conn, title=f"queued {i}", assignee="coder")
+            for i in range(3)
+        ]
+        for task_id, created_at, started_at in zip(
+            task_ids, (100, 200, 300), (110, 230, 390)
+        ):
+            conn.execute(
+                "UPDATE tasks SET created_at=? WHERE id=?", (created_at, task_id)
+            )
             conn.execute(
                 "INSERT INTO task_runs (task_id, profile, status, outcome, started_at) VALUES (?, 'coder', 'running', NULL, ?)",
                 (task_id, started_at),
@@ -1561,15 +1670,21 @@ def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_ho
     with kb.connect() as conn:
         root = kb.create_task(conn, title="subscription ship", triage=True)
         (child,) = kb.decompose_triage_task(
-            conn, root, root_assignee="default",
+            conn,
+            root,
+            root_assignee="default",
             children=[{"title": "sub-build", "assignee": "claude-cli", "parents": []}],
             author="decomposer",
         )
         with kb.write_txn(conn):
             _insert_cost_run_with_meta(
-                conn, child, profile="claude-cli",
-                input_tokens=900, output_tokens=180,
-                cost_usd=0.0, metadata={"cost_usd_equivalent": 0.42},
+                conn,
+                child,
+                profile="claude-cli",
+                input_tokens=900,
+                output_tokens=180,
+                cost_usd=0.0,
+                metadata={"cost_usd_equivalent": 0.42},
             )
         kb.complete_task(conn, child, summary="built")
         kb.complete_task(conn, root, summary="merged")
@@ -1582,7 +1697,9 @@ def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_ho
     assert only["cost_effective_usd"] == pytest.approx(0.42)
 
 
-def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(client, kanban_home):
+def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(
+    client, kanban_home
+):
     """S1: windowed rollup ranks roots by real+equivalent cost and keeps
     worker/runner provider+model evidence attached."""
     with kb.connect() as conn:
@@ -1593,7 +1710,11 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(clie
             root_assignee="orchestrator",
             children=[
                 {"title": "metered worker", "assignee": "coder", "parents": []},
-                {"title": "subscription worker", "assignee": "claude-cli", "parents": []},
+                {
+                    "title": "subscription worker",
+                    "assignee": "claude-cli",
+                    "parents": [],
+                },
             ],
             author="decomposer",
         )
@@ -1663,7 +1784,6 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(clie
     assert any(r["cost_effective_usd"] == pytest.approx(0.42) for r in worker_b_runs)
 
 
-
 def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanban_home):
     """Contract: a real backend response must parse with the frontend Zod schema."""
     with kb.connect() as conn:
@@ -1698,8 +1818,13 @@ def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanba
 
     repo_root = Path(__file__).resolve().parents[2]
     web_dir = repo_root / "web"
-    if not ((web_dir / "node_modules" / "@nous-research" / "ui").exists() and (repo_root / "node_modules" / "vitest").exists()):
-        pytest.skip("frontend dependencies are not installed; run npm ci in web/ for contract gate")
+    if not (
+        (web_dir / "node_modules" / "@nous-research" / "ui").exists()
+        and (repo_root / "node_modules" / "vitest").exists()
+    ):
+        pytest.skip(
+            "frontend dependencies are not installed; run npm ci in web/ for contract gate"
+        )
 
     lib_dir = web_dir / "src" / "control" / "lib"
     fixture_file = lib_dir / "__windowed_rollup_contract_fixture.json"
@@ -1713,10 +1838,10 @@ def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanba
         '  it("parses the real backend response with the frontend schema", () => {\n'
         '    const parsed = parseOrThrow(WindowedRollupResponseSchema, fixture, "windowed-rollup-contract");\n'
         '    expect(parsed.schema).toBe("kanban-windowed-rollup-v1");\n'
-        '    expect(parsed.roots.length).toBeGreaterThan(0);\n'
-        '    expect(parsed.roots[0].runners).toBeInstanceOf(Array);\n'
-        '  });\n'
-        '});\n',
+        "    expect(parsed.roots.length).toBeGreaterThan(0);\n"
+        "    expect(parsed.roots[0].runners).toBeInstanceOf(Array);\n"
+        "  });\n"
+        "});\n",
         encoding="utf-8",
     )
     try:
@@ -1733,6 +1858,7 @@ def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanba
         fixture_file.unlink(missing_ok=True)
         test_file.unlink(missing_ok=True)
     assert result.returncode == 0, result.stdout
+
 
 def test_runs_windowed_rollup_keeps_unknown_costs_null(client, kanban_home):
     """S1: missing price evidence remains unknown/null instead of fake $0."""
@@ -1768,7 +1894,10 @@ def test_runs_windowed_rollup_exposes_runner_detail_metadata(client, kanban_home
         root = kb.create_task(conn, title="detail root", triage=True)
         child = kb.create_task(conn, title="runner child", parents=[root])
         with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?)", (now, root, child))
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?)",
+                (now, root, child),
+            )
             conn.execute(
                 "INSERT INTO task_runs "
                 "(task_id, profile, status, outcome, started_at, ended_at, metadata) "
@@ -1822,16 +1951,37 @@ def test_runs_summary_empty_window(client):
 # ---------------------------------------------------------------------------
 
 
-def _insert_run(conn, task_id, *, profile, outcome, started_at, ended_at,
-                verdict=None, cost=None, tokens_in=None, tokens_out=None,
-                metadata=None):
+def _insert_run(
+    conn,
+    task_id,
+    *,
+    profile,
+    outcome,
+    started_at,
+    ended_at,
+    verdict=None,
+    cost=None,
+    tokens_in=None,
+    tokens_out=None,
+    metadata=None,
+):
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, "
         "started_at, ended_at, verdict, cost_usd, input_tokens, "
         "output_tokens, metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (task_id, profile, "done", outcome, started_at, ended_at, verdict,
-         cost, tokens_in, tokens_out,
-         json.dumps(metadata) if metadata is not None else None),
+        (
+            task_id,
+            profile,
+            "done",
+            outcome,
+            started_at,
+            ended_at,
+            verdict,
+            cost,
+            tokens_in,
+            tokens_out,
+            json.dumps(metadata) if metadata is not None else None,
+        ),
     )
 
 
@@ -1846,17 +1996,56 @@ def test_runs_reliability_per_profile(client):
         t2 = kb.create_task(conn, title="work 2")
         with kb.write_txn(conn):
             # coder: 2 completed, 1 crashed (3 runs, 2 tasks → 1 retry)
-            _insert_run(conn, t1, profile="coder", outcome="crashed", started_at=now - 4000, ended_at=now - 3900)
-            _insert_run(conn, t1, profile="coder", outcome="completed", started_at=now - 3800, ended_at=now - 3600)
-            _insert_run(conn, t2, profile="coder", outcome="completed", started_at=now - 3000, ended_at=now - 2800)
+            _insert_run(
+                conn,
+                t1,
+                profile="coder",
+                outcome="crashed",
+                started_at=now - 4000,
+                ended_at=now - 3900,
+            )
+            _insert_run(
+                conn,
+                t1,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 3800,
+                ended_at=now - 3600,
+            )
+            _insert_run(
+                conn,
+                t2,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 3000,
+                ended_at=now - 2800,
+            )
             # verifier judges t1 (APPROVED) and t2 (REQUEST_CHANGES) — the
             # verdicts must be attributed to coder, not verifier.
-            _insert_run(conn, t1, profile="verifier", outcome="completed", started_at=now - 3500, ended_at=now - 3400, verdict="APPROVED")
-            _insert_run(conn, t2, profile="verifier", outcome="completed", started_at=now - 2700, ended_at=now - 2600, verdict="REQUEST_CHANGES")
+            _insert_run(
+                conn,
+                t1,
+                profile="verifier",
+                outcome="completed",
+                started_at=now - 3500,
+                ended_at=now - 3400,
+                verdict="APPROVED",
+            )
+            _insert_run(
+                conn,
+                t2,
+                profile="verifier",
+                outcome="completed",
+                started_at=now - 2700,
+                ended_at=now - 2600,
+                verdict="REQUEST_CHANGES",
+            )
     finally:
         conn.close()
 
-    data = client.get("/api/plugins/kanban/runs/reliability?since_hours=24&min_n=2").json()
+    data = client.get(
+        "/api/plugins/kanban/runs/reliability?since_hours=24&min_n=2"
+    ).json()
     assert data["min_n"] == 2
     by_profile = {p["profile"]: p for p in data["profiles"]}
     coder = by_profile["coder"]
@@ -1871,7 +2060,9 @@ def test_runs_reliability_per_profile(client):
     verifier = by_profile["verifier"]
     assert verifier["judged"] == 0  # verdicts never count for the verifier itself
     # min-n-Gate: unter der Schwelle keine approve_rate-Behauptung.
-    data_strict = client.get("/api/plugins/kanban/runs/reliability?since_hours=24&min_n=5").json()
+    data_strict = client.get(
+        "/api/plugins/kanban/runs/reliability?since_hours=24&min_n=5"
+    ).json()
     coder_strict = {p["profile"]: p for p in data_strict["profiles"]}["coder"]
     assert coder_strict["approve_rate"] is None
     assert coder_strict["low_sample"] is True
@@ -1884,7 +2075,9 @@ def test_runs_daily_series(client):
     try:
         root = kb.create_task(conn, title="ship it", triage=True)
         child_ids = kb.decompose_triage_task(
-            conn, root, root_assignee="default",
+            conn,
+            root,
+            root_assignee="default",
             children=[{"title": "build", "assignee": "coder", "parents": []}],
             author="decomposer",
         )
@@ -1892,8 +2085,24 @@ def test_runs_daily_series(client):
         kb.complete_task(conn, a, summary="done")
         kb.complete_task(conn, root, summary="done")
         with kb.write_txn(conn):
-            _insert_run(conn, a, profile="coder", outcome="completed", started_at=now - 600, ended_at=now - 300, cost=0.25)
-            _insert_run(conn, a, profile="coder", outcome="crashed", started_at=now - 900, ended_at=now - 800, cost=0.05)
+            _insert_run(
+                conn,
+                a,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 600,
+                ended_at=now - 300,
+                cost=0.25,
+            )
+            _insert_run(
+                conn,
+                a,
+                profile="coder",
+                outcome="crashed",
+                started_at=now - 900,
+                ended_at=now - 800,
+                cost=0.05,
+            )
     finally:
         conn.close()
 
@@ -1903,8 +2112,8 @@ def test_runs_daily_series(client):
     active_days = [day for day in data["series"] if day["done_tasks"]]
     assert len(active_days) == 1
     today = active_days[0]
-    assert today["done_roots"] == 1     # nur der Root zählt als Lieferung
-    assert today["done_tasks"] == 2     # Root + Subtask
+    assert today["done_roots"] == 1  # nur der Root zählt als Lieferung
+    assert today["done_tasks"] == 2  # Root + Subtask
     # complete_task legt selbst synthetische completed-Runs an → >= statt ==.
     assert today["runs_completed"] >= 1
     assert today["runs_failed"] == 1
@@ -1921,10 +2130,17 @@ def test_runs_daily_value_classes(client):
     created_by in nutzer (Funnel) / haertung (Review-Ketten) / meta (Rest)."""
     conn = kb.connect()
     try:
-        for created_by in ("family", "discord-idee", "kanban-review-chain",
-                           "dashboard", "worker"):
+        for created_by in (
+            "family",
+            "discord-idee",
+            "kanban-review-chain",
+            "dashboard",
+            "worker",
+        ):
             tid = kb.create_task(
-                conn, title=f"root {created_by}", created_by=created_by,
+                conn,
+                title=f"root {created_by}",
+                created_by=created_by,
             )
             kb.complete_task(conn, tid, summary="done")
     finally:
@@ -1936,7 +2152,9 @@ def test_runs_daily_value_classes(client):
     assert today["done_roots_by_class"] == {"nutzer": 2, "haertung": 1, "meta": 2}
     # leere Tage tragen die Klassen-Struktur mit Nullen (durchgehende Achse)
     assert data["series"][0]["done_roots_by_class"] == {
-        "nutzer": 0, "haertung": 0, "meta": 0,
+        "nutzer": 0,
+        "haertung": 0,
+        "meta": 0,
     }
 
 
@@ -1950,31 +2168,73 @@ def test_runs_costs_today_window_and_profiles(client):
         t = kb.create_task(conn, title="costly work")
         with kb.write_txn(conn):
             # API-Lane heute: echte Dollar + Tokens.
-            _insert_run(conn, t, profile="coder", outcome="completed",
-                        started_at=now - 600, ended_at=now,
-                        cost=0.25, tokens_in=1000, tokens_out=200)
+            _insert_run(
+                conn,
+                t,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 600,
+                ended_at=now,
+                cost=0.25,
+                tokens_in=1000,
+                tokens_out=200,
+            )
             # Subscription-Lane heute: ehrliche $0 + Äquivalent in Metadata.
-            _insert_run(conn, t, profile="premium", outcome="completed",
-                        started_at=now - 500, ended_at=now,
-                        cost=0.0, tokens_in=5000, tokens_out=900,
-                        metadata={"billing_mode": "subscription_included",
-                                  "cost_usd_equivalent": 1.5})
+            _insert_run(
+                conn,
+                t,
+                profile="premium",
+                outcome="completed",
+                started_at=now - 500,
+                ended_at=now,
+                cost=0.0,
+                tokens_in=5000,
+                tokens_out=900,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "cost_usd_equivalent": 1.5,
+                },
+            )
             # Neuralwatt-Lane: echte USD kommen direkt aus cost.request_cost_usd
             # (keine kWh×Rate-Rekonstruktion mehr); kWh bleibt als Energie-Detail
             # getrennt als Abrechnungsbasis sichtbar.
-            _insert_run(conn, t, profile="neuralwatt", outcome="completed",
-                        started_at=now - 450, ended_at=now,
-                        cost=0.0, tokens_in=600, tokens_out=120,
-                        metadata={"provider": "neuralwatt",
-                                  "energy": {"energy_kwh": 0.02},
-                                  "cost": {"request_cost_usd": 0.10}})
+            _insert_run(
+                conn,
+                t,
+                profile="neuralwatt",
+                outcome="completed",
+                started_at=now - 450,
+                ended_at=now,
+                cost=0.0,
+                tokens_in=600,
+                tokens_out=120,
+                metadata={
+                    "provider": "neuralwatt",
+                    "energy": {"energy_kwh": 0.02},
+                    "cost": {"request_cost_usd": 0.10},
+                },
+            )
             # Verifier ohne Stamps: zählt als Run, kostet nichts.
-            _insert_run(conn, t, profile="verifier", outcome="completed",
-                        started_at=now - 400, ended_at=now)
+            _insert_run(
+                conn,
+                t,
+                profile="verifier",
+                outcome="completed",
+                started_at=now - 400,
+                ended_at=now,
+            )
             # Gestern (im Fenster, nicht heute).
-            _insert_run(conn, t, profile="coder", outcome="completed",
-                        started_at=yesterday - 300, ended_at=yesterday,
-                        cost=0.05, tokens_in=400, tokens_out=80)
+            _insert_run(
+                conn,
+                t,
+                profile="coder",
+                outcome="completed",
+                started_at=yesterday - 300,
+                ended_at=yesterday,
+                cost=0.05,
+                tokens_in=400,
+                tokens_out=80,
+            )
     finally:
         conn.close()
 
@@ -2033,9 +2293,44 @@ def test_runs_costs_review_value_real_metadata(client):
             # Live-Run 6011 destilliert: review_findings neben
             # acceptance/cost/provider-Feldern.
             _insert_run(
-                conn, t, profile="verifier", outcome="completed",
-                started_at=now - 900, ended_at=now - 800,
-                verdict="APPROVED", tokens_in=175738, tokens_out=8350,
+                conn,
+                t,
+                profile="scout",
+                outcome="completed",
+                started_at=now - 1100,
+                ended_at=now - 1000,
+                tokens_in=35866,
+                tokens_out=7000,
+                metadata={
+                    # Live-Run 6031-Form: read-only Scout hat keine
+                    # review_findings, aber konkrete Leseevidenz.
+                    "changed_files": [],
+                    "files_read": [
+                        "/home/piet/.hermes/hermes-agent/hermes_cli/control_plane_gate.py",
+                    ],
+                    "citations": [
+                        "hermes_cli/control_plane_gate.py:178-188",
+                        "hermes_cli/control_plane_gate.py:191-197",
+                        "hermes_cli/control_plane_gate.py:200-217",
+                    ],
+                    "tests_run": 0,
+                    "residual_risk": "read-only recon; no tests run",
+                    "worker_session_id": "20260702_120856_55b0c5",
+                },
+            )
+            # verifier — APPROVED, 1 Blocker + 2 Anmerkungen. Metadata-Form aus
+            # Live-Run 6011 destilliert: review_findings neben
+            # acceptance/cost/provider-Feldern.
+            _insert_run(
+                conn,
+                t,
+                profile="verifier",
+                outcome="completed",
+                started_at=now - 900,
+                ended_at=now - 800,
+                verdict="APPROVED",
+                tokens_in=175738,
+                tokens_out=8350,
                 metadata={
                     "review_findings": {"blocking": 1, "observations": 2},
                     "acceptance_checklist": [
@@ -2053,9 +2348,15 @@ def test_runs_costs_review_value_real_metadata(client):
             )
             # reviewer — APPROVED, nur eine Anmerkung (Live-Run 6013-Form).
             _insert_run(
-                conn, t, profile="reviewer", outcome="completed",
-                started_at=now - 700, ended_at=now - 600,
-                verdict="APPROVED", tokens_in=30105, tokens_out=11231,
+                conn,
+                t,
+                profile="reviewer",
+                outcome="completed",
+                started_at=now - 700,
+                ended_at=now - 600,
+                verdict="APPROVED",
+                tokens_in=30105,
+                tokens_out=11231,
                 metadata={
                     "review_findings": {"blocking": 0, "observations": 1},
                     "independent_finding": "one nit",
@@ -2066,27 +2367,52 @@ def test_runs_costs_review_value_real_metadata(client):
             )
             # reviewer — REQUEST_CHANGES mit 2 Blockern.
             _insert_run(
-                conn, t, profile="reviewer", outcome="completed",
-                started_at=now - 500, ended_at=now - 400,
-                verdict="REQUEST_CHANGES", tokens_in=42000, tokens_out=6000,
-                metadata={"review_findings": {"blocking": 2, "observations": 0},
-                          "verdict": "REQUEST_CHANGES"},
+                conn,
+                t,
+                profile="reviewer",
+                outcome="completed",
+                started_at=now - 500,
+                ended_at=now - 400,
+                verdict="REQUEST_CHANGES",
+                tokens_in=42000,
+                tokens_out=6000,
+                metadata={
+                    "review_findings": {"blocking": 2, "observations": 0},
+                    "verdict": "REQUEST_CHANGES",
+                },
             )
             # critic — Feld vorhanden, aber nachweislich KEINE Funde (0/0):
             # Fund-Zähler stehen auf 0, tokens_per_finding bleibt None.
             _insert_run(
-                conn, t, profile="critic", outcome="completed",
-                started_at=now - 300, ended_at=now - 200,
-                verdict="APPROVED", tokens_in=48931, tokens_out=2170,
-                metadata={"review_findings": {"blocking": 0, "observations": 0},
-                          "action": "uphold", "critic_checks": {}},
+                conn,
+                t,
+                profile="critic",
+                outcome="completed",
+                started_at=now - 300,
+                ended_at=now - 200,
+                verdict="APPROVED",
+                tokens_in=48931,
+                tokens_out=2170,
+                metadata={
+                    "review_findings": {"blocking": 0, "observations": 0},
+                    "action": "uphold",
+                    "critic_checks": {},
+                },
             )
     finally:
         conn.close()
 
     data = client.get("/api/plugins/kanban/runs/costs?days=7").json()
     stages = {s["profile"]: s for s in data["review_value"]}
-    assert set(stages) == {"verifier", "reviewer", "critic"}
+    assert set(stages) == {"scout", "verifier", "reviewer", "critic"}
+
+    scout = stages["scout"]
+    assert scout["runs"] == 1
+    assert scout["findings_blocking"] is None
+    assert scout["findings_observations"] is None
+    assert scout["tokens_per_finding"] is None
+    assert scout["read_items"] == 4
+    assert scout["tokens_per_read_item"] == round(35866 / 4)
 
     verifier = stages["verifier"]
     assert verifier["runs"] == 1
@@ -2096,6 +2422,8 @@ def test_runs_costs_review_value_real_metadata(client):
     assert verifier["findings_observations"] == 2
     assert verifier["input_tokens"] == 175738
     assert verifier["tokens_per_finding"] == round(175738 / 3)
+    assert verifier["read_items"] is None
+    assert verifier["tokens_per_read_item"] is None
 
     reviewer = stages["reviewer"]
     assert reviewer["runs"] == 2
@@ -2126,14 +2454,30 @@ def test_runs_costs_review_value_legacy_without_field_is_null(client):
     try:
         t = kb.create_task(conn, title="legacy review")
         with kb.write_txn(conn):
-            _insert_run(conn, t, profile="verifier", outcome="completed",
-                        started_at=now - 600, ended_at=now - 500,
-                        verdict="APPROVED", tokens_in=90000, tokens_out=4000,
-                        metadata={"cost_usd_equivalent": 1.0, "model": "x"})
-            _insert_run(conn, t, profile="reviewer", outcome="completed",
-                        started_at=now - 400, ended_at=now - 300,
-                        verdict="REQUEST_CHANGES", tokens_in=50000,
-                        tokens_out=3000, metadata={"verdict": "REQUEST_CHANGES"})
+            _insert_run(
+                conn,
+                t,
+                profile="verifier",
+                outcome="completed",
+                started_at=now - 600,
+                ended_at=now - 500,
+                verdict="APPROVED",
+                tokens_in=90000,
+                tokens_out=4000,
+                metadata={"cost_usd_equivalent": 1.0, "model": "x"},
+            )
+            _insert_run(
+                conn,
+                t,
+                profile="reviewer",
+                outcome="completed",
+                started_at=now - 400,
+                ended_at=now - 300,
+                verdict="REQUEST_CHANGES",
+                tokens_in=50000,
+                tokens_out=3000,
+                metadata={"verdict": "REQUEST_CHANGES"},
+            )
     finally:
         conn.close()
 
@@ -2153,6 +2497,13 @@ def test_runs_costs_review_value_legacy_without_field_is_null(client):
     assert reviewer["request_changes"] == 1
     assert reviewer["findings_blocking"] is None
     assert reviewer["tokens_per_finding"] is None
+
+    # critic: keine Läufe im Fenster → leere Stufe, ebenfalls NULL, kein Fehler.
+    scout = stages["scout"]
+    assert scout["runs"] == 0
+    assert scout["findings_blocking"] is None
+    assert scout["read_items"] is None
+    assert scout["tokens_per_read_item"] is None
 
     # critic: keine Läufe im Fenster → leere Stufe, ebenfalls NULL, kein Fehler.
     critic = stages["critic"]
@@ -2181,8 +2532,8 @@ def test_profile_subscription_grounded_in_provider(monkeypatch):
         "coder": ("openai-codex", "chatgpt"),
         "verifier": ("openai-codex", "chatgpt"),
         "coder-claude": ("anthropic", "claude"),
-        "critic": ("openrouter", None),      # API-Lane, kein Abo
-        "research": ("gemini", None),        # API-Lane, kein Abo
+        "critic": ("openrouter", None),  # API-Lane, kein Abo
+        "research": ("gemini", None),  # API-Lane, kein Abo
     }
     for name, (prov, expect) in cases.items():
         kb._PROFILE_SUBSCRIPTION_CACHE.clear()
@@ -2210,7 +2561,8 @@ def test_patch_status_complete(client):
 
     # Board reflects the move.
     done = next(
-        c for c in client.get("/api/plugins/kanban/board").json()["columns"]
+        c
+        for c in client.get("/api/plugins/kanban/board").json()["columns"]
         if c["name"] == "done"
     )
     assert any(x["id"] == t["id"] for x in done["tasks"])
@@ -2261,7 +2613,9 @@ def test_patch_drag_drop_move_todo_to_ready(client):
 
     Promoting a child whose parent is not done is rejected (409).
     Promoting a child whose parent IS done is accepted (200)."""
-    parent = client.post("/api/plugins/kanban/tasks", json={"title": "p"}).json()["task"]
+    parent = client.post("/api/plugins/kanban/tasks", json={"title": "p"}).json()[
+        "task"
+    ]
     child = client.post(
         "/api/plugins/kanban/tasks",
         json={"title": "c", "parents": [parent["id"]]},
@@ -2306,7 +2660,9 @@ def test_reopening_parent_demotes_ready_child(client):
     should not keep showing a stale child as ready after an operator drags
     its parent back out of done for more work.
     """
-    parent = client.post("/api/plugins/kanban/tasks", json={"title": "p"}).json()["task"]
+    parent = client.post("/api/plugins/kanban/tasks", json={"title": "p"}).json()[
+        "task"
+    ]
     child = client.post(
         "/api/plugins/kanban/tasks",
         json={"title": "c", "parents": [parent["id"]]},
@@ -2319,9 +2675,9 @@ def test_reopening_parent_demotes_ready_child(client):
     )
     assert r.status_code == 200
 
-    child_after_done = client.get(
-        f"/api/plugins/kanban/tasks/{child['id']}"
-    ).json()["task"]
+    child_after_done = client.get(f"/api/plugins/kanban/tasks/{child['id']}").json()[
+        "task"
+    ]
     assert child_after_done["status"] == "ready"
 
     r = client.patch(
@@ -2330,9 +2686,9 @@ def test_reopening_parent_demotes_ready_child(client):
     )
     assert r.status_code == 200
 
-    child_after_reopen = client.get(
-        f"/api/plugins/kanban/tasks/{child['id']}"
-    ).json()["task"]
+    child_after_reopen = client.get(f"/api/plugins/kanban/tasks/{child['id']}").json()[
+        "task"
+    ]
     assert child_after_reopen["status"] == "todo"
 
 
@@ -2390,9 +2746,7 @@ def test_patch_status_running_rejected(client):
     # was rejected before any mutation.
     board = client.get("/api/plugins/kanban/board").json()
     statuses = {
-        tt["id"]: col["name"]
-        for col in board["columns"]
-        for tt in col["tasks"]
+        tt["id"]: col["name"] for col in board["columns"] for tt in col["tasks"]
     }
     assert statuses.get(t["id"]) != "running"
 
@@ -2401,8 +2755,11 @@ def test_patch_status_running_rejected(client):
 # DELETE /tasks/:id
 # ---------------------------------------------------------------------------
 
+
 def test_delete_task(client):
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "to-delete"}).json()["task"]
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "to-delete"}).json()[
+        "task"
+    ]
     r = client.delete(f"/api/plugins/kanban/tasks/{t['id']}")
     assert r.status_code == 200
     assert r.json()["deleted"] is True
@@ -2543,18 +2900,21 @@ def test_triage_task_not_promoted_to_ready(client):
 def test_patch_status_triage_works(client):
     """A user (or specifier) can push a task back into triage, and out of it."""
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x"},
     ).json()["task"]
     # Normal creation is 'ready'; push to triage.
     r = client.patch(
-        f"/api/plugins/kanban/tasks/{t['id']}", json={"status": "triage"},
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "triage"},
     )
     assert r.status_code == 200
     assert r.json()["task"]["status"] == "triage"
 
     # Now promote to todo.
     r = client.patch(
-        f"/api/plugins/kanban/tasks/{t['id']}", json={"status": "todo"},
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "todo"},
     )
     assert r.status_code == 200
     assert r.json()["task"]["status"] == "todo"
@@ -2567,7 +2927,8 @@ def test_patch_status_triage_works(client):
 
 def test_board_progress_rollup(client):
     parent = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "parent"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "parent"},
     ).json()["task"]
     child_a = client.post(
         "/api/plugins/kanban/tasks",
@@ -2592,7 +2953,9 @@ def test_board_progress_rollup(client):
     # 0/2 done.
     r = client.get("/api/plugins/kanban/board")
     parent_row = next(
-        t for col in r.json()["columns"] for t in col["tasks"]
+        t
+        for col in r.json()["columns"]
+        for t in col["tasks"]
         if t["id"] == parent["id"]
     )
     assert parent_row["progress"] == {"done": 0, "total": 2}
@@ -2605,16 +2968,23 @@ def test_board_progress_rollup(client):
     assert r.status_code == 200
     r = client.get("/api/plugins/kanban/board")
     parent_row = next(
-        t for col in r.json()["columns"] for t in col["tasks"]
+        t
+        for col in r.json()["columns"]
+        for t in col["tasks"]
         if t["id"] == parent["id"]
     )
     assert parent_row["progress"] == {"done": 1, "total": 2}
 
     # Childless tasks report progress=None, not {0/0}.
-    assert next(
-        t for col in r.json()["columns"] for t in col["tasks"]
-        if t["id"] == child_b["id"]
-    )["progress"] is None
+    assert (
+        next(
+            t
+            for col in r.json()["columns"]
+            for t in col["tasks"]
+            if t["id"] == child_b["id"]
+        )["progress"]
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2629,17 +2999,20 @@ def test_board_root_id_resolves_chain(client):
     their own root."""
     # sink waits for two work tasks: work_a, work_b are parents of sink.
     work_a = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "work a"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "work a"},
     ).json()["task"]
     work_b = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "work b"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "work b"},
     ).json()["task"]
     sink = client.post(
         "/api/plugins/kanban/tasks",
         json={"title": "sink", "parents": [work_a["id"], work_b["id"]]},
     ).json()["task"]
     lone = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "standalone"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "standalone"},
     ).json()["task"]
 
     cards = {
@@ -2727,9 +3100,7 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
             pass
     assert exc.value.code == 1008
 
-    with c.websocket_connect(
-        "/api/plugins/kanban/events?token=secret-xyz"
-    ) as ws:
+    with c.websocket_connect("/api/plugins/kanban/events?token=secret-xyz") as ws:
         assert ws is not None
 
 
@@ -2774,13 +3145,13 @@ def test_ws_events_accepts_gated_ticket(tmp_path, monkeypatch):
     assert exc.value.code == 1008
 
     # A valid ticket is accepted.
-    with c.websocket_connect(
-        "/api/plugins/kanban/events?ticket=good-ticket"
-    ) as ws:
+    with c.websocket_connect("/api/plugins/kanban/events?ticket=good-ticket") as ws:
         assert ws is not None
 
 
-def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp_path, monkeypatch):
+def test_ws_events_board_query_param_default_overrides_current_board_pointer(
+    tmp_path, monkeypatch
+):
     """The event stream must honor ``board=default`` even when the global
     current-board pointer targets a different board.
 
@@ -2858,6 +3229,7 @@ def test_ws_events_swallows_cancellation_on_shutdown(tmp_path, monkeypatch):
     # Short-circuit the auth check — this test is about the cancellation
     # path, not auth.
     import plugins.kanban.dashboard.plugin_api as pa
+
     monkeypatch.setattr(pa, "_ws_upgrade_authorized", lambda ws: True)
 
     class _FakeWS:
@@ -2907,11 +3279,15 @@ def test_bulk_status_ready(client):
     c2 = client.post("/api/plugins/kanban/tasks", json={"title": "c"}).json()["task"]
     # Parent-less tasks land in "ready" already; push them to blocked first.
     for tid in (a["id"], b["id"], c2["id"]):
-        client.patch(f"/api/plugins/kanban/tasks/{tid}",
-                     json={"status": "blocked", "block_reason": "wait"})
+        client.patch(
+            f"/api/plugins/kanban/tasks/{tid}",
+            json={"status": "blocked", "block_reason": "wait"},
+        )
 
-    r = client.post("/api/plugins/kanban/tasks/bulk",
-                    json={"ids": [a["id"], b["id"], c2["id"]], "status": "ready"})
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [a["id"], b["id"], c2["id"]], "status": "ready"},
+    )
     assert r.status_code == 200
     results = r.json()["results"]
     assert all(r["ok"] for r in results)
@@ -2970,9 +3346,7 @@ def test_bulk_status_running_rejected(client):
 
     board = client.get("/api/plugins/kanban/board").json()
     statuses = {
-        tt["id"]: col["name"]
-        for col in board["columns"]
-        for tt in col["tasks"]
+        tt["id"]: col["name"] for col in board["columns"] for tt in col["tasks"]
     }
     assert statuses.get(t["id"]) != "running"
 
@@ -3008,7 +3382,10 @@ def test_dashboard_surfaces_ready_blocked_error_inline():
 
     # Drag/drop banner now uses the parsed message instead of raw
     # ``err.message`` so it no longer leaks HTTP plumbing.
-    assert "setError(tx(t, \"moveFailed\", \"Move failed: \") + parseApiErrorMessage(err))" in bundle
+    assert (
+        'setError(tx(t, "moveFailed", "Move failed: ") + parseApiErrorMessage(err))'
+        in bundle
+    )
 
     # Drawer action row has its own visible error surface and clears it
     # on success/refresh so stale failures don't follow the operator
@@ -3030,14 +3407,14 @@ def test_dashboard_dependency_selects_use_value_change_handler():
     ).read_text()
 
     parent_select = (
-        'value: newParent,\n'
+        "value: newParent,\n"
         '          className: "h-7 text-xs flex-1",\n'
-        '        }, selectChangeHandler(setNewParent))'
+        "        }, selectChangeHandler(setNewParent))"
     )
     child_select = (
-        'value: newChild,\n'
+        "value: newChild,\n"
         '          className: "h-7 text-xs flex-1",\n'
-        '        }, selectChangeHandler(setNewChild))'
+        "        }, selectChangeHandler(setNewChild))"
     )
 
     assert parent_select in bundle
@@ -3047,8 +3424,10 @@ def test_dashboard_dependency_selects_use_value_change_handler():
 def test_bulk_archive(client):
     a = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
     b = client.post("/api/plugins/kanban/tasks", json={"title": "b"}).json()["task"]
-    r = client.post("/api/plugins/kanban/tasks/bulk",
-                    json={"ids": [a["id"], b["id"]], "archive": True})
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [a["id"], b["id"]], "archive": True},
+    )
     assert r.status_code == 200
     assert all(r["ok"] for r in r.json()["results"])
     # Default board (archived hidden) — both gone.
@@ -3059,12 +3438,16 @@ def test_bulk_archive(client):
 
 
 def test_bulk_reassign(client):
-    a = client.post("/api/plugins/kanban/tasks",
-                    json={"title": "a", "assignee": "old"}).json()["task"]
-    b = client.post("/api/plugins/kanban/tasks",
-                    json={"title": "b", "assignee": "old"}).json()["task"]
-    r = client.post("/api/plugins/kanban/tasks/bulk",
-                    json={"ids": [a["id"], b["id"]], "assignee": "new"})
+    a = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "a", "assignee": "old"}
+    ).json()["task"]
+    b = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "b", "assignee": "old"}
+    ).json()["task"]
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [a["id"], b["id"]], "assignee": "new"},
+    )
     assert r.status_code == 200
     for tid in (a["id"], b["id"]):
         t = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
@@ -3072,10 +3455,12 @@ def test_bulk_reassign(client):
 
 
 def test_bulk_unassign_via_empty_string(client):
-    a = client.post("/api/plugins/kanban/tasks",
-                    json={"title": "a", "assignee": "x"}).json()["task"]
-    r = client.post("/api/plugins/kanban/tasks/bulk",
-                    json={"ids": [a["id"]], "assignee": ""})
+    a = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "a", "assignee": "x"}
+    ).json()["task"]
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk", json={"ids": [a["id"]], "assignee": ""}
+    )
     assert r.status_code == 200
     t = client.get(f"/api/plugins/kanban/tasks/{a['id']}").json()["task"]
     assert t["assignee"] is None
@@ -3086,8 +3471,10 @@ def test_bulk_partial_failure_doesnt_abort_siblings(client):
     applying."""
     a = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
     c2 = client.post("/api/plugins/kanban/tasks", json={"title": "c"}).json()["task"]
-    r = client.post("/api/plugins/kanban/tasks/bulk",
-                    json={"ids": [a["id"], "bogus-id", c2["id"]], "priority": 7})
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [a["id"], "bogus-id", c2["id"]], "priority": 7},
+    )
     assert r.status_code == 200
     results = r.json()["results"]
     assert len(results) == 3
@@ -3168,21 +3555,25 @@ def test_mutating_endpoint_500_uses_generic_detail(client, monkeypatch):
 # Runs surfacing (vulcan-artivus RFC feedback)
 # ---------------------------------------------------------------------------
 
+
 def test_task_detail_includes_runs(client):
     """GET /tasks/:id carries a runs[] array with the attempt history."""
-    r = client.post("/api/plugins/kanban/tasks",
-                    json={"title": "port x", "assignee": "worker"}).json()
+    r = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "port x", "assignee": "worker"}
+    ).json()
     tid = r["task"]["id"]
 
     # Drive status running to force a run creation: PATCH to running
     # doesn't call claim_task (the PATCH path uses _set_status_direct),
     # so use the bulk/claim indirection via the kernel.
     import hermes_cli.kanban_db as _kb
+
     conn = _kb.connect()
     try:
         _kb.claim_task(conn, tid)
         _kb.complete_task(
-            conn, tid,
+            conn,
+            tid,
             result="done",
             summary="tested on rate limiter",
             metadata={"changed_files": ["limiter.py"]},
@@ -3210,8 +3601,12 @@ def test_task_detail_runs_empty_before_claim(client):
     assert d["runs"] == []
 
 
-def test_task_deliverables_lists_result_md_first_and_downloads_safe_file(client, kanban_home):
-    task = client.post("/api/plugins/kanban/tasks", json={"title": "deliverable"}).json()["task"]
+def test_task_deliverables_lists_result_md_first_and_downloads_safe_file(
+    client, kanban_home
+):
+    task = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "deliverable"}
+    ).json()["task"]
     root = kanban_home / "reports" / "by-task" / task["id"]
     nested = root / "artifacts"
     nested.mkdir(parents=True)
@@ -3236,8 +3631,12 @@ def test_task_deliverables_lists_result_md_first_and_downloads_safe_file(client,
     assert download.headers["content-disposition"].startswith("inline")
 
 
-def test_task_deliverables_rejects_traversal_and_skips_symlinks_outside(client, kanban_home):
-    task = client.post("/api/plugins/kanban/tasks", json={"title": "safe deliverables"}).json()["task"]
+def test_task_deliverables_rejects_traversal_and_skips_symlinks_outside(
+    client, kanban_home
+):
+    task = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "safe deliverables"}
+    ).json()["task"]
     root = kanban_home / "reports" / "by-task" / task["id"]
     root.mkdir(parents=True)
     outside = kanban_home / "reports" / "by-task" / "outside-secret.txt"
@@ -3248,10 +3647,14 @@ def test_task_deliverables_rejects_traversal_and_skips_symlinks_outside(client, 
     except OSError:
         pass
 
-    listed = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables").json()["deliverables"]
+    listed = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables").json()[
+        "deliverables"
+    ]
     assert [item["relative_path"] for item in listed] == ["RESULT.md"]
 
-    escaped = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables/%2e%2e/outside-secret.txt")
+    escaped = client.get(
+        f"/api/plugins/kanban/tasks/{task['id']}/deliverables/%2e%2e/outside-secret.txt"
+    )
     assert escaped.status_code == 404
     assert "do not serve" not in escaped.text
 
@@ -3263,7 +3666,9 @@ def test_task_deliverables_caps_large_artifact_trees_and_keeps_result_md(
 ):
     plugin_api = sys.modules["hermes_dashboard_plugin_kanban_test"]
 
-    task = client.post("/api/plugins/kanban/tasks", json={"title": "many deliverables"}).json()["task"]
+    task = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "many deliverables"}
+    ).json()["task"]
     root = kanban_home / "reports" / "by-task" / task["id"]
     root.mkdir(parents=True)
     (root / "RESULT.md").write_text("primary result", encoding="utf-8")
@@ -3311,11 +3716,18 @@ def test_recent_results_includes_preserved_deliverables(client, kanban_home):
     assert r.status_code == 200, r.text
     result = r.json()["results"][0]
     assert result["task_id"] == task_id
-    assert [item["relative_path"] for item in result["deliverables"]] == ["RESULT.md", "artifact.json"]
-    assert result["deliverables"][0]["url"].endswith(f"/tasks/{task_id}/deliverables/RESULT.md")
+    assert [item["relative_path"] for item in result["deliverables"]] == [
+        "RESULT.md",
+        "artifact.json",
+    ]
+    assert result["deliverables"][0]["url"].endswith(
+        f"/tasks/{task_id}/deliverables/RESULT.md"
+    )
 
 
-def test_recent_results_exposes_openable_artifact_links_from_metadata_and_preserved_event(client, kanban_home):
+def test_recent_results_exposes_openable_artifact_links_from_metadata_and_preserved_event(
+    client, kanban_home
+):
     now = int(time.time())
     conn = kb.connect()
     try:
@@ -3344,7 +3756,14 @@ def test_recent_results_exposes_openable_artifact_links_from_metadata_and_preser
         )
         conn.execute(
             "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'deliverables_preserved', ?, ?)",
-            (task_id, json.dumps({"dir": str(reports_root), "files": ["RESULT.md", "PRESERVED.md"]}), now - 5),
+            (
+                task_id,
+                json.dumps({
+                    "dir": str(reports_root),
+                    "files": ["RESULT.md", "PRESERVED.md"],
+                }),
+                now - 5,
+            ),
         )
         conn.commit()
     finally:
@@ -3368,19 +3787,25 @@ def test_recent_results_exposes_openable_artifact_links_from_metadata_and_preser
     assert result_link["url"].endswith(f"/tasks/{task_id}/deliverables/RESULT.md")
     assert result_link["source"] == "metadata.artifacts"
     assert result_link["path"] == str(reports_result)
-    preserved_link = next(link for link in links if link["relative_path"] == "PRESERVED.md")
+    preserved_link = next(
+        link for link in links if link["relative_path"] == "PRESERVED.md"
+    )
     assert preserved_link["source"] == "deliverables_preserved"
     assert preserved_link["url"].endswith(f"/tasks/{task_id}/deliverables/PRESERVED.md")
 
 
-def test_today_digest_summarizes_today_with_deliverable_excerpt_and_gate_state(client, kanban_home):
+def test_today_digest_summarizes_today_with_deliverable_excerpt_and_gate_state(
+    client, kanban_home
+):
     now = int(time.time())
     today = time.localtime(now)
     day_start = int(time.mktime(today[:3] + (0, 0, 0) + today[6:]))
     today_end = max(day_start + 1, now - 60)
     conn = kb.connect()
     try:
-        useful_task = kb.create_task(conn, title="Ship useful dashboard slice", assignee="coder")
+        useful_task = kb.create_task(
+            conn, title="Ship useful dashboard slice", assignee="coder"
+        )
         old_task = kb.create_task(conn, title="Yesterday result", assignee="coder")
         run_id = _insert_completed_run(
             conn,
@@ -3427,7 +3852,9 @@ def test_today_digest_summarizes_today_with_deliverable_excerpt_and_gate_state(c
     assert item["run_id"] == run_id
     assert item["task_summary"] == "S4 complete — digest now answers what arrived today"
     assert item["deliverable"]["relative_path"] == "RESULT.md"
-    assert item["deliverable"]["url"].endswith(f"/tasks/{useful_task}/deliverables/RESULT.md")
+    assert item["deliverable"]["url"].endswith(
+        f"/tasks/{useful_task}/deliverables/RESULT.md"
+    )
     assert "Operator-facing deliverable text" in item["deliverable_excerpt"]
     assert item["verification_state"] == "approved"
     assert item["verdict_label"] == "Verified: APPROVED"
@@ -3438,9 +3865,12 @@ def test_patch_status_done_with_summary_and_metadata(client):
     """PATCH /tasks/:id with status=done + summary + metadata must
     reach complete_task, so the dashboard has CLI parity."""
     # Create + claim.
-    r = client.post("/api/plugins/kanban/tasks", json={"title": "x", "assignee": "worker"})
+    r = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "assignee": "worker"}
+    )
     tid = r.json()["task"]["id"]
     from hermes_cli import kanban_db as kb
+
     conn = kb.connect()
     try:
         kb.claim_task(conn, tid)
@@ -3471,9 +3901,12 @@ def test_patch_status_done_with_summary_and_metadata(client):
 
 def test_patch_status_done_without_summary_still_works(client):
     """Back-compat: PATCH without the new fields still completes."""
-    r = client.post("/api/plugins/kanban/tasks", json={"title": "y", "assignee": "worker"})
+    r = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "y", "assignee": "worker"}
+    )
     tid = r.json()["task"]["id"]
     from hermes_cli import kanban_db as kb
+
     conn = kb.connect()
     try:
         kb.claim_task(conn, tid)
@@ -3495,9 +3928,12 @@ def test_patch_status_done_without_summary_still_works(client):
 
 def test_patch_status_archive_closes_running_run(client):
     """PATCH to archived while running must close the in-flight run."""
-    r = client.post("/api/plugins/kanban/tasks", json={"title": "z", "assignee": "worker"})
+    r = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "z", "assignee": "worker"}
+    )
     tid = r.json()["task"]["id"]
     from hermes_cli import kanban_db as kb
+
     conn = kb.connect()
     try:
         kb.claim_task(conn, tid)
@@ -3522,9 +3958,12 @@ def test_patch_status_archive_closes_running_run(client):
 
 def test_event_dict_includes_run_id(client):
     """GET /tasks/:id returns events with run_id populated."""
-    r = client.post("/api/plugins/kanban/tasks", json={"title": "e", "assignee": "worker"})
+    r = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "e", "assignee": "worker"}
+    )
     tid = r.json()["task"]["id"]
     from hermes_cli import kanban_db as kb
+
     conn = kb.connect()
     try:
         kb.claim_task(conn, tid)
@@ -3544,10 +3983,10 @@ def test_event_dict_includes_run_id(client):
     assert comp[0]["run_id"] == run_id
 
 
-
 # ---------------------------------------------------------------------------
 # Per-task force-loaded skills via REST
 # ---------------------------------------------------------------------------
+
 
 def test_create_task_with_skills_roundtrips(client):
     """POST /tasks accepts `skills: [...]`, GET /tasks/:id returns it."""
@@ -3597,10 +4036,10 @@ def test_create_task_with_toolset_name_in_skills_is_rejected(client):
     assert "toolset name" in r.json()["detail"]
 
 
-
 # ---------------------------------------------------------------------------
 # Dispatcher-presence warning in POST /tasks response
 # ---------------------------------------------------------------------------
+
 
 def test_create_task_includes_warning_when_no_dispatcher(client, monkeypatch):
     """ready+assigned task + no gateway -> response has `warning` field
@@ -3692,6 +4131,7 @@ def test_board_endpoint_survives_task_age_exception(client, monkeypatch):
     # contract this test pins.
     def _boom(_task):
         raise RuntimeError("simulated future task_age bug")
+
     monkeypatch.setattr("hermes_cli.kanban_db.task_age", _boom)
 
     r = client.get("/api/plugins/kanban/board")
@@ -3723,6 +4163,7 @@ def test_single_task_endpoint_survives_task_age_exception(client, monkeypatch):
 
     def _boom(_task):
         raise RuntimeError("simulated future task_age bug")
+
     monkeypatch.setattr("hermes_cli.kanban_db.task_age", _boom)
 
     r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
@@ -3732,10 +4173,13 @@ def test_single_task_endpoint_survives_task_age_exception(client, monkeypatch):
 
 def test_create_task_probe_error_does_not_break_create(client, monkeypatch):
     """Probe failure must never break task creation."""
+
     def _raise():
         raise RuntimeError("probe crashed")
+
     monkeypatch.setattr(
-        "hermes_cli.kanban._check_dispatcher_presence", _raise,
+        "hermes_cli.kanban._check_dispatcher_presence",
+        _raise,
     )
     r = client.post(
         "/api/plugins/kanban/tasks",
@@ -3743,7 +4187,6 @@ def test_create_task_probe_error_does_not_break_create(client, monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["task"]["title"] == "resilient"
-
 
 
 # ---------------------------------------------------------------------------
@@ -3794,10 +4237,12 @@ def test_home_subscribe_creates_notify_sub_row(client, with_home_channels):
     """POST .../home-subscribe/telegram writes a kanban_notify_subs row
     keyed to the telegram home's (chat_id, thread_id)."""
     from hermes_cli import kanban_db as kb
+
     # notify_home=False: isolate the explicit home-subscribe endpoint from the
     # FU-3 subscribe-on-create default (which would pre-seed telegram+discord).
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
 
     r = client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
@@ -3816,11 +4261,14 @@ def test_home_subscribe_creates_notify_sub_row(client, with_home_channels):
     assert subs[0]["notifier_profile"] == "default"
 
 
-def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(client, with_home_channels):
+def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(
+    client, with_home_channels
+):
     """After subscribe, the GET endpoint reports subscribed=true for that
     platform and false for the others."""
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
 
@@ -3832,8 +4280,10 @@ def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(client, with_hom
 def test_home_subscribe_is_idempotent(client, with_home_channels):
     """Re-subscribing keeps a single row at the DB layer."""
     from hermes_cli import kanban_db as kb
+
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
@@ -3848,8 +4298,10 @@ def test_home_subscribe_is_idempotent(client, with_home_channels):
 def test_home_subscribe_backfills_owner_on_legacy_row(client, with_home_channels):
     """Re-subscribing should backfill notifier ownership on ownerless rows."""
     from hermes_cli import kanban_db as kb
+
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
 
     conn = kb.connect()
@@ -3893,8 +4345,10 @@ def test_home_subscribe_unknown_task_returns_404(client, with_home_channels):
 def test_home_unsubscribe_removes_notify_sub_row(client, with_home_channels):
     """DELETE .../home-subscribe/telegram removes the matching row."""
     from hermes_cli import kanban_db as kb
+
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     r = client.delete(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
@@ -3910,8 +4364,10 @@ def test_home_unsubscribe_removes_notify_sub_row(client, with_home_channels):
 def test_home_subscribe_multiple_platforms_independent(client, with_home_channels):
     """Subscribing on telegram does not affect discord and vice versa."""
     from hermes_cli import kanban_db as kb
+
     t = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+        "/api/plugins/kanban/tasks",
+        json={"title": "x", "notify_home": False},
     ).json()["task"]
 
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
@@ -3938,8 +4394,10 @@ def test_home_channels_empty_when_no_homes_configured(client, monkeypatch):
     """Zero platforms with a home -> empty list (UI hides the section)."""
     # No BOT_TOKEN env vars set → load_gateway_config().platforms is empty.
     for var in [
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL",
-        "DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_HOME_CHANNEL",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_HOME_CHANNEL",
         "SLACK_BOT_TOKEN",
     ]:
         monkeypatch.delenv(var, raising=False)
@@ -3951,6 +4409,7 @@ def test_home_channels_empty_when_no_homes_configured(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # Recovery endpoints (reclaim + reassign) and warnings field
 # ---------------------------------------------------------------------------
+
 
 def test_board_surfaces_warnings_field_for_hallucinated_completions(client):
     """Tasks with a pending completion_blocked_hallucination event surface
@@ -3966,9 +4425,11 @@ def test_board_surfaces_warnings_field_for_hallucinated_completions(client):
         real = kb.create_task(conn, title="real", assignee="x", created_by="alice")
 
         import pytest as _pytest
+
         with _pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
-                conn, parent,
+                conn,
+                parent,
                 summary="claimed phantom",
                 created_cards=[real, "t_deadbeefcafe"],
             )
@@ -4000,16 +4461,19 @@ def test_board_warnings_cleared_after_clean_completion(client):
         real = kb.create_task(conn, title="real", assignee="x", created_by="alice")
 
         import pytest as _pytest
+
         with _pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
-                conn, parent,
+                conn,
+                parent,
                 summary="first attempt phantom",
                 created_cards=[real, "t_phantom11"],
             )
 
         # Second attempt drops the bad id — succeeds.
         ok = kb.complete_task(
-            conn, parent,
+            conn,
+            parent,
             summary="retry without phantom",
             created_cards=[real],
         )
@@ -4030,6 +4494,7 @@ def test_reclaim_endpoint_releases_running_claim(client):
     """POST /tasks/<id>/reclaim drops the claim, returns ok, and emits
     a manual reclaimed event."""
     import secrets
+
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="x")
@@ -4064,7 +4529,8 @@ def test_reclaim_endpoint_releases_running_claim(client):
     conn2 = kb.connect()
     try:
         row = conn2.execute(
-            "SELECT status, claim_lock FROM tasks WHERE id=?", (t,),
+            "SELECT status, claim_lock FROM tasks WHERE id=?",
+            (t,),
         ).fetchone()
         assert row["status"] == "ready"
         assert row["claim_lock"] is None
@@ -4160,14 +4626,16 @@ def test_repair_endpoint_closes_deliverable_miss(client, monkeypatch):
         t = kb.get_task(conn, tid)
         assert t.status == "done"
         repair_events = [
-            e for e in kb.list_events(conn, tid)
+            e
+            for e in kb.list_events(conn, tid)
             if e.kind == "deliverable_protocol_repaired"
         ]
         assert repair_events
         assert repair_events[-1].payload["actor"] == "operator-test"
         # No review verdict written by a protocol repair.
         verdicts = conn.execute(
-            "SELECT verdict FROM task_runs WHERE task_id = ?", (tid,),
+            "SELECT verdict FROM task_runs WHERE task_id = ?",
+            (tid,),
         ).fetchall()
         assert all(row["verdict"] is None for row in verdicts)
     finally:
@@ -4222,7 +4690,8 @@ def test_reassign_endpoint_switches_profile(client):
     conn2 = kb.connect()
     try:
         row = conn2.execute(
-            "SELECT assignee FROM tasks WHERE id=?", (t,),
+            "SELECT assignee FROM tasks WHERE id=?",
+            (t,),
         ).fetchone()
         assert row["assignee"] == "newbie"
     finally:
@@ -4232,6 +4701,7 @@ def test_reassign_endpoint_switches_profile(client):
 def test_reassign_endpoint_409_on_running_without_reclaim(client):
     """Reassigning a running task without reclaim_first returns 409."""
     import secrets
+
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
@@ -4254,6 +4724,7 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
     """With reclaim_first=true, a running task is reclaimed+reassigned in
     one call."""
     import secrets
+
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
@@ -4284,7 +4755,8 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
     conn2 = kb.connect()
     try:
         row = conn2.execute(
-            "SELECT status, assignee FROM tasks WHERE id=?", (t,),
+            "SELECT status, assignee FROM tasks WHERE id=?",
+            (t,),
         ).fetchone()
         assert row["status"] == "ready"
         assert row["assignee"] == "new"
@@ -4295,6 +4767,7 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
 # ---------------------------------------------------------------------------
 # Diagnostics endpoint (/api/plugins/kanban/diagnostics)
 # ---------------------------------------------------------------------------
+
 
 def test_diagnostics_endpoint_empty_for_clean_board(client):
     r = client.get("/api/plugins/kanban/diagnostics")
@@ -4310,9 +4783,12 @@ def test_diagnostics_endpoint_surfaces_blocked_hallucination(client):
         parent = kb.create_task(conn, title="parent", assignee="alice")
         real = kb.create_task(conn, title="real", assignee="x", created_by="alice")
         import pytest as _pytest
+
         with _pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
-                conn, parent, summary="phantom",
+                conn,
+                parent,
+                summary="phantom",
                 created_cards=[real, "t_ffff00001234"],
             )
     finally:
@@ -4476,9 +4952,7 @@ def test_specify_happy_path(client, monkeypatch):
 
     _patch_specifier_response(
         monkeypatch,
-        content=jsonlib.dumps(
-            {"title": "Polished", "body": "**Goal**\nDo the thing."}
-        ),
+        content=jsonlib.dumps({"title": "Polished", "body": "**Goal**\nDo the thing."}),
     )
 
     r = client.post(
@@ -4576,7 +5050,9 @@ def test_board_endpoint_accepts_explicit_board_default_param(client):
 def test_dashboard_requests_default_board_explicitly():
     """Dashboard REST calls must include board=default instead of relying on server current board."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
 
     assert "SDK.fetchJSON(withBoard(`${API}/config`, board))" in dist
     assert "SDK.fetchJSON(withBoard(`${API}/boards`, board))" in dist
@@ -4587,17 +5063,21 @@ def test_dashboard_search_includes_body_and_result():
     """Client-side search must match body, result, latest_summary, and summary
     so full card contents are findable."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
 
-    assert "t.body || \"\"" in dist
-    assert "t.result || \"\"" in dist
-    assert "t.latest_summary || \"\"" in dist
+    assert 't.body || ""' in dist
+    assert 't.result || ""' in dist
+    assert 't.latest_summary || ""' in dist
 
 
 def test_dashboard_bulk_actions_include_reclaim_first():
     """Bulk action bar must expose reclaim_first checkbox and expanded status buttons."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
 
     assert "reclaim_first: reclaimFirst" in dist
     assert "hermes-kanban-bulk-reclaim-first" in dist
@@ -4609,7 +5089,9 @@ def test_dashboard_bulk_actions_include_reclaim_first():
 def test_dashboard_shift_click_range_selection_exists():
     """Shift-click must trigger range selection via toggleRange."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
 
     assert "function toggleRange" in dist or "const toggleRange =" in dist
     assert "props.toggleRange(t.id)" in dist or "props.toggleRange" in dist
@@ -4619,7 +5101,9 @@ def test_dashboard_shift_click_range_selection_exists():
 def test_dashboard_multi_move_bulk_exists():
     """Dragging a selected card with other selections must use /tasks/bulk."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
 
     assert "onMoveSelected" in dist
     assert "props.onMoveSelected" in dist
@@ -4629,8 +5113,12 @@ def test_dashboard_multi_move_bulk_exists():
 def test_dashboard_failed_card_highlight_class_exists():
     """Partial bulk failures must highlight failing cards."""
     repo_root = Path(__file__).resolve().parents[2]
-    js = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
-    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+    js = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
+    css = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css"
+    ).read_text()
 
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
@@ -4641,7 +5129,9 @@ def test_dashboard_failed_card_highlight_class_exists():
 # FU-3: subscribe-on-create routes dashboard-created tasks to home channels
 # ---------------------------------------------------------------------------
 
-_FAKE_HOME = [{"platform": "telegram", "chat_id": "home-1", "thread_id": "", "name": "Home"}]
+_FAKE_HOME = [
+    {"platform": "telegram", "chat_id": "home-1", "thread_id": "", "name": "Home"}
+]
 
 
 def test_create_task_subscribes_to_home_channel(client, monkeypatch):
@@ -4650,10 +5140,12 @@ def test_create_task_subscribes_to_home_channel(client, monkeypatch):
     inheritance) reaches the home channel without a manual notify-subscribe.
     """
     import gateway.config as gwc
+
     monkeypatch.setattr(gwc, "configured_home_channels", lambda: list(_FAKE_HOME))
 
     task = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "ship a feature"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "ship a feature"},
     ).json()["task"]
 
     conn = kb.connect()
@@ -4669,6 +5161,7 @@ def test_create_task_subscribes_to_home_channel(client, monkeypatch):
 def test_create_task_notify_home_false_skips_subscription(client, monkeypatch):
     """notify_home=False opts out of the home subscription (bulk/scripted use)."""
     import gateway.config as gwc
+
     monkeypatch.setattr(gwc, "configured_home_channels", lambda: list(_FAKE_HOME))
 
     task = client.post(
@@ -4687,10 +5180,12 @@ def test_create_task_notify_home_false_skips_subscription(client, monkeypatch):
 def test_create_task_no_home_channels_is_noop(client, monkeypatch):
     """No configured home channel -> create still succeeds, just no sub."""
     import gateway.config as gwc
+
     monkeypatch.setattr(gwc, "configured_home_channels", lambda: [])
 
     task = client.post(
-        "/api/plugins/kanban/tasks", json={"title": "homeless"},
+        "/api/plugins/kanban/tasks",
+        json={"title": "homeless"},
     ).json()["task"]
 
     conn = kb.connect()
@@ -4706,12 +5201,31 @@ def test_create_task_no_home_channels_is_noop(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _insert_completed_run(conn, *, task_id, title, started_at, ended_at, outcome="completed", summary="", metadata=None, profile: str | None = "coder"):
+def _insert_completed_run(
+    conn,
+    *,
+    task_id,
+    title,
+    started_at,
+    ended_at,
+    outcome="completed",
+    summary="",
+    metadata=None,
+    profile: str | None = "coder",
+):
     conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, summary, metadata) "
         "VALUES (?, ?, 'done', ?, ?, ?, ?, ?)",
-        (task_id, profile, outcome, started_at, ended_at, summary, json.dumps(metadata or {})),
+        (
+            task_id,
+            profile,
+            outcome,
+            started_at,
+            ended_at,
+            summary,
+            json.dumps(metadata or {}),
+        ),
     )
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -4723,7 +5237,9 @@ def _append_claimed_event(conn, *, task_id, run_id, payload=None):
     )
 
 
-def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metadata(client):
+def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metadata(
+    client,
+):
     now = int(time.time())
     conn = kb.connect()
     try:
@@ -4737,7 +5253,11 @@ def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metada
             started_at=now - 500,
             ended_at=now - 400,
             summary="First line\nSecond line with details",
-            metadata={"artifact": "/tmp/a.txt", "tests_run": ["pytest x"], "residual_risk": "needs operator review"},
+            metadata={
+                "artifact": "/tmp/a.txt",
+                "tests_run": ["pytest x"],
+                "residual_risk": "needs operator review",
+            },
         )
         newer_run = _insert_completed_run(
             conn,
@@ -4773,7 +5293,10 @@ def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metada
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["count"] == 2
-    assert [row["task_title"] for row in data["results"]] == ["Verify changed files", "Ship receipt artifact"]
+    assert [row["task_title"] for row in data["results"]] == [
+        "Verify changed files",
+        "Ship receipt artifact",
+    ]
     first = data["results"][0]
     assert first["run_id"] == newer_run
     assert first["followups"] == ["open board drawer"]
@@ -4825,7 +5348,10 @@ def test_recent_results_surfaces_verifier_verdict_evidence_and_ungated_state(cli
             started_at=now - 80,
             ended_at=now - 30,
             summary="REQUEST_CHANGES — tests failed",
-            metadata={"verdict": "REQUEST_CHANGES", "gate_output_excerpt": "pytest -> failed"},
+            metadata={
+                "verdict": "REQUEST_CHANGES",
+                "gate_output_excerpt": "pytest -> failed",
+            },
             profile="verifier",
         )
         _insert_completed_run(
@@ -4895,7 +5421,9 @@ def test_recent_results_exposes_run_lineage_without_profile_fallbacks(client):
             metadata={},
             profile="coder",
         )
-        _append_claimed_event(conn, task_id=coder_task, run_id=coder_run, payload={"run_id": coder_run})
+        _append_claimed_event(
+            conn, task_id=coder_task, run_id=coder_run, payload={"run_id": coder_run}
+        )
         verifier_run = _insert_completed_run(
             conn,
             task_id=verifier_task,
@@ -4981,7 +5509,9 @@ def test_task_detail_runs_include_lineage_for_coder_verifier_and_legacy(client):
             metadata={},
             profile="coder",
         )
-        _append_claimed_event(conn, task_id=task_id, run_id=coder_run, payload={"run_id": coder_run})
+        _append_claimed_event(
+            conn, task_id=task_id, run_id=coder_run, payload={"run_id": coder_run}
+        )
         _append_claimed_event(
             conn,
             task_id=task_id,
@@ -5018,7 +5548,9 @@ def test_review_verdicts_surfaces_review_tasks_with_request_changes_evidence(cli
             summary="REQUEST_CHANGES — pytest failed",
             metadata={
                 "verdict": "REQUEST_CHANGES",
-                "verification_evidence": ["pytest tests/foo.py -> stdout: FAILED test_add"],
+                "verification_evidence": [
+                    "pytest tests/foo.py -> stdout: FAILED test_add"
+                ],
             },
             profile="verifier",
         )
@@ -5046,7 +5578,9 @@ def test_review_verdicts_surfaces_review_tasks_with_request_changes_evidence(cli
     assert row["reviewer_profile"] == "verifier"
     assert row["verifier_verdict"] == "REQUEST_CHANGES"
     assert row["verification_state"] == "request_changes"
-    assert row["verifier_evidence"] == ["pytest tests/foo.py -> stdout: FAILED test_add"]
+    assert row["verifier_evidence"] == [
+        "pytest tests/foo.py -> stdout: FAILED test_add"
+    ]
 
 
 def test_review_verdicts_surfaces_active_verifier_run_for_review_claim(client):
@@ -5055,7 +5589,9 @@ def test_review_verdicts_surfaces_active_verifier_run_for_review_claim(client):
         review_task = kb.create_task(conn, title="Review active", assignee="coder")
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_task,))
-        claimed = kb.claim_review_task(conn, review_task, claimer="test-host:944", reviewer_profile="verifier")
+        claimed = kb.claim_review_task(
+            conn, review_task, claimer="test-host:944", reviewer_profile="verifier"
+        )
         assert claimed is not None
         run = kb.latest_run(conn, review_task)
         assert run is not None
@@ -5084,13 +5620,17 @@ def test_review_verdicts_surfaces_active_verifier_run_for_review_claim(client):
 def test_patch_status_done_rejected_from_review_without_review_done_affordance(client):
     conn = kb.connect()
     try:
-        review_task = kb.create_task(conn, title="Cannot manually finish review", assignee="coder")
+        review_task = kb.create_task(
+            conn, title="Cannot manually finish review", assignee="coder"
+        )
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_task,))
     finally:
         conn.close()
 
-    r = client.patch(f"/api/plugins/kanban/tasks/{review_task}", json={"status": "done"})
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{review_task}", json={"status": "done"}
+    )
     assert r.status_code == 409
     assert "not valid" in r.json()["detail"] or "refused" in r.json()["detail"]
 
@@ -5153,15 +5693,20 @@ def test_blocked_completions_surfaces_refused_and_advisory_events(client):
         # phantom_cards + summary_preview, then raises.
         with pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
-                conn, parent,
+                conn,
+                parent,
                 summary="Erstellte Karte t_deadbeefcafe wie gewuenscht",
                 created_cards=[real, "t_deadbeefcafe"],
             )
 
         # Advisory prose-scan event (completion succeeded, advisory only).
-        advisory_task = kb.create_task(conn, title="Advisory prose", assignee="research")
+        advisory_task = kb.create_task(
+            conn, title="Advisory prose", assignee="research"
+        )
         kb._append_event(
-            conn, advisory_task, "suspected_hallucinated_references",
+            conn,
+            advisory_task,
+            "suspected_hallucinated_references",
             {"phantom_refs": ["t_cafef00dbabe"], "source": "summary"},
         )
         conn.commit()
@@ -5177,14 +5722,21 @@ def test_blocked_completions_surfaces_refused_and_advisory_events(client):
     assert "completion_blocked_hallucination" in kinds
     assert "suspected_hallucinated_references" in kinds
 
-    blocked_row = next(b for b in data["blocked"] if b["kind"] == "completion_blocked_hallucination")
+    blocked_row = next(
+        b for b in data["blocked"] if b["kind"] == "completion_blocked_hallucination"
+    )
     assert blocked_row["task_title"] == "Phantom claimer"
     assert blocked_row["assignee"] == "critic"
     assert "t_deadbeefcafe" in blocked_row["phantom"]
-    assert blocked_row["summary_preview"] == "Erstellte Karte t_deadbeefcafe wie gewuenscht"
+    assert (
+        blocked_row["summary_preview"]
+        == "Erstellte Karte t_deadbeefcafe wie gewuenscht"
+    )
     assert "event_id" in blocked_row
 
-    advisory_row = next(b for b in data["blocked"] if b["kind"] == "suspected_hallucinated_references")
+    advisory_row = next(
+        b for b in data["blocked"] if b["kind"] == "suspected_hallucinated_references"
+    )
     assert advisory_row["phantom"] == ["t_cafef00dbabe"]
     assert advisory_row["summary_preview"] is None
 
@@ -5195,9 +5747,13 @@ def test_blocked_completions_surfaces_verifier_request_changes_with_fix_summary(
     now = int(time.time())
     conn = kb.connect()
     try:
-        rejected_task = kb.create_task(conn, title="Rejected by verifier", assignee="coder")
+        rejected_task = kb.create_task(
+            conn, title="Rejected by verifier", assignee="coder"
+        )
         approved_task = kb.create_task(conn, title="Approved ignored", assignee="coder")
-        non_verifier_task = kb.create_task(conn, title="Critic ignored", assignee="critic")
+        non_verifier_task = kb.create_task(
+            conn, title="Critic ignored", assignee="critic"
+        )
 
         rejected_run = _insert_completed_run(
             conn,
@@ -5252,7 +5808,9 @@ def test_blocked_completions_surfaces_verifier_request_changes_with_fix_summary(
     assert row["run_id"] == rejected_run
     assert row["reviewer_profile"] == "verifier"
     assert row["verifier_verdict"] == "REQUEST_CHANGES"
-    assert row["failure_output"] == ["pytest tests/test_calc.py -> stdout: FAILED test_add"]
+    assert row["failure_output"] == [
+        "pytest tests/test_calc.py -> stdout: FAILED test_add"
+    ]
     assert row["fix_summary"] == "Fix add(a, b) to return a + b before resubmitting."
     assert all(b["task_title"] != "Approved ignored" for b in data["blocked"])
     assert all(b["task_title"] != "Critic ignored" for b in data["blocked"])
@@ -5265,7 +5823,9 @@ def test_blocked_completions_filters_by_since_hours(client):
     try:
         old_task = kb.create_task(conn, title="old block", assignee="critic")
         kb._append_event(
-            conn, old_task, "completion_blocked_hallucination",
+            conn,
+            old_task,
+            "completion_blocked_hallucination",
             {"phantom_cards": ["t_oldphantom00"], "summary_preview": "old"},
         )
         # Backdate the event past the window.
@@ -5293,19 +5853,30 @@ def _setup_gated_root(tenant="flow-capture"):
     """Create a root parked in scheduled with three HELD (scheduled) children
     via the real DB fan-out — no LLM. Returns (root_id, child_ids)."""
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="gated root", body="a; b; c", triage=True, tenant=tenant)
+        root = kb.create_task(
+            conn, title="gated root", body="a; b; c", triage=True, tenant=tenant
+        )
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (root,))
         kb.schedule_task(conn, root, reason="parked")
         child_ids = kb.decompose_triage_task(
-            conn, root, root_assignee="default",
+            conn,
+            root,
+            root_assignee="default",
             children=[
                 {"title": "a", "body": "a", "assignee": "coder", "parents": []},
                 {"title": "b", "body": "b", "assignee": "coder", "parents": []},
-                {"title": "c needs a,b", "body": "c", "assignee": "reviewer", "parents": [0, 1]},
+                {
+                    "title": "c needs a,b",
+                    "body": "c",
+                    "assignee": "reviewer",
+                    "parents": [0, 1],
+                },
             ],
-            author="user", auto_promote=False,
-            initial_child_status="scheduled", expected_root_status="scheduled",
+            author="user",
+            auto_promote=False,
+            initial_child_status="scheduled",
+            expected_root_status="scheduled",
         )
     return root, child_ids
 
@@ -5372,7 +5943,9 @@ def test_flow_release_applies_lane_override_and_records_release_level(client):
 
     with kb.connect() as conn:
         assert kb.get_task(conn, child_ids[0]).assignee == "reviewer"
-        release_events = [e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"]
+        release_events = [
+            e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"
+        ]
     assert release_events
     assert release_events[-1].payload["release_level"] == "live"
     assert release_events[-1].payload["released_ids"] == child_ids
@@ -5409,7 +5982,9 @@ def test_flow_release_without_options_is_backward_compatible(client):
     assert "scout_id" not in body
     with kb.connect() as conn:
         assert all(kb.get_task(conn, c).review_tier is None for c in child_ids)
-        events = [e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"]
+        events = [
+            e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"
+        ]
         assert events
         assert "review_tier" not in events[-1].payload
         assert "scout_id" not in events[-1].payload
@@ -5429,7 +6004,9 @@ def test_flow_release_review_tier_only_stamps_children_started_this_call(client)
     with kb.connect() as conn:
         kb.set_task_review_tier(conn, child_ids[0], None)
         with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child_ids[0],))
+            conn.execute(
+                "UPDATE tasks SET status='running' WHERE id=?", (child_ids[0],)
+            )
     # A second release with a different tier releases nothing (none scheduled) →
     # must NOT re-stamp the already-started child.
     r2 = client.post(
@@ -5484,7 +6061,8 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
     auto-scout (from the chain-wide tier stamp) fires first; the explicit inject_scout
     then dedups against it. Each released child ends with exactly one scout parent."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {
             "enabled": True,
             "code_roles": frozenset({"coder", "premium"}),
@@ -5502,10 +6080,11 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
     with kb.connect() as conn:
         for cid in child_ids:
             scouts = [
-                p for p in kb.parent_ids(conn, cid)
+                p
+                for p in kb.parent_ids(conn, cid)
                 if kb.get_task(conn, p).assignee == "scout"
             ]
-            assert len(scouts) == 1, (cid, scouts)   # exactly one scout, never two
+            assert len(scouts) == 1, (cid, scouts)  # exactly one scout, never two
 
 
 def test_flow_release_scout_body_inherits_entry_child_scope(client):
@@ -5567,8 +6146,14 @@ def _patch_planner(monkeypatch, *, gate):
 
     def _fake(task_id, **kw):
         return SimpleNamespace(
-            ok=True, task_id=task_id, reason=None, fanout=False,
-            child_ids=[], new_title=None, spec_relpath=None, gated=gate,
+            ok=True,
+            task_id=task_id,
+            reason=None,
+            fanout=False,
+            child_ids=[],
+            new_title=None,
+            spec_relpath=None,
+            gated=gate,
         )
 
     monkeypatch.setattr("hermes_cli.kanban_decompose.plan_and_document", _fake)
@@ -5585,7 +6170,10 @@ def test_flow_suggest_tier_classifies_title_and_description(client):
     assert r.json()["tier"] == "standard"
     r2 = client.get(
         "/api/plugins/kanban/flow/suggest-tier",
-        params={"title": "ship it", "description": "run a database migration and deploy"},
+        params={
+            "title": "ship it",
+            "description": "run a database migration and deploy",
+        },
     )
     assert r2.status_code == 200, r2.text
     assert r2.json()["tier"] == "critical"
@@ -5597,8 +6185,12 @@ def test_flow_capture_persists_description_into_body(client, monkeypatch):
     _patch_planner(monkeypatch, gate=True)
     r = client.post(
         "/api/plugins/kanban/tasks/flow-capture",
-        json={"title": "Baue X", "method": "lean", "gate": True,
-              "description": "run a database migration and deploy"},
+        json={
+            "title": "Baue X",
+            "method": "lean",
+            "gate": True,
+            "description": "run a database migration and deploy",
+        },
     )
     assert r.status_code == 200, r.text
     tid = r.json()["task_id"]
@@ -5613,8 +6205,13 @@ def test_flow_capture_stamps_root_tier_and_records_intent(client, monkeypatch):
     _patch_planner(monkeypatch, gate=True)
     r = client.post(
         "/api/plugins/kanban/tasks/flow-capture",
-        json={"title": "Baue X", "method": "lean", "gate": True,
-              "review_tier": "critical", "inject_scout": True},
+        json={
+            "title": "Baue X",
+            "method": "lean",
+            "gate": True,
+            "review_tier": "critical",
+            "inject_scout": True,
+        },
     )
     assert r.status_code == 200, r.text
     tid = r.json()["task_id"]
@@ -5638,7 +6235,9 @@ def test_flow_capture_without_levers_records_no_intent(client, monkeypatch):
     tid = r.json()["task_id"]
     with kb.connect() as conn:
         assert kb.get_task(conn, tid).review_tier is None
-        assert not [e for e in kb.list_events(conn, tid) if e.kind == "flow_capture_opts"]
+        assert not [
+            e for e in kb.list_events(conn, tid) if e.kind == "flow_capture_opts"
+        ]
 
 
 def test_flow_capture_intent_applied_on_bare_release(client):
@@ -5647,8 +6246,12 @@ def test_flow_capture_intent_applied_on_bare_release(client):
     starten" — the release call carries no levers, the capture intent fills it."""
     root, child_ids = _setup_gated_root()
     with kb.connect() as conn, kb.write_txn(conn):
-        kb._append_event(conn, root, "flow_capture_opts",
-                         {"review_tier": "critical", "inject_scout": True})
+        kb._append_event(
+            conn,
+            root,
+            "flow_capture_opts",
+            {"review_tier": "critical", "inject_scout": True},
+        )
 
     r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")  # no body levers
     assert r.status_code == 200, r.text
@@ -5666,8 +6269,12 @@ def test_flow_release_explicit_levers_override_capture_intent(client):
     operator can change their mind at "Kette starten"."""
     root, child_ids = _setup_gated_root()
     with kb.connect() as conn, kb.write_txn(conn):
-        kb._append_event(conn, root, "flow_capture_opts",
-                         {"review_tier": "review", "inject_scout": False})
+        kb._append_event(
+            conn,
+            root,
+            "flow_capture_opts",
+            {"review_tier": "review", "inject_scout": False},
+        )
 
     r = client.post(
         f"/api/plugins/kanban/tasks/{root}/flow-release",
@@ -5685,8 +6292,9 @@ def test_flow_release_explicit_false_vetoes_captured_scout(client):
     intent). Guards the precedence contract: an explicit release value wins."""
     root, child_ids = _setup_gated_root()
     with kb.connect() as conn, kb.write_txn(conn):
-        kb._append_event(conn, root, "flow_capture_opts",
-                         {"review_tier": None, "inject_scout": True})
+        kb._append_event(
+            conn, root, "flow_capture_opts", {"review_tier": None, "inject_scout": True}
+        )
 
     r = client.post(
         f"/api/plugins/kanban/tasks/{root}/flow-release",
@@ -5717,7 +6325,9 @@ def test_flow_release_clears_freigabe_operator_hold_at_root(client):
                 (root,),
             )
         # Pre: it surfaces as a held operator proposal (scheduled + freigabe).
-        assert any(p["id"] == root for p in strategist_surface.held_operator_proposals(conn))
+        assert any(
+            p["id"] == root for p in strategist_surface.held_operator_proposals(conn)
+        )
 
     r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
     assert r.status_code == 200, r.text
@@ -5727,7 +6337,9 @@ def test_flow_release_clears_freigabe_operator_hold_at_root(client):
         # Root flipped scheduled -> todo (mirrors release_freigabe_hold) ...
         assert kb.get_task(conn, root).status == "todo", kb.get_task(conn, root).status
         # ... so it is no longer a held proposal ...
-        assert not any(p["id"] == root for p in strategist_surface.held_operator_proposals(conn))
+        assert not any(
+            p["id"] == root for p in strategist_surface.held_operator_proposals(conn)
+        )
         # ... and the release is recorded as a freigabe release.
         kinds = [e.kind for e in kb.list_events(conn, root)]
         assert "freigabe_released" in kinds
@@ -5775,7 +6387,11 @@ def test_flow_gate_sizing_merge_and_split_before_release(client):
 
     r = client.post(
         f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
-        json={"action": "split", "task_ids": [child_ids[0]], "title": "a follow-up split"},
+        json={
+            "action": "split",
+            "task_ids": [child_ids[0]],
+            "title": "a follow-up split",
+        },
     )
     assert r.status_code == 200, r.text
     split = r.json()
@@ -5853,9 +6469,7 @@ def test_flow_gate_timeout_sweep_scopes_to_flow_planspec_roots(client):
 
     with kb.connect() as conn:
         # Foreign children remain held; eligible flow children get released.
-        assert all(
-            kb.get_task(conn, c).status == "scheduled" for c in foreign_children
-        )
+        assert all(kb.get_task(conn, c).status == "scheduled" for c in foreign_children)
         assert kb.get_task(conn, flow_children[0]).status == "ready"
         assert kb.get_task(conn, ingested_children[0]).status == "ready"
 
@@ -5892,9 +6506,7 @@ def test_flow_gate_timeout_sweep_skips_freigabe_operator_roots(client):
 
     with kb.connect() as conn:
         # Children stay held, root untouched, no freigabe_released event.
-        assert all(
-            kb.get_task(conn, c).status == "scheduled" for c in plan_children
-        )
+        assert all(kb.get_task(conn, c).status == "scheduled" for c in plan_children)
         assert kb.get_task(conn, plan_root).status == pre_root_status
         freigabe = conn.execute(
             "SELECT freigabe FROM tasks WHERE id=?", (plan_root,)
@@ -5905,7 +6517,9 @@ def test_flow_gate_timeout_sweep_skips_freigabe_operator_roots(client):
             "WHERE task_id=? AND kind='freigabe_released' LIMIT 1",
             (plan_root,),
         ).fetchone()
-        assert released_ev is None, "operator hold must not be auto-released by the sweep"
+        assert released_ev is None, (
+            "operator hold must not be auto-released by the sweep"
+        )
 
 
 def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
@@ -5962,8 +6576,9 @@ def test_chain_costs_endpoint_returns_breakdown(client, kanban_home):
     """GET /tasks/{id}/chain-costs returns schema kanban-chain-costs-v1 with
     correct totals and by_lane breakdown aggregated from task_runs."""
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="costed-chain", assignee="default",
-                              triage=True)
+        root = kb.create_task(
+            conn, title="costed-chain", assignee="default", triage=True
+        )
         child_ids = kb.decompose_triage_task(
             conn,
             root,
@@ -5976,9 +6591,30 @@ def test_chain_costs_endpoint_returns_breakdown(client, kanban_home):
         )
         a, b = child_ids
         with kb.write_txn(conn):
-            _insert_cost_run(conn, a, profile="coder", input_tokens=1000, output_tokens=200, cost_usd=0.01)
-            _insert_cost_run(conn, b, profile="coder", input_tokens=600, output_tokens=100, cost_usd=0.006)
-            _insert_cost_run(conn, b, profile="verifier", input_tokens=200, output_tokens=30, cost_usd=0.002)
+            _insert_cost_run(
+                conn,
+                a,
+                profile="coder",
+                input_tokens=1000,
+                output_tokens=200,
+                cost_usd=0.01,
+            )
+            _insert_cost_run(
+                conn,
+                b,
+                profile="coder",
+                input_tokens=600,
+                output_tokens=100,
+                cost_usd=0.006,
+            )
+            _insert_cost_run(
+                conn,
+                b,
+                profile="verifier",
+                input_tokens=200,
+                output_tokens=30,
+                cost_usd=0.002,
+            )
 
     r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-costs")
     assert r.status_code == 200, r.text
@@ -6010,8 +6646,9 @@ def test_chain_costs_endpoint_404_for_unknown_task(client):
 def test_chain_costs_endpoint_resolves_non_root_to_root(client, kanban_home):
     """Endpoint resolves a non-root member task to its chain root."""
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="chain-root-resolve", assignee="default",
-                              triage=True)
+        root = kb.create_task(
+            conn, title="chain-root-resolve", assignee="default", triage=True
+        )
         child_ids = kb.decompose_triage_task(
             conn,
             root,
@@ -6021,7 +6658,14 @@ def test_chain_costs_endpoint_resolves_non_root_to_root(client, kanban_home):
         )
         (leaf,) = child_ids
         with kb.write_txn(conn):
-            _insert_cost_run(conn, leaf, profile="coder", input_tokens=500, output_tokens=80, cost_usd=0.005)
+            _insert_cost_run(
+                conn,
+                leaf,
+                profile="coder",
+                input_tokens=500,
+                output_tokens=80,
+                cost_usd=0.005,
+            )
 
     # Querying via the leaf should resolve to the root chain
     r = client.get(f"/api/plugins/kanban/tasks/{leaf}/chain-costs")
@@ -6037,8 +6681,14 @@ def test_chain_graph_nodes_include_cost_fields(client, kanban_home):
     root, child_ids = _setup_gated_root()
     with kb.connect() as conn:
         with kb.write_txn(conn):
-            _insert_cost_run(conn, child_ids[0], profile="coder",
-                             input_tokens=800, output_tokens=150, cost_usd=0.008)
+            _insert_cost_run(
+                conn,
+                child_ids[0],
+                profile="coder",
+                input_tokens=800,
+                output_tokens=150,
+                cost_usd=0.008,
+            )
 
     r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-graph")
     assert r.status_code == 200, r.text
@@ -6063,10 +6713,12 @@ def test_chain_graph_nodes_include_cost_fields(client, kanban_home):
     assert n1["output_tokens"] == 0
 
 
-def _insert_cost_run_with_meta(conn, task_id, *, profile, input_tokens, output_tokens,
-                               cost_usd, metadata=None):
+def _insert_cost_run_with_meta(
+    conn, task_id, *, profile, input_tokens, output_tokens, cost_usd, metadata=None
+):
     """Insert a run row with cost data and optional metadata; does NOT commit."""
     import json as _json
+
     meta_str = _json.dumps(metadata) if metadata is not None else None
     conn.execute(
         "INSERT INTO task_runs "
@@ -6085,7 +6737,8 @@ def test_chain_graph_nodes_include_cost_equivalent_fields(client, kanban_home):
         with kb.write_txn(conn):
             # subscription run on child_ids[0]: cost_usd=0, equivalent=0.55
             _insert_cost_run_with_meta(
-                conn, child_ids[0],
+                conn,
+                child_ids[0],
                 profile="claude-cli",
                 input_tokens=1200,
                 output_tokens=300,
@@ -6116,9 +6769,11 @@ def test_chain_costs_endpoint_includes_equivalent_fields(client, kanban_home):
     """GET /tasks/{id}/chain-costs now returns cost_usd_equivalent and
     cost_effective_usd in totals and by_lane for subscription runs."""
     import json as _json
+
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="equiv-chain", assignee="default",
-                              triage=True)
+        root = kb.create_task(
+            conn, title="equiv-chain", assignee="default", triage=True
+        )
         child_ids = kb.decompose_triage_task(
             conn,
             root,
@@ -6131,7 +6786,8 @@ def test_chain_costs_endpoint_includes_equivalent_fields(client, kanban_home):
         (task_a,) = child_ids
         with kb.write_txn(conn):
             _insert_cost_run_with_meta(
-                conn, task_a,
+                conn,
+                task_a,
                 profile="claude-cli",
                 input_tokens=900,
                 output_tokens=180,
@@ -6171,7 +6827,9 @@ def test_flow_plan_serves_spec_and_404s_when_absent(client, tmp_path, monkeypatc
     assert r.status_code == 404
 
     # Write a spec and serve it.
-    (spec_dir / "t_abc123.md").write_text("# Flow-Plan\n\n## Narrativ\n\nhi\n", encoding="utf-8")
+    (spec_dir / "t_abc123.md").write_text(
+        "# Flow-Plan\n\n## Narrativ\n\nhi\n", encoding="utf-8"
+    )
     r = client.get("/api/plugins/kanban/tasks/t_abc123/flow-plan")
     assert r.status_code == 200, r.text
     assert "## Narrativ" in r.text
@@ -6312,12 +6970,16 @@ def test_epic_create_endpoint(client):
     )
     assert r2.json()["epic"]["body"] == "longer intent"
     # Empty title → 400, not a 500.
-    assert client.post("/api/plugins/kanban/epics", json={"title": "  "}).status_code == 400
+    assert (
+        client.post("/api/plugins/kanban/epics", json={"title": "  "}).status_code
+        == 400
+    )
 
 
 def test_epic_close_endpoint(client):
     eid = client.post(
-        "/api/plugins/kanban/epics", json={"title": "to close"},
+        "/api/plugins/kanban/epics",
+        json={"title": "to close"},
     ).json()["epic"]["id"]
     r = client.post(f"/api/plugins/kanban/epics/{eid}/close")
     assert r.status_code == 200
@@ -6327,7 +6989,8 @@ def test_epic_close_endpoint(client):
 
 def test_patch_task_epic_id_assign_and_detach(client):
     eid = client.post(
-        "/api/plugins/kanban/epics", json={"title": "target"},
+        "/api/plugins/kanban/epics",
+        json={"title": "target"},
     ).json()["epic"]["id"]
     with kb.connect() as conn:
         t = kb.create_task(conn, title="chain root", assignee="coder")
@@ -6337,9 +7000,12 @@ def test_patch_task_epic_id_assign_and_detach(client):
     assert r.status_code == 200
     assert r.json()["task"]["epic_id"] == eid
     # Rollup sees the member.
-    assert client.get(
-        f"/api/plugins/kanban/epics/{eid}",
-    ).json()["epic"]["task_count"] == 1
+    assert (
+        client.get(
+            f"/api/plugins/kanban/epics/{eid}",
+        ).json()["epic"]["task_count"]
+        == 1
+    )
 
     # Absent epic_id leaves membership untouched (no accidental detach).
     r2 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"priority": 1})
@@ -6360,7 +7026,8 @@ def test_patch_task_epic_id_validates_target(client):
     assert "not found" in r.json()["detail"]
     # Closed epic → 409.
     eid = client.post(
-        "/api/plugins/kanban/epics", json={"title": "closed"},
+        "/api/plugins/kanban/epics",
+        json={"title": "closed"},
     ).json()["epic"]["id"]
     client.post(f"/api/plugins/kanban/epics/{eid}/close")
     r2 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": eid})
@@ -6385,14 +7052,19 @@ def test_workers_active_carries_note_and_eta(client):
                 )
             run_id = conn.execute(
                 "INSERT INTO task_runs (task_id, profile, status, started_at, worker_pid) "
-                "VALUES (?, 'coder', 'running', ?, 4242)", (t, now - 60),
+                "VALUES (?, 'coder', 'running', ?, 4242)",
+                (t, now - 60),
             ).lastrowid
             conn.execute(
                 "UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?",
                 (run_id, t),
             )
-        assert kb.heartbeat_worker(conn, t, note="Edit: WorkerCard.tsx", expected_run_id=run_id)
-        assert kb.heartbeat_worker(conn, t, note="Bash: vitest run", expected_run_id=run_id)
+        assert kb.heartbeat_worker(
+            conn, t, note="Edit: WorkerCard.tsx", expected_run_id=run_id
+        )
+        assert kb.heartbeat_worker(
+            conn, t, note="Bash: vitest run", expected_run_id=run_id
+        )
     finally:
         conn.close()
 
@@ -6408,6 +7080,7 @@ def test_workers_active_surfaces_claude_cli_dispatcher_heartbeat(client, monkeyp
     """Criterion 3: the dispatcher-side claude-CLI heartbeat surfaces through the
     EXISTING last_heartbeat_* fields — no new endpoint/field/UI concept needed."""
     import hermes_cli.kanban_db as _kb
+
     monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
 
@@ -6450,7 +7123,8 @@ def test_task_model_override_roundtrip(client):
 
     # Eskalation per PATCH umschwenken
     patched = client.patch(
-        f"/api/plugins/kanban/tasks/{tid}", json={"model_override": "claude-opus-4-8"},
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"model_override": "claude-opus-4-8"},
     )
     assert patched.status_code == 200
     got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
@@ -6458,7 +7132,8 @@ def test_task_model_override_roundtrip(client):
 
     # Explizites null löscht; Event-Trail dokumentiert beide Schritte
     cleared = client.patch(
-        f"/api/plugins/kanban/tasks/{tid}", json={"model_override": None},
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"model_override": None},
     )
     assert cleared.status_code == 200
     got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
@@ -6466,9 +7141,11 @@ def test_task_model_override_roundtrip(client):
     conn = kb.connect()
     try:
         kinds = [
-            r["payload"] for r in conn.execute(
+            r["payload"]
+            for r in conn.execute(
                 "SELECT payload FROM task_events WHERE task_id = ? "
-                "AND kind = 'model_override_set' ORDER BY id", (tid,),
+                "AND kind = 'model_override_set' ORDER BY id",
+                (tid,),
             ).fetchall()
         ]
     finally:
@@ -6483,6 +7160,7 @@ def test_task_model_override_roundtrip(client):
 
 def _make_funnel_draft(conn, *, created_by="family", title="wunsch"):
     from hermes_cli import funnel
+
     tid = funnel.create_wish(conn, title=title, body="b", created_by=created_by)
     kb.add_comment(conn, tid, "coder-claude", "# Draft\n" + "d" * 200)
     with kb.write_txn(conn):
@@ -6570,7 +7248,10 @@ def test_funnel_draft_dismiss_archives_root(client):
     finally:
         conn.close()
     # Nochmal verwerfen -> 409 (nicht mehr in der Queue).
-    assert client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss").status_code == 409
+    assert (
+        client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss").status_code
+        == 409
+    )
 
 
 def test_funnel_draft_patch_saves_operator_edit(client):
@@ -6624,7 +7305,12 @@ def test_funnel_draft_revise_creates_new_root_and_archives_old(client):
     conn = kb.connect()
     try:
         assert kb.get_task(conn, tid).status == "archived"
-        assert conn.execute("SELECT 1 FROM task_links WHERE child_id = ?", (task["id"],)).fetchone() is None
+        assert (
+            conn.execute(
+                "SELECT 1 FROM task_links WHERE child_id = ?", (task["id"],)
+            ).fetchone()
+            is None
+        )
     finally:
         conn.close()
 
@@ -6738,7 +7424,10 @@ def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
     assert any(m["id"] == "qwen/qwen3.7-max" for m in openrouter_rows)
     assert "gpt-5.4" in model_ids
     assert "moonshotai/kimi-k2.7" in model_ids
-    assert any(m["runtime"] == "claude-cli" and m["id"] == "claude-fable-5" for m in data["models"])
+    assert any(
+        m["runtime"] == "claude-cli" and m["id"] == "claude-fable-5"
+        for m in data["models"]
+    )
 
 
 def test_lanes_openrouter_import_smokes_then_persists_config(client, monkeypatch):
@@ -6798,7 +7487,9 @@ def test_lanes_openrouter_import_reports_already_configured(client, monkeypatch)
         encoding="utf-8",
     )
     mod = _plugin_module()
-    monkeypatch.setattr(mod, "_smoke_openrouter_model_id", lambda model_id: (True, "Smoke ok"))
+    monkeypatch.setattr(
+        mod, "_smoke_openrouter_model_id", lambda model_id: (True, "Smoke ok")
+    )
 
     r = client.post(
         "/api/plugins/kanban/lanes/openrouter-models/import",
@@ -6854,7 +7545,9 @@ def test_lanes_catalog_includes_kanban_spawn_health(client, monkeypatch):
     assert catalog["research"]["kanban_spawn_health"]["status"] == "healthy"
 
 
-def test_lanes_catalog_spawn_health_unhealthy_without_claude_binary(client, monkeypatch):
+def test_lanes_catalog_spawn_health_unhealthy_without_claude_binary(
+    client, monkeypatch
+):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
@@ -6897,7 +7590,11 @@ def test_lanes_spawn_check_rejects_obvious_model_runtime_mismatch(client):
 
     r = client.post(
         "/api/plugins/kanban/lanes/spawn-check",
-        json={"profile": "research", "worker_runtime": "hermes", "model": "claude-fable-5"},
+        json={
+            "profile": "research",
+            "worker_runtime": "hermes",
+            "model": "claude-fable-5",
+        },
     )
 
     assert r.status_code == 200, r.text
@@ -6928,6 +7625,7 @@ def test_lanes_spawn_check_reports_unknown_profile(client):
 # ---------------------------------------------------------------------------
 # GET /planspecs/detail
 # ---------------------------------------------------------------------------
+
 
 def _write_open_planspec_fixture(plans_root: Path) -> Path:
     """A self-contained, valid, OPEN binding PlanSpec for detail-endpoint tests.
@@ -6976,7 +7674,8 @@ def _bind_detail_plans_root(monkeypatch, plans_root: Path):
 
     real_parse = _ps.parse_binding_planspec
     monkeypatch.setattr(
-        _ps, "parse_binding_planspec",
+        _ps,
+        "parse_binding_planspec",
         lambda p, **kw: real_parse(p, plans_root=plans_root),
     )
 
@@ -7050,7 +7749,9 @@ def test_planspecs_detail_missing_file_under_root(client):
     """Valid path under vault root but file does not exist → 404."""
     r = client.get(
         "/api/plugins/kanban/planspecs/detail",
-        params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"},
+        params={
+            "path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"
+        },
     )
     assert r.status_code == 404, r.text
 
@@ -7081,13 +7782,17 @@ def test_planspecs_detail_missing_file_does_not_leak_resolved_path(client):
     resolved absolute server path."""
     r = client.get(
         "/api/plugins/kanban/planspecs/detail",
-        params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"},
+        params={
+            "path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"
+        },
     )
     assert r.status_code == 404, r.text
     body = r.json()
     findings = body.get("detail", {}).get("findings", [])
     assert findings, body
-    assert not any("/home/piet" in f for f in findings), f"resolved path leaked: {findings}"
+    assert not any("/home/piet" in f for f in findings), (
+        f"resolved path leaked: {findings}"
+    )
 
 
 def test_planspecs_detail_resolves_path_exactly_once(client, tmp_path, monkeypatch):
@@ -7113,7 +7818,9 @@ def test_planspecs_detail_resolves_path_exactly_once(client, tmp_path, monkeypat
         params={"path": str(path)},
     )
     assert r.status_code == 200, r.text
-    assert calls["n"] == 1, f"path resolved {calls['n']}× — TOCTOU window between resolutions"
+    assert calls["n"] == 1, (
+        f"path resolved {calls['n']}× — TOCTOU window between resolutions"
+    )
 
 
 def test_planspecs_detail_null_byte_path_is_400_not_500(client):

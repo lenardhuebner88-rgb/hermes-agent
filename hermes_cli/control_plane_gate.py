@@ -48,6 +48,9 @@ _REVIEW_REQUIRED_MARKERS = {
     "auth",
     "database",
     "db",
+    "migration",
+    "drop",
+    "alter",
     "kanban-dispatch",
     "dispatch",
     "push",
@@ -66,6 +69,34 @@ _CRITICAL_REVIEW_MARKERS = frozenset({
     "alter",
     "auth",
 })
+_REVIEW_REQUIRED_MARKER_PATTERNS = {
+    "medium": r"medium",
+    "high": r"high",
+    "critical": r"critical",
+    "code": r"code",
+    "config": r"configs?",
+    "profile": r"profiles?",
+    "runtime": r"runtimes?",
+    "restart": r"restarts?|restarted|restarting",
+    "reload": r"reloads?|reloaded|reloading",
+    "deploy": r"deploy(?:s|ed|ing|ments?)?",
+    "build": r"builds?|built|building",
+    "cron": r"crons?",
+    "timer": r"timers?",
+    "systemd": r"systemd",
+    "gateway": r"gateways?",
+    "secret": r"secrets?",
+    "credential": r"credentials?",
+    "auth": r"auth(?:entication)?",
+    "database": r"databases?",
+    "db": r"dbs?",
+    "migration": r"(?:migrations?|(?:db|database)[-\s]+migrations?)",
+    "drop": r"drop(?:s|ped|ping)?",
+    "alter": r"alter(?:s|ed|ing|ations?)?",
+    "kanban-dispatch": r"kanban[-\s]+dispatch",
+    "dispatch": r"dispatch(?:es|ed|ing)?",
+    "push": r"push(?:es|ed|ing)?",
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +118,16 @@ def _truthy(value: Any) -> bool:
         return value != 0
     if isinstance(value, str):
         normalized = value.strip().lower()
-        return normalized in {"true", "yes", "1", "ok", "pass", "passed", "approved", "go"} or normalized.startswith("go ")
+        return normalized in {
+            "true",
+            "yes",
+            "1",
+            "ok",
+            "pass",
+            "passed",
+            "approved",
+            "go",
+        } or normalized.startswith("go ")
     return bool(value)
 
 
@@ -99,7 +139,14 @@ def _explicit_override(value: Any) -> bool:
         return value != 0
     if isinstance(value, str):
         normalized = value.strip().lower()
-        return bool(normalized) and normalized not in {"false", "no", "0", "none", "null", "off"}
+        return bool(normalized) and normalized not in {
+            "false",
+            "no",
+            "0",
+            "none",
+            "null",
+            "off",
+        }
     return bool(value)
 
 
@@ -140,7 +187,9 @@ def _plan_text(plan_spec: Mapping[str, Any]) -> str:
     return " ".join(values).lower()
 
 
-_PATHISH_FRAGMENT_RE = re.compile(r"(?u)\S*(?:[/\\]|\.[A-Za-z0-9]{1,12}\b|_[A-Za-z0-9])\S*")
+_PATHISH_FRAGMENT_RE = re.compile(
+    r"(?u)\S*(?:[/\\]|\.[A-Za-z0-9]{1,12}\b|_[A-Za-z0-9])\S*"
+)
 _CRITICAL_REVIEW_MARKER_PATTERNS = {
     "database": r"databases?",
     "db": r"dbs?",
@@ -179,12 +228,46 @@ def _critical_review_chunks(plan_spec: Mapping[str, Any]) -> list[str]:
     # ``forbidden_actions`` and ``changed_paths`` are intentionally excluded:
     # anti-scope and file names produced the observed false-critical cascade.
     values: list[str] = []
-    for key in ("risk_class", "action_class", "scope", "objective", "goal", "allowed_actions"):
+    for key in (
+        "risk_class",
+        "action_class",
+        "scope",
+        "objective",
+        "goal",
+        "allowed_actions",
+    ):
         value = plan_spec.get(key)
         if isinstance(value, (list, tuple, set)):
             values.extend(str(item) for item in value)
         elif value is not None:
             values.append(str(value))
+    return values
+
+
+def _review_required_chunks(plan_spec: Mapping[str, Any]) -> list[str]:
+    # ``forbidden_actions`` and ``changed_paths`` are anti-scope/evidence fields,
+    # not requested work. Including them caused live substring overfires such as
+    # ``kanban.db`` or "no deploy" escalating harmless cards to review.
+    values: list[str] = []
+    for key in (
+        "risk_class",
+        "action_class",
+        "scope",
+        "objective",
+        "goal",
+        "allowed_actions",
+    ):
+        value = plan_spec.get(key)
+        structured = key in {"risk_class", "action_class", "scope"}
+
+        def _field_text(item: Any) -> str:
+            text = str(item)
+            return text.replace("-", " ").replace("_", " ") if structured else text
+
+        if isinstance(value, (list, tuple, set)):
+            values.extend(_field_text(item) for item in value)
+        elif value is not None:
+            values.append(_field_text(value))
     return values
 
 
@@ -197,7 +280,12 @@ def _marker_is_negated(text: str, match_start: int) -> bool:
     return any(word in _NEGATION_WORDS for word in words[-3:])
 
 
-def _contains_unnegated_whole_marker(chunks: Iterable[str], markers: Iterable[str]) -> bool:
+def _contains_unnegated_whole_marker(
+    chunks: Iterable[str],
+    markers: Iterable[str],
+    *,
+    patterns: Mapping[str, str] | None = None,
+) -> bool:
     """True only for standalone, non-negated risk markers.
 
     The staged-review critical tier must not fire on substrings like
@@ -208,13 +296,16 @@ def _contains_unnegated_whole_marker(chunks: Iterable[str], markers: Iterable[st
     for chunk in chunks:
         normalized = _strip_pathish_fragments(chunk.lower())
         for marker in markers:
-            pattern = _CRITICAL_REVIEW_MARKER_PATTERNS.get(marker, re.escape(marker.lower()))
+            pattern = (patterns or _CRITICAL_REVIEW_MARKER_PATTERNS).get(
+                marker, re.escape(marker.lower())
+            )
             marker_re = re.compile(rf"(?<![A-Za-z0-9_-])(?:{pattern})(?![A-Za-z0-9_-])")
             for match in marker_re.finditer(normalized):
                 if _marker_is_negated(normalized, match.start()):
                     continue
                 return True
     return False
+
 
 def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
     """Return whether the plan's risk/scope requires Reviewer or Piet override.
@@ -227,10 +318,14 @@ def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
     """
     if not isinstance(plan_spec, Mapping):
         return True
-    text = _plan_text(plan_spec)
-    if any(marker in text for marker in _REVIEW_REQUIRED_MARKERS):
+    if _contains_unnegated_whole_marker(
+        _review_required_chunks(plan_spec),
+        _REVIEW_REQUIRED_MARKERS,
+        patterns=_REVIEW_REQUIRED_MARKER_PATTERNS,
+    ):
         # Keep docs-only low-risk work out of mandatory review if the risky words
         # only appear in anti-scope / forbidden actions.
+        text = _plan_text(plan_spec)
         risk = str(plan_spec.get("risk_class") or "").lower()
         action = str(plan_spec.get("action_class") or "").lower()
         if "low" in risk and "docs" in text and not action:
@@ -250,7 +345,9 @@ def classify_review_tier(plan_spec: Mapping[str, Any] | None) -> str:
     """
     if not plan_spec or not reviewer_gate_required(plan_spec):
         return "standard"
-    if _contains_unnegated_whole_marker(_critical_review_chunks(plan_spec), _CRITICAL_REVIEW_MARKERS):
+    if _contains_unnegated_whole_marker(
+        _critical_review_chunks(plan_spec), _CRITICAL_REVIEW_MARKERS
+    ):
         return "critical"
     return "review"
 
@@ -367,7 +464,9 @@ def orchestrator_gate_decision(
     must pass explicit current-thread approval evidence.
     """
     if not isinstance(plan_spec, Mapping):
-        return GateDecision(False, "plan_spec_invalid", ["plan_spec object is required"])
+        return GateDecision(
+            False, "plan_spec_invalid", ["plan_spec object is required"]
+        )
 
     findings: list[str] = []
     if not _truthy(current_thread_approval):
@@ -383,7 +482,9 @@ def orchestrator_gate_decision(
             expected_workflow_id=expected_workflow_id,
         )
         if verdict_missing:
-            findings.extend(f"reviewer metadata invalid: {item}" for item in verdict_missing)
+            findings.extend(
+                f"reviewer metadata invalid: {item}" for item in verdict_missing
+            )
         else:
             verdict = reviewer_metadata.get("verdict")
             if verdict != "APPROVED" and not override:
@@ -433,7 +534,11 @@ def coordinator_gate_decision(
             blocking_findings=verdict_missing,
         )
 
-    verdict = reviewer_metadata.get("verdict") if isinstance(reviewer_metadata, Mapping) else None
+    verdict = (
+        reviewer_metadata.get("verdict")
+        if isinstance(reviewer_metadata, Mapping)
+        else None
+    )
     if verdict != "APPROVED":
         return GateDecision(
             allowed=False,
@@ -449,7 +554,8 @@ def coordinator_gate_decision(
     )
     if diffs:
         raise SubstantiveCoordinatorChangeError(
-            "Coordinator changed Orchestrator-owned PlanSpec fields: " + ", ".join(diffs)
+            "Coordinator changed Orchestrator-owned PlanSpec fields: "
+            + ", ".join(diffs)
         )
 
     return GateDecision(

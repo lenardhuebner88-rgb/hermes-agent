@@ -68,6 +68,21 @@ LIVE_FALSE_POSITIVE_TASK_FIXTURES = (
     ),
 )
 
+LIVE_REVIEW_REQUIRED_FALSE_POSITIVE_TASK_FIXTURES = (
+    (
+        "t_e7926429",
+        "WEGWERF S7-Push-Beweis",
+        "Wegwerf.",
+        "",
+    ),
+    (
+        "t_aca040b5",
+        "PlanSpec ESCALATION-RELEASE-GATE-ERROR-CONTEXT: Release-Gate/Silent-Block-Eskalationen mit Fehlerkontext befuellen, damit sie klassifizierbar sind",
+        "grounding: Auditor-Sample (7-Tage, kanban.db read-only): 3 von 18 unclassified distinct roots sind [Release-Gate]-Tasks mit last_error='' und blocked_kind='retryable'",
+        "",
+    ),
+)
+
 APPROVED_VERDICT = {
     "workflow_id": WORKFLOW_ID,
     "verdict": "APPROVED",
@@ -100,6 +115,7 @@ def test_reviewer_verdict_metadata_requires_gate_fields():
 
 
 # --- FRD Phase 1b: flag-gated disposition enforcement (scope_contract_version >= 3) ---
+
 
 def test_disposition_not_required_below_v3():
     """A complete v2 verdict without a disposition block stays valid (backward-compat)."""
@@ -186,32 +202,59 @@ def test_classify_review_tier_levels():
     """B-T4: None/low → standard; gate-required non-critical → review;
     DB/deploy/security markers → critical."""
     assert classify_review_tier(None) == "standard"
-    assert classify_review_tier(
-        {"risk_class": "low", "action_class": "", "scope": "docs only"}
-    ) == "standard"
-    assert classify_review_tier(
-        {"risk_class": "medium", "objective": "refactor code module"}
-    ) == "review"
-    assert classify_review_tier(
-        {"risk_class": "high", "objective": "run database migration + deploy"}
-    ) == "critical"
+    assert (
+        classify_review_tier({
+            "risk_class": "low",
+            "action_class": "",
+            "scope": "docs only",
+        })
+        == "standard"
+    )
+    assert (
+        classify_review_tier({
+            "risk_class": "medium",
+            "objective": "refactor code module",
+        })
+        == "review"
+    )
+    assert (
+        classify_review_tier({
+            "risk_class": "high",
+            "objective": "run database migration + deploy",
+        })
+        == "critical"
+    )
 
 
 def test_classify_review_tier_does_not_critical_on_path_or_subword_markers():
     """Critical markers must be real risk words, not substrings in paths/titles."""
-    assert classify_review_tier(
-        {"risk_class": "medium", "objective": "fix hermes_cli/kanban_db.py"}
-    ) == "review"
-    assert classify_review_tier(
-        {"risk_class": "medium", "objective": "adjust database.py helper"}
-    ) == "review"
-    assert classify_review_tier(
-        {"risk_class": "medium", "objective": "document drop-in config snippet"}
-    ) == "review"
+    assert (
+        classify_review_tier({
+            "risk_class": "medium",
+            "objective": "fix hermes_cli/kanban_db.py",
+        })
+        == "review"
+    )
+    assert (
+        classify_review_tier({
+            "risk_class": "medium",
+            "objective": "adjust database.py helper",
+        })
+        == "review"
+    )
+    assert (
+        classify_review_tier({
+            "risk_class": "medium",
+            "objective": "document drop-in config snippet",
+        })
+        == "review"
+    )
 
 
 @pytest.mark.parametrize("task_id,title,body,kind", LIVE_FALSE_POSITIVE_TASK_FIXTURES)
-def test_classify_review_tier_live_false_positive_fixtures_stay_review(task_id, title, body, kind):
+def test_classify_review_tier_live_false_positive_fixtures_stay_review(
+    task_id, title, body, kind
+):
     """Live 2026-07-02 fixture snippets, using the _task_plan_spec field shape."""
     spec = {"risk_class": kind, "objective": title, "goal": body}
 
@@ -219,29 +262,48 @@ def test_classify_review_tier_live_false_positive_fixtures_stay_review(task_id, 
     assert classify_review_tier(spec) == "review", task_id
 
 
+@pytest.mark.parametrize(
+    "task_id,title,body,kind", LIVE_REVIEW_REQUIRED_FALSE_POSITIVE_TASK_FIXTURES
+)
+def test_reviewer_gate_required_live_substring_overfire_fixtures_stay_standard(
+    task_id, title, body, kind
+):
+    """Live 2026-07-03 task snippets: substrings in hyphenated/path-ish text are not risk markers."""
+    spec = {"risk_class": kind, "objective": title, "goal": body}
+
+    assert reviewer_gate_required(spec) is False, task_id
+    assert classify_review_tier(spec) == "standard", task_id
+
+
 def test_classify_review_tier_ignores_anti_scope_critical_words():
-    assert classify_review_tier(
-        {
+    assert (
+        classify_review_tier({
             "risk_class": "medium",
             "objective": "refactor code module",
             "goal": "no database migration, no deploy, no secrets, no auth changes",
             "forbidden_actions": ["drop tables", "alter db schema", "deploy"],
-        }
-    ) == "review"
+        })
+        == "review"
+    )
 
 
 def test_classify_review_tier_does_not_let_negated_marker_hide_real_critical():
-    assert classify_review_tier(
-        {"risk_class": "high", "objective": "no database migration but deploy gateway change"}
-    ) == "critical"
-    assert classify_review_tier(
-        {
+    assert (
+        classify_review_tier({
+            "risk_class": "high",
+            "objective": "no database migration but deploy gateway change",
+        })
+        == "critical"
+    )
+    assert (
+        classify_review_tier({
             "risk_class": "high",
             "objective": "release gateway",
             "goal": "no database migration",
             "allowed_actions": ["deploy gateway change"],
-        }
-    ) == "critical"
+        })
+        == "critical"
+    )
 
 
 def test_classify_review_tier_keeps_true_critical_word_family_markers():
@@ -257,7 +319,10 @@ def test_classify_review_tier_keeps_true_critical_word_family_markers():
         "rotate credentials",
         "read secrets from vault",
     ):
-        assert classify_review_tier({"risk_class": "high", "objective": objective}) == "critical"
+        assert (
+            classify_review_tier({"risk_class": "high", "objective": objective})
+            == "critical"
+        )
 
 
 def test_medium_or_runtime_scope_requires_reviewer_or_explicit_piet_override():
@@ -346,6 +411,7 @@ def test_false_piet_override_does_not_bypass_reviewer_gate():
 # Legacy compatibility: old callers can still prove a mechanical-only Coordinator
 # normalization path, but these tests do not make Coordinator a target requirement.
 
+
 def test_legacy_coordinator_gate_blocks_without_approved_reviewer_verdict_metadata():
     decision = coordinator_gate_decision(
         hub_plan_spec=ORCHESTRATOR_DOCS_PLAN,
@@ -365,10 +431,18 @@ def test_legacy_coordinator_gate_blocks_without_approved_reviewer_verdict_metada
     [
         ("goal", "expanded goal"),
         ("risk_class", "medium"),
-        ("scope_contract", {**ORCHESTRATOR_DOCS_PLAN["scope_contract"], "forbidden_systems": ["OpenClaw"]}),
+        (
+            "scope_contract",
+            {
+                **ORCHESTRATOR_DOCS_PLAN["scope_contract"],
+                "forbidden_systems": ["OpenClaw"],
+            },
+        ),
     ],
 )
-def test_legacy_coordinator_gate_rejects_substantive_non_mechanical_changes(field, new_value):
+def test_legacy_coordinator_gate_rejects_substantive_non_mechanical_changes(
+    field, new_value
+):
     changed = {**ORCHESTRATOR_DOCS_PLAN, field: new_value}
 
     with pytest.raises(SubstantiveCoordinatorChangeError, match=field):
@@ -398,6 +472,9 @@ def test_legacy_coordinator_gate_allows_only_mechanical_normalization():
         reason="reviewer_approved_and_only_mechanical_changes",
         blocking_findings=[],
         mechanical_diffs={
-            "workflow_id": {"from": WORKFLOW_ID, "to": "wf-normalized-by-legacy-coordinator"},
+            "workflow_id": {
+                "from": WORKFLOW_ID,
+                "to": "wf-normalized-by-legacy-coordinator",
+            },
         },
     )

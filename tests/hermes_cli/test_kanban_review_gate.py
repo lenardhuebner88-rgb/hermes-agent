@@ -15,6 +15,7 @@ Covers the producer side (``complete_task(review_gate=...)`` →
 * the scratch workspace is preserved across the review hop (the verifier
   needs it) and only cleaned on terminal ``done``.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,6 +30,7 @@ def _write_profile(home: Path, name: str) -> None:
     d = home / "profiles" / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "config.yaml").write_text("model: {}\n")
+
 
 import hermes_cli.profiles as profiles_mod
 from hermes_cli import kanban_db as kb
@@ -51,7 +53,8 @@ def kanban_home(tmp_path, monkeypatch):
 def gate_on(monkeypatch):
     """Enable the review gate with coder/premium roles + an existing verifier."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {
             "enabled": True,
             "code_roles": frozenset({"coder", "premium"}),
@@ -69,29 +72,40 @@ def gate_on(monkeypatch):
 # B-T5: effective review tier (explicit column wins; NULL → auto only if opt-in)
 # ---------------------------------------------------------------------------
 
+
 def test_effective_review_tier_floor_explicit_raises_freely(kanban_home, monkeypatch):
     """Auto-floor (2026-06-21 Vision-Pushback, ersetzt 'explizit gewinnt beide Wege'):
     explicit may RAISE freely; a downgrade BELOW the hard-marker heuristic floor snaps
     back up unless a deliberate ack is logged. NULL → heuristic self-classifies."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": True},
     )
     with kb.connect() as conn:
         # explicit UPGRADES a trivial task (above the standard floor) → wins
-        t1 = kb.create_task(conn, title="trivial", assignee="coder", review_tier="critical")
+        t1 = kb.create_task(
+            conn, title="trivial", assignee="coder", review_tier="critical"
+        )
         assert kb._effective_review_tier(conn, t1) == "critical"
         # explicit DOWNGRADE below the critical floor, NO ack → snaps up to the floor
-        t2 = kb.create_task(conn, title="db change",
-                            body="run a database migration and deploy",
-                            assignee="coder", review_tier="standard")
+        t2 = kb.create_task(
+            conn,
+            title="db change",
+            body="run a database migration and deploy",
+            assignee="coder",
+            review_tier="standard",
+        )
         assert kb._effective_review_tier(conn, t2) == "critical"
         # NULL + auto_tier ON → heuristic decides (critical marker in body)
-        t3 = kb.create_task(conn, title="db change",
-                            body="run a database migration", assignee="coder")
+        t3 = kb.create_task(
+            conn, title="db change", body="run a database migration", assignee="coder"
+        )
         assert kb._effective_review_tier(conn, t3) == "critical"
         # NULL, no markers → standard
-        t4 = kb.create_task(conn, title="tweak copy", body="reword a label", assignee="coder")
+        t4 = kb.create_task(
+            conn, title="tweak copy", body="reword a label", assignee="coder"
+        )
         assert kb._effective_review_tier(conn, t4) == "standard"
 
 
@@ -99,44 +113,62 @@ def test_effective_review_tier_floor_allows_acked_downgrade(kanban_home, monkeyp
     """A logged review_tier_downgrade_ack lets an explicit below-floor value through —
     the deliberate, audit-trailed operator decision."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": True},
     )
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="db change",
-                             body="run a database migration and deploy",
-                             assignee="coder", review_tier="standard")
+        tid = kb.create_task(
+            conn,
+            title="db change",
+            body="run a database migration and deploy",
+            assignee="coder",
+            review_tier="standard",
+        )
         # without ack: floor holds
         assert kb._effective_review_tier(conn, tid) == "critical"
         # log a deliberate downgrade ack → explicit standard now wins
         with kb.write_txn(conn):
-            kb._append_event(conn, tid, "review_tier_downgrade_ack", {"to_tier": "standard"})
+            kb._append_event(
+                conn, tid, "review_tier_downgrade_ack", {"to_tier": "standard"}
+            )
         assert kb._effective_review_tier(conn, tid) == "standard"
 
 
 def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypatch):
     """auto_tier OFF (default): a NULL-column risky task stays standard = today."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": False},
     )
     with kb.connect() as conn:
-        t = kb.create_task(conn, title="db change",
-                           body="run a database migration and deploy", assignee="coder")
-        assert kb._effective_review_tier(conn, t) == "standard"   # auto OFF → no chain
+        t = kb.create_task(
+            conn,
+            title="db change",
+            body="run a database migration and deploy",
+            assignee="coder",
+        )
+        assert kb._effective_review_tier(conn, t) == "standard"  # auto OFF → no chain
         # explicit column still wins even with auto OFF
         t2 = kb.create_task(conn, title="x", assignee="coder", review_tier="critical")
         assert kb._effective_review_tier(conn, t2) == "critical"
 
 
-def test_effective_review_tier_ignores_coder_contract_boilerplate(kanban_home, monkeypatch):
+def test_effective_review_tier_ignores_coder_contract_boilerplate(
+    kanban_home, monkeypatch
+):
     """The auto-injected coder-contract body (anti-scope: 'no deploy/migration/secret')
     must NOT drive the heuristic — else every bodyless code task would over-classify to
     critical (caught by live dogfood 2026-06-21). Real intent (title/user-spec) decides."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "code_roles": frozenset({"coder", "premium"})},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
     )
     with kb.connect() as conn:
         # bodyless ordinary code task → create_task appends the coder contract whose
@@ -145,17 +177,25 @@ def test_effective_review_tier_ignores_coder_contract_boilerplate(kanban_home, m
         assert kb._CODE_TASK_CONTRACT_MARKER in (kb.get_task(conn, ordinary).body or "")
         assert kb._effective_review_tier(conn, ordinary) == "standard"
         # a genuinely risky TITLE still classifies critical despite the same boilerplate
-        risky = kb.create_task(conn, title="run database migration and deploy", assignee="coder")
+        risky = kb.create_task(
+            conn, title="run database migration and deploy", assignee="coder"
+        )
         assert kb._effective_review_tier(conn, risky) == "critical"
 
 
-def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban_home, monkeypatch):
+def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(
+    kanban_home, monkeypatch
+):
     """Live regression for the false-critical cascade: file names and anti-scope
     risk words must not force the expensive verifier→reviewer→critic lane."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "code_roles": frozenset({"coder", "premium"})},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
     )
     with kb.connect() as conn:
         path_only = kb.create_task(
@@ -163,7 +203,7 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban
             title="fix hermes_cli/kanban_db.py dispatcher edge case",
             assignee="coder",
         )
-        assert kb._effective_review_tier(conn, path_only) == "review"
+        assert kb._effective_review_tier(conn, path_only) == "standard"
 
         anti_scope = kb.create_task(
             conn,
@@ -179,7 +219,7 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban
             body="Vollständiger Drop-in-Draft für ~/.hermes/profiles/reviewer/SOUL.md",
             assignee="coder",
         )
-        assert kb._effective_review_tier(conn, drop_in) == "review"
+        assert kb._effective_review_tier(conn, drop_in) == "standard"
 
         auth_enabled_visual = kb.create_task(
             conn,
@@ -187,10 +227,13 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban
             body="Screenshot über den auth-enabled Visual-Harness",
             assignee="coder",
         )
-        assert kb._effective_review_tier(conn, auth_enabled_visual) == "review"
+        assert kb._effective_review_tier(conn, auth_enabled_visual) == "standard"
 
         real_db = kb.create_task(
-            conn, title="DB-Migration durchführen", body="apply ALTER TABLE", assignee="coder"
+            conn,
+            title="DB-Migration durchführen",
+            body="apply ALTER TABLE",
+            assignee="coder",
         )
         assert kb._effective_review_tier(conn, real_db) == "critical"
 
@@ -199,33 +242,47 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(kanban
             title="no database migration but deploy gateway change",
             assignee="coder",
         )
-        assert kb._effective_review_tier(conn, real_deploy_after_anti_scope) == "critical"
+        assert (
+            kb._effective_review_tier(conn, real_deploy_after_anti_scope) == "critical"
+        )
 
-        plural_security = kb.create_task(conn, title="rotate credentials", assignee="coder")
+        plural_security = kb.create_task(
+            conn, title="rotate credentials", assignee="coder"
+        )
         assert kb._effective_review_tier(conn, plural_security) == "critical"
 
 
-def test_effective_review_tier_truncates_future_contract_versions(kanban_home, monkeypatch):
+def test_effective_review_tier_truncates_future_contract_versions(
+    kanban_home, monkeypatch
+):
     """Forward-compat: the classify-truncation must strip ANY coder-contract version,
     not only the exact current marker string. A future ``v2`` contract whose anti-scope
     still lists 'no deploy/migration/secret' would otherwise slip past a v1-only
     ``str.find`` and re-open the false-green over-classify bug (dogfood 2026-06-21)."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "code_roles": frozenset({"coder", "premium"})},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
     )
     with kb.connect() as conn:
         # Real intent ('reword a label') precedes a *future* contract marker carrying
         # the same risky anti-scope words. Truncation at the marker PREFIX must keep
         # the goal benign → standard; a v1-only match leaves the risky words in → critical.
-        body = ("reword a label\n\n## Hermes Coder Contract v2\n"
-                "ANTI-scope: no deploy, no database migration, no secret access")
+        body = (
+            "reword a label\n\n## Hermes Coder Contract v2\n"
+            "ANTI-scope: no deploy, no database migration, no secret access"
+        )
         t = kb.create_task(conn, title="ui tweak", body=body, assignee="coder")
         assert kb._effective_review_tier(conn, t) == "standard"
 
 
-def test_effective_review_tier_logs_when_classify_raises(kanban_home, monkeypatch, caplog):
+def test_effective_review_tier_logs_when_classify_raises(
+    kanban_home, monkeypatch, caplog
+):
     """A crash in ``classify_review_tier`` is swallowed to a ``standard`` floor
     (fail-open), but it must be LOGGED — otherwise a config error in the heuristic
     would silently down-gate every task to standard with no operator-visible signal."""
@@ -236,9 +293,13 @@ def test_effective_review_tier_logs_when_classify_raises(kanban_home, monkeypatc
 
     monkeypatch.setattr(cpg, "classify_review_tier", boom)
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "code_roles": frozenset({"coder", "premium"})},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
     )
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="coder")
@@ -247,12 +308,15 @@ def test_effective_review_tier_logs_when_classify_raises(kanban_home, monkeypatc
         assert any(
             "review" in r.message.lower() and "tier" in r.message.lower()
             for r in caplog.records
-        ), f"expected a review-tier classify warning, got: {[r.message for r in caplog.records]}"
+        ), (
+            f"expected a review-tier classify warning, got: {[r.message for r in caplog.records]}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # C-T1: operator setter set_task_review_tier (mirror of set_task_model_override)
 # ---------------------------------------------------------------------------
+
 
 def test_set_task_review_tier_roundtrip(kanban_home):
     """Setter mirrors set_task_model_override: set/clear, normalise, validate, event."""
@@ -292,19 +356,31 @@ def test_set_tier_below_floor_with_ack_records_event(kanban_home, monkeypatch):
     """acknowledge_downgrade=True logs a review_tier_downgrade_ack so an explicit
     below-floor tier actually takes effect; without it the safety floor holds."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": True},
     )
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="db change",
-                             body="run a database migration and deploy", assignee="coder")
+        tid = kb.create_task(
+            conn,
+            title="db change",
+            body="run a database migration and deploy",
+            assignee="coder",
+        )
         # plain downgrade (no ack) → floor holds, downgrade has no effect
         assert kb.set_task_review_tier(conn, tid, "standard") is True
         assert kb._effective_review_tier(conn, tid) == "critical"
         # acknowledged downgrade → standard now wins + ack event recorded
-        assert kb.set_task_review_tier(conn, tid, "standard", acknowledge_downgrade=True) is True
+        assert (
+            kb.set_task_review_tier(conn, tid, "standard", acknowledge_downgrade=True)
+            is True
+        )
         assert kb._effective_review_tier(conn, tid) == "standard"
-        acks = [e for e in kb.list_events(conn, tid) if e.kind == "review_tier_downgrade_ack"]
+        acks = [
+            e
+            for e in kb.list_events(conn, tid)
+            if e.kind == "review_tier_downgrade_ack"
+        ]
         assert acks and acks[-1].payload["to_tier"] == "standard"
 
 
@@ -312,12 +388,21 @@ def test_set_tier_below_floor_with_ack_records_event(kanban_home, monkeypatch):
 # B-T6: ordered stage list per tier (missing profiles degrade gracefully)
 # ---------------------------------------------------------------------------
 
+
 def test_review_stages_for_tier(monkeypatch):
-    cfg = {"verifier_profile": "verifier", "review_profile": "reviewer", "critic_profile": "critic"}
+    cfg = {
+        "verifier_profile": "verifier",
+        "review_profile": "reviewer",
+        "critic_profile": "critic",
+    }
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     assert kb._review_stages_for_tier("standard", cfg) == ["verifier"]
     assert kb._review_stages_for_tier("review", cfg) == ["verifier", "reviewer"]
-    assert kb._review_stages_for_tier("critical", cfg) == ["verifier", "reviewer", "critic"]
+    assert kb._review_stages_for_tier("critical", cfg) == [
+        "verifier",
+        "reviewer",
+        "critic",
+    ]
     # missing critic profile → critical degrades, never strands the task
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name != "critic")
     assert kb._review_stages_for_tier("critical", cfg) == ["verifier", "reviewer"]
@@ -330,17 +415,24 @@ def test_review_stages_for_tier(monkeypatch):
 # B-T7: submit stamps the frozen tier + stage 0 + target profile into the event
 # ---------------------------------------------------------------------------
 
+
 def test_submit_for_review_stamps_stage_zero(kanban_home, gate_on):
     import json
+
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="hard db work",
-                             body="database migration", assignee="coder",
-                             review_tier="critical")
+        tid = kb.create_task(
+            conn,
+            title="hard db work",
+            body="database migration",
+            assignee="coder",
+            review_tier="critical",
+        )
         kb.claim_task(conn, tid)
         assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
         ev = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? "
-            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1", (tid,)
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
         ).fetchone()
         p = json.loads(ev["payload"])
         assert p["review_stage"] == 0
@@ -352,12 +444,20 @@ def test_submit_for_review_stamps_stage_zero(kanban_home, gate_on):
 # B-T8: dispatch reads the stage profile from the event (not fixed verifier)
 # ---------------------------------------------------------------------------
 
+
 def test_review_chain_target_reads_event(kanban_home, gate_on):
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="x", body="database migration",
-                             assignee="coder", review_tier="critical")
+        tid = kb.create_task(
+            conn,
+            title="x",
+            body="database migration",
+            assignee="coder",
+            review_tier="critical",
+        )
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, summary="impl", review_gate=True)  # stage 0 → verifier
+        kb.complete_task(
+            conn, tid, summary="impl", review_gate=True
+        )  # stage 0 → verifier
         cfg = kb._review_gate_config()
         assert kb._review_chain_target(conn, tid, cfg) == "verifier"
 
@@ -366,19 +466,27 @@ def test_review_chain_target_reads_event(kanban_home, gate_on):
 # B-T9: complete_task chain advance (APPROVED intermediate → next stage)
 # ---------------------------------------------------------------------------
 
+
 def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="x", body="database migration",
-                             assignee="coder", review_tier="critical")
+        tid = kb.create_task(
+            conn,
+            title="x",
+            body="database migration",
+            assignee="coder",
+            review_tier="critical",
+        )
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
-        assert kb.get_task(conn, tid).status == "review"          # stage 0 (verifier) pending
+        assert kb.get_task(conn, tid).status == "review"  # stage 0 (verifier) pending
 
         # stage 0: verifier APPROVED → re-park for stage 1 (reviewer)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
         kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
         assert kb.get_task(conn, tid).status == "review"
-        assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
+        assert (
+            kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
+        )
 
         # stage 1: reviewer APPROVED → re-park for stage 2 (critic)
         kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
@@ -394,17 +502,20 @@ def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
 
 def test_standard_tier_still_single_stage(kanban_home, gate_on):
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="trivial", body="reword label", assignee="coder")
+        tid = kb.create_task(
+            conn, title="trivial", body="reword label", assignee="coder"
+        )
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
         kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
-        assert kb.get_task(conn, tid).status == "done"   # standard → one stage only
+        assert kb.get_task(conn, tid).status == "done"  # standard → one stage only
 
 
 # ---------------------------------------------------------------------------
 # B-T12: auto-retry renders structured findings (else plaintext fallback)
 # ---------------------------------------------------------------------------
+
 
 def test_auto_retry_feedback_renders_structured_findings(kanban_home, gate_on):
     with kb.connect() as conn:
@@ -412,13 +523,20 @@ def test_auto_retry_feedback_renders_structured_findings(kanban_home, gate_on):
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
-        kb.block_task(conn, tid, reason="changes needed", reviewer_metadata={
-            "verdict": "REQUEST_CHANGES",
-            "blocking_findings": ["null deref in foo()", "missing test for bar"]})
+        kb.block_task(
+            conn,
+            tid,
+            reason="changes needed",
+            reviewer_metadata={
+                "verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["null deref in foo()", "missing test for bar"],
+            },
+        )
         kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
         body = conn.execute(
             "SELECT body FROM task_comments WHERE task_id = ? "
-            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1", (tid,)
+            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1",
+            (tid,),
         ).fetchone()["body"]
         assert "null deref in foo()" in body
         assert "missing test for bar" in body
@@ -433,7 +551,8 @@ def test_auto_retry_feedback_plaintext_fallback(kanban_home, gate_on):
         kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
         body = conn.execute(
             "SELECT body FROM task_comments WHERE task_id = ? "
-            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1", (tid,)
+            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1",
+            (tid,),
         ).fetchone()["body"]
         assert "Previous block reason" in body
         assert "just stuck" in body
@@ -442,7 +561,6 @@ def test_auto_retry_feedback_plaintext_fallback(kanban_home, gate_on):
 # ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
-
 
 
 def test_code_worker_cannot_block_for_review_required(kanban_home, gate_on):
@@ -473,7 +591,11 @@ def test_code_worker_cannot_block_for_review_required(kanban_home, gate_on):
         assert "blocked" not in events
 
         assert kb.complete_task(
-            conn, tid, summary="implementation ready", expected_run_id=run_id, review_gate=True
+            conn,
+            tid,
+            summary="implementation ready",
+            expected_run_id=run_id,
+            review_gate=True,
         )
         assert kb.get_task(conn, tid).status == "review"
 
@@ -484,12 +606,15 @@ def test_code_worker_can_still_block_real_blocker(kanban_home, gate_on):
         kb.claim_task(conn, tid)
         run_id = kb.get_task(conn, tid).current_run_id
 
-        assert kb.block_task(
-            conn,
-            tid,
-            reason="needs credential from operator",
-            expected_run_id=run_id,
-        ) is True
+        assert (
+            kb.block_task(
+                conn,
+                tid,
+                reason="needs credential from operator",
+                expected_run_id=run_id,
+            )
+            is True
+        )
         assert kb.get_task(conn, tid).status == "blocked"
 
 
@@ -670,7 +795,12 @@ def test_review_diff_sentinel_uses_pre_run_commit_baseline(
     target = repo / "sentinel.txt"
     target.write_text("before\n")
     subprocess.run(["git", "add", "sentinel.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "before"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "commit", "-m", "before"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
 
     with kb.connect() as conn:
         tid = kb.create_task(
@@ -686,7 +816,12 @@ def test_review_diff_sentinel_uses_pre_run_commit_baseline(
 
         target.write_text("after\n")
         subprocess.run(["git", "add", "sentinel.txt"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-m", "after"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "commit", "-m", "after"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
 
         assert kb.complete_task(
             conn, tid, summary="done", review_gate=True, expected_run_id=run_id
@@ -700,6 +835,125 @@ def test_review_diff_sentinel_uses_pre_run_commit_baseline(
 
         assert "sentinel.txt" in payload.get("changed_files", [])
         assert payload.get("diff_baseline") == "pre_run_commit_sha"
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "README.md").write_text("baseline\n")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
+    kanban_home, tmp_path, monkeypatch
+):
+    """Live t_92528385 shape: no file edits should not pay reviewer stage by heuristic."""
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": True,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    repo = tmp_path / "repo-zero-diff"
+    _init_repo(repo)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Selbststart-Probe: bestätigen und abschließen, keine Edits",
+            body=(
+                "Live-Beweis-Probe M1: Diese Kette wurde mit freigabe complete ingested.\n"
+                "Deine einzige Aufgabe: bestätige mit einem Satz, dass du gestartet wurdest,\n"
+                "und schließe den Task ab. KEINE Datei anfassen, KEIN Commit, keine Analyse."
+            ),
+            assignee="coder",
+            kind="code",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="Gestartet: keine Datei-Edits, kein Commit, keine Analyse.",
+            review_gate=True,
+            expected_run_id=run_id,
+        )
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind=? "
+            "ORDER BY id DESC LIMIT 1",
+            (tid, "submitted_for_review"),
+        ).fetchone()
+        payload = json.loads(ev["payload"])
+
+        assert payload["review_tier"] == "standard"
+        assert payload["target_profile"] == "verifier"
+        assert payload["review_tier_adjustment"] == {
+            "from": "review",
+            "to": "standard",
+            "reason": "zero_diff",
+        }
+
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert kb.complete_task(conn, tid, summary="APPROVED", review_gate=True)
+        assert kb.get_task(conn, tid).status == "done"
+        assert (
+            len([
+                e for e in kb.list_events(conn, tid) if e.kind == "submitted_for_review"
+            ])
+            == 1
+        )
+
+
+def test_final_review_completion_writes_review_released_event(kanban_home, gate_on):
+    """Live t_92528385 event gap: final review approve gets an explicit release verb."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Selbststart-Probe: bestätigen und abschließen, keine Edits",
+            body=(
+                "Live-Beweis-Probe M1: Diese Kette wurde mit freigabe complete ingested.\n"
+                "Deine einzige Aufgabe: bestätige mit einem Satz, dass du gestartet wurdest,\n"
+                "und schließe den Task ab. KEINE Datei anfassen, KEIN Commit, keine Analyse."
+            ),
+            assignee="coder",
+            kind="code",
+            review_tier="review",
+        )
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        assert kb.complete_task(conn, tid, summary="reviewer ok", review_gate=True)
+
+        releases = [e for e in kb.list_events(conn, tid) if e.kind == "review_released"]
+        assert len(releases) == 1
+        assert releases[0].payload["verdict"] == "APPROVED"
+        assert releases[0].payload["review_tier"] == "review"
+        assert releases[0].payload["review_stage"] == 1
+        assert releases[0].payload["target_profile"] == "reviewer"
 
 
 def test_verdict_spawn_lane_resolver_error_fails_closed(
@@ -740,7 +994,8 @@ def test_gate_disabled_by_default_goes_done(kanban_home):
 def test_gate_inert_when_verifier_profile_missing(kanban_home, monkeypatch):
     """Enabled gate but missing verifier profile must NOT strand the task."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {
             "enabled": True,
             "code_roles": frozenset({"coder"}),
@@ -759,6 +1014,7 @@ def test_gate_inert_when_verifier_profile_missing(kanban_home, monkeypatch):
 # Anti-loop: the verifier's own completion is terminal
 # ---------------------------------------------------------------------------
 
+
 def test_run_originated_from_review_discriminates(kanban_home, gate_on):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
@@ -767,9 +1023,7 @@ def test_run_originated_from_review_discriminates(kanban_home, gate_on):
         assert kb._run_originated_from_review(conn, tid, coder_run) is False
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         claimed = kb.claim_review_task(conn, tid)
-        assert kb._run_originated_from_review(
-            conn, tid, claimed.current_run_id
-        ) is True
+        assert kb._run_originated_from_review(conn, tid, claimed.current_run_id) is True
 
 
 def test_verifier_completion_goes_done(kanban_home, gate_on):
@@ -787,7 +1041,9 @@ def test_verifier_completion_goes_done(kanban_home, gate_on):
         assert kb.get_task(conn, tid).status == "done"
 
 
-def test_review_originated_request_changes_completion_does_not_go_done(kanban_home, gate_on):
+def test_review_originated_request_changes_completion_does_not_go_done(
+    kanban_home, gate_on
+):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="coder")
         kb.claim_task(conn, tid)
@@ -812,7 +1068,9 @@ def test_review_originated_request_changes_completion_does_not_go_done(kanban_ho
         assert row["verdict"] == "REQUEST_CHANGES"
 
 
-def test_non_review_originated_approved_metadata_cannot_fake_review_completion(kanban_home, gate_on):
+def test_non_review_originated_approved_metadata_cannot_fake_review_completion(
+    kanban_home, gate_on
+):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="coder")
         claimed = kb.claim_task(conn, tid)
@@ -839,12 +1097,11 @@ def test_non_review_originated_approved_metadata_cannot_fake_review_completion(k
 # Dependency gating
 # ---------------------------------------------------------------------------
 
+
 def test_children_wait_for_verified_done(kanban_home, gate_on):
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent", assignee="coder")
-        child = kb.create_task(
-            conn, title="child", parents=[parent], assignee="coder"
-        )
+        child = kb.create_task(conn, title="child", parents=[parent], assignee="coder")
         assert kb.get_task(conn, child).status == "todo"
         kb.claim_task(conn, parent)
         kb.complete_task(conn, parent, summary="impl", review_gate=True)
@@ -862,9 +1119,7 @@ def test_children_wait_for_verified_done(kanban_home, gate_on):
 def test_reject_blocks_and_keeps_children_gated(kanban_home, gate_on):
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent", assignee="coder")
-        child = kb.create_task(
-            conn, title="child", parents=[parent], assignee="coder"
-        )
+        child = kb.create_task(conn, title="child", parents=[parent], assignee="coder")
         kb.claim_task(conn, parent)
         kb.complete_task(conn, parent, summary="impl", review_gate=True)
         claimed = kb.claim_review_task(conn, parent)
@@ -880,11 +1135,10 @@ def test_reject_blocks_and_keeps_children_gated(kanban_home, gate_on):
 # Workspace preservation
 # ---------------------------------------------------------------------------
 
+
 def test_review_does_not_cleanup_workspace(kanban_home, gate_on, monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        kb, "_cleanup_workspace", lambda conn, tid: calls.append(tid)
-    )
+    monkeypatch.setattr(kb, "_cleanup_workspace", lambda conn, tid: calls.append(tid))
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="coder")
         kb.claim_task(conn, tid)
@@ -894,9 +1148,7 @@ def test_review_does_not_cleanup_workspace(kanban_home, gate_on, monkeypatch):
 
 def test_done_cleans_up_workspace(kanban_home, monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        kb, "_cleanup_workspace", lambda conn, tid: calls.append(tid)
-    )
+    monkeypatch.setattr(kb, "_cleanup_workspace", lambda conn, tid: calls.append(tid))
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         kb.claim_task(conn, tid)
@@ -911,6 +1163,7 @@ def test_done_cleans_up_workspace(kanban_home, monkeypatch):
 # verb and bypassed the verifier (went straight to 'done').
 # ---------------------------------------------------------------------------
 
+
 def _cli_complete(task_id):
     """Invoke the real CLI handler the claude-CLI lifecycle bridge uses."""
     import argparse
@@ -918,7 +1171,10 @@ def _cli_complete(task_id):
     from hermes_cli import kanban as kanban_cli
 
     args = argparse.Namespace(
-        task_ids=[task_id], summary="impl done", metadata=None, result=None,
+        task_ids=[task_id],
+        summary="impl done",
+        metadata=None,
+        result=None,
     )
     return kanban_cli._cmd_complete(args)
 
@@ -960,11 +1216,13 @@ def test_cli_complete_operator_context_stays_direct_done(
 #   (1) set_task_review_tier(critical)  (2) plan-ingest / decompose critical child.
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def auto_scout_on(monkeypatch):
     """Enable auto_scout_on_critical (the opt-in critical→scout coupling)."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
+        kb,
+        "_review_gate_config",
         lambda: {
             "enabled": True,
             "code_roles": frozenset({"coder", "premium"}),
@@ -992,27 +1250,37 @@ def test_auto_scout_off_is_byte_identical(kanban_home):
         tid = kb.create_task(conn, title="risky", assignee="coder")
         assert kb.set_task_review_tier(conn, tid, "critical") is True
         assert _scout_parents(conn, tid) == []
-        assert kb.get_task(conn, tid).status == "ready"   # not demoted
+        assert kb.get_task(conn, tid).status == "ready"  # not demoted
 
 
-def test_heuristic_critical_injects_scout_without_explicit_column(kanban_home, monkeypatch):
+def test_heuristic_critical_injects_scout_without_explicit_column(
+    kanban_home, monkeypatch
+):
     """Self-gating: a task the heuristic rates critical (NO explicit review_tier
     column) gets the scout when auto_tier + auto_scout are on. The resolver
     (_effective_review_tier), not the raw column, drives the coupling — and the
     heuristic value is never stamped into the column (Landmine 1)."""
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "auto_scout_on_critical": True},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "auto_scout_on_critical": True,
+        },
     )
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="run database migration + deploy", assignee="coder")
-        assert kb.get_task(conn, tid).review_tier is None          # never stamped
+        tid = kb.create_task(
+            conn, title="run database migration + deploy", assignee="coder"
+        )
+        assert kb.get_task(conn, tid).review_tier is None  # never stamped
         assert kb._maybe_inject_critical_scout(conn, tid) is not None
         assert kb.scout_predecessor_id(conn, tid) is not None
 
 
-def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_scout_on):
+def test_set_critical_injects_scout_predecessor_when_flag_on(
+    kanban_home, auto_scout_on
+):
     """Flag on: set_task_review_tier(critical) ensures ONE read-only scout predecessor."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="risky build", assignee="coder")
@@ -1022,8 +1290,10 @@ def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_s
         assert len(scouts) == 1
         scout = kb.get_task(conn, scouts[0])
         assert scout.assignee == "scout"
-        assert kb.parent_ids(conn, scouts[0]) == []          # scout has no parents
-        assert kb.get_task(conn, tid).status == "todo"        # demoted ready->todo, waits on scout
+        assert kb.parent_ids(conn, scouts[0]) == []  # scout has no parents
+        assert (
+            kb.get_task(conn, tid).status == "todo"
+        )  # demoted ready->todo, waits on scout
         # Atomic dedup: the scout carries a per-task idempotency_key so two
         # concurrent critical setters converge on ONE scout (no race-created 2nd).
         key = conn.execute(
@@ -1037,8 +1307,9 @@ def test_scout_predecessor_gets_bounded_runtime_cap(kanban_home, monkeypatch):
     wedged read-only recon is reaped by enforce_max_runtime (which only acts on
     tasks with a non-null cap) — without it a stuck scout silently blocks its
     whole chain forever (auto_scout_on_critical is live)."""
-    monkeypatch.setattr(kb, "_review_gate_config",
-                        lambda: {"verifier_profile": "verifier"})
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"verifier_profile": "verifier"}
+    )
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="risky build", assignee="coder")
         scout_id = kb.ensure_scout_predecessor(conn, tid)
@@ -1050,9 +1321,11 @@ def test_scout_predecessor_gets_bounded_runtime_cap(kanban_home, monkeypatch):
 
 def test_scout_runtime_cap_respects_config_override(kanban_home, monkeypatch):
     """P1-S1: the scout TTL is tunable via kanban.review_gate.scout_max_runtime_seconds."""
-    monkeypatch.setattr(kb, "_review_gate_config",
-                        lambda: {"verifier_profile": "verifier",
-                                 "scout_max_runtime_seconds": 600})
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "scout_max_runtime_seconds": 600},
+    )
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         scout_id = kb.ensure_scout_predecessor(conn, tid)
@@ -1065,11 +1338,12 @@ def test_blocked_scout_escalation_names_the_gated_chain(kanban_home):
     wedged read-only scout is actionable (unblock/complete) instead of silently
     deadlocking its chain forever — recompute_ready needs all parents done."""
     import json as _json
+
     with kb.connect() as conn:
         child = kb.create_task(conn, title="implement the slice", assignee="coder")
         scout_id = kb.ensure_scout_predecessor(conn, child)
         assert scout_id is not None
-        assert kb.get_task(conn, child).status == "todo"      # gated on the scout
+        assert kb.get_task(conn, child).status == "todo"  # gated on the scout
         # scout wedges → worker/operator blocks it (sticky → never auto-recovers)
         assert kb.block_task(conn, scout_id, reason="recon stuck") is True
         summary = kb.escalate_blocking_scouts_sweep(conn)
@@ -1103,24 +1377,36 @@ def test_transient_blocked_scout_not_escalated_by_blocking_sweep(kanban_home):
 @pytest.fixture
 def _heuristic_critical_cfg(monkeypatch):
     monkeypatch.setattr(
-        kb, "_review_gate_config",
-        lambda: {"verifier_profile": "verifier", "auto_tier": True,
-                 "auto_scout_on_critical": True,
-                 "code_roles": frozenset({"coder", "premium"})},
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "auto_scout_on_critical": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
     )
 
 
-def test_create_task_auto_scout_injects_for_heuristic_critical(kanban_home, _heuristic_critical_cfg):
+def test_create_task_auto_scout_injects_for_heuristic_critical(
+    kanban_home, _heuristic_critical_cfg
+):
     """P1-S3: a standalone heuristic-critical task created with auto_scout=True gets
     the SAME scout predecessor as the decompose/release paths (closes the create-path
     gap; _maybe_inject_critical_scout was never called from create_task)."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="run database migration and deploy",
-                             assignee="coder", auto_scout=True)
+        tid = kb.create_task(
+            conn,
+            title="run database migration and deploy",
+            assignee="coder",
+            auto_scout=True,
+        )
         assert kb.scout_predecessor_id(conn, tid) is not None
 
 
-def test_auto_scout_inherits_target_workspace(kanban_home, tmp_path, _heuristic_critical_cfg):
+def test_auto_scout_inherits_target_workspace(
+    kanban_home, tmp_path, _heuristic_critical_cfg
+):
     """A read-only scout must inspect the target repo, not an empty scratch dir."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1144,25 +1430,36 @@ def test_create_task_auto_scout_off_by_default(kanban_home, _heuristic_critical_
     """P1-S3: default (no auto_scout) is byte-identical — no scout. Decompose and
     internal callers are unaffected; only standalone entry points opt in."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="run database migration and deploy",
-                             assignee="coder")
+        tid = kb.create_task(
+            conn, title="run database migration and deploy", assignee="coder"
+        )
         assert kb.scout_predecessor_id(conn, tid) is None
 
 
-def test_create_task_auto_scout_defers_for_held_task(kanban_home, _heuristic_critical_cfg):
+def test_create_task_auto_scout_defers_for_held_task(
+    kanban_home, _heuristic_critical_cfg
+):
     """P1-S3: a held (blocked) standalone task does NOT get a scout even with
     auto_scout — held tasks defer their scout to release (no held-scout deadlock)."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="run database migration and deploy",
-                             assignee="coder", auto_scout=True, initial_status="blocked")
+        tid = kb.create_task(
+            conn,
+            title="run database migration and deploy",
+            assignee="coder",
+            auto_scout=True,
+            initial_status="blocked",
+        )
         assert kb.scout_predecessor_id(conn, tid) is None
 
 
-def test_create_task_auto_scout_noop_for_non_critical(kanban_home, _heuristic_critical_cfg):
+def test_create_task_auto_scout_noop_for_non_critical(
+    kanban_home, _heuristic_critical_cfg
+):
     """P1-S3: auto_scout only couples on resolved-critical — a benign task gets none."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="reword a button label",
-                             assignee="coder", auto_scout=True)
+        tid = kb.create_task(
+            conn, title="reword a button label", assignee="coder", auto_scout=True
+        )
         assert kb.scout_predecessor_id(conn, tid) is None
 
 
@@ -1179,7 +1476,7 @@ def test_scout_injection_is_deduped(kanban_home, auto_scout_on):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="risky", assignee="coder")
         kb.set_task_review_tier(conn, tid, "critical")
-        kb.set_task_review_tier(conn, tid, "critical")   # idempotent
+        kb.set_task_review_tier(conn, tid, "critical")  # idempotent
         assert len(_scout_parents(conn, tid)) == 1
         # clear then re-set: still one scout (dedup is structural, not event-based)
         kb.set_task_review_tier(conn, tid, None)
@@ -1194,24 +1491,32 @@ def test_scout_not_injected_for_running_task(kanban_home, auto_scout_on):
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
         assert kb.set_task_review_tier(conn, tid, "critical") is True
-        assert _scout_parents(conn, tid) == []            # too late, skipped
+        assert _scout_parents(conn, tid) == []  # too late, skipped
 
 
-def test_decompose_critical_child_injects_scout_when_flag_on(kanban_home, auto_scout_on):
+def test_decompose_critical_child_injects_scout_when_flag_on(
+    kanban_home, auto_scout_on
+):
     """Plan-ingest chokepoint: a decomposed child stamped critical gets a scout predecessor."""
     with kb.connect() as conn:
         root = kb.create_task(conn, title="epic", triage=True)
         kids = kb.decompose_triage_task(
-            conn, root, root_assignee="premium",
+            conn,
+            root,
+            root_assignee="premium",
             children=[
-                {"title": "critical slice", "assignee": "coder", "review_tier": "critical"},
+                {
+                    "title": "critical slice",
+                    "assignee": "coder",
+                    "review_tier": "critical",
+                },
                 {"title": "trivial slice", "assignee": "coder"},
             ],
         )
         assert kids is not None and len(kids) == 2
         crit, triv = kids
-        assert len(_scout_parents(conn, crit)) == 1        # critical child scouted
-        assert _scout_parents(conn, triv) == []            # trivial child not
+        assert len(_scout_parents(conn, crit)) == 1  # critical child scouted
+        assert _scout_parents(conn, triv) == []  # trivial child not
 
 
 def test_decompose_critical_child_no_scout_when_flag_off(kanban_home):
@@ -1219,8 +1524,12 @@ def test_decompose_critical_child_no_scout_when_flag_off(kanban_home):
     with kb.connect() as conn:
         root = kb.create_task(conn, title="epic", triage=True)
         kids = kb.decompose_triage_task(
-            conn, root, root_assignee="premium",
-            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            conn,
+            root,
+            root_assignee="premium",
+            children=[
+                {"title": "crit", "assignee": "coder", "review_tier": "critical"}
+            ],
         )
         assert kids is not None
         assert _scout_parents(conn, kids[0]) == []
@@ -1233,31 +1542,42 @@ def test_decompose_scheduled_held_child_defers_scout(kanban_home, auto_scout_on)
     with kb.connect() as conn:
         root = kb.create_task(conn, title="held epic", triage=True)
         kids = kb.decompose_triage_task(
-            conn, root, root_assignee="premium",
-            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            conn,
+            root,
+            root_assignee="premium",
+            children=[
+                {"title": "crit", "assignee": "coder", "review_tier": "critical"}
+            ],
             initial_child_status="scheduled",
         )
         assert kids is not None
-        assert _scout_parents(conn, kids[0]) == []            # deferred, not bypassed
+        assert _scout_parents(conn, kids[0]) == []  # deferred, not bypassed
         assert kb.get_task(conn, kids[0]).status == "scheduled"  # still held
 
 
-def test_release_freigabe_hold_recouples_scout_for_critical_child(kanban_home, auto_scout_on):
+def test_release_freigabe_hold_recouples_scout_for_critical_child(
+    kanban_home, auto_scout_on
+):
     """Closes the held-chain loop: the decompose-time guard DEFERS (no bypass), and
     release_freigabe_hold RE-COUPLES the scout post-approval — so a held critical
     chain released via the bare operator path still gets its scout, just on RELEASE."""
     with kb.connect() as conn:
         root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
         kids = kb.decompose_triage_task(
-            conn, root, root_assignee="premium",
-            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
-            initial_child_status="scheduled", expected_root_status="triage",
+            conn,
+            root,
+            root_assignee="premium",
+            children=[
+                {"title": "crit", "assignee": "coder", "review_tier": "critical"}
+            ],
+            initial_child_status="scheduled",
+            expected_root_status="triage",
         )
         assert kids is not None
-        assert _scout_parents(conn, kids[0]) == []            # deferred while held
+        assert _scout_parents(conn, kids[0]) == []  # deferred while held
         # operator GO via the bare release path (not flow-release)
         assert kb.release_freigabe_hold(conn, root) is True
-        assert len(_scout_parents(conn, kids[0])) == 1        # re-coupled on release
+        assert len(_scout_parents(conn, kids[0])) == 1  # re-coupled on release
         # idempotent: a second release does not spawn a second scout
         kb.release_freigabe_hold(conn, root)
         assert len(_scout_parents(conn, kids[0])) == 1
@@ -1268,6 +1588,7 @@ def test_release_freigabe_hold_recouples_scout_for_critical_child(kanban_home, a
 # the latest submitted_for_review event (powers the dashboard live-stage pill).
 # ---------------------------------------------------------------------------
 
+
 def test_batch_active_review_stages_latest_event_wins(kanban_home):
     """Returns the target_profile of the LATEST submitted_for_review event; tasks
     without such an event are omitted."""
@@ -1275,10 +1596,14 @@ def test_batch_active_review_stages_latest_event_wins(kanban_home):
         t1 = kb.create_task(conn, title="reviewing", assignee="coder")
         t2 = kb.create_task(conn, title="no review events", assignee="coder")
         with kb.write_txn(conn):
-            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "verifier"})
-            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "reviewer"})
+            kb._append_event(
+                conn, t1, "submitted_for_review", {"target_profile": "verifier"}
+            )
+            kb._append_event(
+                conn, t1, "submitted_for_review", {"target_profile": "reviewer"}
+            )
         m = kb.batch_active_review_stages(conn, [t1, t2])
-        assert m == {t1: "reviewer"}   # latest event wins; t2 (no event) omitted
+        assert m == {t1: "reviewer"}  # latest event wins; t2 (no event) omitted
         assert kb.batch_active_review_stages(conn, []) == {}
 
 
@@ -1307,7 +1632,9 @@ def test_auto_scout_body_inherits_target_scope(kanban_home):
     scope_contract/allowed paths) — not a generic recon instruction."""
     with kb.connect() as conn:
         tid = kb.create_task(
-            conn, title="redaction slice", assignee="coder",
+            conn,
+            title="redaction slice",
+            assignee="coder",
             body=_TARGET_SCOPED_BODY,
         )
         scout_id = kb.ensure_scout_predecessor(conn, tid)
@@ -1323,7 +1650,6 @@ def test_auto_scout_body_inherits_target_scope(kanban_home):
     assert "scope_contract:" in body
     # explicit allowed-path list pulled out of the body
     assert "/home/piet/.hermes/hermes-agent/gateway/run.py" in body
-
 
 
 def test_auto_scout_body_does_not_promote_forbidden_paths_to_allowed(kanban_home):
@@ -1342,16 +1668,23 @@ def test_auto_scout_body_does_not_promote_forbidden_paths_to_allowed(kanban_home
         "    - /home/piet/.hermes/config.yaml\n"
     )
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="forbidden path smoke", assignee="coder", body=body)
+        tid = kb.create_task(
+            conn, title="forbidden path smoke", assignee="coder", body=body
+        )
         scout_id = kb.ensure_scout_predecessor(conn, tid)
         scout_body = kb.get_task(conn, scout_id).body or ""
-    allowed_line = next(line for line in scout_body.splitlines() if line.startswith("Allowed paths"))
-    forbidden_line = next(line for line in scout_body.splitlines() if line.startswith("Forbidden paths"))
+    allowed_line = next(
+        line for line in scout_body.splitlines() if line.startswith("Allowed paths")
+    )
+    forbidden_line = next(
+        line for line in scout_body.splitlines() if line.startswith("Forbidden paths")
+    )
     assert "/safe/project/file.py" in allowed_line
     assert "/home/piet/.env" not in allowed_line
     assert "/home/piet/.hermes/config.yaml" not in allowed_line
     assert "/home/piet/.env" in forbidden_line
     assert "/home/piet/.hermes/config.yaml" in forbidden_line
+
 
 def test_auto_scout_body_warns_against_broadening(kanban_home):
     """The scout body must explicitly say the target body/operator directives are
@@ -1361,7 +1694,7 @@ def test_auto_scout_body_warns_against_broadening(kanban_home):
         scout_id = kb.ensure_scout_predecessor(conn, tid)
         body = kb.get_task(conn, scout_id).body or ""
     assert "Source of Truth" in body
-    assert "Recent work" in body          # names the thing NOT to broaden from
+    assert "Recent work" in body  # names the thing NOT to broaden from
     assert "enger statt breiter" in body  # err narrow, not broad
 
 
@@ -1371,6 +1704,7 @@ def test_scout_recon_body_handles_empty_target_body():
     scopeless). (A real coder task gets the Coder-Contract boilerplate body, so
     this path is exercised at the helper.)"""
     from types import SimpleNamespace
+
     fake = SimpleNamespace(id="t_empty", title="no-body target", body="")
     body = kb._scout_recon_body([fake])
     assert "t_empty" in body
