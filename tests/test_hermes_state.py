@@ -327,6 +327,17 @@ class TestSessionLifecycle:
                                model="xiaomi/mimo-v2.5-pro")
         assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
 
+    @pytest.mark.xfail(
+        reason="Ungelöster Semantik-Konflikt Fork vs. Upstream: Fork nutzt seit "
+        "cbd6ff2c1 (t_e4dd5a71) last-writer-wins in update_token_counts, um "
+        "falsche billing_provider-Stempel (claude-Sessions mit openai-codex/"
+        "kimi-coding) zu heilen; dieser Upstream-Test (3e99ec0ff) pinnt "
+        "first-writer-wins. Entscheidung offen: Kanban-Task "
+        "'billing_provider-Semantik' vom 2026-07-03. Bei Übernahme der "
+        "Upstream-Semantik muss der Fork-Bug an der Quelle gefixt und dieser "
+        "xfail entfernt werden.",
+        strict=True,
+    )
     def test_update_session_billing_route_overwrites_after_switch(self, db):
         """A mid-session provider switch must overwrite the billing route.
 
