@@ -1338,6 +1338,7 @@ def test_heuristic_critical_injects_scout_without_explicit_column(
         "_review_gate_config",
         lambda: {
             "verifier_profile": "verifier",
+            "code_roles": frozenset({"coder", "premium"}),
             "auto_tier": True,
             "auto_scout_on_critical": True,
         },
@@ -1349,6 +1350,31 @@ def test_heuristic_critical_injects_scout_without_explicit_column(
         assert kb.get_task(conn, tid).review_tier is None  # never stamped
         assert kb._maybe_inject_critical_scout(conn, tid) is not None
         assert kb.scout_predecessor_id(conn, tid) is not None
+
+
+def test_auto_scout_only_injects_for_code_roles(kanban_home, monkeypatch):
+    """Critical review/verdict-only tasks must not get a scout predecessor: scout
+    is coder relief, not a universal review tax."""
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "auto_scout_on_critical": True,
+        },
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="review database migration diff",
+            assignee="reviewer",
+            review_tier="critical",
+        )
+        assert kb._maybe_inject_critical_scout(conn, tid) is None
+        assert kb.scout_predecessor_id(conn, tid) is None
 
 
 def test_set_critical_injects_scout_predecessor_when_flag_on(
@@ -1858,6 +1884,12 @@ def test_auto_scout_body_warns_against_broadening(kanban_home):
     assert "Source of Truth" in body
     assert "Recent work" in body  # names the thing NOT to broaden from
     assert "enger statt breiter" in body  # err narrow, not broad
+    assert "CODER_HANDOFF" in body
+    assert "PATCH_TARGET" in body
+    assert "TEST_TARGET" in body
+    assert "AVOID" in body
+    assert "maximal 8 Dateien" in body
+    assert "maximal 12 konkrete file:line-Fakten" in body
 
 
 def test_scout_recon_body_handles_empty_target_body():

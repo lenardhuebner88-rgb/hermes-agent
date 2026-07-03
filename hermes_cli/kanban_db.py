@@ -25812,9 +25812,24 @@ def _scout_max_runtime_seconds(cfg: Optional[dict] = None) -> int:
 # dashboard flow-release scout injection so both stay in lockstep.
 
 _SCOUT_RECON_INTRO = (
-    "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und liefere "
-    "knappe Fund-Notizen (Dateien, Symbole, Risiken) für den nachfolgenden "
-    "Coder. Nichts editieren, committen oder deployen."
+    "Code-Recon-Vorlauf (read-only): entlaste den nachfolgenden Coder mit "
+    "einem engen Datei-/Zeilen-Handoff. Stoppe, sobald der nächste Patch- und "
+    "Test-Zielpunkt klar ist; breite Repo-Kartierung ist Token-Waste. Nichts "
+    "editieren, committen oder deployen."
+)
+
+_SCOUT_CODER_HANDOFF_CONTRACT = (
+    "SCOUT-BUDGET / CODER-HANDOFF (verpflichtend):\n"
+    "- Inspiziere maximal 8 Dateien, außer eine zusätzliche Datei ist für einen "
+    "Blocker zwingend.\n"
+    "- Melde maximal 12 konkrete file:line-Fakten.\n"
+    "- Ende mit genau diesem Block:\n"
+    "  CODER_HANDOFF:\n"
+    "  - PATCH_TARGET: erste Datei/Symbole, die der Coder ändern soll.\n"
+    "  - TEST_TARGET: engste Tests/Gates, die den Patch beweisen.\n"
+    "  - AVOID: Pfade/Ansätze, die Tokens verbrennen oder Arbeit doppeln.\n"
+    "- Wenn der Scope dafür zu breit ist: BLOCK mit der fehlenden Eingrenzung, "
+    "statt das Repo breit zu lesen."
 )
 
 _SCOUT_SOURCE_OF_TRUTH_WARNING = (
@@ -25926,7 +25941,14 @@ def _scout_recon_body(targets: "list[Optional[Task]]") -> str:
     raced) are skipped; an empty list falls back to intro + warning only.
     """
     real = [t for t in targets if t is not None]
-    lines = [_SCOUT_RECON_INTRO, "", _SCOUT_SOURCE_OF_TRUTH_WARNING, ""]
+    lines = [
+        _SCOUT_RECON_INTRO,
+        "",
+        _SCOUT_SOURCE_OF_TRUTH_WARNING,
+        "",
+        _SCOUT_CODER_HANDOFF_CONTRACT,
+        "",
+    ]
     if not real:
         return "\n".join(lines).rstrip() + "\n"
     body_cap = (
@@ -26026,6 +26048,12 @@ def _maybe_inject_critical_scout(
     """
     cfg = cfg if cfg is not None else _review_gate_config()
     if not cfg.get("auto_scout_on_critical", False):
+        return None
+    task = get_task(conn, task_id)
+    if task is None:
+        return None
+    assignee = (task.assignee or "").strip().lower()
+    if assignee not in (cfg.get("code_roles") or frozenset()):
         return None
     if _effective_review_tier(conn, task_id, cfg=cfg) != "critical":
         return None
