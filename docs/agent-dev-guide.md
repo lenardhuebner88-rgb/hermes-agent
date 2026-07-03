@@ -1069,8 +1069,10 @@ job B's prompt), `workdir` (run in a specific directory with its
 `AGENTS.md`/`CLAUDE.md` loaded), and multi-platform delivery.
 
 Hardening invariants:
-- **3-minute hard interrupt** on cron sessions — runaway agent loops
-  cannot monopolize the scheduler.
+- **10-minute inactivity timeout** on cron sessions (default; override via
+  `HERMES_CRON_TIMEOUT`, `0` = unlimited) — a session with no tool/API/stream
+  activity for that long is killed, but an actively working session can run
+  for hours.
 - Catchup window: half the job's period, clamped to 120s–2h.
 - Grace window: 120s for one-shot jobs whose fire time was missed.
 - File lock at `~/.hermes/cron/.tick.lock` prevents duplicate ticks
