@@ -16,6 +16,12 @@ export interface StrategistProposal {
   display_title?: string | null;
   created_by: string | null;
   created_at: number;
+  /** Unix-Epoch since when this root has been held (backend-computed; only
+   *  roots carry `freigabe`, stamped at ingest, so `created_at` IS the hold
+   *  start — no separate event needed). */
+  held_since: number;
+  /** Seconds held so far, computed server-side at response time. */
+  age_seconds: number;
   subtask_count: number;
   /** Ziel-Kennzahl — null when the strategist left it unannotated. */
   target_metric: string | null;
@@ -37,7 +43,22 @@ export interface StrategistProposalsResponse {
   count: number;
   /** The distilled Vision snapshot (H1); null until a snapshot is written. */
   metrics: Record<string, unknown> | null;
+  /** Longest-held proposal's age in seconds; null when the list is empty. */
+  oldest_age_seconds: number | null;
   checked_at: number;
+}
+
+/** Age (seconds) above which a held proposal's badge is flagged as stale. */
+export const STALE_HOLD_SECONDS = 48 * 3600;
+
+/** True once a held proposal has waited longer than STALE_HOLD_SECONDS. */
+export function isStaleHold(ageSeconds: number): boolean {
+  return ageSeconds > STALE_HOLD_SECONDS;
+}
+
+/** Oldest-first (longest held first) ordering for the triage list. */
+export function sortProposalsByAge(proposals: StrategistProposal[]): StrategistProposal[] {
+  return [...proposals].sort((a, b) => a.held_since - b.held_since);
 }
 
 export interface MetricRow {

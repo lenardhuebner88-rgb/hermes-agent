@@ -4911,10 +4911,14 @@ def get_strategist_proposals(request: Request, board: Optional[str] = Query(None
 
     Each proposal carries its Ziel-Kennzahl / ROI / Counter-Metrik (parsed from
     the strategist-stamped root body, ``None`` when absent) and the number of
-    held subtasks it would dispatch on approval. ``metrics`` is the distilled
-    Vision snapshot (H1, ``vision-metrics.json``) as triage context, or ``None``
-    when no snapshot has been written yet. A weak ETag lets the SPA's poll
-    revalidate to a 304 while nothing changed — consistent with the board tab.
+    held subtasks it would dispatch on approval. Each also carries ``held_since``
+    (the root's ``created_at``) and ``age_seconds`` (computed fresh per request,
+    excluded from the ETag so the poll's 304 revalidation still fires as time
+    passes); ``oldest_age_seconds`` is the max across all proposals, ``None`` when
+    the list is empty. ``metrics`` is the distilled Vision snapshot (H1,
+    ``vision-metrics.json``) as triage context, or ``None`` when no snapshot has
+    been written yet. A weak ETag lets the SPA's poll revalidate to a 304 while
+    nothing changed — consistent with the board tab.
     """
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -4931,7 +4935,15 @@ def get_strategist_proposals(request: Request, board: Optional[str] = Query(None
     etag = 'W/"' + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()[:32] + '"'
-    payload["checked_at"] = int(time.time())
+    # age_seconds/oldest_age_seconds grow every second even when nothing about
+    # the held proposals changed — added after the ETag hash (like checked_at)
+    # so the poll's 304 revalidation keeps working as real time moves on.
+    now = int(time.time())
+    ages = [max(0, now - p["held_since"]) for p in proposals]
+    for proposal, age in zip(proposals, ages):
+        proposal["age_seconds"] = age
+    payload["oldest_age_seconds"] = max(ages, default=None)
+    payload["checked_at"] = now
     if request.headers.get("if-none-match") == etag:
         return Response(
             status_code=http_status.HTTP_304_NOT_MODIFIED,

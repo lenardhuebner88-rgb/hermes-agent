@@ -12,6 +12,8 @@ const proposal = (over: Partial<StrategistProposal> = {}): StrategistProposal =>
   title: "Autonomie-Hebel: Heiler-Ursachen automatisch reparieren",
   created_by: "strategist-cron",
   created_at: 1781161012,
+  held_since: 1781161012,
+  age_seconds: 3600,
   subtask_count: 3,
   target_metric: "Autonomie-% 62 → 75",
   roi: "hoch",
@@ -111,6 +113,48 @@ describe("ProposalList", () => {
     // Operator can still release or veto.
     expect(html).toContain("Freigeben");
     expect(html).toContain("Verwerfen");
+  });
+
+  it("renders proposals oldest-held-first regardless of input order", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[
+          proposal({ id: "t_newer", title: "Newer lever", held_since: 1781161012, age_seconds: 3600 }),
+          proposal({ id: "t_older", title: "Older lever", held_since: 1781000000, age_seconds: 200000 }),
+        ]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html.indexOf("Older lever")).toBeLessThan(html.indexOf("Newer lever"));
+  });
+
+  it("highlights the age badge once held past the stale threshold (48h)", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[proposal({ id: "t_stale", age_seconds: 49 * 3600 })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html).toContain("text-amber-200");
+  });
+
+  it("does not highlight the age badge under the stale threshold", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[proposal({ id: "t_fresh", age_seconds: 3600 })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html).not.toContain("text-amber-200");
   });
 });
 

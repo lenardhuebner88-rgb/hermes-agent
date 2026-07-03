@@ -151,6 +151,8 @@ describe("partitionProposals", () => {
     title: `PlanSpec ${id}: x`,
     created_by,
     created_at: 1,
+    held_since: 1,
+    age_seconds: 0,
     subtask_count: 0,
     target_metric: null,
     roi: null,

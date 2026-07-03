@@ -18,6 +18,8 @@ import {
   partitionProposals,
   runSummaryText,
   sourceLabel,
+  sortProposalsByAge,
+  isStaleHold,
   type StrategistProposal,
   type StrategistProposalsResponse,
 } from "../lib/strategist";
@@ -54,6 +56,7 @@ const t = {
   groundingLabel: "Beleg anzeigen",
   unannotated: "ohne Annotation",
   subtasks: (n: number) => `${n} ${n === 1 ? "Teilaufgabe" : "Teilaufgaben"}`,
+  heldFor: (age: string) => `seit ${age}`,
   approve: "Freigeben → bauen",
   approveHint: "gibt die Kette frei (held → ready) — der Dispatcher übernimmt",
   veto: "Verwerfen",
@@ -339,9 +342,10 @@ export function ProposalList({
   variant?: "strategist" | "manual";
 }) {
   const isManual = variant === "manual";
+  const sorted = sortProposalsByAge(proposals);
   return (
     <ul className="space-y-1.5">
-      {proposals.map((p) => {
+      {sorted.map((p) => {
         const isPending = pending?.id === p.id ? pending : null;
         const annotated = p.target_metric || p.roi || p.counter_metric || p.grounding;
         return (
@@ -356,6 +360,15 @@ export function ProposalList({
                 {t.subtasks(p.subtask_count)}
               </span>
               <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(p.created_at)}</span>
+              <span
+                className={
+                  isStaleHold(p.age_seconds)
+                    ? "hc-mono shrink-0 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200"
+                    : "hc-mono shrink-0 text-[0.72rem] hc-dim"
+                }
+              >
+                {t.heldFor(fmtAge(p.held_since))}
+              </span>
             </div>
 
             {isManual ? null : (

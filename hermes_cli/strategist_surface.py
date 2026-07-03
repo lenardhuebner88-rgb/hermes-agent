@@ -352,6 +352,10 @@ def held_operator_proposals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "origin": origin,
                 "created_by": row["created_by"],
                 "created_at": row["created_at"],
+                # Only roots carry freigabe, stamped at ingest time (planspecs.py),
+                # so the root's created_at IS the moment the hold began — no
+                # separate event/column needed.
+                "held_since": row["created_at"],
                 "subtask_count": len(subtask_rows),
                 "target_metric": annotation["target_metric"],
                 "roi": annotation["roi"],

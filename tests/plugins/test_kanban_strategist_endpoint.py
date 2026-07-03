@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,66 @@ def test_list_emits_weak_etag_and_304_roundtrip(client):
     assert r1.headers.get("cache-control") == "private, no-cache"
     r2 = client.get(f"{PREFIX}/strategist/proposals", headers={"If-None-Match": etag})
     assert r2.status_code == 304
+
+
+def _set_created_at(task_id: str, epoch: int) -> None:
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (epoch, task_id))
+
+
+def test_list_reports_held_since_and_age_seconds(client, monkeypatch):
+    root_id, _ = _make_held_chain()
+    held_since = 1_700_000_000  # Unix-Epoch fixture, real row format (not ISO)
+    _set_created_at(root_id, held_since)
+    monkeypatch.setattr(time, "time", lambda: held_since + 3 * 86400)
+
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    p = data["proposals"][0]
+    assert p["held_since"] == held_since
+    assert p["age_seconds"] == 3 * 86400
+    assert data["oldest_age_seconds"] == 3 * 86400
+
+
+def test_oldest_age_seconds_is_max_across_held_proposals(client, monkeypatch):
+    root_a, _ = _make_held_chain()
+    root_b, _ = _make_held_chain()
+    now = 1_700_100_000
+    _set_created_at(root_a, now - 100)
+    _set_created_at(root_b, now - 5000)
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    data = r.json()
+    ages = {p["id"]: p["age_seconds"] for p in data["proposals"]}
+    assert ages[root_a] == 100
+    assert ages[root_b] == 5000
+    assert data["oldest_age_seconds"] == 5000
+
+
+def test_age_seconds_does_not_bust_the_poll_etag(client, monkeypatch):
+    """age_seconds/oldest_age_seconds are volatile (grow every second) and must
+    be excluded from the ETag hash exactly like checked_at — otherwise the SPA's
+    304 revalidation would never fire again once real time has moved on past
+    the held root's creation, defeating the whole point of the poll cache."""
+    root_id, _ = _make_held_chain()
+    held_since = 1_700_000_000
+    _set_created_at(root_id, held_since)
+
+    monkeypatch.setattr(time, "time", lambda: held_since + 10)
+    r1 = client.get(f"{PREFIX}/strategist/proposals")
+    etag1 = r1.headers.get("etag")
+    assert r1.json()["proposals"][0]["age_seconds"] == 10
+
+    monkeypatch.setattr(time, "time", lambda: held_since + 20)
+    r2 = client.get(f"{PREFIX}/strategist/proposals")
+    assert r2.headers.get("etag") == etag1
+    assert r2.json()["proposals"][0]["age_seconds"] == 20
+
+    r3 = client.get(f"{PREFIX}/strategist/proposals", headers={"If-None-Match": etag1})
+    assert r3.status_code == 304
 
 
 # ---------------------------------------------------------------------------
