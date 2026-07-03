@@ -54,6 +54,30 @@ def _seed_ledger(conn, error, *, outcome="crashed"):
     return task
 
 
+def _draft_with_grounding(grounding: str) -> dict[str, object]:
+    return {
+        "key": "DRAFT-STALE-CHECK",
+        "title": "Fix referenced red test",
+        "lane": "coder-claude",
+        "target_metric": "gate green",
+        "roi": "positive",
+        "counter_metric": "no regression",
+        "grounding": grounding,
+        "counter_risk": 0.2,
+        "gain_weight": 1.0,
+        "cost": 0.3,
+        "signal_strength": 5.0,
+    }
+
+
+def _write_latest_green_gate_log(board_home: Path, text: str) -> Path:
+    log_dir = board_home / ".hermes" / "logs" / "green-gate" / "20260703-052049"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "python.log"
+    log_path.write_text(text, encoding="utf-8")
+    return log_path
+
+
 # --------------------------------------------------------------------------- #
 # 1. Budget > 80 % → skip
 # --------------------------------------------------------------------------- #
@@ -166,6 +190,95 @@ def test_cap_limits_to_five(board_home, monkeypatch):
     assert len(result["ingested"]) == 5
     with kb.connect() as conn:
         assert len(strategist_surface.held_operator_proposals(conn)) == 5
+
+
+def test_stale_target_drops_draft_when_referenced_test_is_green(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/other/test_still_red.py::test_case - AssertionError\n",
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["ingested"] == []
+    assert result["stale_targets"][0]["key"] == "DRAFT-STALE-CHECK"
+    assert "stale_target" in result["stale_targets"][0]["reason"]
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_stale_target_allows_draft_when_referenced_test_is_still_red(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/tools/test_terminal_output_transform_hook.py::test_transform - AssertionError\n",
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_stale_target_allows_draft_without_test_reference(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(board_home, "no failures for referenced pytest files\n")
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("git log und grep belegen die Luecke")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+
+
+def test_stale_target_fail_open_when_gate_log_missing(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+
+
+def test_stale_target_is_recorded_in_run_history(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/other/test_still_red.py::test_case - AssertionError\n",
+    )
+    drafts_file = board_home / "drafts.json"
+    drafts_file.write_text(
+        json.dumps([_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")]),
+        encoding="utf-8",
+    )
+
+    result = strategist.run_propose(
+        SimpleNamespace(out_dir=str(board_home / "specs"), drafts_file=str(drafts_file), dry_run=False)
+    )
+
+    assert result["ingested"] == []
+    history_path = board_home / ".hermes" / "state" / "strategist" / "run-history.jsonl"
+    last_entry = json.loads(history_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last_entry["stale_target"] == 1
+    assert last_entry["stale_targets"][0]["key"] == "DRAFT-STALE-CHECK"
 
 
 # --------------------------------------------------------------------------- #
@@ -462,6 +575,21 @@ def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes 
     }
 
 
+def _task_body(task_id: str) -> str:
+    with kb.connect() as conn:
+        row = conn.execute("SELECT body FROM tasks WHERE id=?", (task_id,)).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _empty_git_log(monkeypatch):
+    monkeypatch.setattr(
+        strategist.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+
 def test_draft_without_grounding_is_blocked(board_home, monkeypatch):
     """(a) A strategist draft with NO grounding field is deterministically
     blocked from ingest — never reaches the board, surfaced as grounding_blocked."""
@@ -504,6 +632,79 @@ def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
     # and surfaced as a parsed field on the proposal surface
     assert len(proposals) == 1
     assert proposals[0]["grounding"] == evidence
+
+
+def test_overlap_coordination_session_is_visible_in_root_body(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    coord_dir = tmp_path / "coordination"
+    coord_dir.mkdir()
+    (coord_dir / "foreign.md").write_text(
+        "\n".join(
+            [
+                "---",
+                "agent: Codex",
+                "started: 2026-07-03T09:29:00+00:00",
+                "ended: null",
+                "task: concurrent cron fix",
+                "touching:",
+                "  - /worktree/hermes_cli/cron.py",
+                "---",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", coord_dir)
+    _empty_git_log(monkeypatch)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-COORD", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    body = _task_body(result["ingested"][0]["root_task_id"])
+    assert "OVERLAP:" in body
+    assert "hermes_cli/cron.py — coordination:Codex (concurrent cron fix)" in body
+
+
+def test_overlap_recent_main_commit_is_visible_in_root_body(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        assert "main" in cmd
+        assert "hermes_cli/cron.py" in cmd
+        return SimpleNamespace(returncode=0, stdout="e2bb467 fix cron race\n", stderr="")
+
+    monkeypatch.setattr(strategist.subprocess, "run", fake_run)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-MAIN", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    body = _task_body(result["ingested"][0]["root_task_id"])
+    assert "OVERLAP:" in body
+    assert "hermes_cli/cron.py — main:e2bb467 fix cron race" in body
+
+
+def test_overlap_absent_when_no_coordination_or_recent_main_hit(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", tmp_path)
+    _empty_git_log(monkeypatch)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-NONE", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    assert "OVERLAP:" not in _task_body(result["ingested"][0]["root_task_id"])
 
 
 def test_general_ingest_path_unaffected_by_grounding_gate(board_home, tmp_path):
