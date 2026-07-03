@@ -688,15 +688,6 @@ def build_root_body(spec: BindingPlanSpec) -> str:
             grounding=_meta_str(meta.get("grounding")),
         )
         lines.extend(["", annotation])
-        overlap = meta.get("overlap")
-        if isinstance(overlap, list) and overlap:
-            lines.extend(["", "OVERLAP:"])
-            for item in overlap:
-                if not isinstance(item, dict):
-                    continue
-                source = str(item.get("source") or "unknown")
-                file_ref = str(item.get("file") or "unknown")
-                lines.append(f"- {file_ref} — {source}")
     return "\n".join(lines)
 
 
