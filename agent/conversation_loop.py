@@ -180,6 +180,26 @@ def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str
     )
 
 
+def _billing_route_for_token_counts(agent: Any) -> tuple[Any, Any]:
+    """Return the stable session billing route for token-count persistence.
+
+    Fallback activation mutates ``agent.provider``/``agent.base_url`` so the
+    current request can run on the fallback transport.  Token-count persistence
+    is session attribution, though, and must not stamp a primary Claude session
+    as the fallback provider.  Explicit model switches update
+    ``_primary_runtime`` separately through ``update_session_billing_route``.
+    """
+    primary_runtime = getattr(agent, "_primary_runtime", None)
+    if isinstance(primary_runtime, dict):
+        provider = primary_runtime.get("provider") or getattr(agent, "provider", None)
+        base_url = primary_runtime.get("base_url")
+        if base_url is None:
+            base_url = getattr(agent, "base_url", None)
+        return provider, base_url
+
+    return getattr(agent, "provider", None), getattr(agent, "base_url", None)
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.handle_function_call`` / ``run_agent._set_interrupt`` /
@@ -2187,6 +2207,7 @@ def run_conversation(
                                     _cost_delta = (_cost_delta or 0.0) + float(_moa_ref_cost)
                                 except (TypeError, ValueError):  # pragma: no cover
                                     pass
+                            billing_provider, billing_base_url = _billing_route_for_token_counts(agent)
                             agent._session_db.update_token_counts(
                                 agent.session_id,
                                 input_tokens=canonical_usage.input_tokens,
@@ -2197,8 +2218,8 @@ def run_conversation(
                                 estimated_cost_usd=_cost_delta,
                                 cost_status=cost_result.status,
                                 cost_source=cost_result.source,
-                                billing_provider=agent.provider,
-                                billing_base_url=agent.base_url,
+                                billing_provider=billing_provider,
+                                billing_base_url=billing_base_url,
                                 billing_mode="subscription_included"
                                 if cost_result.status == "included" else None,
                                 model=agent.model,
