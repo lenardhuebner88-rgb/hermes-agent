@@ -4665,6 +4665,23 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+                if task_status == "blocked":
+                    # Born-blocked tasks had no ``blocked`` event, so
+                    # ``_has_sticky_block`` (keyed on the latest blocked/
+                    # unblocked event) returned False and the promotion
+                    # sweep treated them as a transient circuit-breaker
+                    # block — auto-dispatching a card the caller deliberately
+                    # parked for operator review (t_50a1983f, 2026-07-03).
+                    # The only legitimate exit stays an explicit unblock.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {
+                            "reason": "born blocked (initial_status=blocked)",
+                            "source": "create_task",
+                        },
+                    )
                 row = conn.execute(
                     "SELECT id, body, assignee, workspace_kind, workspace_path, "
                     "tenant, created_by, kind FROM tasks WHERE id = ?",
