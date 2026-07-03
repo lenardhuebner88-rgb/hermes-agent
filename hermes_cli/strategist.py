@@ -47,8 +47,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -121,6 +122,16 @@ HARVEST_RECEIPT_MAX_CHARS = 12000
 HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
 AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 
+# FG-S2: fail-open overlap visibility for strategist-held PlanSpecs. These
+# constants are module-level so tests can monkeypatch temp coordination dirs and
+# fake repos without touching Piet's live Vault/git state.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_COORDINATION_DIR = Path("/home/piet/vault/_agents/_coordination")
+_GIT_LOG_SINCE = "24 hours ago"
+_CODE_FILE_REF_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|sh|yaml|yml|toml|json))"
+)
+
 # LEVER-OUTCOMES-S1: maturity window before a shipped lever is measured.
 # Metrics like green_gate_streak need multiple nightly runs to stabilise.
 MATURITY_DAYS: int = 3
@@ -161,6 +172,7 @@ class Lever:
     # it — :func:`grounding_gate` only enforces PRESENCE on the draft path. Empty
     # for the deterministic baseline levers (which never traverse that gate).
     grounding: str = ""
+    overlap: list[dict[str, str]] = field(default_factory=list)
     source: str = "baseline"
     # LEVER-OUTCOMES-S1: optional machine-readable metric key from Opus drafts.
     # When set, reflect() uses it for delta-verdict; otherwise attempts exact
@@ -790,6 +802,128 @@ def stale_target_gate(lever: Lever) -> GateResult:
     return GateResult(True, f"referenzierter Test weiterhin rot: {', '.join(failing_refs)}")
 
 
+def _grounding_code_refs(grounding: str) -> list[str]:
+    """Return unique code-file path references mentioned in strategist grounding."""
+    refs: list[str] = []
+    seen: set[str] = set()
+    for match in _CODE_FILE_REF_RE.finditer(grounding or ""):
+        ref = match.group("path").strip()
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
+
+
+def _extract_markdown_frontmatter(text: str) -> dict[str, Any]:
+    """Parse YAML frontmatter from a coordination note; return {} on mismatch."""
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(parts[1])
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _frontmatter_session_is_open(frontmatter: dict[str, Any]) -> bool:
+    ended = frontmatter.get("ended")
+    return ended is None or ended == ""
+
+
+def _path_mentions_ref(touched: object, ref: str) -> bool:
+    touched_text = str(touched or "").strip()
+    ref_text = str(ref or "").strip().lstrip("./")
+    if not touched_text or not ref_text:
+        return False
+    normalized_touched = touched_text.replace("\\", "/").rstrip("/")
+    normalized_ref = ref_text.replace("\\", "/").rstrip("/")
+    return normalized_touched == normalized_ref or normalized_touched.endswith("/" + normalized_ref)
+
+
+def _open_coordination_overlaps(ref: str) -> list[dict[str, str]]:
+    overlaps: list[dict[str, str]] = []
+    for note in sorted(_COORDINATION_DIR.glob("*.md")):
+        try:
+            frontmatter = _extract_markdown_frontmatter(
+                note.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            logger.warning("strategist overlap check skipped coordination note %s", note, exc_info=True)
+            continue
+        if not frontmatter or not _frontmatter_session_is_open(frontmatter):
+            continue
+        touching = frontmatter.get("touching") or []
+        if isinstance(touching, str):
+            touching = [touching]
+        if not isinstance(touching, list):
+            continue
+        if any(_path_mentions_ref(item, ref) for item in touching):
+            source = str(frontmatter.get("agent") or note.stem)
+            task = str(frontmatter.get("task") or "").strip()
+            overlaps.append(
+                {
+                    "source": f"coordination:{source}{f' ({task})' if task else ''}",
+                    "file": ref,
+                }
+            )
+    return overlaps
+
+
+def _recent_main_commit_overlaps(ref: str) -> list[dict[str, str]]:
+    cmd = [
+        "git",
+        "-C",
+        str(_REPO_ROOT),
+        "log",
+        "main",
+        f"--since={_GIT_LOG_SINCE}",
+        "--format=%h %s",
+        "--",
+        ref,
+    ]
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
+    except Exception:
+        logger.warning("strategist overlap git-log check failed-open for %s", ref, exc_info=True)
+        return []
+    if result.returncode != 0:
+        logger.warning(
+            "strategist overlap git-log check failed-open for %s: %s",
+            ref,
+            (result.stderr or "").strip(),
+        )
+        return []
+    return [
+        {"source": f"main:{line.strip()}", "file": ref}
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _overlap_findings_for_lever(lever: Lever) -> list[dict[str, str]]:
+    """Detect active foreign-work overlaps from grounding refs; fail-open."""
+    findings: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    try:
+        refs = _grounding_code_refs(lever.grounding)
+        for ref in refs:
+            for finding in [*_open_coordination_overlaps(ref), *_recent_main_commit_overlaps(ref)]:
+                key = (finding.get("source", ""), finding.get("file", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(finding)
+    except Exception:
+        logger.warning("strategist overlap check failed-open", exc_info=True)
+        return []
+    return findings
+
+
 # --------------------------------------------------------------------------- #
 # PlanSpec rendering + ingest
 # --------------------------------------------------------------------------- #
@@ -812,7 +946,7 @@ def lever_to_markdown(lever: Lever) -> str:
 
     build_id = f"{lever.key}-S1"
     review_id = f"{lever.key}-S2"
-    strategist_meta = {
+    strategist_meta: dict[str, Any] = {
         "target_metric": lever.target_metric,
         "roi": lever.roi,
         "counter_metric": lever.counter_metric,
@@ -822,6 +956,8 @@ def lever_to_markdown(lever: Lever) -> str:
     grounding = (lever.grounding or "").strip()
     if grounding:
         strategist_meta["grounding"] = grounding
+    if lever.overlap:
+        strategist_meta["overlap"] = lever.overlap
     frontmatter = {
         "status": "vorgeschlagen",
         "owner": "Strategist",
@@ -1065,6 +1201,9 @@ def propose(
     ingest_errors: list[dict[str, Any]] = []
     if do_ingest:
         for lever in ingestable:
+            overlap = _overlap_findings_for_lever(lever)
+            if overlap:
+                lever = replace(lever, overlap=overlap)
             spec_path = _write_spec(out_dir, lever)
             try:
                 result = planspecs.ingest_planspec(

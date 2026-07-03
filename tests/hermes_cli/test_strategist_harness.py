@@ -575,6 +575,21 @@ def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes 
     }
 
 
+def _task_body(task_id: str) -> str:
+    with kb.connect() as conn:
+        row = conn.execute("SELECT body FROM tasks WHERE id=?", (task_id,)).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _empty_git_log(monkeypatch):
+    monkeypatch.setattr(
+        strategist.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+
 def test_draft_without_grounding_is_blocked(board_home, monkeypatch):
     """(a) A strategist draft with NO grounding field is deterministically
     blocked from ingest — never reaches the board, surfaced as grounding_blocked."""
@@ -617,6 +632,79 @@ def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
     # and surfaced as a parsed field on the proposal surface
     assert len(proposals) == 1
     assert proposals[0]["grounding"] == evidence
+
+
+def test_overlap_coordination_session_is_visible_in_root_body(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    coord_dir = tmp_path / "coordination"
+    coord_dir.mkdir()
+    (coord_dir / "foreign.md").write_text(
+        "\n".join(
+            [
+                "---",
+                "agent: Codex",
+                "started: 2026-07-03T09:29:00+00:00",
+                "ended: null",
+                "task: concurrent cron fix",
+                "touching:",
+                "  - /worktree/hermes_cli/cron.py",
+                "---",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", coord_dir)
+    _empty_git_log(monkeypatch)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-COORD", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    body = _task_body(result["ingested"][0]["root_task_id"])
+    assert "OVERLAP:" in body
+    assert "hermes_cli/cron.py — coordination:Codex (concurrent cron fix)" in body
+
+
+def test_overlap_recent_main_commit_is_visible_in_root_body(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        assert "main" in cmd
+        assert "hermes_cli/cron.py" in cmd
+        return SimpleNamespace(returncode=0, stdout="e2bb467 fix cron race\n", stderr="")
+
+    monkeypatch.setattr(strategist.subprocess, "run", fake_run)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-MAIN", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    body = _task_body(result["ingested"][0]["root_task_id"])
+    assert "OVERLAP:" in body
+    assert "hermes_cli/cron.py — main:e2bb467 fix cron race" in body
+
+
+def test_overlap_absent_when_no_coordination_or_recent_main_hit(board_home, tmp_path, monkeypatch):
+    _patch_budget(monkeypatch, 20.0)
+    monkeypatch.setattr(strategist, "_COORDINATION_DIR", tmp_path)
+    _empty_git_log(monkeypatch)
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        drafts=[_grounded_draft(key="OVERLAP-NONE", grounding="Beleg: hermes_cli/cron.py ist betroffen")],
+    )
+
+    assert len(result["ingested"]) == 1
+    assert "OVERLAP:" not in _task_body(result["ingested"][0]["root_task_id"])
 
 
 def test_general_ingest_path_unaffected_by_grounding_gate(board_home, tmp_path):
