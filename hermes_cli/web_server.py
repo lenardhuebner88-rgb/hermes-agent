@@ -12814,8 +12814,14 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not bound_host:
         return None
 
+    # Mirror host_header_middleware's extra_allowed_hosts (operator-declared
+    # public_url / HERMES_DASHBOARD_ALLOWED_HOSTS) — otherwise a Tailscale
+    # Serve-fronted loopback bind rejects every terminal WS upgrade while
+    # same-bind HTTP requests pass (GHSA-ppp5-vxwm-4cf7 follow-up).
+    extra_allowed = getattr(app.state, "extra_allowed_hosts", frozenset())
+
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host):
+    if not _is_accepted_host(host_header, bound_host, extra_allowed):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -12832,7 +12838,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host):
+    if not _is_accepted_host(parsed.netloc, bound_host, extra_allowed):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 

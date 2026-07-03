@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { AgentTerminalCapabilityState, AgentTerminalOverviewResponse, AgentTerminalWindow } from "@/lib/api";
 
@@ -525,4 +525,70 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ja" }));
     await waitFor(() => expect(apiMock.sendAgentTerminalKeys).toHaveBeenCalledWith("hermes-agents", "hermes", "status\r"));
   });
+});
+
+describe("AgentTerminalsView attach reconnect on initial connect failure", () => {
+  it("schedules a 1s backoff retry with an honest status line, reconnects, and resets the attempt counter on success", async () => {
+    // Higher than the default vitest test timeout — several StatusPill
+    // instances render on desktop (header + identity bar + tools drawer),
+    // so this waits out real setTimeout(0) WS-open ticks across multiple
+    // waitFor polls rather than racing the default 5s budget.
+    // Tracks only WebSockets that actually get constructed — the failed initial
+    // attempt below rejects inside buildWsUrl(), BEFORE `new WebSocket(...)` runs.
+    const wsInstances: FakeWebSocket[] = [];
+    class TrackingWebSocket extends FakeWebSocket {
+      constructor() {
+        super();
+        wsInstances.push(this);
+      }
+    }
+    global.WebSocket = TrackingWebSocket as unknown as typeof WebSocket;
+
+    // Dynamic import (not a static top-level import): a static value import of
+    // "@/lib/api" here would run before the vi.mock factory's `apiMock` const is
+    // initialized (TDZ crash) — the module is already loaded via loadView() by
+    // the time a test body runs, so this just resolves the mocked binding.
+    const { buildWsUrl } = await import("@/lib/api");
+    const mockedBuildWsUrl = vi.mocked(buildWsUrl);
+    // Simulates a backend that's down/restarting when the attach flow starts —
+    // the promise that builds the WS URL (e.g. the ws-ticket fetch) rejects
+    // BEFORE any socket ever opens.
+    mockedBuildWsUrl.mockRejectedValueOnce(new Error("backend offline"));
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+
+    await renderView();
+    await screen.findByText("Sessions / Windows");
+
+    await waitFor(() => expect(mockedBuildWsUrl).toHaveBeenCalledTimes(1));
+    // RED without the fix: this error is set, but nothing ever retries — the
+    // terminal is stuck on "Attaching …" forever.
+    await screen.findByText(/backend offline/);
+
+    const firstSchedule = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 1000);
+    if (!firstSchedule) throw new Error("expected a 1000ms backoff timer to be scheduled after the initial connect failure");
+    const [firstRetryCallback] = firstSchedule;
+
+    // Simulate the 1s backoff elapsing (same effect as real time passing).
+    act(() => {
+      (firstRetryCallback as () => void)();
+    });
+
+    await waitFor(() => expect(mockedBuildWsUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(wsInstances.length).toBe(1));
+    // Desktop renders several StatusPill instances at once (header + identity
+    // bar + tools drawer) — getAllByText, not findByText (which requires a
+    // single match).
+    await waitFor(() => expect(screen.getAllByText("attached").length).toBeGreaterThan(0));
+    // Stale failure banner must clear once the retry lands.
+    expect(screen.queryByText(/backend offline/)).toBeNull();
+
+    // Attempt counter must reset on success: a later drop re-arms at 1s again,
+    // not 2s (which it would if the counter had kept climbing across retries).
+    const callsBeforeSecondDrop = setTimeoutSpy.mock.calls.length;
+    act(() => {
+      wsInstances[0].close();
+    });
+    const secondSchedule = setTimeoutSpy.mock.calls.slice(callsBeforeSecondDrop).find(([, delay]) => delay === 1000);
+    expect(secondSchedule).toBeTruthy();
+  }, 15000);
 });

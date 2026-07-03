@@ -825,6 +825,20 @@ export function AgentTerminalsView() {
     term.clear();
     term.writeln(`Attaching ${target.session}:${target.window} …`);
 
+    // Backoff-Reconnect, geteilt zwischen "Verbindung ging auf, dann weg" (onclose)
+    // und "Verbindung kam nie zustande" (initialer buildWsUrl/Connect-Fehler) — sonst
+    // bleibt der zweite Fall ein toter "Attaching …"-Screen ohne geplanten Retry.
+    const scheduleReconnect = (): number => {
+      const attempt = reconnectAttemptRef.current;
+      reconnectAttemptRef.current = attempt + 1;
+      const delayMs = reconnectDelayMs(attempt);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!disposed) setAttachNonce((n) => n + 1);
+      }, delayMs);
+      return delayMs;
+    };
+
     void buildWsUrl("/api/agent-terminals/attach", { session: target.session, window: target.window, client_id: "agent-terminals-ui" })
       .then((url) => {
         if (disposed) return;
@@ -839,6 +853,7 @@ export function AgentTerminalsView() {
           reconnectAttemptRef.current = 0;
           setSocketReady(true);
           setSocketConnecting(false);
+          setError(null);
           term.clear();
           try {
             fitRef.current?.fit();
@@ -866,17 +881,20 @@ export function AgentTerminalsView() {
           // Unerwarteter Abbruch (nicht Ziel-Wechsel/Unmount, sonst wäre disposed=true) —
           // mit Backoff automatisch neu verbinden, statt den User zum manuellen "Neu
           // verbinden" zu zwingen (mobile Tailscale-Reconnects sind häufig).
-          const attempt = reconnectAttemptRef.current;
-          reconnectAttemptRef.current = attempt + 1;
-          reconnectTimerRef.current = window.setTimeout(() => {
-            reconnectTimerRef.current = null;
-            if (!disposed) setAttachNonce((n) => n + 1);
-          }, reconnectDelayMs(attempt));
+          scheduleReconnect();
         };
       })
       .catch((err) => {
+        if (disposed) return;
+        setSocketReady(false);
         setSocketConnecting(false);
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        // Fehler VOR dem Socket-Open (z.B. getWsTicket()/Backend während Deploy-Restart
+        // weg) war bislang ein toter Endpunkt ohne Retry — derselbe Backoff wie onclose,
+        // sonst hängt das Terminal nach einem Backend-Neustart für immer auf "Attaching …".
+        const delayMs = scheduleReconnect();
+        term.writeln(`Verbindung fehlgeschlagen (${message}) — neuer Versuch in ${Math.round(delayMs / 1000)}s …`);
       });
 
     return () => {
