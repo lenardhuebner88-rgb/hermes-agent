@@ -21,6 +21,14 @@ from hermes_cli.colors import Colors, color
 # Deliberately specific — a bare "gateway ... restart" catch-all would block
 # legitimate prompts that merely mention an unrelated gateway (e.g. "summarize
 # the API gateway logs and report restart events").
+#
+# SYNC NOTE: this is the CANONICAL, more-hardened guard for the CLI
+# subcommand path (`hermes cron create`/`edit`). The agent's `cronjob` model
+# tool bypasses this module entirely (`cron.jobs.create_job` is called
+# directly), so it is guarded separately by `_GATEWAY_LIFECYCLE_PATTERN` in
+# `cron/lifecycle_guard.py`. When a new gateway-lifecycle command shape is
+# added here, mirror it there too or the agent-tool path stays exploitable
+# for that shape after this one is closed.
 _HERMES_GATEWAY_ACTION = (
     r"\bgateway\b"
     r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"

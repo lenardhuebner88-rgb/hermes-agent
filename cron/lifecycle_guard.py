@@ -45,6 +45,20 @@ class GatewayLifecycleBlocked(ValueError):
 # Shell-level command shapes that target the gateway lifecycle. Each branch
 # is anchored on a concrete command identifier so a match can only fire on
 # actual shell-command-shaped strings, not on prose.
+#
+# SYNC NOTE: this is the guard for the agent's ``cronjob`` tool path
+# (``cron.jobs.create_job``, called directly — no CLI involved). The CLI
+# subcommand path (``hermes cron create``/``edit``) is guarded separately by
+# ``_GATEWAY_LIFECYCLE_PATTERNS`` in ``hermes_cli/cron.py``, which is the
+# more-hardened, canonical source for these command shapes (it is reviewed
+# and extended first). When a new gateway-lifecycle command shape is added to
+# either guard, mirror it in the other or the two enforcement points diverge
+# and one path lets a foot-gun through that the other blocks.
+_HERMES_GATEWAY_ACTION = (
+    r"\bgateway\b"
+    r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"
+    r"\s+(?:restart|stop)\b"
+)
 _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
     # Branch A: `hermes gateway restart|stop` — the canonical foot-gun.
@@ -52,17 +66,27 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     # gateway is benign (a no-op or "already running" error), and a
     # legitimate cron job might start a sibling profile's gateway.
     r"(?:hermes\s+gateway\s+(?:restart|stop))"
-    # Branch B: launchctl ops on a hermes-gateway label. macOS launchd
+    # Branch B: `python -m hermes_cli[.main]` invoking a gateway
+    # restart/stop — the module-invocation equivalent of Branch A, for cron
+    # scripts/prompts that shell to a venv interpreter directly instead of
+    # the `hermes` console-script entrypoint. Same restart/stop-only scope
+    # as Branch A via `_HERMES_GATEWAY_ACTION`.
+    r"|(?:python(?:3(?:\.\d+)?)?\s+-m\s+hermes_cli(?:\.main)?\b(?=[^\n]*" + _HERMES_GATEWAY_ACTION + r"))"
+    # Branch C: `python .../hermes_cli/main.py` — the direct-script-path
+    # equivalent of Branch B (no `-m`, absolute/relative path to main.py).
+    r"|(?:python(?:3(?:\.\d+)?)?\s+\S*hermes_cli/main\.py\b(?=[^\n]*" + _HERMES_GATEWAY_ACTION + r"))"
+    # Branch D: launchctl ops on a hermes-gateway label. macOS launchd
     # labels look like `ai.hermes.gateway` / `hermes-gateway`. Requiring the
     # gateway identifier prevents blocking unrelated hermes services (e.g.
     # `launchctl unload ai.hermes.update-checker.plist`).
     r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart)\b[^\n]*\bhermes[.\-]?gateway)"
-    # Branch C: systemctl ops on a hermes-gateway unit.
+    # Branch E: systemctl ops on a hermes-gateway unit.
     r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^\n]*\bhermes[.\-]?gateway)"
-    # Branch D: pkill / kill targeting the hermes gateway process. Both
-    # token orders because real reproductions show both.
-    r"|(?:p?kill\b[^\n]*\bhermes\b[^\n]*\bgateway)"
-    r"|(?:p?kill\b[^\n]*\bgateway\b[^\n]*\bhermes)"
+    # Branch F: pkill/pgrep targeting any hermes process. Broader than the
+    # gateway-scoped branches above deliberately (mirrors the CLI guard): a
+    # `pkill -f hermes` kills the whole process tree including the gateway,
+    # with no gateway-specific token left to anchor on.
+    r"|(?:(?:p?kill|pgrep)\s+.*hermes)"
 )
 
 

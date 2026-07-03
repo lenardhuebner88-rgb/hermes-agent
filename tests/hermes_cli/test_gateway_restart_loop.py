@@ -683,6 +683,35 @@ class TestCreateJobBlocksLifecycleCommands:
         assert result.get("success") is False
         assert "#30719" in result.get("error", "")
 
+    @pytest.mark.parametrize("prompt", [
+        "python3 -m hermes_cli.main gateway restart",
+        "python3 /opt/hermes/hermes_cli/main.py gateway restart",
+        "pkill -f hermes",
+    ])
+    def test_create_job_blocks_cli_guard_parity_commands(self, prompt):
+        """Regression: the agent-tool path (cron.jobs.create_job) must block
+        the same command shapes the CLI guard (hermes_cli/cron.py) hardened
+        in e2bb46738 — `python -m hermes_cli(.main)`, a direct
+        `hermes_cli/main.py` invocation, and a bare `pkill -f hermes`. Before
+        this fix, cron.lifecycle_guard only recognized the `hermes gateway
+        restart|stop` shell-entrypoint form and let these through."""
+        from cron.jobs import create_job
+        from cron.lifecycle_guard import GatewayLifecycleBlocked
+        with pytest.raises(GatewayLifecycleBlocked):
+            create_job(prompt=prompt, schedule="30m")
+
+    @pytest.mark.parametrize("prompt", [
+        "hermes gateway start",
+        "systemctl restart hermes-meta.service",
+    ])
+    def test_create_job_allows_benign_lifecycle_lookalikes(self, prompt):
+        """Counter-proof for the parity fix above: the `start` exception and
+        the hermes-gateway service-name narrowing must still allow benign
+        commands through on the agent-tool path, same as the CLI guard."""
+        from cron.jobs import create_job
+        job = create_job(prompt=prompt, schedule="30m")
+        assert job["id"]
+
 
 # ---------------------------------------------------------------------------
 # Defense 3: auto-resume restart-loop breaker
