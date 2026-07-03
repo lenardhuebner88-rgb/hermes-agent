@@ -112,6 +112,7 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
+_PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = False
 
 
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
@@ -130,6 +131,20 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _ensure_push_hook_consumers_registered() -> None:
+    """Register bundled Web Push lifecycle observers, fully best-effort."""
+    global _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED
+    if _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED:
+        return
+    try:
+        from plugins.kanban.dashboard import plugin_api as _kanban_dashboard_plugin_api
+
+        _kanban_dashboard_plugin_api.register_push_lifecycle_hooks()
+        _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = True
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban push hook consumer bootstrap failed: %s", exc)
+
+
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
     """Fire a kanban lifecycle plugin hook, fully best-effort.
 
@@ -144,6 +159,7 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
     it through.
     """
     try:
+        _ensure_push_hook_consumers_registered()
         from hermes_cli.plugins import invoke_hook
         from hermes_cli.profiles import get_active_profile_name
         try:
@@ -1897,6 +1913,17 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
+);
+
+-- Browser Web Push subscriptions for the operator cockpit. Endpoint is the
+-- browser-push endpoint URL; keys are the PushSubscription ECDH/auth secrets.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint        TEXT PRIMARY KEY,
+    keys_p256dh     TEXT NOT NULL,
+    keys_auth       TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    last_success_at INTEGER,
+    fail_count      INTEGER NOT NULL DEFAULT 0
 );
 
 -- N-E3: durable epic — a goal that spans MULTIPLE task trees. Unlike a
@@ -25116,6 +25143,78 @@ def remove_notify_sub(
             (task_id, platform, chat_id, thread_id or ""),
         )
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Browser Web Push subscriptions (used by the control dashboard)
+# ---------------------------------------------------------------------------
+
+def add_push_subscription(
+    conn: sqlite3.Connection,
+    *,
+    endpoint: str,
+    keys_p256dh: str,
+    keys_auth: str,
+) -> None:
+    """Register or refresh a browser Web Push subscription."""
+    endpoint = (endpoint or "").strip()
+    keys_p256dh = (keys_p256dh or "").strip()
+    keys_auth = (keys_auth or "").strip()
+    if not endpoint or not keys_p256dh or not keys_auth:
+        raise ValueError("endpoint, keys_p256dh and keys_auth are required")
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            """
+            INSERT INTO push_subscriptions
+                (endpoint, keys_p256dh, keys_auth, created_at, fail_count)
+            VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT(endpoint) DO UPDATE SET
+                keys_p256dh = excluded.keys_p256dh,
+                keys_auth = excluded.keys_auth,
+                fail_count = 0
+            """,
+            (endpoint, keys_p256dh, keys_auth, now),
+        )
+
+
+def list_push_subscriptions(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT endpoint, keys_p256dh, keys_auth, created_at, "
+        "last_success_at, fail_count FROM push_subscriptions ORDER BY created_at ASC",
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_push_subscription(conn: sqlite3.Connection, *, endpoint: str) -> bool:
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        return False
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM push_subscriptions WHERE endpoint = ?",
+            (endpoint,),
+        )
+    return cur.rowcount > 0
+
+
+def record_push_success(conn: sqlite3.Connection, *, endpoint: str) -> None:
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE push_subscriptions "
+            "SET last_success_at = ?, fail_count = 0 WHERE endpoint = ?",
+            (now, endpoint),
+        )
+
+
+def record_push_failure(conn: sqlite3.Connection, *, endpoint: str) -> None:
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE push_subscriptions "
+            "SET fail_count = fail_count + 1 WHERE endpoint = ?",
+            (endpoint,),
+        )
 
 
 def unseen_events_for_sub(

@@ -74,6 +74,7 @@ export default defineConfig({
       manifest: false,
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
+        importScripts: ["hermes-push-sw.js"],
         navigateFallbackDenylist: [/^\/api\//, /^\/auth\//],
         runtimeCaching: [],
       },

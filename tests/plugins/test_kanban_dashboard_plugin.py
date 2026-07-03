@@ -116,6 +116,194 @@ def client(kanban_home, kanban_app):
     return TestClient(app)
 
 
+def _push_rows():
+    conn = kb.connect()
+    try:
+        return kb.list_push_subscriptions(conn)
+    finally:
+        conn.close()
+
+
+def _install_fake_webpush(monkeypatch, mod, calls, *, status_code=None):
+    class FakeWebPushException(Exception):
+        def __init__(self, message, response=None):
+            super().__init__(message)
+            self.response = response
+
+    class FakeResponse:
+        def __init__(self, status):
+            self.status_code = status
+
+    def fake_webpush(**kwargs):
+        calls.append(kwargs)
+        if status_code is not None:
+            raise FakeWebPushException("push failed", response=FakeResponse(status_code))
+        return None
+
+    monkeypatch.setattr(mod, "_load_pywebpush", lambda: (fake_webpush, FakeWebPushException))
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "test-private-key")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "test-public-key")
+    monkeypatch.setenv("VAPID_CLAIMS_SUB", "mailto:test@example.invalid")
+
+
+def _add_push_sub(endpoint="https://push.example/sub-1"):
+    conn = kb.connect()
+    try:
+        kb.add_push_subscription(
+            conn,
+            endpoint=endpoint,
+            keys_p256dh="p256dh-key",
+            keys_auth="auth-key",
+        )
+    finally:
+        conn.close()
+
+
+def test_push_subscribe_unsubscribe_routes_are_idempotent(kanban_home):
+    mod = _load_plugin_module_for_lanes_auth_smoke()
+    body = {
+        "endpoint": "https://push.example/sub-1",
+        "keys": {"p256dh": "p256dh-a", "auth": "auth-a"},
+    }
+    response = mod.subscribe_push(mod.PushSubscriptionBody(**body), board=None)
+
+    assert response == {"ok": True}
+    rows = _push_rows()
+    assert len(rows) == 1
+    assert rows[0]["endpoint"] == body["endpoint"]
+
+    body["keys"] = {"p256dh": "p256dh-b", "auth": "auth-b"}
+    response = mod.subscribe_push(mod.PushSubscriptionBody(**body), board=None)
+
+    assert response == {"ok": True}
+    rows = _push_rows()
+    assert len(rows) == 1
+    assert rows[0]["keys_p256dh"] == "p256dh-b"
+    assert rows[0]["fail_count"] == 0
+
+    with pytest.raises(Exception):
+        mod.PushSubscriptionBody(
+            endpoint="https://push.example/bad",
+            keys={"p256dh": "missing-auth"},
+        )
+    assert len(_push_rows()) == 1
+
+    response = mod.unsubscribe_push(
+        mod.PushUnsubscribeBody(endpoint="https://push.example/sub-1"),
+        board=None,
+    )
+
+    assert response["removed"] is True
+    assert _push_rows() == []
+
+
+def test_push_send_path_sends_once_and_deletes_expired_subscription(kanban_home, monkeypatch):
+    mod = _load_plugin_module_for_lanes_auth_smoke()
+    mod._PUSH_DISABLED_REASONS_LOGGED.clear()
+    _add_push_sub("https://push.example/sub-1")
+    calls = []
+    _install_fake_webpush(monkeypatch, mod, calls)
+
+    result = mod._send_web_push_payload(
+        board=None,
+        payload={
+            "title": "Entscheidung nötig",
+            "body": "operator approval",
+            "tag": "t",
+            "task_id": "t_push",
+            "url": "/control/flow?task=t_push",
+        },
+    )
+
+    assert result == {"enabled": True, "sent": 1, "removed": 0, "failed": 0}
+    assert len(calls) == 1
+    assert _push_rows()[0]["last_success_at"] is not None
+
+    calls.clear()
+    _install_fake_webpush(monkeypatch, mod, calls, status_code=410)
+    result = mod._send_web_push_payload(
+        board=None,
+        payload={
+            "title": "Entscheidung nötig",
+            "body": "operator approval",
+            "tag": "t",
+            "task_id": "t_push",
+            "url": "/control/flow?task=t_push",
+        },
+    )
+
+    assert result == {"enabled": True, "sent": 0, "removed": 1, "failed": 0}
+    assert len(calls) == 1
+    assert _push_rows() == []
+
+
+def test_push_missing_vapid_env_disables_without_crash(kanban_home, monkeypatch):
+    mod = _load_plugin_module_for_lanes_auth_smoke()
+    mod._PUSH_DISABLED_REASONS_LOGGED.clear()
+    _add_push_sub()
+    monkeypatch.delenv("VAPID_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("VAPID_CLAIMS_SUB", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_load_pywebpush",
+        lambda: pytest.fail("pywebpush must not load when VAPID env is missing"),
+    )
+
+    result = mod._send_web_push_payload(
+        board=None,
+        payload={
+            "title": "Entscheidung nötig",
+            "body": "operator approval",
+            "tag": "t",
+            "task_id": "t_push",
+            "url": "/control/flow?task=t_push",
+        },
+    )
+
+    assert result == {"enabled": False, "sent": 0, "removed": 0, "failed": 0}
+    assert len(_push_rows()) == 1
+
+
+def test_push_hook_filters_only_operator_blocks_and_chain_roots(kanban_home, monkeypatch):
+    mod = _load_plugin_module_for_lanes_auth_smoke()
+    mod._PUSH_DISABLED_REASONS_LOGGED.clear()
+    _add_push_sub()
+    calls = []
+    _install_fake_webpush(monkeypatch, mod, calls)
+    conn = kb.connect()
+    try:
+        worker = kb.create_task(conn, title="Worker node", assignee="worker")
+        root = kb.create_task(conn, title="Root sink", assignee="worker")
+        kb.link_tasks(conn, worker, root)
+    finally:
+        conn.close()
+
+    mod._handle_blocked_push(
+        task_id=worker,
+        board=None,
+        reason="dependency failed",
+    )
+    assert calls == []
+
+    mod._handle_blocked_push(
+        task_id=worker,
+        board=None,
+        reason="operator approval needed",
+    )
+    assert len(calls) == 1
+
+    calls.clear()
+    mod._handle_completed_push(task_id=worker, board=None, summary="worker done")
+    assert calls == []
+
+    mod._handle_completed_push(task_id=root, board=None, summary="chain done")
+    assert len(calls) == 1
+    payload = json.loads(calls[0]["data"])
+    assert payload["title"] == "Kette fertig"
+    assert payload["task_id"] == root
+
+
 def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
     from hermes_cli import planspecs
 

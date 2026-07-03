@@ -68,6 +68,11 @@ router = APIRouter()
 _SHORT_TEXT_MAX_LENGTH = 512
 _FREE_TEXT_MAX_LENGTH = 20_000
 _LIST_MAX_LENGTH = 1_000
+_PUSH_HOOKS_REGISTERED = False
+_PUSH_DISABLED_REASONS_LOGGED: set[str] = set()
+_PUSH_OPERATOR_EVENT_IDS: OrderedDict[int, None] = OrderedDict()
+_PUSH_OPERATOR_EVENT_IDS_LOCK = threading.Lock()
+_PUSH_OPERATOR_EVENT_IDS_MAX = 2_000
 
 ShortText = Annotated[str, Field(max_length=_SHORT_TEXT_MAX_LENGTH)]
 FreeText = Annotated[str, Field(max_length=_FREE_TEXT_MAX_LENGTH)]
@@ -250,6 +255,302 @@ def _conn(
         )
         time.sleep(_DASHBOARD_CORRUPT_OPEN_RETRY_DELAY_S)
         return kanban_db.connect(board=board, busy_timeout_ms=_DASHBOARD_BUSY_TIMEOUT_MS)
+
+
+# ---------------------------------------------------------------------------
+# Browser Web Push
+# ---------------------------------------------------------------------------
+
+class PushSubscriptionKeysBody(BaseModel):
+    p256dh: str = Field(min_length=1)
+    auth: str = Field(min_length=1)
+
+
+class PushSubscriptionBody(BaseModel):
+    endpoint: str = Field(min_length=1)
+    keys: PushSubscriptionKeysBody
+
+
+class PushUnsubscribeBody(BaseModel):
+    endpoint: str = Field(min_length=1)
+
+
+def _log_push_disabled_once(reason: str) -> None:
+    if reason in _PUSH_DISABLED_REASONS_LOGGED:
+        return
+    _PUSH_DISABLED_REASONS_LOGGED.add(reason)
+    log.info("kanban web push disabled: %s", reason)
+
+
+def _vapid_config() -> Optional[dict[str, Any]]:
+    private_key = (os.environ.get("VAPID_PRIVATE_KEY") or "").strip()
+    public_key = (os.environ.get("VAPID_PUBLIC_KEY") or "").strip()
+    claims_sub = (os.environ.get("VAPID_CLAIMS_SUB") or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("VAPID_PRIVATE_KEY", private_key),
+            ("VAPID_PUBLIC_KEY", public_key),
+            ("VAPID_CLAIMS_SUB", claims_sub),
+        )
+        if not value
+    ]
+    if missing:
+        _log_push_disabled_once("missing " + ", ".join(missing))
+        return None
+    return {
+        "private_key": private_key,
+        "public_key": public_key,
+        "claims": {"sub": claims_sub},
+    }
+
+
+def _load_pywebpush():
+    try:
+        from pywebpush import WebPushException, webpush
+    except Exception as exc:
+        _log_push_disabled_once(f"pywebpush unavailable: {type(exc).__name__}")
+        return None, None
+    return webpush, WebPushException
+
+
+def _push_url(task_id: str) -> str:
+    return f"/control/flow?task={quote(task_id)}"
+
+
+def _truncate_push_text(value: str, limit: int = 220) -> str:
+    clean = " ".join((value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
+def _push_payload(
+    *,
+    title: str,
+    body: str,
+    task_id: str,
+    tag: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "hermes-control-push-v1",
+        "title": title,
+        "body": _truncate_push_text(body),
+        "tag": tag,
+        "task_id": task_id,
+        "url": _push_url(task_id),
+    }
+
+
+def _webpush_status_code(exc: Exception) -> Optional[int]:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is None:
+        status_code = getattr(response, "status", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _send_web_push_payload(
+    *,
+    board: Optional[str],
+    payload: dict[str, Any],
+) -> dict[str, int | bool]:
+    vapid = _vapid_config()
+    if vapid is None:
+        return {"enabled": False, "sent": 0, "removed": 0, "failed": 0}
+    webpush_fn, webpush_exc = _load_pywebpush()
+    if webpush_fn is None:
+        return {"enabled": False, "sent": 0, "removed": 0, "failed": 0}
+
+    conn = _conn(board=board)
+    sent = 0
+    removed = 0
+    failed = 0
+    try:
+        subscriptions = kanban_db.list_push_subscriptions(conn)
+        for sub in subscriptions:
+            endpoint = str(sub.get("endpoint") or "")
+            try:
+                webpush_fn(
+                    subscription_info={
+                        "endpoint": endpoint,
+                        "keys": {
+                            "p256dh": str(sub.get("keys_p256dh") or ""),
+                            "auth": str(sub.get("keys_auth") or ""),
+                        },
+                    },
+                    data=json.dumps(payload, ensure_ascii=False),
+                    vapid_private_key=vapid["private_key"],
+                    vapid_claims=vapid["claims"],
+                    ttl=300,
+                )
+                kanban_db.record_push_success(conn, endpoint=endpoint)
+                sent += 1
+            except Exception as exc:
+                status_code = (
+                    _webpush_status_code(exc)
+                    if webpush_exc is not None and isinstance(exc, webpush_exc)
+                    else None
+                )
+                if status_code in {404, 410}:
+                    kanban_db.remove_push_subscription(conn, endpoint=endpoint)
+                    removed += 1
+                else:
+                    kanban_db.record_push_failure(conn, endpoint=endpoint)
+                    failed += 1
+                    log.debug(
+                        "kanban web push send failed for endpoint %s: %s",
+                        endpoint[:32],
+                        exc,
+                    )
+    finally:
+        conn.close()
+    return {"enabled": True, "sent": sent, "removed": removed, "failed": failed}
+
+
+def _task_title(conn: sqlite3.Connection, task_id: str) -> str:
+    task = kanban_db.get_task(conn, task_id)
+    return task.title if task is not None and task.title else task_id
+
+
+def _reason_needs_operator(reason: Optional[str]) -> bool:
+    normalized = (reason or "").casefold()
+    return "operator" in normalized or "freigabe" in normalized
+
+
+def _handle_blocked_push(
+    *,
+    task_id: str,
+    board: Optional[str] = None,
+    reason: Optional[str] = None,
+    **_: Any,
+) -> None:
+    if not _reason_needs_operator(reason):
+        return
+    conn = _conn(board=board)
+    try:
+        title = _task_title(conn, task_id)
+    finally:
+        conn.close()
+    body = f"{title}: {reason}" if reason else title
+    _send_web_push_payload(
+        board=board,
+        payload=_push_payload(
+            title="Entscheidung nötig",
+            body=body,
+            task_id=task_id,
+            tag=f"hermes-decision-{task_id}",
+        ),
+    )
+
+
+def _completed_task_is_chain_root(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+) -> bool:
+    if _resolve_chain_root(conn, task_id) != task_id:
+        return False
+    if not kanban_db.parent_ids(conn, task_id):
+        return False
+    if run_id is None:
+        return True
+    row = conn.execute(
+        "SELECT outcome FROM task_runs WHERE id = ?",
+        (int(run_id),),
+    ).fetchone()
+    return row is None or row["outcome"] == "completed"
+
+
+def _handle_completed_push(
+    *,
+    task_id: str,
+    board: Optional[str] = None,
+    run_id: Optional[int] = None,
+    summary: Optional[str] = None,
+    **_: Any,
+) -> None:
+    conn = _conn(board=board)
+    try:
+        if not _completed_task_is_chain_root(conn, task_id, run_id):
+            return
+        title = _task_title(conn, task_id)
+    finally:
+        conn.close()
+    body = summary or title
+    _send_web_push_payload(
+        board=board,
+        payload=_push_payload(
+            title="Kette fertig",
+            body=body,
+            task_id=task_id,
+            tag=f"hermes-chain-complete-{task_id}",
+        ),
+    )
+
+
+def register_push_lifecycle_hooks() -> None:
+    """Register the dashboard Web Push sender as a kanban hook consumer."""
+    global _PUSH_HOOKS_REGISTERED
+    if _PUSH_HOOKS_REGISTERED:
+        return
+    from hermes_cli.plugins import get_plugin_manager
+
+    hooks = get_plugin_manager()._hooks
+    for hook_name, callback in (
+        ("kanban_task_blocked", _handle_blocked_push),
+        ("kanban_task_completed", _handle_completed_push),
+    ):
+        callbacks = hooks.setdefault(hook_name, [])
+        if callback not in callbacks:
+            callbacks.append(callback)
+    _PUSH_HOOKS_REGISTERED = True
+
+
+def _claim_operator_escalation_push_event(event_id: int) -> bool:
+    if event_id <= 0:
+        return True
+    with _PUSH_OPERATOR_EVENT_IDS_LOCK:
+        if event_id in _PUSH_OPERATOR_EVENT_IDS:
+            return False
+        _PUSH_OPERATOR_EVENT_IDS[event_id] = None
+        while len(_PUSH_OPERATOR_EVENT_IDS) > _PUSH_OPERATOR_EVENT_IDS_MAX:
+            _PUSH_OPERATOR_EVENT_IDS.popitem(last=False)
+        return True
+
+
+def _handle_operator_escalation_event_for_push(
+    *,
+    event_id: int,
+    task_id: str,
+    board: Optional[str],
+    payload: Optional[dict[str, Any]],
+) -> None:
+    if not _claim_operator_escalation_push_event(int(event_id)):
+        return
+    conn = _conn(board=board)
+    try:
+        task_title = _task_title(conn, task_id)
+    finally:
+        conn.close()
+    data = payload or {}
+    detail = (
+        str(data.get("recommended_human_action") or "").strip()
+        or str(data.get("reason") or "").strip()
+        or task_title
+    )
+    _send_web_push_payload(
+        board=board,
+        payload=_push_payload(
+            title="Entscheidung nötig",
+            body=f"{task_title}: {detail}" if detail != task_title else task_title,
+            task_id=task_id,
+            tag=f"hermes-operator-escalation-{task_id}",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5675,6 +5976,54 @@ def get_config():
 
 
 # ---------------------------------------------------------------------------
+# Browser Web Push subscriptions
+# ---------------------------------------------------------------------------
+
+@router.get("/push/vapid-public-key")
+def get_push_vapid_public_key():
+    vapid = _vapid_config()
+    return {
+        "enabled": vapid is not None,
+        "public_key": vapid["public_key"] if vapid else None,
+    }
+
+
+@router.post("/push/subscribe")
+def subscribe_push(
+    payload: PushSubscriptionBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        kanban_db.add_push_subscription(
+            conn,
+            endpoint=payload.endpoint,
+            keys_p256dh=payload.keys.p256dh,
+            keys_auth=payload.keys.auth,
+        )
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.post("/push/unsubscribe")
+def unsubscribe_push(
+    payload: PushUnsubscribeBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        removed = kanban_db.remove_push_subscription(conn, endpoint=payload.endpoint)
+        return {"ok": True, "removed": removed}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Home-channel subscriptions (per-task, per-platform toggles)
 # ---------------------------------------------------------------------------
 #
@@ -7650,6 +7999,17 @@ async def stream_events(ws: WebSocket):
                         payload = json.loads(r["payload"]) if r["payload"] else None
                     except Exception:
                         payload = None
+                    if r["kind"] == kanban_db.OPERATOR_ESCALATION_EVENT:
+                        # operator_escalation is not a kanban lifecycle hook
+                        # today. Bridge only this one event kind from the
+                        # existing dashboard poll instead of widening the
+                        # WebSocket/event fan-out surface.
+                        _handle_operator_escalation_event_for_push(
+                            event_id=int(r["id"]),
+                            task_id=str(r["task_id"]),
+                            board=ws_board,
+                            payload=payload if isinstance(payload, dict) else None,
+                        )
                     out.append({
                         "id": r["id"],
                         "task_id": r["task_id"],

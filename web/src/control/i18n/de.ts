@@ -1,5 +1,14 @@
 export const de = {
   app: { name: "Hermes Control", operator: "pieter_pan" },
+  notifications: {
+    enable: "Browser-Benachrichtigungen an",
+    disable: "Browser-Benachrichtigungen aus",
+    unconfigured: "Web-Push ist nicht konfiguriert",
+    busy: "…",
+    statusOn: "an",
+    statusOff: "aus",
+    localTitle: "Rote Entscheidung wartet",
+  },
   staleBadge: {
     stale: (age: string) => `Daten von vor ${age}`,
     staleUnknown: "Daten nicht frisch",
