@@ -5657,6 +5657,67 @@ def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
     assert heiler.payload["class"] == kb.HEILER_CLASS_BAD_SPEC
 
 
+def test_silent_block_sweep_classifies_superseded_block_as_operator_intent(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose reason records a
+    deliberate operator supersede is not a product defect — it classifies
+    operator-intent, not the real-bug default (live: t_2491b29e, reason
+    'Superseded: operator requested direct Claude CLI review instead of
+    Kanban reviewer.')."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="superseded review", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t,
+            reason="Superseded: operator requested direct Claude CLI review "
+                   "instead of Kanban reviewer.",
+        )
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        esc = _escalation_event(conn, t)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert esc.payload["evidence"]["last_error"].startswith("Superseded:")
+    assert heiler.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
+
+
+def test_silent_block_sweep_completed_outcome_avoids_default_bucket(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block parked via a raw status
+    flip AFTER a green run (release-gate park: t_76401275/t_6931affd) has no
+    blocked run, so the escalation falls back to the completed run's summary
+    — and a passing run is not a product defect, so it must not land in the
+    real-bug default."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="release gate park", assignee="verifier")
+        kb.claim_task(conn, t)
+        with kb.write_txn(conn):
+            kb._end_run(
+                conn, t, outcome="completed", status="completed",
+                summary="release gate green after 0 fixer attempt(s)",
+            )
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        esc = _escalation_event(conn, t)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert esc.payload["evidence"]["trigger_outcome"] == "completed"
+    assert "release gate green" in esc.payload["evidence"]["last_error"]
+    assert heiler.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
+
+
 def test_silent_block_sweep_carves_out_strategist_meta_task(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
@@ -8931,14 +8992,15 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     silently lose the second cycle (escalation_count=1, coalesced_repeats=0)."""
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="loops", assignee="coder")
-        # NON-gave_up writer: a budget-runaway park writes a raw unclassified
-        # operator_escalation without going through the gave_up branch.
+        # NON-gave_up writer: a budget-runaway park writes a raw operator_escalation
+        # (HEILER-CLASSIFY-SIGNAL-GAP-S2: classifies capacity, not unclassified)
+        # without going through the gave_up branch.
         fresh = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
         assert kb._park_budget_runaway(conn, fresh, token_sum=999, cap=10, runs=3)
-        # re-dispatch, then trip the breaker with the SAME (unclassified) class
+        # re-dispatch, then trip the breaker with the SAME (capacity) class
         _redispatch(conn, tid)
         assert kb._record_task_failure(
-            conn, tid, "something entirely opaque happened", outcome="unknown",
+            conn, tid, "iteration budget exhausted", outcome="unknown",
             failure_limit=1, release_claim=True, end_run=True,
         )
         events = kb.list_events(conn, tid)
@@ -8956,7 +9018,7 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     assert row["kind"] == "operator_escalation"
     # 2 escalation cycles total: the budget-runaway park + the coalesced gave_up
     assert row["escalation_count"] == 2
-    assert row["escalation_classes"] == ["unclassified"]
+    assert row["escalation_classes"] == ["capacity"]
     # exactly one suppressed repeat, made explicit (was invisibly dropped before)
     assert row["coalesced_repeats"] == 1
 
@@ -13828,6 +13890,44 @@ def test_unclassified_class_registered_but_not_non_transient():
     assert kb.HEILER_CLASS_UNCLASSIFIED in kb.HEILER_CLASSES
     from hermes_cli import vision_metrics as vm
     assert kb.HEILER_CLASS_UNCLASSIFIED not in vm._NON_TRANSIENT_HEILER_CLASSES
+
+
+def test_operator_intent_class_registered_but_not_non_transient():
+    """A deliberate operator/hold state (supersede, green-run-yet-still-
+    blocked) is not a self-healing signal but also not a product defect —
+    like capacity, it is pure observability (HEILER-CLASSIFY-SIGNAL-GAP-S2)."""
+    assert kb.HEILER_CLASS_OPERATOR_INTENT == "operator-intent"
+    assert kb.HEILER_CLASS_OPERATOR_INTENT in kb.HEILER_CLASSES
+    from hermes_cli import vision_metrics as vm
+    assert kb.HEILER_CLASS_OPERATOR_INTENT not in vm._NON_TRANSIENT_HEILER_CLASSES
+
+
+def test_classify_nonspawnable_assignee_is_bad_spec():
+    """A ready-stage mis-assignment (outcome='nonspawnable_assignee') is a
+    structural config/spec gap, not the opaque default (live: t_23415f60,
+    assignee 'ui-verifier')."""
+    cls, ev = kb._classify_escalation_payload({
+        "why_now": "assignee 'ui-verifier' is neither a spawnable Hermes "
+                   "profile nor a known terminal lane — the task can never "
+                   "auto-dispatch and would rot in ready without this "
+                   "escalation",
+        "evidence": {"trigger_outcome": "nonspawnable_assignee",
+                     "assignee": "ui-verifier"},
+    })
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+    assert ev["signal_source"] == "outcome"
+
+
+def test_classify_input_token_runaway_is_capacity():
+    """A per-task input-token runaway park reuses the existing capacity class
+    (HEILER-CLASSIFY-SIGNAL-GAP-S2: no new class per anti-scope), not the
+    opaque default (live budget-runaway escalation why_now shape)."""
+    cls, _ = kb._classify_escalation_payload({
+        "why_now": "per-task input-token runaway: 2718064 cumulative input "
+                   "tokens across 4 run(s) exceeded the cap of 2000000",
+        "evidence": {},
+    })
+    assert cls == kb.HEILER_CLASS_CAPACITY
 
 
 def test_s4_classify_crashed_worker_is_transient():

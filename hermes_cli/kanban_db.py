@@ -3756,6 +3756,12 @@ HEILER_CLASS_UNCLASSIFIED = "unclassified"
 # (kein Token-Runaway): capacity intentionally has no _LEDGER_TEMPLATES entry and
 # is NOT in vision_metrics._NON_TRANSIENT_HEILER_CLASSES (pure observability).
 HEILER_CLASS_CAPACITY = "capacity"
+# HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose only signal is a
+# deliberate operator decision (supersede) or a run that actually SUCCEEDED
+# (green gate, task blocked by something outside the run) is not a product
+# defect either — same "pure observability, not a real problem" rationale as
+# capacity above, so also NOT in vision_metrics._NON_TRANSIENT_HEILER_CLASSES.
+HEILER_CLASS_OPERATOR_INTENT = "operator-intent"
 HEILER_CLASSES = (
     HEILER_CLASS_TRANSIENT,
     HEILER_CLASS_FLAKY,
@@ -3764,6 +3770,7 @@ HEILER_CLASSES = (
     HEILER_CLASS_CONFLICT,
     HEILER_CLASS_UNCLASSIFIED,
     HEILER_CLASS_CAPACITY,
+    HEILER_CLASS_OPERATOR_INTENT,
 )
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
@@ -15105,113 +15112,107 @@ _HEILER_CONFLICT_SIGNALS = (
     "unmerged path",
 )
 _HEILER_TEXT_SIGNALS = (
-    (
-        HEILER_CLASS_BAD_SPEC,
-        (
-            "unerfüllbar",
-            "unfulfillable",
-            "unsatisfiable",
-            "impossible acceptance",
-            "acceptance criteria cannot",
-            "bad spec",
-            "bad-spec",
-            "cannot be decomposed",
-            "no runnable verifier",
-            "no runnable reviewer",
-            # REASON-FIDELITY-S1: spec-gap park reasons — the true class of the
-            # dominant live silent-block real-bug cluster (the card has no actionable
-            # work, not a code defect). Specific enough to never catch a red gate.
-            "no actionable implementation spec",
-            "no implementation spec",
-            "missing task spec",
-            # HEILER-CLASSIFY-SIGNAL-GAP-S1: the dominant live "settled block"
-            # reasons that fell through to unclassified are placeholder / null-body
-            # spec gaps. These sit ahead of the deliberately-last broad git/branch
-            # transient catch-alls, so a spec gap that incidentally mentions a branch
-            # classifies bad-spec, not transient. Kept precise (no bare
-            # "placeholder" and no bare "no actionable") so a reviewer finding that
-            # merely MENTIONS placeholders or missing proof is not hijacked off
-            # real-bug (AC-2 over-mapping guard).
-            "no actionable review scope",
-            "no actionable implementation scope",
-            "no actionable task spec",
-            "no actionable task body",
-            "body is a placeholder",
-            "unblockable placeholder",
-            "task body is null",
-            "task body is empty",
-        ),
-    ),
-    (
-        HEILER_CLASS_FLAKY,
-        (
-            "flake",
-            "flaky",
-            "passed on retry",
-            "intermittent",
-            "non-deterministic",
-            "nondeterministic",
-        ),
-    ),
-    (
-        HEILER_CLASS_REAL_BUG,
-        (
-            "request_changes",
-            "requested changes",
-            "request changes",
-            # HEILER-CLASSIFY-SIGNAL-GAP-S1: a reviewer NEEDS_REVISION verdict is a
-            # reviewer finding (changes needed), the same defect signal as
-            # request_changes — a settled block carrying it must not default to
-            # unclassified.
-            "needs_revision",
-            "needs revision",
-            "reviewer finding",
-            "red gate",
-            "gate failed",
-            "gates failed",
-            "gate red",
-            "test failed",
-            "tests failed",
-            "assertionerror",
-            "assertion failed",
-            "lint error",
-            "tsc error",
-            "type error",
-            "build failed",
-        ),
-    ),
-    (
-        HEILER_CLASS_CAPACITY,
-        (
-            # HEILER-BUDGET-BOUNDED-EXTEND / OUTCOME-RECLASSIFY: budget exhaustion
-            # is capacity, not product defect. Placed after real-bug signals so a
-            # budget-exhausted run whose text carries a red gate remains triagierbar.
-            "iteration budget exhausted",
-        ),
-    ),
-    (
-        HEILER_CLASS_TRANSIENT,
-        (
-            "dirty",
-            "overlap",
-            "wrong branch",
-            "falscher branch",
-            "git lock",
-            "git-lock",
-            "index.lock",
-            "worktree",
-            "could not provision",
-            "provisioning",
-            "checkout",
-            "rate limit",
-            "rate_limited",
-            # REASON-FIDELITY-S1: harness-protocol faults are operational, not
-            # product defects. Budget exhaustion is capacity above, not transient.
-            "protocol violation",
-            "git",
-            "branch",
-        ),
-    ),
+    # HEILER-CLASSIFY-SIGNAL-GAP-S2: an explicit operator supersede is a
+    # deliberate decision, never a product defect — checked first (like the
+    # conflict markers above) since the phrase is specific and unambiguous.
+    (HEILER_CLASS_OPERATOR_INTENT, (
+        "superseded:",
+    )),
+    (HEILER_CLASS_BAD_SPEC, (
+        "unerfüllbar",
+        "unfulfillable",
+        "unsatisfiable",
+        "impossible acceptance",
+        "acceptance criteria cannot",
+        "bad spec",
+        "bad-spec",
+        "cannot be decomposed",
+        "no runnable verifier",
+        "no runnable reviewer",
+        # REASON-FIDELITY-S1: spec-gap park reasons — the true class of the
+        # dominant live silent-block real-bug cluster (the card has no actionable
+        # work, not a code defect). Specific enough to never catch a red gate.
+        "no actionable implementation spec",
+        "no implementation spec",
+        "missing task spec",
+        # HEILER-CLASSIFY-SIGNAL-GAP-S1: the dominant live "settled block"
+        # reasons that fell through to unclassified are placeholder / null-body
+        # spec gaps. These sit ahead of the deliberately-last broad git/branch
+        # transient catch-alls, so a spec gap that incidentally mentions a branch
+        # classifies bad-spec, not transient. Kept precise (no bare
+        # "placeholder" and no bare "no actionable") so a reviewer finding that
+        # merely MENTIONS placeholders or missing proof is not hijacked off
+        # real-bug (AC-2 over-mapping guard).
+        "no actionable review scope",
+        "no actionable implementation scope",
+        "no actionable task spec",
+        "no actionable task body",
+        "body is a placeholder",
+        "unblockable placeholder",
+        "task body is null",
+        "task body is empty",
+    )),
+    (HEILER_CLASS_FLAKY, (
+        "flake",
+        "flaky",
+        "passed on retry",
+        "intermittent",
+        "non-deterministic",
+        "nondeterministic",
+    )),
+    (HEILER_CLASS_REAL_BUG, (
+        "request_changes",
+        "requested changes",
+        "request changes",
+        # HEILER-CLASSIFY-SIGNAL-GAP-S1: a reviewer NEEDS_REVISION verdict is a
+        # reviewer finding (changes needed), the same defect signal as
+        # request_changes — a settled block carrying it must not default to
+        # unclassified.
+        "needs_revision",
+        "needs revision",
+        "reviewer finding",
+        "red gate",
+        "gate failed",
+        "gates failed",
+        "gate red",
+        "test failed",
+        "tests failed",
+        "assertionerror",
+        "assertion failed",
+        "lint error",
+        "tsc error",
+        "type error",
+        "build failed",
+    )),
+    (HEILER_CLASS_CAPACITY, (
+        # HEILER-BUDGET-BOUNDED-EXTEND / OUTCOME-RECLASSIFY: budget exhaustion
+        # is capacity, not product defect. Placed after real-bug signals so a
+        # budget-exhausted run whose text carries a red gate remains triagierbar.
+        "iteration budget exhausted",
+        # HEILER-CLASSIFY-SIGNAL-GAP-S2: per-task input-token runaway (G1 park)
+        # is the same capacity signal, reusing this class (no new class).
+        "input-token runaway",
+    )),
+    (HEILER_CLASS_TRANSIENT, (
+        "dirty",
+        "overlap",
+        "wrong branch",
+        "falscher branch",
+        "git lock",
+        "git-lock",
+        "index.lock",
+        "worktree",
+        "could not provision",
+        "provisioning",
+        "checkout",
+        "rate limit",
+        "rate_limited",
+        # REASON-FIDELITY-S1: harness-protocol faults are operational, not
+        # product defects. Budget exhaustion is capacity above, not transient.
+        "protocol violation",
+        "git",
+        "branch",
+    )),
 )
 # Strong structural mappings, independent of free-text error wording.
 _HEILER_OUTCOME_CLASS = {
@@ -15224,6 +15225,10 @@ _HEILER_OUTCOME_CLASS = {
     # silent-block sweep) lands honestly instead of defaulting to real-bug.
     "timed_out": HEILER_CLASS_TRANSIENT,
     "reclaimed": HEILER_CLASS_TRANSIENT,
+    # HEILER-CLASSIFY-SIGNAL-GAP-S2: a mis-assigned (nonspawnable) assignee is
+    # a structural config/spec gap by construction, never free-text — mapped
+    # STRONG like the other terminal outcomes above.
+    "nonspawnable_assignee": HEILER_CLASS_BAD_SPEC,
 }
 _HEILER_STALL_CLASS = {
     "scheduled_overdue": HEILER_CLASS_TRANSIENT,
@@ -15252,6 +15257,12 @@ _HEILER_STALL_CLASS = {
 _HEILER_OUTCOME_FALLBACK_CLASS = {
     "crashed": HEILER_CLASS_TRANSIENT,
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
+    # HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose last ended run
+    # actually COMPLETED (green gate) carries no failure signal by
+    # definition — WEAK so a completed run whose reason text still reveals a
+    # genuine defect (e.g. a reviewer finding surfaced afterwards) stays
+    # real-bug via the text signals above.
+    "completed": HEILER_CLASS_OPERATOR_INTENT,
 }
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
