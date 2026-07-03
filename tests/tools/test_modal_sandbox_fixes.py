@@ -314,6 +314,26 @@ class TestHostPrefixList:
 class TestDockerHostBindApproval:
     """Docker host bind mounts disable the container approval fast-path."""
 
+    @pytest.fixture(autouse=True)
+    def _clean_approval_state(self):
+        """Isolate from the operator's real command_allowlist.
+
+        ``tools.approval`` loads ``command_allowlist`` from the live
+        ``~/.hermes/config.yaml`` into the module-level
+        ``_permanent_approved`` set at import time (before any per-test
+        HERMES_HOME redirection takes effect). On a machine whose real
+        config has permanently allowed a pattern this class exercises
+        (e.g. "delete in root path"), that ambient state falsely
+        auto-approves commands this class asserts must escalate.
+        Mirrors the ``_clean_state`` fixture in test_command_guards.py.
+        """
+        import tools.approval as approval_module
+        approval_module._session_approved.clear()
+        approval_module._permanent_approved.clear()
+        yield
+        approval_module._session_approved.clear()
+        approval_module._permanent_approved.clear()
+
     def test_docker_host_access_detection(self):
         """_docker_has_host_access flags bind-mounted host paths only."""
         # Isolated docker (no host binds) -> not host access.
