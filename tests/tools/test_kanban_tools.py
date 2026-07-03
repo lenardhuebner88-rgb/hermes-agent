@@ -1281,6 +1281,42 @@ def test_create_rejects_code_kind_for_verdict_only_role(worker_env, monkeypatch)
     assert "verdict" in err
 
 
+def test_create_kind_schema_enum_matches_valid_task_kinds():
+    """Regression (Codex cross-review, fix/merge-losses-20260703): the
+    kanban_create tool schema's ``kind`` enum previously hard-coded
+    ["code", "research", "review", "ops", "text"], silently omitting
+    "analysis" (the read-only counter-class to "code" the CLI's --kind
+    accepts, hermes_cli/kanban_decompose.py:_VALID_TASK_KINDS). Derive it
+    from the same source of truth so the two surfaces can't drift again."""
+    from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
+    from tools import kanban_tools as kt
+
+    assert set(kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["kind"]["enum"]) == set(
+        _VALID_TASK_KINDS
+    )
+    assert "analysis" in kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["kind"]["enum"]
+
+
+def test_create_accepts_analysis_kind(worker_env):
+    """End-to-end: kanban_create must accept kind='analysis', not just
+    advertise it in the schema."""
+    from tools import kanban_tools as kt
+
+    d = json.loads(kt._handle_create({
+        "title": "analysis task",
+        "assignee": "peer",
+        "kind": "analysis",
+    }))
+    assert d.get("ok") is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, d["task_id"])
+        assert task.kind == "analysis"
+    finally:
+        conn.close()
+
+
 def test_create_rejects_legacy_openclaw_assignee(worker_env, monkeypatch):
     """Native tool creation should not create legacy OpenClaw runtime cards."""
     from hermes_cli import profiles

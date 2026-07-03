@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import check_goal_mode_completion
+from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -1701,12 +1702,17 @@ KANBAN_CREATE_SCHEMA = {
             },
             "kind": {
                 "type": "string",
-                "enum": ["code", "research", "review", "ops", "text"],
+                # Derived from _VALID_TASK_KINDS (hermes_cli/kanban_decompose.py)
+                # instead of hard-coded, so this schema can't silently drift from
+                # the CLI's `--kind` choices (regression: this enum previously
+                # omitted 'analysis', the read-only counter-class to 'code').
+                "enum": sorted(_VALID_TASK_KINDS),
                 "description": (
                     "Coarse task lane. Use 'code' only for implementation "
                     "work assigned to code lanes such as coder, coder-claude, "
                     "or premium; reviewer/critic/research lanes are "
-                    "verdict/research-only."
+                    "verdict/research-only. 'analysis' is the read-only "
+                    "counter-class to 'code'."
                 ),
             },
             "idempotency_key": {
