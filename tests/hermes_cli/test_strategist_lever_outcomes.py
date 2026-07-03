@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
 from hermes_cli import strategist
 
 
@@ -129,6 +130,27 @@ def _shipped_record(lever_key, baseline, *, metric_key=None, shipped_at):
     }
 
 
+def _proposed_record(root_task_id, lever_key="TEST-LEVER"):
+    return {
+        "schema_version": 1,
+        "lever_key": lever_key,
+        "root_task_id": root_task_id,
+        "proposed_at": 1_700_000_000,
+        "baseline": {"autonomy_pct": 75.0},
+        "metric_key": "autonomy_pct",
+        "shipped_at": None,
+        "measured_at": None,
+        "current": None,
+        "delta": None,
+        "verdict": None,
+        "status": "proposed",
+    }
+
+
+def _canonical_outcomes_path(board_home):
+    return board_home / ".hermes" / "state" / "strategist" / "lever-outcomes.json"
+
+
 # --------------------------------------------------------------------------- #
 # 1. Ingest writes baseline record
 # --------------------------------------------------------------------------- #
@@ -170,6 +192,253 @@ def test_ingest_writes_baseline_record(board_home, monkeypatch, tmp_path):
     assert baseline["green_gate_streak.streak"] == pytest.approx(3.0)
     # non-numeric / nested dict values must NOT appear as raw values
     assert not any(isinstance(v, dict) for v in baseline.values())
+
+
+def test_complete_task_stamps_matching_lever_outcome_shipped(board_home):
+    """Completing a strategist root stamps the matching lever-outcomes record."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: ship stamp",
+            body="held",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kb.complete_task(conn, root, result="integrated", summary="done")
+        kb.complete_task(conn, root, result="integrated again", summary="done")
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_complete_task_without_lever_outcome_entry_is_noop(board_home):
+    """A completed root without a lever-outcomes entry must not crash."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    outcomes_path.write_text(
+        json.dumps([_proposed_record("other-root")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="ordinary root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        kb.complete_task(conn, root, result="done", summary="done")
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == "other-root"
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
+
+
+def test_complete_freigabe_hold_stamps_matching_lever_outcome_shipped(board_home):
+    """The done-elsewhere freigabe completion path also stamps shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder"}],
+            initial_child_status="scheduled",
+        )
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        assert kb.complete_freigabe_hold(
+            conn,
+            root,
+            author="pytest",
+            note="Superseded: operator reviewed directly.",
+        ) is True
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
+    """The integrated decompose-root finalizer stamps strategist shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: integrated root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=completed_child,
+            outcome={"action": "integrated", "branch": "kanban/test-root"},
+        )
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_auto_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
+    board_home, monkeypatch
+):
+    """Ship stamps are post-commit: a failed DB finalizer must not update JSON."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: failed integrated root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    def fail_end_run(*args, **kwargs):
+        raise RuntimeError("forced db failure after root update")
+
+    monkeypatch.setattr(kb, "_end_run", fail_end_run)
+    with kb.connect() as conn:
+        with pytest.raises(RuntimeError, match="forced db failure"):
+            kwt._auto_complete_decompose_root(
+                conn,
+                root_id=root,
+                completed_task_id=completed_child,
+                outcome={"action": "integrated", "branch": "kanban/test-root"},
+            )
+        row = conn.execute(
+            "SELECT status, completed_at FROM tasks WHERE id=?",
+            (root,),
+        ).fetchone()
+
+    assert row["status"] != "done"
+    assert row["completed_at"] is None
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
+
+
+def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
+    """The commitless decompose-root finalizer stamps strategist shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: commitless root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        child = kb.create_task(conn, title="scratch child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kwt._direct_complete_decompose_root(
+            conn,
+            root_id=root,
+            children=[(child, "done")],
+        )
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_direct_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
+    board_home, monkeypatch
+):
+    """Commitless finalizer also stamps only after the DB transaction commits."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: failed commitless root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        child = kb.create_task(conn, title="scratch child", assignee="coder")
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    def fail_end_run(*args, **kwargs):
+        raise RuntimeError("forced db failure after root update")
+
+    monkeypatch.setattr(kb, "_end_run", fail_end_run)
+    with kb.connect() as conn:
+        with pytest.raises(RuntimeError, match="forced db failure"):
+            kwt._direct_complete_decompose_root(
+                conn,
+                root_id=root,
+                children=[(child, "done")],
+            )
+        row = conn.execute(
+            "SELECT status, completed_at FROM tasks WHERE id=?",
+            (root,),
+        ).fetchone()
+
+    assert row["status"] != "done"
+    assert row["completed_at"] is None
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
 
 
 def test_ingest_skips_duplicate_for_already_ingested_lever(board_home, monkeypatch, tmp_path):
@@ -313,7 +582,7 @@ def test_reflect_does_not_measure_before_maturity(board_home, tmp_path):
 
 
 def test_reflect_measures_after_maturity_window(board_home, tmp_path):
-    """After MATURITY_DAYS, reflect() computes current, delta, status=measured."""
+    """After MATURITY_DAYS, reflect() computes metric current, delta, verdict."""
     now_ts = int(time.time())
     # shipped just past the maturity window
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
@@ -336,11 +605,9 @@ def test_reflect_measures_after_maturity_window(board_home, tmp_path):
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
     assert rec["measured_at"] is not None
-    # current is the full flattened snapshot — at minimum the tested key is present
-    assert isinstance(rec["current"], dict)
-    assert rec["current"]["autonomy_pct"] == pytest.approx(80.0)
-    # delta only contains keys that appear in BOTH current and baseline
-    assert rec["delta"]["autonomy_pct"] == pytest.approx(5.0)
+    assert rec["current"] == pytest.approx(80.0)
+    assert rec["delta"] == pytest.approx(5.0)
+    assert rec["verdict"] == "improved"
     assert result["note"]["outcomes"]["measured"] == 1
 
 
@@ -390,8 +657,8 @@ def test_verdict_worsened_for_escalations_per_week_up(board_home, tmp_path):
     assert rec["verdict"] == "worsened"
 
 
-def test_verdict_unchanged_for_zero_delta(board_home, tmp_path):
-    """Zero delta on a known metric → verdict=unchanged."""
+def test_verdict_neutral_for_under_five_percent_relative_delta(board_home, tmp_path):
+    """Known metric with <5% relative delta → verdict=neutral."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -405,14 +672,14 @@ def test_verdict_unchanged_for_zero_delta(board_home, tmp_path):
     with kb.connect() as conn:
         strategist.reflect(
             conn, since=0, notes_path=notes_path, outcomes_path=outcomes_path,
-            metrics={"generated_at": now_ts, "autonomy_pct": 80.0}, now=float(now_ts),
+            metrics={"generated_at": now_ts, "autonomy_pct": 83.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] == "unchanged"
+    assert rec["verdict"] == "neutral"
 
 
-def test_verdict_unknown_for_unrecognised_metric_key(board_home, tmp_path):
-    """An unrecognised metric_key → verdict=unknown."""
+def test_verdict_unmeasurable_for_unrecognised_metric_key(board_home, tmp_path):
+    """An unrecognised metric_key is stamped unmeasurable, not left pending."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -430,11 +697,15 @@ def test_verdict_unknown_for_unrecognised_metric_key(board_home, tmp_path):
             metrics={"generated_at": now_ts, "some_custom_metric": 7.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] == "unknown"
+    assert rec["status"] == "measured"
+    assert rec["measured_at"] is not None
+    assert rec["current"] == pytest.approx(7.0)
+    assert rec["delta"] == pytest.approx(2.0)
+    assert rec["verdict"] == "unmeasurable"
 
 
-def test_verdict_null_when_metric_key_is_none(board_home, tmp_path):
-    """No metric_key → verdict stays None (direction cannot be determined)."""
+def test_verdict_unmeasurable_when_metric_key_is_none(board_home, tmp_path):
+    """No metric_key is stamped unmeasurable, not left pending."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -451,7 +722,11 @@ def test_verdict_null_when_metric_key_is_none(board_home, tmp_path):
             metrics={"generated_at": now_ts, "autonomy_pct": 80.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] is None
+    assert rec["status"] == "measured"
+    assert rec["measured_at"] is not None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] == "unmeasurable"
 
 
 # --------------------------------------------------------------------------- #
@@ -654,7 +929,7 @@ def test_verdict_resolves_fully_qualified_flat_metric_key():
     assert strategist._compute_verdict(1.0, "green_gate_streak.streak") == "improved"
     assert strategist._compute_verdict(-2.0, "green_gate_streak.fail_nights") == "improved"
     assert strategist._compute_verdict(-0.01, "cost_per_task.recent_avg_cost_per_task") == "improved"
-    assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unknown"
+    assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unmeasurable"
 
 
 def test_flatten_unwraps_h1_wrapper_shape():
@@ -700,7 +975,8 @@ def test_measurement_with_h1_wrapper_yields_delta_and_verdict(board_home, tmp_pa
 
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
-    assert rec["delta"]["autonomy.autonomy_pct"] == pytest.approx(11.5)
+    assert rec["current"] == pytest.approx(81.5)
+    assert rec["delta"] == pytest.approx(11.5)
     assert rec["verdict"] == "improved"
 
 

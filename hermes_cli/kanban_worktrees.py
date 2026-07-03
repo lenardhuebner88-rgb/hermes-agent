@@ -1782,6 +1782,7 @@ def _auto_complete_decompose_root(
         "auto-completed decomposed root after all children completed and "
         f"`{outcome.get('branch', chain_branch(root_id))}` integrated"
     )
+    stamp_after_commit = False
     with kb.write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks "
@@ -1792,6 +1793,7 @@ def _auto_complete_decompose_root(
         )
         if cur.rowcount != 1:
             return
+        stamp_after_commit = True
         run_id = kb._end_run(
             conn,
             root_id,
@@ -1819,6 +1821,8 @@ def _auto_complete_decompose_root(
             {"result_len": len(summary), "summary": summary},
             run_id=run_id,
         )
+    if stamp_after_commit:
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
 
 
 def _direct_complete_decompose_root(
@@ -1847,6 +1851,7 @@ def _direct_complete_decompose_root(
         f"auto-completed decomposed root: all {len(children)} child task(s) "
         f"terminal-done, commitless chain (no `{branch}` branch to integrate)"
     )
+    stamp_after_commit = False
     with kb.write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks "
@@ -1857,6 +1862,7 @@ def _direct_complete_decompose_root(
         )
         if cur.rowcount != 1:
             return
+        stamp_after_commit = True
         run_id = kb._end_run(
             conn,
             root_id,
@@ -1886,6 +1892,8 @@ def _direct_complete_decompose_root(
             {"result_len": len(summary), "summary": summary},
             run_id=run_id,
         )
+    if stamp_after_commit:
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
     # Evidence comment is written OUTSIDE the txn above — add_comment opens its
     # own write_txn (nesting would fail).
     evidence = "\n".join(f"- `{cid}` — {status}" for cid, status in children)
