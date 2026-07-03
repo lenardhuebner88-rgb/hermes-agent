@@ -582,7 +582,7 @@ def test_reflect_does_not_measure_before_maturity(board_home, tmp_path):
 
 
 def test_reflect_measures_after_maturity_window(board_home, tmp_path):
-    """After MATURITY_DAYS, reflect() computes current, delta, status=measured."""
+    """After MATURITY_DAYS, reflect() computes metric current, delta, verdict."""
     now_ts = int(time.time())
     # shipped just past the maturity window
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
@@ -605,11 +605,9 @@ def test_reflect_measures_after_maturity_window(board_home, tmp_path):
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
     assert rec["measured_at"] is not None
-    # current is the full flattened snapshot — at minimum the tested key is present
-    assert isinstance(rec["current"], dict)
-    assert rec["current"]["autonomy_pct"] == pytest.approx(80.0)
-    # delta only contains keys that appear in BOTH current and baseline
-    assert rec["delta"]["autonomy_pct"] == pytest.approx(5.0)
+    assert rec["current"] == pytest.approx(80.0)
+    assert rec["delta"] == pytest.approx(5.0)
+    assert rec["verdict"] == "improved"
     assert result["note"]["outcomes"]["measured"] == 1
 
 
@@ -659,8 +657,8 @@ def test_verdict_worsened_for_escalations_per_week_up(board_home, tmp_path):
     assert rec["verdict"] == "worsened"
 
 
-def test_verdict_unchanged_for_zero_delta(board_home, tmp_path):
-    """Zero delta on a known metric → verdict=unchanged."""
+def test_verdict_neutral_for_under_five_percent_relative_delta(board_home, tmp_path):
+    """Known metric with <5% relative delta → verdict=neutral."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -674,14 +672,14 @@ def test_verdict_unchanged_for_zero_delta(board_home, tmp_path):
     with kb.connect() as conn:
         strategist.reflect(
             conn, since=0, notes_path=notes_path, outcomes_path=outcomes_path,
-            metrics={"generated_at": now_ts, "autonomy_pct": 80.0}, now=float(now_ts),
+            metrics={"generated_at": now_ts, "autonomy_pct": 83.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] == "unchanged"
+    assert rec["verdict"] == "neutral"
 
 
-def test_verdict_unknown_for_unrecognised_metric_key(board_home, tmp_path):
-    """An unrecognised metric_key → verdict=unknown."""
+def test_verdict_unmeasurable_for_unrecognised_metric_key(board_home, tmp_path):
+    """An unrecognised metric_key is stamped unmeasurable, not left pending."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -699,11 +697,15 @@ def test_verdict_unknown_for_unrecognised_metric_key(board_home, tmp_path):
             metrics={"generated_at": now_ts, "some_custom_metric": 7.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] == "unknown"
+    assert rec["status"] == "measured"
+    assert rec["measured_at"] is not None
+    assert rec["current"] == pytest.approx(7.0)
+    assert rec["delta"] == pytest.approx(2.0)
+    assert rec["verdict"] == "unmeasurable"
 
 
-def test_verdict_null_when_metric_key_is_none(board_home, tmp_path):
-    """No metric_key → verdict stays None (direction cannot be determined)."""
+def test_verdict_unmeasurable_when_metric_key_is_none(board_home, tmp_path):
+    """No metric_key is stamped unmeasurable, not left pending."""
     now_ts = int(time.time())
     shipped_at = now_ts - (strategist.MATURITY_DAYS * 86400) - 3600
     outcomes_path = tmp_path / "lever-outcomes.json"
@@ -720,7 +722,11 @@ def test_verdict_null_when_metric_key_is_none(board_home, tmp_path):
             metrics={"generated_at": now_ts, "autonomy_pct": 80.0}, now=float(now_ts),
         )
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
-    assert rec["verdict"] is None
+    assert rec["status"] == "measured"
+    assert rec["measured_at"] is not None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] == "unmeasurable"
 
 
 # --------------------------------------------------------------------------- #
@@ -923,7 +929,7 @@ def test_verdict_resolves_fully_qualified_flat_metric_key():
     assert strategist._compute_verdict(1.0, "green_gate_streak.streak") == "improved"
     assert strategist._compute_verdict(-2.0, "green_gate_streak.fail_nights") == "improved"
     assert strategist._compute_verdict(-0.01, "cost_per_task.recent_avg_cost_per_task") == "improved"
-    assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unknown"
+    assert strategist._compute_verdict(1.0, "voellig.unbekannter_pfad") == "unmeasurable"
 
 
 def test_flatten_unwraps_h1_wrapper_shape():
@@ -969,7 +975,8 @@ def test_measurement_with_h1_wrapper_yields_delta_and_verdict(board_home, tmp_pa
 
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
-    assert rec["delta"]["autonomy.autonomy_pct"] == pytest.approx(11.5)
+    assert rec["current"] == pytest.approx(81.5)
+    assert rec["delta"] == pytest.approx(11.5)
     assert rec["verdict"] == "improved"
 
 

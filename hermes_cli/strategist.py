@@ -124,7 +124,7 @@ AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 MATURITY_DAYS: int = 3
 
 # Direction map for the known core metrics: +1 means ↑ is better (improved),
-# -1 means ↓ is better (improved). Unknown keys yield verdict="unknown".
+# -1 means ↓ is better (improved). Unknown keys yield verdict="unmeasurable".
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
@@ -1399,11 +1399,12 @@ def stamp_lever_outcome_shipped(
         return False
 
 
-def _compute_verdict(delta_val: float, metric_key: str) -> str:
-    """Return improved|worsened|unchanged|unknown for *delta_val* on *metric_key*.
+def _compute_verdict(delta_val: float, metric_key: str, baseline_val: float | None = None) -> str:
+    """Return improved|neutral|worsened|unmeasurable for a metric delta.
 
     Uses :data:`_VERDICT_DIRECTION`; ``+1`` means ↑ is better, ``-1`` means
-    ↓ is better.  Unknown keys yield ``"unknown"`` regardless of direction.
+    ↓ is better.  Unknown keys yield ``"unmeasurable"`` regardless of direction.
+    Deltas smaller than 5% relative to the baseline are neutral.
     """
     direction = _VERDICT_DIRECTION.get(metric_key)
     if direction is None and "." in metric_key:
@@ -1411,9 +1412,15 @@ def _compute_verdict(delta_val: float, metric_key: str) -> str:
         # die Richtungs-Map kennt die Kurz-Keys — Basename-Fallback.
         direction = _VERDICT_DIRECTION.get(metric_key.rsplit(".", 1)[-1])
     if direction is None:
-        return "unknown"
-    if abs(delta_val) < 1e-9:
-        return "unchanged"
+        return "unmeasurable"
+    if baseline_val is not None:
+        if abs(float(baseline_val)) > 1e-9:
+            if abs(float(delta_val)) / abs(float(baseline_val)) < 0.05:
+                return "neutral"
+        elif abs(float(delta_val)) < 1e-9:
+            return "neutral"
+    elif abs(delta_val) < 1e-9:
+        return "neutral"
     return "improved" if direction * delta_val > 0 else "worsened"
 
 
@@ -1443,8 +1450,8 @@ def _outcomes_compact(records: list[dict[str, Any]], n: int = 10) -> list[dict[s
     out = []
     for r in sorted_recs[:n]:
         mk = r.get("metric_key")
-        delta = r.get("delta") or {}
-        delta_key = delta.get(mk) if mk and isinstance(delta, dict) else None
+        delta = r.get("delta")
+        delta_key = delta.get(mk) if mk and isinstance(delta, dict) else delta
         out.append({
             "lever_key": r.get("lever_key"),
             "status": r.get("status"),
@@ -1652,13 +1659,19 @@ def reflect(
                     if _current_metrics is not None:
                         flat_current = _flatten_numeric(_metrics_payload(_current_metrics))
                         flat_baseline = rec.get("baseline") or {}
-                        delta = {
-                            k: round(flat_current[k] - float(flat_baseline[k]), 9)
-                            for k in flat_current
-                            if k in flat_baseline
-                        }
-                        rec["current"] = flat_current
-                        rec["delta"] = delta
+                        mk = rec.get("metric_key")
+                        current_val: float | None = None
+                        baseline_val: float | None = None
+                        delta_val: float | None = None
+                        verdict = "unmeasurable"
+                        if mk and mk in flat_current and mk in flat_baseline:
+                            current_val = float(flat_current[mk])
+                            baseline_val = float(flat_baseline[mk])
+                            delta_val = round(current_val - baseline_val, 9)
+                            verdict = _compute_verdict(delta_val, mk, baseline_val)
+
+                        rec["current"] = current_val
+                        rec["delta"] = delta_val
                         rec["measured_at"] = now_ts
                         rec["status"] = "measured"
                         # Stale-metrics flag: generated_at older than 24 h.
@@ -1666,12 +1679,7 @@ def reflect(
                         gen_epoch = _epoch_from_generated_at(_current_metrics.get("generated_at"))
                         if gen_epoch is not None and now_ts - gen_epoch > 86400:
                             rec["stale_metrics"] = True
-                        # Verdict: only when metric_key is set and in the direction map.
-                        mk = rec.get("metric_key")
-                        if mk:
-                            delta_val = delta.get(mk)
-                            if delta_val is not None:
-                                rec["verdict"] = _compute_verdict(delta_val, mk)
+                        rec["verdict"] = verdict
                         outcomes_measured += 1
                         changed = True
 
