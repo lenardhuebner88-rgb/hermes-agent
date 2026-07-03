@@ -40,7 +40,8 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
   z. B. bei fremdem dirty `web/`-Stand.)
   (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
   Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
-- Python: `scripts/run_tests.sh` (mit pytest-timeout) + `ruff`
+- Python: `scripts/run_tests.sh` (Per-Datei-Timeout via `run_tests_parallel.py`,
+  `HERMES_TEST_FILE_TIMEOUT`/`--file-timeout`) + `ruff`
 - **Testumfang:** targeted by default — `scripts/run-affected.sh` beim
   Bauen/Verifizieren; vor Deploy/Push einmal Collection-Sweep (`pytest --co -q tests/`) + betroffene
   Tests; die **komplette** Suite läuft nur nachts (`green-gate-heartbeat`). Regel: AGENTS.md → *Test
