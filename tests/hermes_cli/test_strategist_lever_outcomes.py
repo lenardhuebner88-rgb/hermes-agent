@@ -1004,6 +1004,82 @@ def test_unparseable_generated_at_measures_without_flag(board_home, tmp_path):
     assert rec.get("stale_metrics") is not True
 
 
+def test_backfill_lever_outcomes_recalculates_existing_measured_rows(tmp_path: Path) -> None:
+    path = tmp_path / "lever-outcomes.json"
+    records = [
+        {
+            "schema_version": 1,
+            "lever_key": "GATE-STABILITY",
+            "root_task_id": "t_old_red",
+            "proposed_at": 1000,
+            "baseline": {"green_gate_streak.streak": 2.0},
+            "metric_key": "green_gate_streak.streak",
+            "shipped_at": 2000,
+            "measured_at": 3000,
+            "current": 1.0,
+            "delta": -1.0,
+            "verdict": "worsened",
+            "status": "measured",
+            "stale_metrics": True,
+        },
+        {
+            "schema_version": 1,
+            "lever_key": "OTHER",
+            "root_task_id": "t_other",
+            "proposed_at": 1001,
+            "baseline": {"green_gate_streak.streak": 5.0},
+            "metric_key": "green_gate_streak.streak",
+            "shipped_at": 2001,
+            "measured_at": 3001,
+            "current": 5.0,
+            "delta": 0.0,
+            "verdict": "neutral",
+            "status": "measured",
+        },
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    dry = strategist.backfill_lever_outcomes(
+        outcomes_path=path,
+        metrics={"generated_at": 4_000, "metrics": {"green_gate_streak": {"streak": 4}}},
+        now=5_000,
+        lever_keys=["GATE-STABILITY"],
+        apply=False,
+    )
+    assert dry["matched"] == 1
+    assert dry["would_update"] == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == records
+
+    applied = strategist.backfill_lever_outcomes(
+        outcomes_path=path,
+        metrics={"generated_at": 4_000, "metrics": {"green_gate_streak": {"streak": 4}}},
+        now=5_000,
+        lever_keys=["GATE-STABILITY"],
+        apply=True,
+    )
+    assert applied["updated"] == 1
+    updated_records = json.loads(path.read_text(encoding="utf-8"))
+    assert len(updated_records) == 2
+    rec = updated_records[0]
+    assert rec["current"] == 4.0
+    assert rec["delta"] == 2.0
+    assert rec["verdict"] == "improved"
+    assert rec["measured_at"] == 5_000
+    assert rec["status"] == "measured"
+    assert "stale_metrics" not in rec
+    assert updated_records[1] == records[1]
+
+    second = strategist.backfill_lever_outcomes(
+        outcomes_path=path,
+        metrics={"generated_at": 4_000, "metrics": {"green_gate_streak": {"streak": 4}}},
+        now=6_000,
+        lever_keys=["GATE-STABILITY"],
+        apply=True,
+    )
+    assert second["updated"] == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == updated_records
+
+
 # --------------------------------------------------------------------------- #
 # 8. Existing reflect() tests must still pass (non-regression)
 # --------------------------------------------------------------------------- #

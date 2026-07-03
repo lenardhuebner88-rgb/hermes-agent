@@ -1553,6 +1553,143 @@ def _autoresearch_vetoes(conn, since: int) -> list[dict[str, Any]]:
     return out
 
 
+def _recalculate_outcome_measurement(
+    rec: dict[str, Any],
+    *,
+    metrics: dict[str, Any],
+    now_ts: int,
+) -> tuple[dict[str, Any], bool]:
+    """Return an updated measured outcome record and whether relevant fields changed."""
+    flat_current = _flatten_numeric(_metrics_payload(metrics))
+    flat_baseline = rec.get("baseline") or {}
+    mk = rec.get("metric_key")
+    current_val: float | None = None
+    baseline_val: float | None = None
+    delta_val: float | None = None
+    verdict = "unmeasurable"
+    if mk and mk in flat_current and mk in flat_baseline:
+        current_val = float(flat_current[mk])
+        baseline_val = float(flat_baseline[mk])
+        delta_val = round(current_val - baseline_val, 9)
+        verdict = _compute_verdict(delta_val, mk, baseline_val)
+
+    desired = dict(rec)
+    desired["current"] = current_val
+    desired["delta"] = delta_val
+    desired["status"] = "measured"
+    desired["verdict"] = verdict
+    gen_epoch = _epoch_from_generated_at(metrics.get("generated_at"))
+    if gen_epoch is not None and now_ts - gen_epoch > 86400:
+        desired["stale_metrics"] = True
+    else:
+        desired.pop("stale_metrics", None)
+
+    relevant_fields = ("current", "delta", "status", "verdict", "stale_metrics")
+    changed = any(rec.get(field) != desired.get(field) for field in relevant_fields)
+    changed = changed or ("stale_metrics" in rec) != ("stale_metrics" in desired)
+    if changed or rec.get("measured_at") is None:
+        desired["measured_at"] = now_ts
+        changed = changed or rec.get("measured_at") != now_ts
+    else:
+        desired["measured_at"] = rec.get("measured_at")
+    return desired, changed
+
+
+def _outcome_matches_filter(
+    rec: dict[str, Any],
+    *,
+    lever_keys: Optional[set[str]] = None,
+    root_task_ids: Optional[set[str]] = None,
+    statuses: Optional[set[str]] = None,
+) -> bool:
+    if lever_keys is not None and str(rec.get("lever_key")) not in lever_keys:
+        return False
+    if root_task_ids is not None and str(rec.get("root_task_id")) not in root_task_ids:
+        return False
+    if statuses is not None and str(rec.get("status")) not in statuses:
+        return False
+    return True
+
+
+def backfill_lever_outcomes(
+    *,
+    outcomes_path: Path,
+    metrics: Optional[dict[str, Any]] = None,
+    now: Optional[float] = None,
+    apply: bool = False,
+    limit: Optional[int] = None,
+    lever_keys: Optional[list[str]] = None,
+    root_task_ids: Optional[list[str]] = None,
+    statuses: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Dry-run/apply recalculation for existing strategist outcome rows.
+
+    The path is intentionally explicit and bounded: it never appends rows, only
+    recalculates matching existing rows in place when ``apply=True``.
+    """
+    outcomes_path = Path(outcomes_path)
+    records = _read_lever_outcomes(outcomes_path)
+    if limit is not None and limit < 0:
+        raise ValueError("outcome backfill --limit must be non-negative")
+    current_metrics = metrics if metrics is not None else strategist_surface.read_vision_metrics()
+    if current_metrics is None:
+        raise ValueError("No vision metrics available for strategist outcome backfill")
+
+    now_ts = int(time.time() if now is None else now)
+    lever_filter = {str(v) for v in lever_keys} if lever_keys else None
+    root_filter = {str(v) for v in root_task_ids} if root_task_ids else None
+    status_filter = {str(v) for v in statuses} if statuses else {"measured", "shipped"}
+    remaining = limit if limit is not None else None
+    matched = 0
+    changed_count = 0
+    changed_examples: list[dict[str, Any]] = []
+    new_records: list[dict[str, Any]] = []
+
+    for rec in records:
+        if remaining == 0 or not _outcome_matches_filter(
+            rec,
+            lever_keys=lever_filter,
+            root_task_ids=root_filter,
+            statuses=status_filter,
+        ):
+            new_records.append(rec)
+            continue
+        matched += 1
+        if remaining is not None:
+            remaining -= 1
+        updated, changed = _recalculate_outcome_measurement(rec, metrics=current_metrics, now_ts=now_ts)
+        if changed:
+            changed_count += 1
+            if len(changed_examples) < 10:
+                changed_examples.append({
+                    "lever_key": rec.get("lever_key"),
+                    "root_task_id": rec.get("root_task_id"),
+                    "old_verdict": rec.get("verdict"),
+                    "new_verdict": updated.get("verdict"),
+                    "old_delta": rec.get("delta"),
+                    "new_delta": updated.get("delta"),
+                })
+        new_records.append(updated if apply else rec)
+
+    if apply and changed_count:
+        _write_lever_outcomes_atomic(outcomes_path, new_records)
+
+    return {
+        "mode": "outcomes-backfill",
+        "outcomes_path": str(outcomes_path),
+        "apply": apply,
+        "matched": matched,
+        "updated": changed_count if apply else 0,
+        "would_update": 0 if apply else changed_count,
+        "limit": limit,
+        "statuses": sorted(status_filter),
+        "lever_keys": sorted(lever_filter) if lever_filter else [],
+        "root_task_ids": sorted(root_filter) if root_filter else [],
+        "changed_examples": changed_examples,
+        "note": "dry-run only; rerun with --apply to rewrite matching rows" if not apply else "applied in-place; no rows appended",
+    }
+
+
 def reflect(
     conn,
     *,
@@ -2300,6 +2437,32 @@ def run_reflect(args) -> dict[str, Any]:
         )
     finally:
         conn.close()
+
+
+def run_outcomes_backfill(args) -> dict[str, Any]:
+    """CLI adapter for bounded, explicit strategist outcome recalculation."""
+    state_dir = default_state_dir()
+    result = backfill_lever_outcomes(
+        outcomes_path=state_dir / "lever-outcomes.json",
+        apply=bool(getattr(args, "apply", False)),
+        limit=getattr(args, "limit", None),
+        lever_keys=getattr(args, "lever_key", None),
+        root_task_ids=getattr(args, "root_task_id", None),
+        statuses=getattr(args, "status", None),
+    )
+    if bool(getattr(args, "apply", False)):
+        append_run_history(
+            state_dir,
+            {
+                "ts": int(time.time()),
+                "mode": "outcomes-backfill",
+                "apply": True,
+                "matched": int(result.get("matched", 0) or 0),
+                "updated": int(result.get("updated", 0) or 0),
+                "would_update": int(result.get("would_update", 0) or 0),
+            },
+        )
+    return result
 
 
 # Marker, die im Receipt-Text auf unerledigte Out-of-Scope-Arbeit hindeuten.

@@ -52,12 +52,22 @@ def build_vision_parser(subparsers) -> None:
     )
     strat.add_argument(
         "--mode",
-        choices=["propose", "reflect", "harvest", "digest", "harvest-watch"],
+        choices=["propose", "reflect", "outcomes-backfill", "harvest", "digest", "harvest-watch"],
         required=True,
-        help="propose, reflect, harvest, digest oder harvest-watch",
+        help="propose, reflect, outcomes-backfill, harvest, digest oder harvest-watch",
     )
     strat.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
     strat.add_argument("--json", action="store_true", help="Emit JSON output")
+    strat.add_argument("--apply", action="store_true", help="Apply outcomes-backfill writes; default is dry-run")
+    strat.add_argument("--limit", type=int, help="Maximum existing outcome rows to backfill")
+    strat.add_argument("--lever-key", action="append", help="Restrict outcomes-backfill to a lever key; repeatable")
+    strat.add_argument("--root-task-id", action="append", help="Restrict outcomes-backfill to a root task id; repeatable")
+    strat.add_argument(
+        "--status",
+        action="append",
+        choices=["shipped", "measured"],
+        help="Restrict outcomes-backfill by status; repeatable (default: shipped + measured)",
+    )
     strat.add_argument(
         "--budget-provider",
         default=strategist.BUDGET_PROVIDER,
@@ -316,6 +326,8 @@ def vision_command(args: argparse.Namespace) -> int:
                 result = strategist.run_digest(args)
             elif args.mode == "harvest-watch":
                 result = strategist.run_harvest_watch(args)
+            elif args.mode == "outcomes-backfill":
+                result = strategist.run_outcomes_backfill(args)
             else:
                 result = strategist.run_reflect(args)
         except (FileNotFoundError, ValueError) as exc:
