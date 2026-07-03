@@ -237,6 +237,8 @@ function reviewRow(over: Partial<ReviewValueRow> = {}): ReviewValueRow {
     findings_observations: null,
     input_tokens: null,
     tokens_per_finding: null,
+    read_items: null,
+    tokens_per_read_item: null,
     ...over,
   };
 }
@@ -733,5 +735,51 @@ describe("EffizienzSection (ST5)", () => {
     expect(html).toContain("5 Läufe");
     // critic (0 runs) is not rendered.
     expect(html).not.toContain("Critic");
+  });
+
+  it("renders the scout stage with read-evidence value, not findings/quote", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[]}
+        costs={[]}
+        reviewValue={[
+          // scout: read-only Recon — 40 gelesene Items (score), 120 K in →
+          // 3 K je Item; kein Verdikt, keine Funde, keine Quote.
+          reviewRow({
+            profile: "scout",
+            runs: 6,
+            input_tokens: 120_000,
+            read_items: 40,
+            tokens_per_read_item: 3_000,
+          }),
+        ]}
+        chainRate={null}
+        queueWaitSeconds={null}
+      />,
+    );
+    expect(html).toContain("Scout");
+    // read-evidence: 40 items as score, 3 K je Item, 6 Läufe.
+    expect(html).toContain("40");
+    expect(html).toContain("3 k je Item");
+    expect(html).toContain("6 Läufe");
+    // scout has no verdict path: no per-finding cost line (the "Gate-Quote" KPI
+    // above is unrelated, so we key on the unique "je Fund" verdict marker).
+    expect(html).not.toContain("je Fund");
+  });
+
+  it("shows an em-dash for a scout stage without read-metadata (Altbestand)", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[]}
+        costs={[]}
+        reviewValue={[reviewRow({ profile: "scout", runs: 3 })]}
+        chainRate={null}
+        queueWaitSeconds={null}
+      />,
+    );
+    expect(html).toContain("Scout");
+    expect(html).toContain("3 Läufe");
+    expect(html).toContain("—");
+    expect(html).not.toContain("je Item");
   });
 });

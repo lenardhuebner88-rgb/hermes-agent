@@ -43,7 +43,7 @@ export const taskStatusLabel: Record<string, string> = {
 export const profileLabel: Record<string, string> = {
   default: 'Standard', admin: 'Admin', coder: 'Coder', devpower: 'DevPower',
   dispatcher: 'Dispatcher', kanbanops: 'Kanban-Ops', planner: 'Planer',
-  research: 'Research', critic: 'Kritiker', verifier: 'Verifier',
+  research: 'Research', critic: 'Kritiker', verifier: 'Verifier', scout: 'Scout',
   // claude-cli-Lanes (Max-Abo) + Review-Lane
   'coder-claude': 'Coder (Claude)', premium: 'Premium', reviewer: 'Reviewer',
 };

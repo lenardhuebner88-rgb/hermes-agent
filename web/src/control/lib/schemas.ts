@@ -1451,6 +1451,12 @@ const ReviewValueRowSchema = z.object({
   findings_observations: nullableNumber,
   input_tokens: nullableNumber,
   tokens_per_finding: nullableNumber,
+  // Scout ist read-only Recon, keine Verdikt-Stufe: sein Wert sind gelesene
+  // Evidenz-Items (read_items) und die Kosten je Item (tokens_per_read_item).
+  // NULL für Verdict-Stufen ohne Read-Metadaten und für Altbestand-Backends,
+  // die das Feld gar nicht senden — nie ein Fehler.
+  read_items: nullableNumber,
+  tokens_per_read_item: nullableNumber,
 });
 export const RunsCostsResponseSchema = z.object({
   days: z.coerce.number().catch(7),
