@@ -129,6 +129,27 @@ def _shipped_record(lever_key, baseline, *, metric_key=None, shipped_at):
     }
 
 
+def _proposed_record(root_task_id, lever_key="TEST-LEVER"):
+    return {
+        "schema_version": 1,
+        "lever_key": lever_key,
+        "root_task_id": root_task_id,
+        "proposed_at": 1_700_000_000,
+        "baseline": {"autonomy_pct": 75.0},
+        "metric_key": "autonomy_pct",
+        "shipped_at": None,
+        "measured_at": None,
+        "current": None,
+        "delta": None,
+        "verdict": None,
+        "status": "proposed",
+    }
+
+
+def _canonical_outcomes_path(board_home):
+    return board_home / ".hermes" / "state" / "strategist" / "lever-outcomes.json"
+
+
 # --------------------------------------------------------------------------- #
 # 1. Ingest writes baseline record
 # --------------------------------------------------------------------------- #
@@ -170,6 +191,97 @@ def test_ingest_writes_baseline_record(board_home, monkeypatch, tmp_path):
     assert baseline["green_gate_streak.streak"] == pytest.approx(3.0)
     # non-numeric / nested dict values must NOT appear as raw values
     assert not any(isinstance(v, dict) for v in baseline.values())
+
+
+def test_complete_task_stamps_matching_lever_outcome_shipped(board_home):
+    """Completing a strategist root stamps the matching lever-outcomes record."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: ship stamp",
+            body="held",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kb.complete_task(conn, root, result="integrated", summary="done")
+        kb.complete_task(conn, root, result="integrated again", summary="done")
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
+
+
+def test_complete_task_without_lever_outcome_entry_is_noop(board_home):
+    """A completed root without a lever-outcomes entry must not crash."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    outcomes_path.write_text(
+        json.dumps([_proposed_record("other-root")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="ordinary root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        kb.complete_task(conn, root, result="done", summary="done")
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == "other-root"
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
+
+
+def test_complete_freigabe_hold_stamps_matching_lever_outcome_shipped(board_home):
+    """The done-elsewhere freigabe completion path also stamps shipments."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder"}],
+            initial_child_status="scheduled",
+        )
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        assert kb.complete_freigabe_hold(
+            conn,
+            root,
+            author="pytest",
+            note="Superseded: operator reviewed directly.",
+        ) is True
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["root_task_id"] == root
+    assert isinstance(rec["shipped_at"], int)
+    assert rec["status"] == "shipped"
+    assert rec["measured_at"] is None
+    assert rec["current"] is None
+    assert rec["delta"] is None
+    assert rec["verdict"] is None
 
 
 def test_ingest_skips_duplicate_for_already_ingested_lever(board_home, monkeypatch, tmp_path):

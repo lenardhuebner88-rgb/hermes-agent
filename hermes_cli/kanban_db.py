@@ -102,6 +102,21 @@ from hermes_cli import kanban_worker_runtime as _worker_runtime
 _log = logging.getLogger(__name__)
 
 
+def _stamp_strategist_lever_outcome_shipped(
+    task_id: str, *, shipped_at: Optional[int] = None
+) -> None:
+    """Fail-open bridge from Kanban root completion to strategist outcomes."""
+    try:
+        from hermes_cli.strategist import stamp_lever_outcome_shipped
+
+        stamp_lever_outcome_shipped(task_id, shipped_at=shipped_at)
+    except Exception:
+        _log.warning(
+            "strategist lever-outcomes ship stamp failed for %s",
+            task_id,
+            exc_info=True,
+        )
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -11262,6 +11277,7 @@ def complete_task(
     # just tracks "is there a current pathology the breaker should
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
+    _stamp_strategist_lever_outcome_shipped(task_id, shipped_at=now)
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
@@ -12570,6 +12586,7 @@ def complete_freigabe_hold(
     # pitfall) — call it outside, mirroring release_freigabe_hold's post-txn
     # child loop.
     add_comment(conn, task_id, author, note)
+    _stamp_strategist_lever_outcome_shipped(task_id)
     return True
 
 

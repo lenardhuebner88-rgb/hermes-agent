@@ -1345,6 +1345,60 @@ def _write_lever_outcomes_atomic(path: Path, records: list[dict[str, Any]]) -> N
     os.replace(tmp, path)
 
 
+def default_lever_outcomes_path() -> Path:
+    """Return the canonical strategist lever-outcomes path under HERMES_HOME."""
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home()) / "state" / "strategist" / "lever-outcomes.json"
+
+
+def stamp_lever_outcome_shipped(
+    root_task_id: str,
+    *,
+    shipped_at: int | None = None,
+    outcomes_path: Path | None = None,
+) -> bool:
+    """Stamp a lever-outcomes record as shipped for a completed PlanSpec root.
+
+    Fail-open for completion callers: missing file, missing record, malformed JSON,
+    or write errors are logged and reported as ``False`` rather than raised.
+    Idempotent: an already stamped record is left unchanged.
+    """
+    path = Path(outcomes_path) if outcomes_path is not None else default_lever_outcomes_path()
+    try:
+        if not path.exists():
+            logger.info("lever-outcomes ship stamp skipped; file missing: %s", path)
+            return False
+        records = _read_lever_outcomes(path)
+        if not records:
+            return False
+        now_ts = int(time.time() if shipped_at is None else shipped_at)
+        changed = False
+        matched = False
+        for rec in records:
+            if rec.get("root_task_id") != root_task_id:
+                continue
+            matched = True
+            if rec.get("shipped_at") is None:
+                rec["shipped_at"] = now_ts
+                changed = True
+            if rec.get("status") == "proposed":
+                rec["status"] = "shipped"
+                changed = True
+        if not matched or not changed:
+            return False
+        _write_lever_outcomes_atomic(path, records)
+        return True
+    except Exception:
+        logger.warning(
+            "lever-outcomes ship stamp failed for root %s at %s",
+            root_task_id,
+            path,
+            exc_info=True,
+        )
+        return False
+
+
 def _compute_verdict(delta_val: float, metric_key: str) -> str:
     """Return improved|worsened|unchanged|unknown for *delta_val* on *metric_key*.
 
