@@ -1654,6 +1654,11 @@ def backfill_lever_outcomes(
         ):
             new_records.append(rec)
             continue
+        if rec.get("status") == "shipped":
+            shipped_at = rec.get("shipped_at")
+            if shipped_at is None or now_ts < int(shipped_at) + MATURITY_DAYS * 86400:
+                new_records.append(rec)
+                continue
         matched += 1
         if remaining is not None:
             remaining -= 1
