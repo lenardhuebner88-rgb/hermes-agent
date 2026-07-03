@@ -11,6 +11,10 @@ type PageWatch = {
   assertClean: () => void;
 };
 
+type MockControlApiStats = {
+  agentTerminalWindowsRequests: number;
+};
+
 function watchPage(page: Page): PageWatch {
   const consoleErrors: string[] = [];
   const failedRequests: string[] = [];
@@ -25,6 +29,9 @@ function watchPage(page: Page): PageWatch {
     const errorText = request.failure()?.errorText ?? "";
     if (errorText === "net::ERR_ABORTED") return;
     failedRequests.push(`${request.method()} ${request.url()} ${errorText}`);
+  });
+  page.on("pageerror", (error) => {
+    consoleErrors.push(error.stack ?? error.message);
   });
   page.on("response", (response) => {
     if (response.status() >= 400) {
@@ -42,7 +49,8 @@ function watchPage(page: Page): PageWatch {
   };
 }
 
-async function mockControlApis(page: Page) {
+async function mockControlApis(page: Page): Promise<MockControlApiStats> {
+  const stats: MockControlApiStats = { agentTerminalWindowsRequests: 0 };
   await page.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     class MockKanbanEventsSocket extends EventTarget {
@@ -90,7 +98,7 @@ async function mockControlApis(page: Page) {
     window.WebSocket = new Proxy(NativeWebSocket, {
       construct(target, args) {
         const [url] = args;
-        if (String(url).includes("/api/plugins/kanban/events")) {
+        if (String(url).includes("/api/plugins/kanban/events") || String(url).includes("/api/agent-terminals/attach")) {
           return new MockKanbanEventsSocket(url as string | URL);
         }
         return Reflect.construct(target, args);
@@ -102,7 +110,55 @@ async function mockControlApis(page: Page) {
   });
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
-    const body = path === "/api/dashboard/plugins" ? [] : path === "/api/account-usage" ? {
+    if (path.startsWith("/api/agent-terminals")) {
+      if (path === "/api/agent-terminals/windows") {
+        stats.agentTerminalWindowsRequests += 1;
+      }
+      const agentWindow = {
+        session: "work",
+        window: "codex",
+        active: true,
+        pane_id: "%7",
+        pid: 4242,
+        command: "codex",
+        cwd: "/home/piet/project",
+        dead: false,
+        title: "codex",
+      };
+      const body = path === "/api/agent-terminals/capabilities" ? {
+        tmux_available: true,
+        hermes_tui_available: true,
+        hermes_binary: "hermes",
+        reason: null,
+        agents: { codex: { available: true, binary: "codex", reason: null } },
+        workdirs: [{ key: "home", label: "Zuhause (~)", path: "~" }],
+      } : path === "/api/agent-terminals/sessions" ? {
+        sessions: ["work"],
+      } : path === "/api/agent-terminals/windows" ? {
+        windows: [agentWindow],
+      } : path === "/api/agent-terminals/overview" ? {
+        now: Math.floor(Date.now() / 1000),
+        windows: [{ ...agentWindow, state: "laeuft", state_source: "heuristic", tail: "running", question: null, last_activity: Math.floor(Date.now() / 1000) }],
+      } : path === "/api/agent-terminals/capture" ? {
+        content: "running",
+      } : path === "/api/agent-terminals/show" ? {
+        window: agentWindow,
+      } : path === "/api/agent-terminals/attach-metadata" ? {
+        metadata: { target: "work:codex", attach_argv: ["tmux", "attach-session", "-t", "work:codex"] },
+      } : path === "/api/agent-terminals/handoff-draft" ? {
+        draft: { target: "work:codex", content: "# handoff" },
+      } : path === "/api/agent-terminals/terminate" ? {
+        ok: true,
+      } : { ok: true };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+      return;
+    }
+    const body = path === "/api/dashboard/plugins" || path === "/api/dashboard/plugins/" ? [] : path === "/api/skills" ? [
+      { name: "code-review", description: "Review", category: "dev", enabled: true },
+      { name: "firecrawl-search", description: "Search", category: "web", enabled: true },
+    ] : path === "/api/tools/toolsets" ? [
+      { name: "terminal", description: "Terminal", enabled: true, tools: ["terminal"] },
+    ] : path === "/api/account-usage" ? {
       cache_ttl_seconds: 60,
       providers: [
         {
@@ -276,6 +332,7 @@ async function mockControlApis(page: Page) {
     } : {};
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
+  return stats;
 }
 
 // probe = Hero-Eyebrow des Tabs; filter({ visible: true }) ist nötig, weil
@@ -464,6 +521,48 @@ test.describe("Control Smoke (live)", () => {
       await expect(page.getByText("cmdline")).toHaveCount(0);
       await expect(page.getByText(".worktrees/")).toHaveCount(0);
       await expect(page.getByText(/\b(stop|kill|update)\b/i)).toHaveCount(0);
+    });
+  }
+  for (const viewport of [
+    { name: "Desktop", size: { width: 1440, height: 1000 } },
+    { name: "Mobile", size: { width: 390, height: 844 } },
+  ]) {
+    test(`Agent-Terminals Terminate-Button bestätigt und refresht (${viewport.name})`, async ({ page }) => {
+      await page.setViewportSize(viewport.size);
+      const stats = await mockControlApis(page);
+      const watch = watchPage(page);
+
+      await page.goto("/control/agent-terminals");
+      await expect(page.getByText("Terminals").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+      await page.waitForTimeout(250);
+      if (await page.getByText("Ansicht abgestürzt").isVisible()) {
+        throw new Error(`Agent-Terminals view crashed: ${watch.consoleErrors.join("\n") || "no pageerror captured"}`);
+      }
+      if (viewport.name === "Mobile") {
+        await page.getByText("codex").filter({ visible: true }).first().click();
+      }
+      const terminate = viewport.name === "Desktop"
+        ? page.locator('button[title="Laufende Session beenden"]').first()
+        : page.getByRole("button", { name: "Session beenden" }).filter({ visible: true }).first();
+      await expect(terminate).toBeVisible({ timeout: 15_000 });
+      const windowsRequestsBeforeTerminate = stats.agentTerminalWindowsRequests;
+
+      page.once("dialog", async (dialog) => {
+        expect(dialog.message()).toContain("Session work:codex wirklich beenden?");
+        await dialog.accept();
+      });
+      const requestPromise = page.waitForRequest((request) =>
+        request.method() === "POST" && request.url().endsWith("/api/agent-terminals/terminate"),
+      );
+      await terminate.click();
+      await requestPromise;
+      await expect.poll(() => stats.agentTerminalWindowsRequests).toBeGreaterThan(windowsRequestsBeforeTerminate);
+      if (viewport.name === "Desktop") {
+        await expect(terminate).toBeVisible();
+      } else {
+        await expect(page.getByRole("button", { name: "codex" }).filter({ visible: true }).first()).toBeVisible();
+      }
+      watch.assertClean();
     });
   }
 

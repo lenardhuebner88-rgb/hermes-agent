@@ -49,6 +49,9 @@ class FakeAgentTerminalService:
     def kill_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
 
+    def terminate_live(self, session, window):
+        assert (session, window) == ("work", "hermes")
+
     def capture(self, session, window, *, start=-200):
         assert (session, window, start) == ("work", "hermes", -10)
         return "captured"
@@ -115,6 +118,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/respawn", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/rename", json={"session": "work", "window": "hermes", "name": "hermes-renamed"}, headers=headers).json()["window"]["window"] == "hermes-renamed"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
+    assert client.post("/api/agent-terminals/terminate", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
     assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
     assert client.post("/api/agent-terminals/handoff-draft", json={"session": "work", "window": "hermes", "start": -12}, headers=headers).json()["draft"]["content"] == "# handoff"

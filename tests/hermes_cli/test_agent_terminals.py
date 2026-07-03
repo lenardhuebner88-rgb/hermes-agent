@@ -204,6 +204,29 @@ def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(
         service.respawn_dead("work", "scratch-thing")
 
 
+def test_terminate_live_kills_only_dashboard_managed_live_windows(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    live = service.ensure("claude")
+    service.terminate_live(live.session, live.window)
+    assert not service.window_exists("work", "claude")
+
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-window", "-d", "-t", "work:", "-n", "codex", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    with pytest.raises(CapabilityError, match="marked dead"):
+        service.terminate_live("work", "codex")
+
+    service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sleep 60")
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service.terminate_live("work", "scratch-thing")
+
+
 def _patch_display_message(
     monkeypatch: pytest.MonkeyPatch, stdout: str
 ) -> list[tuple[str, ...]]:

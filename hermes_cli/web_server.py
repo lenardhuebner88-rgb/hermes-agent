@@ -13331,6 +13331,15 @@ async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str,
     return {"ok": True}
 
 
+@app.post("/api/agent-terminals/terminate")
+async def agent_terminal_terminate(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+    try:
+        _agent_terminal_service().terminate_live(req.session, req.window)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"ok": True}
+
+
 @app.post("/api/agent-terminals/capture")
 async def agent_terminal_capture(req: AgentTerminalCaptureRequest) -> Dict[str, object]:
     try:

@@ -15,6 +15,7 @@ const apiMock = {
   createAgentTerminalWindow: vi.fn(),
   respawnAgentTerminalWindow: vi.fn(),
   killDeadAgentTerminalWindow: vi.fn(),
+  terminateAgentTerminalWindow: vi.fn(),
   renameAgentTerminalWindow: vi.fn(),
   getAgentTerminalOverview: vi.fn(),
   sendAgentTerminalKeys: vi.fn(),
@@ -218,6 +219,7 @@ beforeEach(() => {
   apiMock.getAgentTerminalOverview.mockResolvedValue(overviewFixture);
   apiMock.sendAgentTerminalKeys.mockResolvedValue({ ok: true });
   apiMock.renameAgentTerminalWindow.mockResolvedValue({ window: windows[0] });
+  apiMock.terminateAgentTerminalWindow.mockResolvedValue({ ok: true });
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -320,6 +322,18 @@ describe("AgentTerminalsView desktop rendering", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
     await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
+  });
+
+  it("offers a confirmed terminate action for live windows and refreshes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Session beenden hermes-agents:codex" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith("Session hermes-agents:codex wirklich beenden? Laufende Agent-Arbeit wird beendet.");
+    await waitFor(() => expect(apiMock.terminateAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "codex"));
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows.mock.calls.length).toBeGreaterThanOrEqual(2));
+    confirmSpy.mockRestore();
   });
 
   it("opens the create-session modal and resets a stale workdir localStorage key to home after capability load", async () => {
