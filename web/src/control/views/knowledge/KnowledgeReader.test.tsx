@@ -27,6 +27,18 @@ const SYNTHESIS_EXCERPT =
 // Wörtlich aus ~/llm-wiki/wiki/overview.md (letzte Zeile).
 const OVERVIEW_TAIL = "Start with [[index]] for navigation and [[log]] for chronology.";
 
+// Wörtlich aus ~/llm-wiki/wiki/concepts/self-improvement-loop.md ("Connection
+// To This Wiki"-Absatz). Live-Regressions-Fund: das Alias von
+// `[[wiki/concepts/persistent-compounding-artifact|...]]` bricht hart auf die
+// nächste Zeile um (Quelltext bei ~80 Spalten umgebrochen) — blieb vorher als
+// rohes `[[...]]` im gerenderten Text stehen.
+const SELF_IMPROVEMENT_LOOP_EXCERPT =
+  "## Connection To This Wiki\n" +
+  "\n" +
+  "The loop mirrors the [[wiki/concepts/persistent-compounding-artifact|persistent\n" +
+  "compounding artifact]] idea: useful operational knowledge should be stored in a\n" +
+  "durable, inspectable form and reused by future sessions.";
+
 describe("resolveWikiLinks (echtes llm-wiki-Format)", () => {
   it("wandelt `[[wiki/x|Label]]` in einen internen Link-Href um", () => {
     const out = resolveWikiLinks(SYNTHESIS_EXCERPT);
@@ -49,6 +61,14 @@ describe("resolveWikiLinks (echtes llm-wiki-Format)", () => {
   it("lässt Wikilinks in Fenced-Code-Blöcken unangetastet", () => {
     const md = "```\n[[wiki/concepts/foo]]\n```";
     expect(resolveWikiLinks(md)).toBe(md);
+  });
+
+  it("löst einen Wikilink auf, dessen Alias hart auf die nächste Zeile umbricht (self-improvement-loop.md-Regression)", () => {
+    const out = resolveWikiLinks(SELF_IMPROVEMENT_LOOP_EXCERPT);
+    const id = encodeURIComponent("kb::llm::concepts/persistent-compounding-artifact.md");
+    expect(out).toContain(`[persistent compounding artifact](internal-link:${id})`);
+    expect(out).not.toContain("[[");
+    expect(out).not.toContain("]]");
   });
 });
 
