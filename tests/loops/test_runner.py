@@ -646,17 +646,54 @@ def test_land_aborts_on_dirty_live_checkout(tmp_path, fake_engine):
     assert not pushes
 
 
-def test_land_aborts_without_ff_and_removes_anchor(tmp_path, fake_engine):
+def test_land_auto_rebases_clean_divergence(tmp_path, fake_engine):
     repo, runner, pushes = make_landable(tmp_path)
-    # main läuft weiter → Branch ist kein Nachfahre mehr → kein ff
+    # main läuft konfliktfrei weiter → früher Abbruch, jetzt Auto-Rebase + Land
     (repo / "anders.py").write_text("x = 1\n", encoding="utf-8")
     g(repo, "add", "-A")
     g(repo, "commit", "-m", "parallel auf main")
-    before = g(repo, "rev-parse", "main").stdout
+    assert runner.cmd_land(push=True) is True
+    log = g(repo, "log", "--oneline", "-5", "main").stdout
+    assert "loop(test): l1" in log and "parallel auf main" in log
+    assert g(repo, "tag", "-l", "loop-rebase/*").stdout.strip(), "Rebase-Anker fehlt"
+    assert "auto-rebase" in runner.ledger_path.read_text(encoding="utf-8")
+    assert pushes, "piet-fork-Push muss versucht werden"
+
+
+def test_land_aborts_on_rebase_conflict(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    # Gleiche Datei auf main UND Loop-Branch → Rebase-Konflikt → Abbruch wie heute
+    (repo / "konflikt.txt").write_text("main-seite\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "parallel auf main")
+    (runner.wt / "konflikt.txt").write_text("loop-seite\n", encoding="utf-8")
+    g(runner.wt, "add", "-A")
+    g(runner.wt, "commit", "-m", "loop(test): konflikt")
+    main_before = g(repo, "rev-parse", "main").stdout
+    branch_before = g(repo, "rev-parse", runner.pack.branch).stdout
     assert runner.cmd_land() is False
-    assert g(repo, "rev-parse", "main").stdout == before
-    assert g(repo, "tag", "-l", "loop-land/*").stdout.strip() == "", "Anker muss bei ff-Abbruch weg"
+    assert g(repo, "rev-parse", "main").stdout == main_before
+    assert (
+        g(repo, "rev-parse", runner.pack.branch).stdout == branch_before
+    ), "rebase --abort muss den Branch unverändert lassen"
+    assert g(repo, "tag", "-l", "loop-land/*").stdout.strip() == "", "ff-Anker muss weg"
+    assert g(repo, "tag", "-l", "loop-rebase/*").stdout.strip() == "", "Rebase-Anker muss weg"
+    assert "Auto-Rebase-Konflikt" in runner.ledger_path.read_text(encoding="utf-8")
     assert not pushes
+
+
+def test_land_aborts_rebase_when_pack_worktree_dirty(tmp_path, fake_engine):
+    repo, runner, pushes = make_landable(tmp_path)
+    (repo / "anders.py").write_text("x = 1\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "parallel auf main")
+    (runner.wt / "unfertig.txt").write_text("dirty\n", encoding="utf-8")
+    main_before = g(repo, "rev-parse", "main").stdout
+    assert runner.cmd_land() is False
+    assert g(repo, "rev-parse", "main").stdout == main_before
+    assert not pushes
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "dirty" in ledger, "Abbruch muss den Dirty-Grund ins LEDGER schreiben"
 
 
 def test_land_rolls_back_when_gates_fail(tmp_path, fake_engine):

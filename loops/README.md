@@ -56,11 +56,14 @@ Neue Engine = Modul mit `@register("name")` nach dem Contract
 
 `--cmd land` automatisiert die Morgen-Mechanik mit Schienen: Abbruch bei UNVERIFIED
 (10-building) · Live-Checkout muss auf main + sauber sein · Rollback-Anker-Tag
-`loop-land/<pack>/<ts>` · **ff-only** (kein Auto-Rebase) · Collection-Sweep +
-affected-Tests (+ Frontend-Gates wenn web/ berührt) · bei Rot `reset --keep` auf den
-Anker · Push NUR piet-fork · verifizierte Pläne → `30-landed` · Pack FRESH von neuem
-main. Das **Urteil** über die Commits (Ledger + Diffs lesen) bleibt vor dem Aufruf
-beim Menschen/Hauptagenten. Auto-Land (Stufe 2) ist bewusst NICHT freigeschaltet.
+`loop-land/<pack>/<ts>` · **ff-only**; wenn main konfliktfrei weitergelaufen ist,
+rebased der Pack-Worktree automatisch auf main und setzt `loop-rebase/<pack>/<ts>`
+als Rollback-Ref · Collection-Sweep + affected-Tests (+ Frontend-Gates wenn web/
+berührt) · bei Rot `reset --keep` auf den Anker · Push NUR piet-fork · verifizierte
+Pläne → `30-landed` · Pack FRESH von neuem main. Rebase-Konflikt oder dirty
+Pack-Worktree bleiben Abbruch mit manuellem Klärbedarf. Das **Urteil** über die
+Commits (Ledger + Diffs lesen) bleibt vor dem Aufruf beim Menschen/Hauptagenten.
+Auto-Land (Stufe 2) ist bewusst NICHT freigeschaltet.
 
 ## Eigene Packs (Werkstatt)
 
