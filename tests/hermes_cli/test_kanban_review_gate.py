@@ -37,6 +37,11 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import strategist_surface as ss
 
 
+def _review_efficiency_fixture(name: str) -> dict:
+    path = Path(__file__).parent / "fixtures" / "review_efficiency_live_fixtures.json"
+    return json.loads(path.read_text(encoding="utf-8"))[name]
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
@@ -251,6 +256,73 @@ def test_effective_review_tier_does_not_critical_on_db_path_or_anti_scope(
             conn, title="rotate credentials", assignee="coder"
         )
         assert kb._effective_review_tier(conn, plural_security) == "critical"
+
+
+def test_effective_review_tier_live_overfire_fixture_stays_noncritical(
+    kanban_home, monkeypatch
+):
+    """Live fixture t_0f85a46e: filename/anti-scope markers must not overfire."""
+    fixture = _review_efficiency_fixture("tier_substring_overfire")
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "verifier_profile": "verifier",
+            "auto_tier": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title=fixture["title"],
+            body=fixture["body"],
+            assignee=fixture["assignee"],
+            kind=fixture["kind"],
+        )
+        assert kb._effective_review_tier(conn, tid) == fixture["expected_effective_tier"]
+
+
+def test_review_value_scout_read_items_from_live_metadata_fixture(kanban_home):
+    """Live fixture run 6033: Scout has read value via checked_files, not findings."""
+    fixture = _review_efficiency_fixture("scout_read_value")
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title=fixture["title"],
+            body=fixture["body"],
+            assignee="scout",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, profile, status, started_at, ended_at, outcome,
+                    metadata, input_tokens, output_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tid,
+                    "scout",
+                    "done",
+                    1782983400,
+                    1782983450,
+                    "completed",
+                    json.dumps(fixture["metadata"]),
+                    fixture["input_tokens"],
+                    fixture["output_tokens"],
+                ),
+            )
+        rows = {
+            row["profile"]: row
+            for row in kb.review_value_by_stage(conn, window_start=0)
+        }
+
+    scout = rows["scout"]
+    assert scout["findings_blocking"] is None
+    assert scout["tokens_per_finding"] is None
+    assert scout["read_items"] == 1
+    assert scout["tokens_per_read_item"] == fixture["input_tokens"]
 
 
 def test_effective_review_tier_truncates_future_contract_versions(

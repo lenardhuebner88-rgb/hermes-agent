@@ -62,6 +62,16 @@ def _load_plugin_module_for_lanes_auth_smoke():
     return mod
 
 
+def _review_efficiency_fixture(name: str) -> dict:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "hermes_cli"
+        / "fixtures"
+        / "review_efficiency_live_fixtures.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))[name]
+
+
 def _configure_dashboard_ws(
     monkeypatch, *, token="secret-xyz", bound_host=None, auth_required=False
 ):
@@ -6519,6 +6529,55 @@ def test_flow_gate_timeout_sweep_skips_freigabe_operator_roots(client):
         ).fetchone()
         assert released_ev is None, (
             "operator hold must not be auto-released by the sweep"
+        )
+
+
+def test_strategist_proposal_complete_route_closes_live_fixture_hold(client):
+    fixture = _review_efficiency_fixture("complete_freigabe")
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title=fixture["title"],
+            body=f"Live fixture root {fixture['root_task_id']}",
+            triage=True,
+            freigabe=fixture["freigabe"],
+            created_by=fixture["created_by"],
+        )
+        kids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="premium",
+            children=[
+                {"title": child["title"], "assignee": child["assignee"]}
+                for child in fixture["children"]
+            ],
+            initial_child_status="scheduled",
+            expected_root_status="triage",
+        )
+        assert kids is not None
+
+    r = client.post(
+        f"/api/plugins/kanban/strategist/proposals/{root}/complete",
+        json={"note": fixture["note"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "task_id": root, "completed": True}
+    proposal_ids = {
+        p["id"]
+        for p in client.get("/api/plugins/kanban/strategist/proposals").json()[
+            "proposals"
+        ]
+    }
+    assert root not in proposal_ids
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, root).status == "archived"
+        assert all(kb.get_task(conn, child).status == "archived" for child in kids)
+        kinds = [event.kind for event in kb.list_events(conn, root)]
+        assert "freigabe_completed" in kinds
+        assert any(
+            fixture["note"] in comment.body
+            for comment in kb.list_comments(conn, root)
         )
 
 

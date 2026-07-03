@@ -1215,6 +1215,30 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--json", action="store_true", help="Emit JSON result"
     )
 
+    p_complete_freigabe = sub.add_parser(
+        "complete-freigabe",
+        help="Close a freigabe:operator PlanSpec chain root held in 'scheduled' "
+             "as done elsewhere (records freigabe_completed, archives the held "
+             "root/children, and stores the required rationale comment).",
+    )
+    p_complete_freigabe.add_argument(
+        "task_id", help="freigabe:operator PlanSpec root task id"
+    )
+    p_complete_freigabe.add_argument(
+        "--note",
+        required=True,
+        help="Mandatory rationale recorded as the freigabe_completed comment",
+    )
+    p_complete_freigabe.add_argument(
+        "--author",
+        default=None,
+        help="Operator identity recorded on the completion event "
+             "(default: active profile name)",
+    )
+    p_complete_freigabe.add_argument(
+        "--json", action="store_true", help="Emit JSON result"
+    )
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1340,6 +1364,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "release-gate": _cmd_release_gate,
             "release-uireal": _cmd_release_uireal,
             "release-freigabe": _cmd_release_freigabe,
+            "complete-freigabe": _cmd_complete_freigabe,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1744,6 +1769,42 @@ def _cmd_release_freigabe(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0 if released else 1
+
+
+def _cmd_complete_freigabe(args: argparse.Namespace) -> int:
+    """Close a held freigabe:operator PlanSpec root as done elsewhere.
+
+    This is the CLI sibling of the dashboard complete route: unlike release, it
+    never dispatches the children. It archives the still-held chain and records
+    the operator rationale as a comment for auditability.
+    """
+    author = getattr(args, "author", None) or _profile_author()
+    note = str(getattr(args, "note", "") or "").strip()
+    with kb.connect_closing() as conn:
+        completed = kb.complete_freigabe_hold(
+            conn,
+            args.task_id,
+            author=author,
+            note=note,
+        )
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "task_id": args.task_id,
+            "completed": completed,
+            "author": author,
+        }))
+    elif completed:
+        print(
+            f"freigabe:operator root {args.task_id} closed by {author} "
+            "(done elsewhere; held children archived)."
+        )
+    else:
+        print(
+            f"complete-freigabe: {args.task_id} is not a held freigabe:operator root "
+            "(not operator, not held in scheduled, or unknown) — nothing closed.",
+            file=sys.stderr,
+        )
+    return 0 if completed else 1
 
 
 def _cmd_assignees(args: argparse.Namespace) -> int:

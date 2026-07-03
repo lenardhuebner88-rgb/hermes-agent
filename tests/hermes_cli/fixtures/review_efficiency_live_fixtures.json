@@ -1,0 +1,56 @@
+{
+  "captured_at_utc": "2026-07-03T06:58:00Z",
+  "source_db": "/home/piet/.hermes/kanban.db",
+  "tier_substring_overfire": {
+    "assignee": "coder",
+    "body": "Live proof for tier heuristic only. Do not edit files. Complete after acknowledging the classifier probe.\n\nFixture text: hermes_cli/kanban_db.py appears only as a filename.\nANTI-SCOPE: KEINE Schema-/Migrations-Change an der DB. KEIN Deploy. KEINE Secrets/Auth-Aenderung.\nAcceptance: completion reaches review gate with submitted_for_review.review_tier != critical.\n\n## Hermes Coder Contract v1\n- Assignee: coder\n- Tenant: default\n- Workspace: dir:/home/piet/.hermes/hermes-agent\n- Reason for lane: default code implementation lane (model resolved per lane config).\n- Allowed paths: use the explicit workspace path and any task-specified paths only; block if the target repo/path is ambiguous.\n- Anti-scope: edit only files required for this card; no unrelated cleanup, broad rewrites, push, deploy, runtime restart, or schema migration.\n- Risk: medium unless the task body states a narrower verified risk.\n- Expected gates: smallest relevant lint/type/test gate; use SELF_VERIFY_LIMITED if a safe worktree-targeted gate is not possible; if a gate is skipped, state why.\n- Escalation triggers: missing workspace, unclear allowed paths, failing required gate, open coordination overlap, or required secret/runtime/deploy action.\n- Forbidden: no git push/deploy/destructive FS/DB schema changes; no secret printing.",
+    "expected_effective_tier": "review",
+    "kind": "code",
+    "task_id": "t_0f85a46e",
+    "title": "Codex live proof: tier heuristic no critical for kanban_db anti-scope"
+  },
+  "scout_read_value": {
+    "body": "Read-only Scout live proof after lane model update. Use terminal/read-only commands only.\n\nTask: inspect /home/piet/.hermes/hermes-agent/hermes_cli/control_plane_gate.py and produce a compact brief with verified file:line citations for _critical_review_chunks and _contains_unnegated_whole_marker.\n\nRequirements: include exact file:line citations; do not invent unverified symbols; complete the task after posting the brief.",
+    "input_tokens": 65545,
+    "metadata": {
+      "checked_files": [
+        "/home/piet/.hermes/hermes-agent/hermes_cli/control_plane_gate.py"
+      ],
+      "model": "gpt-5.4",
+      "provider": "openai-codex",
+      "residual_risk": "Function behavior was inspected read-only; no tests were run in this scout pass.",
+      "symbols": [
+        "_critical_review_chunks",
+        "_contains_unnegated_whole_marker",
+        "classify_review_tier"
+      ],
+      "worker_session_id": "20260702_121058_0638f6",
+      "workspace_verified": "/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_9f6103f6"
+    },
+    "output_tokens": 1481,
+    "run_id": 6033,
+    "task_id": "t_9f6103f6",
+    "title": "Recon: verify scout lane model and file lines"
+  },
+  "complete_freigabe": {
+    "children": [
+      {
+        "assignee": "reviewer",
+        "id": "t_0b4b65ad",
+        "status": "scheduled",
+        "title": "Review-Urteil zum Hebel"
+      },
+      {
+        "assignee": "premium",
+        "id": "t_38e45e24",
+        "status": "scheduled",
+        "title": "review_findings-Consumer bauen und Gateway-Stack live schalten (Build plus Test)"
+      }
+    ],
+    "created_by": "strategist-cron",
+    "freigabe": "operator",
+    "note": "Live fixture: operator reviewed directly; close without building.",
+    "root_task_id": "t_9ff03bf9",
+    "title": "PlanSpec disposition-di_3d045653: review_findings-Consumer bauen und Gateway-Stack live schalten"
+  }
+}

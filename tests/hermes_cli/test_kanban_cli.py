@@ -14,6 +14,11 @@ from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 
 
+def _review_efficiency_fixture(name: str) -> dict:
+    path = Path(__file__).parent / "fixtures" / "review_efficiency_live_fixtures.json"
+    return json.loads(path.read_text(encoding="utf-8"))[name]
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     home = tmp_path / ".hermes"
@@ -89,6 +94,48 @@ def test_run_slash_create_and_list(kanban_home):
     out = kc.run_slash("list")
     assert "ship feature" in out
     assert "alice" in out
+
+
+def test_run_slash_complete_freigabe_closes_live_fixture_hold(kanban_home):
+    fixture = _review_efficiency_fixture("complete_freigabe")
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title=fixture["title"],
+            body=f"Live fixture root {fixture['root_task_id']}",
+            triage=True,
+            freigabe=fixture["freigabe"],
+            created_by=fixture["created_by"],
+        )
+        kids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="premium",
+            children=[
+                {
+                    "title": child["title"],
+                    "assignee": child["assignee"],
+                }
+                for child in fixture["children"]
+            ],
+            initial_child_status="scheduled",
+            expected_root_status="triage",
+        )
+        assert kids is not None
+
+    out = kc.run_slash(
+        f"complete-freigabe {root} --author pytest --note '{fixture['note']}' --json"
+    )
+    payload = json.loads(out)
+    assert payload == {"task_id": root, "completed": True, "author": "pytest"}
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, root).status == "archived"
+        assert all(kb.get_task(conn, child).status == "archived" for child in kids)
+        assert any(
+            fixture["note"] in comment.body
+            for comment in kb.list_comments(conn, root)
+        )
 
 
 def test_run_slash_create_worktree_path_and_branch(kanban_home, tmp_path):
