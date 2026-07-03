@@ -21,20 +21,25 @@ from hermes_cli.colors import Colors, color
 # Deliberately specific — a bare "gateway ... restart" catch-all would block
 # legitimate prompts that merely mention an unrelated gateway (e.g. "summarize
 # the API gateway logs and report restart events").
-_GATEWAY_ACTION = (
+_HERMES_GATEWAY_ACTION = (
     r"\bgateway\b"
     r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"
-    r"\s+(restart|stop|start)\b"
+    r"\s+(restart|stop)\b"
 )
+_SERVICE_GATEWAY_NAME = r"(?:ai\.)?hermes[.-]gateway(?:\.(?:plist|service))?\b"
 _GATEWAY_LIFECYCLE_PATTERNS = re.compile(
     r"(?i)"
-    r"(\bhermes\b(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
+    r"(\bhermes\b(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
     r"|(\bpython(?:3(?:\.\d+)?)?\s+-m\s+hermes_cli(?:\.main)?\b"
-    r"(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
+    r"(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
     r"|(\bpython(?:3(?:\.\d+)?)?\s+\S*hermes_cli/main\.py\b"
-    r"(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
-    r"|(launchctl\s+(kickstart|unload|load|stop|restart)\s+.*hermes)"
-    r"|(systemctl\s+(-\S+\s+)*(restart|stop|start)\s+.*hermes)"
+    r"(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
+    r"|(\blaunchctl\s+(kickstart|unload|load|stop|restart)\b[^;&|<>`]*"
+    + _SERVICE_GATEWAY_NAME
+    + r")"
+    r"|(\bsystemctl\s+(-\S+\s+)*(restart|stop|start)\b[^;&|<>`]*"
+    + _SERVICE_GATEWAY_NAME
+    + r")"
     r"|((p?kill|pgrep)\s+.*hermes)"
 )
 

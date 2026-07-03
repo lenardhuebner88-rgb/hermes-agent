@@ -365,21 +365,22 @@ def load_cli_config() -> Dict[str, Any]:
     Returns default values if no config file exists.
 
     If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
-    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
-    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
-    Credentials in ``.env`` are still loaded — this flag only suppresses
-    behavioral/config settings.
+    the user config at ``~/.hermes/config.yaml`` is skipped entirely and the
+    loader uses built-in defaults only. Credentials in ``.env`` are still loaded
+    — this flag only suppresses behavioral/config settings.
     """
     # Check user config first ({HERMES_HOME}/config.yaml)
     user_config_path = _hermes_home / 'config.yaml'
     project_config_path = Path(__file__).parent / 'cli-config.yaml'
 
-    # --ignore-user-config: force-skip the user config.yaml (still honor project
-    # config as a fallback so defaults stay sensible).
+    # --ignore-user-config: force-skip user/project config so troubleshooting
+    # runs are built from code defaults, not profile-local behavior.
     ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
 
     # Use user config if it exists, otherwise project config
-    if user_config_path.exists() and not ignore_user_config:
+    if ignore_user_config:
+        config_path = None
+    elif user_config_path.exists():
         config_path = user_config_path
     else:
         config_path = project_config_path
@@ -505,7 +506,7 @@ def load_cli_config() -> Dict[str, Any]:
     _file_has_terminal_config = False
 
     # Load from file if exists
-    if config_path.exists():
+    if config_path is not None and config_path.exists():
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 from hermes_cli.config import _normalize_root_model_keys

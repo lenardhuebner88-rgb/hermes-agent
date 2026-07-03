@@ -120,6 +120,8 @@ VALID_STATUSES = {
 TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_BLOCK_KINDS = frozenset({"needs_input", "capability", "dependency"})
+BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = False
@@ -986,6 +988,7 @@ class Task:
     claim_expires: Optional[int]
     tenant: Optional[str]
     branch_name: Optional[str] = None
+    project_id: Optional[str] = None
     result: Optional[str] = None
     idempotency_key: Optional[str] = None
     # Unified non-success counter. Incremented on any of:
@@ -1075,6 +1078,8 @@ class Task:
     auto_retry_count: int = 0
     integration_retry_count: int = 0
     transient_retry_count: int = 0
+    block_kind: Optional[str] = None
+    block_recurrences: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1110,6 +1115,7 @@ class Task:
             workspace_kind=row["workspace_kind"],
             workspace_path=row["workspace_path"],
             branch_name=row["branch_name"] if "branch_name" in keys else None,
+            project_id=row["project_id"] if "project_id" in keys else None,
             claim_lock=row["claim_lock"],
             claim_expires=row["claim_expires"],
             tenant=row["tenant"] if "tenant" in keys else None,
@@ -1204,6 +1210,10 @@ class Task:
             ),
             transient_retry_count=(
                 row["transient_retry_count"] if "transient_retry_count" in keys else 0
+            ),
+            block_kind=row["block_kind"] if "block_kind" in keys else None,
+            block_recurrences=(
+                row["block_recurrences"] if "block_recurrences" in keys else 0
             ),
         )
 
@@ -1767,10 +1777,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     workspace_kind       TEXT NOT NULL DEFAULT 'scratch',
     workspace_path       TEXT,
     branch_name          TEXT,
+    project_id           TEXT,
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
     result               TEXT,
+    block_kind           TEXT,
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
     idempotency_key      TEXT,
     -- Unified consecutive-failure counter. Incremented on spawn
     -- failure, timeout, or crash; reset only on successful completion.
@@ -2842,6 +2855,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "tasks", "result", "result TEXT")
     if "branch_name" not in cols:
         _add_column_if_missing(conn, "tasks", "branch_name", "branch_name TEXT")
+    if "project_id" not in cols:
+        _add_column_if_missing(conn, "tasks", "project_id", "project_id TEXT")
+    if "block_kind" not in cols:
+        _add_column_if_missing(conn, "tasks", "block_kind", "block_kind TEXT")
+    if "block_recurrences" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "block_recurrences",
+            "block_recurrences INTEGER NOT NULL DEFAULT 0",
+        )
     if "idempotency_key" not in cols:
         _add_column_if_missing(conn, "tasks", "idempotency_key", "idempotency_key TEXT")
     # ``idx_tasks_idempotency`` is created unconditionally below alongside
@@ -4224,6 +4248,7 @@ def create_task(
     workspace_kind: str = "scratch",
     workspace_path: Optional[str] = None,
     branch_name: Optional[str] = None,
+    project_id: Optional[str] = None,
     tenant: Optional[str] = None,
     priority: int = 0,
     parents: Iterable[str] = (),
@@ -4277,6 +4302,21 @@ def create_task(
     role_misuse = _role_misuse_reason(assignee=assignee, kind=kind)
     if role_misuse is not None:
         raise ValueError(role_misuse)
+    project = None
+    project_ref = str(project_id or "").strip()
+    resolved_project_id: Optional[str] = None
+    if project_ref:
+        try:
+            from hermes_cli import projects_db as _projects_db
+
+            with _projects_db.connect_closing() as project_conn:
+                project = _projects_db.get_project(project_conn, project_ref)
+        except Exception:
+            project = None
+        if project is not None and project.primary_path:
+            resolved_project_id = project.id
+            if workspace_kind == "scratch" and workspace_path is None:
+                workspace_kind = "worktree"
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
@@ -4387,13 +4427,7 @@ def create_task(
                 workspace_kind = "dir"
                 workspace_path = str(FO_REPO_PATH)
 
-    body = _with_code_task_contract(
-        body,
-        assignee=assignee,
-        workspace_kind=workspace_kind,
-        workspace_path=workspace_path,
-        tenant=tenant,
-    )
+    base_body = body
 
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly. Board defaults represent
@@ -4404,7 +4438,11 @@ def create_task(
     # task would point cleanup at the user's source tree (#28818). The
     # containment guard in ``_cleanup_workspace`` is the safety rail, but
     # we also stop the bad state from being created in the first place.
-    if workspace_path is None and workspace_kind in {"dir", "worktree"}:
+    if (
+        workspace_path is None
+        and workspace_kind in {"dir", "worktree"}
+        and project is None
+    ):
         board_slug = board if board else get_current_board()
         board_meta = read_board_metadata(board_slug)
         board_default = board_meta.get("default_workdir")
@@ -4431,6 +4469,34 @@ def create_task(
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
+        task_workspace_kind = workspace_kind
+        task_workspace_path = workspace_path
+        task_branch_name = branch_name
+        if project is not None and resolved_project_id:
+            if task_workspace_kind == "scratch" and task_workspace_path is None:
+                task_workspace_kind = "worktree"
+            if task_workspace_kind == "worktree":
+                if task_workspace_path is None and project.primary_path:
+                    task_workspace_path = os.path.join(
+                        project.primary_path,
+                        ".worktrees",
+                        task_id,
+                    )
+                if task_branch_name is None:
+                    from hermes_cli import projects_db as _projects_db
+
+                    task_branch_name = _projects_db.branch_name_for(
+                        project,
+                        task_id,
+                        title=title,
+                    )
+        task_body = _with_code_task_contract(
+            base_body,
+            assignee=assignee,
+            workspace_kind=task_workspace_kind,
+            workspace_path=task_workspace_path,
+            tenant=tenant,
+        )
         try:
             with write_txn(conn):
                 if idempotency_key:
@@ -4491,24 +4557,25 @@ def create_task(
                     INSERT INTO tasks (
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
-                        branch_name, tenant, idempotency_key, max_runtime_seconds,
+                        branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
                         scope_contract, model_override, freigabe, live_test_depth, review_tier
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
                         title.strip(),
-                        body,
+                        task_body,
                         assignee,
                         task_status,
                         priority,
                         created_by,
                         now,
-                        workspace_kind,
-                        workspace_path,
-                        branch_name,
+                        task_workspace_kind,
+                        task_workspace_path,
+                        task_branch_name,
+                        resolved_project_id,
                         tenant,
                         idempotency_key,
                         int(max_runtime_seconds)
@@ -4561,7 +4628,8 @@ def create_task(
                         "status": task_status,
                         "parents": list(parents),
                         "tenant": tenant,
-                        "branch_name": branch_name,
+                        "branch_name": task_branch_name,
+                        "project_id": resolved_project_id,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
                     },
@@ -10956,7 +11024,9 @@ def complete_task(
                            completed_at = ?,
                            claim_lock   = NULL,
                            claim_expires= NULL,
-                           worker_pid   = NULL
+                           worker_pid   = NULL,
+                           block_kind   = NULL,
+                           block_recurrences = 0
                      WHERE id = ?
                        AND status IN ('running', 'ready', 'blocked')
                     """,
@@ -10971,7 +11041,9 @@ def complete_task(
                            completed_at = ?,
                            claim_lock   = NULL,
                            claim_expires= NULL,
-                           worker_pid   = NULL
+                           worker_pid   = NULL,
+                           block_kind   = NULL,
+                           block_recurrences = 0
                      WHERE id = ?
                        AND status IN ('running', 'ready', 'blocked')
                        AND current_run_id = ?
@@ -11975,6 +12047,7 @@ def block_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    kind: Optional[str] = None,
     expected_run_id: Optional[int] = None,
     reviewer_metadata: Optional[dict] = None,
 ) -> bool:
@@ -11985,37 +12058,71 @@ def block_task(
     into ``task_runs.metadata`` so the auto-retry feedback can render them for
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
+    block_kind = str(kind).strip().lower() if kind is not None else None
+    if block_kind == "":
+        block_kind = None
+    if block_kind is not None and block_kind not in VALID_BLOCK_KINDS:
+        raise ValueError(
+            f"unknown block kind {block_kind!r}; expected one of {sorted(VALID_BLOCK_KINDS)}"
+        )
     with write_txn(conn):
         if _reject_code_worker_review_required_block(
             conn, task_id, reason=reason, expected_run_id=expected_run_id
         ):
             return False
+        existing = conn.execute(
+            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if existing is None or existing["status"] not in ("running", "ready"):
+            return False
+        previous_kind = existing["block_kind"] if "block_kind" in existing.keys() else None
+        previous_recurrences = (
+            int(existing["block_recurrences"] or 0)
+            if "block_recurrences" in existing.keys()
+            else 0
+        )
+        recurrences = (
+            previous_recurrences + 1
+            if previous_recurrences > 0 and previous_kind == block_kind
+            else 1
+        )
+        if block_kind == "dependency":
+            next_status = "todo"
+        elif recurrences >= BLOCK_RECURRENCE_LIMIT:
+            next_status = "triage"
+        else:
+            next_status = "blocked"
         if expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'blocked',
+                   SET status       = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
-                       worker_pid   = NULL
+                       worker_pid   = NULL,
+                       block_kind   = ?,
+                       block_recurrences = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """,
-                (task_id,),
+                (next_status, block_kind, recurrences, task_id),
             )
         else:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'blocked',
+                   SET status       = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
-                       worker_pid   = NULL
+                       worker_pid   = NULL,
+                       block_kind   = ?,
+                       block_recurrences = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                    AND current_run_id = ?
                 """,
-                (task_id, int(expected_run_id)),
+                (next_status, block_kind, recurrences, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
@@ -12047,7 +12154,21 @@ def block_task(
             )
             if verdict is not None:
                 _set_run_verdict(conn, run_id, verdict)
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        blocked_payload = {
+            "reason": reason,
+            "kind": block_kind,
+            "recurrences": recurrences,
+            "status": next_status,
+        }
+        _append_event(conn, task_id, "blocked", blocked_payload, run_id=run_id)
+        if next_status == "triage":
+            _append_event(
+                conn,
+                task_id,
+                "block_loop_detected",
+                {"kind": block_kind, "recurrences": recurrences, "reason": reason},
+                run_id=run_id,
+            )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -19650,7 +19771,9 @@ def auto_retry_blocked_tasks(
                            model_override = COALESCE(?, model_override),
                            claim_lock = NULL,
                            claim_expires = NULL,
-                           worker_pid = NULL
+                           worker_pid = NULL,
+                           block_kind = NULL,
+                           block_recurrences = 0
                      WHERE id = ? AND status = 'blocked'
                     """,
                 (
