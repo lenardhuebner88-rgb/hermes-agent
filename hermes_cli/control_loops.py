@@ -194,6 +194,15 @@ def _timer_enabled(name: str) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "enabled"
 
 
+def _unit_failed_fast(unit: str, probe: float = 0.6) -> bool:
+    """True, wenn die Unit unmittelbar nach dem Start bereits 'failed' ist (Sofort-Fail
+    wie 203/EXEC). 'activating'/'active' = ordentlich angelaufen → False. Seam für Tests."""
+    import time as _time
+
+    _time.sleep(probe)
+    return _systemctl("is-active", unit).stdout.strip() == "failed"
+
+
 def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
     try:
         pack = loop_runner.load_pack(_dir_for(name), name)
@@ -310,11 +319,21 @@ def register_loops_routes(app: FastAPI) -> None:
         )
         # --no-block: oneshot-Units halten den systemctl-Client sonst bis zum
         # Prozessende (Stunden) — empirisch bewiesen, Review-Blocker 2026-07-02.
-        res = _systemctl("start", "--no-block", f"hermes-loop@{loaded.name}.service")
+        unit = f"hermes-loop@{loaded.name}.service"
+        _systemctl("reset-failed", unit)  # alten failed-Zustand räumen, sonst blockt der Restart
+        res = _systemctl("start", "--no-block", unit)
         if res.returncode != 0:
             raise HTTPException(
                 status_code=502,
                 detail=f"systemctl start fehlgeschlagen: {res.stderr.strip() or res.stdout.strip()}",
+            )
+        # Ehrlichkeits-Check: --no-block kehrt sofort zurück; ein Sofort-Fail (z.B.
+        # 203/EXEC) wäre sonst als "started" durchgerutscht (UI-Start-Bug 2026-07-03).
+        if _unit_failed_fast(unit):
+            log = _systemctl("show", "-p", "StatusText", "--value", unit).stdout.strip()
+            raise HTTPException(
+                status_code=502,
+                detail=f"Loop-Unit sofort gescheitert (nicht angelaufen). {log or 'journalctl --user -u ' + unit}",
             )
         return {"started": True, "pack": loaded.name, "overrides_written": len(lines)}
 

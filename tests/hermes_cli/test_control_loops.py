@@ -70,9 +70,13 @@ def api(tmp_path, monkeypatch):
         calls.append(args)
         if args[0] == "is-enabled":
             return subprocess.CompletedProcess(args, 1, stdout="disabled\n", stderr="")
+        if args[0] == "is-active":
+            return subprocess.CompletedProcess(args, 0, stdout="active\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(control_loops, "_systemctl", fake_systemctl)
+    # Start-Endpoint probet is-active nach kurzem Sleep — im Test nicht warten.
+    monkeypatch.setattr(control_loops, "_unit_failed_fast", lambda unit, probe=0.6: False)
 
     app = FastAPI()
     control_loops.register_loops_routes(app)
@@ -121,6 +125,19 @@ def test_start_writes_overrides_and_starts_unit(api):
     assert "FOKUS=auth.py Token-Refresh" in env  # Pack-Param dynamisch erlaubt
     # --no-block ist Pflicht: oneshot-Units halten den Client sonst stundenlang
     assert ("start", "--no-block", "hermes-loop@nacht.service") in calls
+    # alten failed-Zustand vorher räumen (sonst blockt der Restart)
+    assert ("reset-failed", "hermes-loop@nacht.service") in calls
+
+
+def test_start_reports_502_when_unit_fails_fast(api, monkeypatch):
+    # UI-Start-Bug 2026-07-03: Unit stirbt sofort (203/EXEC), aber --no-block hatte
+    # rc 0 → früher "started: true". Jetzt muss der Sofort-Fail als 502 durchschlagen.
+    client, _calls, _tmp = api
+    from hermes_cli import control_loops as cl
+    monkeypatch.setattr(cl, "_unit_failed_fast", lambda unit, probe=0.6: True)
+    resp = client.post("/api/loops/nacht/start", json={"overrides": {}})
+    assert resp.status_code == 502
+    assert "sofort gescheitert" in resp.json()["detail"]
 
 
 def test_start_rejects_override_for_foreign_param(api):

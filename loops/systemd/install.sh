@@ -9,6 +9,8 @@ set -euo pipefail
 SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 DST="$HOME/.config/systemd/user"
 mkdir -p "$DST"
+# Sicherheitsnetz: shim ausführbar machen (git-mode kann bei Checkout verloren gehen).
+chmod +x "$SRC/../shim.sh" 2>/dev/null || true
 install -m 0644 "$SRC/hermes-loop@.service" "$SRC/hermes-loop@.timer" "$DST/"
 systemctl --user daemon-reload
 echo "Installiert: $DST/hermes-loop@.service + .timer"

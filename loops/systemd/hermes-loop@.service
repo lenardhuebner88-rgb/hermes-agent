@@ -8,7 +8,9 @@ Description=Hermes Loop-Runner: Pack %i (night)
 Type=oneshot
 # Läuft im Live-Checkout; der Runner arbeitet in einem isolierten Worktree
 # unter ~/.hermes/loops/%i/wt und pusht/deployt nie selbst.
-ExecStart=%h/.hermes/hermes-agent/loops/shim.sh %i
+# Über `bash` gestartet (nicht direkt), damit ein fehlendes x-Bit am shim NIE
+# wieder ein 203/EXEC-Silent-Fail gibt (2026-07-03 UI-Start-Bug).
+ExecStart=/bin/bash %h/.hermes/hermes-agent/loops/shim.sh %i
 # Nacht-Budget: plan + run (max_hours default 7h) + Puffer.
 TimeoutStartSec=9h
 Nice=10
