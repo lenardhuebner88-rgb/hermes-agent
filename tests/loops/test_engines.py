@@ -15,6 +15,7 @@ from loops.engines import claude_cli, codex_cli, kimi_cli
 def test_registry_contains_claude_and_rejects_unknown():
     assert "claude" in engines.ENGINES
     assert "hermes" in engines.ENGINES
+    assert "neuralwatt" in engines.ENGINES
     with pytest.raises(KeyError, match="warpantrieb"):
         engines.get_engine("warpantrieb")
 
@@ -65,6 +66,55 @@ def test_hermes_profile_timeout_maps_to_timed_out(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_profile.subprocess, "run", fake_run)
     result = hermes_profile.run("reviewer", "x", tmp_path, 60)
     assert result.timed_out is True and result.rc == 124
+
+
+def test_neuralwatt_cli_builds_oneshot_command_with_sandbox(monkeypatch, tmp_path):
+    from loops.engines import neuralwatt_cli
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["cwd"] = kwargs.get("cwd")
+        seen["env"] = kwargs.get("env")
+        seen["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Antwort", stderr="")
+
+    monkeypatch.setattr(neuralwatt_cli.subprocess, "run", fake_run)
+    result = neuralwatt_cli.run("glm-5.2", "sag OK", tmp_path, 60)
+    assert result.rc == 0 and result.output == "Antwort"
+    cmd = seen["cmd"]
+    assert cmd[0].endswith("hermes")
+    assert cmd == [cmd[0], "-m", "glm-5.2", "--provider", "neuralwatt", "-z", "sag OK"]
+    assert seen["cwd"] == str(tmp_path)
+    assert seen["timeout"] == 60
+    # kanban.db ist bewusst profil-übergreifend → Sandbox-Mode ist Pflicht
+    assert seen["env"]["HERMES_SANDBOX_MODE"] == "1"
+
+
+def test_neuralwatt_cli_timeout_maps_to_timed_out(monkeypatch, tmp_path):
+    from loops.engines import neuralwatt_cli
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60, output=b"teil", stderr=None)
+
+    monkeypatch.setattr(neuralwatt_cli.subprocess, "run", fake_run)
+    result = neuralwatt_cli.run("glm-5.2", "x", tmp_path, 60)
+    assert result.timed_out is True and result.rc == 124
+
+
+def test_neuralwatt_cli_flags_usage_limit_output(monkeypatch, tmp_path):
+    from loops.engines import neuralwatt_cli
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="",
+            stderr="hermes -z: agent failed: HTTP 429 rate_limit_exceeded",
+        )
+
+    monkeypatch.setattr(neuralwatt_cli.subprocess, "run", fake_run)
+    result = neuralwatt_cli.run("kimi-k2.7-code", "x", tmp_path, 60)
+    assert result.usage_limit is True
 
 
 @pytest.mark.parametrize(
@@ -243,10 +293,10 @@ def test_models_yaml_loads_and_registered_engines_have_adapter():
     catalog = yaml.safe_load(models_path.read_text(encoding="utf-8"))
     assert "engines" in catalog
 
-    # neuralwatt bleibt bewusst adapter-los — Katalog-Eintrag existiert, models==[]
+    # neuralwatt hat seit der neuralwatt_cli-Engine einen echten Adapter
     assert "neuralwatt" in catalog["engines"]
-    assert catalog["engines"]["neuralwatt"]["models"] == []
-    assert "neuralwatt" not in engines.ENGINES
+    assert catalog["engines"]["neuralwatt"]["models"]
+    assert "neuralwatt" in engines.ENGINES
 
     for name, spec in catalog["engines"].items():
         assert "label" in spec
