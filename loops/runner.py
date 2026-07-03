@@ -677,6 +677,34 @@ class LoopRunner:
         res = self.git("push", "piet-fork", "main", cwd=repo)
         return res.returncode == 0, (res.stderr.strip() or res.stdout.strip())
 
+    def _auto_rebase(self, repo: Path) -> tuple[bool, str]:
+        """Loop-Branch im Pack-Worktree auf main rebasen — nur wenn sicher.
+
+        Sicher heißt: Worktree existiert, steht auf dem Loop-Branch, ist clean,
+        und der Rebase läuft konfliktfrei durch. Sonst (False, Grund) und der
+        Branch bleibt unverändert (rebase --abort). Der alte Tip bleibt bei
+        Erfolg als Tag loop-rebase/<pack>/<ts> erreichbar (Rollback-Anker,
+        gleiche Konvention wie loop-land/…). NIEMALS ensure_wt(fresh=True)
+        hier — das würde den Branch auf main resetten.
+        """
+        if not self.wt.is_dir():
+            return False, f"Pack-Worktree fehlt ({self.wt}) — manuell rebasen"
+        head = self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.wt).stdout.strip()
+        if head != self.pack.branch:
+            return False, f"Worktree steht auf {head!r}, nicht {self.pack.branch!r}"
+        if self.git("status", "--porcelain", cwd=self.wt).stdout.strip():
+            return False, "Pack-Worktree ist dirty — manuell klären"
+        anchor = f"loop-rebase/{self.pack.name}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        if self.git("tag", anchor, self.pack.branch, cwd=repo).returncode != 0:
+            return False, "Rebase-Anker-Tag ließ sich nicht setzen"
+        res = self.git("rebase", "main", cwd=self.wt)
+        if res.returncode != 0:
+            self.git("rebase", "--abort", cwd=self.wt)
+            self.git("tag", "-d", anchor, cwd=repo)
+            tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-5:])
+            return False, f"Auto-Rebase-Konflikt — manuell rebasen:\n{tail}"
+        return True, f"auto-rebase auf main (Anker {anchor})"
+
     def cmd_land(self, push: bool = True) -> bool:
         repo = self.pack.repo
         ahead = self.git("rev-list", "--count", f"main..{self.pack.branch}", cwd=repo).stdout.strip()
@@ -700,12 +728,23 @@ class LoopRunner:
         if self.git("tag", tag, "main", cwd=repo).returncode != 0:
             self.say("ABBRUCH: Rollback-Anker-Tag konnte nicht gesetzt werden.")
             return False
+        rebase_note = ""
         merge = self.git("merge", "--ff-only", self.pack.branch, cwd=repo)
         if merge.returncode != 0:
-            self.git("tag", "-d", tag, cwd=repo)
-            self.say(f"ABBRUCH: kein ff-Merge möglich (main ist weitergelaufen) — KEIN Auto-Rebase.\n{merge.stderr.strip()}")
-            self.ledger(f"LAND abgebrochen: nicht ff-fähig (base {base[:9]})")
-            return False
+            reb_ok, reb_msg = self._auto_rebase(repo)
+            if not reb_ok:
+                self.git("tag", "-d", tag, cwd=repo)
+                self.say(f"ABBRUCH: kein ff-Merge möglich, Auto-Rebase nicht sicher — {reb_msg}")
+                self.ledger(f"LAND abgebrochen: {reb_msg.splitlines()[0]} (base {base[:9]})")
+                return False
+            self.say(f"main weitergelaufen → {reb_msg}")
+            merge = self.git("merge", "--ff-only", self.pack.branch, cwd=repo)
+            if merge.returncode != 0:
+                self.git("tag", "-d", tag, cwd=repo)
+                self.say(f"ABBRUCH: ff-Merge nach Auto-Rebase weiterhin unmöglich:\n{merge.stderr.strip()}")
+                self.ledger(f"LAND abgebrochen: ff nach auto-rebase fehlgeschlagen (base {base[:9]})")
+                return False
+            rebase_note = f" · {reb_msg.splitlines()[0]}"
         ok, report = self._land_gates(repo, base)
         if not ok:
             # Baum war sauber, Merge war reiner ff → --keep rollt den Ref zurück,
@@ -728,9 +767,12 @@ class LoopRunner:
             moved += 1
         self.ensure_wt(fresh=True)
         new_main = self.git("rev-parse", "--short", "main", cwd=repo).stdout.strip()
-        self.ledger(f"LAND ✅ {ahead} Commits → main {new_main} (Anker {tag}, {moved} Pläne archiviert){pushed}")
-        self.say(f"LAND ✅ main={new_main} · Gates: {report}{pushed}")
-        self.notify(f"🛬 {self.pack.name} LAND: {ahead} Commits auf main ({new_main}); {report}{pushed}")
+        self.ledger(
+            f"LAND ✅ {ahead} Commits → main {new_main} "
+            f"(Anker {tag}, {moved} Pläne archiviert){pushed}{rebase_note}"
+        )
+        self.say(f"LAND ✅ main={new_main} · Gates: {report}{pushed}{rebase_note}")
+        self.notify(f"🛬 {self.pack.name} LAND: {ahead} Commits auf main ({new_main}); {report}{pushed}{rebase_note}")
         return True
 
     def cmd_status(self) -> None:
