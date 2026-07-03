@@ -46,6 +46,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -54,6 +55,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
 from hermes_cli import vision_metrics
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -721,6 +723,73 @@ def grounding_gate(lever: Lever) -> GateResult:
     return GateResult(True, "grounding-Evidenz vorhanden")
 
 
+_TEST_FILE_REF_RE = re.compile(r"(?P<path>tests/(?:[\w.-]+/)*test_[\w.-]+\.py)(?::\d+)?")
+_FAILURE_MARKERS = ("FAILED", "ERROR", "FAILURES", "AssertionError", "E   ")
+
+
+def _grounding_test_refs(grounding: str) -> list[str]:
+    """Return unique pytest file references mentioned in strategist grounding."""
+    refs: list[str] = []
+    seen: set[str] = set()
+    for match in _TEST_FILE_REF_RE.finditer(grounding or ""):
+        ref = match.group("path")
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
+
+
+def _latest_green_gate_python_log() -> Path | None:
+    """Resolve the newest green-gate ``python.log`` if it exists."""
+    root = get_hermes_home() / "logs" / "green-gate"
+    try:
+        candidates = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    try:
+        latest = max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.name))
+    except OSError:
+        return None
+    log_path = latest / "python.log"
+    return log_path if log_path.is_file() else None
+
+
+def _python_log_has_failure_for_test(log_text: str, test_file: str) -> bool:
+    """True when the latest python gate log still shows ``test_file`` as red."""
+    normalized = test_file.strip()
+    if not normalized:
+        return False
+    for line in log_text.splitlines():
+        if normalized not in line:
+            continue
+        if any(marker in line for marker in _FAILURE_MARKERS):
+            return True
+    return False
+
+
+def stale_target_gate(lever: Lever) -> GateResult:
+    """Fail-open guard against ingesting a lever for an already-green test."""
+    refs = _grounding_test_refs(lever.grounding)
+    if not refs:
+        return GateResult(True, "keine konkrete Testdatei im grounding")
+    try:
+        log_path = _latest_green_gate_python_log()
+        if log_path is None:
+            logger.warning("strategist stale_target check fail-open: no green-gate python.log")
+            return GateResult(True, "fail-open: kein green-gate python.log")
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        failing_refs = [ref for ref in refs if _python_log_has_failure_for_test(log_text, ref)]
+    except Exception:
+        logger.warning("strategist stale_target check fail-open", exc_info=True)
+        return GateResult(True, "fail-open: stale_target check failed")
+    if not failing_refs:
+        joined = ", ".join(refs)
+        return GateResult(False, f"stale_target: {joined} nicht als Failure im neuesten green-gate python.log")
+    return GateResult(True, f"referenzierter Test weiterhin rot: {', '.join(failing_refs)}")
+
+
 # --------------------------------------------------------------------------- #
 # PlanSpec rendering + ingest
 # --------------------------------------------------------------------------- #
@@ -983,10 +1052,19 @@ def propose(
     survivors.sort(key=lambda lv: (-lv.roi_score, lv.key))
     capped = survivors[: max(0, cap)]
 
+    stale_targets: list[dict[str, Any]] = []
+    ingestable: list[Lever] = []
+    for lever in capped:
+        verdict = stale_target_gate(lever)
+        if verdict.passed:
+            ingestable.append(lever)
+        else:
+            stale_targets.append({"key": lever.key, "title": lever.title, "reason": verdict.reason})
+
     ingested: list[dict[str, Any]] = []
     ingest_errors: list[dict[str, Any]] = []
     if do_ingest:
-        for lever in capped:
+        for lever in ingestable:
             spec_path = _write_spec(out_dir, lever)
             try:
                 result = planspecs.ingest_planspec(
@@ -1020,7 +1098,7 @@ def propose(
                 "counter_metric": lv.counter_metric,
                 "dry_run": True,
             }
-            for lv in capped
+            for lv in ingestable
         ]
 
     # LEVER-OUTCOMES-S1: write a baseline record for each newly ingested lever.
@@ -1030,7 +1108,7 @@ def propose(
         _outcomes_write_baselines(
             outcomes_path=Path(outcomes_path),
             ingested=ingested,
-            capped=capped,
+            capped=ingestable,
             flat_metrics=_flatten_numeric(_metrics_payload(context.get("metrics"))),
         )
 
@@ -1041,13 +1119,14 @@ def propose(
         "used_percent": budget["used_percent"],
         # idle = genuinely nothing to propose. A run whose drafts were all
         # grounding-blocked is NOT idle — it had candidates that failed the gate.
-        "idle": len(ingested) == 0 and not ingest_errors and not grounding_blocked,
+        "idle": len(ingested) == 0 and not ingest_errors and not grounding_blocked and not stale_targets,
         "candidates": len(candidates),
         "survivors": len(survivors),
         "capped": len(capped),
         "cap": cap,
         "gated_out": gated_out,
         "grounding_blocked": grounding_blocked,
+        "stale_targets": stale_targets,
         "ingest_errors": ingest_errors,
         "ingested": ingested,
         # LEVER-OUTCOMES-S1: pre-existing outcomes from context (written by prior
@@ -2184,6 +2263,8 @@ def run_propose(args) -> dict[str, Any]:
             "mode": "propose",
             "candidates": int(result.get("candidates", 0) or 0),
             "ingested": len(result.get("ingested", []) or []),
+            "stale_target": len(result.get("stale_targets", []) or []),
+            "stale_targets": result.get("stale_targets", []) or [],
         },
     )
     return result

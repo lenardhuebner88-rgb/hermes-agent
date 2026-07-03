@@ -54,6 +54,30 @@ def _seed_ledger(conn, error, *, outcome="crashed"):
     return task
 
 
+def _draft_with_grounding(grounding: str) -> dict[str, object]:
+    return {
+        "key": "DRAFT-STALE-CHECK",
+        "title": "Fix referenced red test",
+        "lane": "coder-claude",
+        "target_metric": "gate green",
+        "roi": "positive",
+        "counter_metric": "no regression",
+        "grounding": grounding,
+        "counter_risk": 0.2,
+        "gain_weight": 1.0,
+        "cost": 0.3,
+        "signal_strength": 5.0,
+    }
+
+
+def _write_latest_green_gate_log(board_home: Path, text: str) -> Path:
+    log_dir = board_home / ".hermes" / "logs" / "green-gate" / "20260703-052049"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "python.log"
+    log_path.write_text(text, encoding="utf-8")
+    return log_path
+
+
 # --------------------------------------------------------------------------- #
 # 1. Budget > 80 % → skip
 # --------------------------------------------------------------------------- #
@@ -166,6 +190,95 @@ def test_cap_limits_to_five(board_home, monkeypatch):
     assert len(result["ingested"]) == 5
     with kb.connect() as conn:
         assert len(strategist_surface.held_operator_proposals(conn)) == 5
+
+
+def test_stale_target_drops_draft_when_referenced_test_is_green(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/other/test_still_red.py::test_case - AssertionError\n",
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["ingested"] == []
+    assert result["stale_targets"][0]["key"] == "DRAFT-STALE-CHECK"
+    assert "stale_target" in result["stale_targets"][0]["reason"]
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_stale_target_allows_draft_when_referenced_test_is_still_red(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/tools/test_terminal_output_transform_hook.py::test_transform - AssertionError\n",
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_stale_target_allows_draft_without_test_reference(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(board_home, "no failures for referenced pytest files\n")
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("git log und grep belegen die Luecke")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+
+
+def test_stale_target_fail_open_when_gate_log_missing(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None,
+        out_dir=out_dir,
+        drafts=[_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")],
+    )
+
+    assert result["stale_targets"] == []
+    assert len(result["ingested"]) == 1
+
+
+def test_stale_target_is_recorded_in_run_history(board_home, monkeypatch):
+    _patch_budget(monkeypatch, 30.0)
+    _write_latest_green_gate_log(
+        board_home,
+        "FAILED tests/other/test_still_red.py::test_case - AssertionError\n",
+    )
+    drafts_file = board_home / "drafts.json"
+    drafts_file.write_text(
+        json.dumps([_draft_with_grounding("pytest tests/tools/test_terminal_output_transform_hook.py:133 war rot")]),
+        encoding="utf-8",
+    )
+
+    result = strategist.run_propose(
+        SimpleNamespace(out_dir=str(board_home / "specs"), drafts_file=str(drafts_file), dry_run=False)
+    )
+
+    assert result["ingested"] == []
+    history_path = board_home / ".hermes" / "state" / "strategist" / "run-history.jsonl"
+    last_entry = json.loads(history_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last_entry["stale_target"] == 1
+    assert last_entry["stale_targets"][0]["key"] == "DRAFT-STALE-CHECK"
 
 
 # --------------------------------------------------------------------------- #
