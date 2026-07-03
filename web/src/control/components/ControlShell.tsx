@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Settings, Shield, Sparkles, TerminalSquare, Workflow } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -10,7 +10,7 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -19,6 +19,8 @@ export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "agent
 // Autoresearch in den "Mehr"-Overflow). Everything else is a re-slice of
 // these and lives in the "Mehr" overflow (moreTabs) below.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  // Fleet: neues erstes Tab — Operator-Lagezentrum (2026-07-03)
+  { id: "fleet", label: "Fleet", mobileLabel: "Fleet", path: "/control/fleet", icon: Anchor },
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   // Terminals = Haupt-Arbeitszentrale (Operator-Entscheid 2026-07-01): der Tab,
   // in dem im tmux mit Hermes/Claude/Codex gearbeitet wird — daher primär.
@@ -32,9 +34,10 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
-// Bibliothek zog in die primäre mobile Bottom-Bar (vorher nur per Mehr-Sheet/
-// Direkt-URL erreichbar) — 5 Slots + "Mehr" = 6-Spalten-Grid (siehe unten).
-const mobileTabs = tabs.filter((tab) => ["inbox", "agentTerminals", "flow", "ketten", "bibliothek"].includes(tab.id));
+// Fleet ist an erster Stelle der mobilen Bottom-Bar (2026-07-03).
+// 'ketten' bleibt im Mehr-Sheet + Desktop-Nav, ist aber kein mobiler Bottom-Tab mehr.
+// 5 Slots + "Mehr" = 6-Spalten-Grid.
+const mobileTabs = tabs.filter((tab) => ["fleet", "inbox", "agentTerminals", "flow", "bibliothek"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.

@@ -59,11 +59,15 @@ import {
   LoopFileSaveResultSchema,
   LoopDuplicateResultSchema,
   LoopLandResultSchema,
+  TaskBodySchema,
+  TaskDeliverablesResponseSchema,
+  LanesCatalogResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import type { TaskBodyResponse, TaskDeliverablesResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -715,6 +719,16 @@ export function usePlanSpecs(options: PlanSpecQueryOptions = {}) {
     key,
     async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options)), "kanban/planspecs"),
     15000,
+  );
+}
+
+// Lane-Preset-Katalog: Modell-Optionen und Profile-Defaults für das Plan-Cockpit.
+// 60s — Lane-Konfiguration ändert sich selten.
+export function useLanesCatalog() {
+  return usePolling<LanesCatalogResponse>(
+    "kanban/lanes",
+    async () => parseOrThrow(LanesCatalogResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/lanes"), "kanban/lanes"),
+    60000,
   );
 }
 
@@ -2459,4 +2473,37 @@ export async function duplicateLoop(source: string, name: string): Promise<LoopD
     }),
     "loops/duplicate",
   );
+}
+
+// ─── Fleet Karten-Detail-Drawer: On-Demand Task-Body + Runs + Deliverables ───
+//
+// Wird NUR bei offenem Drawer geladen (task-body-on-demand/{id}) — kein Background-Poll.
+// useTaskBodyOnDemand pollt alle 8s WENN taskId != null (= Drawer offen), ansonsten pausiert.
+// Pattern analog zu useWorkerActivity (Null-Guard + leerer Fallback).
+
+export function useTaskBodyOnDemand(taskId: string | null) {
+  const key = taskId ? `task-body-on-demand/${taskId}` : "task-body-on-demand/__none__";
+  const loader = useCallback(async (): Promise<TaskBodyResponse> => {
+    if (!taskId) return { task: null, runs: [], deliverables: [] };
+    const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
+    return parseOrThrow(TaskBodySchema, raw, `task-body/${taskId}`);
+  }, [taskId]);
+  const result = usePolling<TaskBodyResponse>(key, loader, taskId ? 8000 : 600_000);
+  if (!taskId) return { ...result, data: { task: null, runs: [], deliverables: [] } as TaskBodyResponse };
+  return result;
+}
+
+// useTaskDeliverablesOnDemand pollt alle 15s NUR wenn taskId != null (= Drawer offen).
+// Endpoint: GET /api/plugins/kanban/tasks/{id}/deliverables — wird in NodeDetailDrawer
+// für den Ergebnis-Tab genutzt. Degradiert sauber zu [] wenn Endpoint 404/empty.
+export function useTaskDeliverablesOnDemand(taskId: string | null) {
+  const key = taskId ? `task-deliverables-on-demand/${taskId}` : "task-deliverables-on-demand/__none__";
+  const loader = useCallback(async (): Promise<TaskDeliverablesResponse> => {
+    if (!taskId) return { task_id: "", deliverables: [] };
+    const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/deliverables`);
+    return parseOrThrow(TaskDeliverablesResponseSchema, raw, `task-deliverables/${taskId}`);
+  }, [taskId]);
+  const result = usePolling<TaskDeliverablesResponse>(key, loader, taskId ? 15_000 : 600_000);
+  if (!taskId) return { ...result, data: { task_id: "", deliverables: [] } as TaskDeliverablesResponse };
+  return result;
 }

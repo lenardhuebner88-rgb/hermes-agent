@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
 
@@ -1148,5 +1148,119 @@ describe("MetricsLiteResponseSchema", () => {
   it("falls back to empty groups on a broken payload without throwing", () => {
     const parsed = parseOrThrow(MetricsLiteResponseSchema, { groups: "nope" }, "metrics-lite");
     expect(parsed.groups).toEqual({});
+  });
+});
+
+describe("TaskBodySchema — workspace_kind/workspace_path (Fleet Karten-Detail-Drawer)", () => {
+  it("parses real API payload that has workspace_kind + workspace_path (not 'workspace')", () => {
+    const raw = {
+      task: {
+        id: "t_abc123",
+        title: "Fleet-Test-Task",
+        body: "Body text",
+        status: "done",
+        assignee: "coder",
+        block_reason: null,
+        created_at: 1782990000,
+        started_at: 1782990100,
+        completed_at: 1782990500,
+        review_tier: null,
+        branch_name: "bridge/fleet-hub",
+        model_override: null,
+        workspace_kind: "worktree",
+        workspace_path: "/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_abc123",
+        acceptance_criteria: ["Gate grün", "Tests laufen"],
+      },
+      runs: [
+        {
+          id: 9001,
+          profile: "sonnet",
+          status: "done",
+          started_at: 1782990100,
+          ended_at: 1782990500,
+          runtime_seconds: 400,
+          input_tokens: 12000,
+          output_tokens: 3200,
+          cost_usd: 0.45,
+        },
+      ],
+      deliverables: [],
+    };
+    const parsed = parseOrThrow(TaskBodySchema, raw, "task-body/t_abc123");
+    expect(parsed.task?.id).toBe("t_abc123");
+    expect(parsed.task?.workspace_kind).toBe("worktree");
+    expect(parsed.task?.workspace_path).toBe("/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_abc123");
+    expect(parsed.task?.branch_name).toBe("bridge/fleet-hub");
+    expect(parsed.runs[0].runtime_seconds).toBe(400);
+    expect(parsed.runs[0].cost_usd).toBe(0.45);
+    expect(parsed.deliverables).toEqual([]);
+  });
+
+  it("parses real taskDetailFixture (workspace_kind=scratch, workspace_path=null)", () => {
+    // Same shape as taskDetailRealPayloadFixture — verifies the fixture passes TaskBodySchema
+    const raw = {
+      task: {
+        id: "t_1e29abc5",
+        title: "PlanSpec Test",
+        body: "Some body text",
+        status: "done",
+        assignee: null,
+        block_reason: null,
+        created_at: 1782992957,
+        started_at: null,
+        completed_at: 1782993166,
+        review_tier: null,
+        branch_name: null,
+        model_override: null,
+        workspace_kind: "scratch",
+        workspace_path: null,
+        acceptance_criteria: null,
+      },
+      runs: [],
+      deliverables: [],
+    };
+    const parsed = parseOrThrow(TaskBodySchema, raw, "task-body/t_1e29abc5");
+    expect(parsed.task?.workspace_kind).toBe("scratch");
+    expect(parsed.task?.workspace_path).toBeNull();
+  });
+
+  it("degrades gracefully on missing task (null)", () => {
+    const parsed = parseOrThrow(TaskBodySchema, { task: null, runs: [], deliverables: [] }, "task-body/null");
+    expect(parsed.task).toBeNull();
+    expect(parsed.deliverables).toEqual([]);
+  });
+});
+
+describe("TaskDeliverablesResponseSchema — Fleet Karten-Detail-Drawer /tasks/{id}/deliverables", () => {
+  it("parses a real deliverables payload with filename, url, size", () => {
+    const raw = {
+      task_id: "t_abc123",
+      deliverables: [
+        {
+          filename: "result.tar.gz",
+          relative_path: "deliverables/result.tar.gz",
+          size: 204800,
+          mtime: 1782993000,
+          content_type: "application/gzip",
+          url: "/api/plugins/kanban/tasks/t_abc123/deliverables/result.tar.gz",
+        },
+      ],
+    };
+    const parsed = parseOrThrow(TaskDeliverablesResponseSchema, raw, "task-deliverables/t_abc123");
+    expect(parsed.task_id).toBe("t_abc123");
+    expect(parsed.deliverables).toHaveLength(1);
+    expect(parsed.deliverables[0].filename).toBe("result.tar.gz");
+    expect(parsed.deliverables[0].size).toBe(204800);
+    expect(parsed.deliverables[0].url).toContain("/deliverables/result.tar.gz");
+  });
+
+  it("degrades to empty deliverables if payload has none", () => {
+    const parsed = parseOrThrow(TaskDeliverablesResponseSchema, { task_id: "t_empty", deliverables: [] }, "task-deliverables/empty");
+    expect(parsed.deliverables).toEqual([]);
+  });
+
+  it("degrades to empty deliverables on completely broken payload", () => {
+    const parsed = parseOrThrow(TaskDeliverablesResponseSchema, {}, "task-deliverables/broken");
+    expect(parsed.deliverables).toEqual([]);
   });
 });

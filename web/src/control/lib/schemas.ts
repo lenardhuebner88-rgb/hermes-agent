@@ -489,6 +489,8 @@ export const BoardResponseSchema = z.object({
   source_errors: z.array(BoardSourceErrorSchema).catch([]),
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
+export type BoardTask = z.infer<typeof BoardTaskSchema>;
+export type BoardResponse = z.infer<typeof BoardResponseSchema>;
 
 // Epics (Vorhaben-Ebene): GET /epics liefert pro Epic den Task-/Kosten-Rollup.
 // cost_usd/tokens sind null, wenn keine Runs Kosten gestempelt haben.
@@ -1737,6 +1739,94 @@ export const LoopLandResultSchema = z.object({
   log: z.string().catch(""),
   note: z.string().catch(""),
 });
+
+// Fleet Ketten-Detail-Drawer: GET /tasks/{id}/deliverables
+// Separate Deliverables-Antwort (wird nur bei offenem Drawer geladen).
+export const TaskDeliverablesResponseSchema = z.object({
+  task_id: z.coerce.string().catch(""),
+  deliverables: z.array(TaskDeliverableSchema).catch([]),
+});
+export type TaskDeliverablesResponse = z.infer<typeof TaskDeliverablesResponseSchema>;
+export type TaskDeliverable = z.infer<typeof TaskDeliverableSchema>;
+
+// Fleet Ketten-Detail-Drawer: GET /tasks/{id} — Body + Acceptance-Criteria
+// für die Übersicht-Tab. Wir picken hier nur die für den Drawer relevanten Felder.
+// (Vollständig: TaskDetailResponseSchema oben — derselbe Endpoint.)
+export const TaskBodySchema = z.object({
+  task: z.object({
+    id: z.coerce.string().catch(""),
+    title: z.string().catch(""),
+    body: z.string().nullable().catch(null),
+    status: z.string().catch(""),
+    assignee: z.string().nullable().catch(null),
+    block_reason: z.string().nullable().catch(null),
+    created_at: z.coerce.number().nullable().catch(null),
+    started_at: z.coerce.number().nullable().catch(null),
+    completed_at: z.coerce.number().nullable().catch(null),
+    review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
+    branch_name: z.string().nullable().catch(null),
+    model_override: z.string().nullable().catch(null),
+    // Real API payload exposes workspace_kind / workspace_path (not "workspace")
+    workspace_kind: z.string().nullable().catch(null),
+    workspace_path: z.string().nullable().catch(null),
+    // Acceptance-Criteria: der Drawer zeigt sie als Liste; raw text oder strukturiert.
+    acceptance_criteria: z.union([
+      z.array(z.string()),
+      z.array(z.object({ statement: z.string().catch("") }).passthrough()),
+      z.string(),
+    ]).nullable().catch(null),
+  }).nullable().catch(null),
+  // Laufzeit aus dem jüngsten Run (für den Übersicht-Tab)
+  runs: z.array(z.object({
+    id: z.coerce.string(),
+    profile: z.string().nullable().catch(null),
+    status: z.string().catch(""),
+    started_at: z.coerce.number().nullable().catch(null),
+    ended_at: z.coerce.number().nullable().catch(null),
+    runtime_seconds: z.coerce.number().nullable().catch(null),
+    input_tokens: z.coerce.number().nullable().catch(null),
+    output_tokens: z.coerce.number().nullable().catch(null),
+    cost_usd: z.coerce.number().nullable().catch(null),
+  })).catch([]),
+  deliverables: z.array(TaskDeliverableSchema).catch([]),
+}).passthrough().catch({ task: null, runs: [], deliverables: [] });
+export type TaskBodyResponse = z.infer<typeof TaskBodySchema>;
+
+// ─── Lane-Preset-Catalog (GET /api/plugins/kanban/lanes) ──────────────────────
+// Benötigt für das Plan-Cockpit: Modell-Optionen je Lane-Profil.
+// Tolerant: ältere Server ohne models-Feld liefern leere Liste.
+
+const LaneModelOptionSchema = z.object({
+  id: z.string().catch(""),
+  label: z.string().catch(""),
+  runtime: z.string().catch("hermes"),
+  provider: z.string().nullable().catch(null),
+  group: z.string().catch(""),
+  locked: z.boolean().catch(false),
+  source: z.string().optional(),
+});
+
+const LaneCatalogProfileSchema = z.object({
+  name: z.string().catch(""),
+  worker_runtime: z.string().catch("hermes"),
+  default_model: z.string().nullable().catch(null),
+  default_provider: z.string().nullable().catch(null),
+  description: z.string().catch(""),
+  locked: z.boolean().catch(false),
+  locked_reason: z.string().nullable().catch(null),
+}).passthrough();
+
+export const LanesCatalogResponseSchema = z.object({
+  lanes: z.array(z.unknown()).catch([]),
+  count: z.coerce.number().catch(0),
+  active_id: z.string().nullable().catch(null),
+  profiles: z.array(LaneCatalogProfileSchema).catch([]),
+  models: z.array(LaneModelOptionSchema).catch([]),
+}).passthrough();
+
+export type LaneCatalogProfile = z.infer<typeof LaneCatalogProfileSchema>;
+export type LaneModelOptionRecord = z.infer<typeof LaneModelOptionSchema>;
+export type LanesCatalogResponse = z.infer<typeof LanesCatalogResponseSchema>;
 
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);

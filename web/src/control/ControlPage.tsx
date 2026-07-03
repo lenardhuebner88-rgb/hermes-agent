@@ -11,6 +11,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
 import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
+import { FleetView } from "./views/FleetView";
 
 // The Decision-Inbox is the /control landing → keep it eager. Every other tab is
 // lazy-loaded (its own chunk, fetched on first visit) so opening /control no
@@ -83,6 +84,7 @@ const OpsRadarView = lazy(() =>
 );
 
 function activeFromPath(pathname: string): ControlTab {
+  if (pathname.includes("/control/fleet")) return "fleet";
   if (pathname.includes("/control/overview")) return "overview";
   if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
@@ -116,6 +118,7 @@ function activeFromPath(pathname: string): ControlTab {
 // Vite dedupliziert dynamische Imports desselben Moduls — idempotent & billig.
 // Muss dieselben import()-Ziele treffen wie die lazy()-Wrapper oben.
 const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
+  fleet: () => import("./views/FleetView"),
   overview: () => import("./views/OverviewView"),
   pulse: () => import("./views/PulseView"),
   workstreams: () => import("./views/AgentOpsView"),
@@ -144,6 +147,7 @@ function prefetchControlView(tab: ControlTab): void {
 }
 
 const tabPath: Record<ControlTab, string> = {
+  fleet: "/control/fleet",
   inbox: "/control",
   overview: "/control/overview",
   pulse: "/control/pulse",
@@ -251,6 +255,7 @@ export default function ControlPage() {
           <Suspense fallback={<ControlViewFallback />}>
           <Routes location={location}>
             <Route index element={<CommandHome density={density.density} />} />
+            <Route path="fleet" element={<FleetView />} />
             <Route path="inbox" element={<CommandHome density={density.density} />} />
             <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />

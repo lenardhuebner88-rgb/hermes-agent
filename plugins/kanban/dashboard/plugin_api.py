@@ -8038,6 +8038,197 @@ def get_flow_plan(task_id: str):
     )
 
 
+class PlanSpecApproveBody(BaseModel):
+    root_task_id: ShortText
+    lane_models: Optional[dict[str, ShortText]] = None
+    inject_scout: Optional[bool] = None
+    dry_run: bool = False
+
+
+@router.post("/planspecs/approve")
+def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(None)):
+    """Composed PlanSpec-release: validate hold, apply lane-model overrides, optionally
+    inject a scout, then release the freigabe:operator hold.
+
+    Body fields:
+    - ``root_task_id``: the held ``freigabe: operator`` root task (required).
+    - ``lane_models``: mapping of lane/assignee → model_id; every chain task whose
+      assignee matches a key receives a ``model_override``.
+    - ``inject_scout``: prepend exactly one scout task before the entry children;
+      idempotent (no second scout if one already exists).
+    - ``dry_run``: validate and report planned actions without writing anything.
+
+    Returns ``{released, overrides_applied, scout_injected, dry_run}``.
+
+    Errors:
+    - 404 when ``root_task_id`` is unknown.
+    - 409 when ``root_task_id`` is not a held ``freigabe: operator`` root.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        root_task_id = body.root_task_id.strip()
+
+        # --- Guard: task must exist (404) -----------------------------------------
+        # freigabe is a DB column not in the Task dataclass → query directly.
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (root_task_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": f"task {root_task_id!r} not found"},
+            )
+
+        # --- Guard: must be a held freigabe:operator root (409) -------------------
+        # Only accept status='scheduled': a 'todo' root is already released (the
+        # hold was cleared by a prior approve call).  Allowing 'todo' here would
+        # re-execute overrides/scout on an already-live chain — violating the
+        # 'gehaltener Root' requirement and masking Doppel-Approve as a no-op 200.
+        freigabe_value = str(row["freigabe"] or "").strip().lower()
+        if freigabe_value != "operator":
+            raise HTTPException(
+                status_code=409,
+                detail={"error": f"{root_task_id} ist kein freigabe:operator-Root"},
+            )
+        if row["status"] != "scheduled":
+            raise HTTPException(
+                status_code=409,
+                detail={"error": f"{root_task_id} hat Status {row['status']!r} und ist nicht freigabefähig (erwartet: scheduled)"},
+            )
+
+        root = kanban_db.get_task(conn, root_task_id)
+
+        # --- Collect chain members (root + all transitive parents via chain graph) -
+        chain_ids = kanban_db._chain_member_ids_from_sink(conn, root_task_id)
+
+        # --- Compute lane-model overrides for chain members -----------------------
+        lane_models: dict[str, str] = dict(body.lane_models or {})
+        override_targets: list[str] = []
+        for tid in chain_ids:
+            task = kanban_db.get_task(conn, tid)
+            if task is None:
+                continue
+            assignee = str(task.assignee or "").strip()
+            if assignee in lane_models:
+                override_targets.append(tid)
+
+        # --- Determine scout injection: entry tasks + global dedup ------------------
+        # Entry tasks = all transitive chain members (not just direct children of
+        # root) that have no in-chain parent themselves — i.e. the true leaves of
+        # the Kanban DAG.  Using only parent_ids(root) missed nodes in chains
+        # deeper than one hop (entry → middle → root).
+        #
+        # Global dedup (Blocker 2): if ANY task in the chain already carries
+        # assignee='scout', we must not inject a second scout anywhere in the
+        # chain — not just under the direct root children.
+        should_inject_scout = bool(body.inject_scout)
+        scout_would_inject = False
+        scout_entry_children: list[str] = []
+        if should_inject_scout:
+            chain_set = set(chain_ids)
+            # Global dedup: abort scout injection if a scout already lives
+            # anywhere in the chain (assignee check on every chain member).
+            chain_already_scouted = any(
+                (t := kanban_db.get_task(conn, tid)) is not None
+                and str(t.assignee or "").strip() == "scout"
+                for tid in chain_ids
+            )
+            if not chain_already_scouted:
+                # Entry tasks = chain members with no in-chain parent.
+                for cid in chain_ids:
+                    if cid == root_task_id:
+                        # Root is the sink — never an entry task.
+                        continue
+                    cid_parents_in_chain = set(kanban_db.parent_ids(conn, cid)) & chain_set
+                    if cid_parents_in_chain:
+                        # Has an in-chain parent → not an entry task.
+                        continue
+                    scout_entry_children.append(cid)
+                if scout_entry_children:
+                    scout_would_inject = True
+
+        # --- dry_run: return planned actions without writing ----------------------
+        if body.dry_run:
+            planned: list[dict] = []
+            for tid in override_targets:
+                task = kanban_db.get_task(conn, tid)
+                if task is not None:
+                    assignee = str(task.assignee or "").strip()
+                    planned.append({
+                        "action": "model_override",
+                        "task_id": tid,
+                        "assignee": assignee,
+                        "model": lane_models[assignee],
+                    })
+            if scout_would_inject:
+                planned.append({
+                    "action": "inject_scout",
+                    "entry_children": scout_entry_children,
+                })
+            planned.append({
+                "action": "release_freigabe_hold",
+                "task_id": root_task_id,
+            })
+            return {
+                "released": False,
+                "overrides_applied": len(override_targets),
+                "scout_injected": False,
+                "dry_run": True,
+                "planned_actions": planned,
+            }
+
+        # --- Apply lane-model overrides -------------------------------------------
+        overrides_applied = 0
+        for tid in override_targets:
+            task = kanban_db.get_task(conn, tid)
+            if task is None:
+                continue
+            assignee = str(task.assignee or "").strip()
+            model_id = lane_models[assignee]
+            if kanban_db.set_task_model_override(conn, tid, model_id):
+                overrides_applied += 1
+
+        # --- Inject scout ---------------------------------------------------------
+        scout_injected = False
+        if should_inject_scout and scout_entry_children:
+            # Create exactly ONE scout that covers all entry children (same pattern
+            # as _release_flow_gate: a single scout title=root.title, body from
+            # _scout_recon_body, linked as parent of each entry child).
+            entry_tasks = [kanban_db.get_task(conn, cid) for cid in scout_entry_children]
+            scout_id = kanban_db.create_task(
+                conn,
+                title=f"Scout: {root.title}",
+                body=kanban_db._scout_recon_body(entry_tasks),
+                assignee="scout",
+                created_by="planspec-approve",
+                priority=root.priority,
+                tenant=root.tenant,
+                max_runtime_seconds=kanban_db._scout_max_runtime_seconds(),
+            )
+            for cid in scout_entry_children:
+                kanban_db.link_tasks(conn, scout_id, cid)
+            scout_injected = True
+
+        # --- Release the freigabe hold -------------------------------------------
+        released = kanban_db.release_freigabe_hold(conn, root_task_id, author="operator")
+        if not released:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
+            )
+
+        return {
+            "released": True,
+            "overrides_applied": overrides_applied,
+            "scout_injected": scout_injected,
+            "dry_run": False,
+        }
+    finally:
+        conn.close()
+
+
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
     # Authorize the upgrade via the dashboard's canonical WS gate so the
