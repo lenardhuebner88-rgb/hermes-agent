@@ -13392,6 +13392,25 @@ async def agent_terminal_detach_client(req: AgentTerminalDetachRequest) -> Dict[
     return {"ok": True}
 
 
+def _attach_dimension(raw: "str | None", default: int) -> int:
+    """Parse a query-param terminal dimension, returning *default* on any bad value.
+
+    Accepts a plain integer string.  Returns *default* when *raw* is None,
+    empty, non-numeric, or below 2 (values < 2 are the classic "not yet known"
+    signal from mobile browsers before the first visualViewport measurement).
+    The upper bound is enforced by PtyBridge.spawn's own _clamp_dimension call.
+    """
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return default
+    if n < 2:
+        return default
+    return n
+
+
 @app.websocket("/api/agent-terminals/attach")
 async def agent_terminal_attach_ws(ws: WebSocket) -> None:
     peer = ws.client.host if ws.client else "?"
@@ -13428,8 +13447,11 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
         await ws.close(code=1008)
         return
 
+    attach_cols = _attach_dimension(ws.query_params.get("cols"), default=80)
+    attach_rows = _attach_dimension(ws.query_params.get("rows"), default=24)
+
     try:
-        bridge = PtyBridge.spawn(argv, cwd=str(Path.home()), env=None)
+        bridge = PtyBridge.spawn(argv, cwd=str(Path.home()), env=None, cols=attach_cols, rows=attach_rows)
     except (PtyUnavailableError, FileNotFoundError, OSError) as exc:
         detail = scrub_detail(f"Agent terminal attach failed: {exc}") or "Agent terminal attach failed"
         await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")

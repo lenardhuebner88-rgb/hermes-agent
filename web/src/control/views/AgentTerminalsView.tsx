@@ -83,6 +83,10 @@ const FONT_MAX = 20;
 const PRIMARY_SESSION = "work";
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 const OVERVIEW_POLL_MS = 5000;
+// Debounce window for RESIZE escape sends (fit() stays immediate).  Mobile keyboards
+// fire dozens of visualViewport events during the slide animation; 300 ms trailing
+// debounce collapses the storm to one send after the keyboard settles.
+const RESIZE_SEND_DEBOUNCE_MS = 300;
 
 const FLEET_STATE_PRIORITY: Record<AgentTerminalOverviewWindow["state"], number> = {
   frage: 0,
@@ -206,6 +210,15 @@ export function chipLabel(window: AgentTerminalWindow): string {
 export function reconnectDelayMs(attempt: number): number {
   const index = Math.min(Math.max(Math.trunc(attempt), 0), RECONNECT_DELAYS_MS.length - 1);
   return RECONNECT_DELAYS_MS[index];
+}
+
+/** Build the PTY resize escape sequence, clamping to valid dimensions (≥ 2, floored).
+ *  Handles NaN/Infinity by falling back to 2 (Math.max propagates NaN, so we guard). */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function formatPtyResize(cols: number, rows: number): string {
+  const c = Math.max(2, Number.isFinite(cols) ? Math.floor(cols) : 0);
+  const r = Math.max(2, Number.isFinite(rows) ? Math.floor(rows) : 0);
+  return `\x1b[RESIZE:${c};${r}]`;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
@@ -538,6 +551,7 @@ export function AgentTerminalsView() {
   const tmuxCopyModeRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const resizeSendTimerRef = useRef<number | null>(null);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [capability, setCapability] = useState<AgentTerminalCapabilityState | null>(null);
   const [windows, setWindows] = useState<AgentTerminalWindow[]>([]);
@@ -778,16 +792,26 @@ export function AgentTerminalsView() {
     let resizeRaf = 0;
     let settleRaf1 = 0;
     let settleRaf2 = 0;
+    const scheduleDebouncedResizeSend = () => {
+      // fit() has already run — just (re-)arm the debounce timer for the RESIZE send.
+      if (resizeSendTimerRef.current != null) window.clearTimeout(resizeSendTimerRef.current);
+      resizeSendTimerRef.current = window.setTimeout(() => {
+        resizeSendTimerRef.current = null;
+        try {
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(formatPtyResize(term.cols, term.rows));
+          }
+        } catch {
+          /* WS closed/term disposed between arm and fire — best-effort send */
+        }
+      }, RESIZE_SEND_DEBOUNCE_MS);
+    };
     const resize = () => {
       try {
         if (!host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
         fit.fit();
-        const cols = Math.max(2, Math.floor(term.cols));
-        const rows = Math.max(2, Math.floor(term.rows));
-        const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(`\x1b[RESIZE:${cols};${rows}]`);
-        }
+        scheduleDebouncedResizeSend();
       } catch {
         /* best-effort fit; ignore transient resize errors */
       }
@@ -818,6 +842,10 @@ export function AgentTerminalsView() {
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);
       if (settleRaf2) cancelAnimationFrame(settleRaf2);
+      if (resizeSendTimerRef.current != null) {
+        window.clearTimeout(resizeSendTimerRef.current);
+        resizeSendTimerRef.current = null;
+      }
       wsRef.current?.close();
       wsRef.current = null;
       term.dispose();
@@ -856,7 +884,16 @@ export function AgentTerminalsView() {
       return delayMs;
     };
 
-    void buildWsUrl("/api/agent-terminals/attach", { session: target.session, window: target.window, client_id: "agent-terminals-ui" })
+    // Pre-fit before opening the socket so cols/rows are passed as query params —
+    // the backend spawns the PTY at this size, avoiding the initial 80×24 blank-screen.
+    try {
+      fitRef.current?.fit();
+    } catch {
+      /* best-effort pre-attach fit */
+    }
+    const attachCols = String(Math.max(2, Math.floor(term.cols)));
+    const attachRows = String(Math.max(2, Math.floor(term.rows)));
+    void buildWsUrl("/api/agent-terminals/attach", { session: target.session, window: target.window, client_id: "agent-terminals-ui", cols: attachCols, rows: attachRows })
       .then((url) => {
         if (disposed) return;
         const ws = new WebSocket(url);
@@ -872,11 +909,10 @@ export function AgentTerminalsView() {
           setSocketConnecting(false);
           setError(null);
           term.clear();
+          // Ungedebounct: dieser Send folgt direkt auf den Handshake — kein Storm-Risiko.
           try {
             fitRef.current?.fit();
-            const cols = Math.max(2, Math.floor(term.cols));
-            const rows = Math.max(2, Math.floor(term.rows));
-            ws.send(`\x1b[RESIZE:${cols};${rows}]`);
+            ws.send(formatPtyResize(term.cols, term.rows));
           } catch {
             /* best-effort initial PTY resize */
           }
@@ -1049,13 +1085,24 @@ export function AgentTerminalsView() {
     if (!term || !fit) return;
     try {
       fit.fit();
-      const cols = Math.max(2, Math.floor(term.cols));
-      const rows = Math.max(2, Math.floor(term.rows));
-      sendRaw(`\x1b[RESIZE:${cols};${rows}]`);
+      // Debounce the RESIZE send to avoid a storm when called from adjustFont
+      // (requestAnimationFrame → syncPtySize path) or repeated font-size taps.
+      if (resizeSendTimerRef.current != null) window.clearTimeout(resizeSendTimerRef.current);
+      resizeSendTimerRef.current = window.setTimeout(() => {
+        resizeSendTimerRef.current = null;
+        try {
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(formatPtyResize(term.cols, term.rows));
+          }
+        } catch {
+          /* WS closed/term disposed between arm and fire — best-effort send */
+        }
+      }, RESIZE_SEND_DEBOUNCE_MS);
     } catch {
       /* best-effort refit */
     }
-  }, [sendRaw]);
+  }, []);
 
   const adjustFont = useCallback(
     (delta: number) => {

@@ -5,6 +5,7 @@ import {
   chipLabel,
   classifyTerminalState,
   formatActivityAge,
+  formatPtyResize,
   hasUnseenActivity,
   orderOverviewForFleet,
   orderWindowsForStrip,
@@ -280,5 +281,41 @@ describe("orderOverviewForFleet", () => {
 
   it("returns an empty list unchanged", () => {
     expect(orderOverviewForFleet([])).toEqual([]);
+  });
+});
+
+describe("formatPtyResize", () => {
+  // Live-Incident-Fixture (2026-07-03): Handy = 69 Spalten, Keyboard-offen = 35 Zeilen,
+  // Keyboard-zu = 49 Zeilen. Echte Sequenz aus dem Resize-Storm: "\x1b[RESIZE:69;35]".
+  it("formats the live incident fixture correctly (69×35, keyboard open)", () => {
+    expect(formatPtyResize(69, 35)).toBe("\x1b[RESIZE:69;35]");
+  });
+
+  it("formats the live incident fixture correctly (69×49, keyboard closed)", () => {
+    expect(formatPtyResize(69, 49)).toBe("\x1b[RESIZE:69;49]");
+  });
+
+  it("floors fractional dimensions", () => {
+    expect(formatPtyResize(69.9, 48.7)).toBe("\x1b[RESIZE:69;48]");
+  });
+
+  it("clamps 0 to minimum 2", () => {
+    expect(formatPtyResize(0, 0)).toBe("\x1b[RESIZE:2;2]");
+  });
+
+  it("clamps 1 to minimum 2", () => {
+    expect(formatPtyResize(1, 1)).toBe("\x1b[RESIZE:2;2]");
+  });
+
+  it("clamps NaN to minimum 2", () => {
+    expect(formatPtyResize(NaN, NaN)).toBe("\x1b[RESIZE:2;2]");
+  });
+
+  it("clamps negative values to minimum 2", () => {
+    expect(formatPtyResize(-5, -10)).toBe("\x1b[RESIZE:2;2]");
+  });
+
+  it("formats the default 80×24 size", () => {
+    expect(formatPtyResize(80, 24)).toBe("\x1b[RESIZE:80;24]");
   });
 });

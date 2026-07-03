@@ -153,10 +153,12 @@ def test_agent_terminal_attach_uses_only_tmux_attach_argv(monkeypatch):
 
     class FakeBridge:
         @classmethod
-        def spawn(cls, argv, cwd=None, env=None):
+        def spawn(cls, argv, cwd=None, env=None, cols=80, rows=24):
             spawned["argv"] = argv
             spawned["cwd"] = cwd
             spawned["env"] = env
+            spawned["cols"] = cols
+            spawned["rows"] = rows
             return cls()
 
         def read(self, timeout):
@@ -183,6 +185,77 @@ def test_agent_terminal_attach_uses_only_tmux_attach_argv(monkeypatch):
     assert spawned["env"] is None
 
 
+# Live incident: Handy = 69 Spalten, Höhen 35 (Keyboard offen) / 49 (Keyboard zu).
+# Diese Fixture-Werte kommen direkt aus dem beobachteten Resize-Storm (2026-07-03).
+def _make_attach_bridge_class(spawned: dict):
+    """Return a FakeBridge that records spawn kwargs and immediately ends the read loop."""
+
+    class FakeBridge:
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None, cols=80, rows=24):
+            spawned["argv"] = argv
+            spawned["cols"] = cols
+            spawned["rows"] = rows
+            return cls()
+
+        def read(self, timeout):
+            return None
+
+        def write(self, raw):
+            pass
+
+        def close(self):
+            pass
+
+    return FakeBridge
+
+
+def _setup_attach_monkeypatches(monkeypatch, spawned: dict):
+    class AttachService(FakeAgentTerminalService):
+        def attach_argv(self, session, window):
+            return ["tmux", "attach-session", "-t", f"{session}:{window}"]
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: AttachService())
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "PtyBridge", _make_attach_bridge_class(spawned))
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+
+def test_agent_terminal_attach_spawns_with_client_dimensions(monkeypatch):
+    """Attach with ?cols=69&rows=49 → PTY spawned at mobile size (live incident fixture)."""
+    spawned: dict = {}
+    _setup_attach_monkeypatches(monkeypatch, spawned)
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes&cols=69&rows=49"):
+        pass
+    assert spawned["cols"] == 69
+    assert spawned["rows"] == 49
+
+
+def test_agent_terminal_attach_spawns_with_defaults_when_no_params(monkeypatch):
+    """Attach without cols/rows → PTY spawned at 80×24 default."""
+    spawned: dict = {}
+    _setup_attach_monkeypatches(monkeypatch, spawned)
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes"):
+        pass
+    assert spawned["cols"] == 80
+    assert spawned["rows"] == 24
+
+
+def test_agent_terminal_attach_garbage_dimensions_fall_back_to_default(monkeypatch):
+    """cols=abc / rows=0 are invalid → fallback to 80×24, no exception."""
+    spawned: dict = {}
+    _setup_attach_monkeypatches(monkeypatch, spawned)
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes&cols=abc&rows=0"):
+        pass
+    assert spawned["cols"] == 80
+    assert spawned["rows"] == 24
+
+
 def test_agent_terminal_attach_consumes_resize_escape(monkeypatch):
     class AttachService(FakeAgentTerminalService):
         def attach_argv(self, session, window):
@@ -192,7 +265,7 @@ def test_agent_terminal_attach_consumes_resize_escape(monkeypatch):
 
     class FakeBridge:
         @classmethod
-        def spawn(cls, argv, cwd=None, env=None):
+        def spawn(cls, argv, cwd=None, env=None, cols=80, rows=24):
             return cls()
 
         def read(self, timeout):
