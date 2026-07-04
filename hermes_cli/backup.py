@@ -1337,11 +1337,43 @@ def _prune_pre_migration_backups(backup_dir: Path, keep: int) -> int:
 
 _PRE_DEPLOY_PREFIX = "pre-deploy-"
 _PRE_DEPLOY_DEFAULT_KEEP = 5
+_PRE_DEPLOY_DEFAULT_MAX_AGE_SECONDS = 3600
+
+
+def _find_reusable_pre_deploy_backup(backup_dir: Path, max_age_seconds: int) -> Optional[Path]:
+    """Return the newest pre-deploy backup by mtime when it is within max age."""
+    if max_age_seconds <= 0 or not backup_dir.exists():
+        return None
+
+    newest: Optional[tuple[float, str, Path]] = None
+    for path in backup_dir.iterdir():
+        if not (path.is_file() and path.name.startswith(_PRE_DEPLOY_PREFIX) and path.suffix.lower() == ".zip"):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError as exc:
+            logger.warning("Could not stat pre-deploy backup %s: %s", path.name, exc)
+            continue
+        candidate = (mtime, path.name, path)
+        if newest is None or candidate > newest:
+            newest = candidate
+
+    if newest is None:
+        return None
+
+    mtime, _, path = newest
+    age_seconds = int(max(0, time.time() - mtime))
+    if age_seconds > max_age_seconds:
+        return None
+
+    logger.info("reusing pre-deploy backup %s (age %ss)", path.name, age_seconds)
+    return path
 
 
 def create_pre_deploy_backup(
     hermes_home: Optional[Path] = None,
     keep: int = _PRE_DEPLOY_DEFAULT_KEEP,
+    max_age_seconds: int = _PRE_DEPLOY_DEFAULT_MAX_AGE_SECONDS,
 ) -> Optional[Path]:
     """Create a full zip backup of HERMES_HOME under ``backups/`` before an
     autonomous deploy / release-gate run.
@@ -1350,7 +1382,9 @@ def create_pre_deploy_backup(
     ``_write_full_zip_backup`` — same exclusions, same SQLite safe-copy,
     restorable with ``hermes import <archive>``.  Writes to
     ``<HERMES_HOME>/backups/pre-deploy-<timestamp>.zip`` and auto-prunes
-    old pre-deploy backups.
+    old pre-deploy backups.  If a pre-deploy zip already exists with an mtime
+    within ``max_age_seconds`` (default: 1 hour), that archive is reused instead
+    of writing a duplicate.  Pass ``max_age_seconds=0`` to force a fresh backup.
 
     Returns the path to the created zip, or ``None`` if nothing was found
     to back up (fresh install) or the write failed.  Never raises — the
@@ -1369,7 +1403,11 @@ def create_pre_deploy_backup(
         logger.warning("Could not create pre-deploy backup dir %s: %s", backup_dir, exc)
         return None
 
-    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    reusable = _find_reusable_pre_deploy_backup(backup_dir, max_age_seconds=max_age_seconds)
+    if reusable is not None:
+        return reusable
+
+    stamp = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%H%M%S")
     out_path = backup_dir / f"{_PRE_DEPLOY_PREFIX}{stamp}.zip"
 
     try:
