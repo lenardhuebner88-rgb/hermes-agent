@@ -448,7 +448,19 @@ class LoopRunner:
         return len(list(stage_dir.glob("*.md"))) if stage_dir.is_dir() else 0
 
     def pick_plan(self) -> Path | None:
-        plans = sorted((self.queue / "00-planned").glob("*.md"))
+        """Frische Pläne (retry 0) vor geretryten — sonst verbraucht ein einzelner
+        schlechter Plan den `fail_streak`-Stop allein, während frische Pläne nie
+        angefasst werden (Nachtlauf-Evidenz 2026-07-04)."""
+        def retry_of(plan: Path) -> int:
+            try:
+                return parse_retry(plan.read_text(encoding="utf-8"))
+            except OSError:
+                return 0
+
+        plans = sorted(
+            (self.queue / "00-planned").glob("*.md"),
+            key=lambda p: (retry_of(p), p.name),
+        )
         return plans[0] if plans else None
 
     def handle_fail(self, plan: Path, reason: str) -> str:

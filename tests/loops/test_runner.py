@@ -248,6 +248,53 @@ def test_handle_fail_retry_then_bounce(tmp_path, fake_engine):
     assert bounced.read_text(encoding="utf-8").count("## Loop-Fail") == 2
 
 
+# ── (d) pick_plan: frische Pläne vor Retries ─────────────────────────────────
+
+def test_pick_plan_prefers_fresh_over_retry_despite_name_order(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "pick", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "pick")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-x.md").write_text(
+        PLAN_BODY.replace("retry: 0", "retry: 1"), encoding="utf-8"
+    )
+    (runner.queue / "00-planned" / "P2-y.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    picked = runner.pick_plan()
+    assert picked.name == "P2-y.md"
+
+
+def test_pick_plan_same_retry_falls_back_to_name_order(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "pick", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "pick")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P2-y.md").write_text(PLAN_BODY, encoding="utf-8")
+    (runner.queue / "00-planned" / "P1-x.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    picked = runner.pick_plan()
+    assert picked.name == "P1-x.md"
+
+
+def test_pick_plan_missing_retry_line_counts_as_zero(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "pick", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "pick")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-x.md").write_text(
+        PLAN_BODY.replace("retry: 0", "retry: 1"), encoding="utf-8"
+    )
+    no_retry_line = PLAN_BODY.replace("retry: 0\n", "")
+    assert "retry:" not in no_retry_line
+    (runner.queue / "00-planned" / "P2-y.md").write_text(no_retry_line, encoding="utf-8")
+
+    picked = runner.pick_plan()
+    assert picked.name == "P2-y.md"
+
+
 # ── (e) Git-Plumbing gegen echtes Repo ───────────────────────────────────────
 
 def test_ensure_wt_guard_clean_and_revert(tmp_path, fake_engine):
