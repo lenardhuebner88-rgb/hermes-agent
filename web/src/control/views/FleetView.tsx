@@ -11,7 +11,7 @@
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesReliability, useChainGraph, useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, usePlanSpecDetail, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus } from "../hooks/useControlData";
+import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useChainGraph, useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, usePlanSpecDetail, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus } from "../hooks/useControlData";
 import {
   buildLagezeile,
   etaFraction,
@@ -35,15 +35,17 @@ import {
   normalizeUsageWindowLabel,
   derivePendingItems,
   deriveEffectivePlanPath,
+  deriveSparklinePoints,
   type PendingItem,
   type ChainChipDef,
   type SegmentKind,
+  type SparklinePoint,
 } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
 // Worker, BoardResponse, BoardTask, ChainGraphResponse: ALLE aus lib/types.
 import type { Worker, BoardResponse, BoardTask, ChainGraphResponse } from "../lib/types";
-import type { PlanSpecsResponse, RunsCostsResponse, ReliabilityResponse, LanesCatalogResponse } from "../lib/schemas";
+import type { PlanSpecsResponse, RunsCostsResponse, RunsDailyResponse, ReliabilityResponse, LanesCatalogResponse } from "../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse } from "../lib/types";
 import { Overlay } from "../components/Overlay";
 import { WorkerLogTail } from "../components/WorkerCard";
@@ -98,6 +100,7 @@ export function FleetView() {
   const board = useBoard();
   const planspecs = usePlanSpecs({ scope: "open", limit: 10 });
   const costs = useHermesRunsCosts();
+  const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
   const lanesCatalog = useLanesCatalog();
   const accountUsage = useAccountUsage();
@@ -212,6 +215,7 @@ export function FleetView() {
                 pendingApprovals={pendingApprovals}
                 allPlanspecs={allPlanspecs}
                 costs={costs.data}
+                daily={daily.data}
                 now={now}
                 onWorkerClick={(w) => {
                   setDrawerWorker(w);
@@ -317,11 +321,12 @@ interface HeuteTabProps {
   pendingApprovals: number;
   allPlanspecs: PlanSpecRecord[];
   costs: RunsCostsResponse | null;
+  daily: RunsDailyResponse | null;
   now: number;
   onWorkerClick: (w: Worker) => void;
 }
 
-function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, now, onWorkerClick }: HeuteTabProps) {
+function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, onWorkerClick }: HeuteTabProps) {
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
     allWorkers,
@@ -329,6 +334,9 @@ function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, a
     costs?.today.actual_cost_usd ?? null,
     costs?.today.runs ?? null,
   );
+  // 7-Tage-Sparkline aus der bestehenden runs/daily-Serie (kein neuer Endpoint).
+  // Liefert null bei <2 Punkten → keine Sparkline (kein Fake, keine Platzhalter).
+  const sparklinePts = useMemo(() => deriveSparklinePoints(daily), [daily]);
 
   return (
     <>
@@ -350,6 +358,7 @@ function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, a
         <div className="fleet-kp">
           <div className="fleet-kp-num">{kpi.fertig24h ?? "—"}</div>
           <div className="fleet-kp-label">{de.fleet.kpiFertig}</div>
+          {sparklinePts && <FleetSparkline points={sparklinePts} />}
         </div>
         <div className="fleet-kp">
           <div className="fleet-kp-num">
@@ -2225,6 +2234,73 @@ function RisikoTab({
         </div>
       ) : null}
     </>
+  );
+}
+
+// ─── FleetSparkline (Fertig-24h 7-Tage-Trend) ─────────────────────────────────
+//
+// Pure presentational SVG: nimmt SparklinePoint[] aus deriveSparklinePoints()
+// und zeichnet eine kleine Polyline. Keine eigene Datenquelle, kein Fetch.
+// Bei <2 Punkten wird null geliefert (Caller rendert dann nichts).
+
+interface FleetSparklineProps {
+  points: SparklinePoint[];
+}
+
+const SPARK_W = 64;
+const SPARK_H = 18;
+const SPARK_PAD = 2;
+
+function FleetSparkline({ points }: FleetSparklineProps) {
+  const n = points.length;
+  if (n < 2) return null;
+
+  const values = points.map((p) => p.value);
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const span = max - min;
+  // Vermeide Division durch 0: wenn alle Werte gleich, horizontale Mittellinie.
+  const range = span === 0 ? 1 : span;
+
+  const innerW = SPARK_W - SPARK_PAD * 2;
+  const innerH = SPARK_H - SPARK_PAD * 2;
+
+  const coords = points.map((p, i) => {
+    const x = SPARK_PAD + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+    // Y invertieren: höherer Wert = weiter oben. min→unten, max→oben.
+    const y = SPARK_PAD + innerH - ((p.value - min) / range) * innerH;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+
+  const last = points[n - 1];
+  const lastValue = last.value;
+  const lastDate = last.date;
+
+  return (
+    <svg
+      className="fleet-spark"
+      width={SPARK_W}
+      height={SPARK_H}
+      viewBox={`0 0 ${SPARK_W} ${SPARK_H}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`7-Tage-Trend: ${lastValue} erledigt am ${lastDate}`}
+    >
+      <title>{`Fertig 24h · 7-Tage-Trend (jüngster: ${lastValue} am ${lastDate})`}</title>
+      <polyline
+        className="fleet-spark-line"
+        points={coords.join(" ")}
+        fill="none"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+      <circle
+        className="fleet-spark-dot"
+        cx={coords[n - 1].split(",")[0]}
+        cy={coords[n - 1].split(",")[1]}
+        r={1.4}
+      />
+    </svg>
   );
 }
 

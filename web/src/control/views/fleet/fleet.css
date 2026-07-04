@@ -175,6 +175,32 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   text-shadow: 0 0 14px rgba(55, 224, 255, 0.4);
 }
 
+/* ── Sparkline (Fertig-24h 7-Tage-Trend) ─────────────────────────────────── */
+/* Inline-SVG unter der KPI-Zahl. Kein Overflow, kein Layout-Shift. */
+.fleet-spark {
+  display: block;
+  margin-top: 5px;
+  width: 100%;
+  max-width: 96px;
+  height: 18px;
+  overflow: visible;
+  pointer-events: none;
+}
+.fleet-spark-line {
+  stroke: var(--fleet-puls);
+  stroke-width: 1.4;
+  opacity: 0.75;
+}
+.fleet-spark-dot {
+  fill: var(--fleet-puls);
+  opacity: 0.95;
+}
+@media (max-width: 380px) {
+  .fleet-spark {
+    max-width: 64px;
+  }
+}
+
 /* ── Worker-Karte ─────────────────────────────────────────────────────────── */
 .fleet-wk {
   background: var(--fleet-karte);

@@ -22,6 +22,7 @@ import {
   pendingCount,
   deriveEffectivePlanPath,
   normalizeUsageWindowLabel,
+  deriveSparklinePoints,
   type ChainChipState,
 } from "./fleetHub";
 import type { Worker, ChainGraphResponse } from "./types";
@@ -855,5 +856,119 @@ describe("deriveEffectivePlanPath", () => {
 
   it("genau ein Eintrag, selectedPath zeigt auf ihn → stabil", () => {
     expect(deriveEffectivePlanPath("specs/only.md", ["specs/only.md"])).toBe("specs/only.md");
+  });
+});
+
+// ─── deriveSparklinePoints (Fertig-24h 7-Tage-Trend) ──────────────────────────
+//
+// Fixtures im echten RunsDailyResponse-Format (vgl. schemas.ts):
+//   series: RunsDailyPoint[] — chronologisch aufsteigend (ältester zuerst).
+//   done_tasks = erledigte Tasks des jeweiligen Tages.
+
+describe("deriveSparklinePoints", () => {
+  /** Minimaler gültiger Punkt, nur die für die Sparkline relevanten Felder. */
+  function mkPoint(date: string, doneTasks: number) {
+    return {
+      date,
+      done_roots: 0,
+      done_roots_by_class: { nutzer: 0, haertung: 0, meta: 0 },
+      done_tasks: doneTasks,
+      cost_usd: null,
+      input_tokens: null,
+      output_tokens: null,
+      runs_completed: doneTasks,
+      runs_failed: 0,
+      cycle_time_p50_seconds: null,
+    };
+  }
+
+  function mkResponse(series: ReturnType<typeof mkPoint>[]) {
+    return {
+      days: 30,
+      now: Math.floor(Date.parse("2026-07-04T12:00:00Z") / 1000),
+      series,
+    };
+  }
+
+  it("null-Input → null (keine Sparkline)", () => {
+    expect(deriveSparklinePoints(null)).toBeNull();
+    expect(deriveSparklinePoints(undefined)).toBeNull();
+  });
+
+  it("leere Serie → null", () => {
+    expect(deriveSparklinePoints(mkResponse([]))).toBeNull();
+  });
+
+  it("genau 1 Punkt → null (für eine Linie braucht es ≥2 Punkte)", () => {
+    expect(deriveSparklinePoints(mkResponse([mkPoint("2026-07-04", 5)]))).toBeNull();
+  });
+
+  it("genau 2 Punkte → beide Punkte, Reihenfolge erhalten", () => {
+    const r = deriveSparklinePoints(
+      mkResponse([mkPoint("2026-07-03", 4), mkPoint("2026-07-04", 8)]),
+    );
+    expect(r).toEqual([
+      { date: "2026-07-03", value: 4 },
+      { date: "2026-07-04", value: 8 },
+    ]);
+  });
+
+  it("30-Tage-Serie → nur die letzten 7 Tage (Slicing vom Ende)", () => {
+    const series = Array.from({ length: 30 }, (_, i) =>
+      mkPoint(`2026-06-${String(5 + i).padStart(2, "0")}`, i + 1),
+    );
+    const r = deriveSparklinePoints(mkResponse(series));
+    expect(r).not.toBeNull();
+    expect(r!.length).toBe(7);
+    // Jüngste 7 Einträge: index 23..29 → Werte 24..30
+    expect(r!.map((p) => p.value)).toEqual([24, 25, 26, 27, 28, 29, 30]);
+  });
+
+  it("kurze Serie (<7) → alle Punkte zurückgeben", () => {
+    const series = [mkPoint("2026-07-02", 3), mkPoint("2026-07-03", 5), mkPoint("2026-07-04", 7)];
+    const r = deriveSparklinePoints(mkResponse(series));
+    expect(r).toEqual([
+      { date: "2026-07-02", value: 3 },
+      { date: "2026-07-03", value: 5 },
+      { date: "2026-07-04", value: 7 },
+    ]);
+  });
+
+  it("done_tasks 0 ist ein gültiger Wert (kein Fake, aber echte 0)", () => {
+    const series = [mkPoint("2026-07-03", 0), mkPoint("2026-07-04", 0)];
+    const r = deriveSparklinePoints(mkResponse(series));
+    expect(r).toEqual([
+      { date: "2026-07-03", value: 0 },
+      { date: "2026-07-04", value: 0 },
+    ]);
+  });
+
+  it("Points enthalten das Datum (nicht nur den Wert) für Tooltip-Mapping", () => {
+    const r = deriveSparklinePoints(
+      mkResponse([mkPoint("2026-07-03", 4), mkPoint("2026-07-04", 8)]),
+    );
+    expect(r).not.toBeNull();
+    expect(r![1].date).toBe("2026-07-04");
+  });
+
+  it("maxDays-Parameter limitiert unabhängig von der Serienlänge", () => {
+    const series = [mkPoint("2026-07-01", 1), mkPoint("2026-07-02", 2), mkPoint("2026-07-03", 3), mkPoint("2026-07-04", 4)];
+    const r = deriveSparklinePoints(mkResponse(series), 3);
+    expect(r).not.toBeNull();
+    expect(r!.length).toBe(3);
+    expect(r![(r!.length - 1)].value).toBe(4);
+    expect(r![(r!.length - 1)].date).toBe("2026-07-04");
+  });
+
+  it("maxDays < 2 wird auf 2 geklemmt (Linie braucht ≥2 Punkte)", () => {
+    const series = [mkPoint("2026-07-03", 1), mkPoint("2026-07-04", 2)];
+    const r = deriveSparklinePoints(mkResponse(series), 1);
+    expect(r).not.toBeNull();
+    expect(r!.length).toBe(2);
+  });
+
+  it("fehlt series-Feld → null", () => {
+    expect(deriveSparklinePoints({ days: 30, now: 0 } as never)).toBeNull();
+    expect(deriveSparklinePoints({ days: 30, now: 0, series: undefined } as never)).toBeNull();
   });
 });
