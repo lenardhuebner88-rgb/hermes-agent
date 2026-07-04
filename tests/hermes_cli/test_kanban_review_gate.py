@@ -1230,6 +1230,82 @@ def test_done_cleans_up_workspace(kanban_home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# fl-20260704: review-gate submit must reset consecutive_failures like the
+# direct-done path. Live regression (t_bbea9b69, 2026-07-04): a coder's
+# first attempt timed out (failures=1), the retry completed successfully
+# and was parked in ``review``, an APPROVED verifier stage followed — then
+# the reviewer's OWN timeout combined with the stale failures=1 to trip the
+# breaker at failures=2, escalating to the operator even though the actual
+# retry ladder for the reviewer's own failure was still failures=1 < 2.
+# ---------------------------------------------------------------------------
+
+
+def test_review_gate_submit_resets_consecutive_failures(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl X", assignee="coder")
+        kb.claim_task(conn, tid)
+        # (1) first attempt times out — one failure recorded, below the
+        # limit, so the task self-heals back to 'ready' for the retry.
+        kb._record_task_failure(
+            conn,
+            tid,
+            error=(
+                "Iteration budget exhausted (90/90) — task could not "
+                "complete within the allowed iterations"
+            ),
+            outcome="timed_out",
+            release_claim=True,
+            end_run=True,
+            failure_limit=2,
+        )
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 1
+
+        # (2) the retry completes successfully via the review gate — the
+        # counter must reset here, exactly like the direct-done path does.
+        assert kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        task = kb.get_task(conn, tid)
+        assert task.status == "review"
+        assert task.consecutive_failures == 0
+        assert task.last_failure_error is None
+
+        # (3) the reviewer's OWN timeout starts from that clean slate:
+        # failures=1 < failure_limit=2 → self-heal, no gave_up/escalation.
+        kb.claim_review_task(conn, tid)
+        tripped = kb._record_task_failure(
+            conn,
+            tid,
+            error=(
+                "Iteration budget exhausted (60/60) — task could not "
+                "complete within the allowed iterations"
+            ),
+            outcome="timed_out",
+            release_claim=True,
+            end_run=True,
+            failure_limit=2,
+        )
+        assert tripped is False
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 1
+        assert (
+            conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'gave_up'",
+                (tid,),
+            ).fetchone()
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ?",
+                (tid, kb.OPERATOR_ESCALATION_EVENT),
+            ).fetchone()
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
 # CLI verb parity (K13): `hermes kanban complete` in worker context must hit
 # the same gate as the in-process kanban_complete tool. Regression for the
 # 2026-06-10 live finding: a claude-CLI premium worker completed via the CLI

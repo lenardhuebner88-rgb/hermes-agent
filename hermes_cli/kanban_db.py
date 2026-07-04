@@ -10990,7 +10990,7 @@ def complete_task(
     # (anti-loop) + code-bearing assignee — otherwise fall through.
     if _review_gate_should_apply(conn, task_id, expected_run_id):
         if review_gate or expected_run_id is not None:
-            return _submit_for_review(
+            submitted = _submit_for_review(
                 conn,
                 task_id,
                 result=result,
@@ -10999,6 +10999,14 @@ def complete_task(
                 verified_cards=verified_cards,
                 expected_run_id=expected_run_id,
             )
+            if submitted:
+                # The WORKER's own run succeeded (work delivered, worker
+                # gate green) — reset the counter here too, mirroring the
+                # direct-done path. From this point on only the review
+                # phase's OWN failures (verifier/reviewer/critic timeouts)
+                # should count toward the breaker.
+                _clear_failure_counter(conn, task_id)
+            return submitted
 
     # B (staged review gate): an APPROVED completion of an INTERMEDIATE review
     # stage re-parks the task for the next stage (verifier→reviewer→critic)
