@@ -16,6 +16,7 @@ import { de } from "../../i18n/de";
 import type { Worker, BoardResponse, BoardTask } from "../../lib/types";
 import type { ReliabilityResponse } from "../../lib/schemas";
 import { Overlay } from "../../components/Overlay";
+import { WorkerLogTail } from "../../components/WorkerCard";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -108,6 +109,8 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
   // Ketten-Position: root_id via Board-Lookup (BoardResponse aus lib/types)
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
   const boardTask = allBoardTasks.find((t) => t.id === w.task_id);
+
+  const [logOpen, setLogOpen] = useState(false);
   // root_id ist entweder der eigene Task (Root) oder der Parent-Root
   const chainRootId = boardTask?.root_id ?? null;
   const branchName = boardTask?.branch_name ?? null;
@@ -213,15 +216,17 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
           <button
             type="button"
             className="fleet-btn"
-            disabled
-            title="Log-Drawer kommt im nächsten Subtask"
+            onClick={() => setLogOpen((v) => !v)}
           >
-            {de.fleet.drawerLog}
+            {logOpen ? de.worker.logHide : de.fleet.drawerLog}
           </button>
           <button type="button" className="fleet-btn" onClick={onClose}>
             {de.fleet.drawerSchliessen}
           </button>
         </div>
+
+        {/* Log-Tail (nur bei offenem Drawer pollend, wie WorkerCard/NodeDetailDrawer) */}
+        {logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
       </div>
     </Overlay>
   );
