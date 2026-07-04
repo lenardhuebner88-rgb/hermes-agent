@@ -247,6 +247,7 @@ export const de = {
     subtabHeute: "Heute",
     subtabWorker: "Worker",
     subtabKetten: "Ketten",
+    subtabBoard: "Board",
     subtabPlan: "Plan",
     subtabRisiko: "Risiko",
     // KPI-Labels

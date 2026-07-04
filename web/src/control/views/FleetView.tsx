@@ -12,15 +12,17 @@
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useMemo, useEffect } from "react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus } from "../hooks/useControlData";
+import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail } from "../hooks/useControlData";
 import { planSpecWaitsForOperator, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
-import type { Worker, ChainGraphResponse } from "../lib/types";
+import type { Worker, ChainGraphResponse, PlanSpecRecord } from "../lib/types";
 import { HeuteTab } from "./fleet/HeuteTab";
 import { WorkerTab } from "./fleet/WorkerTab";
 import { KettenTab } from "./fleet/KettenTab";
+import { BoardTab } from "./fleet/BoardTab";
 import { NodeDetailDrawer } from "./fleet/NodeDetailDrawer";
+import { PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
 import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import "./fleet/fleet.css";
@@ -45,7 +47,7 @@ function useIsLg(): boolean {
 
 // ─── Subtab-Definition ───────────────────────────────────────────────────────
 
-type FleetSubtab = "heute" | "worker" | "ketten" | "plan" | "risiko";
+type FleetSubtab = "heute" | "worker" | "ketten" | "board" | "plan" | "risiko";
 
 interface SubtabDef {
   id: FleetSubtab;
@@ -60,6 +62,9 @@ export function FleetView() {
   const [subtab, setSubtab] = useState<FleetSubtab>("heute");
   const isLg = useIsLg();
   const [drawerWorker, setDrawerWorker] = useState<Worker | null>(null);
+  // PlanSpec-Detail-Drawer: vom Fleet-Besitz aus öffenbar (Heute/Plan-Karten).
+  const [planspecDrawerItem, setPlanspecDrawerItem] = useState<PlanSpecRecord | null>(null);
+  const planspecDetail = usePlanSpecDetail(planspecDrawerItem?.path ?? null);
   // rootId für den Ketten-Subtab: wird beim "Kette öffnen"-Klick im Worker-Drawer gesetzt.
   const [kettenRootId, setKettenRootId] = useState<string | null>(null);
   // Karten-Detail-Drawer: task_id des geöffneten Nodes
@@ -107,6 +112,7 @@ export function FleetView() {
     { id: "heute", label: de.fleet.subtabHeute },
     { id: "worker", label: de.fleet.subtabWorker, count: activeWorkers.length > 0 ? activeWorkers.length : undefined },
     { id: "ketten", label: de.fleet.subtabKetten, count: activePlanspecs.length > 0 ? activePlanspecs.length : undefined },
+    { id: "board", label: de.fleet.subtabBoard },
     { id: "plan", label: de.fleet.subtabPlan, count: pendingApprovals > 0 ? pendingApprovals : undefined },
     { id: "risiko", label: de.fleet.subtabRisiko, warn: blockedCount > 0 },
   ];
@@ -169,6 +175,18 @@ export function FleetView() {
           chainNodes={nodeDetailChainNodes}
           now={now}
           onClose={() => { setNodeDetailId(null); setNodeDetailChainNodes([]); }}
+          onChanged={board.reload}
+        />
+      ) : null}
+
+      {/* PlanSpec-Detail-Drawer (Volltext, Fleet-Besitz) */}
+      {planspecDrawerItem ? (
+        <PlanSpecDetailDrawer
+          item={planspecDrawerItem}
+          detail={planspecDetail.data}
+          loading={planspecDetail.loading}
+          error={planspecDetail.error}
+          onClose={() => { setPlanspecDrawerItem(null); }}
         />
       ) : null}
 
@@ -192,6 +210,7 @@ export function FleetView() {
                   setDrawerWorker(w);
                   setSubtab("worker");
                 }}
+                onPlanSpecClick={(ps) => setPlanspecDrawerItem(ps)}
               />
             )}
             {subtab === "worker" && (
@@ -229,6 +248,16 @@ export function FleetView() {
                   // Refetch planspecs nach Freigabe
                   void planspecs.reload();
                 }}
+                onShowDetail={(ps) => setPlanspecDrawerItem(ps)}
+              />
+            )}
+            {subtab === "board" && (
+              <BoardTab
+                board={board.data}
+                onOpenNodeDetail={(id, chainNodes) => {
+                  setNodeDetailId(id);
+                  setNodeDetailChainNodes(chainNodes ?? []);
+                }}
               />
             )}
             {subtab === "risiko" && (
@@ -239,6 +268,7 @@ export function FleetView() {
                 systemHealth={systemHealth.data}
                 pressureStatus={pressureStatus.data}
                 onNavigateToPlan={() => setSubtab("plan")}
+                onTaskChanged={board.reload}
               />
             )}
           </div>
