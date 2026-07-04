@@ -27,7 +27,7 @@ import {
   buildSegments,
   pickFocusNode,
   chainProgress,
-  chainTotalCostUsd,
+  chainTotalCostUsdWithSource,
   budgetTone,
   derivePlanLanes,
   buildApproveRequest,
@@ -38,6 +38,7 @@ import {
   deriveSparklinePoints,
   type PendingItem,
   type ChainChipDef,
+  type CostDisplayValue,
   type SegmentKind,
   type SparklinePoint,
 } from "../lib/fleetHub";
@@ -70,6 +71,10 @@ function useIsLg(): boolean {
     return () => media.removeEventListener("change", onChange);
   }, []);
   return matches;
+}
+
+function fmtUsdDisplay(cost: CostDisplayValue): string {
+  return cost.value != null ? `${fmtUsd(cost.value)}${cost.isEquivalent ? " äquiv." : ""}` : "—";
 }
 
 // ─── Subtab-Definition ───────────────────────────────────────────────────────
@@ -333,6 +338,7 @@ function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, a
     blockedCount,
     costs?.today.actual_cost_usd ?? null,
     costs?.today.runs ?? null,
+    costs?.today.cost_usd_equivalent ?? null,
   );
   // 7-Tage-Sparkline aus der bestehenden runs/daily-Serie (kein neuer Endpoint).
   // Liefert null bei <2 Punkten → keine Sparkline (kein Fake, keine Platzhalter).
@@ -366,6 +372,7 @@ function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, a
               <>
                 {kpi.kosten24h.toFixed(1).replace(".", ",")}
                 <small>$</small>
+                {kpi.kosten24hEquiv ? <small> äquiv.</small> : null}
               </>
             ) : "—"}
           </div>
@@ -873,7 +880,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, onOpenNodeDetail }: KettenG
   const { pct, done, total } = chainProgress(nodes);
   const focusNode = pickFocusNode(nodes);
   const segments: SegmentKind[] = buildSegments(nodes);
-  const totalCost = chainTotalCostUsd(nodes);
+  const totalCost = chainTotalCostUsdWithSource(nodes);
 
   // ETA aus dem Fokus-Node
   const focusLaufzeit = focusNode?.latest_run?.runtime_seconds ?? null;
@@ -918,7 +925,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, onOpenNodeDetail }: KettenG
           </span>
           <span className="fleet-prog-eta">
             {focusLaufzeit != null ? `ETA ~${fmtSeconds(focusLaufzeit)}` : "—"}
-            {totalCost != null ? ` · ${fmtUsd(totalCost)}` : ""}
+            {totalCost.value != null ? ` · ${fmtUsdDisplay(totalCost)}` : ""}
           </span>
         </div>
 
@@ -1203,7 +1210,7 @@ function NodeDetailDrawer({ taskId, chainNodes, now, onClose }: NodeDetailDrawer
             <ErgebnisTab
               verdicts={taskVerdicts}
               deliverables={deliverables}
-              chainCost={chainTotalCostUsd(chainNodes)}
+              chainCost={chainTotalCostUsdWithSource(chainNodes)}
             />
           )}
         </div>
@@ -1435,9 +1442,9 @@ function ErgebnisTab({
 }: {
   verdicts: Array<{ task_id: string; reviewer_profile: string | null; review_run_state: string; verifier_verdict: string | null }>;
   deliverables: Array<{ filename: string; url: string; size: number }>;
-  chainCost: number | null;
+  chainCost: CostDisplayValue;
 }) {
-  if (verdicts.length === 0 && deliverables.length === 0 && chainCost == null) {
+  if (verdicts.length === 0 && deliverables.length === 0 && chainCost.value == null) {
     return (
       <p style={{ font: "400 11.5px/1.4 var(--hc-font-sans)", color: "var(--fleet-t3)", padding: "8px 2px" }}>
         {de.fleet.detailErgebnisEmpty}
@@ -1494,10 +1501,10 @@ function ErgebnisTab({
       ) : null}
 
       {/* Kosten-Beitrag */}
-      {chainCost != null ? (
+      {chainCost.value != null ? (
         <div className="fleet-kv" style={{ marginTop: 4 }}>
           <div className="fleet-kv-k">Kosten-Beitrag zur Kette</div>
-          <div className="fleet-kv-v">{fmtUsd(chainCost)}</div>
+          <div className="fleet-kv-v">{fmtUsdDisplay(chainCost)}</div>
         </div>
       ) : null}
     </>

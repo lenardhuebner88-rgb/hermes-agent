@@ -107,25 +107,55 @@ export interface KpiValues {
   blockiert: number;
   /** Abgeschlossene Tasks in 24h (null wenn Quelle fehlt). */
   fertig24h: number | null;
-  /** Kosten in 24h USD (null wenn Quelle fehlt oder 0 = Subscription). */
+  /** Kosten in 24h USD (null wenn Quelle fehlt). */
   kosten24h: number | null;
+  /** true wenn kosten24h aus cost_usd_equivalent statt realem actual_cost_usd stammt. */
+  kosten24hEquiv: boolean;
+}
+
+export interface CostDisplayValue {
+  value: number | null;
+  isEquivalent: boolean;
+}
+
+function positiveCost(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** Reale Kosten gewinnen; cost_usd_equivalent nur als sichtbar markierten Fallback nutzen. */
+export function costDisplayValue(
+  actualCostUsd: number | null | undefined,
+  equivalentCostUsd: number | null | undefined,
+): CostDisplayValue {
+  const actual = positiveCost(actualCostUsd);
+  if (actual != null) {
+    return { value: actual, isEquivalent: false };
+  }
+  const equivalent = positiveCost(equivalentCostUsd);
+  if (equivalent != null) {
+    return { value: equivalent, isEquivalent: true };
+  }
+  return { value: null, isEquivalent: false };
 }
 
 /**
  * deriveKpi: leitet KPI-Werte aus Live-Worker-Daten und dem Board ab.
- * Nur echte Quellen — kein Fake. Wenn `actual_cost_usd` fehlt → null.
+ * Wenn `actual_cost_usd` fehlt/0 ist, darf `cost_usd_equivalent` nur markiert als Äquivalenzwert erscheinen.
  */
 export function deriveKpi(
   workers: Worker[],
   blockedCount: number,
   todayActualCostUsd: number | null | undefined,
   todayRuns: number | null | undefined,
+  todayEquivalentCostUsd?: number | null | undefined,
 ): KpiValues {
+  const cost = costDisplayValue(todayActualCostUsd, todayEquivalentCostUsd);
   return {
     aktiv: workers.filter((w) => w.run_status === "running").length,
     blockiert: blockedCount,
     fertig24h: todayRuns ?? null,
-    kosten24h: todayActualCostUsd ?? null,
+    kosten24h: cost.value,
+    kosten24hEquiv: cost.isEquivalent,
   };
 }
 
@@ -431,12 +461,24 @@ export function chainProgress(nodes: ChainGraphResponse["nodes"]): { pct: number
 }
 
 /**
- * chainTotalCostUsd: Gesamtkosten der Kette (Summe cost_usd aller Nodes).
+ * chainTotalCostUsd: Gesamtkosten der Kette (Summe cost_usd aller Nodes, mit markiertem cost_usd_equivalent-Fallback).
  * Gibt null zurück wenn keine Kosten vorhanden (alle 0).
  */
 export function chainTotalCostUsd(nodes: ChainGraphResponse["nodes"]): number | null {
-  const total = nodes.reduce((sum: number, n: ChainGraphResponse["nodes"][number]) => sum + (n.cost_usd ?? 0), 0);
-  return total > 0 ? total : null;
+  return chainTotalCostUsdWithSource(nodes).value;
+}
+
+export function chainTotalCostUsdWithSource(nodes: ChainGraphResponse["nodes"]): CostDisplayValue {
+  let total = 0;
+  let hasEquivalent = false;
+  for (const n of nodes) {
+    const cost = costDisplayValue(n.cost_usd, n.cost_usd_equivalent);
+    if (cost.value != null) {
+      total += cost.value;
+      hasEquivalent = hasEquivalent || cost.isEquivalent;
+    }
+  }
+  return total > 0 ? { value: total, isEquivalent: hasEquivalent } : { value: null, isEquivalent: false };
 }
 
 // ─── "Wartet auf dich"-Leiste ────────────────────────────────────────────────
