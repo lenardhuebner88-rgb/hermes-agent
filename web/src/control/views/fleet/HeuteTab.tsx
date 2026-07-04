@@ -23,6 +23,7 @@ import { de } from "../../i18n/de";
 import type { Worker } from "../../lib/types";
 import type { CostBucket, CostProfileRow, RunsCostsResponse, RunsDailyResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "./shared";
+import { LaneQuickSwitch } from "./LaneQuickSwitch";
 
 // ─── Heute-Subtab ────────────────────────────────────────────────────────────
 
@@ -97,6 +98,8 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       {costDrawerOpen ? (
         <CostDrawer costs={costs} daily={daily} onClose={() => setCostDrawerOpen(false)} />
       ) : null}
+
+      <LaneQuickSwitch />
 
       {/* Worker-Karten */}
       {activeWorkers.length === 0 ? null : (
