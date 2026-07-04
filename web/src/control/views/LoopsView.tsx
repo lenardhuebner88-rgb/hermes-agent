@@ -600,6 +600,7 @@ function LoopStartForm({
   const defaultMaxHours = String(pack.stop.max_hours ?? "");
   const [maxRounds, setMaxRounds] = useState(defaultMaxRounds);
   const [maxHours, setMaxHours] = useState(defaultMaxHours);
+  const [skipPlan, setSkipPlan] = useState(false);
   // Pack-Params dynamisch (focus/fokus/services/…): ein Feld pro Manifest-Param.
   const paramNames = useMemo(() => Object.keys(pack.params), [pack]);
   const [paramValues, setParamValues] = useState<Record<string, string>>(() => ({ ...pack.params }));
@@ -612,6 +613,7 @@ function LoopStartForm({
     const overrides = buildPhaseOverrides(pack, phaseValues);
     if (maxRounds.trim() && maxRounds !== defaultMaxRounds) overrides.MAX_ROUNDS = maxRounds.trim();
     if (maxHours.trim() && maxHours !== defaultMaxHours) overrides.MAX_HOURS = maxHours.trim();
+    if (skipPlan) overrides.SKIP_PLAN = "1";
     for (const name of paramNames) {
       const value = (paramValues[name] ?? "").trim();
       if (value && value !== pack.params[name]) overrides[name.toUpperCase()] = value;
@@ -708,6 +710,19 @@ function LoopStartForm({
           />
         </label>
       </div>
+      {pack.type === "pipeline" ? (
+        <label className="inline-flex min-h-9 items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
+          <input
+            type="checkbox"
+            checked={skipPlan}
+            disabled={busy}
+            aria-label={t.skipPlanLabel}
+            onChange={(e) => setSkipPlan(e.target.checked)}
+            className={NIGHT_FOCUS}
+          />
+          {t.skipPlanLabel}
+        </label>
+      ) : null}
       {failStreak != null && dryRounds != null ? (
         <p className="text-xs" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
           {t.stopCriteria(failStreak, dryRounds)}

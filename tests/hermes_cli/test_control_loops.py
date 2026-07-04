@@ -129,6 +129,17 @@ def test_start_writes_overrides_and_starts_unit(api):
     assert ("reset-failed", "hermes-loop@nacht.service") in calls
 
 
+def test_start_accepts_skip_plan_override(api):
+    client, calls, tmp = api
+    resp = client.post("/api/loops/nacht/start", json={
+        "overrides": {"SKIP_PLAN": "1"},
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["started"] is True
+    env = (tmp / "state" / "nacht" / "overrides.env").read_text(encoding="utf-8")
+    assert "SKIP_PLAN=1" in env
+
+
 def test_start_reports_502_when_unit_fails_fast(api, monkeypatch):
     # UI-Start-Bug 2026-07-03: Unit stirbt sofort (203/EXEC), aber --no-block hatte
     # rc 0 → früher "started: true". Jetzt muss der Sofort-Fail als 502 durchschlagen.

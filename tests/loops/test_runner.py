@@ -351,6 +351,63 @@ def test_overrides_env_switches_model_and_limits(tmp_path, fake_engine):
     assert parse_overrides(state / "fehlt.env") == {}
 
 
+def test_skip_plan_override_skips_planning_phase(tmp_path, fake_engine):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "skip", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "skip")
+    state = tmp_path / "state" / "skip"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("SKIP_PLAN=1\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def build_phase(kv, cwd):
+        assert kv["PLAN"].endswith("10-building/P1-beispiel.md")
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    (runner.queue / "00-planned").mkdir(parents=True, exist_ok=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    runner.cmd_night()
+
+    assert calls == ["build", "verify"]
+    assert "plan" not in calls
+
+
+def test_skip_plan_override_falsy_still_plans(tmp_path, fake_engine):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "noskip", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "noskip")
+    state = tmp_path / "state" / "noskip"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("SKIP_PLAN=0\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state_dir = Path(kv["STATE"])
+        (state_dir / "queue" / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+        (state_dir / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    runner.cmd_night()
+
+    assert calls == ["plan", "build", "verify"]
+
+
 # ── (f) Pipeline-Mini-Läufe mit Fake-Engine ──────────────────────────────────
 
 def test_pipeline_happy_path_plan_build_verify(tmp_path, fake_engine):

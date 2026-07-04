@@ -628,6 +628,9 @@ class LoopRunner:
                 break
 
     def cmd_night(self, fresh: bool = False, skip_plan: bool = False) -> None:
+        if not skip_plan and self.overrides.get("SKIP_PLAN", "").strip().lower() in ("1", "true", "yes"):
+            skip_plan = True
+            self.say("SKIP_PLAN-Override aktiv — Planung übersprungen.")
         if self.pack.type == "pipeline" and not skip_plan:
             if not self.cmd_plan(fresh=fresh):
                 return

@@ -52,7 +52,7 @@ _PACK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # Parameter (focus/fokus/services/…) statt eines hartkodierten FOCUS-Felds.
 _OVERRIDE_KEY_RE = re.compile(
     r"(PHASE_[A-Z]+_(MODEL|ENGINE|TIMEOUT)"
-    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL)"
+    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL|SKIP_PLAN)"
 )
 _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
 

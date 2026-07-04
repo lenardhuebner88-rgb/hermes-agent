@@ -669,6 +669,7 @@ export const de = {
     paramLabel: "Pack-Parameter",
     maxRoundsLabel: "Max. Runden",
     maxHoursLabel: "Max. Stunden",
+    skipPlanLabel: "Planung überspringen (Queue direkt bauen)",
     stopCriteria: (failStreak: number, dryRounds: number) => `Stop-Kriterien: fail_streak ${failStreak} · dry_rounds ${dryRounds}`,
     submitStart: "Loop starten",
     cancelStart: "Abbrechen",

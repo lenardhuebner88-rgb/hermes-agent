@@ -1,4 +1,6 @@
+// @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
@@ -463,5 +465,116 @@ describe("deriveRingTicks — nur der hintere zusammenhängende round-Block", ()
       heartbeat: { current: null, last: [hbEntry("round", 0), hbEntry("round", 1), hbEntry("round", 0)] },
     };
     expect(deriveRingTicks(pack).done).toBe(2);
+  });
+});
+
+// Idle-Pipeline für das Start-Formular: SKIP_PLAN gibt es nur bei Packs MIT
+// Planungsphase — Sweeps zeigen die Checkbox gar nicht erst.
+const idlePipeline: LoopPack = {
+  ...runningPipeline,
+  running: false,
+  heartbeat: null,
+  timer_enabled: false,
+};
+
+describe("LoopStartForm — SKIP_PLAN-Override", () => {
+  it("zeigt die Checkbox bei Sweep-Packs (keine Planungsphase) gar nicht", () => {
+    render(
+      <LoopsGrid
+        packs={[idleSweepWithCommits]}
+        models={models}
+        selectedPack={null}
+        detail={null}
+        detailLoading={false}
+        detailError={null}
+        busyPack={null}
+        actionErrorByPack={{}}
+        landNoteByPack={{}}
+        startOpenPack={idleSweepWithCommits.name}
+        pendingStopPack={null}
+        pendingLandPack={null}
+        workshopOpenPack={null}
+        files={null}
+        filesLoading={false}
+        filesError={null}
+        fileSaveBusy={false}
+        fileSaveError={null}
+        duplicateBusy={false}
+        duplicateError={null}
+        {...noopHandlers}
+      />,
+    );
+    expect(screen.queryByLabelText(t.skipPlanLabel)).toBeNull();
+  });
+
+  it("setzt SKIP_PLAN=1 in overrides, wenn die Checkbox angehakt ist", () => {
+    const onSubmitStart = vi.fn();
+    render(
+      <LoopsGrid
+        packs={[idlePipeline]}
+        models={models}
+        selectedPack={null}
+        detail={null}
+        detailLoading={false}
+        detailError={null}
+        busyPack={null}
+        actionErrorByPack={{}}
+        landNoteByPack={{}}
+        startOpenPack={idlePipeline.name}
+        pendingStopPack={null}
+        pendingLandPack={null}
+        workshopOpenPack={null}
+        files={null}
+        filesLoading={false}
+        filesError={null}
+        fileSaveBusy={false}
+        fileSaveError={null}
+        duplicateBusy={false}
+        duplicateError={null}
+        {...noopHandlers}
+        onSubmitStart={onSubmitStart}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText(t.skipPlanLabel));
+    const submitButtons = screen.getAllByRole("button", { name: t.submitStart });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+    expect(onSubmitStart).toHaveBeenCalledTimes(1);
+    const [, overrides] = onSubmitStart.mock.calls[0];
+    expect(overrides.SKIP_PLAN).toBe("1");
+  });
+
+  it("lässt SKIP_PLAN weg, wenn die Checkbox nicht angehakt ist", () => {
+    const onSubmitStart = vi.fn();
+    render(
+      <LoopsGrid
+        packs={[idlePipeline]}
+        models={models}
+        selectedPack={null}
+        detail={null}
+        detailLoading={false}
+        detailError={null}
+        busyPack={null}
+        actionErrorByPack={{}}
+        landNoteByPack={{}}
+        startOpenPack={idlePipeline.name}
+        pendingStopPack={null}
+        pendingLandPack={null}
+        workshopOpenPack={null}
+        files={null}
+        filesLoading={false}
+        filesError={null}
+        fileSaveBusy={false}
+        fileSaveError={null}
+        duplicateBusy={false}
+        duplicateError={null}
+        {...noopHandlers}
+        onSubmitStart={onSubmitStart}
+      />,
+    );
+    const submitButtons = screen.getAllByRole("button", { name: t.submitStart });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+    expect(onSubmitStart).toHaveBeenCalledTimes(1);
+    const [, overrides] = onSubmitStart.mock.calls[0];
+    expect(overrides.SKIP_PLAN).toBeUndefined();
   });
 });
