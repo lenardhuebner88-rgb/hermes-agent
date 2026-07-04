@@ -14,14 +14,15 @@ import {
   buildSegments,
   pickFocusNode,
   chainProgress,
-  chainTotalCostUsdWithSource,
   type ChainChipDef,
   type SegmentKind,
 } from "../../lib/fleetHub";
+import { formatEffectiveCost } from "../../lib/derive";
 import { de } from "../../i18n/de";
-import { useChainGraph, useHermesReviewVerdicts } from "../../hooks/useControlData";
+import { useChainGraph, useHermesChainCosts, useHermesReviewVerdicts } from "../../hooks/useControlData";
 import type { BoardResponse, BoardTask } from "../../lib/types";
-import { fmtUsdDisplay, type ChainNode } from "./shared";
+import type { ChainCostsResponse } from "../../lib/schemas";
+import { type ChainNode } from "./shared";
 
 // ─── Ketten-Subtab ────────────────────────────────────────────────────────────
 
@@ -69,6 +70,11 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
   // Chain-Graph für die ausgewählte Kette
   const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId);
   const nodes = chainGraph?.nodes ?? [];
+
+  // AC-3: Ketten-Kosten aus dem server-seitigen Rollup (GET /tasks/{id}/chain-
+  // costs — dieselbe Quelle wie die Flow-Receipt-Leiste und ChainVizView), nicht
+  // clientseitig aus den Node-Summen abgeleitet.
+  const chainCosts = useHermesChainCosts(selectedRootId);
 
   // Verdicts für Gate-Status
   const verdicts = useHermesReviewVerdicts();
@@ -123,6 +129,8 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
             review_run_state: v.review_run_state ?? "pending",
             reviewer_profile: v.reviewer_profile,
           }))}
+          chainCosts={chainCosts.data}
+          chainCostsLoading={chainCosts.loading}
           onOpenNodeDetail={onOpenNodeDetail}
         />
       ) : selectedRootId ? (
@@ -165,15 +173,24 @@ interface KettenGraphProps {
   now: number;
   chips: ChainChipDef[];
   verdicts: Array<{ task_id: string; task_status: string; review_run_state: string; reviewer_profile: string | null }>;
+  /** Server-seitiger Ketten-Kosten-Rollup (AC-3). null ⇒ noch nicht geladen. */
+  chainCosts?: ChainCostsResponse | null;
+  chainCostsLoading?: boolean;
   /** Callback: öffnet den Karten-Detail-Drawer + übergibt die Ketten-Nodes für Kostendarstellung. */
   onOpenNodeDetail: (taskId: string, chainNodes: ChainNode[]) => void;
 }
 
-function KettenGraph({ rootId, nodes, now, verdicts, onOpenNodeDetail }: KettenGraphProps) {
+function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoading, onOpenNodeDetail }: KettenGraphProps) {
   const { pct, done, total } = chainProgress(nodes);
   const focusNode = pickFocusNode(nodes);
   const segments: SegmentKind[] = buildSegments(nodes);
-  const totalCost = chainTotalCostUsdWithSource(nodes);
+  // AC-3: Ketten-Kosten aus dem server-seitigen Rollup, gerettet aus ChainVizViews
+  // ChainSummary (formatEffectiveCost auf den totals) — realer Ist-$ statt Node-Summe.
+  const costTotals = chainCosts?.totals;
+  const costTokens = costTotals ? costTotals.input_tokens + costTotals.output_tokens : 0;
+  const costText = costTotals
+    ? formatEffectiveCost({ cost_usd: costTotals.cost_usd, cost_effective_usd: costTotals.cost_effective_usd, tokens: costTokens }).text
+    : chainCostsLoading ? "…" : "—";
 
   // ETA aus dem Fokus-Node
   const focusLaufzeit = focusNode?.latest_run?.runtime_seconds ?? null;
@@ -218,7 +235,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, onOpenNodeDetail }: KettenG
           </span>
           <span className="fleet-prog-eta">
             {focusLaufzeit != null ? `ETA ~${fmtSeconds(focusLaufzeit)}` : "—"}
-            {totalCost.value != null ? ` · ${fmtUsdDisplay(totalCost)}` : ""}
+            {costText !== "—" ? ` · ${costText}` : ""}
           </span>
         </div>
 

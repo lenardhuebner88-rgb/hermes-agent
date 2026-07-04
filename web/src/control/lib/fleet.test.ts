@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   statusToStage,
   stageActions,
+  manageActions,
   stageGuard,
   isActionableStatus,
   roleChip,
@@ -99,6 +100,26 @@ describe("stageActions", () => {
     expect(stageActions("ready")).toEqual([]);
     expect(stageActions("running")).toEqual([]);
     expect(stageActions("done")).toEqual([]);
+  });
+});
+
+describe("manageActions", () => {
+  it("offers Retry + Cancel (+ Cancel-chain) for a blocked task", () => {
+    expect(manageActions("blocked", { hasChain: false })).toEqual(["retry", "cancel"]);
+    expect(manageActions("blocked", { hasChain: true })).toEqual(["retry", "cancel", "cancelChain"]);
+  });
+  it("offers Retry only from blocked (not review/ready)", () => {
+    expect(manageActions("review", { hasChain: false })).toEqual(["cancel"]);
+    expect(manageActions("ready", { hasChain: false })).toEqual(["cancel"]);
+    expect(manageActions("triage", { hasChain: false })).toEqual(["cancel"]);
+  });
+  it("withholds the single-cancel from a live running worker but still allows the chain abort", () => {
+    expect(manageActions("running", { hasChain: false })).toEqual([]);
+    expect(manageActions("running", { hasChain: true })).toEqual(["cancelChain"]);
+  });
+  it("exposes nothing for terminal tasks", () => {
+    expect(manageActions("done", { hasChain: true })).toEqual([]);
+    expect(manageActions("archived", { hasChain: true })).toEqual([]);
   });
 });
 

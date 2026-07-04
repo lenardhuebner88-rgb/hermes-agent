@@ -356,6 +356,20 @@ export const de = {
     detailKopieren: "Kopieren",
     detailKopiert: "Kopiert",
     detailSchliessen: "Schließen",
+    // Task-Steuerung (NodeDetailDrawer + Risiko-Blocked-Zeilen) — S3.
+    actionsTitle: "Steuerung",
+    actionRetry: "Wiederholen",
+    actionRetryConfirm: "Neu einreihen und den Dispatcher sofort anstoßen?",
+    actionRetryDone: "Neu eingereiht — Lauf startet.",
+    actionCancelTask: "Abbrechen",
+    actionCancelTaskConfirm: "Task archivieren — laufende Arbeit verwerfen?",
+    actionCancelChain: "Kette abbrechen",
+    actionCancelChainConfirm: "Ganze Kette stoppen — laufende beenden, offene halten?",
+    actionConfirm: "Bestätigen",
+    actionDismiss: "Zurück",
+    actionBusy: "…",
+    actionChainCancelled: (terminated: number, held: number, skipped: number) =>
+      `Kette abgebrochen: ${terminated} beendet · ${held} gehalten · ${skipped} übersprungen`,
   },
   flow: {
     eyebrow: "Flow Command Board",

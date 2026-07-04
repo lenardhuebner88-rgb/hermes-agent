@@ -19,6 +19,7 @@ import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
+import { FleetTaskActions } from "./TaskActions";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -30,9 +31,11 @@ interface NodeDetailDrawerProps {
   chainNodes: ChainNode[];
   now: number;
   onClose: () => void;
+  /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
+  onChanged?: () => void | Promise<void>;
 }
 
-export function NodeDetailDrawer({ taskId, chainNodes, now, onClose }: NodeDetailDrawerProps) {
+export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }: NodeDetailDrawerProps) {
   const [tab, setTab] = useState<DetailTab>("uebersicht");
   const [copied, setCopied] = useState(false);
 
@@ -44,6 +47,10 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose }: NodeDetai
 
   const task = taskBody.data?.task ?? null;
   const runs = taskBody.data?.runs ?? [];
+  // Ketten-Root für "Kette abbrechen": min-level Node, nur bei echter Mehr-Node-Kette.
+  const chainRootId = chainNodes.length > 1
+    ? ([...chainNodes].sort((a, b) => a.level - b.level)[0]?.id ?? null)
+    : null;
   // Deliverables: eigener Endpoint /tasks/{id}/deliverables — degradiert sauber zu []
   const deliverables = deliverablesResult.data?.deliverables ?? [];
   const events = activity.data?.events ?? [];
@@ -149,6 +156,19 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose }: NodeDetai
             />
           )}
         </div>
+
+        {/* Steuerung — Unblock/Retry/Cancel Task/Cancel Kette (S3, tab-übergreifend) */}
+        {task ? (
+          <div className="fleet-dr-actions">
+            <FleetTaskActions
+              taskId={taskId}
+              status={task.status ?? ""}
+              chainRootId={chainRootId}
+              onChanged={onChanged}
+              onCancelled={onClose}
+            />
+          </div>
+        ) : null}
       </div>
     </Overlay>
   );

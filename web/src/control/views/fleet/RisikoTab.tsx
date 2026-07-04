@@ -8,16 +8,33 @@ import { de } from "../../i18n/de";
 import type { ReliabilityResponse } from "../../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse } from "../../lib/types";
 import type { PlanSpecRecord } from "./shared";
+import { FleetTaskActions } from "./TaskActions";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
+interface RisikoBlockedTask {
+  id: string;
+  title: string;
+  status: string;
+  block_reason?: string | null;
+  root_id?: string | null;
+}
+
 interface RisikoTabProps {
   allPlanspecs: PlanSpecRecord[];
-  blockedTasks: Array<{ id: string; title: string; status: string; block_reason?: string | null }>;
+  blockedTasks: RisikoBlockedTask[];
   reliability: ReliabilityResponse | null;
   systemHealth: SystemHealthResponse | null;
   pressureStatus: PressureStatusResponse | null;
   onNavigateToPlan: () => void;
+  /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
+  onTaskChanged?: () => void | Promise<void>;
+}
+
+/** Ketten-Root eines Blocked-Tasks für "Kette abbrechen" — nur wenn der Task
+ *  Kind einer Kette ist (root_id gesetzt und ≠ eigener id). */
+function rowChainRootId(t: RisikoBlockedTask): string | null {
+  return t.root_id && t.root_id !== t.id ? t.root_id : null;
 }
 
 export function RisikoTab({
@@ -27,6 +44,7 @@ export function RisikoTab({
   systemHealth,
   pressureStatus,
   onNavigateToPlan,
+  onTaskChanged,
 }: RisikoTabProps) {
   // (a) Wartende Freigaben
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
@@ -116,22 +134,36 @@ export function RisikoTab({
                   {t.block_reason}
                 </div>
               ) : null}
+              <FleetTaskActions
+                taskId={t.id}
+                status={t.status}
+                chainRootId={rowChainRootId(t)}
+                onChanged={onTaskChanged}
+              />
             </div>
           ))}
         </>
       ) : null}
 
-      {/* Sonstige blockierte Tasks (keine Operator-Halts) — kompakt */}
+      {/* Sonstige blockierte Tasks (keine Operator-Halts) — kompakt, mit Aktionen */}
       {otherBlocked.length > 0 ? (
-        <div className="fleet-risiko-rel">
+        <div className="fleet-risiko-rel" style={{ gap: 10 }}>
           {otherBlocked.slice(0, 5).map((t) => (
-            <div key={t.id} className="fleet-risiko-rel-row">
-              <span className="fleet-risiko-rel-lane" style={{ width: "auto", flex: 1 }}>{t.title}</span>
-              {t.block_reason ? (
-                <span className="fleet-risiko-rel-val" style={{ flex: "none", fontSize: 10, color: "var(--fleet-t3)" }}>
-                  {t.block_reason.slice(0, 40)}
-                </span>
-              ) : null}
+            <div key={t.id}>
+              <div className="fleet-risiko-rel-row">
+                <span className="fleet-risiko-rel-lane" style={{ width: "auto", flex: 1 }}>{t.title}</span>
+                {t.block_reason ? (
+                  <span className="fleet-risiko-rel-val" style={{ flex: "none", fontSize: 10, color: "var(--fleet-t3)" }}>
+                    {t.block_reason.slice(0, 40)}
+                  </span>
+                ) : null}
+              </div>
+              <FleetTaskActions
+                taskId={t.id}
+                status={t.status}
+                chainRootId={rowChainRootId(t)}
+                onChanged={onTaskChanged}
+              />
             </div>
           ))}
         </div>

@@ -357,7 +357,13 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  width: 100%;
 }
+.fleet-ps:hover { border-color: var(--fleet-t3); }
 .fleet-ps-top {
   display: flex;
   align-items: center;
@@ -526,6 +532,67 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   background: rgba(55, 224, 255, 0.12);
   border-color: rgba(55, 224, 255, 0.45);
   color: var(--fleet-puls);
+}
+
+/* ── Task-Steuerung (S3: NodeDetailDrawer + Risiko-Blocked-Zeilen) ─────────── */
+.fleet-task-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.fleet-ta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fleet-ta-btn {
+  font: 500 11px/1 var(--hc-font-sans);
+  padding: 7px 11px;
+  min-height: 32px;
+  border-radius: 9px;
+  border: 1px solid var(--fleet-linie-stark);
+  background: var(--fleet-karte);
+  color: var(--fleet-t1);
+  cursor: pointer;
+  transition: opacity 0.1s;
+}
+.fleet-ta-btn:hover { opacity: 0.85; }
+.fleet-ta-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.fleet-ta-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 93, 115, 0.3);
+  background: rgba(255, 93, 115, 0.07);
+}
+.fleet-ta-confirm-text {
+  flex: 1;
+  min-width: 150px;
+  font: 400 11.5px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t2);
+}
+.fleet-ta-error {
+  font: 400 11px/1.45 var(--hc-font-mono);
+  color: var(--fleet-rot);
+  background: rgba(255, 93, 115, 0.08);
+  border: 1px solid rgba(255, 93, 115, 0.25);
+  border-radius: 8px;
+  padding: 6px 9px;
+  word-break: break-word;
+}
+.fleet-ta-note {
+  font: 400 11px/1.4 var(--hc-font-sans);
+  color: var(--fleet-gruen);
+}
+/* Steuerungs-Footer im Karten-Detail-Drawer (immer sichtbar, tab-übergreifend). */
+.fleet-dr-actions {
+  padding: 10px 0 2px;
+  margin-top: 6px;
+  border-top: 1px solid var(--fleet-linie);
 }
 
 /* ── Placeholder (Ketten/Plan/Risiko) ────────────────────────────────────── */
@@ -953,6 +1020,18 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   font: 400 10.5px/1 var(--hc-font-mono);
   color: var(--fleet-t3);
 }
+.fleet-plan-volltext-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--fleet-linie);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font: 500 11px/1 var(--hc-font-mono);
+  color: var(--fleet-t2);
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.fleet-plan-volltext-btn:hover { border-color: var(--fleet-t3); color: var(--fleet-t1); }
 
 /* Lane-Konfiguration */
 .fleet-lane-cfg {
