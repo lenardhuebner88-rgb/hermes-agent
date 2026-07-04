@@ -1,0 +1,45 @@
+/* Leitstand design tokens — Tailwind v4 CSS-first config (@theme).
+ *
+ * Canonical source: docs/design/leitstand-mockup-terminals.html
+ * (operator-approved mockup). Values below are copied 1:1 from that
+ * mockup's `:root` block; do not invent new hex values here — extend the
+ * mockup first, then port.
+ *
+ * @theme generates Tailwind utilities from these tokens, e.g.:
+ *   --color-surface-1  → bg-surface-1 / text-surface-1 / border-surface-1
+ *   --color-live        → bg-live / text-live / border-live
+ *   --radius-panel       → rounded-panel
+ *
+ * See web/src/control/DESIGN.md for the binding usage rules (when to use
+ * which surface depth, live vs. brand, status trio semantics, etc.).
+ */
+
+@theme {
+  /* surfaces: 3 depths, deep navy family */
+  --color-surface-0: #050b14; /* app canvas */
+  --color-surface-1: #081322; /* column panels */
+  --color-surface-2: #0c1b2e; /* cards / inset */
+  --color-surface-3: #102438; /* hover / selected fill */
+
+  /* hairlines */
+  --color-line: #1b3049;
+  --color-line-soft: #132338;
+
+  /* split accents */
+  --color-live: #4fd8eb; /* interactive / live ONLY — never decorative */
+  --color-brand: #6f8fb8; /* quiet chrome, steel-blue */
+
+  /* status trio */
+  --color-status-ok: #3ddc97;
+  --color-status-warn: #f2b84b;
+  --color-status-alert: #ff6b6b;
+
+  /* text hierarchy */
+  --color-ink: #e9f2f7; /* primary */
+  --color-ink-2: #9db4c4; /* secondary — AA on surface-1, body text minimum */
+  --color-ink-3: #64809a; /* tertiary / eyebrows */
+
+  /* radii */
+  --radius-panel: 14px;
+  --radius-card: 10px;
+}

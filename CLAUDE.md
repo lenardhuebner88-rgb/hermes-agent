@@ -16,6 +16,7 @@
 - Restart: `systemctl --user restart hermes-dashboard.service` (run via systemd, never by hand).
 - Deploy: `scripts/deploy_dashboard.sh` — standing grant only on *truly* green gates (with `CONFIRMED=1`), otherwise not. Truth = API payload, not screenshot (the SPA injects its token via `window.__HERMES_SESSION_TOKEN__`; bare loopback curl = 401).
 - Auth smoke after a gated deploy: `HERMES_DASHBOARD_URL=https://… HERMES_DASHBOARD_USERNAME=… HERMES_DASHBOARD_PASSWORD=… scripts/smoke_health_status_auth.py --no-prompt` (login cookie → `/api/health-status`; the script logs no passwords, tokens, or cookies).
+- Design language is binding → `web/src/control/DESIGN.md` (tokens in `web/src/control/theme.css`, gate-enforced ratchet in `scripts/gate-frontend.sh`).
 
 ## Gates (before deploy/push)
 - Frontend: `scripts/gate-frontend.sh` (lint:control → `tsc -b --noEmit` → vitest → build). It pipes nothing — the exit code is the truth; never gate freehand with `| tail` (without pipefail that swallows the exit code). `--skip-build` when `web_dist` must not be overwritten (e.g. foreign dirty `web/` state). lint:control = eslint over fork-own code (`src/control` + `vite.config.ts` + `e2e`) — do NOT "clean up" upstream files like `src/App.tsx`; the verifier judges those diff-relative.
