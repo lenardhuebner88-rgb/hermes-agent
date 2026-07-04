@@ -170,6 +170,210 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   color: var(--fleet-puls);
   text-shadow: 0 0 14px rgba(55, 224, 255, 0.4);
 }
+.fleet-kp-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-kp-button:hover,
+.fleet-kp-button:focus-visible {
+  background: color-mix(in srgb, var(--color-live) 18%, transparent);
+  outline: none;
+}
+.fleet-kp-button:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--color-live);
+}
+
+/* ── Kosten-Drawer ───────────────────────────────────────────────────────── */
+.fleet-cost-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in srgb, var(--color-surface-0) 72%, transparent);
+}
+.fleet-cost-drawer {
+  width: min(560px, 100%);
+  height: 100%;
+  overflow: auto;
+  padding: 20px;
+  background: var(--color-surface-1);
+  border-left: 1px solid var(--color-line);
+  box-shadow: 0 22px 60px color-mix(in srgb, var(--color-surface-0) 70%, transparent);
+  color: var(--color-ink);
+}
+.fleet-cost-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.fleet-cost-eyebrow {
+  margin: 0 0 4px;
+  font: 600 11px/1.2 var(--hc-font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+.fleet-cost-head h2 {
+  margin: 0;
+  font: 700 22px/1.15 var(--hc-font-display);
+}
+.fleet-cost-close {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.fleet-cost-buckets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.fleet-cost-bucket,
+.fleet-cost-trend,
+.fleet-cost-table-wrap,
+.fleet-cost-note,
+.fleet-cost-empty {
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  background: var(--color-surface-2);
+}
+.fleet-cost-bucket {
+  padding: 14px;
+}
+.fleet-cost-bucket h3,
+.fleet-cost-trend-title {
+  margin: 0 0 10px;
+  font: 700 13px/1.2 var(--hc-font-sans);
+  color: var(--color-ink);
+}
+.fleet-cost-values {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font: 700 18px/1.1 var(--hc-font-mono);
+  color: var(--color-ink);
+}
+.fleet-cost-values span + span {
+  color: var(--color-live);
+}
+.fleet-cost-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  font: 500 11px/1.2 var(--hc-font-mono);
+  color: var(--color-ink-2);
+}
+.fleet-cost-note,
+.fleet-cost-empty {
+  margin-top: 12px;
+  padding: 12px;
+  font: 600 12px/1.35 var(--hc-font-sans);
+  color: var(--color-status-warn);
+}
+.fleet-cost-trend {
+  margin-top: 12px;
+  padding: 14px;
+}
+.fleet-cost-bars {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(22px, 1fr));
+  gap: 8px;
+  align-items: end;
+  min-height: 118px;
+}
+.fleet-cost-line {
+  position: absolute;
+  inset: 0 0 18px;
+  width: 100%;
+  height: calc(100% - 18px);
+  pointer-events: none;
+}
+.fleet-cost-line polyline {
+  stroke: var(--color-status-warn);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.fleet-cost-day {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 96px;
+  padding-bottom: 18px;
+}
+.fleet-cost-bar {
+  width: 100%;
+  min-height: 4px;
+  border-radius: 8px 8px 3px 3px;
+  background: color-mix(in srgb, var(--color-live) 28%, var(--color-surface-3));
+}
+.fleet-cost-line-dot {
+  position: absolute;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  transform: translate(-50%, 4px);
+  background: var(--color-status-warn);
+  box-shadow: 0 0 0 2px var(--color-surface-1);
+}
+.fleet-cost-day small {
+  position: absolute;
+  bottom: 0;
+  font: 600 9px/1 var(--hc-font-mono);
+  color: var(--color-ink-3);
+}
+.fleet-cost-table-wrap {
+  margin-top: 12px;
+  overflow: auto;
+}
+.fleet-cost-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 500 12px/1.3 var(--hc-font-sans);
+}
+.fleet-cost-table th,
+.fleet-cost-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--color-line-soft);
+  text-align: left;
+  white-space: nowrap;
+}
+.fleet-cost-table th {
+  color: var(--color-ink-3);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.fleet-cost-subscription {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-status-ok) 18%, var(--color-surface-3));
+  color: var(--color-status-ok);
+  font: 700 10px/1 var(--hc-font-mono);
+}
+@media (max-width: 560px) {
+  .fleet-cost-buckets {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* ── Sparkline (Fertig-24h 7-Tage-Trend) ─────────────────────────────────── */
 /* Inline-SVG unter der KPI-Zahl. Kein Overflow, kein Layout-Shift. */

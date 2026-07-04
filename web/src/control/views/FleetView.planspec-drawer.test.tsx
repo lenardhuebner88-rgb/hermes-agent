@@ -133,4 +133,84 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
   });
+
+  it("opens the cost drawer from the Heute cost KPI", () => {
+    hooks.useHermesRunsCosts.mockReturnValue({
+      data: {
+        days: 7,
+        now: 1783200000,
+        today: {
+          runs: 3,
+          cost_usd: 0,
+          cost_usd_equivalent: 4.2,
+          api_equivalent_usd: 4.2,
+          actual_cost_usd: 0,
+          billing_neuralwatt_kwh: null,
+          billing_neuralwatt_charged_kwh: null,
+          billing_neuralwatt_usd_per_kwh: null,
+          billing_neuralwatt_cost_usd: null,
+          input_tokens: 1200,
+          output_tokens: 800,
+        },
+        window: {
+          runs: 9,
+          cost_usd: 1.5,
+          cost_usd_equivalent: 12.75,
+          api_equivalent_usd: 12.75,
+          actual_cost_usd: 1.5,
+          billing_neuralwatt_kwh: null,
+          billing_neuralwatt_charged_kwh: null,
+          billing_neuralwatt_usd_per_kwh: null,
+          billing_neuralwatt_cost_usd: null,
+          input_tokens: 5000,
+          output_tokens: 3000,
+        },
+        profiles: [
+          {
+            profile: "coder",
+            subscription: "chatgpt",
+            runs: 6,
+            cost_usd: 0,
+            cost_usd_equivalent: 7.25,
+            api_equivalent_usd: 7.25,
+            actual_cost_usd: 0,
+            billing_neuralwatt_kwh: null,
+            billing_neuralwatt_charged_kwh: null,
+            billing_neuralwatt_usd_per_kwh: null,
+            billing_neuralwatt_cost_usd: null,
+            input_tokens: 3000,
+            output_tokens: 2000,
+          },
+        ],
+        review_value: [],
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+    hooks.useHermesRunsDaily.mockReturnValue({
+      data: {
+        days: 7,
+        now: 1783200000,
+        series: [
+          { date: "2026-07-01", done_roots: 1, done_roots_by_class: { nutzer: 1, haertung: 0, meta: 0 }, done_tasks: 2, cost_usd: 0, input_tokens: 100, output_tokens: 50, runs_completed: 1, runs_failed: 0, cycle_time_p50_seconds: null },
+          { date: "2026-07-02", done_roots: 2, done_roots_by_class: { nutzer: 1, haertung: 1, meta: 0 }, done_tasks: 4, cost_usd: 1.5, input_tokens: 400, output_tokens: 200, runs_completed: 2, runs_failed: 0, cycle_time_p50_seconds: null },
+        ],
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Kosten-Details öffnen" }));
+
+    const costDrawer = screen.getByRole("dialog", { name: "Kosten-Details" });
+    expect(within(costDrawer).getByText("Kosten heute"));
+    expect(within(costDrawer).getByText("Ist: $0.00"));
+    expect(within(costDrawer).getByText("≈ API: $4.20"));
+    expect(within(costDrawer).getByText("coder"));
+    expect(within(costDrawer).getByText("ChatGPT/Codex"));
+    expect(within(costDrawer).getByText("$0 ist bei Abo-Lanes Grenzpreis, nicht kostenlos — Tokenverbrauch und API-Äquivalent zeigen den Verbrauch."));
+  });
 });

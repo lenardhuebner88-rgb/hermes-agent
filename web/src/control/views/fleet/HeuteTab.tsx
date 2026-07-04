@@ -5,7 +5,7 @@
  * Enthält die Heute-lokalen Präsentationsbausteine (Lagezeile-Formatter,
  * Worker-Karte, PlanSpec-Karte, Fertig-24h-Sparkline).
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   buildLagezeile,
   runProgressFraction,
@@ -21,7 +21,7 @@ import {
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import type { Worker } from "../../lib/types";
-import type { RunsCostsResponse, RunsDailyResponse } from "../../lib/schemas";
+import type { CostBucket, CostProfileRow, RunsCostsResponse, RunsDailyResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "./shared";
 
 // ─── Heute-Subtab ────────────────────────────────────────────────────────────
@@ -40,6 +40,7 @@ interface HeuteTabProps {
 }
 
 export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, onWorkerClick, onPlanSpecClick }: HeuteTabProps) {
+  const [costDrawerOpen, setCostDrawerOpen] = useState(false);
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
     allWorkers,
@@ -74,7 +75,12 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
           <div className="fleet-kp-label">{de.fleet.kpiFertig}</div>
           {sparklinePts && <FleetSparkline points={sparklinePts} />}
         </div>
-        <div className="fleet-kp">
+        <button
+          type="button"
+          className="fleet-kp fleet-kp-button"
+          onClick={() => setCostDrawerOpen(true)}
+          aria-label="Kosten-Details öffnen"
+        >
           <div className="fleet-kp-num">
             {kpi.kosten24h != null ? (
               <>
@@ -85,8 +91,12 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
             ) : "—"}
           </div>
           <div className="fleet-kp-label">{de.fleet.kpiKosten}</div>
-        </div>
+        </button>
       </div>
+
+      {costDrawerOpen ? (
+        <CostDrawer costs={costs} daily={daily} onClose={() => setCostDrawerOpen(false)} />
+      ) : null}
 
       {/* Worker-Karten */}
       {activeWorkers.length === 0 ? null : (
@@ -101,6 +111,142 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       ))}
     </>
   );
+}
+
+function CostDrawer({ costs, daily, onClose }: { costs: RunsCostsResponse | null; daily: RunsDailyResponse | null; onClose: () => void }) {
+  const trendPoints = daily?.series.slice(-7) ?? [];
+
+  return (
+    <div className="fleet-cost-scrim" role="presentation" onClick={onClose}>
+      <section
+        className="fleet-cost-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Kosten-Details"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="fleet-cost-head">
+          <div>
+            <p className="fleet-cost-eyebrow">GET /runs/costs · 7 Tage</p>
+            <h2>Kosten-Details</h2>
+          </div>
+          <button type="button" className="fleet-cost-close" onClick={onClose} aria-label="Kosten-Details schließen">×</button>
+        </div>
+
+        {costs ? (
+          <>
+            <div className="fleet-cost-buckets">
+              <CostBucketCard title="Kosten heute" bucket={costs.today} />
+              <CostBucketCard title={`Kosten ${costs.days} Tage`} bucket={costs.window} />
+            </div>
+
+            <div className="fleet-cost-note">
+              $0 ist bei Abo-Lanes Grenzpreis, nicht kostenlos — Tokenverbrauch und API-Äquivalent zeigen den Verbrauch.
+            </div>
+
+            {trendPoints.length > 0 ? <CostTrend points={trendPoints} /> : null}
+            <CostProfileTable profiles={costs.profiles} />
+          </>
+        ) : (
+          <p className="fleet-cost-empty">Noch keine Kostendaten geladen.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function CostBucketCard({ title, bucket }: { title: string; bucket: CostBucket }) {
+  return (
+    <div className="fleet-cost-bucket">
+      <h3>{title}</h3>
+      <div className="fleet-cost-values">
+        <span>Ist: {fmtUsd(bucket.actual_cost_usd)}</span>
+        <span>≈ API: {fmtUsd(bucket.api_equivalent_usd)}</span>
+      </div>
+      <div className="fleet-cost-meta">
+        <span>{bucket.runs} Runs</span>
+        <span>{fmtTokens(sumTokens(bucket.input_tokens, bucket.output_tokens))} Token</span>
+      </div>
+    </div>
+  );
+}
+
+function CostTrend({ points }: { points: RunsDailyResponse["series"] }) {
+  const maxTokens = Math.max(...points.map((p) => sumTokens(p.input_tokens, p.output_tokens)), 1);
+  const maxCost = Math.max(...points.map((p) => p.cost_usd ?? 0), 0);
+  const linePoints = points.map((point, index) => {
+    const x = points.length === 1 ? 50 : (index / (points.length - 1)) * 100;
+    const y = maxCost > 0 ? 100 - (((point.cost_usd ?? 0) / maxCost) * 100) : 100;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+
+  return (
+    <div className="fleet-cost-trend" aria-label="7-Tage-Trend Tokenbalken und Dollar-Linie">
+      <div className="fleet-cost-trend-title">7-Tage-Trend · Balken = Token, Linie = $ Ist-Kosten</div>
+      <div className="fleet-cost-bars">
+        <svg className="fleet-cost-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <polyline points={linePoints.join(" ")} fill="none" />
+        </svg>
+        {points.map((point) => {
+          const tokens = sumTokens(point.input_tokens, point.output_tokens);
+          const costUsd = point.cost_usd ?? 0;
+          const tokenPct = Math.max(6, Math.round((tokens / maxTokens) * 100));
+          const costPct = maxCost > 0 ? Math.round((costUsd / maxCost) * 100) : 0;
+          return (
+            <div key={point.date} className="fleet-cost-day" title={`${point.date}: ${fmtTokens(tokens)} Token · Ist ${fmtUsd(costUsd)}`}>
+              <span className="fleet-cost-line-dot" style={{ bottom: `${costPct}%` }} />
+              <span className="fleet-cost-bar" style={{ height: `${tokenPct}%` }} />
+              <small>{point.date.slice(5).replace("-", ".")}</small>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CostProfileTable({ profiles }: { profiles: CostProfileRow[] }) {
+  return (
+    <div className="fleet-cost-table-wrap">
+      <table className="fleet-cost-table">
+        <thead>
+          <tr>
+            <th>Lane</th>
+            <th>Abo</th>
+            <th>Runs</th>
+            <th>Ist</th>
+            <th>API-Äquiv.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {profiles.map((profile) => (
+            <tr key={`${profile.profile}:${profile.subscription ?? "none"}`}>
+              <td>{profile.profile}</td>
+              <td><span className="fleet-cost-subscription">{formatSubscription(profile.subscription)}</span></td>
+              <td>{profile.runs}</td>
+              <td>{fmtUsd(profile.actual_cost_usd)}</td>
+              <td>{fmtUsd(profile.api_equivalent_usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function fmtUsd(value: number | null | undefined) {
+  return `$${(value ?? 0).toFixed(2)}`;
+}
+
+function sumTokens(input: number | null | undefined, output: number | null | undefined) {
+  return (input ?? 0) + (output ?? 0);
+}
+
+function formatSubscription(subscription: string | null | undefined) {
+  if (subscription === "chatgpt") return "ChatGPT/Codex";
+  if (subscription === "claude") return "Claude";
+  if (subscription === "api") return "API";
+  return subscription ?? "—";
 }
 
 // ─── Lagezeile-Formatter ─────────────────────────────────────────────────────
