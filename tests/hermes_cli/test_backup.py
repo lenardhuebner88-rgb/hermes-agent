@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import time
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -2453,6 +2454,13 @@ class TestRestoreCronJobsIfEmptied:
 # ---------------------------------------------------------------------------
 
 class TestCreatePreDeployBackup:
+    def _seed_pre_deploy_backup(self, backup_dir: Path, name: str, *, mtime: float) -> Path:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        path = backup_dir / name
+        path.write_bytes(b"PK")
+        os.utime(path, (mtime, mtime))
+        return path
+
     def test_creates_pre_deploy_zip(self, tmp_path, monkeypatch):
         """create_pre_deploy_backup writes pre-deploy-<stamp>.zip into backups/."""
         hermes_home = tmp_path / ".hermes"
@@ -2469,6 +2477,121 @@ class TestCreatePreDeployBackup:
         assert result.name.startswith("pre-deploy-")
         assert result.suffix == ".zip"
         assert result.parent == hermes_home / "backups"
+
+    def test_reuses_young_pre_deploy_backup_within_window(self, tmp_path, monkeypatch, caplog):
+        """A young pre-deploy zip is reused instead of writing another full backup."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import hermes_cli.backup as backup_mod
+
+        now = 1_800_000_000.0
+        monkeypatch.setattr(backup_mod.time, "time", lambda: now)
+        backup_dir = hermes_home / "backups"
+        older = self._seed_pre_deploy_backup(
+            backup_dir,
+            "pre-deploy-2026-07-04-095736.zip",
+            mtime=now - 300,
+        )
+        newest = self._seed_pre_deploy_backup(
+            backup_dir,
+            "pre-deploy-2026-07-04-100633.zip",
+            mtime=now - 120,
+        )
+
+        def _unexpected_write(*_a, **_kw):
+            raise AssertionError("reuse path must not write a new backup")
+
+        monkeypatch.setattr(backup_mod, "_write_full_zip_backup", _unexpected_write)
+        caplog.set_level("INFO", logger="hermes_cli.backup")
+
+        result = backup_mod.create_pre_deploy_backup(hermes_home=hermes_home, max_age_seconds=3600)
+
+        assert result == newest
+        assert sorted(backup_dir.glob("pre-deploy-*.zip")) == [older, newest]
+        assert "reusing pre-deploy backup pre-deploy-2026-07-04-100633.zip (age 120s)" in caplog.text
+
+    def test_max_age_zero_forces_fresh_pre_deploy_backup(self, tmp_path, monkeypatch):
+        """max_age_seconds=0 opts out of reuse even when a young backup exists."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import hermes_cli.backup as backup_mod
+
+        now = 1_800_000_000.0
+        monkeypatch.setattr(backup_mod.time, "time", lambda: now)
+        backup_dir = hermes_home / "backups"
+        existing = self._seed_pre_deploy_backup(
+            backup_dir,
+            "pre-deploy-2026-07-04-100633.zip",
+            mtime=now - 1,
+        )
+
+        written = []
+
+        def _fake_write(out_path, _root):
+            written.append(out_path)
+            out_path.write_bytes(b"PK\x03\x04")
+            return out_path
+
+        monkeypatch.setattr(backup_mod, "_write_full_zip_backup", _fake_write)
+
+        result = backup_mod.create_pre_deploy_backup(hermes_home=hermes_home, max_age_seconds=0)
+
+        assert written == [result]
+        assert result != existing
+        assert existing.exists()
+
+    def test_stale_pre_deploy_backup_by_mtime_writes_fresh_backup_and_prunes(self, tmp_path, monkeypatch):
+        """Reuse age follows mtime, so a current-looking name with stale mtime is not reused."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import hermes_cli.backup as backup_mod
+
+        now = time.mktime(time.strptime("2026-07-04 10:10:00", "%Y-%m-%d %H:%M:%S"))
+        monkeypatch.setattr(backup_mod.time, "time", lambda: now)
+        backup_dir = hermes_home / "backups"
+        stale = self._seed_pre_deploy_backup(
+            backup_dir,
+            "pre-deploy-2026-07-04-100633.zip",
+            mtime=now - 7200,
+        )
+        old = self._seed_pre_deploy_backup(
+            backup_dir,
+            "pre-deploy-2026-07-04-090000.zip",
+            mtime=now - 8000,
+        )
+
+        written = []
+
+        def _fake_write(out_path, _root):
+            written.append(out_path)
+            out_path.write_bytes(b"PK\x03\x04")
+            return out_path
+
+        monkeypatch.setattr(backup_mod, "_write_full_zip_backup", _fake_write)
+
+        result = backup_mod.create_pre_deploy_backup(
+            hermes_home=hermes_home,
+            keep=2,
+            max_age_seconds=3600,
+        )
+
+        assert written == [result]
+        assert result.name == "pre-deploy-2026-07-04-101000.zip"
+        assert result.exists()
+        assert stale.exists()
+        assert not old.exists()
 
     def test_pre_deploy_zip_is_valid_zip(self, tmp_path, monkeypatch):
         """The created archive is a valid zip containing expected content."""
@@ -2527,7 +2650,7 @@ class TestCreatePreDeployBackup:
             (backup_dir / f"pre-deploy-2026-01-0{i+1}-120000.zip").write_bytes(b"PK")
 
         from hermes_cli.backup import create_pre_deploy_backup
-        create_pre_deploy_backup(hermes_home=hermes_home, keep=3)
+        create_pre_deploy_backup(hermes_home=hermes_home, keep=3, max_age_seconds=0)
 
         remaining = sorted(backup_dir.glob("pre-deploy-*.zip"))
         assert len(remaining) == 3
@@ -2550,7 +2673,7 @@ class TestCreatePreDeployBackup:
             (backup_dir / f"pre-deploy-2026-01-0{i+1}-120000.zip").write_bytes(b"PK")
 
         from hermes_cli.backup import create_pre_deploy_backup
-        create_pre_deploy_backup(hermes_home=hermes_home, keep=1)
+        create_pre_deploy_backup(hermes_home=hermes_home, keep=1, max_age_seconds=0)
 
         assert (backup_dir / "pre-update-2026-01-01-120000.zip").exists()
         assert (backup_dir / "pre-migration-2026-01-01-120000.zip").exists()
