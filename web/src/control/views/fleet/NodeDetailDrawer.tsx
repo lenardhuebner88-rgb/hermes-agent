@@ -20,6 +20,8 @@ import { WorkerLogTail } from "../../components/WorkerCard";
 import { openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
+import { AnswerQuestion } from "./AnswerQuestion";
+import { isOperatorQuestion } from "../../lib/fleet";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -251,6 +253,11 @@ function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Uebersicht
         <div style={{ background: "rgba(245,168,60,.08)", border: "1px solid rgba(245,168,60,.3)", borderRadius: 10, padding: "8px 10px", fontSize: 11.5, color: "var(--fleet-signal)", lineHeight: 1.5 }}>
           {de.fleet.detailLabelBlockReason}: {task.block_reason}
         </div>
+      ) : null}
+
+      {/* Operator-Frage beantworten (S6) — nur wenn blockiert + operator_question */}
+      {task.status === "blocked" && isOperatorQuestion(task.block_reason) ? (
+        <AnswerQuestion taskId={task.id ?? ""} />
       ) : null}
 
       {/* KV-Grid */}

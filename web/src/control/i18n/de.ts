@@ -371,6 +371,14 @@ export const de = {
     actionBusy: "…",
     actionChainCancelled: (terminated: number, held: number, skipped: number) =>
       `Kette abgebrochen: ${terminated} beendet · ${held} gehalten · ${skipped} übersprungen`,
+    // Operator-Frage beantworten (S6)
+    answerTitle: "Operator-Frage beantworten",
+    answerPlaceholder: "Antwort eingeben …",
+    answerSubmit: "Antworten",
+    answerBusy: "…",
+    answerDone: "Gesendet — Task neu gestartet.",
+    answerEmpty: "Antwort darf nicht leer sein.",
+    answerErrorHint: "Senden fehlgeschlagen — siehe Detail.",
   },
   flow: {
     eyebrow: "Flow Command Board",

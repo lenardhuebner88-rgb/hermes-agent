@@ -124,6 +124,21 @@ export function manageActions(status: TaskStatus, opts: { hasChain: boolean }): 
   return out;
 }
 
+// ── Operator-question classification (S6) ────────────────────────────────────
+// Mirrors the backend _AUTO_RETRY_QUESTION_RE classification: a blocked task
+// whose block_reason signals a non-retryable operator hold — e.g. "operator
+// hold", "missing credentials", "human approval needed", "?" etc. The auto-retry
+// sweep skips these; the operator must answer them. The RisikoTab previously
+// filtered with a bare `includes("operator")` — this captures the same set plus
+// the other auto-retry-question markers for consistency.
+const OPERATOR_QUESTION_RE =
+  /\?|\boperator\b|\bhuman\b|\bcredentials?\b|\bsecret\b|\btoken\b|\bapproval\b|\bfreigabe\b/i;
+
+export function isOperatorQuestion(blockReason?: string | null): boolean {
+  if (!blockReason) return false;
+  return OPERATOR_QUESTION_RE.test(blockReason);
+}
+
 // ── Role chips ───────────────────────────────────────────────────────────────
 // The screenshot's coloured run-role chip (Verifier = azure, Coder = gold,
 // Researcher = emerald). Keyed by worker profile; results override to "Verifier"

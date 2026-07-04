@@ -14,6 +14,7 @@ import {
   usesFlowCaptureEndpoint,
   chainReviewTier,
   chainActiveReviewStage,
+  isOperatorQuestion,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
@@ -120,6 +121,31 @@ describe("manageActions", () => {
   it("exposes nothing for terminal tasks", () => {
     expect(manageActions("done", { hasChain: true })).toEqual([]);
     expect(manageActions("archived", { hasChain: true })).toEqual([]);
+  });
+});
+
+describe("isOperatorQuestion", () => {
+  it("classifies operator holds and human/credential/approval blockers as questions", () => {
+    expect(isOperatorQuestion("operator hold")).toBe(true);
+    expect(isOperatorQuestion("Operator Hold")).toBe(true);
+    expect(isOperatorQuestion("missing credentials?")).toBe(true);
+    expect(isOperatorQuestion("human approval needed")).toBe(true);
+    expect(isOperatorQuestion("Freigabe: bitte bestätigen")).toBe(true);
+    expect(isOperatorQuestion("secret token missing")).toBe(true);
+    expect(isOperatorQuestion("?")).toBe(true);
+  });
+
+  it("rejects non-question block reasons (infra, timeout, etc.)", () => {
+    expect(isOperatorQuestion("timeout")).toBe(false);
+    expect(isOperatorQuestion("connection refused")).toBe(false);
+    expect(isOperatorQuestion("OOM killed")).toBe(false);
+    expect(isOperatorQuestion("max iterations exceeded")).toBe(false);
+  });
+
+  it("rejects empty/null/undefined", () => {
+    expect(isOperatorQuestion("")).toBe(false);
+    expect(isOperatorQuestion(null)).toBe(false);
+    expect(isOperatorQuestion(undefined)).toBe(false);
   });
 });
 

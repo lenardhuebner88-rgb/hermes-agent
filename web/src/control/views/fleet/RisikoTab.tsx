@@ -9,6 +9,8 @@ import type { ReliabilityResponse } from "../../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse } from "../../lib/types";
 import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
+import { AnswerQuestion } from "./AnswerQuestion";
+import { isOperatorQuestion } from "../../lib/fleet";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
@@ -133,6 +135,9 @@ export function RisikoTab({
                 <div style={{ font: "400 11px/1.4 var(--hc-font-mono)", color: "var(--fleet-t3)", paddingLeft: 0 }}>
                   {t.block_reason}
                 </div>
+              ) : null}
+              {isOperatorQuestion(t.block_reason) ? (
+                <AnswerQuestion taskId={t.id} />
               ) : null}
               <FleetTaskActions
                 taskId={t.id}

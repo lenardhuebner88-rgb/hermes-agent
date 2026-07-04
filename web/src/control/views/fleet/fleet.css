@@ -588,6 +588,66 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   font: 400 11px/1.4 var(--hc-font-sans);
   color: var(--fleet-gruen);
 }
+
+/* ── Operator-Frage beantworten (S6) ─────────────────────────────────────── */
+.fleet-aq {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 176, 59, 0.3);
+  background: rgba(255, 176, 59, 0.06);
+}
+.fleet-aq-title {
+  font: 600 11px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t2);
+  margin-bottom: 6px;
+}
+.fleet-aq-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.fleet-aq-input {
+  flex: 1;
+  min-width: 0;
+  font: 400 12px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t1);
+  background: var(--fleet-bg);
+  border: 1px solid var(--fleet-linie);
+  border-radius: 7px;
+  padding: 6px 9px;
+  outline: none;
+}
+.fleet-aq-input:focus { border-color: rgba(255, 176, 59, 0.55); }
+.fleet-aq-input::placeholder { color: var(--fleet-t4); }
+.fleet-aq-btn {
+  flex: 0 0 auto;
+  font: 600 12px/1.2 var(--hc-font-sans);
+  color: #fff;
+  background: rgba(255, 176, 59, 0.85);
+  border: none;
+  border-radius: 7px;
+  padding: 0 14px;
+  cursor: pointer;
+  transition: opacity 0.1s;
+}
+.fleet-aq-btn:hover { opacity: 0.85; }
+.fleet-aq-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.fleet-aq-note {
+  font: 400 11px/1.4 var(--hc-font-sans);
+  color: var(--fleet-gruen);
+  margin-top: 6px;
+}
+.fleet-aq-error {
+  font: 400 11px/1.45 var(--hc-font-mono);
+  color: var(--fleet-rot);
+  background: rgba(255, 93, 115, 0.08);
+  border: 1px solid rgba(255, 93, 115, 0.25);
+  border-radius: 8px;
+  padding: 6px 9px;
+  margin-top: 6px;
+  word-break: break-word;
+}
 /* Steuerungs-Footer im Karten-Detail-Drawer (immer sichtbar, tab-übergreifend). */
 .fleet-dr-actions {
   padding: 10px 0 2px;
