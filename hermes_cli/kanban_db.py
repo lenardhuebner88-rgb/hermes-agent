@@ -11077,6 +11077,24 @@ def complete_task(
             expected_run_id=expected_run_id,
         )
 
+    # Orphan-reap snapshot (fl-20260704-complete-orphan-reap): a MANUAL
+    # completion (no expected_run_id — the CLI/operator path; the worker's
+    # own kanban_complete tool always passes its own run id and must never
+    # be signalled here, mid its own exit protocol) can close a task whose
+    # spawned process is still running, e.g. an operator `hermes kanban
+    # complete <id>` racing a dispatcher claim. Snapshot BEFORE the write
+    # lock — the actual kill happens after commit, below, mirroring the
+    # diff-snapshot-before-lock pattern in _submit_for_review.
+    _reap_pid: Optional[int] = None
+    _reap_claim_lock: Optional[str] = None
+    if expected_run_id is None:
+        _reap_row = conn.execute(
+            "SELECT worker_pid, claim_lock FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if _reap_row is not None:
+            _reap_pid = _reap_row["worker_pid"]
+            _reap_claim_lock = _reap_row["claim_lock"]
+
     with write_txn(conn):
         with _review_done_terminal_authority():
             if expected_run_id is None:
@@ -11257,6 +11275,35 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+    # Orphan reap (fl-20260704-complete-orphan-reap): the completion above
+    # already cleared tasks.worker_pid, but never signalled the process
+    # itself. Only the manual path (see snapshot above) reaps — the
+    # worker's own self-completion must not risk killing itself before its
+    # exit protocol (e.g. review-gate submit) finishes. Runs OUTSIDE any
+    # txn (the SIGTERM->grace->SIGKILL wait must not hold the write lock),
+    # reusing the existing reclaim kill helper rather than new kill logic.
+    if expected_run_id is None and _reap_pid:
+        if _pid_alive(_reap_pid):
+            _reap_termination = _terminate_reclaimed_worker(
+                _reap_pid, _reap_claim_lock
+            )
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "worker_reaped",
+                    {"pid": int(_reap_pid), **_reap_termination},
+                    run_id=run_id,
+                )
+        else:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "worker_reaped",
+                    {"pid": int(_reap_pid), "already_exited": True},
+                    run_id=run_id,
+                )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
