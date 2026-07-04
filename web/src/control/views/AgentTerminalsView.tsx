@@ -318,12 +318,12 @@ function useIsCompactTerminalLayout(): boolean {
 function StatusPill({ state }: { state: TerminalUiState }) {
   const tone =
     state === "attached"
-      ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200"
+      ? "border-status-ok/40 bg-status-ok/10 text-status-ok"
       : state === "window running"
-        ? "border-sky-400/40 bg-sky-400/10 text-sky-200"
+        ? "border-status-ok/40 bg-status-ok/10 text-status-ok"
         : state === "Tailscale/mobile reconnect"
-          ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
-          : "border-red-400/35 bg-red-400/10 text-red-100";
+          ? "border-status-warn/40 bg-status-warn/10 text-status-warn"
+          : "border-status-alert/35 bg-status-alert/10 text-status-alert";
   return <span className={cn("rounded-full border px-2 py-0.5 text-[11px] font-medium", tone)}>{state}</span>;
 }
 
@@ -336,7 +336,7 @@ function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabi
   const label = ok ? "verfügbar" : reason?.includes("symlink") || reason?.includes("resolvable") ? "kaputter Symlink/Binary" : reason ? "CLI fehlt" : "unbekannt";
   const title = reason ?? agentState?.binary ?? agent.hint;
   return (
-    <span title={title} className={cn("rounded border px-1.5 py-0.5 text-[10px]", ok ? "border-emerald-400/35 text-emerald-200" : "border-white/15 text-white/45")}>
+    <span title={title} className={cn("rounded-card border px-1.5 py-0.5 text-[10px]", ok ? "border-status-ok/35 text-status-ok" : "border-line text-ink-3")}>
       {label}
     </span>
   );
@@ -357,16 +357,16 @@ function TerminalIdentityBar({
   const cwd = window?.cwd?.trim() || "cwd unbekannt";
   const process = terminalProcessLabel(window, kind);
   return (
-    <div className="sticky top-0 z-10 border-b border-cyan-300/15 bg-[#062022]/95 px-2.5 py-2 text-[11px] text-white/75 backdrop-blur sm:px-3">
+    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">{/* TOKEN-REVIEW: was border-cyan-300/15 */}
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="shrink-0 font-semibold text-white">{label}</span>
-        <span className="text-white/30">·</span>
-        <span className="min-w-0 max-w-[9rem] truncate font-mono text-cyan-100 sm:max-w-[14rem]" title={target}>{target}</span>
-        <span className="text-white/30">·</span>
-        <span className="min-w-0 max-w-[13rem] truncate font-mono text-white/70 sm:max-w-[28rem]" title={cwd}>{cwd}</span>
-        <span className="text-white/30">·</span>
-        <span className="min-w-0 max-w-[8rem] truncate font-mono text-white/70" title={process}>{process}</span>
-        <span className="text-white/30">·</span>
+        <span className="shrink-0 font-semibold text-ink">{label}</span>
+        <span className="text-ink-3">·</span>
+        <span className="min-w-0 max-w-[9rem] truncate font-mono text-live sm:max-w-[14rem]" title={target}>{target}</span>
+        <span className="text-ink-3">·</span>
+        <span className="min-w-0 max-w-[13rem] truncate font-mono text-ink-2 sm:max-w-[28rem]" title={cwd}>{cwd}</span>
+        <span className="text-ink-3">·</span>
+        <span className="min-w-0 max-w-[8rem] truncate font-mono text-ink-2" title={process}>{process}</span>
+        <span className="text-ink-3">·</span>
         <StatusPill state={state} />
       </div>
     </div>
@@ -384,13 +384,13 @@ function MiniStat({
 }) {
   const toneClass =
     tone === "ok"
-      ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
+      ? "border-status-ok/25 bg-status-ok/10 text-status-ok"
       : tone === "warn"
-        ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
-        : "border-white/10 bg-white/[0.03] text-white";
+        ? "border-status-warn/25 bg-status-warn/10 text-status-warn"
+        : "border-line bg-surface-2 text-ink";
   return (
-    <div className={cn("min-w-0 rounded-lg border p-1.5", toneClass)}>
-      <div className="text-[10px] uppercase tracking-normal text-white/45">{label}</div>
+    <div className={cn("min-w-0 rounded-card border p-1.5", toneClass)}>
+      <div className="text-[10px] uppercase tracking-normal text-ink-3">{label}</div>
       <div className="mt-1 truncate text-sm font-semibold">{value}</div>
     </div>
   );
@@ -416,7 +416,7 @@ function TerminalControlButton({
       onPointerDown={(event) => event.preventDefault()}
       onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
-      className="grid h-9 w-full min-w-0 place-items-center rounded-md border border-white/10 bg-white/[0.04] text-white/75 transition hover:border-cyan-300/40 hover:bg-cyan-300/10 hover:text-cyan-100 active:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-35"
+      className="grid h-9 w-full min-w-0 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-live/10 hover:text-live active:bg-live/15 disabled:cursor-not-allowed disabled:opacity-35"
     >
       {children}
     </button>
@@ -426,15 +426,15 @@ function TerminalControlButton({
 function fleetStateMeta(state: AgentTerminalOverviewWindow["state"]): { label: string; className: string } {
   switch (state) {
     case "frage":
-      return { label: "Braucht dich", className: "animate-pulse border-red-400/50 bg-red-400/15 text-red-100" };
+      return { label: "Braucht dich", className: "animate-pulse border-status-alert/50 bg-status-alert/15 text-status-alert" };
     case "laeuft":
-      return { label: "Läuft", className: "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" };
+      return { label: "Läuft", className: "border-brand/40 bg-brand/10 text-brand" };
     case "wartet":
-      return { label: "Fertig/wartet", className: "border-emerald-400/40 bg-emerald-400/10 text-emerald-100" };
+      return { label: "Fertig/wartet", className: "border-status-ok/40 bg-status-ok/10 text-status-ok" };
     case "dead":
-      return { label: "Tot", className: "border-red-400/35 bg-red-400/10 text-red-100" };
+      return { label: "Tot", className: "border-status-alert/35 bg-status-alert/10 text-status-alert" };
     default:
-      return { label: "Idle", className: "border-white/15 bg-white/[0.03] text-white/40" };
+      return { label: "Idle", className: "border-line bg-surface-2 text-ink-3" };
   }
 }
 
@@ -474,16 +474,16 @@ function FleetCard({
         else onOpen();
       }}
       className={cn(
-        "relative grid cursor-pointer gap-2 rounded-xl border p-2.5 text-left transition",
-        selected ? "border-cyan-300/60 bg-cyan-300/10" : "border-white/10 bg-black/20 hover:border-white/20",
+        "relative grid cursor-pointer gap-2 rounded-card border p-2.5 text-left transition",
+        selected ? "border-live/60 bg-live/10" : "border-line bg-surface-2 hover:border-line",
       )}
     >
       {selectable && (
         <span
           aria-hidden="true"
           className={cn(
-            "absolute right-2 top-2 grid h-4 w-4 place-items-center rounded border",
-            selected ? "border-cyan-300 bg-cyan-300/80 text-[#041113]" : "border-white/30",
+            "absolute right-2 top-2 grid h-4 w-4 place-items-center rounded-card border",
+            selected ? "border-live bg-live/80 text-surface-0" : "border-line",
           )}
         >
           {selected && <CheckCircle2 className="h-3 w-3" />}
@@ -491,10 +491,10 @@ function FleetCard({
       )}
       <div className="flex min-w-0 items-center gap-1.5 pr-5">
         <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium", meta.className)}>{meta.label}</span>
-        <span className="min-w-0 truncate font-mono text-xs text-white/75">{chipLabel(win)}</span>
+        <span className="min-w-0 truncate font-mono text-xs text-ink-2">{chipLabel(win)}</span>
       </div>
-      <div className="text-[10px] text-white/45">{formatActivityAge(now, win.activity ?? null)}</div>
-      <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-lg bg-black/30 p-1.5 font-mono text-[10px] leading-tight text-white/70">
+      <div className="text-[10px] text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
+      <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-card bg-surface-2 p-1.5 font-mono text-[10px] leading-tight text-ink-2">
         {(win.tail ?? "").split("\n").slice(-5).join("\n") || "—"}
       </pre>
       {dead && (
@@ -505,7 +505,7 @@ function FleetCard({
               event.stopPropagation();
               onRespawn();
             }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-white/10 px-2 py-1.5 text-[11px] text-white/70 hover:border-cyan-300/40 hover:text-cyan-100"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-live/40 hover:text-live"
           >
             <RotateCcw className="h-3 w-3" />Respawn
           </button>
@@ -515,7 +515,7 @@ function FleetCard({
               event.stopPropagation();
               onKill();
             }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-white/10 px-2 py-1.5 text-[11px] text-white/70 hover:border-red-300/40 hover:text-red-200"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-status-alert/40 hover:text-status-alert"
           >
             <Trash2 className="h-3 w-3" />Entfernen
           </button>
@@ -529,9 +529,9 @@ function FleetCard({
               event.stopPropagation();
               onTerminate();
             }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-red-500/30 px-2 py-1.5 text-[11px] text-red-200 hover:border-red-300/60 hover:bg-red-950/20"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/30 px-2 py-1.5 text-[11px] text-status-alert hover:border-status-alert/60 hover:bg-status-alert/10"
             aria-label={`Session beenden ${win.session}:${win.window}`}
-          >
+          >{/* TOKEN-REVIEW: was hover:bg-red-950/20 */}
             <Trash2 className="h-3 w-3" />Session beenden
           </button>
         </div>
@@ -1372,37 +1372,37 @@ export function AgentTerminalsView() {
       <div className="flex items-center justify-between">
         <div>
           <p className="hc-eyebrow">tmux</p>
-          <h2 className="text-sm font-semibold text-white">Sessions / Windows</h2>
+          <h2 className="text-sm font-semibold text-ink">Sessions / Windows</h2>
         </div>
-        <button type="button" onClick={() => void refresh()} aria-label="Refresh agent terminals" className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><RefreshCw className="h-4 w-4" /></button>
+        <button type="button" onClick={() => void refresh()} aria-label="Refresh agent terminals" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><RefreshCw className="h-4 w-4" /></button>
       </div>
       <div className="grid gap-2">
-        {sessions.length === 0 && <div className="rounded-lg border border-white/10 p-3 text-xs text-white/60">Keine tmux-Session gefunden.</div>}
+        {sessions.length === 0 && <div className="rounded-card border border-line p-3 text-xs text-ink-3">Keine tmux-Session gefunden.</div>}
         {sessions.map((session) => (
-          <div key={session} className="rounded-lg border border-white/10 bg-black/15 p-2">
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-white/75"><Server className="h-3.5 w-3.5" />{session}</div>
+          <div key={session} className="rounded-card border border-line bg-surface-2 p-2">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-ink-2"><Server className="h-3.5 w-3.5" />{session}</div>
             <div className="grid gap-1">
               {windows.filter((w) => w.session === session).map((win) => {
                 const active = target?.session === win.session && target.window === win.window;
                 const dead = isDeadWindow(win);
                 return (
                   <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
-                    <button type="button" onClick={() => setTarget(targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-md border px-2 py-2 text-left text-xs transition", active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-transparent text-white/65 hover:border-white/10 hover:bg-white/5")}>
-                      <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-red-300" : "bg-emerald-300")} /></span>
-                      <span className="mt-0.5 block truncate text-[10px] text-white/40">{dead ? "dead pane" : win.command || "—"}</span>
+                    <button type="button" onClick={() => setTarget(targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-card border px-2 py-2 text-left text-xs transition", active ? "border-live/60 bg-live/10 text-live" : "border-transparent text-ink-2 hover:border-line hover:bg-surface-3")}>
+                      <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
+                      <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
                     </button>
                     {dead && (
                       <>
-                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-white/10 text-white/55 hover:border-cyan-300/40 hover:text-cyan-100">
+                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-live/40 hover:text-live">
                           <RotateCcw className="h-3.5 w-3.5" />
                         </button>
-                        <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-white/10 text-white/55 hover:border-red-300/40 hover:text-red-200">
+                        <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-status-alert/40 hover:text-status-alert">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </>
                     )}
                     {!dead && (
-                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-md border border-red-500/20 text-red-200/70 hover:border-red-300/50 hover:text-red-100">
+                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-status-alert/20 text-status-alert/70 hover:border-status-alert/50 hover:text-status-alert">
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}
@@ -1417,12 +1417,12 @@ export function AgentTerminalsView() {
   );
 
   const toolsVisibility = (
-    <div className="grid gap-3 rounded-xl border border-white/10 bg-black/20 p-3">
+    <div className="grid gap-3 rounded-card border border-line bg-surface-2 p-3">
       <div className="flex items-center gap-2">
-        <Sparkles className="h-4 w-4 text-cyan-200" />
+        <Sparkles className="h-4 w-4 text-brand" />
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/60">Skills / Tools</p>
-          <h3 className="text-sm font-semibold text-white">Fähigkeiten sichtbar</h3>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-3">Skills / Tools</p>
+          <h3 className="text-sm font-semibold text-ink">Fähigkeiten sichtbar</h3>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-1.5">
@@ -1435,18 +1435,18 @@ export function AgentTerminalsView() {
           <div
             key={capability.label}
             title={capability.command}
-            className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5"
+            className="flex items-center justify-between gap-2 rounded-card border border-line bg-surface-2 px-2 py-1.5"
           >
-            <span className="min-w-0 truncate font-medium text-white">{capability.label}</span>
+            <span className="min-w-0 truncate font-medium text-ink">{capability.label}</span>
             <span
               title={state.detail}
               className={cn(
                 "shrink-0 rounded-full border px-2 py-0.5 text-[10px]",
                 state.tone === "ok"
-                  ? "border-emerald-300/35 text-emerald-200"
+                  ? "border-status-ok/35 text-status-ok"
                   : state.tone === "warn"
-                    ? "border-amber-300/35 text-amber-100"
-                    : "border-white/15 text-white/50",
+                    ? "border-status-warn/35 text-status-warn"
+                    : "border-line text-ink-3",
               )}
             >
               {state.label}
@@ -1454,7 +1454,7 @@ export function AgentTerminalsView() {
           </div>
         ))}
       </div>
-      <div className="grid gap-1 text-[11px] text-white/60">
+      <div className="grid gap-1 text-[11px] text-ink-3">
         <div className="flex items-start gap-2">
           <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0">
@@ -1474,12 +1474,12 @@ export function AgentTerminalsView() {
   );
 
   const controlOverview = (
-    <div className="grid gap-3 rounded-xl border border-white/10 bg-black/20 p-3">
+    <div className="grid gap-3 rounded-card border border-line bg-surface-2 p-3">
       <div className="flex items-center gap-2">
-        <Gauge className="h-4 w-4 text-emerald-200" />
+        <Gauge className="h-4 w-4 text-status-ok" />
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/60">Tageslage</p>
-          <h3 className="text-sm font-semibold text-white">Was läuft / was ist belegt</h3>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-3">Tageslage</p>
+          <h3 className="text-sm font-semibold text-ink">Was läuft / was ist belegt</h3>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-1.5">
@@ -1488,27 +1488,27 @@ export function AgentTerminalsView() {
         <MiniStat label="Kanban aktiv" value={activeTasks.length} tone={activeTasks.length > 0 ? "warn" : "neutral"} />
         <MiniStat label="Blockiert" value={blockedTasks.length + decisionCount} tone={blockedTasks.length + decisionCount > 0 ? "warn" : "ok"} />
       </div>
-      <div className="grid gap-2 text-[11px] text-white/65">
+      <div className="grid gap-2 text-[11px] text-ink-2">
         <div className="flex items-center gap-1.5">
-          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-200" />
-          <span>Health: <span className="font-medium text-white">{healthOverall}</span></span>
+          <CheckCircle2 className="h-3.5 w-3.5 text-status-ok" />
+          <span>Health: <span className="font-medium text-ink">{healthOverall}</span></span>
         </div>
         <div>
-          <div className="mb-1 flex items-center gap-1.5 text-white/75"><Bot className="h-3.5 w-3.5" />Aktive Agent-Terminals</div>
+          <div className="mb-1 flex items-center gap-1.5 text-ink-2"><Bot className="h-3.5 w-3.5" />Aktive Agent-Terminals</div>
           {windows.filter((win) => win.pid).length ? (
             <ul className="space-y-1">
               {windows.filter((win) => win.pid).slice(0, 4).map((win) => (
                 <li key={`${win.session}:${win.window}`} className="truncate" title={`${win.session}:${win.window} · ${win.cwd ?? ""}`}>
-                  <span className="font-mono text-cyan-100">{win.session}:{win.window}</span> · {terminalProcessLabel(win, kindFromWindow(win, selectedKind))}
+                  <span className="font-mono text-live">{win.session}:{win.window}</span> · {terminalProcessLabel(win, kindFromWindow(win, selectedKind))}
                 </li>
               ))}
             </ul>
           ) : (
-            <div className="text-white/45">—</div>
+            <div className="text-ink-3">—</div>
           )}
         </div>
         <div>
-          <div className="mb-1 flex items-center gap-1.5 text-white/75"><Inbox className="h-3.5 w-3.5" />Offene Coordination-Claims</div>
+          <div className="mb-1 flex items-center gap-1.5 text-ink-2"><Inbox className="h-3.5 w-3.5" />Offene Coordination-Claims</div>
           {openClaims.length ? (
             <ul className="space-y-1">
               {openClaims.slice(0, 3).map((claim) => (
@@ -1518,45 +1518,45 @@ export function AgentTerminalsView() {
               ))}
             </ul>
           ) : (
-            <div className="text-white/45">keine</div>
+            <div className="text-ink-3">keine</div>
           )}
         </div>
         <div>
-          <div className="mb-1 flex items-center gap-1.5 text-white/75"><ClipboardList className="h-3.5 w-3.5" />Letzte Belege</div>
+          <div className="mb-1 flex items-center gap-1.5 text-ink-2"><ClipboardList className="h-3.5 w-3.5" />Letzte Belege</div>
           {(evidenceReceipts.length ? evidenceReceipts : recentReceipts).length ? (
             <ul className="space-y-1">
               {(evidenceReceipts.length ? evidenceReceipts : recentReceipts).slice(0, 4).map((receipt) => (
                 <li key={receipt.path} className="truncate" title={receipt.path}>
-                  <span className="font-mono text-white/45">{receipt.when}</span> [{receipt.agent}] {receipt.file}
+                  <span className="font-mono text-ink-3">{receipt.when}</span> [{receipt.agent}] {receipt.file}
                 </li>
               ))}
             </ul>
           ) : (
-            <div className="text-white/45">—</div>
+            <div className="text-ink-3">—</div>
           )}
         </div>
         <div>
-          <div className="mb-1 text-white/75">Kanban nächste Signale</div>
+          <div className="mb-1 text-ink-2">Kanban nächste Signale</div>
           {activeTasks.length || blockedTasks.length || decisionCount ? (
             <ul className="space-y-1">
               {activeTasks.slice(0, 2).map((task) => (
                 <li key={`active-${task.id}`} className="truncate" title={task.title}>
-                  <span className="font-mono text-cyan-100">{task.id}</span> · {task.status} · {task.title}
+                  <span className="font-mono text-live">{task.id}</span> · {task.status} · {task.title}
                 </li>
               ))}
               {blockedTasks.slice(0, 2).map((task) => (
-                <li key={`blocked-${task.id}`} className="truncate text-amber-100" title={task.title}>
+                <li key={`blocked-${task.id}`} className="truncate text-status-warn" title={task.title}>
                   <span className="font-mono">{task.id}</span> · blocked · {task.title}
                 </li>
               ))}
-              {decisionCount > 0 && <li className="text-amber-100">{decisionCount} Operator-Entscheidung(en) offen</li>}
+              {decisionCount > 0 && <li className="text-status-warn">{decisionCount} Operator-Entscheidung(en) offen</li>}
             </ul>
           ) : (
-            <div className="text-white/45">keine aktiven/blockierten Items sichtbar</div>
+            <div className="text-ink-3">keine aktiven/blockierten Items sichtbar</div>
           )}
         </div>
         {controlContext.error && (
-          <div className="rounded-lg border border-amber-300/25 bg-amber-300/10 p-2 text-amber-100">
+          <div className="rounded-card border border-status-warn/25 bg-status-warn/10 p-2 text-status-warn">
             Kontext teilweise nicht geladen: {controlContext.error}
           </div>
         )}
@@ -1567,23 +1567,23 @@ export function AgentTerminalsView() {
   const toolsDrawer = (
     <div className="grid gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
-        <div><p className="hc-eyebrow">Tools / Handoff</p><h2 className="font-semibold text-white">Terminal-Kontext</h2></div>
-        {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>}
+        <div><p className="hc-eyebrow">Tools / Handoff</p><h2 className="font-semibold text-ink">Terminal-Kontext</h2></div>
+        {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>}
       </div>
-      <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
-        <div className="flex justify-between"><span>Target</span><span className="text-white">{target ? `${target.session}:${target.window}` : "—"}</span></div>
+      <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
+        <div className="flex justify-between"><span>Target</span><span className="text-ink">{target ? `${target.session}:${target.window}` : "—"}</span></div>
         <div className="flex justify-between"><span>Attach</span><StatusPill state={state} /></div>
-        <div className="flex justify-between"><span>Input</span><span className="text-white/80">nur User-Tasten, kein Auto-Send</span></div>
-        <div className="flex justify-between"><span>Mobile</span><span className="text-white/80">reattach an dasselbe tmux-Fenster</span></div>
+        <div className="flex justify-between"><span>Input</span><span className="text-ink-2">nur User-Tasten, kein Auto-Send</span></div>
+        <div className="flex justify-between"><span>Mobile</span><span className="text-ink-2">reattach an dasselbe tmux-Fenster</span></div>
       </div>
-      <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs text-amber-50">
+      <div className="rounded-card border border-status-warn/20 bg-status-warn/10 p-3 text-xs text-status-warn">
         Handoff bleibt optional: Diese Fläche erzwingt keinen Prompt- oder Übergabe-Flow.
       </div>
       <button
         type="button"
         onClick={() => { setHandoffOpen(true); setToolsOpen(false); }}
         disabled={!target}
-        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-40"
+        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs text-live hover:bg-live/20 disabled:opacity-40"
       >
         <Share2 className="h-3.5 w-3.5" />
         Handoff öffnen (Auswahl → PlanSpec/Kanban)
@@ -1596,7 +1596,7 @@ export function AgentTerminalsView() {
   const composer = (
     <div
       className={cn(
-        "shrink-0 border-t border-white/10 bg-[#06191b] px-2 py-1.5 sm:px-3",
+        "shrink-0 border-t border-line-soft bg-surface-1 px-2 py-1.5 sm:px-3",
         compactLayout && !keysOpen && "pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]",
       )}
     >
@@ -1610,8 +1610,8 @@ export function AgentTerminalsView() {
             onPointerDown={(event) => event.preventDefault()}
             onClick={toggleKeysOpen}
             className={cn(
-              "grid h-10 w-10 shrink-0 place-items-center rounded-lg border transition",
-              keysOpen ? "border-cyan-300/50 bg-cyan-300/15 text-cyan-100" : "border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10",
+              "grid h-10 w-10 shrink-0 place-items-center rounded-card border transition",
+              keysOpen ? "border-live/50 bg-live/15 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
             )}
           >
             <Keyboard className="h-4 w-4" />
@@ -1634,7 +1634,7 @@ export function AgentTerminalsView() {
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
-          className="agent-terminal-composer-input min-h-10 min-w-0 flex-1 resize-none rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[13px] leading-5 text-white placeholder:text-white/55 focus:border-cyan-300/50 focus:outline-none disabled:opacity-40"
+          className="agent-terminal-composer-input min-h-10 min-w-0 flex-1 resize-none rounded-card border border-line bg-surface-2 px-2.5 py-2 font-mono text-[13px] leading-5 text-ink placeholder:text-ink-3 focus:border-live/50 focus:outline-none disabled:opacity-40"
         />
         <button
           type="button"
@@ -1642,7 +1642,7 @@ export function AgentTerminalsView() {
           title="Senden (mit Enter)"
           disabled={!socketReady || !composerText}
           onClick={() => sendComposer(true)}
-          className="grid h-10 w-12 shrink-0 place-items-center rounded-lg border border-cyan-300/50 bg-cyan-300/15 text-cyan-100 transition hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-35"
+          className="grid h-10 w-12 shrink-0 place-items-center rounded-card border border-live/50 bg-live/15 text-live transition hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-35"
         >
           <CornerDownLeft className="h-4 w-4" />
         </button>
@@ -1651,7 +1651,7 @@ export function AgentTerminalsView() {
   );
 
   const keysBar = compactLayout && keysOpen ? (
-    <div className="shrink-0 border-t border-white/10 bg-[#06191b] px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]">
+    <div className="shrink-0 border-t border-line-soft bg-surface-1 px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]">
       <div className="grid gap-1.5">
         <div className="grid grid-cols-2 gap-1.5">
           <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal scroll controls">
@@ -1698,12 +1698,12 @@ export function AgentTerminalsView() {
   const sessionSheetDead = selectedWindow ? isDeadWindow(selectedWindow) : false;
 
   const chipStrip = (
-    <div className="flex h-11 shrink-0 items-stretch border-b border-white/10 bg-[#06191b]">
+    <div className="flex h-11 shrink-0 items-stretch border-b border-line-soft bg-surface-1">
       <button
         type="button"
         aria-label={view === "flotte" ? "Terminal-Ansicht" : "Flotten-Übersicht"}
         onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
-        className="grid shrink-0 place-items-center border-r border-white/10 px-3 text-white/70 hover:bg-white/10"
+        className="grid shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
       >
         {view === "flotte" ? <TerminalSquare className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}
       </button>
@@ -1711,7 +1711,7 @@ export function AgentTerminalsView() {
         type="button"
         aria-label="Zurück zum Dashboard"
         onClick={() => navigate("/control")}
-        className="grid shrink-0 place-items-center border-r border-white/10 px-3 text-white/70 hover:bg-white/10"
+        className="grid shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
       >
         <ChevronLeft className="h-4 w-4" />
       </button>
@@ -1731,12 +1731,12 @@ export function AgentTerminalsView() {
               onClick={() => (active ? setSessionSheetOpen(true) : setTarget(targetFromWindow(win)))}
               className={cn(
                 "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition",
-                active ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/65",
+                active ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2",
               )}
             >
               <span className="relative grid h-2 w-2 shrink-0 place-items-center">
-                <span className={cn("h-2 w-2 rounded-full", dead ? "bg-red-400" : "bg-emerald-400")} />
-                {unseen && <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-cyan-300" />}
+                <span className={cn("h-2 w-2 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} />
+                {unseen && <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-live" />}
               </span>
               <span className="max-w-[8rem] truncate">{chipLabel(win)}</span>
             </button>
@@ -1747,7 +1747,7 @@ export function AgentTerminalsView() {
         type="button"
         aria-label="Neue Session starten"
         onClick={() => setCreateSheetOpen(true)}
-        className="grid shrink-0 place-items-center border-l border-white/10 px-3 text-cyan-100 hover:bg-cyan-300/10"
+        className="grid shrink-0 place-items-center border-l border-line-soft px-3 text-live hover:bg-live/10"
       >
         <Plus className="h-4 w-4" />
       </button>
@@ -1755,74 +1755,74 @@ export function AgentTerminalsView() {
   );
 
   const sessionSheet = compactLayout && sessionSheetOpen && selectedWindow && (
-    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
-      <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />
+    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">{/* TOKEN-REVIEW: was rounded-t-3xl */}
+      <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="hc-eyebrow">{AGENT_LABELS[sessionSheetKind] ?? sessionSheetKind}</p>
-          <h2 className="truncate font-mono text-sm font-semibold text-white">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
+          <h2 className="truncate font-mono text-sm font-semibold text-ink">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
         </div>
-        <button type="button" onClick={() => setSessionSheetOpen(false)} aria-label="Sitzung schließen" className="shrink-0 rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>
+        <button type="button" onClick={() => setSessionSheetOpen(false)} aria-label="Sitzung schließen" className="shrink-0 rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
       </div>
       <div className="mt-2 flex items-center gap-1.5">
-        <Pencil className="h-3.5 w-3.5 shrink-0 text-white/40" />
+        <Pencil className="h-3.5 w-3.5 shrink-0 text-ink-3" />
         <input
           aria-label="Neuer Fenstername"
           value={renameValue}
           disabled={renameBusy}
           onChange={(event) => setRenameValue(event.target.value)}
-          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/25 px-2.5 py-1.5 font-mono text-xs text-white focus:border-cyan-300/50 focus:outline-none disabled:opacity-40"
+          className="min-w-0 flex-1 rounded-card border border-line bg-surface-2 px-2.5 py-1.5 font-mono text-xs text-ink focus:border-live/50 focus:outline-none disabled:opacity-40"
         />
         <button
           type="button"
           onClick={() => void renameWindow()}
           disabled={renameBusy || !renameValue.trim() || renameValue.trim() === selectedWindow.window}
-          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs text-white/75 hover:border-cyan-300/40 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex shrink-0 items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-ink-2 hover:border-live/40 hover:text-live disabled:cursor-not-allowed disabled:opacity-40"
         >
           {renameBusy ? "…" : "Umbenennen"}
         </button>
       </div>
-      {renameError && <div className="mt-1.5 rounded-lg border border-red-400/30 bg-red-400/10 p-2 text-[11px] text-red-100">{renameError}</div>}
-      <div className="mt-3 grid gap-1.5 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
-        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-white/75">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
-        <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-white/75">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
+      {renameError && <div className="mt-1.5 rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-[11px] text-status-alert">{renameError}</div>}
+      <div className="mt-3 grid gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
+        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-ink-2">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-ink-2">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Status</span><StatusPill state={state} /></div>
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <button type="button" onClick={() => setAttachNonce((n) => n + 1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => setAttachNonce((n) => n + 1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <PlugZap className="h-4 w-4" /><span>Neu verbinden</span>
         </button>
-        <button type="button" disabled={!socketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-35">
+        <button type="button" disabled={!socketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
           <span className="font-mono text-sm">^C</span><span>^C senden</span>
         </button>
         {sessionSheetDead && (
-          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
             <RotateCcw className="h-4 w-4" /><span>Neu starten</span>
           </button>
         )}
         {sessionSheetDead && (
-          <button type="button" onClick={() => { void killWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-red-400/25 px-2 py-2.5 text-center leading-tight text-red-100 hover:bg-red-400/10">
+          <button type="button" onClick={() => { void killWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
             <Trash2 className="h-4 w-4" /><span>Fenster entfernen</span>
           </button>
         )}
         {!sessionSheetDead && (
-          <button type="button" onClick={() => { void terminateWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-red-400/25 px-2 py-2.5 text-center leading-tight text-red-100 hover:bg-red-400/10">
+          <button type="button" onClick={() => { void terminateWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
             <Trash2 className="h-4 w-4" /><span>Session beenden</span>
           </button>
         )}
-        <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
         </button>
-        <button type="button" onClick={() => adjustFont(-1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => adjustFont(-1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <span className="font-mono text-sm">A−</span><span>Schrift kleiner</span>
         </button>
-        <button type="button" onClick={() => adjustFont(1)} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => adjustFont(1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <span className="font-mono text-sm">A+</span><span>Schrift größer</span>
         </button>
-        <button type="button" onClick={() => { setToolsOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => { setToolsOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Wrench className="h-4 w-4" /><span>Tools / Tageslage</span>
         </button>
-        <button type="button" onClick={() => void refresh()} className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-2.5 text-center leading-tight text-white/75 hover:bg-white/[0.06]">
+        <button type="button" onClick={() => void refresh()} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <RefreshCw className="h-4 w-4" /><span>Liste aktualisieren</span>
         </button>
       </div>
@@ -1838,8 +1838,8 @@ export function AgentTerminalsView() {
             type="button"
             onClick={() => setCreateKind(agent.kind)}
             className={cn(
-              "rounded-lg border px-2 py-2 text-left text-xs transition",
-              createKind === agent.kind ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.06]",
+              "rounded-card border px-2 py-2 text-left text-xs transition",
+              createKind === agent.kind ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
             )}
           >
             <span className="flex min-w-0 items-center justify-between gap-1.5">
@@ -1849,25 +1849,25 @@ export function AgentTerminalsView() {
           </button>
         ))}
       </div>
-      <label className="grid gap-1 text-xs text-white/60">
+      <label className="grid gap-1 text-xs text-ink-3">
         <span>Arbeitsverzeichnis</span>
         <select
           aria-label="Arbeitsverzeichnis für neue Terminals"
           value={workdir}
           onChange={(event) => selectWorkdir(event.target.value)}
-          className="rounded-lg border border-white/10 bg-[#0a2427] px-2 py-2 text-xs text-white/75 focus:border-cyan-300/50 focus:outline-none"
-        >
+          className="rounded-card border border-line bg-surface-2 px-2 py-2 text-xs text-ink-2 focus:border-live/50 focus:outline-none"
+        >{/* TOKEN-REVIEW: was bg-[#0a2427] */}
           {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
             <option key={option.key} value={option.key}>{option.label}</option>
           ))}
         </select>
       </label>
-      {createError && <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-2 text-xs text-red-100">{createError}</div>}
+      {createError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-xs text-status-alert">{createError}</div>}
       <button
         type="button"
         onClick={() => void submitCreateSession()}
         disabled={createBusy}
-        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/15 px-3 py-2.5 text-sm font-medium text-cyan-100 hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sm font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {createBusy ? "Startet…" : "Session starten"}
       </button>
@@ -1876,21 +1876,21 @@ export function AgentTerminalsView() {
 
   const createSheetHeader = (
     <div className="mb-3 flex items-center justify-between gap-2">
-      <div><p className="hc-eyebrow">Neue Session</p><h2 className="text-sm font-semibold text-white">Agent wählen</h2></div>
-      <button type="button" onClick={() => setCreateSheetOpen(false)} aria-label="Schließen" className="rounded-md border border-white/10 p-1.5 text-white/65 hover:bg-white/10"><X className="h-4 w-4" /></button>
+      <div><p className="hc-eyebrow">Neue Session</p><h2 className="text-sm font-semibold text-ink">Agent wählen</h2></div>
+      <button type="button" onClick={() => setCreateSheetOpen(false)} aria-label="Schließen" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
     </div>
   );
 
   const createSheet = createSheetOpen && (
     compactLayout ? (
-      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
-        <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />
+      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">{/* TOKEN-REVIEW: was rounded-t-3xl */}
+        <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}
         {createSheetHeader}
         {createSessionForm}
       </div>
     ) : (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4">
-        <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl">
+      <div className="fixed inset-0 z-50 grid place-items-center bg-surface-0/60 p-4">{/* TOKEN-REVIEW: was bg-black/60 */}
+        <div className="w-full max-w-sm rounded-panel border border-line bg-surface-1 p-4 shadow-2xl">
           {createSheetHeader}
           {createSessionForm}
         </div>
@@ -1903,19 +1903,19 @@ export function AgentTerminalsView() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="hc-eyebrow">Flotte</p>
-          <h2 className="text-sm font-semibold text-white">
+          <h2 className="text-sm font-semibold text-ink">
             {orderedOverview.length} Fenster · {orderedOverview.filter((win) => win.state !== "dead").length} aktiv
           </h2>
         </div>
         <div className="flex items-center gap-2">
-          {overviewLoading && <span className="text-xs text-white/50">lädt…</span>}
+          {overviewLoading && <span className="text-xs text-ink-3">lädt…</span>}
           <button
             type="button"
             onClick={toggleBroadcastMode}
             aria-pressed={broadcastOpen}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition",
-              broadcastOpen ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100" : "border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10",
+              "inline-flex items-center gap-1.5 rounded-card border px-3 py-1.5 text-xs font-medium transition",
+              broadcastOpen ? "border-live/60 bg-live/15 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
             )}
           >
             Senden an mehrere
@@ -1923,12 +1923,12 @@ export function AgentTerminalsView() {
         </div>
       </div>
       {overviewError && (
-        <div className="flex items-center gap-1.5 rounded-lg border border-red-400/25 bg-red-400/10 px-2.5 py-1.5 text-xs text-red-100">
+        <div className="flex items-center gap-1.5 rounded-card border border-status-alert/25 bg-status-alert/10 px-2.5 py-1.5 text-xs text-status-alert">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />{overviewError}
         </div>
       )}
       {orderedOverview.length === 0 ? (
-        <div className="rounded-xl border border-white/10 p-4 text-center text-xs text-white/55">
+        <div className="rounded-card border border-line p-4 text-center text-xs text-ink-3">
           {overviewLoading ? "Lädt Flotten-Übersicht…" : "Keine tmux-Fenster gefunden."}
         </div>
       ) : (
@@ -1953,23 +1953,23 @@ export function AgentTerminalsView() {
         </div>
       )}
       {broadcastOpen && (
-        <div className="grid gap-1.5 rounded-xl border border-cyan-300/30 bg-[#06191b] p-2.5">
+        <div className="grid gap-1.5 rounded-card border border-live/30 bg-surface-1 p-2.5">
           {broadcastConfirming ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-amber-100">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-status-warn">
               <span>Wirklich an {broadcastSelection.size} Sessions senden?</span>
               <div className="flex gap-1.5">
                 <button
                   type="button"
                   onClick={() => void sendBroadcast()}
                   disabled={broadcastBusy}
-                  className="rounded-md border border-cyan-300/50 bg-cyan-300/15 px-2.5 py-1 text-cyan-100 hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-card border border-live/50 bg-live/15 px-2.5 py-1 text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {broadcastBusy ? "Sendet…" : "Ja"}
                 </button>
                 <button
                   type="button"
                   onClick={() => setBroadcastConfirming(false)}
-                  className="rounded-md border border-white/10 px-2.5 py-1 text-white/70 hover:bg-white/10"
+                  className="rounded-card border border-line px-2.5 py-1 text-ink-2 hover:bg-surface-3"
                 >
                   Abbrechen
                 </button>
@@ -1983,32 +1983,32 @@ export function AgentTerminalsView() {
                 onChange={(event) => setBroadcastText(event.target.value)}
                 rows={Math.min(2, Math.max(1, broadcastText.split("\n").length))}
                 placeholder="Prompt oder Befehl für die Auswahl …"
-                className="min-h-9 min-w-0 flex-1 resize-none rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 font-mono text-[13px] leading-5 text-white placeholder:text-white/55 focus:border-cyan-300/50 focus:outline-none"
+                className="min-h-9 min-w-0 flex-1 resize-none rounded-card border border-line bg-surface-2 px-2.5 py-1.5 font-mono text-[13px] leading-5 text-ink placeholder:text-ink-3 focus:border-live/50 focus:outline-none"
               />
               <button
                 type="button"
                 onClick={() => setBroadcastConfirming(true)}
                 disabled={!broadcastText || broadcastSelection.size === 0}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/15 px-3 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2 text-xs font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 An {broadcastSelection.size} senden
               </button>
             </div>
           )}
-          {broadcastError && <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-2 text-[11px] text-red-100">{broadcastError}</div>}
+          {broadcastError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-[11px] text-status-alert">{broadcastError}</div>}
         </div>
       )}
-      <p className="text-center text-[10px] text-white/40">Zustände: Heuristik aus Terminal-Ausgabe</p>
+      <p className="text-center text-[10px] text-ink-3">Zustände: Heuristik aus Terminal-Ausgabe</p>
     </div>
   );
 
   return (
-    <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-white sm:gap-3">
+    <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-ink sm:gap-3">
       {!compactLayout && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#071b1d]/90 p-2 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:rounded-2xl sm:p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-card border border-line bg-surface-1/90 p-2 shadow-2xl sm:rounded-panel sm:p-3">
           <div className="min-w-0">
             <p className="hc-eyebrow">Agent Terminals</p>
-            <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-white/50">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-red-200"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
@@ -2016,8 +2016,8 @@ export function AgentTerminalsView() {
               onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
               aria-pressed={view === "flotte"}
               className={cn(
-                "inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition",
-                view === "flotte" ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100" : "border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10",
+                "inline-flex items-center gap-1.5 rounded-card border px-3 py-2 text-xs font-medium transition",
+                view === "flotte" ? "border-live/60 bg-live/15 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
               )}
             >
               <LayoutGrid className="h-3.5 w-3.5" />
@@ -2026,7 +2026,7 @@ export function AgentTerminalsView() {
             <button
               type="button"
               onClick={() => setCreateSheetOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-300/50 bg-cyan-300/10 px-3 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-300/20"
+              className="inline-flex items-center gap-1.5 rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs font-medium text-live hover:bg-live/20"
             >
               <Plus className="h-3.5 w-3.5" />
               Neue Session
@@ -2036,42 +2036,42 @@ export function AgentTerminalsView() {
       )}
 
       <div className="grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
-        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 lg:block">{sessionList}</aside>
+        <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 lg:block">{sessionList}</aside>
         <section
           style={immersive && immersiveHeight ? { height: `${immersiveHeight}px` } : undefined}
           className={cn(
-            "relative overflow-hidden border-white/10 bg-[#041113]",
-            immersive ? "fixed inset-0 z-[45] flex flex-col" : "rounded-2xl border md:min-h-[640px] lg:min-h-[540px]",
+            "relative overflow-hidden border-line bg-surface-0",
+            immersive ? "fixed inset-0 z-[45] flex flex-col" : "rounded-panel border md:min-h-[640px] lg:min-h-[540px]",
           )}
         >
           {compactLayout && chipStrip}
           {!compactLayout && view === "terminal" && (
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-white/65">
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2 text-xs text-ink-2">
               <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{target ? `${target.session}:${target.window}` : "missing window"}</span></div>
               <div className="flex shrink-0 items-center gap-1">
-                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A−</button>
-                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 font-mono text-[11px] text-white/70 hover:bg-white/10">A+</button>
-                <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-md border border-white/10 text-white/70 hover:bg-white/10">
+                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A−</button>
+                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A+</button>
+                <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-card border border-line text-ink-2 hover:bg-surface-3">
                   {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
                 </button>
               </div>
             </div>
           )}
           {compactLayout && error && (
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-red-400/25 bg-red-400/10 px-3 py-1.5 text-[11px] text-red-100">
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-status-alert/25 bg-status-alert/10 px-3 py-1.5 text-[11px] text-status-alert">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 truncate">{error}</span>
             </div>
           )}
           {!target && !loading ? (
-            <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-white/55">Kein tmux-Fenster verfügbar. Neue Session über „+" anlegen.</div>
+            <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-ink-3">Kein tmux-Fenster verfügbar. Neue Session über „+" anlegen.</div>
           ) : (
             <div className={cn("flex w-full flex-col", immersive ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
               {!compactLayout && <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />}
               {state === "dead pane" && selectedWindow && (
-                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-[11px] text-amber-100">
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-[11px] text-status-warn">
                   <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
-                  <button type="button" onClick={() => void respawnWindow(selectedWindow)} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-300/40 px-2 py-1 hover:bg-amber-300/15">
+                  <button type="button" onClick={() => void respawnWindow(selectedWindow)} className="inline-flex shrink-0 items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15">
                     <RotateCcw className="h-3 w-3" />Neu starten
                   </button>
                 </div>
@@ -2089,15 +2089,15 @@ export function AgentTerminalsView() {
             // (ResizeObserver/WS-Refs bleiben gültig), Flotte deckt es nur visuell/interaktiv ab.
             // Auf compact beginnt das Overlay UNTER dem Chip-Strip (h-11) — sonst deckt es
             // den Flotte/Terminal-Toggle und den Zurück-Button ab (jsdom-Tests sehen das nicht).
-            <div className={cn("absolute inset-x-0 bottom-0 z-10 overflow-y-auto bg-[#041113] p-3", compactLayout ? "top-11" : "top-0")}>{fleetPanel}</div>
+            <div className={cn("absolute inset-x-0 bottom-0 z-10 overflow-y-auto bg-surface-0 p-3", compactLayout ? "top-11" : "top-0")}>{fleetPanel}</div>
           )}
         </section>
-        <aside className="hidden min-h-[540px] rounded-2xl border border-white/10 bg-black/20 p-3 xl:block">{toolsDrawer}</aside>
+        <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 xl:block">{toolsDrawer}</aside>
       </div>
 
       {sessionSheet}
       {createSheet}
-      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-3xl border border-white/10 bg-[#071b1d] p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-white/20" />{toolsDrawer}</div>}
+      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}{toolsDrawer}</div>}
 
       {handoffOpen && (
         <TerminalHandoffPanel
