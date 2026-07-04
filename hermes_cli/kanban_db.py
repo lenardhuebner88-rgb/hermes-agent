@@ -8280,7 +8280,9 @@ def recompute_ready(
                     )
                 else:
                     conn.execute(
-                        "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                        "UPDATE tasks SET status = 'ready', "
+                        "block_kind = NULL, block_recurrences = 0 "
+                        "WHERE id = ? AND status = 'todo'",
                         (task_id,),
                     )
                 _append_event(conn, task_id, "promoted", None)
@@ -12154,6 +12156,51 @@ def _reject_code_worker_review_required_block(
     return True
 
 
+def _latest_unblocked_block_recurrence(
+    conn: sqlite3.Connection,
+    task_id: str,
+    block_kind: Optional[str],
+) -> Optional[int]:
+    """Return prior recurrence memory for a block resolved by ``unblock_task``.
+
+    ``unblock_task`` clears visible block metadata so ready/running rows no
+    longer render stale block badges. The loop breaker still needs to remember
+    the immediately preceding block when the same task is unblocked, claimed,
+    and blocks for the same kind again. Events are the durable audit trail for
+    that resolved block; manual promote/recompute paths intentionally do not
+    use this memory because they are explicit/final resolution paths.
+    """
+    rows = conn.execute(
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked', 'completed') "
+        "ORDER BY id DESC LIMIT 3",
+        (task_id,),
+    ).fetchall()
+    if not rows or rows[0]["kind"] != "unblocked":
+        return None
+    for row in rows[1:]:
+        if row["kind"] == "completed":
+            return None
+        if row["kind"] != "blocked":
+            continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        prior_kind = payload.get("kind")
+        if prior_kind == "":
+            prior_kind = None
+        if prior_kind != block_kind:
+            return None
+        try:
+            return int(payload.get("recurrences") or 0)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -12194,6 +12241,11 @@ def block_task(
             if "block_recurrences" in existing.keys()
             else 0
         )
+        if previous_recurrences <= 0:
+            previous_recurrences = (
+                _latest_unblocked_block_recurrence(conn, task_id, block_kind) or 0
+            )
+            previous_kind = block_kind if previous_recurrences > 0 else previous_kind
         recurrences = (
             previous_recurrences + 1
             if previous_recurrences > 0 and previous_kind == block_kind
@@ -12350,7 +12402,8 @@ def promote_task(
 
     with write_txn(conn):
         upd = conn.execute(
-            "UPDATE tasks SET status = 'ready' "
+            "UPDATE tasks SET status = 'ready', "
+            "block_kind = NULL, block_recurrences = 0 "
             "WHERE id = ? AND status IN ('todo', 'blocked')",
             (task_id,),
         )
@@ -12766,7 +12819,9 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     now = int(time.time())
     with write_txn(conn):
         stale = conn.execute(
-            "SELECT current_run_id FROM tasks WHERE id = ? AND status IN ('blocked', 'scheduled')",
+            "SELECT current_run_id FROM tasks WHERE id = ? "
+            "AND (status IN ('blocked', 'scheduled') "
+            "OR (status = 'todo' AND block_kind IS NOT NULL))",
             (task_id,),
         ).fetchone()
         if stale and stale["current_run_id"]:
@@ -12797,8 +12852,10 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, transient_retry_count = 0, "
-            "last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')",
+            "last_failure_error = NULL, block_kind = NULL, "
+            "block_recurrences = 0 "
+            "WHERE id = ? AND (status IN ('blocked', 'scheduled') "
+            "OR (status = 'todo' AND block_kind IS NOT NULL))",
             (new_status, task_id),
         )
         if cur.rowcount != 1:

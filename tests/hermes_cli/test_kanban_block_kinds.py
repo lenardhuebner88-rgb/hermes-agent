@@ -10,8 +10,9 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
   each same-cause re-block after an unblock increments ``block_recurrences``,
   and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
-* ``unblock_task`` deliberately does NOT reset ``block_recurrences`` (the
-  amnesia that let the loop run unbounded).
+* ``unblock_task`` clears visible block metadata on the task row, while the
+  event trail preserves enough memory for a same-cause re-block to trip the
+  loop breaker.
 * A successful ``complete_task`` resets the loop memory.
 """
 
@@ -65,8 +66,8 @@ def test_first_typed_block_lands_in_blocked(kanban_home: Path) -> None:
         assert t.block_recurrences == 1
 
 
-def test_unblock_does_not_reset_recurrence_counter(kanban_home: Path) -> None:
-    """The crux of the fix: unblock must preserve the loop counter."""
+def test_unblock_clears_visible_metadata(kanban_home: Path) -> None:
+    """Resolved blocks should not leave stale badges on ready tasks."""
     with kb.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="needs_input")
@@ -74,8 +75,8 @@ def test_unblock_does_not_reset_recurrence_counter(kanban_home: Path) -> None:
         assert kb.unblock_task(conn, tid)
         t = kb.get_task(conn, tid)
         assert t.status == "ready"
-        assert t.block_recurrences == 1  # NOT reset to 0
-        assert t.block_kind == "needs_input"  # kind preserved for comparison
+        assert t.block_recurrences == 0
+        assert t.block_kind is None
 
 
 def test_same_cause_reblock_routes_to_triage(kanban_home: Path) -> None:
@@ -172,7 +173,7 @@ def test_completion_clears_block_memory(kanban_home: Path) -> None:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="capability")
         kb.unblock_task(conn, tid)
-        assert kb.get_task(conn, tid).block_recurrences == 1
+        assert kb.get_task(conn, tid).block_recurrences == 0
         kb.complete_task(conn, tid, result="done")
         t = kb.get_task(conn, tid)
         assert t.status == "done"
