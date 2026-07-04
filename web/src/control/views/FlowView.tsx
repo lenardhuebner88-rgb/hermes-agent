@@ -61,8 +61,8 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
-import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./flow/planSpecKanban";
+import { PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
+import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./fleet/planSpecKanban";
 import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName, VaultMemoryLink } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { ChainCostsResponse, Epic, KanbanDecision, TaskComment, TaskDetailResponse, TaskDiagnostic } from "../lib/schemas";

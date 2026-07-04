@@ -28,9 +28,10 @@ interface PlanTabProps {
   lanesCatalog: LanesCatalogResponse | null;
   accountUsage: import("../../lib/types").AccountUsageResponse | null;
   onApproveSuccess: () => void;
+  onShowDetail: (ps: PlanSpecRecord) => void;
 }
 
-export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess }: PlanTabProps) {
+export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail }: PlanTabProps) {
   // Nur PlanSpecs die auf Operator-Freigabe warten
   const pendingSpecs = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
   const pendingPaths = pendingSpecs.map((ps) => ps.path);
@@ -89,6 +90,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
             onApproveSuccess();
           }}
           onHold={() => setSelectedPath(null)}
+          onShowDetail={onShowDetail}
         />
       ) : null}
     </>
@@ -104,9 +106,10 @@ interface PlanSpecCockpitProps {
   accountUsage: import("../../lib/types").AccountUsageResponse | null;
   onApproveSuccess: () => void;
   onHold: () => void;
+  onShowDetail: (ps: PlanSpecRecord) => void;
 }
 
-function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSuccess, onHold }: PlanSpecCockpitProps) {
+function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSuccess, onHold, onShowDetail }: PlanSpecCockpitProps) {
   // PlanSpec-Detail (subtasks mit lane) laden
   const detail = usePlanSpecDetail(ps.path);
 
@@ -212,6 +215,14 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
           ) : null}
           {ps.binding ? <span>binding</span> : null}
           {ps.freigabe ? <span>freigabe: {ps.freigabe}</span> : null}
+          <button
+            type="button"
+            className="fleet-plan-volltext-btn"
+            onClick={() => onShowDetail(ps)}
+            aria-label="PlanSpec-Volltext öffnen"
+          >
+            Volltext
+          </button>
         </div>
       </div>
 

@@ -36,9 +36,10 @@ interface HeuteTabProps {
   daily: RunsDailyResponse | null;
   now: number;
   onWorkerClick: (w: Worker) => void;
+  onPlanSpecClick: (ps: PlanSpecRecord) => void;
 }
 
-export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, onWorkerClick }: HeuteTabProps) {
+export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, onWorkerClick, onPlanSpecClick }: HeuteTabProps) {
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
     allWorkers,
@@ -96,7 +97,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
 
       {/* PlanSpec-Karten */}
       {allPlanspecs.slice(0, 5).map((ps) => (
-        <PlanSpecCard key={ps.path} ps={ps} />
+        <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
       ))}
     </>
   );
@@ -188,7 +189,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
 
 // ─── PlanSpec-Karte ───────────────────────────────────────────────────────────
 
-function PlanSpecCard({ ps }: { ps: PlanSpecRecord }) {
+function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
   const fraction = ps.kanban_child_total > 0 ? ps.kanban_child_done / ps.kanban_child_total : null;
   const waitsForOp = planSpecWaitsForOperator(ps.freigabe, ps.kanban_state);
   const isRunning = ps.kanban_state === "running";
@@ -204,7 +205,7 @@ function PlanSpecCard({ ps }: { ps: PlanSpecRecord }) {
   }
 
   return (
-    <div className="fleet-ps">
+    <button type="button" className="fleet-ps" onClick={onClick}>
       <div className="fleet-ps-top">
         <span className="fleet-ps-name">{ps.topic || ps.filename}</span>
         <span className={`fleet-ps-badge ${badgeClass}`}>{badgeLabel}</span>
@@ -221,7 +222,7 @@ function PlanSpecCard({ ps }: { ps: PlanSpecRecord }) {
         <span>{ps.freigabe}</span>
         {ps.live_test_depth ? <span>{ps.live_test_depth}</span> : null}
       </div>
-    </div>
+    </button>
   );
 }
 
