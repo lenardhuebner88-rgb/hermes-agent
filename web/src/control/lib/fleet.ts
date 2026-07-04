@@ -100,6 +100,45 @@ export function isActionableStatus(status: TaskStatus): boolean {
   return status === "triage" || status === "todo" || status === "scheduled" || status === "blocked" || status === "review";
 }
 
+// ── Management actions (S3) ──────────────────────────────────────────────────
+// The operator actions the pure stage model can't express because they are not
+// simple status writes: Retry (unblock + a dispatcher tick, useFixRedispatch),
+// Cancel (archive a single task) and Cancel-chain (POST /tasks/{root}/cancel-
+// chain). Rendered on TOP of {@link stageActions} so the Fleet node drawer and
+// the Risiko blocked-rows carry a full control surface. Terminal tasks
+// (done/archived) and a live `running` worker expose no single-task destructive
+// button here (the worker is torn down via the chain/worker controls).
+
+export type ManageActionKey = "retry" | "cancel" | "cancelChain";
+
+export function manageActions(status: TaskStatus, opts: { hasChain: boolean }): ManageActionKey[] {
+  if (status === "done" || status === "archived") return [];
+  const out: ManageActionKey[] = [];
+  // Retry only makes sense once a run has fallen out (blocked): re-open + tick.
+  if (status === "blocked") out.push("retry");
+  // Cancel a single task (archive) for every non-terminal, non-running task —
+  // a live worker is stopped through the chain/worker path, not by archiving.
+  if (status !== "running") out.push("cancel");
+  // Cancel the whole chain only when the task belongs to a multi-node chain.
+  if (opts.hasChain) out.push("cancelChain");
+  return out;
+}
+
+// ── Operator-question classification (S6) ────────────────────────────────────
+// Mirrors the backend _AUTO_RETRY_QUESTION_RE classification: a blocked task
+// whose block_reason signals a non-retryable operator hold — e.g. "operator
+// hold", "missing credentials", "human approval needed", "?" etc. The auto-retry
+// sweep skips these; the operator must answer them. The RisikoTab previously
+// filtered with a bare `includes("operator")` — this captures the same set plus
+// the other auto-retry-question markers for consistency.
+const OPERATOR_QUESTION_RE =
+  /\?|\boperator\b|\bhuman\b|\bcredentials?\b|\bsecret\b|\btoken\b|\bapproval\b|\bfreigabe\b/i;
+
+export function isOperatorQuestion(blockReason?: string | null): boolean {
+  if (!blockReason) return false;
+  return OPERATOR_QUESTION_RE.test(blockReason);
+}
+
 // ── Role chips ───────────────────────────────────────────────────────────────
 // The screenshot's coloured run-role chip (Verifier = azure, Coder = gold,
 // Researcher = emerald). Keyed by worker profile; results override to "Verifier"

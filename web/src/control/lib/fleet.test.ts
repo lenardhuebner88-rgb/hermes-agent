@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   statusToStage,
   stageActions,
+  manageActions,
   stageGuard,
   isActionableStatus,
   roleChip,
@@ -13,6 +14,7 @@ import {
   usesFlowCaptureEndpoint,
   chainReviewTier,
   chainActiveReviewStage,
+  isOperatorQuestion,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
@@ -99,6 +101,51 @@ describe("stageActions", () => {
     expect(stageActions("ready")).toEqual([]);
     expect(stageActions("running")).toEqual([]);
     expect(stageActions("done")).toEqual([]);
+  });
+});
+
+describe("manageActions", () => {
+  it("offers Retry + Cancel (+ Cancel-chain) for a blocked task", () => {
+    expect(manageActions("blocked", { hasChain: false })).toEqual(["retry", "cancel"]);
+    expect(manageActions("blocked", { hasChain: true })).toEqual(["retry", "cancel", "cancelChain"]);
+  });
+  it("offers Retry only from blocked (not review/ready)", () => {
+    expect(manageActions("review", { hasChain: false })).toEqual(["cancel"]);
+    expect(manageActions("ready", { hasChain: false })).toEqual(["cancel"]);
+    expect(manageActions("triage", { hasChain: false })).toEqual(["cancel"]);
+  });
+  it("withholds the single-cancel from a live running worker but still allows the chain abort", () => {
+    expect(manageActions("running", { hasChain: false })).toEqual([]);
+    expect(manageActions("running", { hasChain: true })).toEqual(["cancelChain"]);
+  });
+  it("exposes nothing for terminal tasks", () => {
+    expect(manageActions("done", { hasChain: true })).toEqual([]);
+    expect(manageActions("archived", { hasChain: true })).toEqual([]);
+  });
+});
+
+describe("isOperatorQuestion", () => {
+  it("classifies operator holds and human/credential/approval blockers as questions", () => {
+    expect(isOperatorQuestion("operator hold")).toBe(true);
+    expect(isOperatorQuestion("Operator Hold")).toBe(true);
+    expect(isOperatorQuestion("missing credentials?")).toBe(true);
+    expect(isOperatorQuestion("human approval needed")).toBe(true);
+    expect(isOperatorQuestion("Freigabe: bitte bestätigen")).toBe(true);
+    expect(isOperatorQuestion("secret token missing")).toBe(true);
+    expect(isOperatorQuestion("?")).toBe(true);
+  });
+
+  it("rejects non-question block reasons (infra, timeout, etc.)", () => {
+    expect(isOperatorQuestion("timeout")).toBe(false);
+    expect(isOperatorQuestion("connection refused")).toBe(false);
+    expect(isOperatorQuestion("OOM killed")).toBe(false);
+    expect(isOperatorQuestion("max iterations exceeded")).toBe(false);
+  });
+
+  it("rejects empty/null/undefined", () => {
+    expect(isOperatorQuestion("")).toBe(false);
+    expect(isOperatorQuestion(null)).toBe(false);
+    expect(isOperatorQuestion(undefined)).toBe(false);
   });
 });
 

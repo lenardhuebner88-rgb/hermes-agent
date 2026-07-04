@@ -247,6 +247,7 @@ export const de = {
     subtabHeute: "Heute",
     subtabWorker: "Worker",
     subtabKetten: "Ketten",
+    subtabBoard: "Board",
     subtabPlan: "Plan",
     subtabRisiko: "Risiko",
     // KPI-Labels
@@ -356,6 +357,28 @@ export const de = {
     detailKopieren: "Kopieren",
     detailKopiert: "Kopiert",
     detailSchliessen: "Schließen",
+    // Task-Steuerung (NodeDetailDrawer + Risiko-Blocked-Zeilen) — S3.
+    actionsTitle: "Steuerung",
+    actionRetry: "Wiederholen",
+    actionRetryConfirm: "Neu einreihen und den Dispatcher sofort anstoßen?",
+    actionRetryDone: "Neu eingereiht — Lauf startet.",
+    actionCancelTask: "Abbrechen",
+    actionCancelTaskConfirm: "Task archivieren — laufende Arbeit verwerfen?",
+    actionCancelChain: "Kette abbrechen",
+    actionCancelChainConfirm: "Ganze Kette stoppen — laufende beenden, offene halten?",
+    actionConfirm: "Bestätigen",
+    actionDismiss: "Zurück",
+    actionBusy: "…",
+    actionChainCancelled: (terminated: number, held: number, skipped: number) =>
+      `Kette abgebrochen: ${terminated} beendet · ${held} gehalten · ${skipped} übersprungen`,
+    // Operator-Frage beantworten (S6)
+    answerTitle: "Operator-Frage beantworten",
+    answerPlaceholder: "Antwort eingeben …",
+    answerSubmit: "Antworten",
+    answerBusy: "…",
+    answerDone: "Gesendet — Task neu gestartet.",
+    answerEmpty: "Antwort darf nicht leer sein.",
+    answerErrorHint: "Senden fehlgeschlagen — siehe Detail.",
   },
   flow: {
     eyebrow: "Flow Command Board",

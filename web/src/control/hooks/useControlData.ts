@@ -923,6 +923,62 @@ export function useTaskAction(onDone?: () => void | Promise<void>) {
   return { busyId, errorById, run, clearError };
 }
 
+// S6: Answer an operator-question hold. Komposition aus drei Schritten (kein
+// atomarer Endpoint — bewusst als Hook, nicht als Backend-POST /answer, das
+// Phase 4 vorbehalten bleibt):
+//   1. POST /tasks/{id}/comments  — Antwort als Kommentar ablegen (author: operator)
+//   2. PATCH /tasks/{id}          — Status → ready (der Server mappt auf unblock_task)
+//   3. POST /workers/0/action      — Dispatcher-Tick, damit der Worker sofort startet
+// Der Retry-Worker liest den Kommentar über build_worker_context. `doneIds`
+// hält erfolgreich beantwortete Tasks fest, bis der Board-Poll die Zeile
+// fallen lässt.
+export function useAnswerQuestion() {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [doneIds, setDoneIds] = useState<Record<string, boolean>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const run = useCallback(async (taskId: string, answer: string) => {
+    const text = answer.trim();
+    if (!text) {
+      const detail = "Antwort darf nicht leer sein.";
+      setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    }
+    setBusyId(taskId);
+    setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    try {
+      // 1. Antwort als Kommentar ablegen (author: operator — der Retry-Worker
+      //    liest Kommentare über build_worker_context in seinen Kontext ein).
+      await fetchJSON<{ ok?: boolean }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/comments`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: text, author: "operator" }) },
+      );
+      // 2. Task entblocken (PATCH ready; der Server mappt das auf unblock_task).
+      await fetchJSON<{ task?: unknown }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
+        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "ready" }) },
+      );
+      // 3. Dispatcher-Tick (run_id 0 als Platzhalter, reiner Tick ohne Run-Bezug).
+      await fetchJSON<{ ok?: boolean; detail?: string }>(
+        "/api/plugins/kanban/workers/0/action",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dispatch", confirm: true, reason: "Operator-Antwort auf Blockgrund — Worker neu gestartet (FleetAnswerQuestion)" }) },
+      );
+      if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+
+  return { busyId, doneIds, errorById, run };
+}
+
 // K3: Inline-Resolve für eine Verifier-Ablehnung (review_rejected) direkt am
 // CommandHome — die EINE dominante Auflösung: Task entblocken (PATCH ready;
 // der Server mappt das auf unblock_task) + ein Dispatcher-Tick, damit der
