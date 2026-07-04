@@ -3,6 +3,9 @@
  * No React, no side-effects, no fetch — injizierbare `now` für Tests.
  */
 import type { Worker, ChainGraphResponse } from "./types";
+import type { RunsDailyResponse, RunsDailyPoint } from "./schemas";
+
+export type { RunsDailyPoint, RunsDailyResponse };
 
 // ─── Lagezeile ──────────────────────────────────────────────────────────────
 
@@ -502,4 +505,53 @@ export function deriveEffectivePlanPath(
   if (pendingPaths.length === 0) return null;
   if (selectedPath !== null && pendingPaths.includes(selectedPath)) return selectedPath;
   return pendingPaths[0];
+}
+
+// ─── Sparkline (Fertig 24h « 7-Tage-Trend) ──────────────────────────────────
+
+/**
+ * Ein Sparkline-Punkt: Datum (ISO-Tag) und die Anzahl erledigter Tasks.
+ */
+export interface SparklinePoint {
+  /** ISO-Datum (YYYY-MM-DD), direkt aus der API-Serie. */
+  date: string;
+  /** Erledigte Tasks an diesem Tag. */
+  value: number;
+}
+
+/**
+ * deriveSparklinePoints: liefert die letzten 7 Tage der runs/daily-Serie
+ * als Sparkline-Punkte (date + done_tasks).
+ *
+ * Reihe: Die API liefert `series` chronologisch aufsteigend (ältester Tag
+ * zuerst, jüngster zuletzt). Der Hook ruft `?days=30` ab; wir nehmen die
+ * letzten N Einträge (default 7), damit die Sparkline stets die jüngste
+ * Woche zeigt, egal wie viele Tage die API tatsächlich liefert.
+ *
+ * Rückgabe `null`, wenn weniger als 2 Punkte vorhanden sind — dann wird
+ * im UI keine Sparkline gerendert (kein Fake, keine Platzhalter-Kurve).
+ *
+ * Pure Funktion: keine Seiteneffekte, deterministisch, injizierbar in
+ * Tests gegen das echte RunsDailyResponse-Format.
+ *
+ * @param daily Ergebnis von useHermesRunsDaily (RunsDailyResponse | null)
+ * @param maxDays maximale Anzahl Tage (default 7)
+ */
+export function deriveSparklinePoints(
+  daily: RunsDailyResponse | null | undefined,
+  maxDays = 7,
+): SparklinePoint[] | null {
+  if (!daily?.series) return null;
+
+  const series: RunsDailyPoint[] = daily.series;
+  if (series.length < 2) return null;
+
+  // Defensive: maxDays >= 2, sonst ist keine Linie möglich.
+  const limit = Math.max(2, maxDays);
+  const slice = series.slice(-limit);
+
+  return slice.map((p) => ({
+    date: p.date,
+    value: p.done_tasks,
+  }));
 }
