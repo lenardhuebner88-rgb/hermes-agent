@@ -15,6 +15,7 @@ import {
   pickFocusNode,
   chainProgress,
   chainTotalCostUsd,
+  chainTotalCostUsdWithSource,
   budgetTone,
   derivePlanLanes,
   buildApproveRequest,
@@ -214,12 +215,32 @@ describe("deriveKpi", () => {
     expect(kpi.aktiv).toBe(2);
     expect(kpi.blockiert).toBe(2);
     expect(kpi.kosten24h).toBe(4.1);
+    expect(kpi.kosten24hEquiv).toBe(false);
     expect(kpi.fertig24h).toBe(21);
+  });
+
+  it("nutzt cost_usd_equivalent markiert wenn actual_cost_usd fehlt oder 0 ist", () => {
+    expect(deriveKpi([], 0, null, null, 1.23)).toMatchObject({
+      kosten24h: 1.23,
+      kosten24hEquiv: true,
+    });
+    expect(deriveKpi([], 0, 0, null, 2.34)).toMatchObject({
+      kosten24h: 2.34,
+      kosten24hEquiv: true,
+    });
+  });
+
+  it("bevorzugt echte actual_cost_usd vor cost_usd_equivalent", () => {
+    expect(deriveKpi([], 0, 0.42, null, 9.99)).toMatchObject({
+      kosten24h: 0.42,
+      kosten24hEquiv: false,
+    });
   });
 
   it("null Kosten wenn Quelle fehlt", () => {
     const kpi = deriveKpi([], 0, null, null);
     expect(kpi.kosten24h).toBeNull();
+    expect(kpi.kosten24hEquiv).toBe(false);
     expect(kpi.fertig24h).toBeNull();
   });
 });
@@ -585,6 +606,19 @@ describe("chainTotalCostUsd", () => {
       makeChainNode({ id: "n2", cost_usd: 0.64 }),
     ];
     expect(chainTotalCostUsd(nodes)).toBeCloseTo(1.02);
+    expect(chainTotalCostUsdWithSource(nodes)).toMatchObject({ value: expect.closeTo(1.02), isEquivalent: false });
+  });
+
+  it("nutzt cost_usd_equivalent pro Node markiert wenn cost_usd fehlt oder 0 ist", () => {
+    const { cost_usd: _omittedCostUsd, ...missingActual } = makeChainNode({ id: "n1", cost_usd_equivalent: 0.38 });
+    const nodes = [missingActual, makeChainNode({ id: "n2", cost_usd: 0, cost_usd_equivalent: 0.64 })] as ChainNode[];
+    expect(chainTotalCostUsd(nodes)).toBeCloseTo(1.02);
+    expect(chainTotalCostUsdWithSource(nodes)).toMatchObject({ value: expect.closeTo(1.02), isEquivalent: true });
+  });
+
+  it("bevorzugt echte Node-Kosten vor cost_usd_equivalent", () => {
+    const nodes = [makeChainNode({ id: "n1", cost_usd: 0.38, cost_usd_equivalent: 9.99 })];
+    expect(chainTotalCostUsdWithSource(nodes)).toMatchObject({ value: expect.closeTo(0.38), isEquivalent: false });
   });
 });
 
