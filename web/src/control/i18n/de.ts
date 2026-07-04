@@ -277,6 +277,8 @@ export const de = {
     risikoBlockiertTitle: "Blockierte Tasks",
     risikoOperatorHalt: "Operator-Halt",
     risikoZuverlässigkeitTitle: "Zuverlässigkeit je Lane",
+    risikoZuverlaessigkeitTitle: "Zuverlässigkeit je Lane",
+    risikoProfileAusgeblendet: (n: number, window: string) => `${n} Profile ausgeblendet (${window}, wenig Daten oder keine aktive Lane).`,
     risikoWenigDaten: "wenig Daten",
     risikoAbschlussRate: "Abschluss",
     risikoFailed: "Fehler",

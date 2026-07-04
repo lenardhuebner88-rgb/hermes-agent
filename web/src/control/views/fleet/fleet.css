@@ -4,27 +4,23 @@
  * Licht = Leben: Glow/Puls nur bei laufender Aktivität.
  */
 [data-fleet-theme] {
-  /* Dunkles Marineblau-Farbschema */
-  --fleet-nacht:     #05090f;
-  --fleet-tiefe:     #0a1220;
-  --fleet-karte:     #0d1728;
-  --fleet-karte-hi:  #111e33;
-  --fleet-linie:     rgba(140, 170, 210, 0.13);
-  --fleet-linie-stark: rgba(140, 170, 210, 0.24);
+  --fleet-nacht: var(--color-surface-0);
+  --fleet-tiefe: var(--color-surface-1);
+  --fleet-karte: var(--color-surface-2);
+  --fleet-karte-hi: var(--color-surface-3);
+  --fleet-linie: color-mix(in oklab, var(--color-brand) 18%, transparent);
+  --fleet-linie-stark: color-mix(in oklab, var(--color-brand) 32%, transparent);
 
-  /* Signal-Farben */
-  --fleet-puls:   #37e0ff;
-  --fleet-signal: #f5a83c;
-  --fleet-gruen:  #43d69a;
-  --fleet-rot:    #ff5d73;
+  --fleet-puls: var(--color-live);
+  --fleet-signal: var(--color-status-warn);
+  --fleet-gruen: var(--color-status-ok);
+  --fleet-rot: var(--color-status-alert);
 
-  /* Text-Hierarchie */
-  --fleet-t1: #e9f1fb;
-  --fleet-t2: #94a8c2;
-  --fleet-t3: #566b85;
+  --fleet-t1: var(--color-ink);
+  --fleet-t2: var(--color-ink-2);
+  --fleet-t3: var(--color-ink-3);
 
-  /* Hintergrund */
-  background: radial-gradient(140% 50% at 50% -12%, #0a1526 0%, var(--fleet-nacht) 55%);
+  background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--fleet-nacht) 55%);
   color: var(--fleet-t1);
 }
 
@@ -37,7 +33,7 @@
  * an .hc-page (Vorfahr, kein Nachfahre) — deshalb hier dieselben Werte wie
  * [data-fleet-theme] literal wiederholt statt referenziert. */
 .hc-page.fleet-bleed {
-  background: radial-gradient(140% 50% at 50% -12%, #0a1526 0%, #05090f 55%);
+  background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--color-surface-0) 55%);
 }
 .hc-page.fleet-bleed::before {
   opacity: 0;
@@ -1430,4 +1426,103 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   /* Puls-Animationen aus */
   @keyframes fleet-pulse { }
   @keyframes fleet-pending-glow { }
+}
+
+
+.fleet-risk-card {
+  border: 1px solid var(--fleet-linie);
+  background: var(--fleet-tiefe);
+  border-radius: var(--radius-panel);
+  padding: 12px;
+}
+
+.fleet-risk-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.fleet-risk-headline {
+  margin: 3px 0 0;
+  color: var(--fleet-t1);
+  font: 600 13px/1.35 var(--hc-font-sans);
+}
+
+.fleet-risk-card-amber { border-color: color-mix(in oklab, var(--fleet-signal) 45%, var(--fleet-linie)); }
+.fleet-risk-card-red { border-color: color-mix(in oklab, var(--fleet-rot) 55%, var(--fleet-linie)); }
+.fleet-risk-card-emerald { border-color: color-mix(in oklab, var(--fleet-gruen) 30%, var(--fleet-linie)); }
+
+.fleet-puls-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.fleet-puls-tile {
+  min-width: 0;
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-card);
+  background: var(--fleet-karte);
+  padding: 9px 10px;
+}
+
+.fleet-puls-detail {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fleet-t3);
+  font: 400 10.5px/1.25 var(--hc-font-sans);
+}
+
+.fleet-puls-tile-amber { border-color: color-mix(in oklab, var(--fleet-signal) 38%, var(--fleet-linie)); }
+.fleet-puls-tile-red { border-color: color-mix(in oklab, var(--fleet-rot) 45%, var(--fleet-linie)); }
+.fleet-puls-tile-emerald { border-color: color-mix(in oklab, var(--fleet-gruen) 28%, var(--fleet-linie)); }
+
+.fleet-risk-disclosure {
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-panel);
+  background: var(--fleet-tiefe);
+  padding: 10px 12px;
+}
+
+.fleet-risk-disclosure-summary {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fleet-t1);
+  font: 600 12px/1.2 var(--hc-font-sans);
+}
+
+.fleet-risk-disclosure-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fleet-t3);
+  font: 400 10.5px/1.2 var(--hc-font-mono);
+}
+
+.fleet-risk-hidden-note {
+  margin: 8px 0 0;
+  color: var(--fleet-t3);
+  font: 400 10.5px/1.35 var(--hc-font-sans);
+}
+
+.fleet-risiko-rel-row-amber .fleet-risiko-rel-val { color: var(--fleet-signal); }
+.fleet-risiko-rel-row-red .fleet-risiko-rel-val { color: var(--fleet-rot); }
+.fleet-risiko-rel-row-emerald .fleet-risiko-rel-val { color: var(--fleet-gruen); }
+
+@media (max-width: 560px) {
+  .fleet-puls-grid { grid-template-columns: 1fr; }
+  .fleet-risk-disclosure-summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
 }
