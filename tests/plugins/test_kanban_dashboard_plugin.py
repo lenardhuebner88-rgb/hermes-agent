@@ -6069,7 +6069,8 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
     """Combined lever (Phase-C-followup a): review_tier=critical + inject_scout with
     auto_scout_on_critical ON must NOT give any child a SECOND scout. The per-child
     auto-scout (from the chain-wide tier stamp) fires first; the explicit inject_scout
-    then dedups against it. Each released child ends with exactly one scout parent."""
+    then dedups against it. Each code-role child ends with exactly one scout parent;
+    non-code roles (reviewer) are skipped by the code_roles guard entirely."""
     monkeypatch.setattr(
         kb,
         "_review_gate_config",
@@ -6088,13 +6089,19 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
     )
     assert r.status_code == 200, r.text
     with kb.connect() as conn:
-        for cid in child_ids:
+        for cid in child_ids[:2]:
             scouts = [
                 p
                 for p in kb.parent_ids(conn, cid)
                 if kb.get_task(conn, p).assignee == "scout"
             ]
             assert len(scouts) == 1, (cid, scouts)  # exactly one scout, never two
+        reviewer_scouts = [
+            p
+            for p in kb.parent_ids(conn, child_ids[2])
+            if kb.get_task(conn, p).assignee == "scout"
+        ]
+        assert reviewer_scouts == [], reviewer_scouts  # code_roles guard: no scout
 
 
 def test_flow_release_scout_body_inherits_entry_child_scope(client):
