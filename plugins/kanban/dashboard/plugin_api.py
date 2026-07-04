@@ -2998,6 +2998,21 @@ except ImportError:
     _psutil = None  # type: ignore[assignment]
 
 
+def run_progress_value(run_row: sqlite3.Row, now_ts: int) -> Optional[float]:
+    """S2: Honest additive 0..1 run progress from EXISTING persisted columns.
+
+    elapsed = now - started_at; progress = elapsed / max_runtime_seconds.
+    Returns None when max_runtime_seconds is missing/0 or started_at is null
+    (claude-cli lanes, uncapped runs). No guessed values.
+    """
+    max_rt = run_row["max_runtime_seconds"] if "max_runtime_seconds" in run_row.keys() else None
+    started = run_row["started_at"] if "started_at" in run_row.keys() else None
+    if max_rt and max_rt > 0 and started and started > 0:
+        elapsed = max(0, now_ts - int(started))
+        return min(1.0, elapsed / float(max_rt))
+    return None
+
+
 @router.get("/workers/active")
 def list_active_workers(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -3074,6 +3089,12 @@ def list_active_workers(
             _, lm = kanban_db._lane_provider_model_for_profile(prof, board=board)
             lane_models[prof] = lm
         workers = []
+        # S2: run_progress is the additive, honest 0..1 run-progress signal.
+        # Derived from ALREADY-persisted columns (started_at + max_runtime_seconds)
+        # — no new migration, no guessed values. null when max_runtime_seconds is
+        # missing/0 (claude-cli lanes, uncapped runs) so the UI falls back to the
+        # ETA heuristic (etaFraction) rather than rendering a fake percent.
+        now_ts = int(time.time())
         for row in rows:
             note = notes.get(int(row["run_id"]), {})
             prof_eta = eta.get((row["profile"] or "").strip(), {})
@@ -3107,6 +3128,9 @@ def list_active_workers(
                 "step_key": row["step_key"],
                 "model_override": model_override,
                 "effective_model": effective_model,
+                # S2: additives Run-Fortschritt 0..1 (elapsed/max_runtime).
+                # null wenn kein Cap → UI fällt auf etaFraction-Heuristik zurück.
+                "run_progress": run_progress_value(row, now_ts),
             })
         # F4: expose the live concurrency cap (kanban.max_in_progress) so the UI
         # can show capacity/Engpass honestly — "3 von 3 Worker, warum dispatcht
@@ -7332,6 +7356,9 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
                     max(0, now - int(heartbeat))
                     if heartbeat is not None else None
                 ),
+                # S2: additiver Run-Fortschritt — elapsed/max_runtime_seconds.
+                # null bei fehlendem Cap → FleetView-Fokus-Rail nutzt DAG-fallback.
+                "run_progress": run_progress_value(run, now),
             }
         costs = node_costs.get(node_id, _zero_costs)
         out_nodes.append({

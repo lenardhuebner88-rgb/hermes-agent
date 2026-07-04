@@ -7135,6 +7135,83 @@ def test_workers_active_carries_note_and_eta(client):
     assert worker["eta_p90_seconds"] == 600
 
 
+def test_workers_active_run_progress_from_runtime_cap(client):
+    """S2 AC-2: run_progress ist ehrlich 0..1, abgeleitet aus started_at +
+    max_runtime_seconds (vorhandene persistierte Spalten). Bei vorhandenem
+    Cap liefert der Endpunkt die korrekte Ratio; ohne Cap bleibt es null."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t_capped = kb.create_task(conn, title="capped run")
+        t_uncapped = kb.create_task(conn, title="uncapped run")
+        with kb.write_txn(conn):
+            # Capped: started vor 30s, max_runtime 300s → 0.10
+            rid_capped = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid, max_runtime_seconds) "
+                "VALUES (?, 'coder', 'running', ?, 9001, 300)",
+                (t_capped, now - 30),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (rid_capped, t_capped),
+            )
+            # Uncapped: kein max_runtime_seconds → null (claude-cli / scorer)
+            rid_uncapped = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid) VALUES (?, 'scout', 'running', ?, 9002)",
+                (t_uncapped, now - 200),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (rid_uncapped, t_uncapped),
+            )
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/workers/active").json()
+    capped = next(w for w in data["workers"] if w["run_id"] == rid_capped)
+    uncapped = next(w for w in data["workers"] if w["run_id"] == rid_uncapped)
+
+    # 30/300 = 0.10 (mit Toleranz für die Sekunde zwischen Insert und Request)
+    assert capped["run_progress"] is not None
+    assert abs(capped["run_progress"] - 0.10) < 0.02
+
+    # Kein Cap → null, KEIN geratener Wert
+    assert uncapped["run_progress"] is None
+
+
+def test_chain_graph_latest_run_carries_run_progress(client):
+    """S2: chain-graph latest_run liefert ebenfalls run_progress (additiv).
+    null bei fehlendem Cap, korrekte Ratio bei vorhandenem Cap."""
+    root, child_ids = _setup_gated_root()
+    now = int(time.time())
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (child_ids[2],))
+            # Capped running run auf child[0]: 45s von 300s → 0.15
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, claim_lock, "
+                "claim_expires, last_heartbeat_at, started_at, max_runtime_seconds) "
+                "VALUES (?, ?, 'running', ?, ?, ?, ?, 300)",
+                (child_ids[0], "coder", "lock-a", now + 300, now - 10, now - 45),
+            )
+            # Uncapped running run auf child[1] → null
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, claim_lock, "
+                "claim_expires, last_heartbeat_at, started_at) "
+                "VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                (child_ids[1], "scout", "lock-b", now + 300, now - 10, now - 60),
+            )
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-graph")
+    assert r.status_code == 200, r.text
+    by_id = {n["id"]: n for n in r.json()["nodes"]}
+    capped_lr = by_id[child_ids[0]]["latest_run"]
+    uncapped_lr = by_id[child_ids[1]]["latest_run"]
+    assert capped_lr is not None and abs(capped_lr["run_progress"] - 0.15) < 0.02
+    assert uncapped_lr is not None and uncapped_lr["run_progress"] is None
+
+
 def test_workers_active_surfaces_claude_cli_dispatcher_heartbeat(client, monkeypatch):
     """Criterion 3: the dispatcher-side claude-CLI heartbeat surfaces through the
     EXISTING last_heartbeat_* fields — no new endpoint/field/UI concept needed."""

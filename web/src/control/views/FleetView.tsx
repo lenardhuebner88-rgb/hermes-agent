@@ -14,7 +14,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useChainGraph, useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, usePlanSpecDetail, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus } from "../hooks/useControlData";
 import {
   buildLagezeile,
-  etaFraction,
+  runProgressFraction,
   heartbeatAge,
   fmtSeconds,
   deriveKpi,
@@ -415,7 +415,8 @@ function LagezeileFormatted({ text }: { text: string }) {
 
 function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; onClick: () => void }) {
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
-  const fraction = etaFraction(w.started_at, w.eta_p50_seconds, now);
+  const fraction = runProgressFraction(w, now);
+  const isEstimated = w.run_progress == null && fraction != null;
   const elapsedSec = Math.max(0, now - w.started_at);
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);
@@ -451,9 +452,9 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
         <div className="fleet-wk-note">{w.last_heartbeat_note}</div>
       ) : null}
 
-      {/* Progress-Rail */}
+      {/* Progress-Rail — S2: run_progress wenn vorhanden, sonst ETA-Heuristik (~) */}
       {fraction != null ? (
-        <div className="fleet-rail">
+        <div className="fleet-rail" title={isEstimated ? "Fortschritt geschätzt (ETA-Heuristik)" : "Fortschritt (Runtime-Cap)"}>
           <div className="fleet-rail-fill" style={{ width: `${Math.round(fraction * 100)}%` }} />
         </div>
       ) : null}
@@ -553,11 +554,11 @@ function WorkerTab({ activeWorkers, board, reliability, now, initialOpen, onOpen
               </div>
             ) : null}
           </div>
-          {etaFraction(w.started_at, w.eta_p50_seconds, now) != null ? (
-            <div className="fleet-rail">
+          {runProgressFraction(w, now) != null ? (
+            <div className="fleet-rail" title={w.run_progress == null ? "Fortschritt geschätzt (ETA-Heuristik)" : "Fortschritt (Runtime-Cap)"}>
               <div
                 className="fleet-rail-fill"
-                style={{ width: `${Math.round((etaFraction(w.started_at, w.eta_p50_seconds, now) ?? 0) * 100)}%` }}
+                style={{ width: `${Math.round((runProgressFraction(w, now) ?? 0) * 100)}%` }}
               />
             </div>
           ) : null}
@@ -977,16 +978,20 @@ function KettenGraph({ rootId, nodes, now, verdicts, onOpenNodeDetail }: KettenG
             </div>
           ) : null}
 
-          <div className="fleet-rail">
-            <div
-              className="fleet-rail-fill"
-              style={{
-                width: focusNode.progress && focusNode.progress.total > 0
-                  ? `${Math.round((focusNode.progress.done / focusNode.progress.total) * 100)}%`
-                  : focusNode.status === "running" ? "58%" : "0%",
-              }}
-            />
-          </div>
+          {(() => {
+            const rp = focusNode.status === "running" ? focusNode.latest_run?.run_progress : null;
+            const effective =
+              rp != null ? rp
+              : focusNode.progress && focusNode.progress.total > 0
+                ? focusNode.progress.done / focusNode.progress.total
+              : focusNode.status === "running" ? 0.58 : 0;
+            const estimated = rp == null;
+            return (
+              <div className="fleet-rail" title={estimated ? "Fortschritt geschätzt (DAG/Heuristik)" : "Fortschritt (Runtime-Cap)"}>
+                <div className="fleet-rail-fill" style={{ width: `${Math.round(effective * 100)}%` }} />
+              </div>
+            );
+          })()}
 
           <div className="fleet-wk-meta">
             {focusNode.latest_run?.profile ? <b>{focusNode.latest_run.profile.replace(/^claude-/, "").split("-")[0] ?? focusNode.latest_run.profile}</b> : null}

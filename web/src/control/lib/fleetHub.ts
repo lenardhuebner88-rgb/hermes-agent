@@ -61,6 +61,26 @@ export function etaFraction(startedAt: number, etaP50Seconds: number | null | un
   return Math.min(0.95, elapsed / etaP50Seconds);
 }
 
+// ─── Run-Fortschritt (S2) ───────────────────────────────────────────────────
+
+/**
+ * runProgressFraction: 0..1 Fortschritt eines Workers.
+ * Bevorzugt das strukturierte Backend-Feld run_progress (elapsed/max_runtime),
+ * das eine ehrliche, task-spezifische Ratio liefert — KEINE Cohort-p50-Schätzung.
+ * Fällt auf etaFraction zurück, wenn run_progress null/missing (z.B. claude-cli
+ * Lanes ohne Runtime-Cap, alte Workers vor S2). Gibt null zurück wenn beides
+ * fehlt — die Rail wird dann nicht gerendert (wie bisher).
+ */
+export function runProgressFraction(
+  w: { run_progress?: number | null; started_at: number; eta_p50_seconds?: number | null },
+  now: number,
+): number | null {
+  if (typeof w.run_progress === "number" && w.run_progress >= 0 && w.run_progress <= 1) {
+    return w.run_progress;
+  }
+  return etaFraction(w.started_at, w.eta_p50_seconds, now);
+}
+
 // ─── Heartbeat-Alter ─────────────────────────────────────────────────────────
 
 /**

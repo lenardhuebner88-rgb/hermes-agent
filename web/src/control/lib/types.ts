@@ -61,6 +61,8 @@ export interface Worker {
   input_tokens?: number | null;
   /** Phase B: Live-Output-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
   output_tokens?: number | null;
+  /** S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime). null → etaFraction-Fallback. */
+  run_progress?: number | null;
 }
 
 export interface WorkersResponse {
@@ -263,6 +265,8 @@ export interface ChainGraphRun {
   last_heartbeat_at: number | null;
   runtime_seconds: number | null;
   heartbeat_age_seconds: number | null;
+  /** S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime). null → DAG/ETA-Fallback. */
+  run_progress?: number | null;
 }
 
 export interface ChainGraphNode {

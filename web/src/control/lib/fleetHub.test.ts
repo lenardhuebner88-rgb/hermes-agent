@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildLagezeile,
   etaFraction,
+  runProgressFraction,
   heartbeatAge,
   fmtSeconds,
   deriveKpi,
@@ -133,6 +134,33 @@ describe("etaFraction", () => {
   it("0 wenn gerade gestartet", () => {
     const frac = etaFraction(NOW, 600, NOW);
     expect(frac).toBe(0);
+  });
+});
+
+// ─── runProgressFraction (S2) ────────────────────────────────────────────────
+
+describe("runProgressFraction", () => {
+  it("bevorzugt run_progress über etaFraction-Heuristik", () => {
+    // run_progress=0.3 (echter Runtime-Cap-Fortschritt) schlägt ETA-Heuristik.
+    const w = makeWorker({ run_progress: 0.3, eta_p50_seconds: 600, started_at: NOW - 600 });
+    expect(runProgressFraction(w, NOW)).toBe(0.3);
+  });
+
+  it("fällt auf etaFraction zurück wenn run_progress null (alten Workers / kein Cap)", () => {
+    const w = makeWorker({ run_progress: null, eta_p50_seconds: 600, started_at: NOW - 300 });
+    // elapsed 300s / eta 600s → 0.5
+    expect(runProgressFraction(w, NOW)).toBeCloseTo(0.5);
+  });
+
+  it("gibt null zurück wenn weder run_progress noch eta vorhanden", () => {
+    const w = makeWorker({ run_progress: null, eta_p50_seconds: null });
+    expect(runProgressFraction(w, NOW)).toBeNull();
+  });
+
+  it("ignoriert run_progress außerhalb 0..1 (defensiv, Schema fängt das ab)", () => {
+    const w = makeWorker({ run_progress: 1.5, eta_p50_seconds: 600, started_at: NOW - 300 });
+    // 1.5 ist nicht im gültigen Bereich → Fallback auf etaFraction (0.5)
+    expect(runProgressFraction(w, NOW)).toBeCloseTo(0.5);
   });
 });
 

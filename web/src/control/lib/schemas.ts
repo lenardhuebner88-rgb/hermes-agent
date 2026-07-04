@@ -80,6 +80,9 @@ export const WorkerSchema = z.object({
   effective_model: z.string().nullable().catch(null),
   input_tokens: z.coerce.number().nullable().catch(null),
   output_tokens: z.coerce.number().nullable().catch(null),
+  // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime_seconds).
+  // null bei fehlendem Cap → UI nutzt etaFraction-Heuristik weiter.
+  run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
 });
 
 export const WorkersResponseSchema = z.object({
@@ -273,6 +276,8 @@ const ChainGraphRunSchema = z.object({
   last_heartbeat_at: z.coerce.number().nullable().catch(null),
   runtime_seconds: z.coerce.number().nullable().catch(null),
   heartbeat_age_seconds: z.coerce.number().nullable().catch(null),
+  // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime).
+  run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
 });
 
 const ChainGraphNodeSchema = z.object({
