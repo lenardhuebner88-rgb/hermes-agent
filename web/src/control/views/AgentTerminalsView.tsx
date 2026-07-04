@@ -48,6 +48,7 @@ import {
   type ControlOverviewVaultResponse,
   type AgentTerminalCapabilityState,
   type AgentTerminalKind,
+  type AgentTerminalOverviewState,
   type AgentTerminalOverviewWindow,
   type AgentTerminalWindow,
   type AgentTerminalWorkdirOption,
@@ -56,6 +57,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { createHermesXtermSurface, TERMINAL_THEME_STATIC } from "@/lib/xtermSurface";
+import { Sparkline } from "../components/fleet/Sparkline";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 
 const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: string }> = [
@@ -373,29 +375,6 @@ function TerminalIdentityBar({
   );
 }
 
-function MiniStat({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string | number;
-  tone?: "neutral" | "ok" | "warn";
-}) {
-  const toneClass =
-    tone === "ok"
-      ? "border-status-ok/25 bg-status-ok/10 text-status-ok"
-      : tone === "warn"
-        ? "border-status-warn/25 bg-status-warn/10 text-status-warn"
-        : "border-line bg-surface-2 text-ink";
-  return (
-    <div className={cn("min-w-0 rounded-card border p-1.5", toneClass)}>
-      <div className="text-[10px] uppercase tracking-normal text-ink-3">{label}</div>
-      <div className="mt-1 truncate text-sm font-semibold">{value}</div>
-    </div>
-  );
-}
-
 function TerminalControlButton({
   label,
   disabled = false,
@@ -436,6 +415,73 @@ function fleetStateMeta(state: AgentTerminalOverviewWindow["state"]): { label: s
     default:
       return { label: "Idle", className: "border-line bg-surface-2 text-ink-3" };
   }
+}
+
+// Persistent fleet strip's status-chip vocabulary — deliberately distinct
+// from fleetStateMeta() above (used by the full-screen "Flotte" overlay,
+// left byte-identical). Follows DESIGN.md rule 2 literally: läuft/ok = green,
+// frage/degraded = warn, tot/failed = alert, idle = neutral ink-3. "wartet"
+// (fertig, wartet auf Weiteres) reads as ok — same bucket as läuft's calm end.
+const STRIP_STATE_META: Record<AgentTerminalOverviewState, { label: string; chipClass: string }> = {
+  laeuft: { label: "läuft", chipClass: "border-status-ok/40 bg-status-ok/10 text-status-ok" },
+  frage: { label: "frage", chipClass: "border-status-warn/40 bg-status-warn/10 text-status-warn" },
+  wartet: { label: "wartet", chipClass: "border-status-ok/35 bg-status-ok/10 text-status-ok" },
+  idle: { label: "idle", chipClass: "border-line text-ink-3" },
+  dead: { label: "tot", chipClass: "border-status-alert/40 bg-status-alert/10 text-status-alert" },
+};
+
+function StatTile({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string | number;
+  tone?: "neutral" | "ok" | "warn";
+}) {
+  const numberClass = tone === "ok" ? "text-status-ok" : tone === "warn" ? "text-status-warn" : "text-ink";
+  return (
+    <div className="min-w-0 rounded-card border border-line-soft bg-surface-2 p-2.5">
+      <div className={cn("truncate font-mono text-lg font-bold leading-none", numberClass)}>{value}</div>
+      <div className="mt-1.5 truncate text-[9px] font-semibold uppercase tracking-[0.12em] text-ink-3">{label}</div>
+    </div>
+  );
+}
+
+/** Persistent fleet-strip card — the always-on summary above the terminal
+ *  pane (desktop only). Distinct from FleetCard: compact, one line of tail,
+ *  no respawn/kill actions (those stay in the full "Flotte" overlay).
+ *  Clicking selects that terminal. */
+function FleetStripCard({
+  win,
+  now,
+  isCurrent,
+  onSelect,
+}: {
+  win: AgentTerminalOverviewWindow;
+  now: number;
+  isCurrent: boolean;
+  onSelect: () => void;
+}) {
+  const meta = STRIP_STATE_META[win.state] ?? STRIP_STATE_META.idle;
+  const tailLine = (win.tail ?? "").split("\n").filter((line) => line.trim()).slice(-1)[0]?.trim();
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "min-w-0 rounded-card border p-2.5 text-left transition",
+        win.state === "frage" ? "border-status-alert/50" : "border-line-soft",
+        isCurrent ? "bg-surface-3" : "bg-surface-2 hover:border-line",
+      )}
+    >
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className={cn("min-w-0 truncate font-mono text-xs font-semibold", isCurrent ? "text-live" : "text-ink")}>{chipLabel(win)}</span>
+        <span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-medium", meta.chipClass)}>{meta.label}</span>
+      </div>
+      <div className="mt-1.5 truncate text-[10px] text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
+    </button>
+  );
 }
 
 function FleetCard({
@@ -1234,10 +1280,12 @@ export function AgentTerminalsView() {
     }
   }, []);
 
-  // Fleet-Polling nur solange die Flotte offen und der Tab sichtbar ist —
-  // gleiches visibility-aware-Timer-Muster wie refreshReadOnlyContext oben.
+  // Fleet-Polling: auf Desktop IMMER an (speist den persistenten Fleet-Strip
+  // über der Terminal-Fläche), auf compactLayout nur solange die Flotte-
+  // Übersicht offen ist — gleiches visibility-aware-Timer-Muster wie
+  // refreshReadOnlyContext oben.
   useEffect(() => {
-    if (view !== "flotte") return;
+    if (compactLayout && view !== "flotte") return;
     let disposed = false;
     let timer: number | null = null;
 
@@ -1280,7 +1328,7 @@ export function AgentTerminalsView() {
       clearTimer();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [view, fetchOverview]);
+  }, [view, compactLayout, fetchOverview]);
 
   const toggleBroadcastMode = useCallback(() => {
     setBroadcastOpen((current) => {
@@ -1367,6 +1415,15 @@ export function AgentTerminalsView() {
   const healthOverall = controlContext.health?.overall ?? "unbekannt";
   const decisionCount = controlContext.decisions?.count ?? controlContext.decisions?.decisions?.length ?? 0;
 
+  // Fleet-Overview keyed by "session:window" — lets the session lanes and the
+  // ticker line look up a window's heuristic state without another fetch.
+  const overviewByKey = useMemo(() => {
+    const map = new Map<string, AgentTerminalOverviewWindow>();
+    for (const win of overview) map.set(`${win.session}:${win.window}`, win);
+    return map;
+  }, [overview]);
+  const selectedOverview = target ? overviewByKey.get(`${target.session}:${target.window}`) ?? null : null;
+
   const sessionList = (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between">
@@ -1385,11 +1442,14 @@ export function AgentTerminalsView() {
               {windows.filter((w) => w.session === session).map((win) => {
                 const active = target?.session === win.session && target.window === win.window;
                 const dead = isDeadWindow(win);
+                const laneOverview = overviewByKey.get(`${win.session}:${win.window}`);
+                const laneState: AgentTerminalOverviewState = laneOverview?.state ?? (dead ? "dead" : "idle");
                 return (
                   <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
                     <button type="button" onClick={() => setTarget(targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-card border px-2 py-2 text-left text-xs transition", active ? "border-live/60 bg-live/10 text-live" : "border-transparent text-ink-2 hover:border-line hover:bg-surface-3")}>
                       <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
                       <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
+                      <Sparkline state={laneState} className="mt-1" />
                     </button>
                     {dead && (
                       <>
@@ -1417,7 +1477,7 @@ export function AgentTerminalsView() {
   );
 
   const toolsVisibility = (
-    <div className="grid gap-3 rounded-card border border-line bg-surface-2 p-3">
+    <div className="grid min-w-0 gap-3 rounded-card border border-line bg-surface-2 p-3">
       <div className="flex items-center gap-2">
         <Sparkles className="h-4 w-4 text-brand" />
         <div>
@@ -1425,10 +1485,9 @@ export function AgentTerminalsView() {
           <h3 className="text-sm font-semibold text-ink">Fähigkeiten sichtbar</h3>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-1.5">
-        <MiniStat label="Skills aktiv" value={enabledSkills.length} tone={enabledSkills.length > 0 ? "ok" : "neutral"} />
-        <MiniStat label="Toolsets aktiv" value={enabledToolsets.length} tone={enabledToolsets.length > 0 ? "ok" : "neutral"} />
-        <MiniStat label="Setup offen" value={setupNeeds.length} tone={setupNeeds.length > 0 ? "warn" : "ok"} />
+      <div className="grid min-w-0 grid-cols-2 gap-1.5">
+        <StatTile label="Skills aktiv" value={enabledSkills.length} tone={enabledSkills.length > 0 ? "ok" : "neutral"} />
+        <StatTile label="Toolsets aktiv" value={enabledToolsets.length} tone={enabledToolsets.length > 0 ? "ok" : "neutral"} />
       </div>
       <div className="grid gap-1 text-xs">
         {capabilityRows.map(({ capability, state }) => (
@@ -1474,7 +1533,7 @@ export function AgentTerminalsView() {
   );
 
   const controlOverview = (
-    <div className="grid gap-3 rounded-card border border-line bg-surface-2 p-3">
+    <div className="grid min-w-0 gap-3 rounded-card border border-line bg-surface-2 p-3">
       <div className="flex items-center gap-2">
         <Gauge className="h-4 w-4 text-status-ok" />
         <div>
@@ -1482,13 +1541,13 @@ export function AgentTerminalsView() {
           <h3 className="text-sm font-semibold text-ink">Was läuft / was ist belegt</h3>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        <MiniStat label="Terminals" value={`${windows.filter((win) => win.pid).length}/${windows.length}`} tone={windows.some((win) => win.pid) ? "ok" : "neutral"} />
-        <MiniStat label="Claims" value={openClaims.length} tone={openClaims.length > 0 ? "warn" : "ok"} />
-        <MiniStat label="Kanban aktiv" value={activeTasks.length} tone={activeTasks.length > 0 ? "warn" : "neutral"} />
-        <MiniStat label="Blockiert" value={blockedTasks.length + decisionCount} tone={blockedTasks.length + decisionCount > 0 ? "warn" : "ok"} />
+      <div className="grid min-w-0 grid-cols-2 gap-1.5">
+        <StatTile label="Terminals" value={`${windows.filter((win) => win.pid).length}/${windows.length}`} tone={windows.some((win) => win.pid) ? "ok" : "neutral"} />
+        <StatTile label="Kanban aktiv" value={activeTasks.length} tone={activeTasks.length > 0 ? "warn" : "neutral"} />
+        <StatTile label="Blockiert" value={blockedTasks.length + decisionCount} tone={blockedTasks.length + decisionCount > 0 ? "warn" : "ok"} />
+        <StatTile label="Claims" value={openClaims.length} tone={openClaims.length > 0 ? "warn" : "ok"} />
       </div>
-      <div className="grid gap-2 text-[11px] text-ink-2">
+      <div className="grid min-w-0 gap-2 text-[11px] text-ink-2 [&>div]:min-w-0">
         <div className="flex items-center gap-1.5">
           <CheckCircle2 className="h-3.5 w-3.5 text-status-ok" />
           <span>Health: <span className="font-medium text-ink">{healthOverall}</span></span>
@@ -1565,7 +1624,7 @@ export function AgentTerminalsView() {
   );
 
   const toolsDrawer = (
-    <div className="grid gap-3 text-sm">
+    <div className="grid min-w-0 gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
         <div><p className="hc-eyebrow">Tools / Handoff</p><h2 className="font-semibold text-ink">Terminal-Kontext</h2></div>
         {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>}
@@ -1583,7 +1642,7 @@ export function AgentTerminalsView() {
         type="button"
         onClick={() => { setHandoffOpen(true); setToolsOpen(false); }}
         disabled={!target}
-        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs text-live hover:bg-live/20 disabled:opacity-40"
+        className="flex w-full items-center justify-center gap-1.5 whitespace-normal text-center rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs text-live hover:bg-live/20 disabled:opacity-40"
       >
         <Share2 className="h-3.5 w-3.5" />
         Handoff öffnen (Auswahl → PlanSpec/Kanban)
@@ -2035,6 +2094,20 @@ export function AgentTerminalsView() {
         </div>
       )}
 
+      {!compactLayout && orderedOverview.length > 0 && (
+        <div className="hidden grid-cols-2 gap-2 lg:grid xl:grid-cols-4">
+          {orderedOverview.map((win) => (
+            <FleetStripCard
+              key={`${win.session}:${win.window}`}
+              win={win}
+              now={overviewNow}
+              isCurrent={target?.session === win.session && target.window === win.window}
+              onSelect={() => setTarget(targetFromWindow(win))}
+            />
+          ))}
+        </div>
+      )}
+
       <div className="grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
         <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 lg:block">{sessionList}</aside>
         <section
@@ -2068,6 +2141,17 @@ export function AgentTerminalsView() {
           ) : (
             <div className={cn("flex w-full flex-col", immersive ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
               {!compactLayout && <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />}
+              {!compactLayout && selectedOverview && (
+                // Ticker line: only the fields we actually have data for. The
+                // mockup also shows model/effort, session-token-budget and
+                // bypass-permission-mode — none of those are exposed by this
+                // view's data (no model/effort/token-budget/permission-mode
+                // field on AgentTerminalWindow/-OverviewWindow), so they are
+                // deliberately omitted rather than fabricated.
+                <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-line-soft bg-live/[0.03] px-3 py-1.5 text-[10px] text-ink-3">
+                  <span>letztes Event <b className="font-semibold text-ink-2">{formatActivityAge(overviewNow, selectedOverview.activity ?? null)}</b></span>
+                </div>
+              )}
               {state === "dead pane" && selectedWindow && (
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-[11px] text-status-warn">
                   <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
@@ -2092,7 +2176,7 @@ export function AgentTerminalsView() {
             <div className={cn("absolute inset-x-0 bottom-0 z-10 overflow-y-auto bg-surface-0 p-3", compactLayout ? "top-11" : "top-0")}>{fleetPanel}</div>
           )}
         </section>
-        <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 xl:block">{toolsDrawer}</aside>
+        <aside className="hidden min-h-[540px] min-w-0 overflow-hidden rounded-panel border border-line bg-surface-2 p-3 xl:block">{toolsDrawer}</aside>
       </div>
 
       {sessionSheet}

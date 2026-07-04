@@ -258,6 +258,31 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByText("node/codex")).toBeTruthy();
   });
 
+  it("renders a persistent fleet-strip card per fleet window and selects the terminal on click", async () => {
+    await renderView();
+
+    // One card per window in the real overview fixture shape (hermes/codex/claude).
+    await waitFor(() => expect(apiMock.getAgentTerminalOverview).toHaveBeenCalled());
+    expect(await screen.findByText("läuft")).toBeTruthy();
+    expect(screen.getByText("frage")).toBeTruthy();
+    expect(screen.getByText("tot")).toBeTruthy();
+    expect(screen.getByText("Allow this action? (y/n)")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Allow this action? (y/n)"));
+    expect(screen.getAllByText("hermes-agents:codex").length).toBeGreaterThan(0);
+  });
+
+  it("renders the stat tiles from the existing skills/toolsets/kanban counts", async () => {
+    await renderView();
+
+    await screen.findByText("Terminal-Kontext");
+    expect(screen.getByText("Skills aktiv")).toBeTruthy();
+    expect(screen.getByText("Toolsets aktiv")).toBeTruthy();
+    expect(screen.getByText("Kanban aktiv")).toBeTruthy();
+    expect(screen.getByText("Blockiert")).toBeTruthy();
+    expect(screen.getByText("Claims")).toBeTruthy();
+  });
+
   it("pauses read-only context loading while hidden and resumes on visible", async () => {
     setDocumentHidden(true);
     await renderView();
