@@ -1,58 +1,30 @@
-# Hermes Agent — Arbeits-Einstieg für Claude Code
+# Hermes Agent — Claude Code entry
 
-Schlanker Auto-Load-Einstieg. `AGENTS.md` bündelt die 7 wichtigsten Pitfalls; die
-volle Tiefe (Architektur + alle Known Pitfalls) steht in `docs/agent-dev-guide.md`
-(groß — nur bei Bedarf lesen).
+`AGENTS.md` = the 7 key pitfalls; full depth (architecture + all known pitfalls): `docs/agent-dev-guide.md` (large — read on demand).
 
-## Live-Checkout (kritisch)
-- Mehrere Agent-Sessions editieren dieses Verzeichnis **parallel**. IMMER zuerst
-  `git status --short`; fremde uncommittete/untracked Arbeit unangetastet lassen.
-- `origin` = NousResearch-Upstream → **NIE pushen**. Push nur auf `piet-fork`,
-  nur fast-forward, nie `--force`.
+## Live checkout (critical)
+- Several agent sessions edit this directory in **parallel**. ALWAYS `git status --short` first; leave foreign uncommitted/untracked work untouched.
+- `origin` = NousResearch upstream → **NEVER push** there. Push only to `piet-fork`, fast-forward only, never `--force`.
 
-## Worktree-Sessions (Handy/Remote)
-- Remote-Sessions spawnen in `.claude/worktrees/bridge-cse_*` (Branch `worktree-bridge-…`,
-  abgezweigt von lokalem HEAD). Fertige Arbeit per Merge zurück auf den Live-Branch —
-  kein Direkt-Edit am Live-Checkout.
-- Worktrees haben anfangs **kein** `web/node_modules` → im Worktree `cd <wt>/web && npm ci`
-  (sicher; verboten ist nur Symlink/Install gegen das LIVE-web), dann Gates über die
-  gehoisteten Root-Binaries `<wt>/node_modules/.bin/{tsc,vitest}` fahren — **nie** `npx
-  tsc/vitest` im Worktree (Stub-Trap `ENOWORKSPACES`). NIE einen Worktree-Diff im Live-
-  Checkout gaten (fremde Sessions halten ihn dirty). Details: Skill `hermes-dashboard-dev`.
+## Worktree sessions (phone/remote)
+- Remote sessions spawn in `.claude/worktrees/bridge-cse_*` (branch `worktree-bridge-…`, forked from local HEAD). Finished work returns to the live branch via merge — no direct edits to the live checkout.
+- Worktrees start **without** `web/node_modules` → `cd <wt>/web && npm ci` (safe; only symlink/install against the LIVE web is forbidden), then run gates via the hoisted root binaries `<wt>/node_modules/.bin/{tsc,vitest}` — **never** `npx tsc/vitest` in a worktree (stub trap `ENOWORKSPACES`). NEVER gate a worktree diff in the live checkout (foreign sessions keep it dirty). Details: skill `hermes-dashboard-dev`.
 
-## Dashboard (Haupt-Bauziel)
-- `/control`-SPA (FastAPI + React/TS), Port **9119** (loopback), via Tailscale Serve
-  `:9443` erreichbar.
-- Binding PlanSpecs (`taskgraph_hints`, `freigabe`, `live_test_depth`) sind in
-  `/home/piet/vault/00-Canon/planspec-taskgraph.md` definiert; Dashboard-Hub und
-  `hermes plan ingest <planspec.md>` müssen dieses Schema nutzen.
-- Neustart: `systemctl --user restart hermes-dashboard.service` (über systemd betreiben,
-  nicht von Hand).
-- Deploy: `scripts/deploy_dashboard.sh` — Standing Grant bei *wirklich* grünen Gates
-  (mit `CONFIRMED=1`), sonst nicht. Wahrheit = API-Payload, nicht Screenshot (die SPA
-  injiziert ihr Token via `window.__HERMES_SESSION_TOKEN__`; bare Loopback-curl = 401).
-- Auth-Smoke nach gated Deploy: `HERMES_DASHBOARD_URL=https://… HERMES_DASHBOARD_USERNAME=… HERMES_DASHBOARD_PASSWORD=… scripts/smoke_health_status_auth.py --no-prompt`
-  prüft Login-Cookie → `/api/health-status`; Script loggt keine Passwörter, Tokens oder Cookies.
+## Dashboard (primary build target)
+- `/control` SPA (FastAPI + React/TS), port **9119** (loopback), reachable via Tailscale Serve `:9443`.
+- Binding PlanSpecs (`taskgraph_hints`, `freigabe`, `live_test_depth`) are defined in `/home/piet/vault/00-Canon/planspec-taskgraph.md`; dashboard hub and `hermes plan ingest <planspec.md>` must use that schema.
+- Restart: `systemctl --user restart hermes-dashboard.service` (run via systemd, never by hand).
+- Deploy: `scripts/deploy_dashboard.sh` — standing grant only on *truly* green gates (with `CONFIRMED=1`), otherwise not. Truth = API payload, not screenshot (the SPA injects its token via `window.__HERMES_SESSION_TOKEN__`; bare loopback curl = 401).
+- Auth smoke after a gated deploy: `HERMES_DASHBOARD_URL=https://… HERMES_DASHBOARD_USERNAME=… HERMES_DASHBOARD_PASSWORD=… scripts/smoke_health_status_auth.py --no-prompt` (login cookie → `/api/health-status`; the script logs no passwords, tokens, or cookies).
 
-## Gates (vor Deploy/Push)
-- Frontend: `scripts/gate-frontend.sh` (lint:control → tsc -b --noEmit → vitest → build; pipet
-  nichts, Exit-Code ist die Wahrheit — nie freihändig mit `| tail` gaten, das schluckt ohne
-  pipefail den Exit-Code. `--skip-build`, wenn `web_dist` nicht überschrieben werden darf,
-  z. B. bei fremdem dirty `web/`-Stand.)
-  (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
-  Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
-- Python: `scripts/run_tests.sh` (Per-Datei-Timeout via `run_tests_parallel.py`,
-  `HERMES_TEST_FILE_TIMEOUT`/`--file-timeout`) + `ruff`
-- **Testumfang:** targeted by default — `scripts/run-affected.sh` beim
-  Bauen/Verifizieren; vor Deploy/Push einmal Collection-Sweep (`pytest --co -q tests/`) + betroffene
-  Tests; die **komplette** Suite läuft nur nachts (`green-gate-heartbeat`). Regel: AGENTS.md → *Test
-  scope* / Canon `conventions-gates.md`. NICHT Worker und Verifier beide die Vollsuite fahren lassen.
+## Gates (before deploy/push)
+- Frontend: `scripts/gate-frontend.sh` (lint:control → `tsc -b --noEmit` → vitest → build). It pipes nothing — the exit code is the truth; never gate freehand with `| tail` (without pipefail that swallows the exit code). `--skip-build` when `web_dist` must not be overwritten (e.g. foreign dirty `web/` state). lint:control = eslint over fork-own code (`src/control` + `vite.config.ts` + `e2e`) — do NOT "clean up" upstream files like `src/App.tsx`; the verifier judges those diff-relative.
+- Python: `scripts/run_tests.sh` (per-file timeout via `run_tests_parallel.py`, `HERMES_TEST_FILE_TIMEOUT`/`--file-timeout`) + `ruff`.
+- **Test scope:** targeted by default — `scripts/run-affected.sh` while building/verifying; before deploy/push one collection sweep (`pytest --co -q tests/`) + affected tests; the **full** suite runs only nightly (`green-gate-heartbeat`). Rule: AGENTS.md → *Test scope* / Canon `conventions-gates.md`. Do NOT have worker and verifier both run the full suite.
 
 ## Skills
-- `hermes-dashboard-dev` — Tabs/Kacheln/Endpoints bauen (das *Was*).
-- `hermes-fork-sync` — Sync, Branches, Merge-Konflikte, dirty `git status` (das *Git/State*).
+- `hermes-dashboard-dev` — build tabs/tiles/endpoints (the *what*).
+- `hermes-fork-sync` — sync, branches, merge conflicts, dirty `git status` (the *git/state*).
 
-## Dependency-Source lesen (opensrc)
-- Internals einer Dependency lesen statt raten: `rg "x" $(opensrc path <pkg>)` /
-  `cat $(opensrc path pypi:<pkg>)/...` — echte Repo-Source am Versions-Tag, global in
-  `~/.opensrc/` (funktioniert auch ohne `web/node_modules` im Worktree). Voller Block in `AGENTS.md`.
+## Dependency source (opensrc)
+Read a dependency's internals instead of guessing: `rg "x" $(opensrc path <pkg>)` / `cat $(opensrc path pypi:<pkg>)/…` — real repo source at the version tag, cached globally in `~/.opensrc/` (works without `web/node_modules` in worktrees). Full block: `AGENTS.md`.
