@@ -26,6 +26,13 @@ echo "[deploy] lint gate (fork-eigener Code: src/control + vite.config.ts + e2e)
 echo "[deploy] building frontend bundle (web/) ..."
 ( cd web && npm run build )
 
+# C1 (auto-release): pre-deploy anchor tag so rollback_dashboard.sh always has
+# a target. Tags the commit being deployed (mirrors the manual fleet-land/pre-*
+# anchors). Annotated-less lightweight tag; never moved, never deleted here.
+ANCHOR="release/pre-deploy/$(date +%Y%m%dT%H%M%S)"
+git tag "$ANCHOR" HEAD 2>/dev/null && echo "[deploy] anchor tag: $ANCHOR ($(git rev-parse --short HEAD))" \
+  || echo "[deploy] WARN: could not create anchor tag $ANCHOR (continuing)"
+
 echo "[deploy] restarting hermes-dashboard.service ..."
 systemctl --user restart hermes-dashboard.service
 
