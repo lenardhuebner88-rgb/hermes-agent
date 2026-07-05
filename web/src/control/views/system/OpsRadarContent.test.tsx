@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { OpsRadarContent } from "./OpsRadarView";
-import type { OperatorInventoryResponse } from "../lib/types";
+import { OpsRadarContent } from "./OpsRadarContent";
+import type { OperatorInventoryResponse } from "../../lib/types";
 
 const inventory: OperatorInventoryResponse = {
   schema: "hermes-operator-inventory-v1",

@@ -19,23 +19,14 @@ import { CommandHome } from "./views/CommandHome";
 const FleetView = lazy(() =>
   import("./views/FleetView").then((m) => ({ default: m.FleetView })),
 );
-const OverviewView = lazy(() =>
-  import("./views/OverviewView").then((m) => ({ default: m.OverviewView })),
-);
-const PulseView = lazy(() =>
-  import("./views/PulseView").then((m) => ({ default: m.PulseView })),
-);
+// AgentOpsView (Ströme) bleibt vorerst — der Worker-Health-/Fan-out-Launch-
+// Snapshot ist noch nicht 1:1 in OrchestratorBacklogView gedeckt (S4-Rescue-D1).
+// Löschung + Redirect hängen an S6/Phase 3.
 const AgentOpsView = lazy(() =>
   import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
 );
 const AgentTerminalsView = lazy(() =>
   import("./views/AgentTerminalsView").then((m) => ({ default: m.AgentTerminalsView })),
-);
-const FlowView = lazy(() =>
-  import("./views/FlowView").then((m) => ({ default: m.FlowView })),
-);
-const ChainVizView = lazy(() =>
-  import("./views/ChainVizView").then((m) => ({ default: m.ChainVizView })),
 );
 const StatistikView = lazy(() =>
   import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
@@ -81,12 +72,6 @@ const StrategistView = lazy(() =>
 const SystemView = lazy(() =>
   import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
 );
-const PressureView = lazy(() =>
-  import("./views/PressureView").then((m) => ({ default: m.PressureView })),
-);
-const OpsRadarView = lazy(() =>
-  import("./views/OpsRadarView").then((m) => ({ default: m.OpsRadarView })),
-);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/fleet")) return "fleet";
@@ -125,12 +110,8 @@ function activeFromPath(pathname: string): ControlTab {
 // Muss dieselben import()-Ziele treffen wie die lazy()-Wrapper oben.
 const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   fleet: () => import("./views/FleetView"),
-  overview: () => import("./views/OverviewView"),
-  pulse: () => import("./views/PulseView"),
   workstreams: () => import("./views/AgentOpsView"),
   agentTerminals: () => import("./views/AgentTerminalsView"),
-  flow: () => import("./views/FlowView"),
-  ketten: () => import("./views/ChainVizView"),
   statistik: () => import("./views/StatistikView"),
   autoresearch: () => import("./views/AutoresearchView"),
   backlog: () => import("./views/BacklogView"),
@@ -139,8 +120,6 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   loops: () => import("./views/LoopsView"),
   lanes: () => import("./views/LanesView"),
   system: () => import("./views/system/SystemView"),
-  pressure: () => import("./views/PressureView"),
-  ops: () => import("./views/OpsRadarView"),
   research: () => import("./views/ResearchView"),
   bibliothek: () => import("./views/BibliothekView"),
   schmiede: () => import("./views/SchmiedeView"),
@@ -265,15 +244,19 @@ export default function ControlPage() {
             <Route index element={<CommandHome density={density.density} />} />
             <Route path="fleet" element={<FleetView />} />
             <Route path="inbox" element={<CommandHome density={density.density} />} />
-            <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
-            <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
+            {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
+            <Route path="overview" element={<Navigate to="/control/bibliothek" replace />} />
+            {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
+            <Route path="pulse" element={<Navigate to="/control/system" replace />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             <Route path="agent-terminals" element={<AgentTerminalsView />} />
             {/* hermes wurde in Flow absorbiert (Phase 2) */}
             <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
             <Route path="statistik" element={<StatistikView />} />
-            <Route path="flow" element={<FlowView />} />
-            <Route path="ketten" element={<ChainVizView />} />
+            {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
+            <Route path="flow" element={<Navigate to="/control/fleet" replace />} />
+            {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
+            <Route path="ketten" element={<Navigate to="/control/fleet" replace />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
@@ -281,8 +264,9 @@ export default function ControlPage() {
             <Route path="loops" element={<LoopsView />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
-            <Route path="pressure" element={<PressureView />} />
-            <Route path="ops" element={<OpsRadarView />} />
+            {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
+            <Route path="pressure" element={<Navigate to="/control/system" replace />} />
+            <Route path="ops" element={<Navigate to="/control/system" replace />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />

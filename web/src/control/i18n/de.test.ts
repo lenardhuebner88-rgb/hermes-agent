@@ -3,8 +3,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { de } from "./de";
 
-const flowViewSrc = readFileSync(fileURLToPath(new URL("../views/FlowView.tsx", import.meta.url)), "utf8");
-const overviewViewSrc = readFileSync(fileURLToPath(new URL("../views/OverviewView.tsx", import.meta.url)), "utf8");
+// Abriss S5: FlowView + OverviewView wurden entfernt. Die „Kette starten"-CTA
+// (früher an FlowView.tsx gepinnt) lebt jetzt im Fleet-Cockpit (PlanTab,
+// de.fleet.planKetteStarten*). Wir pinnen daher die überlebenden Fleet-Quellen
+// statt der gelöschten Views — die negative Verify-Copy-Prüfung deckte vorher
+// FlowView ab und liegt jetzt auf FleetPipeline/lib.fleet (unten).
+const planTabSrc = readFileSync(fileURLToPath(new URL("../views/fleet/PlanTab.tsx", import.meta.url)), "utf8");
 const fleetPipelineSrc = readFileSync(fileURLToPath(new URL("../components/fleet/FleetPipeline.tsx", import.meta.url)), "utf8");
 const fleetSrc = readFileSync(fileURLToPath(new URL("../lib/fleet.ts", import.meta.url)), "utf8");
 
@@ -17,14 +21,16 @@ describe("German gated Flow copy", () => {
 
   it("uses the chain-start CTA for the release confirmation button", () => {
     expect(de.flow.plan.releaseConfirmButton).toBe("Kette starten");
-    expect(flowViewSrc).toContain("de.flow.plan.releaseConfirmButton");
+    // Chain-start zog beim Abriss (S5) in die Fleet-PlanTab um; sie verdrahtet
+    // die i18n-Keys statt Hardcode — hier gepinnt (Coverage-Umzug, kein -Verlust).
+    expect(de.fleet.planKetteStarten).toBe("Kette starten");
+    expect(planTabSrc).toContain("de.fleet.planKetteStarten");
   });
 
   it("offers chain-first choices when a held subtask is dispatched directly", () => {
     expect(de.flow.singleDispatch.startChain).toBe("Ganze Kette starten");
     expect(de.flow.singleDispatch.startSingle).toBe("Nur diesen Task starten");
     expect(de.flow.singleDispatch.cancel).toBe("Abbrechen");
-    expect(flowViewSrc).toContain("de.flow.singleDispatch.startChain");
   });
 
   it("uses consistent German Worker-panel error and status copy", () => {
@@ -35,9 +41,6 @@ describe("German gated Flow copy", () => {
     expect(de.fleet.actionFailed).toBe("Kanban-Aktion fehlgeschlagen");
     expect(de.crons.actionFailed).toBe("Cron-Aktion fehlgeschlagen");
 
-    expect(overviewViewSrc).toContain('idle: "Inaktiv"');
-    expect(overviewViewSrc).toContain('crashed: "Abgestürzt"');
-    expect(flowViewSrc).not.toMatch(/Zum Review eingereicht|Rework|>High<|Verifier-Gate — Ship|Aktion fehlgeschlagen/);
     expect(fleetPipelineSrc).not.toMatch(/Rework|Verify:/);
     expect(fleetSrc).not.toMatch(/ship: \{ key: "ship", label: "Ship"|rework: \{ key: "rework", label: "Rework"|Review abnehmen/);
   });

@@ -1,14 +1,16 @@
 import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { type PulseEvent, type PulseKind, type PulseSummary } from "../lib/pulse";
-import { fmtAge, fmtClockTime } from "../lib/derive";
-import { TONE_HEX } from "../lib/tones";
-import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
-import { Hero } from "../components/Hero";
-import { SkeletonCard } from "../components/primitives";
-import { StaleBadge } from "../components/atoms";
-import { usePulseData, type PulseData, type PulseSource } from "../hooks/usePulseData";
-import { de } from "../i18n/de";
+import { type PulseEvent, type PulseKind, type PulseSummary } from "../../lib/pulse";
+import { fmtAge, fmtClockTime } from "../../lib/derive";
+import { TONE_HEX } from "../../lib/tones";
+import { FleetPanel, FleetPod, FleetEmptyState } from "../../components/fleet/atoms";
+import { SkeletonCard } from "../../components/primitives";
+import { type PulseData } from "../../hooks/usePulseData";
+import { de } from "../../i18n/de";
+
+// PulseTally + PulseTimeline leben seit dem Abriss (S5) hier unter views/system/,
+// weil die eigenständige Puls-Route zum System-Redirect wurde. Die System-View
+// rahmt PulseTally im Kopf und PulseTimeline als "Ereignisse"-Sektion.
 
 const kindMeta: Record<PulseKind, { icon: React.ComponentType<{ className?: string }>; label: string }> = {
   run: { icon: Bot, label: de.pulse.kindRun },
@@ -21,8 +23,8 @@ const kindMeta: Record<PulseKind, { icon: React.ComponentType<{ className?: stri
 
 /**
  * PulseTimeline — die reine 48h-Zeitleiste (Skeleton / Leerzustand / nach Tagen
- * gruppierte Ereignisliste), ohne Hero. Die PulseView setzt ihren Hero davor;
- * die System-Fusion rahmt sie als "Ereignisse"-Sektion.
+ * gruppierte Ereignisliste), ohne Hero. Die System-Fusion rahmt sie als
+ * "Ereignisse"-Sektion.
  */
 export function PulseTimeline({ data }: { data: PulseData }) {
   const navigate = useNavigate();
@@ -59,38 +61,6 @@ export function PulseTally({ summary }: { summary: PulseSummary }) {
         suffix={summary.cronErrors > 0 ? de.pulse.cronErrorSuffix(summary.cronErrors) : undefined}
         dot={summary.cronErrors > 0 ? "error" : "live"}
       />
-    </div>
-  );
-}
-
-export function PulseView(props: PulseSource) {
-  const data = usePulseData(props);
-  const { summary, fresh, error, now, windowHours, results, crons } = data;
-
-  return (
-    <div className="space-y-5">
-      <Hero
-        eyebrow={de.pulse.eyebrow}
-        title={de.pulse.title}
-        subtitle={de.pulse.subtitle(windowHours)}
-        tone={summary.cronErrors > 0 ? "amber" : "cyan"}
-        status={{
-          label: error ? de.pulse.sourceError : fresh.stale ? de.pulse.staleWarn(fresh.label.replace("vor ", "")) : fresh.label,
-          tone: error || fresh.stale ? "amber" : "emerald",
-          dot: error ? "error" : fresh.stale ? "warn" : "live",
-        }}
-        action={
-          <div className="flex flex-wrap justify-end gap-1.5">
-            <StaleBadge isStale={results.isStale} lastUpdated={results.lastUpdated} errorObj={results.errorObj} error={results.error} now={now} />
-            <StaleBadge isStale={crons.isStale} lastUpdated={crons.lastUpdated} errorObj={crons.errorObj} error={crons.error} now={now} />
-          </div>
-        }
-      >
-        {/* Tally: eine ehrliche Zeile darüber, was die Maschine geleistet hat. */}
-        <PulseTally summary={summary} />
-      </Hero>
-
-      <PulseTimeline data={data} />
     </div>
   );
 }

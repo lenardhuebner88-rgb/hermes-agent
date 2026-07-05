@@ -1,9 +1,12 @@
 import { Bot, GitBranch, Radar, ShieldCheck, Wrench } from "lucide-react";
-import { Led, StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
-import { Card, Panel, SkeletonCard, Stat, Text } from "../components/primitives";
-import { StatusChip } from "../components/StatusChip";
-import { useOperatorInventory } from "../hooks/useControlData";
-import type { OperatorInventoryActor, OperatorInventoryResponse, OperatorInventoryWorktree, OperatorInventoryWorktreeState, ToneName } from "../lib/types";
+import { Led, StaleBadge, StatusPill, ToneCallout } from "../../components/atoms";
+import { Card, Panel, SkeletonCard, Stat, Text } from "../../components/primitives";
+import { StatusChip } from "../../components/StatusChip";
+import type { OperatorInventoryActor, OperatorInventoryResponse, OperatorInventoryWorktree, OperatorInventoryWorktreeState, ToneName } from "../../lib/types";
+
+// OpsRadarContent lebt seit dem Abriss (S5) hier unter views/system/, weil die
+// eigenständige OpsRadar-Route zum System-Redirect wurde. Die System-View
+// bettet diesen Inhalt als "Worktrees · Akteure"-Sektion ein.
 
 function fmtNumber(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "-";
@@ -196,17 +199,5 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
         <ToneCallout tone="amber">Einige Inventarwerte konnten nicht gelesen werden. Die Anzeige bleibt read-only und zeigt keine Rohpfade oder Cmdlines.</ToneCallout>
       ) : null}
     </div>
-  );
-}
-
-export function OpsRadarView() {
-  const inventory = useOperatorInventory();
-  return (
-    <OpsRadarContent
-      data={inventory.data}
-      lastUpdated={inventory.lastUpdated}
-      isStale={inventory.isStale}
-      error={inventory.error}
-    />
   );
 }

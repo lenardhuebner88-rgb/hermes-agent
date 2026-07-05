@@ -1,9 +1,12 @@
 import { Activity, Cpu, Gauge, MemoryStick, Network, ShieldCheck, Wrench } from "lucide-react";
-import { Led, MeterBar, StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
-import { Card, Panel, SkeletonCard, Stat, Text } from "../components/primitives";
-import { StatusChip } from "../components/StatusChip";
-import { usePressureStatus } from "../hooks/useControlData";
-import type { PressureOverall, PressureSource, PressureStatusResponse, TailnetPressureState, ToneName } from "../lib/types";
+import { Led, MeterBar, StaleBadge, StatusPill, ToneCallout } from "../../components/atoms";
+import { Card, Panel, SkeletonCard, Stat, Text } from "../../components/primitives";
+import { StatusChip } from "../../components/StatusChip";
+import type { PressureOverall, PressureSource, PressureStatusResponse, TailnetPressureState, ToneName } from "../../lib/types";
+
+// PressureContent lebt seit dem Abriss (S5) hier unter views/system/, weil die
+// eigenständige PressureView-Route zum System-Redirect wurde. Die System-View
+// bettet diesen Inhalt als "Druck · Zugang · Druckquellen"-Sektion ein.
 
 const overallTone: Record<PressureOverall, ToneName> = {
   ok: "emerald",
@@ -227,17 +230,5 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
         </ToneCallout>
       ) : null}
     </div>
-  );
-}
-
-export function PressureView() {
-  const pressure = usePressureStatus();
-  return (
-    <PressureContent
-      data={pressure.data}
-      lastUpdated={pressure.lastUpdated}
-      isStale={pressure.isStale}
-      error={pressure.error}
-    />
   );
 }

@@ -6,9 +6,9 @@ import { useOperatorInventory, usePressureStatus } from "../../hooks/useControlD
 import { usePulseData } from "../../hooks/usePulseData";
 import type { DotKind } from "../../lib/tones";
 import type { PressureOverall, Proposal, TailnetPressureState, ToneName } from "../../lib/types";
-import { PressureContent } from "../PressureView";
-import { OpsRadarContent } from "../OpsRadarView";
-import { PulseTally, PulseTimeline } from "../PulseView";
+import { PressureContent } from "./PressureContent";
+import { OpsRadarContent } from "./OpsRadarContent";
+import { PulseTally, PulseTimeline } from "./PulsePanels";
 
 // ── Fusions-Vokabular ───────────────────────────────────────────────────────
 // Der geteilte Kopf leitet die Druck-Ampel (Status-Trio) und den Mismatch-

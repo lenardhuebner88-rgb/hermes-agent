@@ -18,7 +18,6 @@ import {
 } from "./BibliothekView";
 
 const src = readFileSync(fileURLToPath(new URL("./BibliothekView.tsx", import.meta.url)), "utf8");
-const overviewSrc = readFileSync(fileURLToPath(new URL("./OverviewView.tsx", import.meta.url)), "utf8");
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -141,10 +140,9 @@ describe("Vault-Provenienz-Regal", () => {
     expect(src).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  it("entfernt die einzigartige Vault-Provenienz-Funktion aus der OverviewView", () => {
-    expect(overviewSrc).not.toContain("useVaultProvenance");
-    expect(overviewSrc).not.toContain("ProvenanceStrip");
-  });
+  // Die frühere Gegenprobe (OverviewView enthält keine Provenienz mehr) ist nach
+  // dem Abriss (S5) gegenstandslos: OverviewView wurde komplett entfernt, die
+  // Vault-Provenienz lebt ausschließlich hier in der Bibliothek (Test oben).
 });
 
 describe("Themen-Follows und Smart Shelves", () => {

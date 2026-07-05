@@ -13,6 +13,7 @@ import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
+import { TriageStrip } from "../../components/TriageStrip";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
@@ -109,6 +110,11 @@ export function RisikoTab({
           ))}
         </div>
       </section>
+
+      {/* Fehler-Triage: gescheiterte/blockierte Runs der letzten 48h mit Ein-Klick-
+          Eskalation. Aus der abgerissenen FlowView (S5) hierher gerettet — die
+          operative Risiko-Fläche ist ihr neues Zuhause (nicht die Inbox). */}
+      <div id="fleet-section-triage"><TriageStrip /></div>
 
       {/* (a) Operator-Entscheidungen: wartende Freigaben */}
       {pendingApprovals.length > 0 ? (

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { PressureContent } from "./PressureView";
-import type { PressureStatusResponse } from "../lib/types";
+import { PressureContent } from "./PressureContent";
+import type { PressureStatusResponse } from "../../lib/types";
 
 const busyPressure: PressureStatusResponse = {
   schema: "hermes-pressure-v1",
