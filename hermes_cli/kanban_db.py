@@ -12249,6 +12249,32 @@ def _park_integration(
                 },
                 run_id=run_id,
             )
+        gate_output = outcome.get("gate_output")
+        if gate_output:
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    "integrator",
+                    "Post-merge gate failed; full gate output follows.\n\n"
+                    f"{gate_output}",
+                    now,
+                    "comment",
+                ),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "commented",
+                {
+                    "author": "integrator",
+                    "kind": "comment",
+                    "source": "post_merge_gate_output",
+                },
+                run_id=run_id,
+            )
     return True
 
 

@@ -436,6 +436,63 @@ def _branch_is_ancestor(repo: Path, branch: str, target: str) -> bool:
         return False
 
 
+def _first_parent_merges_reaching_branch(
+    repo: Path, branch: str, target: str
+) -> list[str]:
+    """Merge commits on *target*'s first-parent history that merged *branch*.
+
+    This is intentionally content-agnostic; callers use it only after branch is
+    already known to be an ancestor of target.  A reverted merge is still an
+    ancestry success, so we need the concrete merge commit(s) for follow-up
+    tree/revert inspection.
+    """
+    merges = [
+        line.strip()
+        for line in _git(
+            repo,
+            "log",
+            "--first-parent",
+            "--merges",
+            "--format=%H",
+            target,
+        ).splitlines()
+        if line.strip()
+    ]
+    matches: list[str] = []
+    for merge in merges:
+        parents = _git(repo, "rev-list", "--parents", "-n", "1", merge).split()
+        # ``parents`` = [merge, first-parent, merged-parent, ...].  The worker
+        # integrator uses normal two-parent merge commits.
+        for parent in parents[2:]:
+            if _branch_is_ancestor(repo, branch, parent):
+                matches.append(merge)
+                break
+    return matches
+
+
+def _revert_commits_for_merge(repo: Path, merge_commit: str, target: str) -> list[str]:
+    """Return commits on *target* that explicitly revert *merge_commit*."""
+    return [
+        line.strip()
+        for line in _git(
+            repo,
+            "log",
+            "--format=%H",
+            f"--grep={merge_commit}",
+            target,
+        ).splitlines()
+        if line.strip() and line.strip() != merge_commit
+    ]
+
+
+def _changed_files_between(repo: Path, left: str, right: str) -> list[str]:
+    return [
+        f
+        for f in _git(repo, "diff", "--name-only", left, right).splitlines()
+        if f
+    ]
+
+
 def dirty_files(repo: Path) -> list[str]:
     """Porcelain status paths (incl. files inside untracked dirs), with the
     worktree namespace and the planted node_modules symlinks filtered out.
@@ -2595,8 +2652,104 @@ def integrate_chain(
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
                 already_integrated = _branch_is_ancestor(repo_root, branch, cur)
-                remove_worktree(repo_root, wt_path, branch)
                 if already_integrated:
+                    merged_commits = _first_parent_merges_reaching_branch(
+                        repo_root, branch, cur
+                    )
+                    if merged_commits:
+                        merge_commit = merged_commits[0]
+                        parents = _git(
+                            repo_root, "rev-list", "--parents", "-n", "1",
+                            merge_commit
+                        ).split()
+                        diff_files = _changed_files_between(
+                            repo_root, parents[1], branch
+                        ) if len(parents) >= 2 else []
+                        revert_commits = _revert_commits_for_merge(
+                            repo_root, merge_commit, cur
+                        )
+                        content_differs = False
+                        if diff_files:
+                            try:
+                                _git(
+                                    repo_root,
+                                    "diff",
+                                    "--quiet",
+                                    cur,
+                                    branch,
+                                    "--",
+                                    *diff_files,
+                                )
+                            except WorktreeError:
+                                content_differs = True
+                        if revert_commits and content_differs:
+                            restore_commit = revert_commits[0]
+                            try:
+                                _git(
+                                    repo_root, "revert", "--no-edit",
+                                    restore_commit,
+                                    timeout=MERGE_TIMEOUT_SECONDS,
+                                )
+                            except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                                _git(repo_root, "revert", "--abort", check=False)
+                                return parked(
+                                    "reverted merge reachable by ancestry, but "
+                                    f"revert-of-revert failed: {exc}",
+                                    merge_commit=merge_commit,
+                                    revert_commit=restore_commit,
+                                    reintegrated_after_revert=False,
+                                )
+                            restored_commit = _git(repo_root, "rev-parse", "HEAD")
+                            gate = gate_runner or (
+                                fo_integration_gate
+                                if _is_fo_repo(repo_root)
+                                else default_quick_gate
+                            )
+                            try:
+                                ok, detail = gate(repo_root, diff_files)
+                            except Exception as exc:
+                                ok, detail = False, f"gate crashed: {exc}"
+                            if not ok:
+                                try:
+                                    _git(
+                                        repo_root,
+                                        "revert",
+                                        "--no-edit",
+                                        restored_commit,
+                                        timeout=MERGE_TIMEOUT_SECONDS,
+                                    )
+                                    reverted = True
+                                except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                                    _git(repo_root, "revert", "--abort", check=False)
+                                    reverted = False
+                                    detail += f" — AND REVERT FAILED: {exc}"
+                                return parked(
+                                    f"post-reintegration gate failed: {detail}",
+                                    merge_commit=merge_commit,
+                                    revert_commit=restore_commit,
+                                    restored_commit=restored_commit,
+                                    reverted=reverted,
+                                    reintegrated_after_revert=True,
+                                    gate_output=detail,
+                                )
+                            remove_worktree(repo_root, wt_path, branch)
+                            result = {
+                                "action": "merged",
+                                "state": MERGED_GREEN,
+                                "merge_commit": restored_commit,
+                                "original_merge_commit": merge_commit,
+                                "revert_commit": restore_commit,
+                                "branch": branch,
+                                "target": cur,
+                                "gate": detail,
+                                "files": len(diff_files),
+                                "changed_files": diff_files,
+                                "reintegrated_after_revert": True,
+                            }
+                            if artifact_receipt:
+                                result["artifact_receipt"] = artifact_receipt
+                            return result
+                    remove_worktree(repo_root, wt_path, branch)
                     result = {
                         "action": "clean",
                         "branch": branch,
@@ -2607,6 +2760,7 @@ def integrate_chain(
                     if artifact_receipt:
                         result["artifact_receipt"] = artifact_receipt
                     return result
+                remove_worktree(repo_root, wt_path, branch)
                 result = {"action": "clean", "branch": branch,
                           "reason": "no commits on chain branch"}
                 if artifact_receipt:
@@ -2687,6 +2841,7 @@ def integrate_chain(
                 return parked(
                     f"post-merge gate failed: {detail}",
                     merge_commit=merge_commit, reverted=reverted,
+                    gate_output=detail,
                 )
 
             remove_worktree(repo_root, wt_path, branch)
