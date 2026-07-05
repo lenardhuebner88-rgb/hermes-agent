@@ -72,6 +72,14 @@ fi
 echo "▶ running per-file parallel test suite via run_tests_parallel.py"
 echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
+# Per-run HERMES_HOME for the runner itself.  ``run_tests_parallel.py``
+# assigns a fresh temp home to each child process, but the runner process
+# also imports Hermes modules and may call logging/config helpers that
+# resolve paths through ``get_hermes_home()`` — keep those writes out of
+# the developer's real ``~/.hermes`` as well.
+HERMES_TEST_HOME=$(mktemp -d -t hermes_test_home.XXXXXX)
+trap 'rm -rf "$HERMES_TEST_HOME"' EXIT
+
 cd "$REPO_ROOT"
 
 exec env -i \
@@ -81,6 +89,7 @@ exec env -i \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
   PYTHONHASHSEED=0 \
+  HERMES_HOME="$HERMES_TEST_HOME" \
   HERMES_TEST_WORKERS="${HERMES_TEST_WORKERS:-8}" \
   ${HERMES_TEST_FILE_TIMEOUT:+HERMES_TEST_FILE_TIMEOUT="$HERMES_TEST_FILE_TIMEOUT"} \
   PYTHONDONTWRITEBYTECODE=1 \

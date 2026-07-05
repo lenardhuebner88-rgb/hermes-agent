@@ -22,6 +22,7 @@ test runner at ``scripts/run_tests.sh``.
 import asyncio
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,16 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# ── Early HERMES_HOME isolation for bare ``pytest`` invocations ─────────────
+#
+# ``scripts/run_tests.sh`` already isolates HERMES_HOME, but developers also
+# run ``pytest tests/foo.py`` directly.  Several modules (e.g. gateway/run.py)
+# read HERMES_HOME at import time, so set it once at conftest load time if it
+# is not already set.  The per-test fixture below will still redirect it to a
+# fresh tempdir for every individual test.
+if not os.environ.get("HERMES_HOME"):
+    os.environ["HERMES_HOME"] = tempfile.mkdtemp(prefix="hermes_pytest_home_")
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────

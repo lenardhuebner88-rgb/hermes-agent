@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -249,7 +250,14 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+
+    # Each test file gets its own HERMES_HOME so that code paths like
+    # ``hermes_logging.setup_logging()`` write into a temp tree instead of
+    # the developer's real ``~/.hermes`` (especially ``logs/errors.log``).
+    # This matches the per-test isolation already enforced by
+    # ``tests/conftest.py`` for bare ``pytest`` invocations.
+    hermes_home_tmp = tempfile.mkdtemp(prefix="hermes_test_home_")
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(
@@ -259,7 +267,11 @@ def _run_one_file(
         stderr=subprocess.STDOUT,
         text=True,
         # skipping writing bytecode because we're running a bunch of parallel python processes on the same code
-        env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+        env={
+            **os.environ,
+            'PYTHONDONTWRITEBYTECODE': '1',
+            'HERMES_HOME': hermes_home_tmp,
+        },
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
@@ -279,30 +291,42 @@ def _run_one_file(
             pgid = None
 
     try:
-        output, _ = proc.communicate(timeout=file_timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc, pgid=pgid)
         try:
-            output, _ = proc.communicate(timeout=10)
+            output, _ = proc.communicate(timeout=file_timeout)
+            rc = proc.returncode
         except subprocess.TimeoutExpired:
-            output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
-    except BaseException:
-        # KeyboardInterrupt / runner crash — make sure no zombie
-        # grandchildren outlive us.
-        _kill_tree(proc, pgid=pgid)
-        raise
-    else:
-        # Happy path: pytest exited on its own. Kill the group anyway in
-        # case it left grandchildren behind; already-dead is a no-op.
-        _kill_tree(proc, pgid=pgid)
+            _kill_tree(proc, pgid=pgid)
+            try:
+                output, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                output = "(file timeout exceeded; output unavailable)"
+            rc = 124  # de facto convention for "killed by timeout".
+            output = (
+                f"({file_timeout:.0f}s exceeded; "
+                f"process tree SIGKILL'd)\n{output}"
+            )
+        except BaseException:
+            # KeyboardInterrupt / runner crash — make sure no zombie
+            # grandchildren outlive us.
+            _kill_tree(proc, pgid=pgid)
+            raise
+        else:
+            # Happy path: pytest exited on its own. Kill the group anyway in
+            # case it left grandchildren behind; already-dead is a no-op.
+            _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+            output += "\n"
+    finally:
+        # Best-effort cleanup of the per-file HERMES_HOME temp tree.
+        # Ignore errors: the child may still hold open log handles briefly
+        # after the process group is killed, and we must not fail the run
+        # over leftover temp files.
+        try:
+            import shutil
+
+            shutil.rmtree(hermes_home_tmp, ignore_errors=True)
+        except Exception:
+            pass
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
