@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, it, expect, vi } from "vitest";
 
@@ -23,5 +23,23 @@ describe("DesignBoardView (jsdom)", () => {
     render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText("Header overlaps")).toBeTruthy());
     expect(screen.getByText("→ FleetView")).toBeTruthy();
+  });
+
+  it("creates a card via the new-card form and posts to the API", async () => {
+    fetchJSONMock.mockResolvedValueOnce([]); // initial list load
+    fetchJSONMock.mockResolvedValueOnce({ id: "c_new" }); // POST /cards
+    render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
+    fireEvent.click(screen.getByText("＋ Neue Karte"));
+    fireEvent.change(screen.getByPlaceholderText(/Titel/), {
+      target: { value: "Neuer Bug" },
+    });
+    fireEvent.click(screen.getByText("Karte anlegen & Screenshot hinzufügen"));
+    await waitFor(() => {
+      const postCall = fetchJSONMock.mock.calls.find(
+        (c) => c[0] === "/api/design-board/cards" && c[1]?.method === "POST",
+      );
+      expect(postCall).toBeTruthy();
+      expect(JSON.parse(postCall![1].body)).toMatchObject({ kind: "bug", title: "Neuer Bug" });
+    });
   });
 });
