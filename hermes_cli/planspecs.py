@@ -1076,6 +1076,37 @@ def _spec_is_signed(spec: BindingPlanSpec) -> bool:
     return bool(approved_by) and spec.freigabe.strip().lower() == "complete"
 
 
+def _spec_max_review_tier(spec: BindingPlanSpec) -> str:
+    """Highest risk tier any slice of *spec* classifies to (B3 risk trigger).
+
+    Runs the same deterministic heuristic the review chain uses
+    (``classify_review_tier``) over each subtask's kind/title/body and returns
+    the maximum. Fail CLOSED: if the classifier import or a classification
+    raises, the plan counts as ``critical`` — a broken classifier must gate,
+    not silently wave risky plans through unsigned.
+    """
+    order = {"standard": 0, "review": 1, "critical": 2}
+    try:
+        from hermes_cli.control_plane_gate import classify_review_tier
+    except Exception:
+        return "critical"
+    top = "standard"
+    for child in spec.children or []:
+        try:
+            tier = classify_review_tier(
+                {
+                    "risk_class": str(child.get("kind") or ""),
+                    "objective": str(child.get("title") or ""),
+                    "goal": str(child.get("body") or ""),
+                }
+            )
+        except Exception:
+            return "critical"
+        if order.get(tier, 0) > order.get(top, 0):
+            top = tier
+    return top
+
+
 def validate_planspec(
     path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT
 ) -> dict[str, Any]:
@@ -1618,13 +1649,30 @@ def ingest_planspec(
                 spec.path,
                 "; ".join(warned),
             )
-    else:
-        # Deterministic rubric first (cheap, no LLM), then the synchronous
-        # subjective Sonnet judge. Both run BEFORE any DB write; the judge
-        # raises only on an actual fail verdict and degrades gracefully on any
-        # infra trouble (see run_spec_quality_judge).
+    elif _spec_max_review_tier(spec) == "critical":
+        # Risk-triggered governance (Plan→Board pipeline B3): the full
+        # ceremony — blocking deterministic rubric + synchronous subjective
+        # judge — fires only when a slice classifies as ``critical``
+        # (migration/deploy/secret/auth hard markers). Both run BEFORE any DB
+        # write; the judge raises only on an actual fail verdict and degrades
+        # gracefully on any infra trouble (see run_spec_quality_judge).
         validate_spec_rubric(spec)
         run_spec_quality_judge(spec)
+    else:
+        # standard/review plan, unsigned: rubric findings are advisory (same
+        # shape as the operator-signed path) and the LLM judge is skipped —
+        # governance is risk-triggered, not ceremony-default. The signature
+        # survives only as the critical-downgrade ack
+        # (kanban_db._effective_review_tier). Structural validation already
+        # ran above (parse_binding_planspec) and stays hard for everyone.
+        warned = _collect_spec_rubric_findings(spec)
+        if warned:
+            logger.warning(
+                "PlanSpec rubric findings WARNED (not blocked) for "
+                "non-critical spec %s: %s",
+                spec.path,
+                "; ".join(warned),
+            )
     idempotency_key = ingest_idempotency_key(spec)
     conn = kanban_db.connect(board=board)
     try:

@@ -27,6 +27,14 @@ pytestmark = pytest.mark.spec_judge
 
 
 @pytest.fixture
+def full_ceremony(monkeypatch):
+    """B3 made the blocking rubric/judge risk-triggered (critical only); these
+    tests exercise the ceremony machinery itself, so pin the classification."""
+    monkeypatch.setattr(planspecs, "_spec_max_review_tier", lambda spec: "critical")
+    return True
+
+
+@pytest.fixture
 def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -368,7 +376,7 @@ def test_judge_missing_usage_does_not_crash(tmp_path, monkeypatch):
 # Integration with ingest_planspec
 # ---------------------------------------------------------------------------
 
-def test_ingest_pass_verdict_creates_chain(kanban_home, tmp_path):
+def test_ingest_pass_verdict_creates_chain(kanban_home, tmp_path, full_ceremony):
     plans_root = tmp_path / "03-Agents"
     path = _write(plans_root, CLEAN)
     client = _mock_client_returning(PASS_JSON)
@@ -379,7 +387,7 @@ def test_ingest_pass_verdict_creates_chain(kanban_home, tmp_path):
     assert client.chat.completions.create.call_count == 1
 
 
-def test_ingest_fail_verdict_blocks_and_leaves_board_untouched(kanban_home, tmp_path):
+def test_ingest_fail_verdict_blocks_and_leaves_board_untouched(kanban_home, tmp_path, full_ceremony):
     plans_root = tmp_path / "03-Agents"
     path = _write(plans_root, CLEAN)
     before = _task_count()
@@ -391,7 +399,7 @@ def test_ingest_fail_verdict_blocks_and_leaves_board_untouched(kanban_home, tmp_
     assert _task_count() == before  # no DB write past the gate
 
 
-def test_ingest_infra_error_still_ingests(kanban_home, tmp_path, caplog):
+def test_ingest_infra_error_still_ingests(kanban_home, tmp_path, caplog, full_ceremony):
     plans_root = tmp_path / "03-Agents"
     path = _write(plans_root, CLEAN)
     client = MagicMock()
@@ -406,7 +414,7 @@ def test_ingest_infra_error_still_ingests(kanban_home, tmp_path, caplog):
     assert any("judge" in r.message.lower() for r in caplog.records)
 
 
-def test_ingest_deterministic_block_preempts_judge(kanban_home, tmp_path):
+def test_ingest_deterministic_block_preempts_judge(kanban_home, tmp_path, full_ceremony):
     """The judge must not be consulted when the deterministic rubric fails —
     the cheap gate fires first and the expensive LLM call never happens."""
     plans_root = tmp_path / "03-Agents"

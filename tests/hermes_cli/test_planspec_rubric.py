@@ -21,6 +21,14 @@ from hermes_cli.subcommands import plan as plan_cmd
 
 
 @pytest.fixture
+def full_ceremony(monkeypatch):
+    """B3 made the blocking rubric/judge risk-triggered (critical only); these
+    tests exercise the ceremony machinery itself, so pin the classification."""
+    monkeypatch.setattr(planspecs, "_spec_max_review_tier", lambda spec: "critical")
+    return True
+
+
+@pytest.fixture
 def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -279,7 +287,7 @@ taskgraph_hints:
 # ---------------------------------------------------------------------------
 
 
-def test_ac_less_subtask_blocks_and_writes_nothing(kanban_home, tmp_path: Path):
+def test_ac_less_subtask_blocks_and_writes_nothing(kanban_home, tmp_path: Path, full_ceremony):
     body = """---
 status: freigegeben-komplett
 owner: Hermes
@@ -318,7 +326,7 @@ taskgraph_hints:
 # ---------------------------------------------------------------------------
 
 
-def test_angle_placeholder_residue_in_title_blocks(kanban_home, tmp_path: Path):
+def test_angle_placeholder_residue_in_title_blocks(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace('title: "Short verbatim task title"', 'title: "Implement <id> handler"')
     path = _write(plans_root := tmp_path / "03-Agents", body)
 
@@ -329,7 +337,7 @@ def test_angle_placeholder_residue_in_title_blocks(kanban_home, tmp_path: Path):
     assert _task_count() == 0
 
 
-def test_todo_marker_residue_in_ac_blocks(kanban_home, tmp_path: Path):
+def test_todo_marker_residue_in_ac_blocks(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace(
         '        - "Verbatim AC statement that must hold for this subtask"',
         '        - "TODO: write a real acceptance criterion"',
@@ -343,7 +351,7 @@ def test_todo_marker_residue_in_ac_blocks(kanban_home, tmp_path: Path):
     assert _task_count() == 0
 
 
-def test_bare_ellipsis_residue_in_body_blocks(kanban_home, tmp_path: Path):
+def test_bare_ellipsis_residue_in_body_blocks(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace('body: "Optional verbatim worker body"', 'body: "Do the thing ..."')
     path = _write(plans_root := tmp_path / "03-Agents", body)
 
@@ -432,7 +440,7 @@ def test_residue_tokens_reports_marker_inside_angle_placeholder_once():
     assert planspecs._residue_tokens("TODO: implement <handler>") == ["<handler>", "TODO"]
 
 
-def test_quoted_placeholder_in_ac_with_documentary_words_blocks(kanban_home, tmp_path: Path):
+def test_quoted_placeholder_in_ac_with_documentary_words_blocks(kanban_home, tmp_path: Path, full_ceremony):
     """A real placeholder inside quotes still blocks, even when the line also
     contains example/placeholder wording that used to trigger broad masking.
     """
@@ -487,7 +495,7 @@ def test_quoted_markers_in_backticks_in_body_and_ac_pass_rubric(kanban_home, tmp
     assert len(result["child_ids"]) == 2
 
 
-def test_genuine_unfilled_angle_placeholder_in_prose_body_still_blocks(kanban_home, tmp_path: Path):
+def test_genuine_unfilled_angle_placeholder_in_prose_body_still_blocks(kanban_home, tmp_path: Path, full_ceremony):
     """(2) A real unfilled, backtick-free angle placeholder in the prose body
     still blocks — the gate is not weakened."""
     body = CLEAN.replace(
@@ -530,7 +538,7 @@ def test_real_vision_flywheel_fixture_passes_rubric(kanban_home, tmp_path: Path,
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_lane_blocks(kanban_home, tmp_path: Path):
+def test_unknown_lane_blocks(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace("      lane: coder\n", "      lane: frontend-wizard\n", 1)
     path = _write(plans_root := tmp_path / "03-Agents", body)
 
@@ -556,7 +564,7 @@ def test_every_documented_lane_is_accepted(lane: str, tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_cc_instrument_as_lane_blocks_with_specific_message(kanban_home, tmp_path: Path):
+def test_cc_instrument_as_lane_blocks_with_specific_message(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace("      lane: coder\n", "      lane: council\n", 1)
     path = _write(plans_root := tmp_path / "03-Agents", body)
 
@@ -569,7 +577,7 @@ def test_cc_instrument_as_lane_blocks_with_specific_message(kanban_home, tmp_pat
     assert _task_count() == 0
 
 
-def test_cc_instrument_in_ac_blocks(kanban_home, tmp_path: Path):
+def test_cc_instrument_in_ac_blocks(kanban_home, tmp_path: Path, full_ceremony):
     body = CLEAN.replace(
         '        - "Verbatim AC statement that must hold for this subtask"',
         '        - "Lass das council-Panel das Ergebnis final freigeben"',
@@ -583,7 +591,7 @@ def test_cc_instrument_in_ac_blocks(kanban_home, tmp_path: Path):
     assert _task_count() == 0
 
 
-def test_cc_instrument_cross_family_in_ac_blocks(kanban_home, tmp_path: Path):
+def test_cc_instrument_cross_family_in_ac_blocks(kanban_home, tmp_path: Path, full_ceremony):
     # Real 2026-06-19 leak: a Claude-Code session baked "Codex-Cross-Family-Review"
     # into a Hermes worker AC. cross-family is a CC orchestration review-ladder
     # instrument (Claude builds → Codex reviews), NOT a Hermes lane — a headless
@@ -609,7 +617,7 @@ def test_cc_instrument_cross_family_in_ac_blocks(kanban_home, tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_force_bypasses_rubric_and_logs_warning(kanban_home, tmp_path: Path, caplog):
+def test_force_bypasses_rubric_and_logs_warning(kanban_home, tmp_path: Path, caplog, full_ceremony):
     body = """---
 status: freigegeben-komplett
 owner: Hermes
@@ -682,7 +690,7 @@ taskgraph_hints:
     assert "rubric bypassed" in warnings.lower()
 
 
-def test_plan_ingest_cli_without_force_blocks(kanban_home, tmp_path: Path, caplog):
+def test_plan_ingest_cli_without_force_blocks(kanban_home, tmp_path: Path, caplog, full_ceremony):
     body = """---
 status: freigegeben-komplett
 owner: Hermes
@@ -784,7 +792,7 @@ def test_signed_spec_with_finding_warns_skips_judge_and_ingests(
     assert "signed" in warnings.lower()
 
 
-def test_unsigned_spec_with_finding_still_blocks(kanban_home, tmp_path: Path, monkeypatch):
+def test_unsigned_spec_with_finding_still_blocks(kanban_home, tmp_path: Path, monkeypatch, full_ceremony):
     """A spec WITHOUT approved_by (even with freigabe=complete) is unsigned — the
     rubric still blocks. The signed-WARN path requires BOTH conditions, which is
     exactly why the existing block-tests (freigabe:complete, no approved_by) keep
@@ -1001,3 +1009,105 @@ def test_scout_lane_passes_rubric(tmp_path: Path):
 
 def test_scout_is_a_valid_lane():
     assert "scout" in planspecs.VALID_PLANSPEC_LANES
+
+
+# ---------------------------------------------------------------------------
+# B3 (Plan→Board pipeline): risk-triggered governance — rubric/judge gate only
+# fires on plans that contain a critical-classified slice; standard/review
+# plans ingest unsigned (signature survives only as the critical-downgrade ack
+# in kanban_db._effective_review_tier).
+# ---------------------------------------------------------------------------
+
+
+CRITICAL_ACLESS = """---
+status: freigegeben-komplett
+owner: Hermes
+slice: R9
+topic: "Critical AC-less"
+freigabe: complete
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: R9-S1
+      title: "Run database migration and deploy the dashboard"
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Migration applied"
+    - id: R9-S2
+      title: "No acceptance criteria at all"
+      lane: coder
+      deps: [R9-S1]
+---
+# R9
+"""
+
+
+def test_standard_review_needs_no_signature(kanban_home, tmp_path: Path, monkeypatch):
+    """Unsigned non-critical plan: no LLM judge in the path, no signature block."""
+
+    def _boom(spec):
+        raise AssertionError("quality judge must not run for non-critical plans")
+
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", _boom)
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, CLEAN)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+
+
+def test_noncritical_rubric_findings_warn_not_block(
+    kanban_home, tmp_path: Path, caplog, monkeypatch
+):
+    """An AC-less subtask in a NON-critical plan warns and ingests (risk-triggered)."""
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", lambda spec: None)
+    body = CLEAN.replace(
+        """    - id: R1-S2
+      title: "Final verdict on the slice"
+      lane: reviewer
+      deps: [R1-S1]
+      acceptance_criteria:
+        - "Review verdict recorded with evidence"
+""",
+        """    - id: R1-S2
+      title: "Final verdict on the slice"
+      lane: reviewer
+      deps: [R1-S1]
+""",
+    )
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, body)
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.planspecs"):
+        result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+    assert any("AC-less subtask: R1-S2" in r.message for r in caplog.records)
+
+
+def test_critical_plan_still_fully_gated(kanban_home, tmp_path: Path):
+    """A plan with a critical-classified slice keeps today's blocking rubric."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, CRITICAL_ACLESS)
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert "AC-less subtask: R9-S2" in exc.value.findings
+    assert _task_count() == 0
+
+
+def test_critical_plan_still_runs_judge(kanban_home, tmp_path: Path, monkeypatch):
+    """Clean-but-critical unsigned plan: the subjective judge still runs."""
+    called = {}
+
+    def _spy(spec):
+        called["yes"] = True
+
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", _spy)
+    body = CLEAN.replace(
+        'title: "Short verbatim task title"',
+        'title: "Run database migration and deploy"',
+    )
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, body)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+    assert called.get("yes") is True
