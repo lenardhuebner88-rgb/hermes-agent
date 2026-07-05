@@ -6737,6 +6737,10 @@ class PlanSpecPathBody(BaseModel):
     author: Optional[ShortText] = "dashboard"
 
 
+class PlanSpecCompilePreviewBody(BaseModel):
+    prose: FreeText
+
+
 @router.get("/planspecs")
 def list_planspecs(
     scope: Literal["open", "all"] = Query("open"),
@@ -6757,6 +6761,23 @@ def list_planspecs(
         board=board,
     )
     return {"planspecs": records, "count": len(records)}
+
+
+@router.post("/planspecs/compile-preview")
+def compile_planspec_preview(payload: PlanSpecCompilePreviewBody):
+    from hermes_cli.plan_compiler import CompileBlocked  # noqa: WPS433 (intentional)
+    from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan  # noqa: WPS433
+
+    try:
+        result = compile_prose_plan(parse_prose_plan(payload.prose))
+    except CompileBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+    return {
+        "ok": True,
+        "children": result.children,
+        "repairs": result.repairs,
+        "warnings": result.warnings,
+    }
 
 
 @router.post("/planspecs/ingest")
