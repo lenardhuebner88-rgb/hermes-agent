@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlShell, type ControlTab } from "./ControlShell";
 import type { DecisionInboxData } from "../hooks/useControlData";
 
@@ -41,7 +41,19 @@ function renderShell() {
   );
 }
 
+function renderShellWith(active: ControlTab) {
+  return render(
+    <MemoryRouter>
+      <ControlShell {...baseProps} active={active} density="airy">
+        <main>content</main>
+      </ControlShell>
+    </MemoryRouter>,
+  );
+}
+
 describe("ControlShell primary navigation", () => {
+  afterEach(() => cleanup());
+
   it("keeps desktop and compact rails on the five PlanSpec primary tabs", () => {
     renderShell();
 
@@ -52,5 +64,13 @@ describe("ControlShell primary navigation", () => {
     for (const retired of ["Flow", "Ketten", "Hermes", "Puls", "Pressure", "Ops"]) {
       expect(screen.queryByRole("button", { name: retired })).toBeNull();
     }
+  });
+
+  it("hides the legacy shell header on the Start mobile bleed route", () => {
+    renderShellWith("inbox");
+
+    const header = screen.getByText("Hermes Control").closest("header");
+    expect(header?.className).toContain("hidden");
+    expect(header?.className).toContain("lg:flex");
   });
 });
