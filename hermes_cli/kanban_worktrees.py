@@ -2279,6 +2279,12 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
             # Fallback: no 1:1 test file. Select the package test directory.
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
+                # hermes_cli/kanban.py maps to tests/hermes_cli/test_kanban_*.py.
+                # Keep in sync with scripts/affected_tests.py.
+                if rel_dir == "hermes_cli" and name == "kanban.py":
+                    for p in (repo_root / pkg_test_dir).glob("test_kanban_*.py"):
+                        modules.add(str(p.relative_to(repo_root)))
+                    continue
                 # Cap: if the directory has too many test files, downgrade to
                 # no selection — the nightly full suite remains the backstop
                 # (AC-2 counter-metric: no gate-tempo-for-coverage trade).

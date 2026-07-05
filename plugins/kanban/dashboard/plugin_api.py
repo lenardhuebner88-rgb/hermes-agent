@@ -3154,6 +3154,29 @@ def list_active_workers(
 
 
 # ---------------------------------------------------------------------------
+# GET /dispatch/holds
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dispatch/holds")
+def get_dispatch_holds(
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return tasks the dispatcher is currently holding and why.
+
+    Bucket-generic read-only report mirroring ``hermes kanban holds --json``.
+    Reuses the dry-run dispatch scan, so it is side-effect free: no spawns,
+    no reclaims, no events appended.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.list_dispatch_holds(conn, board=board)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # B2 — Task activity timeline (read-only)
 # ---------------------------------------------------------------------------
 _ACTIVITY_DEFAULT_LIMIT = 12

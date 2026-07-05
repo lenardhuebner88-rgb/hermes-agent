@@ -301,6 +301,10 @@ def test_no_template_completes_straight_to_done(isolated_kanban_home):
     assert spawned_as == ["coder"]
 
     with kb.connect_closing() as conn:
+        # The fake spawn returned PID 99 outside the test subtree; complete_task
+        # would otherwise try to signal it. Clear the worker_pid so completion
+        # tests only the workflow-routing path.
+        conn.execute("UPDATE tasks SET worker_pid = NULL WHERE id = ?", (task_id,))
         assert kb.complete_task(conn, task_id, summary="done") is True
     with kb.connect_closing() as conn:
         row = conn.execute(
@@ -356,6 +360,9 @@ def test_broken_template_falls_back_to_column_assignee(isolated_kanban_home):
 
     # Completion of a task whose template can't be resolved -> done (no stall).
     with kb.connect_closing() as conn:
+        # Fake spawn returned PID 7 outside the test subtree; clear it before
+        # completion so the test exercises only workflow fallback routing.
+        conn.execute("UPDATE tasks SET worker_pid = NULL WHERE id = ?", (task_id,))
         assert kb.complete_task(conn, task_id, summary="x") is True
     with kb.connect_closing() as conn:
         row = conn.execute(
