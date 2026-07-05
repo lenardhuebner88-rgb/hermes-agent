@@ -3207,6 +3207,74 @@ def get_task_activity(
         conn.close()
 
 
+def _decision_queue_block_reason_from_payload(raw_payload: Any) -> Optional[str]:
+    if raw_payload is None:
+        return None
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    reason = str(payload.get("reason") or "").strip()
+    return reason or None
+
+
+def _decision_queue_block_reasons(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> dict[str, Optional[str]]:
+    task_ids = [task_id for task_id in task_ids if task_id]
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    try:
+        rows = conn.execute(
+            "SELECT task_id, payload FROM ("
+            "  SELECT task_id, payload, "
+            "         ROW_NUMBER() OVER ("
+            "           PARTITION BY task_id ORDER BY created_at DESC, id DESC"
+            "         ) AS rn "
+            "  FROM task_events "
+            f"  WHERE kind = 'blocked' AND task_id IN ({placeholders})"
+            ") WHERE rn = 1",
+            task_ids,
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        row["task_id"]: _decision_queue_block_reason_from_payload(row["payload"])
+        for row in rows
+    }
+
+
+def _enrich_decision_queue_block_reasons(
+    conn: sqlite3.Connection,
+    queue: dict[str, Any],
+) -> dict[str, Any]:
+    decisions = queue.get("decisions")
+    if not isinstance(decisions, list):
+        return queue
+    task_ids = [
+        str(row.get("task_id") or "")
+        for row in decisions
+        if isinstance(row, dict) and isinstance(row.get("operator_escalation"), dict)
+    ]
+    block_reasons = _decision_queue_block_reasons(conn, task_ids)
+    for row in decisions:
+        if not isinstance(row, dict):
+            continue
+        escalation = row.get("operator_escalation")
+        if not isinstance(escalation, dict):
+            continue
+        evidence = escalation.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+            escalation["evidence"] = evidence
+        evidence["block_reason"] = block_reasons.get(str(row.get("task_id") or ""))
+    return queue
+
+
 @router.get("/decision-queue")
 def get_decision_queue(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -3228,7 +3296,8 @@ def get_decision_queue(
 
     conn = _conn(board=board)
     try:
-        return kanban_db.decision_queue(conn, config=kanban_config)
+        queue = kanban_db.decision_queue(conn, config=kanban_config)
+        return _enrich_decision_queue_block_reasons(conn, queue)
     finally:
         conn.close()
 

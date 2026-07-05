@@ -6988,6 +6988,90 @@ def test_decision_queue_surfaces_failure_escalation_with_human_payload(client):
     assert [d["task_id"] for d in repeat["decisions"]] == [t]
 
 
+def test_decision_queue_enriches_operator_escalation_with_latest_block_reason(client):
+    def _seed_operator_escalation(conn, title, *, block_reason_marker):
+        task_id = kb.create_task(conn, title=title, assignee="coder")
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (task_id,))
+        with kb.write_txn(conn):
+            if block_reason_marker is not None:
+                kb._append_event(
+                    conn,
+                    task_id,
+                    "blocked",
+                    {
+                        "reason": "stale block reason",
+                        "kind": "retryable",
+                    },
+                )
+                kb._append_event(
+                    conn,
+                    task_id,
+                    "blocked",
+                    {
+                        # Live task_events payload shape for retryable parked blocks.
+                        "reason": block_reason_marker,
+                        "kind": "retryable",
+                    },
+                )
+            kb._append_event(
+                conn,
+                task_id,
+                "operator_escalation",
+                {
+                    "task": {
+                        "id": task_id,
+                        "title": title,
+                        "status": "blocked",
+                        "assignee": "coder",
+                    },
+                    "why_now": "settled block without actionable last_error",
+                    "attempts_already_made": 1,
+                    "evidence": {
+                        "trigger_outcome": "blocked",
+                        "last_error": "",
+                        "blocked_kind": "retryable",
+                    },
+                    "recommended_human_action": "inspect the task",
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+        return task_id
+
+    with kb.connect() as conn:
+        with_reason = _seed_operator_escalation(
+            conn,
+            "release gate retryable block",
+            block_reason_marker="awaiting release-gate GO",
+        )
+        without_blocked_event = _seed_operator_escalation(
+            conn,
+            "budget runaway park",
+            block_reason_marker=None,
+        )
+        empty_reason = _seed_operator_escalation(
+            conn,
+            "empty block reason",
+            block_reason_marker="  ",
+        )
+
+    r = client.get("/api/plugins/kanban/decision-queue")
+    assert r.status_code == 200, r.text
+    by_task = {row["task_id"]: row for row in r.json()["decisions"]}
+
+    assert (
+        by_task[with_reason]["operator_escalation"]["evidence"]["block_reason"]
+        == "awaiting release-gate GO"
+    )
+    assert (
+        by_task[without_blocked_event]["operator_escalation"]["evidence"]["block_reason"]
+        is None
+    )
+    assert (
+        by_task[empty_reason]["operator_escalation"]["evidence"]["block_reason"]
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # N-E3: GET /epics + /epics/{id}
 # ---------------------------------------------------------------------------
