@@ -6741,6 +6741,11 @@ class PlanSpecCompilePreviewBody(BaseModel):
     prose: FreeText
 
 
+class PlanSpecProseIngestBody(BaseModel):
+    prose: FreeText
+    author: Optional[ShortText] = "dashboard"
+
+
 @router.get("/planspecs")
 def list_planspecs(
     scope: Literal["open", "all"] = Query("open"),
@@ -6778,6 +6783,34 @@ def compile_planspec_preview(payload: PlanSpecCompilePreviewBody):
         "repairs": result.repairs,
         "warnings": result.warnings,
     }
+
+
+def _persist_dashboard_prose_plan(prose: str) -> Path:
+    from hermes_constants import get_hermes_home  # noqa: WPS433 (intentional)
+
+    digest = hashlib.sha256(prose.encode("utf-8")).hexdigest()[:16]
+    root = get_hermes_home() / "dashboard" / "prose-plans"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"dashboard-prose-{digest}.md"
+    if not path.exists() or path.read_text(encoding="utf-8") != prose:
+        path.write_text(prose, encoding="utf-8")
+    return path
+
+
+@router.post("/planspecs/ingest-prose")
+def ingest_prose_planspec(payload: PlanSpecProseIngestBody, board: Optional[str] = Query(None)):
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    board = _resolve_board(board)
+    try:
+        source_path = _persist_dashboard_prose_plan(payload.prose)
+        return planspecs.ingest_prose_plan(
+            source_path,
+            board=board,
+            author=payload.author or "dashboard",
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
 @router.post("/planspecs/ingest")

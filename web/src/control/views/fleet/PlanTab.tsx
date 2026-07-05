@@ -17,6 +17,7 @@ import {
 import { de } from "../../i18n/de";
 import { usePlanSpecDetail } from "../../hooks/useControlData";
 import type { RunsCostsResponse, LanesCatalogResponse } from "../../lib/schemas";
+import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
 
@@ -45,15 +46,20 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
 
   if (pendingSpecs.length === 0) {
     return (
-      <div className="fleet-empty">
-        <p className="fleet-empty-title">{de.fleet.planLeer}</p>
-        <p className="fleet-empty-sub">{de.fleet.planLeerDesc}</p>
-      </div>
+      <>
+        <PlanComposer onIngestSuccess={onApproveSuccess} />
+        <div className="fleet-empty">
+          <p className="fleet-empty-title">{de.fleet.planLeer}</p>
+          <p className="fleet-empty-sub">{de.fleet.planLeerDesc}</p>
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      <PlanComposer onIngestSuccess={onApproveSuccess} />
+
       {/* Liste wartender PlanSpecs — wenn mehr als eine, als auswählbare Chips */}
       {pendingSpecs.length > 1 ? (
         <div className="fleet-kchips" style={{ marginBottom: 4 }}>
@@ -302,7 +308,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
           borderRadius: 11,
           padding: "9px 12px",
           font: "400 11.5px/1.5 var(--hc-font-sans)",
-          color: "#ff7d90",
+          color: "var(--fleet-rot)",
         }}>
           {approveError}
         </div>
@@ -461,7 +467,7 @@ function TokenBudgetBlock({
                 const pct = w.used_percent ?? 0;
                 const tone = budgetTone(w.used_percent);
                 const barColor = tone === "danger"
-                  ? "linear-gradient(90deg,rgba(255,93,115,.5),#ff5d73)"
+                  ? "linear-gradient(90deg,color-mix(in srgb, var(--fleet-rot) 50%, transparent),var(--fleet-rot))"
                   : tone === "warn"
                   ? "linear-gradient(90deg,rgba(245,168,60,.4),var(--fleet-signal))"
                   : "linear-gradient(90deg,rgba(67,214,154,.5),var(--fleet-gruen))";
@@ -473,7 +479,7 @@ function TokenBudgetBlock({
                       <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
                     </div>
                     <span className="fleet-bg-bv" style={{
-                      color: tone === "danger" ? "#ff7d90" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
+                      color: tone === "danger" ? "var(--fleet-rot)" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
                     }}>
                       {Math.round(pct)} %
                     </span>

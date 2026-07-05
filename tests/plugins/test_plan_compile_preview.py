@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from hermes_cli import kanban_db as kb
+
 
 def _load_plugin_module():
     repo_root = Path(__file__).resolve().parents[2]
@@ -23,10 +25,14 @@ def _load_plugin_module():
 
 @pytest.fixture
 def plugin_module(tmp_path, monkeypatch):
+    from hermes_cli import profiles
+
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+    kb.init_db()
     return _load_plugin_module()
 
 
@@ -53,3 +59,27 @@ def test_compile_preview_endpoint(plugin_module):
     assert payload["children"][1]["parents"] == [0]
     assert any("lane missing" in item for item in payload["repairs"])
     assert any("ambiguous slice" in item for item in payload["warnings"])
+
+
+def test_ingest_prose_endpoint(plugin_module):
+    prose = """# Ingest Plan
+**Goal:** Create a held kanban chain.
+
+## Slice: Ship composer
+- done-when: Chain exists.
+"""
+
+    assert "/planspecs/ingest-prose" in {
+        route.path for route in plugin_module.router.routes
+    }
+
+    payload = plugin_module.ingest_prose_planspec(
+        plugin_module.PlanSpecProseIngestBody(prose=prose, author="pytest"),
+        board=None,
+    )
+
+    assert payload["ok"] is True
+    assert payload["subtask_count"] == 1
+    source_path = Path(payload["path"])
+    assert source_path.name.startswith("dashboard-prose-")
+    assert source_path.read_text(encoding="utf-8") == prose
