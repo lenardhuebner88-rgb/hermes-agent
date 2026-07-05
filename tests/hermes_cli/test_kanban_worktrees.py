@@ -1393,6 +1393,59 @@ def test_red_gate_reverts_merge_and_parks(repo):
     assert head_subject.startswith("Revert")
 
 
+def test_reverted_merge_is_reintegrated_not_clean(repo):
+    info = _provisioned_chain(repo, "t_reverted", relpath="restored.py")
+    gate_results = iter([(False, "first gate failed"), (True, "gate ok")])
+
+    out1 = kwt.integrate_chain(
+        repo,
+        info["path"],
+        info["branch"],
+        "main",
+        gate_runner=lambda _repo, _files: next(gate_results),
+    )
+
+    assert out1["action"] == "parked"
+    assert out1["gate_output"] == "first gate failed"
+    assert kwt._branch_is_ancestor(repo, info["branch"], "main") is True
+    assert not (repo / "restored.py").exists()
+
+    out2 = kwt.integrate_chain(
+        repo,
+        info["path"],
+        info["branch"],
+        "main",
+        gate_runner=lambda _repo, _files: next(gate_results),
+    )
+
+    assert out2["action"] == "merged"
+    assert out2["reintegrated_after_revert"] is True
+    assert out2["original_merge_commit"] == out1["merge_commit"]
+    assert "revert_commit" in out2
+    assert (repo / "restored.py").read_text() == "VALUE = 1\n"
+    assert not info["path"].exists()
+
+
+def test_integration_parked_writes_full_gate_output_comment(kanban_home):
+    full_output = "line-000\n" + "x" * 5000 + "\nline-end"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="gate fail", assignee="coder")
+        assert kb._park_integration(
+            conn,
+            tid,
+            {"reason": "post-merge gate failed", "gate_output": full_output},
+        )
+        body = conn.execute(
+            "SELECT body FROM task_comments "
+            "WHERE task_id = ? AND author = 'integrator' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()["body"]
+
+    assert "Post-merge gate failed; full gate output follows." in body
+    assert full_output in body
+
+
 def test_dirty_chain_worktree_parks(repo):
     info = _provisioned_chain(repo, "t_dwt")
     (info["path"] / "uncommitted.py").write_text("oops = 1\n")
