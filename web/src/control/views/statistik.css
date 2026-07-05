@@ -27,6 +27,20 @@ body:has([data-statistik]) [data-control] { background: #05090f; }
 
 [data-statistik] { color: var(--color-ink); }
 
+/* ── Kontrast-Boden (DESIGN.md Regel 4) ─────────────────────────────────────
+   Das Broadsheet-/Light-Erbe brachte die hellen control-tokens mit: `.hc-soft`
+   (#555c6e) und `.hc-dim` (#8b8f9c) sind für einen HELLEN Grund kalibriert und
+   fallen auf dem dunklen Leitstand-Canvas unter den ink-2-Boden ("dunkel auf
+   dunkel"). Flächig auf die Leitstand-ink-Tokens remappen, damit KEIN Body-Text
+   unter ink-2 rutscht — statt nur die 3 Fundstellen (Höchste-Auslastung-Zeile,
+   Fenster-%/-Labels, Provider-Strings) einzeln zu patchen. Höhere Spezifität
+   (0,2,0) schlägt die globalen `.hc-*` (0,1,0) aus control-tokens.css. */
+[data-statistik] .hc-soft { color: var(--color-ink-2); }
+[data-statistik] .hc-dim { color: var(--color-ink-3); }
+[data-statistik] .text-zinc-400 { color: var(--color-ink-2); }
+[data-statistik] .text-zinc-500,
+[data-statistik] .text-zinc-600 { color: var(--color-ink-3); }
+
 /* ── Masthead (Fleet/Start-Idiom) ─────────────────────────────────────────── */
 .st-masthead {
   display: flex;

@@ -98,11 +98,14 @@ function AccountProviderCard({
   const weekly = provider.windows.find((w) => classifyWindow(w, config) === "weekly");
   const primary = [session, weekly].filter((w): w is AccountUsageWindow => Boolean(w));
   const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
-  const tone: ToneName = provider.windows.some((w) => (w.used_percent ?? 0) >= 90)
-    ? "red"
-    : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
-      ? "amber"
-      : "emerald";
+  const unavailable = !provider.available;
+  const tone: ToneName = unavailable
+    ? "zinc"
+    : provider.windows.some((w) => (w.used_percent ?? 0) >= 90)
+      ? "red"
+      : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
+        ? "amber"
+        : "emerald";
   const hasExtras = others.length > 0 || provider.details.length > 0;
   return (
     <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
@@ -112,12 +115,25 @@ function AccountProviderCard({
           {provider.plan ? <p className="text-xs hc-dim">{provider.plan}</p> : null}
         </div>
         <div className="justify-self-end">
-          <StatusPill tone={tone} label={provider.cached ? "Cache" : "Live"} dot="live" />
+          <StatusPill
+            tone={tone}
+            label={unavailable ? "offline" : provider.cached ? "Cache" : "Live"}
+            dot={unavailable ? "idle" : "live"}
+          />
         </div>
       </div>
-      <div className="mt-3 space-y-1.5">
-        {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}
-      </div>
+      {primary.length ? (
+        <div className="mt-3 space-y-1.5">
+          {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}
+        </div>
+      ) : (
+        // Gleichwertige Abo-Karte auch ohne Provider-Fenster (Kimi = lokale
+        // Schätzung) bzw. wenn der Provider gerade offline ist: ehrlicher
+        // Leerzustand statt zusammengeworfener Strichel-Fußzeile.
+        <p className="mt-3 text-xs hc-soft">
+          {unavailable ? provider.unavailable_reason ?? "nicht verfügbar" : "keine Fensterdaten vom Provider"}
+        </p>
+      )}
       {align ? (
         <p className="mt-2 text-[0.7rem] hc-dim">
           ↳ Abgleich: {fmtTokens(align.tokens)} Tok diese Woche laut Worker-Runs ({align.runs} Runs)
@@ -166,13 +182,20 @@ export function AccountUsageTile({
     .sort((a, b) => providerOrder(config, a.provider) - providerOrder(config, b.provider));
   const available = providers.filter((p) => p.available).length;
   const nowMs = nowSec() * 1000;
-  // Kimi = lokale Schätzung aus kanban.db, kein Provider-Limit → nie als Engpass
-  // oder volle Karte (§8). Bleibt unten in der Fußzeile sichtbar.
-  const realProviders = providers.filter((p) => providerToLane(p.provider, config) !== "kimi");
-  const bottleneck = pickBottleneck(realProviders);
-  const cockpit = realProviders.filter(
-    (p) => p.available && p.windows.some((w) => classifyWindow(w, config) !== "other"),
+  // Abo = ein Provider mit Subscription-Lane (Claude/anthropic, ChatGPT/Codex,
+  // Kimi). Operator-Direktive: ALLE drei Abos als gleichwertige Karten — auch
+  // Kimi (lokale Schätzung), das fehlende Provider-Fenster wird in der Karte als
+  // ehrlicher Leerzustand beschriftet statt in eine Strichel-Fußzeile geworfen.
+  // OpenRouter (= $-Guthaben, keine Lane) bleibt die einzige Fußzeilen-Restklasse.
+  const isAbo = (p: AccountUsageProvider) => providerToLane(p.provider, config) != null;
+  // Kimi = lokale Schätzung, kein hartes Provider-Limit → zählt nie als Engpass (§8).
+  const bottleneck = pickBottleneck(
+    providers.filter((p) => providerToLane(p.provider, config) !== "kimi"),
   );
+  // Alle drei Abos bekommen eine gleichwertige Karte — auch wenn der Provider
+  // gerade offline ist (dann trägt die Karte den unavailable_reason als ehrlichen
+  // Leerzustand). Nur echte Nicht-Abos (OpenRouter = $-Guthaben) landen in der Fußzeile.
+  const cockpit = providers.filter((p) => isAbo(p));
   const footer = providers.filter((p) => !cockpit.includes(p));
   // Engpass-Ton: rot ab 90 %, gelb ab 75 %, sonst neutral (kein ⚠) — §3.
   const bnTone: ToneName =

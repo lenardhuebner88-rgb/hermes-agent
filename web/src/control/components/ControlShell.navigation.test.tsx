@@ -73,4 +73,19 @@ describe("ControlShell primary navigation", () => {
     expect(header?.className).toContain("hidden");
     expect(header?.className).toContain("lg:flex");
   });
+
+  it("hides the legacy shell header on the Statistik mobile bleed route (own Masthead)", () => {
+    renderShellWith("statistik");
+
+    const header = screen.getByText("Hermes Control").closest("header");
+    expect(header?.className).toContain("hidden");
+    expect(header?.className).toContain("lg:flex");
+  });
+
+  it("keeps the legacy shell header on a non-bleed route (Backlog unchanged)", () => {
+    renderShellWith("backlog");
+
+    const header = screen.getByText("Hermes Control").closest("header");
+    expect(header?.className).not.toContain("hidden");
+  });
 });
