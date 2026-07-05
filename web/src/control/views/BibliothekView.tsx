@@ -4,7 +4,14 @@ import { Library, ListTree, Newspaper } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { Led, ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import {
+  DrawerShell,
+  FleetEmptyState,
+  FleetPanel,
+  ListRow,
+  SectionHeader,
+  SubtabChips,
+} from "../components/leitstand";
 import { SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
@@ -75,6 +82,7 @@ const t = {
   toc: "Inhalt",
 };
 
+const ALL_CATEGORY_TAB = "__all";
 
 export interface LibraryItem {
   id: string;
@@ -135,19 +143,30 @@ const LAST_VISIT_KEY = "hc-bibliothek-last-visit";
 
 
 export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unreadSince: number; onOpen: (item: LibraryItem) => void }) {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onOpen(item);
+    }
+  };
   return (
     <li>
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => onOpen(item)}
-        className="flex w-full flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 py-2 text-left hover:bg-white/5"
+        onKeyDown={handleKeyDown}
+        className="cursor-pointer"
       >
-        <span className="min-w-0 flex-1 basis-64 truncate text-[0.86rem] text-white">{item.title}</span>
-        {item.ts > unreadSince ? (
-          <span className="rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span>
-        ) : null}
-        <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(item.ts)}</span>
-      </button>
+        <ListRow
+          title={item.title}
+          meta={fmtClock(item.ts)}
+          trailing={item.ts > unreadSince ? <span className="rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span> : null}
+          className="hover:bg-white/5"
+        >
+          {CATEGORY_LABEL[item.category] ?? item.category} · {item.series}
+        </ListRow>
+      </div>
     </li>
   );
 }
@@ -467,19 +486,22 @@ export function LesesaalBody() {
   const sortedItems = useMemo(() => sortItems(items, sort), [items, sort]);
   const neighbors = useMemo(() => seriesNeighbors(items, reading), [reading, items]);
   const counts = useMemo(() => countByCategory(items), [items]);
+  const categoryTabs = useMemo(() => [
+    { id: ALL_CATEGORY_TAB, label: t.frontpage },
+    ...((data?.categories ?? []).map((c) => ({ id: c, label: CATEGORY_LABEL[c] ?? c, count: counts[c] || undefined }))),
+  ], [data?.categories, counts]);
   const hasMore = data?.has_more ?? false;
 
   return (
     <div className="space-y-4">
       <div className="hc-surface-card p-3">
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => { setCategory(null); closeItem(); }} className={`inline-flex min-h-9 items-center rounded-full border px-3 py-1 text-[0.78rem] ${!category ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>{t.frontpage}</button>
-          {(data?.categories ?? []).map((c) => (
-            <button key={c} type="button" onClick={() => { setCategory(c); closeItem(); }} className={`inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 py-1 text-[0.78rem] ${category === c ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>
-              {CATEGORY_LABEL[c] ?? c}
-              {counts[c] ? <span className="hc-mono text-[0.66rem] hc-dim">{counts[c]}</span> : null}
-            </button>
-          ))}
+          <SubtabChips
+            items={categoryTabs}
+            active={category ?? ALL_CATEGORY_TAB}
+            onSelect={(next) => { setCategory(next === ALL_CATEGORY_TAB ? null : next); closeItem(); }}
+            ariaLabelPrefix={t.eyebrow}
+          />
           <input
             type="search"
             value={q}
@@ -499,9 +521,7 @@ export function LesesaalBody() {
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
 
-      {reading ? (
-        <ReadingView item={reading} neighbors={neighbors} onNavigate={openItem} onBack={closeItem} />
-      ) : data === null && !error ? (
+      {data === null && !error ? (
         <SkeletonCard rows={4} />
       ) : data !== null && items.length === 0 ? (
         <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
@@ -516,15 +536,18 @@ export function LesesaalBody() {
       ) : isFrontpage ? (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {frontpage.map((item) => (
-            <button key={item.id} type="button" onClick={() => openItem(item)} className="hc-surface-card space-y-2 p-4 text-left hover:bg-white/5">
-              <p className="hc-eyebrow">{CATEGORY_LABEL[item.category] ?? item.category}</p>
-              <h3 className="text-[0.95rem] font-semibold leading-snug text-white">{item.title}</h3>
-              <p className="line-clamp-3 text-[0.8rem] leading-relaxed hc-soft">{item.preview}</p>
-              <p className="hc-mono text-[0.7rem] hc-dim">
-                {item.series} · {fmtClock(item.ts)}
-                {item.ts > unreadSince ? <span className="ml-2 rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span> : null}
-              </p>
-            </button>
+            <div key={item.id} role="button" tabIndex={0} onClick={() => openItem(item)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openItem(item); } }} className="cursor-pointer">
+              <ListRow
+                title={item.title}
+                meta={fmtClock(item.ts)}
+                leading={<span className="hc-eyebrow">{CATEGORY_LABEL[item.category] ?? item.category}</span>}
+                trailing={item.ts > unreadSince ? <span className="rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span> : null}
+                className="h-full hover:bg-white/5"
+              >
+                <span className="line-clamp-3">{item.preview}</span>
+                <span className="mt-2 block hc-mono text-[0.7rem] hc-dim">{item.series}</span>
+              </ListRow>
+            </div>
           ))}
         </div>
       ) : (
@@ -541,7 +564,20 @@ export function LesesaalBody() {
         </div>
       )}
 
-      {!reading && hasMore ? (
+      {reading ? (
+        <DrawerShell
+          eyebrow={CATEGORY_LABEL[reading.category] ?? reading.category}
+          title={reading.title}
+          ariaLabel={`${t.modeLesesaal}: ${reading.title}`}
+          closeLabel={t.back}
+          onClose={closeItem}
+          widthClassName="sm:w-[min(900px,calc(100vw-2rem))]"
+        >
+          <ReadingView item={reading} neighbors={neighbors} onNavigate={openItem} onBack={closeItem} />
+        </DrawerShell>
+      ) : null}
+
+      {hasMore ? (
         <div className="flex justify-center pt-1">
           <button
             type="button"
@@ -558,24 +594,17 @@ export function LesesaalBody() {
 }
 
 function SortToggle({ sort, onChange }: { sort: LesesaalSort; onChange: (sort: LesesaalSort) => void }) {
-  const opt = (value: LesesaalSort, label: string) => (
-    <button
-      type="button"
-      aria-pressed={sort === value}
-      onClick={() => onChange(value)}
-      className={`inline-flex min-h-8 items-center rounded-full border px-2.5 py-1 text-[0.74rem] ${
-        sort === value ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:bg-white/5"
-      }`}
-    >
-      {label}
-    </button>
-  );
   return (
-    <div role="group" aria-label={t.sortLabel} className="flex items-center gap-1">
-      {opt("newest", t.sortNewest)}
-      {opt("oldest", t.sortOldest)}
-      {opt("az", t.sortAz)}
-    </div>
+    <SubtabChips
+      items={[
+        { id: "newest", label: t.sortNewest },
+        { id: "oldest", label: t.sortOldest },
+        { id: "az", label: t.sortAz },
+      ]}
+      active={sort}
+      onSelect={(next) => onChange(next as LesesaalSort)}
+      ariaLabelPrefix={t.sortLabel}
+    />
   );
 }
 
@@ -592,48 +621,66 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   const isUnknown = !data || Boolean(detail);
 
   return (
-    <FleetPanel eyebrow={de.provenance.title} meta={stale > 0 ? de.provenance.staleBadge(stale) : "Vault"}>
+    <section className="hc-surface-card space-y-3 p-3" aria-label={de.provenance.title}>
+      <SectionHeader
+        label={(
+          <span className="inline-flex items-center gap-2">
+            <Led kind={isUnknown ? "idle" : stale > 0 ? "warn" : "live"} size={8} />
+            {de.provenance.title}
+          </span>
+        )}
+        meta={stale > 0 ? de.provenance.staleBadge(stale) : "Vault"}
+        rule={false}
+      />
       {detail ? (
         <FleetEmptyState title="Vault-Provenienz nicht verfügbar" desc={detail} />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <article className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)]/60 p-3">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal hc-dim">
-              <Led kind={isUnknown ? "idle" : stale > 0 ? "warn" : "live"} size={8} />
-              <span>{de.provenance.openTitle}</span>
-            </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="space-y-2">
+            <SectionHeader label={de.provenance.openTitle} rule={false} />
             {opens.length === 0 ? (
-              <p className="mt-2 text-sm hc-dim">{de.provenance.openEmpty}</p>
+              <p className="text-sm hc-dim">{de.provenance.openEmpty}</p>
             ) : (
-              <ul className="mt-2 space-y-2">
+              <ul className="space-y-2">
                 {opens.map((session) => (
-                  <li key={session.path} className="min-w-0 truncate text-sm hc-soft" title={`${session.agent} · ${session.task}`}>
-                    <span className="hc-mono text-[11px] hc-dim">[{session.agent}]</span> {session.task}
-                    {session.stale ? <span className="ml-2 text-xs text-amber-200">⚠ {de.provenance.staleInline}</span> : null}
+                  <li key={session.path}>
+                    <ListRow
+                      title={session.task}
+                      meta={session.started}
+                      leading={<span className="hc-mono text-[11px] hc-dim">[{session.agent}]</span>}
+                      trailing={session.stale ? <span className="text-xs text-amber-200">⚠ {de.provenance.staleInline}</span> : null}
+                    >
+                      {session.path}
+                    </ListRow>
                   </li>
                 ))}
               </ul>
             )}
-          </article>
+          </div>
 
-          <article className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)]/60 p-3">
-            <div className="text-[11px] font-semibold uppercase tracking-normal hc-dim">{de.provenance.recentTitle}</div>
+          <div className="space-y-2">
+            <SectionHeader label={de.provenance.recentTitle} rule={false} />
             {receipts.length === 0 ? (
-              <p className="mt-2 text-sm hc-dim">—</p>
+              <p className="text-sm hc-dim">—</p>
             ) : (
-              <ul className="mt-2 space-y-2">
+              <ul className="space-y-2">
                 {receipts.slice(0, 5).map((receipt) => (
-                  <li key={receipt.path} className="min-w-0 truncate text-sm hc-soft" title={receipt.path}>
-                    <span className="hc-mono text-[11px] hc-dim">{receipt.when}</span>{" "}
-                    <span className="text-[var(--hc-text)]">[{receipt.agent}]</span> {receipt.file}
+                  <li key={receipt.path}>
+                    <ListRow
+                      title={receipt.file}
+                      meta={receipt.when}
+                      leading={<span className="hc-mono text-[11px] hc-dim">[{receipt.agent}]</span>}
+                    >
+                      {receipt.path}
+                    </ListRow>
                   </li>
                 ))}
               </ul>
             )}
-          </article>
+          </div>
         </div>
       )}
-    </FleetPanel>
+    </section>
   );
 }
 

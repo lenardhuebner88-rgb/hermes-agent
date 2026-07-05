@@ -1436,6 +1436,8 @@ const CostBucketSchema = z.object({
   billing_neuralwatt_cost_usd: nullableNumber,
   input_tokens: nullableNumber,
   output_tokens: nullableNumber,
+  cached_tokens: nullableNumber.optional(),
+  total_tokens: nullableNumber.optional(),
 });
 const CostProfileRowSchema = CostBucketSchema.extend({
   profile: z.string().catch("unbekannt"),
@@ -1473,8 +1475,19 @@ export const RunsCostsResponseSchema = z.object({
   profiles: z.array(CostProfileRowSchema).catch([]),
   review_value: z.array(ReviewValueRowSchema).catch([]),
 });
+export const RunsCostsSeriesPointSchema = CostBucketSchema.extend({
+  day: z.string().catch(""),
+});
+export const RunsCostsSeriesResponseSchema = z.object({
+  days: z.coerce.number().catch(7),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  series: z.array(RunsCostsSeriesPointSchema).catch([]),
+  field_sources: z.record(z.string(), z.string()).optional(),
+});
 export type CostBucket = z.infer<typeof CostBucketSchema>;
 export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
+export type RunsCostsSeriesPoint = z.infer<typeof RunsCostsSeriesPointSchema>;
+export type RunsCostsSeriesResponse = z.infer<typeof RunsCostsSeriesResponseSchema>;
 export type ReviewValueRow = z.infer<typeof ReviewValueRowSchema>;
 export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
 

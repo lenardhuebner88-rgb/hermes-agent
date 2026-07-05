@@ -50,6 +50,7 @@ const controlDataMock = vi.hoisted(() => ({
   issues: null as ControlHookState | null,
   accountUsage: null as ControlHookState | null,
   costs: null as ControlHookState | null,
+  costSeries: null as ControlHookState | null,
   subscriptionBurn: null as ControlHookState | null,
   chain: null as ControlHookState | null,
   board: null as ControlHookState | null,
@@ -65,6 +66,7 @@ vi.mock("../hooks/useControlData", async (importOriginal) => {
     useHermesReliability: () => controlDataMock.reliability,
     useHermesRunSummary: () => controlDataMock.summary,
     useHermesRunsCosts: () => controlDataMock.costs,
+    useHermesRunsCostSeries: () => controlDataMock.costSeries,
     useHermesRunsDaily: () => controlDataMock.daily,
     useHermesRunsIssues: () => controlDataMock.issues,
     useHermesSubscriptionBurn: () => controlDataMock.subscriptionBurn,
@@ -108,6 +110,7 @@ beforeEach(() => {
   controlDataMock.issues = controlState({ issues: [] });
   controlDataMock.accountUsage = controlState({ providers: [] });
   controlDataMock.costs = controlState({ profiles: [] });
+  controlDataMock.costSeries = controlState({ series: [] });
   controlDataMock.subscriptionBurn = controlState(null);
   controlDataMock.chain = controlState({ chain_completion_rate: null });
   controlDataMock.board = controlState({ queue_wait_p50_seconds: null });
@@ -139,6 +142,23 @@ function withViewport<T>(width: number, run: () => T): T {
 function renderStatistikAtViewport(width: number) {
   windowedRollupMock.state = rollupState({ data: rollupResponse() });
   return withViewport(width, () => renderToStaticMarkup(<StatistikView />));
+}
+
+function costSeriesPoint() {
+  return {
+    day: "2026-07-05",
+    runs: 2,
+    cost_usd: 0.12,
+    cost_usd_equivalent: 0.42,
+    api_equivalent_usd: 0.42,
+    actual_cost_usd: 0.12,
+    billing_neuralwatt_kwh: null,
+    billing_neuralwatt_cost_usd: null,
+    input_tokens: 1000,
+    output_tokens: 400,
+    cached_tokens: 100,
+    total_tokens: 1500,
+  };
 }
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
@@ -223,6 +243,8 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
     billing_neuralwatt_cost_usd: null,
     input_tokens: null,
     output_tokens: null,
+    cached_tokens: null,
+    total_tokens: null,
     ...over,
   };
 }
@@ -506,9 +528,36 @@ describe("ErrorTaxonomySection (ST4)", () => {
     expect(html).toContain("sauberes Fenster");
     expect(html).not.toContain("sb-estack");
   });
+
+  it("marks the unified MotherLedger responsive layout as desktop at the 1440px Statistik viewport", () => {
+    const html = renderStatistikAtViewport(1440);
+
+    expect(html).toContain('data-ledger-viewport="desktop"');
+    expect(html).not.toContain("<table");
+  });
+
+  it("renders the /runs/costs-series trend from live token and api-equivalent fields", () => {
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [costSeriesPoint()],
+      field_sources: {
+        tokens: "task_runs.input_tokens/output_tokens/cached_tokens plus metadata fallbacks",
+        api_equivalent_usd: "task_runs.cost_usd_equivalent plus metadata cost fallbacks",
+      },
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain('data-testid="runs-costs-series-trend"');
+    expect(html).toContain("07-05");
+    expect(html).toContain("2 k");
+    expect(html).toContain("$ 0.42");
+    expect(html).toContain("task_runs");
+  });
 });
 
-describe("BudgetLedgerSection (ST5)", () => {
+describe("BudgetLedgerSection", () => {
   it("orders providers Engpass-first, leads with the bottleneck, tags Kimi estimated", () => {
     const html = renderToStaticMarkup(
       <BudgetLedgerSection
