@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { legacyControlRedirectTarget } from "./navigation";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
@@ -171,6 +172,11 @@ function ControlViewFallback() {
   );
 }
 
+function QueryPreservingRedirect({ to }: { to: string }) {
+  const location = useLocation();
+  return <Navigate to={legacyControlRedirectTarget(to, location.search)} replace />;
+}
+
 export default function ControlPage() {
   const density = useDensity();
   const navigate = useNavigate();
@@ -245,18 +251,18 @@ export default function ControlPage() {
             <Route path="fleet" element={<FleetView />} />
             <Route path="inbox" element={<CommandHome density={density.density} />} />
             {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
-            <Route path="overview" element={<Navigate to="/control/bibliothek" replace />} />
+            <Route path="overview" element={<QueryPreservingRedirect to="/control/bibliothek" />} />
             {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
-            <Route path="pulse" element={<Navigate to="/control/system" replace />} />
+            <Route path="pulse" element={<QueryPreservingRedirect to="/control/system" />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             <Route path="agent-terminals" element={<AgentTerminalsView />} />
             {/* hermes wurde in Fleet absorbiert (Phase 2) */}
-            <Route path="hermes" element={<Navigate to="/control/fleet" replace />} />
+            <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
             <Route path="statistik" element={<StatistikView />} />
             {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
-            <Route path="flow" element={<Navigate to="/control/fleet" replace />} />
+            <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
             {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
-            <Route path="ketten" element={<Navigate to="/control/fleet" replace />} />
+            <Route path="ketten" element={<QueryPreservingRedirect to="/control/fleet" />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
@@ -265,8 +271,8 @@ export default function ControlPage() {
             <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
-            <Route path="pressure" element={<Navigate to="/control/system" replace />} />
-            <Route path="ops" element={<Navigate to="/control/system" replace />} />
+            <Route path="pressure" element={<QueryPreservingRedirect to="/control/system" />} />
+            <Route path="ops" element={<QueryPreservingRedirect to="/control/system" />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />
