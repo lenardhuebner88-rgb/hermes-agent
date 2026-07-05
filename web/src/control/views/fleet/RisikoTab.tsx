@@ -3,7 +3,7 @@
  *
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
-import { planSpecWaitsForOperator } from "../../lib/fleetHub";
+import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { Disclosure } from "../../components/primitives";
 import { buildReliabilityRiskModel, buildSystemPulseRiskModel } from "../../lib/fleetRisk";
@@ -13,6 +13,7 @@ import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
+import { TriageStrip } from "../../components/TriageStrip";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ export function RisikoTab({
   onTaskChanged,
 }: RisikoTabProps) {
   // (a) Wartende Freigaben
-  const pendingApprovals = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
+  const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
 
   // (a) Blockierte Tasks — Operator-Halts vs. sonstige blockierte
   const operatorHalts = blockedTasks.filter((t) => {
@@ -109,6 +110,11 @@ export function RisikoTab({
           ))}
         </div>
       </section>
+
+      {/* Fehler-Triage: gescheiterte/blockierte Runs der letzten 48h mit Ein-Klick-
+          Eskalation. Aus der abgerissenen FlowView (S5) hierher gerettet — die
+          operative Risiko-Fläche ist ihr neues Zuhause (nicht die Inbox). */}
+      <div id="fleet-section-triage"><TriageStrip /></div>
 
       {/* (a) Operator-Entscheidungen: wartende Freigaben */}
       {pendingApprovals.length > 0 ? (

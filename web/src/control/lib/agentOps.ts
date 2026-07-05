@@ -355,7 +355,7 @@ function buildOperatorDecision(input: {
       tone: "cyan",
       title: "Kapazitaet voll",
       detail: `${input.activeWorkers}/${input.parallelTarget} Agenten laufen. Erst Ergebnisse abwarten.`,
-      target: "/control/flow",
+      target: "/control/fleet",
     };
   }
   if (input.contractDrift > 0) {
@@ -430,7 +430,7 @@ function buildReadinessGaps(input: {
       label: "Kapazitaet",
       count: 0,
       detail: "Ready Tasks vorhanden, aber kein freier Agenten-Slot.",
-      target: "/control/flow",
+      target: "/control/fleet",
     });
   }
   if (input.contractDrift > 0) {
@@ -567,7 +567,7 @@ export function buildInterventions(input: {
       tone: health.tone,
       title: worker.task_title,
       detail: health.label,
-      target: "/control/flow",
+      target: "/control/fleet",
     });
   }
 

@@ -7856,6 +7856,30 @@ def _release_flow_gate(
     # no-op for a non-operator root, and the children are already unblocked above
     # so its own child loop finds nothing scheduled (no double-release).
     kanban_db.release_freigabe_hold(conn, root_id, author="flow-gate")
+    root_after = kanban_db.get_task(conn, root_id)
+    root_freigabe_row = conn.execute(
+        "SELECT freigabe FROM tasks WHERE id=?",
+        (root_id,),
+    ).fetchone()
+    root_freigabe = (
+        str(root_freigabe_row["freigabe"] or "").strip().lower()
+        if root_freigabe_row is not None and "freigabe" in root_freigabe_row.keys()
+        else ""
+    )
+    root_released = False
+    if (
+        root_after is not None
+        and root_after.status == "scheduled"
+        and root_freigabe == "complete"
+    ):
+        root_released = kanban_db.unblock_task(conn, root_id)
+        if root_released:
+            _append_flow_gate_event(
+                conn,
+                root_id,
+                "flow_gate_root_released",
+                {"reason": reason, "release_level": release_level},
+            )
     result: dict[str, Any] = {
         "ok": True,
         "task_id": root_id,
@@ -7869,6 +7893,8 @@ def _release_flow_gate(
         result["review_tier"] = tier_value
     if scout_id is not None:
         result["scout_id"] = scout_id
+    if root_released:
+        result["root_released"] = True
     return result
 
 

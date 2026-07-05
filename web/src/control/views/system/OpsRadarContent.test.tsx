@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { OpsRadarContent } from "./OpsRadarView";
-import type { OperatorInventoryResponse } from "../lib/types";
+import { OpsRadarContent } from "./OpsRadarContent";
+import type { OperatorInventoryResponse } from "../../lib/types";
 
 const inventory: OperatorInventoryResponse = {
   schema: "hermes-operator-inventory-v1",
@@ -16,19 +16,19 @@ const inventory: OperatorInventoryResponse = {
     actors_total: 4,
     actors_canonical: 1,
   },
-  next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
+  next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/system?filter=dirty", mutation: "none" },
   levers: [
-    { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
-    { action: "inspect_orphan_worktrees", label: "Worktree ohne Worker", detail: "1 Kanban-Worktree hat keinen aktiven Worker-Match.", tone: "rose", count: 1, target: "/control/ops?filter=orphaned", mutation: "none" },
+    { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/system?filter=dirty", mutation: "none" },
+    { action: "inspect_orphan_worktrees", label: "Worktree ohne Worker", detail: "1 Kanban-Worktree hat keinen aktiven Worker-Match.", tone: "rose", count: 1, target: "/control/system?filter=orphaned", mutation: "none" },
   ],
   worktrees: [
     { id: "main:main checkout", path_label: "main checkout", branch: "main", head: "abc123", relation: "main", task_hint: null, state: "clean", locked: false, prunable: false, detached: false, dirty_count: 0, untracked_count: 0, status_checked: true, orphaned: false },
     { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "def456", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
   ],
   actors: [
-    { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
-    { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 120, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
-    { role: "claude_code", label: "Claude Code", count: 1, cpu_percent: 4, rss_mb: 256, oldest_age_seconds: 90, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
+    { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/fleet", controllable: false },
+    { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 120, source: "process", confidence: "medium", stale_count: 0, target: "/control/system", controllable: false },
+    { role: "claude_code", label: "Claude Code", count: 1, cpu_percent: 4, rss_mb: 256, oldest_age_seconds: 90, source: "process", confidence: "medium", stale_count: 0, target: "/control/system", controllable: false },
   ],
   errors: [],
 };

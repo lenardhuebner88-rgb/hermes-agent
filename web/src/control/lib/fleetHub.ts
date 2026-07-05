@@ -193,8 +193,42 @@ export function fmtUsd(usd: number | null | undefined): string {
 // ─── PlanSpec-Freigabe-Badge ─────────────────────────────────────────────────
 
 /** true wenn die PlanSpec auf den Operator wartet (freigabe = "operator" + hold). */
-export function planSpecWaitsForOperator(freigabe: string, kanbanState: string): boolean {
-  return freigabe === "operator" && (kanbanState === "queued" || kanbanState === "not_ingested");
+export function planSpecWaitsForOperator(freigabe: string | null | undefined, kanbanState: string | null | undefined): boolean {
+  const normalizedFreigabe = String(freigabe || "").trim().toLowerCase();
+  const normalizedState = String(kanbanState || "").trim().toLowerCase();
+  return normalizedFreigabe === "operator" && (normalizedState === "queued" || normalizedState === "not_ingested");
+}
+
+export type PlanSpecActionState = {
+  freigabe?: string | null;
+  kanban_state?: string | null;
+  kanban_root_status?: string | null;
+  kanban_root_task_id?: string | null;
+  kanban_child_total?: number | null;
+  kanban_child_done?: number | null;
+  kanban_child_running?: number | null;
+  kanban_child_blocked?: number | null;
+};
+
+/** true wenn eine signierte PlanSpec-Kette noch geparkt ist und gestartet werden kann. */
+export function planSpecHasParkedSignedChain(plan: PlanSpecActionState): boolean {
+  if (String(plan.freigabe || "").trim().toLowerCase() !== "complete") return false;
+  if (!plan.kanban_root_task_id) return false;
+  const state = String(plan.kanban_state || "").trim().toLowerCase();
+  const rootStatus = String(plan.kanban_root_status || "").trim().toLowerCase();
+  if (rootStatus === "scheduled") return true;
+  if (state !== "queued") return false;
+  const total = Number(plan.kanban_child_total ?? 0);
+  if (total <= 0) return false;
+  const accounted = Number(plan.kanban_child_done ?? 0)
+    + Number(plan.kanban_child_running ?? 0)
+    + Number(plan.kanban_child_blocked ?? 0);
+  return accounted < total;
+}
+
+export function planSpecAwaitsPlanAction(plan: PlanSpecActionState): boolean {
+  return planSpecWaitsForOperator(plan.freigabe, plan.kanban_state)
+    || planSpecHasParkedSignedChain(plan);
 }
 
 // ─── Plan-Cockpit Hilfsfunktionen ─────────────────────────────────────────────
@@ -507,14 +541,14 @@ export interface PendingItem {
  * @param blockedTasks Board-Tasks mit Status "blocked"
  */
 export function derivePendingItems(
-  planspecs: Array<{ freigabe: string; kanban_state: string; topic?: string | null; filename?: string }>,
+  planspecs: Array<PlanSpecActionState & { topic?: string | null; filename?: string }>,
   blockedTasks: Array<{ id: string; title: string; block_reason?: string | null }>,
 ): PendingItem[] {
   const items: PendingItem[] = [];
 
   // Wartende Freigaben (Plan-Subtab)
   for (const ps of planspecs) {
-    if (planSpecWaitsForOperator(ps.freigabe, ps.kanban_state)) {
+    if (planSpecAwaitsPlanAction(ps)) {
       items.push({
         kind: "approval",
         topic: ps.topic || ps.filename || "Plan",

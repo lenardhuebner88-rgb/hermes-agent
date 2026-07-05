@@ -1,10 +1,12 @@
-import type { ComponentType } from "react";
 import { Activity, Cpu, Gauge, MemoryStick, Network, ShieldCheck, Wrench } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { Led, MeterBar, StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
-import { Card, Panel, SkeletonCard, Stat, Text } from "../components/primitives";
-import { usePressureStatus } from "../hooks/useControlData";
-import type { PressureOverall, PressureSource, PressureStatusResponse, TailnetPressureState, ToneName } from "../lib/types";
+import { Led, MeterBar, StaleBadge, StatusPill, ToneCallout } from "../../components/atoms";
+import { Card, Panel, SkeletonCard, Stat, Text } from "../../components/primitives";
+import { StatusChip } from "../../components/StatusChip";
+import type { PressureOverall, PressureSource, PressureStatusResponse, TailnetPressureState, ToneName } from "../../lib/types";
+
+// PressureContent lebt seit dem Abriss (S5) hier unter views/system/, weil die
+// eigenständige PressureView-Route zum System-Redirect wurde. Die System-View
+// bettet diesen Inhalt als "Druck · Zugang · Druckquellen"-Sektion ein.
 
 const overallTone: Record<PressureOverall, ToneName> = {
   ok: "emerald",
@@ -91,30 +93,14 @@ function apiTone(latency: number | null): ToneName {
   return "emerald";
 }
 
-function Chip({ icon: Icon, label, value, hint, tone = "zinc" }: {
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: ToneName;
-}) {
-  return (
-    <div className={cn("min-h-16 min-w-0 rounded-lg border px-2.5 py-2 sm:min-h-20 sm:px-3", tone === "red" ? "border-red-500/25 bg-red-500/10" : tone === "amber" ? "border-amber-500/25 bg-amber-500/10" : tone === "emerald" ? "border-emerald-500/25 bg-emerald-500/10" : "border-white/10 bg-white/[.03]")}>
-      <div className="flex min-w-0 items-center gap-2">
-        <Icon className="h-3.5 w-3.5 shrink-0 hc-dim" />
-        <span className="truncate hc-type-label hc-dim">{label}</span>
-      </div>
-      <p className="mt-1 truncate hc-mono text-sm font-semibold text-white sm:mt-2">{value}</p>
-      {hint ? <p className="mt-0.5 line-clamp-1 hc-type-label hc-soft">{hint}</p> : null}
-    </div>
-  );
-}
-
-export function PressureContent({ data, lastUpdated, isStale, error }: {
+export function PressureContent({ data, lastUpdated, isStale, error, embedded }: {
   data: PressureStatusResponse | null;
   lastUpdated: number | null;
   isStale?: boolean;
   error?: string | null;
+  /** In der System-Fusion (S1) trägt der geteilte Kopf die Status-Zeile — dann
+   *  entfällt hier die eigene Pressure-Status-Karte, die Sektionen bleiben. */
+  embedded?: boolean;
 }) {
   if (!data) {
     return (
@@ -143,6 +129,7 @@ export function PressureContent({ data, lastUpdated, isStale, error }: {
 
   return (
     <div className="space-y-4">
+      {embedded ? null : (
       <Card surface="raised" tone={tone} className="overflow-hidden p-0" ariaLabel="Pressure Status">
         <div className="flex flex-col gap-3 border-b border-[var(--hc-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -156,11 +143,11 @@ export function PressureContent({ data, lastUpdated, isStale, error }: {
         </div>
 
         <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-5">
-          <Chip icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} hint={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} tone={loadTone(data) === "red" ? "red" : loadTone(data) === "amber" ? "amber" : "zinc"} />
-          <Chip icon={Cpu} label="CPU" value={cpuValue} hint={cpuHint} tone={cpuTone} />
-          <Chip icon={MemoryStick} label="RAM" value={fmtMb(data.dashboard.rss_mb)} hint="Dashboard" />
-          <Chip icon={Activity} label="API" value={fmtMs(apiLatency)} hint="p95" tone={apiTone(apiLatency)} />
-          <Chip icon={Network} label="Tailnet" value={tailnetLabel[data.access.tailnet]} hint={data.access.detail ?? undefined} tone={tailnetTone[data.access.tailnet]} />
+          <StatusChip icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} hint={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} tone={loadTone(data) === "red" ? "red" : loadTone(data) === "amber" ? "amber" : "zinc"} />
+          <StatusChip icon={Cpu} label="CPU" value={cpuValue} hint={cpuHint} tone={cpuTone} />
+          <StatusChip icon={MemoryStick} label="RAM" value={fmtMb(data.dashboard.rss_mb)} hint="Dashboard" />
+          <StatusChip icon={Activity} label="API" value={fmtMs(apiLatency)} hint="p95" tone={apiTone(apiLatency)} />
+          <StatusChip icon={Network} label="Tailnet" value={tailnetLabel[data.access.tailnet]} hint={data.access.detail ?? undefined} tone={tailnetTone[data.access.tailnet]} />
         </div>
 
         <div className="border-t border-[var(--hc-border)] px-4 py-3">
@@ -181,6 +168,7 @@ export function PressureContent({ data, lastUpdated, isStale, error }: {
           {data.errors.length > 0 ? <p className="mt-1 truncate hc-type-label text-amber-200">{data.errors.length} Teilwert unklar</p> : null}
         </div>
       </Card>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
         <Panel title="System" eyebrow="Host">
@@ -242,17 +230,5 @@ export function PressureContent({ data, lastUpdated, isStale, error }: {
         </ToneCallout>
       ) : null}
     </div>
-  );
-}
-
-export function PressureView() {
-  const pressure = usePressureStatus();
-  return (
-    <PressureContent
-      data={pressure.data}
-      lastUpdated={pressure.lastUpdated}
-      isStale={pressure.isStale}
-      error={pressure.error}
-    />
   );
 }

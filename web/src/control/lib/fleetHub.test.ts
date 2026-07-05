@@ -8,6 +8,7 @@ import {
   deriveKpi,
   fmtTokens,
   fmtUsd,
+  planSpecHasParkedSignedChain,
   planSpecWaitsForOperator,
   profileInitial,
   buildChainChips,
@@ -297,6 +298,34 @@ describe("planSpecWaitsForOperator", () => {
 
   it("false wenn state=running", () => {
     expect(planSpecWaitsForOperator("operator", "running")).toBe(false);
+  });
+});
+
+describe("planSpecHasParkedSignedChain", () => {
+  it("true für echte signierte PlanSpec-Payload mit geparktem Root", () => {
+    expect(planSpecHasParkedSignedChain({
+      freigabe: "complete",
+      kanban_state: "queued",
+      kanban_root_task_id: "t_root",
+      kanban_root_status: "scheduled",
+      kanban_child_total: 3,
+      kanban_child_done: 0,
+      kanban_child_running: 0,
+      kanban_child_blocked: 0,
+    })).toBe(true);
+  });
+
+  it("false für complete ohne geparkten Root und ohne scheduled Kinder", () => {
+    expect(planSpecHasParkedSignedChain({
+      freigabe: "complete",
+      kanban_state: "done",
+      kanban_root_task_id: "t_root",
+      kanban_root_status: "done",
+      kanban_child_total: 3,
+      kanban_child_done: 3,
+      kanban_child_running: 0,
+      kanban_child_blocked: 0,
+    })).toBe(false);
   });
 });
 
@@ -799,6 +828,26 @@ describe("derivePendingItems", () => {
     );
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "approval", topic: "mein-plan", targetSubtab: "plan" });
+  });
+
+  it("signierte geparkte PlanSpec → Plan-Item", () => {
+    const items = derivePendingItems(
+      [{
+        freigabe: "complete",
+        kanban_state: "queued",
+        kanban_root_task_id: "t_root",
+        kanban_root_status: "scheduled",
+        kanban_child_total: 4,
+        kanban_child_done: 0,
+        kanban_child_running: 0,
+        kanban_child_blocked: 0,
+        topic: "signed-plan",
+        filename: "signed-plan.md",
+      }],
+      [],
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "approval", topic: "signed-plan", targetSubtab: "plan" });
   });
 
   it("nicht-wartende PlanSpec (kanban_state: running) → kein Item", () => {

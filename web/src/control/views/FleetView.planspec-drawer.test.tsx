@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -22,6 +22,9 @@ const hooks = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useControlData", () => hooks);
+
+const api = vi.hoisted(() => ({ fetchJSON: vi.fn() }));
+vi.mock("@/lib/api", () => api);
 
 const reload = vi.fn();
 
@@ -50,6 +53,22 @@ const planSpec = {
   ingest_would_block: false,
   ingest_findings: [],
   errors: [],
+} satisfies PlanSpecRecord;
+
+const signedCompletePlanSpec = {
+  ...planSpec,
+  path: "/home/piet/vault/03-Agents/Hermes/plans/signed-complete.md",
+  filename: "signed-complete.md",
+  topic: "Signed Complete Plan",
+  freigabe: "complete",
+  live_test_depth: "ui-real",
+  kanban_root_task_id: "t_signed_root",
+  kanban_root_status: "scheduled",
+  kanban_state: "queued",
+  kanban_child_done: 0,
+  kanban_child_total: 2,
+  kanban_child_blocked: 0,
+  kanban_child_running: 0,
 } satisfies PlanSpecRecord;
 
 function setHookDefaults() {
@@ -89,6 +108,7 @@ describe("FleetView PlanSpec detail drawer", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    api.fetchJSON.mockResolvedValue({ ok: true });
     Object.defineProperty(window, "matchMedia", {
       writable: true,
       value: vi.fn().mockImplementation((query: string) => ({
@@ -132,6 +152,46 @@ describe("FleetView PlanSpec detail drawer", () => {
     const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
+  });
+
+  it("shows signed complete parked PlanSpecs and starts the chain via flow-release", async () => {
+    hooks.usePlanSpecs.mockReturnValue({ data: { planspecs: [signedCompletePlanSpec], count: 1 }, loading: false, error: null, reload });
+    hooks.usePlanSpecDetail.mockImplementation((path: string | null) => ({
+      data: path
+        ? {
+            path,
+            filename: "signed-complete.md",
+            topic: "Signed Complete Plan",
+            goal: "Echte PlanSpec-Payload: freigabe complete, Root scheduled.",
+            freigabe: "complete",
+            live_test_depth: "ui-real",
+            acceptance_criteria: [],
+            anti_scope: [],
+            subtasks: [],
+          }
+        : null,
+      loading: false,
+      error: null,
+    }));
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+
+    expect(screen.getByText("Signed Complete Plan")).toBeTruthy();
+    expect(screen.getByText("signiert · geparkt")).toBeTruthy();
+    expect(screen.getByTestId("signed-chain-start-card")).toBeTruthy();
+
+    const startButton = screen.getByRole("button", { name: "Kette starten" });
+    fireEvent.click(startButton);
+    fireEvent.click(screen.getByRole("button", { name: "Start bestätigen" }));
+
+    await waitFor(() => expect(api.fetchJSON).toHaveBeenCalledWith(
+      "/api/plugins/kanban/tasks/t_signed_root/flow-release",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ release_level: "live" }),
+      }),
+    ));
   });
 
   it("opens the cost drawer from the Heute cost KPI", () => {

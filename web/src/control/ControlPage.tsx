@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { legacyControlRedirectTarget } from "./navigation";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
@@ -19,23 +20,14 @@ import { CommandHome } from "./views/CommandHome";
 const FleetView = lazy(() =>
   import("./views/FleetView").then((m) => ({ default: m.FleetView })),
 );
-const OverviewView = lazy(() =>
-  import("./views/OverviewView").then((m) => ({ default: m.OverviewView })),
-);
-const PulseView = lazy(() =>
-  import("./views/PulseView").then((m) => ({ default: m.PulseView })),
-);
+// AgentOpsView (Ströme) bleibt vorerst — der Worker-Health-/Fan-out-Launch-
+// Snapshot ist noch nicht 1:1 in OrchestratorBacklogView gedeckt (S4-Rescue-D1).
+// Löschung + Redirect hängen an S6/Phase 3.
 const AgentOpsView = lazy(() =>
   import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
 );
 const AgentTerminalsView = lazy(() =>
   import("./views/AgentTerminalsView").then((m) => ({ default: m.AgentTerminalsView })),
-);
-const FlowView = lazy(() =>
-  import("./views/FlowView").then((m) => ({ default: m.FlowView })),
-);
-const ChainVizView = lazy(() =>
-  import("./views/ChainVizView").then((m) => ({ default: m.ChainVizView })),
 );
 const StatistikView = lazy(() =>
   import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
@@ -78,22 +70,19 @@ const SchmiedeView = lazy(() =>
 const StrategistView = lazy(() =>
   import("./views/StrategistView").then((m) => ({ default: m.StrategistView })),
 );
-const PressureView = lazy(() =>
-  import("./views/PressureView").then((m) => ({ default: m.PressureView })),
-);
-const OpsRadarView = lazy(() =>
-  import("./views/OpsRadarView").then((m) => ({ default: m.OpsRadarView })),
+const SystemView = lazy(() =>
+  import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
 );
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/fleet")) return "fleet";
   if (pathname.includes("/control/overview")) return "overview";
-  if (pathname.includes("/control/pulse")) return "pulse";
+  if (pathname.includes("/control/pulse")) return "system";
   if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/agent-terminals")) return "agentTerminals";
-  // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
-  if (pathname.includes("/control/flow")) return "flow";
-  if (pathname.includes("/control/ketten")) return "ketten";
+  // Flow/Ketten/Hermes wurden ins Fleet-Cockpit absorbiert (Phase 2).
+  if (pathname.includes("/control/flow")) return "fleet";
+  if (pathname.includes("/control/ketten")) return "fleet";
   if (pathname.includes("/control/statistik")) return "statistik";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
@@ -101,8 +90,9 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/loops")) return "loops";
   if (pathname.includes("/control/lanes")) return "lanes";
-  if (pathname.includes("/control/pressure")) return "pressure";
-  if (pathname.includes("/control/ops")) return "ops";
+  if (pathname.includes("/control/system")) return "system";
+  if (pathname.includes("/control/pressure")) return "system";
+  if (pathname.includes("/control/ops")) return "system";
   if (pathname.includes("/control/research")) return "research";
   if (pathname.includes("/control/bibliothek")) return "bibliothek";
   if (pathname.includes("/control/schmiede")) return "schmiede";
@@ -121,12 +111,8 @@ function activeFromPath(pathname: string): ControlTab {
 // Muss dieselben import()-Ziele treffen wie die lazy()-Wrapper oben.
 const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   fleet: () => import("./views/FleetView"),
-  overview: () => import("./views/OverviewView"),
-  pulse: () => import("./views/PulseView"),
   workstreams: () => import("./views/AgentOpsView"),
   agentTerminals: () => import("./views/AgentTerminalsView"),
-  flow: () => import("./views/FlowView"),
-  ketten: () => import("./views/ChainVizView"),
   statistik: () => import("./views/StatistikView"),
   autoresearch: () => import("./views/AutoresearchView"),
   backlog: () => import("./views/BacklogView"),
@@ -134,8 +120,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   crons: () => import("./views/CronView"),
   loops: () => import("./views/LoopsView"),
   lanes: () => import("./views/LanesView"),
-  pressure: () => import("./views/PressureView"),
-  ops: () => import("./views/OpsRadarView"),
+  system: () => import("./views/system/SystemView"),
   research: () => import("./views/ResearchView"),
   bibliothek: () => import("./views/BibliothekView"),
   schmiede: () => import("./views/SchmiedeView"),
@@ -152,11 +137,11 @@ const tabPath: Record<ControlTab, string> = {
   fleet: "/control/fleet",
   inbox: "/control",
   overview: "/control/overview",
-  pulse: "/control/pulse",
+  pulse: "/control/system",
   workstreams: "/control/workstreams",
   agentTerminals: "/control/agent-terminals",
-  flow: "/control/flow",
-  ketten: "/control/ketten",
+  flow: "/control/fleet",
+  ketten: "/control/fleet",
   statistik: "/control/statistik",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
@@ -164,8 +149,9 @@ const tabPath: Record<ControlTab, string> = {
   crons: "/control/crons",
   loops: "/control/loops",
   lanes: "/control/lanes",
-  pressure: "/control/pressure",
-  ops: "/control/ops",
+  system: "/control/system",
+  pressure: "/control/system",
+  ops: "/control/system",
   research: "/control/research",
   bibliothek: "/control/bibliothek",
   schmiede: "/control/schmiede",
@@ -184,6 +170,11 @@ function ControlViewFallback() {
       <Spinner />
     </div>
   );
+}
+
+function QueryPreservingRedirect({ to }: { to: string }) {
+  const location = useLocation();
+  return <Navigate to={legacyControlRedirectTarget(to, location.search)} replace />;
 }
 
 export default function ControlPage() {
@@ -219,11 +210,11 @@ export default function ControlPage() {
         setPaletteOpen(true);
         return;
       }
-      // Zwei-Tasten-Navigation "g <x>" (g s / g h / g a / g u).
+      // Zwei-Tasten-Navigation "g <x>" (g f / g h / g p -> Fleet/System).
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", k: "ketten", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "fleet", h: "fleet", k: "fleet", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "system", o: "system" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -259,23 +250,29 @@ export default function ControlPage() {
             <Route index element={<CommandHome density={density.density} />} />
             <Route path="fleet" element={<FleetView />} />
             <Route path="inbox" element={<CommandHome density={density.density} />} />
-            <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
-            <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
+            {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
+            <Route path="overview" element={<QueryPreservingRedirect to="/control/bibliothek" />} />
+            {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
+            <Route path="pulse" element={<QueryPreservingRedirect to="/control/system" />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             <Route path="agent-terminals" element={<AgentTerminalsView />} />
-            {/* hermes wurde in Flow absorbiert (Phase 2) */}
-            <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
+            {/* hermes wurde in Fleet absorbiert (Phase 2) */}
+            <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
             <Route path="statistik" element={<StatistikView />} />
-            <Route path="flow" element={<FlowView />} />
-            <Route path="ketten" element={<ChainVizView />} />
+            {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
+            <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
+            {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
+            <Route path="ketten" element={<QueryPreservingRedirect to="/control/fleet" />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="loops" element={<LoopsView />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
-            <Route path="pressure" element={<PressureView />} />
-            <Route path="ops" element={<OpsRadarView />} />
+            <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
+            {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
+            <Route path="pressure" element={<QueryPreservingRedirect to="/control/system" />} />
+            <Route path="ops" element={<QueryPreservingRedirect to="/control/system" />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />

@@ -98,19 +98,18 @@ const ERROR_LABEL: Record<string, string> = {
 };
 
 const LANE_COLORS: Record<string, string> = {
-  coder: "#1e40af",
-  "coder-claude": "#6d28d9",
-  premium: "#6d28d9",
-  reviewer: "#15803d",
-  verifier: "#0e7490",
-  critic: "#b91c1c",
-  scout: "#c2410c",
-  research: "#a16207",
-  admin: "#475569",
+  coder: "var(--color-brand)",
+  "coder-claude": "var(--color-ink-3)",
+  premium: "var(--color-brand)",
+  reviewer: "var(--color-status-ok)",
+  verifier: "var(--color-status-ok)",
+  critic: "var(--color-status-alert)",
+  scout: "var(--color-status-warn)",
+  research: "var(--color-brand)",
+  admin: "var(--color-ink-3)",
 };
-
 function laneStyle(profile: string): CSSProperties {
-  return { "--sb-lane": LANE_COLORS[profile] ?? "#475569" } as CSSProperties;
+  return { "--sb-lane": LANE_COLORS[profile] ?? "var(--color-ink-3)" } as CSSProperties;
 }
 
 function LaneLabel({ profile, label = profile }: { profile: string; label?: ReactNode }) {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -10,14 +10,10 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
 
-// The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
-// health), Flow (the live work board, absorbs the fleet), Statistik (charts:
-// throughput / burn / cycle-time / reliability), Bibliothek (the reading
-// room — Piet-Entscheid 2026-06-11: der Alltags-Lesesaal verdrängt
-// Autoresearch in den "Mehr"-Overflow). Everything else is a re-slice of
-// these and lives in the "Mehr" overflow (moreTabs) below.
+// The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
+// live in Fleet now, and System remains reachable through "Mehr" + deep-link.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   // Fleet: neues erstes Tab — Operator-Lagezentrum (2026-07-03)
   { id: "fleet", label: "Fleet", mobileLabel: "Fleet", path: "/control/fleet", icon: Anchor },
@@ -25,25 +21,21 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   // Terminals = Haupt-Arbeitszentrale (Operator-Entscheid 2026-07-01): der Tab,
   // in dem im tmux mit Hermes/Claude/Codex gearbeitet wird — daher primär.
   { id: "agentTerminals", label: "Terminals", mobileLabel: "Terminal", path: "/control/agent-terminals", icon: TerminalSquare },
-  { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
-  { id: "ketten", label: "Ketten", mobileLabel: "Ketten", path: "/control/ketten", icon: GitBranch },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Statistik", path: "/control/statistik", icon: ChartSpline },
   // Kurzlabel "Regal" fürs 6-Slot-Grid der mobilen Bottom-Bar (Cockpit-Slice
   // "Bibliothek-Lesesaal + Shell-Upgrade") — Desktop-`label` bleibt "Bibliothek".
   { id: "bibliothek", label: "Bibliothek", mobileLabel: "Regal", path: "/control/bibliothek", icon: BookOpen },
-  { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
-// Fleet ist an erster Stelle der mobilen Bottom-Bar (2026-07-03).
-// 'ketten' bleibt im Mehr-Sheet + Desktop-Nav, ist aber kein mobiler Bottom-Tab mehr.
+// Fleet ist an erster Stelle der mobilen Bottom-Bar (2026-07-03); Statistik
+// übernimmt den alten Flow-Slot (S6, 2026-07-05).
 // 5 Slots + "Mehr" = 6-Spalten-Grid.
-const mobileTabs = tabs.filter((tab) => ["fleet", "inbox", "agentTerminals", "flow", "bibliothek"].includes(tab.id));
+const mobileTabs = tabs.filter((tab) => ["fleet", "inbox", "agentTerminals", "statistik", "bibliothek"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.
 const moreTabs = [
   { label: de.tabs.overview, path: "/control/overview", icon: Activity },
-  { label: de.tabs.pulse, path: "/control/pulse", icon: Activity },
   { label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
   { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
   { label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
@@ -52,14 +44,16 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
-  { label: "Pressure", path: "/control/pressure", icon: Gauge },
-  { label: "Ops Radar", path: "/control/ops", icon: Radar },
+  // System (S1-Fusion): Druck + Ops Radar + Puls in einer Leitstand-Ansicht.
+  { label: "System", path: "/control/system", icon: Server },
+
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
   // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.
   { label: "Recherche", path: "/control/research", icon: SearchCheck },
   { label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
   // Prompt-Schmiede: Copy-Paste-Generator für Agent-Steuerbefehle (kein Dispatch).
   { label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
+  { label: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
 const secondaryNav = [

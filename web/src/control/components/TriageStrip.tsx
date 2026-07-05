@@ -17,8 +17,8 @@ import { triageRequeueState } from "./triage";
 // Runs der letzten 48h werden eine Queue mit Aktionen statt ein Suchauftrag:
 // „Nochmal" (Task wieder ready) und „Nochmal stärker" (= Phase-B-
 // model_override auf die Premium-Lane + requeue). Zwei-Schritt-Confirm nach
-// Fleet-Muster. Lebt in der FlowView; die Inbox bleibt für Inhalts-
-// Entscheidungen (Grill-Entscheid §7.6).
+// Fleet-Muster. Nach dem Abriss (S5) im Fleet-Risiko-Subtab gemountet (vorher
+// FlowView); die Inbox bleibt für Inhalts-Entscheidungen (Grill-Entscheid §7.6).
 const t = {
   eyebrow: "Fehler-Triage",
   meta: (h: number) => `failed/blocked · letzte ${h}h · jüngster Run pro Task`,

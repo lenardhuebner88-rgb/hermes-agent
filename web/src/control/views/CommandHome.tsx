@@ -149,7 +149,7 @@ export function CommandHome({ density }: { density: Density }) {
       </section>
 
       {/* ── LIVE FLEET ──────────────────────────────────────────────────────── */}
-      <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/flow")} freshness={workers} />
+      <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/fleet")} freshness={workers} />
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
@@ -198,7 +198,7 @@ export function CommandHome({ density }: { density: Density }) {
         <p className="text-xs text-amber-300/80">{inbox.sourceErrors.join(" · ")}</p>
       ) : null}
 
-      <FlowCapture onCreated={(id) => navigate(`/control/flow?task=${encodeURIComponent(id)}`)} />
+      <FlowCapture onCreated={(id) => navigate(`/control/fleet?task=${encodeURIComponent(id)}`)} />
     </div>
   );
 }

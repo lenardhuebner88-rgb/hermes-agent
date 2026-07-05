@@ -413,16 +413,16 @@ describe("OperatorInventoryResponseSchema", () => {
         actors_total: 3,
         actors_canonical: 1,
       },
-      next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/ops?filter=dirty", mutation: "none" },
+      next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/system?filter=dirty", mutation: "none" },
       levers: [
-        { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/ops?filter=dirty", mutation: "none" },
+        { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/system?filter=dirty", mutation: "none" },
       ],
       worktrees: [
         { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "abc123", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
       ],
       actors: [
-        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 120, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
-        { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 60, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
+        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 120, source: "canonical", confidence: "high", stale_count: 0, target: "/control/fleet", controllable: false },
+        { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 60, source: "process", confidence: "medium", stale_count: 0, target: "/control/system", controllable: false },
       ],
       errors: [],
     }, "operator-inventory");
