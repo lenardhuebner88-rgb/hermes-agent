@@ -9314,6 +9314,13 @@ def _review_gate_config() -> dict:
     auto_scout_on_critical = _coerce_config_bool(
         rg.get("auto_scout_on_critical", False), default=False
     )
+    # Verification economy (Plan→Board pipeline B1): when False, a completed
+    # ``standard``-tier code task whose deterministic worker gate ran GREEN
+    # skips the LLM verifier entirely (gates are the done signal). Default
+    # True = today's behavior; the live config opts in to the economy.
+    standard_uses_llm_verifier = _coerce_config_bool(
+        rg.get("standard_uses_llm_verifier", True), default=True
+    )
     return {
         "enabled": _coerce_config_bool(rg.get("enabled", False), default=False),
         "code_roles": code_roles,
@@ -9324,6 +9331,7 @@ def _review_gate_config() -> dict:
         "auto_tier": auto_tier,
         "auto_scout_on_critical": auto_scout_on_critical,
         "scout_max_runtime_seconds": rg.get("scout_max_runtime_seconds"),
+        "standard_uses_llm_verifier": standard_uses_llm_verifier,
     }
 
 
@@ -9971,6 +9979,120 @@ def _zero_diff_review_snapshot(diff_snapshot: dict) -> bool:
     )
 
 
+def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
+    """Run the enforced light worker gate (``kanban.worker_gate``) for *task_id*.
+
+    Returns the machine-readable stamp: ``{"configured": False}`` when the gate
+    is disabled, the assignee is not code-bearing, the workspace is missing, or
+    no commands match the repo; ``{"passed": True, "commands": [...],
+    "exit_codes": [...], "ts": ..., "commit": ...}`` when every command exited 0.
+    On the first non-zero command a ``worker_gate_blocked`` audit event is
+    written in its own short txn and :class:`WorkerGateError` is raised — the
+    caller must NOT have an open write txn (subprocesses run outside the lock).
+    && semantics: stop at the first failure.
+    """
+    _wg = _worker_gate_config()
+    _wg_stamp: dict = {"configured": False}
+    if not _wg["enabled"]:
+        return _wg_stamp
+    _wg_row = conn.execute(
+        "SELECT assignee, workspace_path FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    _wg_assignee = (_wg_row["assignee"] or "").strip().lower() if _wg_row else ""
+    _wg_ws = _wg_row["workspace_path"] if _wg_row else None
+    if _wg_assignee not in _wg["code_roles"] or not _wg_ws or not os.path.isdir(_wg_ws):
+        return _wg_stamp
+    _wg_cmds = _worker_gate_commands_for_workspace(_wg, _wg_ws)
+    if not _wg_cmds:
+        return _wg_stamp
+    # Gate will run — initialize stamp as passed (flip on failure)
+    _wg_run_ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _wg_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_wg_ws,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout.strip()[:40]
+    except Exception:
+        _wg_commit = ""
+    _wg_stamp = {
+        "passed": True,
+        "commands": list(_wg_cmds),
+        "exit_codes": [],
+        "ts": _wg_run_ts,
+        "commit": _wg_commit,
+    }
+    for _cmd in _wg_cmds:
+        try:
+            _proc = subprocess.run(
+                shlex.split(_cmd),
+                cwd=_wg_ws,
+                capture_output=True,
+                text=True,
+                timeout=_wg["timeout"],
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as _exc:
+            _tail = f"{_cmd}: {_exc}"[-4000:]
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "worker_gate_blocked",
+                    {
+                        "command": _cmd,
+                        "returncode": -1,
+                        "output_tail": _tail,
+                    },
+                )
+            raise WorkerGateError(_cmd, -1, _tail)
+        _wg_stamp["exit_codes"].append(_proc.returncode)
+        if _proc.returncode != 0:
+            _wg_stamp["passed"] = False
+            _tail = ((_proc.stdout or "") + (_proc.stderr or ""))[-4000:]
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "worker_gate_blocked",
+                    {
+                        "command": _cmd,
+                        "returncode": _proc.returncode,
+                        "output_tail": _tail,
+                    },
+                )
+            raise WorkerGateError(_cmd, _proc.returncode, _tail)
+    return _wg_stamp
+
+
+def _deterministic_review_skip(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """B1 verification economy: decide whether this completion may skip the LLM
+    verifier because its deterministic gates ARE the done signal.
+
+    Applies ONLY when all of: ``standard_uses_llm_verifier`` is False (opt-in),
+    the task's effective tier is ``standard`` (review/critical always park),
+    AND the worker gate actually ran GREEN for this workspace. Returns the green
+    worker-gate stamp on skip, ``None`` otherwise (caller parks in review — the
+    safety floor: no gate evidence, no un-verified ship). A RED gate raises
+    :class:`WorkerGateError` from :func:`_run_worker_gate` — identical
+    fail-safe to the review submission path.
+    """
+    cfg = _review_gate_config()
+    if cfg.get("standard_uses_llm_verifier", True):
+        return None
+    if _effective_review_tier(conn, task_id, cfg=cfg) != "standard":
+        return None
+    stamp = _run_worker_gate(conn, task_id)
+    if stamp.get("passed") is True:
+        return stamp
+    return None
+
+
 def _submit_for_review(
     conn: sqlite3.Connection,
     task_id: str,
@@ -10007,88 +10129,11 @@ def _submit_for_review(
         run_metadata = metadata
     # D (worker gate): enforce the light repo gate (e.g. lint && backlog:check &&
     # test) at this DB commit boundary, BEFORE the review transition. subprocess
-    # runs OUTSIDE the write txn (like the diff snapshot above). config disabled /
-    # role not code-bearing / no commands for the repo => skip (byte-identical to
-    # today). On the first non-zero command: write a worker_gate_blocked audit
-    # event in its own short txn, then raise WorkerGateError WITHOUT entering the
-    # review txn -> the task stays running/ready (same fail-safe as the
-    # hallucination gate). && semantics: stop at the first failure.
-    _wg = _worker_gate_config()
-    # #3-A: capture worker_gate stamp for the submitted_for_review payload.
-    # _wg_stamp accumulates the result; set to {"configured": False} when the
-    # gate is disabled/unconfigured, or {"passed": True/False, ...} when it ran.
-    _wg_stamp: dict = {"configured": False}
-    if _wg["enabled"]:
-        _wg_row = conn.execute(
-            "SELECT assignee, workspace_path FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        _wg_assignee = (_wg_row["assignee"] or "").strip().lower() if _wg_row else ""
-        _wg_ws = _wg_row["workspace_path"] if _wg_row else None
-        if _wg_assignee in _wg["code_roles"] and _wg_ws and os.path.isdir(_wg_ws):
-            _wg_cmds = _worker_gate_commands_for_workspace(_wg, _wg_ws)
-            if _wg_cmds:
-                # Gate will run — initialize stamp as passed (flip on failure)
-                _wg_run_ts = _dt.datetime.now(_dt.timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-                try:
-                    _wg_commit = subprocess.run(
-                        ["git", "rev-parse", "HEAD"],
-                        cwd=_wg_ws,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    ).stdout.strip()[:40]
-                except Exception:
-                    _wg_commit = ""
-                _wg_stamp = {
-                    "passed": True,
-                    "commands": list(_wg_cmds),
-                    "exit_codes": [],
-                    "ts": _wg_run_ts,
-                    "commit": _wg_commit,
-                }
-                for _cmd in _wg_cmds:
-                    try:
-                        _proc = subprocess.run(
-                            shlex.split(_cmd),
-                            cwd=_wg_ws,
-                            capture_output=True,
-                            text=True,
-                            timeout=_wg["timeout"],
-                            check=False,
-                        )
-                    except (OSError, subprocess.SubprocessError) as _exc:
-                        _tail = f"{_cmd}: {_exc}"[-4000:]
-                        with write_txn(conn):
-                            _append_event(
-                                conn,
-                                task_id,
-                                "worker_gate_blocked",
-                                {
-                                    "command": _cmd,
-                                    "returncode": -1,
-                                    "output_tail": _tail,
-                                },
-                            )
-                        raise WorkerGateError(_cmd, -1, _tail)
-                    _wg_stamp["exit_codes"].append(_proc.returncode)
-                    if _proc.returncode != 0:
-                        _wg_stamp["passed"] = False
-                        _tail = ((_proc.stdout or "") + (_proc.stderr or ""))[-4000:]
-                        with write_txn(conn):
-                            _append_event(
-                                conn,
-                                task_id,
-                                "worker_gate_blocked",
-                                {
-                                    "command": _cmd,
-                                    "returncode": _proc.returncode,
-                                    "output_tail": _tail,
-                                },
-                            )
-                        raise WorkerGateError(_cmd, _proc.returncode, _tail)
+    # runs OUTSIDE the write txn (like the diff snapshot above). Extracted into
+    # _run_worker_gate so the B1 deterministic-skip path in complete_task shares
+    # the exact same enforcement (config disabled / role not code-bearing / no
+    # commands => {"configured": False}; RED command => WorkerGateError).
+    _wg_stamp = _run_worker_gate(conn, task_id)
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -11003,23 +11048,39 @@ def complete_task(
     # (anti-loop) + code-bearing assignee — otherwise fall through.
     if _review_gate_should_apply(conn, task_id, expected_run_id):
         if review_gate or expected_run_id is not None:
-            submitted = _submit_for_review(
-                conn,
-                task_id,
-                result=result,
-                summary=summary,
-                metadata=metadata,
-                verified_cards=verified_cards,
-                expected_run_id=expected_run_id,
-            )
-            if submitted:
-                # The WORKER's own run succeeded (work delivered, worker
-                # gate green) — reset the counter here too, mirroring the
-                # direct-done path. From this point on only the review
-                # phase's OWN failures (verifier/reviewer/critic timeouts)
-                # should count toward the breaker.
-                _clear_failure_counter(conn, task_id)
-            return submitted
+            # B1 verification economy: a green deterministic worker gate IS the
+            # done signal for a standard-tier task (opt-in via
+            # standard_uses_llm_verifier: false). The gate ran and passed →
+            # audit-stamp the skip and fall through to the direct done path
+            # below. None → park in review as before (safety floor). A RED
+            # gate raises WorkerGateError exactly like the submission path.
+            _skip_stamp = _deterministic_review_skip(conn, task_id)
+            if _skip_stamp is not None:
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "review_skipped_deterministic",
+                        {"worker_gate": _skip_stamp, "tier": "standard"},
+                    )
+            else:
+                submitted = _submit_for_review(
+                    conn,
+                    task_id,
+                    result=result,
+                    summary=summary,
+                    metadata=metadata,
+                    verified_cards=verified_cards,
+                    expected_run_id=expected_run_id,
+                )
+                if submitted:
+                    # The WORKER's own run succeeded (work delivered, worker
+                    # gate green) — reset the counter here too, mirroring the
+                    # direct-done path. From this point on only the review
+                    # phase's OWN failures (verifier/reviewer/critic timeouts)
+                    # should count toward the breaker.
+                    _clear_failure_counter(conn, task_id)
+                return submitted
 
     # B (staged review gate): an APPROVED completion of an INTERMEDIATE review
     # stage re-parks the task for the next stage (verifier→reviewer→critic)
