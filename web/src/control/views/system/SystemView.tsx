@@ -1,7 +1,7 @@
 import { Activity, Bot, Cpu, Gauge, GitBranch, Network } from "lucide-react";
 import { StaleBadge, StatusPill } from "../../components/atoms";
-import { Card, Eyebrow, Text } from "../../components/primitives";
-import { StatusChip } from "../../components/StatusChip";
+import { Card, Text } from "../../components/primitives";
+import { SectionHeader, StatusChip } from "../../components/leitstand";
 import { useOperatorInventory, usePressureStatus } from "../../hooks/useControlData";
 import { usePulseData } from "../../hooks/usePulseData";
 import type { DotKind } from "../../lib/tones";
@@ -77,18 +77,6 @@ function apiTone(latency: number | null): ToneName {
   if (latency > 1500) return "red";
   if (latency >= 500) return "amber";
   return "emerald";
-}
-
-/** Dünnes Leitstand-Sektions-Label: uppercase-mono Eyebrow links, ruhiger Meta-
- *  Wert rechts, auf einer Hairline — die Rahmung, die die drei fusionierten
- *  Domänen zu einer Ansicht zusammenbindet (DESIGN.md, Regel 5 + 7). */
-function GroupLabel({ label, meta }: { label: string; meta?: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 border-t border-[var(--hc-border)] pt-4">
-      <Eyebrow>{label}</Eyebrow>
-      {meta ? <span className="hc-type-label hc-dim truncate text-right">{meta}</span> : null}
-    </div>
-  );
 }
 
 interface Props {
@@ -172,13 +160,13 @@ export function SystemView({ proposals, proposalsLastUpdated }: Props) {
         </div>
       </Card>
 
-      <GroupLabel label="Druck · Zugang · Druckquellen" meta={p ? overallLabel[overall] : undefined} />
+      <SectionHeader label="Druck · Zugang · Druckquellen" meta={p ? overallLabel[overall] : undefined} />
       <PressureContent embedded data={pressure.data} lastUpdated={pressure.lastUpdated} isStale={pressure.isStale} error={pressure.error} />
 
-      <GroupLabel label="Worktrees · Akteure" meta={opsMeta} />
+      <SectionHeader label="Worktrees · Akteure" meta={opsMeta} />
       <OpsRadarContent embedded data={inventory.data} lastUpdated={inventory.lastUpdated} isStale={inventory.isStale} error={inventory.error} />
 
-      <GroupLabel label="Ereignisse" meta={`letzte ${pulse.windowHours}h`} />
+      <SectionHeader label="Ereignisse" meta={`letzte ${pulse.windowHours}h`} />
       <PulseTimeline data={pulse} />
     </div>
   );
