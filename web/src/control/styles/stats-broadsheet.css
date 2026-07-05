@@ -16,22 +16,21 @@
 [data-stats-broadsheet] {
   /* Newsprint paper + ink ladder — warmer & a touch lighter than control's bone
      field so the column reads as its own printed sheet without a theme break. */
-  --sb-paper: var(--color-surface, #f1f2ec);
-  --sb-ink:   var(--color-text, #15171b);
-  --sb-ink2:  var(--color-text-muted, #4d525c);
-  --sb-ink3:  var(--color-text-subtle, #6b7180);
-  --sb-rule:  var(--color-border, #d8d8cf);
-  --sb-rule2: var(--color-border-strong, #c2c2b6);
+  --sb-paper: #f1f2ec;
+  --sb-ink:   #15171b;
+  --sb-ink2:  #4d525c;
+  --sb-ink3:  #6b7180;
+  --sb-rule:  #d8d8cf;
+  --sb-rule2: #c2c2b6;
   /* The one ink accent — used for identity/interaction only, never as a status. */
-  --sb-navy:    var(--color-accent, #15355f);
+  --sb-navy:    #15355f;
   /* Status inks — dark enough to read as text on paper, strong enough to fill a
-     micro-bar.  Do not use raw status hexes outside this token block. */
-  --sb-emerald: var(--color-success, #0a7d52);
-  --sb-amber:   var(--color-warning, #a6620a);
-  --sb-red:     var(--color-danger, #bf2f3f);
-  --sb-neutral: var(--color-text-faint, #9aa0ac);
+     meter/dot. The error stack carries a 4th, neutral, ink for the residual bucket. */
+  --sb-emerald: #0a7d52;
+  --sb-amber:   #a6620a;
+  --sb-red:     #bf2f3f;
+  --sb-neutral: #9aa0ac;
   --sb-disp: "Bricolage Grotesque", system-ui, sans-serif;
-
   --sb-body: "Hanken Grotesk", system-ui, sans-serif;
   --sb-mono: "Spline Sans Mono", ui-monospace, monospace;
 
@@ -54,24 +53,11 @@
   text-transform: uppercase; color: var(--sb-ink3);
 }
 [data-stats-broadsheet] .sb-lane-label { display: inline-flex; align-items: center; gap: 7px; min-width: 0; vertical-align: middle; }
-[data-stats-broadsheet] .sb-lane-dot { width: 9px; height: 9px; border-radius: 999px; background: var(--sb-lane, var(--color-text-muted, var(--sb-ink2))); box-shadow: 0 0 0 2px color-mix(in srgb, var(--sb-lane, var(--color-text-muted, var(--sb-ink2))) 14%, transparent); flex: 0 0 auto; }
+[data-stats-broadsheet] .sb-lane-dot { width: 9px; height: 9px; border-radius: 999px; background: var(--sb-lane, #475569); box-shadow: 0 0 0 2px color-mix(in srgb, var(--sb-lane, #475569) 14%, transparent); flex: 0 0 auto; }
 [data-stats-broadsheet] .sb-ok   { color: var(--sb-emerald); }
 [data-stats-broadsheet] .sb-warn { color: var(--sb-amber); }
 [data-stats-broadsheet] .sb-crit { color: var(--sb-red); }
 [data-stats-broadsheet] .sb-accent { color: var(--sb-navy); }
-[data-stats-broadsheet] .sb-note { color: var(--sb-ink2); font-size: 13px; line-height: 1.35; margin: 8px 0 0; }
-[data-stats-broadsheet] .sb-linkbutton { appearance: none; border: 1px solid var(--sb-rule2); background: transparent; color: var(--sb-navy); min-height: 40px; padding: 0 12px; border-radius: 999px; font: 700 12px/1 var(--sb-body); letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
-[data-stats-broadsheet] .sb-budget-details { margin-top: 8px; }
-[data-stats-broadsheet] .sb-budget-summary { cursor: pointer; display: flex; gap: 8px; align-items: center; list-style: none; min-height: 44px; }
-[data-stats-broadsheet] .sb-cost-trend { display: grid; gap: 8px; margin-top: 12px; }
-[data-stats-broadsheet] .sb-cost-trend-row { display: grid; grid-template-columns: 44px minmax(88px, 1fr) 58px 58px 32px; gap: 8px; align-items: center; font-size: 12px; color: var(--sb-ink2); }
-[data-stats-broadsheet] .sb-cost-trend-bars { display: grid; gap: 3px; }
-[data-stats-broadsheet] .sb-cost-trend-token,
-[data-stats-broadsheet] .sb-cost-trend-money { display: block; width: var(--sb-w, 0%); height: 6px; border-radius: 999px; }
-[data-stats-broadsheet] .sb-cost-trend-token { background: var(--sb-navy); }
-[data-stats-broadsheet] .sb-cost-trend-money { background: var(--sb-amber); }
-[data-stats-broadsheet] .sb-drilldown-grid { display: grid; gap: 18px; }
-[data-stats-broadsheet] .sb-drilldown-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--sb-rule); color: var(--sb-ink2); }
 
 /* ── Column shell ─────────────────────────────────────────────────────────── */
 /* A centred broadsheet column — mobile-first 390px, capped narrow on desktop so
@@ -201,9 +187,9 @@
 [data-stats-broadsheet] .sb-subburn-row i::before { content: ""; display: block; width: var(--sb-share, 0%); height: 100%; background: var(--sb-lane, var(--sb-navy)); }
 [data-stats-broadsheet] .sb-subburn-row small { color: var(--sb-ink3); }
 [data-stats-broadsheet] .sb-subburn-flags { display: flex; flex-wrap: wrap; gap: 8px; }
-[data-stats-broadsheet] .sb-subburn-flag { border: 1px solid var(--sb-rule2); background: color-mix(in srgb, var(--sb-navy) 5%, transparent); padding: 7px 9px; font-size: 12px; color: var(--sb-ink2); }
+[data-stats-broadsheet] .sb-subburn-flag { border: 1px solid var(--sb-rule2); background: rgba(21, 53, 95, .05); padding: 7px 9px; font-size: 12px; color: var(--sb-ink2); }
 [data-stats-broadsheet] .sb-subburn-flag b { color: var(--sb-navy); margin-right: 4px; }
-[data-stats-broadsheet] .sb-subburn-anti { background: color-mix(in srgb, var(--sb-amber) 8%, transparent); }
+[data-stats-broadsheet] .sb-subburn-anti { background: rgba(166, 98, 10, .08); }
 [data-stats-broadsheet] .sb-subburn-anti b { color: var(--sb-amber); }
 
 /* ── MotherLedger (responsive, no mobile horizontal scroll table) ─────────── */
@@ -227,7 +213,7 @@
 [data-stats-broadsheet] .sb-ledger-worker-card small { grid-column: 1 / -1; color: var(--sb-ink3); }
 [data-stats-broadsheet] .sb-ledger-usd { color: var(--sb-navy); }
 [data-stats-broadsheet] .sb-ledger-usd small { display: block; font-size: 11px; color: var(--sb-ink3); font-weight: 400; }
-[data-stats-broadsheet] .sb-ledger-runners { margin: 0 0 10px; padding: 7px 9px; background: color-mix(in srgb, var(--sb-navy) 4.5%, transparent); color: var(--sb-ink2); }
+[data-stats-broadsheet] .sb-ledger-runners { margin: 0 0 10px; padding: 7px 9px; background: rgba(21, 53, 95, .045); color: var(--sb-ink2); }
 [data-stats-broadsheet] .sb-ledger-runner { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content max-content; gap: 8px; align-items: baseline; padding: 4px 0; font-size: 12px; }
 [data-stats-broadsheet] .sb-ledger-runner span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (min-width: 760px) {

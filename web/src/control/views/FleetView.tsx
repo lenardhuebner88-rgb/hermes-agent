@@ -25,7 +25,6 @@ import { NodeDetailDrawer } from "./fleet/NodeDetailDrawer";
 import { PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
 import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
-import { SubtabChips } from "../components/leitstand";
 import "./fleet/fleet.css";
 
 // ─── Viewport-Hook ───────────────────────────────────────────────────────────
@@ -151,15 +150,23 @@ export function FleetView() {
         />
       ) : null}
 
-      {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes. */}
-      <SubtabChips
-        items={subtabDefs}
-        active={subtab}
-        onSelect={setSubtab}
-        ariaLabelPrefix="Subtab"
-        className="py-2.5"
-        classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
-      />
+      {/* Subtab-Chips */}
+      <div className="flex gap-1.5 overflow-x-auto px-0 py-2.5 scrollbar-none" style={{ paddingLeft: 0, paddingRight: 0 }}>
+        {subtabDefs.map((def) => (
+          <button
+            key={def.id}
+            type="button"
+            className={`fleet-chip${subtab === def.id ? " fleet-chip-on" : ""}`}
+            onClick={() => setSubtab(def.id)}
+            aria-pressed={subtab === def.id}
+            aria-label={`Subtab ${def.label}${def.warn ? " — enthält Warnungen" : ""}`}
+          >
+            {def.label}
+            {def.count != null ? <sup>{def.count}</sup> : null}
+            {def.warn ? <span className="fleet-warn-dot" aria-label="Warnung" /> : null}
+          </button>
+        ))}
+      </div>
 
       {/* Karten-Detail-Drawer (Overlay, rendert außerhalb des Scrollbereichs) */}
       {nodeDetailId ? (

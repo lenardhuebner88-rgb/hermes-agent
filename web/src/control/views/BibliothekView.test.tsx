@@ -136,10 +136,7 @@ describe("Vault-Provenienz-Regal", () => {
   it("zieht Vault-Provenienz-Daten in der Bibliothek und rendert sie im Regal-Look", () => {
     expect(src).toContain("useVaultProvenance");
     expect(src).toContain("VaultProvenanceShelf");
-    expect(src).toContain("SectionHeader");
-    expect(src).toContain("ListRow");
-    expect(src).toContain("SubtabChips");
-    expect(src).toContain("DrawerShell");
+    expect(src).toContain("FleetPanel eyebrow={de.provenance.title}");
     expect(src).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 

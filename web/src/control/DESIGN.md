@@ -39,12 +39,3 @@ utilities.
 8. **No raw hex in components.** Every color in `web/src/control` components comes from a token (Tailwind utility like `bg-surface-1`, `text-ink-2`, `border-line`) — never a literal `#hex` or arbitrary `[#...]`/`[rgb(...)]` class. Enforced by the ratchet in `scripts/gate-frontend.sh`.
 9. **Mobile**: no desktop tables. A table collapses to a card list; a card expands into a drawer for details. The active chain/session stays visible at all times (no dead-end views that hide current state).
 10. **Extend the mockup first.** If a new pattern isn't covered here, add it to the mockup, get it approved, then port the tokens/rules here — don't invent ad hoc colors in components.
-
-## Building blocks (shared components)
-
-The rules above are realised as one canonical component layer at
-`web/src/control/components/leitstand/` — `KpiTile`, `SectionHeader`,
-`SubtabChips`, `DrawerShell`, `ListRow`, `StatusChip`, and the Fleet atoms
-(`FleetPod` / `FleetPanel` / `FleetEmptyState` / `RoleChip`). Import these from
-`components/leitstand` instead of re-deriving the idiom per view. Props and
-usage: `components/leitstand/README.md`.

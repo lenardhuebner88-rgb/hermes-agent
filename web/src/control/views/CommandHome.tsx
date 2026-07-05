@@ -27,19 +27,22 @@ import {
   useHermesTodayDigest,
   useHermesWorkers,
   useStrategistCount,
+  useStatsConfig,
   useSystemHealth,
 } from "../hooks/useControlData";
+import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
 import type { Density } from "../hooks/useDensity";
-import type { AccountUsageResponse, BoardTask, ToneName, Worker } from "../lib/types";
+import type { BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge, StatusPill } from "../components/atoms";
-import { KpiTile, ListRow, RoleChip, SectionHeader } from "../components/leitstand";
+import { RoleChip } from "../components/fleet/atoms";
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
+import { AccountUsageTile } from "../components/AccountUsageTile";
 
 const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
   autoresearch: { label: "Autoresearch", tone: "cyan" },
@@ -58,6 +61,7 @@ export function CommandHome({ density }: { density: Density }) {
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
   const accountUsage = useAccountUsage();
+  const statsConfig = useStatsConfig();
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
@@ -103,36 +107,26 @@ export function CommandHome({ density }: { density: Density }) {
 
   return (
     <div className={cn("space-y-5", density === "compact" && "space-y-4")}>
-      {/* ── ATTENTION FIRST ──────────────────────────────────────────────────
-          Oben beantwortet CommandHome: ist alles ok und was braucht mich? */}
+      {/* ── COMMAND HERO ─────────────────────────────────────────────────────
+          Left: the state + the #1 decision (actionable). Right: the pulse rail
+          (fleet + today + health) — the whole situation in one surface. */}
       <section
-        aria-label="Aufmerksamkeit"
-        className="hc-hero p-4 sm:p-6"
+        className="hc-hero grid gap-6 p-5 sm:p-7 lg:grid-cols-[1.55fr_1fr]"
         style={{ "--hc-hero-accent": heroAccent(heroTone) } as React.CSSProperties}
       >
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <Eyebrow>Attention Inbox</Eyebrow>
+            <Eyebrow>Kommandozentrale</Eyebrow>
             <StatusPill
               tone={calm ? "emerald" : heroTone === "red" || heroTone === "rose" ? "red" : "amber"}
               label={settling ? "lädt…" : calm ? "Alles ruhig" : "Aufmerksamkeit"}
               dot={settling ? "idle" : calm ? "live" : heroTone === "red" || heroTone === "rose" ? "error" : "warn"}
             />
           </div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-            <div>
-              <div className="hc-aurora-text hc-type-display tabular-nums">{settling ? "—" : inbox.summary.total}</div>
-              <Text as="h1" variant="title" className="hc-hero-statement mt-1 text-[var(--hc-text)]">
-                {calm ? "Ruhig. Nichts wartet auf dich." : "Was braucht mich gerade?"}
-              </Text>
-            </div>
-            <div className="grid grid-cols-4 gap-1.5 sm:min-w-72">
-              <AttentionCount label="Freigaben" value={inbox.summary.autoresearch + inbox.summary.family} />
-              <AttentionCount label="Held" value={inbox.summary.kanban} />
-              <AttentionCount label="Fragen" value={inbox.summary.orchestrator} />
-              <AttentionCount label="Top" value={top ? 1 : 0} />
-            </div>
-          </div>
+          <div className="hc-aurora-text hc-type-display mt-2 tabular-nums">{settling ? "—" : inbox.summary.total}</div>
+          <Text as="h1" variant="title" className="hc-hero-statement mt-1 text-[var(--hc-text)]">
+            {calm ? "Ruhig. Nichts wartet auf dich." : "Was braucht mich gerade?"}
+          </Text>
 
           {top && !settling ? (
             <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} repair={repair} veto={veto} />
@@ -140,30 +134,21 @@ export function CommandHome({ density }: { density: Density }) {
             <p className="mt-4 max-w-md text-sm hc-soft">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
           ) : null}
         </div>
+
+        <PulseRail
+          health={health}
+          running={liveWorkers.length || counts.running}
+          inReview={counts.review}
+          blocked={counts.blocked}
+          shippedToday={shippedToday}
+          now={now}
+          board={board}
+          workers={workers}
+          digest={digest}
+        />
       </section>
 
-      {/* ── SYSTEM-/KOSTEN-PULS ─────────────────────────────────────────────── */}
-      <section aria-label="System- und Kosten-Puls" className="space-y-3">
-        <SectionHeader label="System-/Kosten-Puls" meta="kompakt" />
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,.65fr)]">
-          <PulseRail
-            health={health}
-            running={liveWorkers.length || counts.running}
-            inReview={counts.review}
-            blocked={counts.blocked}
-            shippedToday={shippedToday}
-            now={now}
-            board={board}
-            workers={workers}
-            digest={digest}
-          />
-          <AccountUsagePulse usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} />
-        </div>
-      </section>
-
-      {/* ── LIVE FLEET bleibt als reduzierte Präsenz unter dem Puls; die primäre
-          Navigation sitzt unten in QuickJumps, damit keine Fleet-Funktion still
-          verschwindet. */}
+      {/* ── LIVE FLEET ──────────────────────────────────────────────────────── */}
       <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/fleet")} freshness={workers} />
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
@@ -171,6 +156,9 @@ export function CommandHome({ density }: { density: Density }) {
 
       {/* ── STRATEGEN-VORSCHLÄGE ────────────────────────────────────────────── */}
       <StrategistSignalTile onOpen={() => navigate("/control/stratege")} />
+
+      {/* ── ABO-LIMITS ──────────────────────────────────────────────────────── */}
+      <AccountUsageTile usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} config={statsConfig.data ?? DEFAULT_STATS_CONFIG} />
 
       {/* ── THE QUEUE ───────────────────────────────────────────────────────── */}
       {!calm && !settling ? (
@@ -210,75 +198,8 @@ export function CommandHome({ density }: { density: Density }) {
         <p className="text-xs text-amber-300/80">{inbox.sourceErrors.join(" · ")}</p>
       ) : null}
 
-      <QuickJumps
-        fleetCount={liveWorkers.length || counts.running}
-        blocked={counts.blocked}
-        shippedToday={shippedToday}
-        accountProviders={accountUsage.data?.providers.length ?? 0}
-        onNavigate={(path) => navigate(path)}
-      />
-
       <FlowCapture onCreated={(id) => navigate(`/control/fleet?task=${encodeURIComponent(id)}`)} />
     </div>
-  );
-}
-
-function AttentionCount({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-xl border border-white/10 bg-black/15 px-2 py-2 text-center">
-      <div className="hc-mono text-base font-semibold tabular-nums text-white">{value}</div>
-      <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{label}</div>
-    </div>
-  );
-}
-
-function AccountUsagePulse({ usage, loading, error }: { usage?: AccountUsageResponse | null; loading: boolean; error?: string | null }) {
-  const providers = usage?.providers ?? [];
-  const available = providers.filter((provider) => provider.available).length;
-  const percents = providers.flatMap((provider) => provider.windows.map((window) => window.used_percent).filter((value): value is number => value != null));
-  const maxPercent = percents.length ? Math.max(...percents) : null;
-  const limited = providers.find((provider) => provider.windows.some((window) => (window.used_percent ?? 0) >= 80));
-  const status = error ? "Fehler" : loading ? "lädt" : limited ? limited.title : `${available}/${providers.length || 0}`;
-  return (
-    <div className="space-y-3 rounded-card border border-line bg-surface p-3">
-      <SectionHeader label="Kosten" meta={status} rule={false} />
-      <div className="grid grid-cols-2 gap-2">
-        <KpiTile label="Accounts" value={loading ? "…" : available} suffix={providers.length ? `/ ${providers.length}` : undefined} dot={error ? "error" : limited ? "warn" : "live"} />
-        <KpiTile label="Max Limit" value={maxPercent == null ? "—" : Math.round(maxPercent)} suffix={maxPercent == null ? undefined : "%"} dot={maxPercent != null && maxPercent >= 80 ? "warn" : "idle"} />
-      </div>
-      <p className="line-clamp-2 text-xs hc-soft">{error ? error : limited ? `${limited.title}: Limit im Blick behalten.` : "Abo-/Provider-Puls ohne den alten Detail-Tiefgang; Details bleiben im Statistik-Tab."}</p>
-    </div>
-  );
-}
-
-function QuickJumps({ fleetCount, blocked, shippedToday, accountProviders, onNavigate }: {
-  fleetCount: number;
-  blocked: number;
-  shippedToday: number;
-  accountProviders: number;
-  onNavigate: (path: string) => void;
-}) {
-  const rows = [
-    { label: "Fleet", detail: `${fleetCount} aktiv`, path: "/control/fleet" },
-    { label: "System", detail: blocked ? `${blocked} blockiert` : "Health" , path: "/control/system" },
-    { label: "Statistik", detail: `${shippedToday} heute`, path: "/control/statistik" },
-    { label: "Regal", detail: `${accountProviders} Provider`, path: "/control/bibliothek" },
-  ];
-  return (
-    <section aria-label="Quick-Jumps" className="space-y-3">
-      <SectionHeader label="Quick-Jumps" meta="Bottom-Bar Einstieg" />
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        {rows.map((row) => (
-          <ListRow
-            key={row.path}
-            title={row.label}
-            meta={row.detail}
-            onClick={() => onNavigate(row.path)}
-            trailing={<ChevronRight className="h-4 w-4 hc-dim" />}
-          />
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -458,14 +379,17 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
     ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
   ];
   return (
-    <div className="hc-glass flex flex-col gap-3 p-3">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <KpiTile label="Laufen" value={running} dot={running > 0 ? "live" : "idle"} />
-        <KpiTile label="Prüfung" value={inReview} dot={inReview > 0 ? "warn" : "idle"} />
-        <KpiTile label="Blockiert" value={blocked} dot={blocked > 0 ? "error" : "idle"} />
-        <KpiTile label="Geliefert" value={shippedToday} suffix="heute" dot="live" />
+    <div className="hc-glass flex flex-col gap-3 p-4">
+      <div className="grid grid-cols-3 gap-3">
+        <RailStat label="Laufen" value={running} tone="cyan" dot={running > 0 ? "live" : "idle"} />
+        <RailStat label="In Prüfung" value={inReview} tone={inReview > 0 ? "amber" : "zinc"} dot={inReview > 0 ? "warn" : "idle"} />
+        <RailStat label="Blockiert" value={blocked} tone={blocked > 0 ? "red" : "zinc"} dot={blocked > 0 ? "error" : "idle"} />
       </div>
-      <div className="border-t border-white/8 pt-3">
+      <div className="flex items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/[.07] px-3 py-2">
+        <span className="text-xs font-medium text-emerald-100/90">Heute geliefert</span>
+        <span className="hc-mono text-lg font-semibold tabular-nums text-emerald-200">{shippedToday}</span>
+      </div>
+      <div className="mt-1 border-t border-white/8 pt-3">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">System</span>
           <StatusPill tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} dot={!health.data ? "idle" : overall === "healthy" ? "live" : overall === "degraded" ? "warn" : "error"} />
@@ -488,6 +412,19 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function RailStat({ label, value, tone, dot }: { label: string; value: number; tone: ToneName; dot: "live" | "warn" | "error" | "idle" }) {
+  void tone;
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[.02] px-2.5 py-2">
+      <div className="flex items-center gap-1.5">
+        <span className={cn("h-1.5 w-1.5 rounded-full", dot === "live" ? "bg-cyan-400" : dot === "warn" ? "bg-amber-400" : dot === "error" ? "bg-red-400" : "bg-zinc-600")} />
+        <span className="text-[10px] font-semibold uppercase tracking-wider hc-dim">{label}</span>
+      </div>
+      <div className="mt-1 hc-mono text-xl font-semibold tabular-nums text-white">{value}</div>
     </div>
   );
 }

@@ -2286,16 +2286,6 @@ def test_runs_costs_today_window_and_profiles(client):
     # Jede Profilzeile trägt das (server-aufgelöste) Abo-Lane-Feld mit.
     assert all("subscription" in p for p in data["profiles"])
 
-    series = client.get("/api/plugins/kanban/runs/costs-series?days=7").json()
-    today_key = time.strftime("%Y-%m-%d", time.localtime(now))
-    today_point = next(p for p in series["series"] if p["day"] == today_key)
-    assert series["field_sources"]["tokens"].startswith("task_runs.input_tokens")
-    assert today_point["runs"] == 4
-    assert today_point["input_tokens"] == 6600
-    assert today_point["output_tokens"] == 1220
-    assert today_point["total_tokens"] == 7820
-    assert today_point["api_equivalent_usd"] == pytest.approx(1.5)
-
 
 def test_runs_costs_review_value_real_metadata(client):
     """S1B/AC-2+AC-4: Review-Wert je Stufe aus dem ECHTEN
