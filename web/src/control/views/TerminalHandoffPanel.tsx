@@ -36,6 +36,7 @@ interface IngestResult {
   subtask_count: number;
   freigabe: string;
   live_test_depth: string;
+  rubric_warnings?: string[];
 }
 interface TaskCreateResult {
   task: { id: string; title?: string; status?: string };
@@ -427,6 +428,21 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                   <div className="mt-1 text-ink-3">
                     Held für Operator-Freigabe — es wurde nichts dispatcht.
                   </div>
+                </ResultBox>
+              )}
+
+              {ingestResult && (ingestResult.rubric_warnings ?? []).length > 0 && (
+                <ResultBox tone="warn">
+                  <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    Ingested mit {(ingestResult.rubric_warnings ?? []).length} Rubrik-Warnung
+                    {(ingestResult.rubric_warnings ?? []).length === 1 ? "" : "en"}
+                  </div>
+                  <ul className="ml-4 list-disc space-y-0.5">
+                    {(ingestResult.rubric_warnings ?? []).map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
                 </ResultBox>
               )}
             </div>

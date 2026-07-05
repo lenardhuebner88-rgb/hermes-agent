@@ -351,7 +351,15 @@ function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Uebersicht
   );
 }
 
-function AktivitaetTab({
+// Review-Economy-Kinds sollen nicht wie un-gereviewte Arbeit aussehen: klare
+// Label + Ton statt des rohen Event-kind (siehe hermes_cli/auto_release.py /
+// Review-Skip-Gates).
+const REVIEW_ECONOMY_KIND_META: Record<string, { label: string; tone: "ok" | "info" }> = {
+  review_skipped_deterministic: { label: "Gates-verifiziert (Review übersprungen)", tone: "ok" },
+  review_deferred_to_tip: { label: "Urteil am Kettenende", tone: "info" },
+};
+
+export function AktivitaetTab({
   events,
   now,
   loading,
@@ -378,10 +386,16 @@ function AktivitaetTab({
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
       {events.slice(0, 20).map((ev) => {
         const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
+        const kindMeta = REVIEW_ECONOMY_KIND_META[ev.kind];
         return (
           <div key={ev.id} className="fleet-activity-row">
             <span className="fleet-activity-time">{age != null ? fmtSeconds(age) : "—"}</span>
-            <span className="fleet-activity-kind">{ev.kind}</span>
+            <span
+              className="fleet-activity-kind"
+              style={kindMeta?.tone === "ok" ? { color: "var(--fleet-gruen)", borderColor: "rgba(67,214,154,.35)" } : undefined}
+            >
+              {kindMeta?.label ?? ev.kind}
+            </span>
             {ev.note ? (
               <span className="fleet-activity-note">{ev.note}</span>
             ) : null}

@@ -19,6 +19,7 @@ import { de } from "../../i18n/de";
 import { usePlanSpecDetail } from "../../hooks/useControlData";
 import type { RunsCostsResponse, LanesCatalogResponse } from "../../lib/schemas";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
+import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
 
@@ -49,6 +50,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
     return (
       <>
         <PlanComposer onIngestSuccess={onApproveSuccess} />
+        <AutoReleaseTile />
         <div className="fleet-empty">
           <p className="fleet-empty-title">{de.fleet.planLeer}</p>
           <p className="fleet-empty-sub">{de.fleet.planLeerDesc}</p>
@@ -60,6 +62,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
   return (
     <>
       <PlanComposer onIngestSuccess={onApproveSuccess} />
+      <AutoReleaseTile />
 
       {/* Liste wartender PlanSpecs — wenn mehr als eine, als auswählbare Chips */}
       {pendingSpecs.length > 1 ? (

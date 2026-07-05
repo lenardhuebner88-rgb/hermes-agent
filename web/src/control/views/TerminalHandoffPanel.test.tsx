@@ -98,6 +98,7 @@ describe("TerminalHandoffPanel", () => {
       subtask_count: 2,
       freigabe: "operator",
       live_test_depth: "smoke",
+      rubric_warnings: [],
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
@@ -111,6 +112,28 @@ describe("TerminalHandoffPanel", () => {
     ));
     expect(await screen.findByText(/t_root9/)).toBeTruthy();
     expect(screen.getByText(/t_c1, t_c2/)).toBeTruthy();
+    expect(screen.queryByText(/Rubrik-Warnung/)).toBeNull();
+  });
+
+  it("shows rubric warnings after ingest when the endpoint reports non-empty rubric_warnings", async () => {
+    fetchJSONMock.mockResolvedValue({
+      ok: true,
+      root_task_id: "t_root10",
+      child_ids: ["t_c1"],
+      subtask_count: 1,
+      freigabe: "operator",
+      live_test_depth: "smoke",
+      rubric_warnings: ["done-when fehlt in Slice 'Compile children'", "kein AC referenziert"],
+    });
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
+    await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ingest/ }));
+
+    expect(await screen.findByText(/Ingested mit 2 Rubrik-Warnungen/)).toBeTruthy();
+    expect(screen.getByText("done-when fehlt in Slice 'Compile children'")).toBeTruthy();
+    expect(screen.getByText("kein AC referenziert")).toBeTruthy();
   });
 
   it("creates a Kanban triage task via the existing task API with triage=true (AC-5)", async () => {
