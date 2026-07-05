@@ -126,14 +126,17 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
   // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
   const [moreOpen, setMoreOpen] = useState(false);
   const moreActive = !mobileTabs.some((tab) => tab.id === active);
-  // Fleet-Tab: full-bleed dunkel auf Mobil (Operator-Feedback von echten
-  // Handy-Screenshots) — der Fleet-Root bringt sein eigenes dunkles Header/Chip-
-  // Set mit ([data-fleet-theme] .fleet-header), daher entfällt der helle
-  // Shell-Header unter lg; die Bottom-Nav bleibt unverändert die Mobil-Navigation.
+  // Fleet/Start: full-bleed dunkel auf Mobil (Operator-Feedback von echten
+  // Handy-Screenshots) — beide Roots bringen ihr eigenes dunkles Header-Set mit
+  // ([data-fleet-theme] .fleet-header bzw. [data-command-home] .ch-masthead),
+  // daher entfällt der helle Shell-Header unter lg; die Bottom-Nav bleibt
+  // unverändert die Mobil-Navigation.
   const fleetBleed = active === "fleet";
+  const commandHomeBleed = active === "inbox";
+  const mobileBleed = fleetBleed || commandHomeBleed;
   return (
-    <div className={cn("hc-page flex min-h-0 flex-col pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))]", fleetBleed ? "fleet-bleed px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8")}>
-      <header className={cn("mb-4 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between", fleetBleed ? "hidden lg:flex" : "flex")}>
+    <div className={cn("hc-page flex min-h-0 flex-col pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))]", fleetBleed && "fleet-bleed", mobileBleed ? "px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8")}>
+      <header className={cn("mb-4 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between", mobileBleed ? "hidden lg:flex" : "flex")}>
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
         <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} strategistCount={strategistCount ?? 0} onNavigate={onNavigate} onPrefetch={onPrefetch} />
@@ -176,7 +179,10 @@ function MoreSheet({ onClose }: { onClose: () => void }) {
 function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   // Fleet-Tab: gleiches dunkles Background-Treatment wie ShellAiry (keine
   // Struktur-Umbauten an der Rail — nur der helle Papier-Rahmen fällt weg).
+  // Start bringt wie Fleet seinen eigenen Masthead mit; der Legacy-Shell-Header
+  // wird nur dort unterdrückt, damit die Rail/andere Views unverändert bleiben.
   const fleetBleed = active === "fleet";
+  const commandHomeBleed = active === "inbox";
   return (
     <div className={cn("hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0", fleetBleed && "fleet-bleed")}>
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
@@ -189,7 +195,7 @@ function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inbo
         <PanelLeft className="h-4 w-4 hc-dim" />
       </aside>
       <div className="min-w-0 px-6 py-5">
-        <header className="mb-5 flex items-center justify-between gap-3">
+        <header className={cn("mb-5 items-center justify-between gap-3", commandHomeBleed ? "hidden" : "flex")}>
           <div><p className="hc-eyebrow">Hermes Control</p><h1 className="mt-1 text-xl font-semibold text-white">{tabs.find((t) => t.id === active)?.label}</h1></div>
           <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><StatusDots health={health} /></div>
         </header>
