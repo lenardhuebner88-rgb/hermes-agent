@@ -1393,6 +1393,123 @@ def test_red_gate_reverts_merge_and_parks(repo):
     assert head_subject.startswith("Revert")
 
 
+def _red_gate_web(_repo, _files):
+    """Stub mimicking a real ``tsc -b`` failure label — the incident shape
+    (t_2fa852c6): AutoReleaseTile.test.tsx is an untracked foreign file."""
+    return False, "tsc -b: exit 2\nerror TS2345 in AutoReleaseTile.test.tsx"
+
+
+def _red_gate_python(_repo, _files):
+    """Stub mimicking a real ``pytest[N]`` failure label."""
+    return False, "pytest[1]: exit 1\nFAILED tests/hermes_cli/test_wip_broken.py"
+
+
+def test_foreign_dirty_web_file_in_failing_stage_parks_as_foreign_dirty_checkout(repo):
+    """P1 2026-07-05 (t_2fa852c6): a foreign session's untracked WIP file
+    OUTSIDE this chain's own diff (AutoReleaseTile.test.tsx analogue) fails
+    the FIRST failing gate stage (tsc, web scope). The park must attribute
+    this honestly instead of the generic chain-blame 'post-merge gate
+    failed' reason."""
+    info = _provisioned_chain(repo, "t_fdc_web", relpath="feature.py")
+    foreign = repo / "web" / "src" / "control" / "AutoReleaseTile.test.tsx"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("// half-finished foreign test\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_web)
+    assert out["action"] == "parked"
+    assert out["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert not out["reason"].startswith("post-merge gate failed")
+    assert "AutoReleaseTile.test.tsx" in out["reason"]
+    assert out["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
+    # Revert-as-chain-fault mechanics unchanged: the live branch stays green
+    # regardless of WHY the gate failed.
+    assert out["reverted"] is True
+    head_subject = _git(repo, "log", "-1", "--format=%s")
+    assert head_subject.startswith("Revert")
+    # No chain-blame: the park must classify "transient" (bounded
+    # integration-retry self-heal), NEVER "needs_orchestrator" (the
+    # conflict-fixer lane that dispatches a fixer to "repair" code that was
+    # never broken — kanban_db.py's no_silent_stall_sweep §5).
+    assert kwt._integration_park_class(out["reason"]) == "transient"
+    # Foreign file untouched.
+    assert foreign.read_text() == "// half-finished foreign test\n"
+
+
+def test_foreign_dirty_python_file_in_failing_stage_parks_as_foreign_dirty_checkout(repo):
+    """Same incident shape for the python gate: a foreign broken tests/
+    file fails the pytest stage."""
+    info = _provisioned_chain(repo, "t_fdc_py", relpath="feature.py")
+    foreign = repo / "tests" / "hermes_cli" / "test_wip_broken.py"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("def test_x():\n    assert False\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_python)
+    assert out["action"] == "parked"
+    assert out["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert "tests/hermes_cli/test_wip_broken.py" in out["reason"]
+    assert kwt._integration_park_class(out["reason"]) == "transient"
+
+
+def test_red_gate_without_foreign_dirty_keeps_generic_classification(repo):
+    """DONE-WHEN (b) regression: a red gate with NO foreign dirty files in
+    the failing stage's scope keeps today's generic 'post-merge gate failed'
+    park + revert, byte-identical to test_red_gate_reverts_merge_and_parks."""
+    info = _provisioned_chain(repo, "t_red_clean", relpath="breaks.py")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_web)
+    assert out["action"] == "parked"
+    assert out["reason"].startswith("post-merge gate failed:")
+    assert "park_class" not in out
+    assert out["reverted"] is True
+
+
+def test_foreign_dirty_web_file_with_green_gate_flags_gate_environment(repo):
+    """DONE-WHEN (c), FALSE-GREEN: gate passes, but a foreign dirty file sat
+    in a scope the gate actually exercised (web/, since this chain's own
+    diff also touches web/) — the merge still lands, but the result carries
+    gate_environment=foreign_dirty so this green is never mistaken for a
+    clean-checkout green."""
+    info = _provisioned_chain(
+        repo, "t_fdc_green", relpath="web/src/control/Foo.tsx",
+        content="export const x = 1;\n",
+    )
+    foreign = repo / "web" / "src" / "control" / "AutoReleaseTile.test.tsx"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("// half-finished foreign test\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_ok_gate)
+    assert out["action"] == "merged"
+    assert out["gate_environment"] == "foreign_dirty"
+    assert out["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
+
+
+def test_clean_checkout_green_has_no_gate_environment_flag(repo):
+    """DONE-WHEN (4) regression: a genuinely clean checkout must not gain the
+    additive gate_environment metadata — identical behavior to today."""
+    info = _provisioned_chain(repo, "t_clean_green", relpath="feature.py")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_ok_gate)
+    assert out["action"] == "merged"
+    assert "gate_environment" not in out
+    assert "foreign_dirty_files" not in out
+
+
+def test_overlapping_dirty_file_parks_by_overlap_not_foreign_dirty_checkout(repo):
+    """DONE-WHEN (d) regression: a dirty file that OVERLAPS the branch diff
+    still parks via the pre-existing overlap pre-check (a), unaffected by the
+    new foreign-dirty-checkout classification introduced above."""
+    info = _provisioned_chain(repo, "t_ovl_regression", relpath="a.txt",
+                              content="branch change\n")
+    (repo / "a.txt").write_text("manual session edit\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_web)
+    assert out["action"] == "parked"
+    assert out["reason"].startswith(
+        "dirty files in live checkout overlap the branch diff:"
+    )
+    assert "park_class" not in out
+
+
 def test_reverted_merge_is_reintegrated_not_clean(repo):
     info = _provisioned_chain(repo, "t_reverted", relpath="restored.py")
     gate_results = iter([(False, "first gate failed"), (True, "gate ok")])
@@ -1424,6 +1541,49 @@ def test_reverted_merge_is_reintegrated_not_clean(repo):
     assert "revert_commit" in out2
     assert (repo / "restored.py").read_text() == "VALUE = 1\n"
     assert not info["path"].exists()
+
+
+def test_reintegration_red_gate_with_foreign_dirty_parks_as_foreign_dirty_checkout(repo):
+    """Coordinator follow-up 2026-07-06: integrate_chain's OTHER gate call
+    site — the ancestry reintegration-after-revert branch (same shape as
+    test_reverted_merge_is_reintegrated_not_clean) — gets the same
+    foreign-dirty-checkout attribution as the standard merge path, via the
+    shared ``_gate_with_foreign_dirty_evidence`` helper."""
+    info = _provisioned_chain(repo, "t_reint_fdc", relpath="restored.py")
+    gate_results = iter([
+        (False, "first gate failed"),
+        (False, "tsc -b: exit 2\nerror TS2345 in AutoReleaseTile.test.tsx"),
+    ])
+
+    out1 = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main",
+        gate_runner=lambda _repo, _files: next(gate_results),
+    )
+    assert out1["action"] == "parked"
+    assert kwt._branch_is_ancestor(repo, info["branch"], "main") is True
+
+    # A foreign session leaves an untracked WIP file behind between the
+    # first (generic) park and the second (reintegration) attempt.
+    foreign = repo / "web" / "src" / "control" / "AutoReleaseTile.test.tsx"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("// half-finished foreign test\n")
+
+    out2 = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main",
+        gate_runner=lambda _repo, _files: next(gate_results),
+    )
+
+    assert out2["action"] == "parked"
+    assert out2["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert out2["reintegrated_after_revert"] is True
+    assert "restored_commit" in out2
+    assert not out2["reason"].startswith("post-reintegration gate failed")
+    assert "AutoReleaseTile.test.tsx" in out2["reason"]
+    assert out2["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
+    # No chain-blame: transient, not needs_orchestrator.
+    assert kwt._integration_park_class(out2["reason"]) == "transient"
+    # Foreign file untouched.
+    assert foreign.read_text() == "// half-finished foreign test\n"
 
 
 def test_integration_parked_writes_full_gate_output_comment(kanban_home):
@@ -2736,3 +2896,46 @@ def test_release_gate_fixer_max_retries_config(kanban_home, monkeypatch):
     # env wins over config
     monkeypatch.setenv("HERMES_RELEASE_GATE_FIXER_MAX_RETRIES", "1")
     assert kwt.release_gate_fixer_max_retries() == 1
+
+
+def _red_gate_ruff(_repo, _files):
+    """Stub mimicking a real ruff failure. ruff lints ONLY the chain's own
+    diff .py files (default_quick_gate's _changed_py), so a red ruff stage is
+    chain fault by construction."""
+    return False, "ruff: exit 1\nfeature.py:1:1: F821 undefined name"
+
+
+def _red_gate_vitest_missing(_repo, _files):
+    """Stub of the fail-closed missing-binary message whose label collides
+    with the vitest[control] stage prefix (real string from
+    default_quick_gate)."""
+    return False, ("vitest[control]: web/ in diff but "
+                   "vitest not found in web/ or root node_modules/.bin")
+
+
+def test_ruff_failure_never_foreign_attributed(repo):
+    """Codex review finding 1 (2026-07-06): a foreign dirty .py nearby must
+    NOT exculpate a red ruff stage — ruff never reads non-diff files."""
+    info = _provisioned_chain(repo, "t_ruff_own_fault", relpath="feature.py")
+    foreign = repo / "foreign_wip.py"
+    foreign.write_text("this is not python\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_ruff)
+    assert out["action"] == "parked"
+    assert out.get("park_class") != kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert out["reason"].startswith("post-merge gate failed")
+
+
+def test_missing_binary_failure_never_foreign_attributed(repo):
+    """Codex finding 2 follow-up: only a real run failure ('exit N') is
+    evidence the stage exercised the contaminated tree — the vitest-missing
+    fail-closed message is a tooling problem, not foreign dirt."""
+    info = _provisioned_chain(repo, "t_vitest_missing", relpath="feature.py")
+    foreign = repo / "web" / "src" / "control" / "Wip.tsx"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("// foreign wip\n")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_red_gate_vitest_missing)
+    assert out["action"] == "parked"
+    assert out.get("park_class") != kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert out["reason"].startswith("post-merge gate failed")

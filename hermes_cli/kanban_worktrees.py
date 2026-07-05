@@ -142,6 +142,14 @@ _ARTIFACT_RECEIPTS_ROOT = Path(
 DIRTY_WORKTREE_CLASS = "DIRTY_WORKTREE"
 PRESERVABLE_ARTIFACTS_CLASS = "PRESERVABLE_ARTIFACTS"
 ARTIFACT_POLICY_MISSING_CLASS = "ARTIFACT_POLICY_MISSING"
+# P1 2026-07-05 (t_2fa852c6): the post-merge gate runs in the shared LIVE
+# checkout, so a foreign session's untracked/dirty file OUTSIDE this chain's
+# OWN diff (e.g. a half-written AutoReleaseTile.test.tsx from a parallel
+# session) can fail the gate even though the chain's own diff is clean. This
+# park class attributes that honestly instead of the generic "post-merge gate
+# failed" chain-blame reason — see ``_gate_stage_scope_predicate`` and its use
+# in ``integrate_chain``.
+FOREIGN_DIRTY_CHECKOUT_CLASS = "foreign_dirty_checkout"
 
 
 def _is_ignorable_dirty_path(path: str) -> bool:
@@ -236,6 +244,16 @@ def _integration_park_class(reason: str) -> str:
         "chain worktree has uncommitted changes:",
         "dirty files in live checkout overlap the branch diff:",
         "chain worktree missing before rebase",
+        # P1 2026-07-05 (t_2fa852c6): a foreign session's dirty file in the
+        # FIRST failing gate stage's scope is environment contamination, not
+        # a defect in this chain's own diff — self-clears once the foreign
+        # session commits/cleans up, so it belongs in the bounded
+        # integration-retry lane (its own counter, never auto_retry_count/
+        # consecutive_failures) rather than the needs_orchestrator
+        # conflict-fixer lane below (which would dispatch a fixer to "repair"
+        # code that was never broken — the chain-blame this park exists to
+        # avoid).
+        "foreign dirty checkout (",
     )
     if text.startswith(transient_prefixes):
         return "transient"
@@ -2365,6 +2383,144 @@ def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
     return None
 
 
+# Path-membership predicates for the two scopes ``default_quick_gate`` itself
+# gates its stages on — ``_changed_py`` (``f.endswith(".py")``, gates
+# ruff+pytest) and ``any(f.startswith("web/") ...)`` (gates lint:control/
+# tsc/vitest/the visual gate). Deliberately mirrors those exact conditions
+# rather than a hand-picked directory allowlist: ruff/pytest select by file
+# suffix/mapping regardless of which top-level dir a .py file lives in, so a
+# fixed prefix list (e.g. only hermes_cli/, tests/, scripts/) would silently
+# miss changes elsewhere in the repo.
+def _py_gate_scope(path: str) -> bool:
+    return path.endswith(".py")
+
+
+def _web_gate_scope(path: str) -> bool:
+    return path.startswith("web/")
+
+
+# Leading ``label:`` token (as emitted by ``default_quick_gate``'s internal
+# ``_run`` helper / the visual-gate error builders) for each stage, mapped to
+# its scope predicate above. Used to attribute a RED gate to the scope of the
+# FIRST failing stage (default_quick_gate short-circuits on the first
+# failure, so ``detail``'s label IS that stage).
+# ``ruff`` is deliberately ABSENT from the py prefixes: default_quick_gate runs
+# ruff exclusively over the chain's OWN diff files (``_changed_py``), so a ruff
+# failure can never be caused by a foreign non-diff file — attributing it to
+# foreign dirt would falsely exculpate a genuinely broken chain (Codex review
+# finding 1, 2026-07-06). pytest stays: affected test modules import shared
+# code and conftests, so any foreign dirty .py can break that stage.
+# ``visual-gate`` is listed but its failures are free-form (``visual-gate:
+# <message>``, no ``exit N`` remainder), so the run-failure guard in
+# ``_gate_stage_scope_predicate`` keeps it unattributed — conservative default.
+_GATE_STAGE_SCOPES: tuple[tuple[tuple[str, ...], Callable[[str], bool]], ...] = (
+    (("pytest[",), _py_gate_scope),
+    (("lint:control", "tsc -b", "vitest[control]", "visual-gate"), _web_gate_scope),
+)
+
+
+def _gate_stage_label(detail: str) -> str:
+    """The leading ``label`` of a gate ``detail`` string, as emitted by
+    ``default_quick_gate``'s internal ``_run`` helper (``f"{label}: {msg}"``).
+
+    Splits on the first ``": "`` (colon-SPACE), not bare ``":"``: the
+    ``lint:control`` label itself contains a colon, so a bare-``":"`` split
+    would truncate it to ``lint`` and lose the match below."""
+    return (detail or "").split(": ", 1)[0].strip()
+
+
+def _gate_stage_scope_predicate(detail: str) -> Optional[Callable[[str], bool]]:
+    """Scope predicate for the stage that produced gate ``detail``, or
+    ``None`` when the leading label doesn't match a known stage (a crashed
+    gate, a custom test ``gate_runner``, or the FO ``npm run build`` gate) —
+    callers then treat the scope as indeterminate and skip foreign-dirty
+    attribution rather than guess."""
+    label = _gate_stage_label(detail)
+    # Only a real RUN failure of the stage (``<label>: exit N``) is evidence
+    # the stage executed against the contaminated tree. TIMEOUT, ``command
+    # not found`` and the fail-closed missing-binary messages ("tsc: web/ in
+    # diff but tsc not found...", "vitest[control]: ... not found") are
+    # tooling/environment problems — foreign dirty files are not the cause,
+    # so those must keep today's generic classification (Codex review
+    # finding 2 + the vitest-missing collision, 2026-07-06).
+    remainder = (detail or "").split(": ", 1)
+    if len(remainder) < 2 or not remainder[1].lstrip().startswith("exit "):
+        return None
+    for prefixes, predicate in _GATE_STAGE_SCOPES:
+        if label.startswith(prefixes):
+            return predicate
+    return None
+
+
+def _quick_gate_scopes_attempted(changed_files: list[str]) -> list[Callable[[str], bool]]:
+    """Scope predicates for every stage ``default_quick_gate`` actually runs
+    for *changed_files* — the same conditions the gate uses to decide whether
+    to run each stage at all. Used on the GREEN path: when the gate passes,
+    ANY attempted stage could have run against a foreign dirty file within its
+    scope without failing loudly (a false green)."""
+    scopes: list[Callable[[str], bool]] = []
+    if any(_py_gate_scope(f) for f in changed_files):
+        scopes.append(_py_gate_scope)
+    if any(_web_gate_scope(f) for f in changed_files):
+        scopes.append(_web_gate_scope)
+    return scopes
+
+
+def _foreign_dirty_checkout_reason(detail: str, foreign_files: list[str]) -> str:
+    """Park reason for the ``FOREIGN_DIRTY_CHECKOUT_CLASS`` path — the
+    ``_integration_park_class`` transient prefix (``"foreign dirty checkout
+    ("``) must match the start of this string exactly."""
+    return (
+        "foreign dirty checkout ("
+        + (_gate_stage_label(detail) or "gate")
+        + " stage): " + ", ".join(foreign_files[:10])
+    )
+
+
+def _gate_with_foreign_dirty_evidence(
+    repo_root: Path,
+    diff_files: list[str],
+    gate: Callable[[Path, list[str]], tuple[bool, str]],
+) -> tuple[bool, str, list[str]]:
+    """Run *gate* and additionally report which foreign (non-diff) dirty
+    files in the live checkout sat within the scope the gate exercised.
+
+    Shared by BOTH ``integrate_chain`` gate call sites — the standard merge
+    and the ancestry reintegration-after-revert branch — so the P1
+    2026-07-05 (t_2fa852c6) foreign-dirty-checkout attribution logic isn't
+    duplicated. Callers own the git revert mechanics and the ``parked``/
+    result dict shape (which legitimately differ between the two sites).
+
+    Returns ``(ok, detail, foreign_files)``:
+    - RED (``ok`` is False): ``foreign_files`` = foreign dirty files within
+      the FIRST failing stage's scope (empty if none, or the label doesn't
+      match a known stage — caller keeps today's generic gate-failed park).
+    - GREEN (``ok`` is True): ``foreign_files`` = foreign dirty files within
+      ANY stage *gate* actually attempted for *diff_files* (empty if none —
+      caller's result stays a plain green, no ``gate_environment`` flag).
+    """
+    # Snapshot taken right before the gate runs so it reflects the ACTUAL
+    # environment the gate is about to be exercised against. The overlap
+    # pre-check (a) in integrate_chain already parked anything intersecting
+    # diff_files, so everything here is genuinely foreign.
+    foreign_dirty = sorted(set(dirty_files(repo_root)) - set(diff_files))
+    try:
+        ok, detail = gate(repo_root, diff_files)
+    except Exception as exc:  # a broken gate must not pass silently
+        ok, detail = False, f"gate crashed: {exc}"
+    if not foreign_dirty:
+        return ok, detail, []
+    if not ok:
+        scope_pred = _gate_stage_scope_predicate(detail)
+        foreign_files = [f for f in foreign_dirty if scope_pred(f)] if scope_pred else []
+    else:
+        scopes_attempted = _quick_gate_scopes_attempted(diff_files)
+        foreign_files = sorted(
+            f for f in foreign_dirty if any(pred(f) for pred in scopes_attempted)
+        )
+    return ok, detail, foreign_files
+
+
 def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
     """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
     modules; when the diff touches ``web/``, run lint:control,
@@ -2705,10 +2861,14 @@ def integrate_chain(
                                 if _is_fo_repo(repo_root)
                                 else default_quick_gate
                             )
-                            try:
-                                ok, detail = gate(repo_root, diff_files)
-                            except Exception as exc:
-                                ok, detail = False, f"gate crashed: {exc}"
+                            # Same foreign-dirty-checkout attribution as the
+                            # standard merge path below (P1 2026-07-05,
+                            # t_2fa852c6) — shared helper, not duplicated.
+                            ok, detail, foreign_files = (
+                                _gate_with_foreign_dirty_evidence(
+                                    repo_root, diff_files, gate,
+                                )
+                            )
                             if not ok:
                                 try:
                                     _git(
@@ -2723,6 +2883,24 @@ def integrate_chain(
                                     _git(repo_root, "revert", "--abort", check=False)
                                     reverted = False
                                     detail += f" — AND REVERT FAILED: {exc}"
+                                if foreign_files:
+                                    # Attribute honestly instead of the
+                                    # generic "post-reintegration gate
+                                    # failed" reason — same chain-blame
+                                    # concern as the standard merge path.
+                                    return parked(
+                                        _foreign_dirty_checkout_reason(
+                                            detail, foreign_files,
+                                        ),
+                                        park_class=FOREIGN_DIRTY_CHECKOUT_CLASS,
+                                        foreign_dirty_files=foreign_files[:10],
+                                        merge_commit=merge_commit,
+                                        revert_commit=restore_commit,
+                                        restored_commit=restored_commit,
+                                        reverted=reverted,
+                                        reintegrated_after_revert=True,
+                                        gate_output=detail,
+                                    )
                                 return parked(
                                     f"post-reintegration gate failed: {detail}",
                                     merge_commit=merge_commit,
@@ -2746,6 +2924,9 @@ def integrate_chain(
                                 "changed_files": diff_files,
                                 "reintegrated_after_revert": True,
                             }
+                            if foreign_files:
+                                result["gate_environment"] = "foreign_dirty"
+                                result["foreign_dirty_files"] = foreign_files[:10]
                             if artifact_receipt:
                                 result["artifact_receipt"] = artifact_receipt
                             return result
@@ -2822,13 +3003,15 @@ def integrate_chain(
             merge_commit = _git(repo_root, "rev-parse", "HEAD")
 
             # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
+            # ``_gate_with_foreign_dirty_evidence`` additionally reports any
+            # foreign (non-diff) dirty file in the live checkout that sat
+            # within the scope the gate exercised (P1 2026-07-05, t_2fa852c6).
             gate = gate_runner or (
                 fo_integration_gate if _is_fo_repo(repo_root) else default_quick_gate
             )
-            try:
-                ok, detail = gate(repo_root, diff_files)
-            except Exception as exc:  # a broken gate must not pass silently
-                ok, detail = False, f"gate crashed: {exc}"
+            ok, detail, foreign_files = _gate_with_foreign_dirty_evidence(
+                repo_root, diff_files, gate,
+            )
             if not ok:
                 try:
                     _git(repo_root, "revert", "-m", "1", "--no-edit",
@@ -2838,6 +3021,22 @@ def integrate_chain(
                     _git(repo_root, "revert", "--abort", check=False)
                     reverted = False
                     detail += f" — AND REVERT FAILED: {exc}"
+                if foreign_files:
+                    # Attribute honestly instead of the generic "post-merge
+                    # gate failed" reason: that prefix classifies
+                    # needs_orchestrator (kanban_db._integration_park_class),
+                    # which dispatches a coder-claude conflict-fixer to
+                    # "repair" this chain's code — chain-blame for a failure
+                    # this chain's own diff didn't cause. The revert above is
+                    # unchanged: the live branch must stay green regardless of
+                    # WHY the gate failed.
+                    return parked(
+                        _foreign_dirty_checkout_reason(detail, foreign_files),
+                        park_class=FOREIGN_DIRTY_CHECKOUT_CLASS,
+                        foreign_dirty_files=foreign_files[:10],
+                        merge_commit=merge_commit, reverted=reverted,
+                        gate_output=detail,
+                    )
                 return parked(
                     f"post-merge gate failed: {detail}",
                     merge_commit=merge_commit, reverted=reverted,
@@ -2855,6 +3054,15 @@ def integrate_chain(
                 "files": len(diff_files),
                 "changed_files": diff_files,
             }
+            if foreign_files:
+                # Evidence-honesty (GREEN path): the gate passed, but a
+                # foreign dirty file sat within a stage it actually ran —
+                # flag the contaminated environment additively so this green
+                # is never read as a clean-checkout green (the same
+                # contamination can also mask a real regression this chain
+                # WOULD have caught in a clean tree).
+                result["gate_environment"] = "foreign_dirty"
+                result["foreign_dirty_files"] = foreign_files[:10]
             if artifact_receipt:
                 result["artifact_receipt"] = artifact_receipt
             return result
