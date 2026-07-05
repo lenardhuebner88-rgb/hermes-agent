@@ -39,8 +39,6 @@ utilities.
 8. **No raw hex in components.** Every color in `web/src/control` components comes from a token (Tailwind utility like `bg-surface-1`, `text-ink-2`, `border-line`) — never a literal `#hex` or arbitrary `[#...]`/`[rgb(...)]` class. Enforced by the ratchet in `scripts/gate-frontend.sh`.
 9. **Mobile**: no desktop tables. A table collapses to a card list; a card expands into a drawer for details. The active chain/session stays visible at all times (no dead-end views that hide current state).
 10. **Extend the mockup first.** If a new pattern isn't covered here, add it to the mockup, get it approved, then port the tokens/rules here — don't invent ad hoc colors in components.
-11. **One design language.** The Leitstand surfaces above are the only page canvas. A parallel visual language (own token set, light "broadsheet" surface, serif display type, …) is a design decision the operator makes explicitly per view and that gets recorded here — token-cleanliness and shared-component usage do NOT make an alternative skin compliant. Incident: Phase 3 S2 shipped CommandHome as a light broadsheet surface that passed every mechanical gate (2026-07-05).
-12. **Redesign means visible change, proven visually.** Any task whose goal is design work must ship a side-by-side screenshot against the reference (Fleet tab or the approved mockup) as completion evidence, and the review verdict must answer explicitly: "would a viewer attribute this view and Fleet to the same app?" Console-0-errors and a green ratchet are necessary, never sufficient.
 
 ## Building blocks (shared components)
 

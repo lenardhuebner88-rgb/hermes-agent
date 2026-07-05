@@ -63,13 +63,13 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       </div>
 
       {showForm && (
-        <div className="mt-3 hc-surface-card p-3">
-          <div className="hc-type-label hc-dim">Neue Karte</div>
+        <div className="mt-3 rounded-panel border border-line bg-surface-2 p-3">
+          <div className="hc-type-label text-ink-3">Neue Karte</div>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Titel — z. B. Header überlappt auf Tablet"
-            className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white"
+            className="mt-2 w-full rounded-card border border-line bg-surface-3 p-2 text-sm text-ink placeholder:text-ink-3"
           />
           <div className="mt-2 flex flex-wrap gap-2">
             {KINDS.map((k) => (
@@ -77,7 +77,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
                 key={k}
                 onClick={() => setKind(k)}
                 className={`rounded-card border border-line px-2 py-1 hc-type-label ${
-                  kind === k ? "text-live" : "hc-dim"
+                  kind === k ? "text-live" : "text-ink-3"
                 }`}
               >
                 {k}
@@ -88,12 +88,12 @@ export function DesignBoardView(_props: { density?: string } = {}) {
             value={targetView}
             onChange={(e) => setTargetView(e.target.value)}
             placeholder="Ziel-View (optional) — z. B. FleetView"
-            className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white"
+            className="mt-2 w-full rounded-card border border-line bg-surface-3 p-2 text-sm text-ink placeholder:text-ink-3"
           />
           <button
             onClick={createCard}
             disabled={busy || !title.trim()}
-            className="mt-2 rounded-card border border-line px-3 py-1 text-sm text-live"
+            className="mt-2 rounded-card border border-live px-3 py-1 text-sm text-live disabled:opacity-45"
           >
             Karte anlegen & Screenshot hinzufügen
           </button>
