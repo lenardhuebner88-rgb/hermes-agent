@@ -9321,6 +9321,17 @@ def _review_gate_config() -> dict:
     standard_uses_llm_verifier = _coerce_config_bool(
         rg.get("standard_uses_llm_verifier", True), default=True
     )
+    # B2: ONE LLM judgment per feature — review-tier slices of a PlanSpec chain
+    # defer their review to the chain tip (the last open code slice, i.e. the
+    # integrated diff). Default False = today's per-slice behavior.
+    judge_at_chain_tip = _coerce_config_bool(
+        rg.get("judge_at_chain_tip", False), default=False
+    )
+    # critical stays per-slice unless the operator explicitly flips this —
+    # the grill decision kept critical-early reviewable behind config.
+    critical_reviews_each_slice = _coerce_config_bool(
+        rg.get("critical_reviews_each_slice", True), default=True
+    )
     return {
         "enabled": _coerce_config_bool(rg.get("enabled", False), default=False),
         "code_roles": code_roles,
@@ -9332,6 +9343,8 @@ def _review_gate_config() -> dict:
         "auto_scout_on_critical": auto_scout_on_critical,
         "scout_max_runtime_seconds": rg.get("scout_max_runtime_seconds"),
         "standard_uses_llm_verifier": standard_uses_llm_verifier,
+        "judge_at_chain_tip": judge_at_chain_tip,
+        "critical_reviews_each_slice": critical_reviews_each_slice,
     }
 
 
@@ -10087,6 +10100,52 @@ def _deterministic_review_skip(
         return None
     if _effective_review_tier(conn, task_id, cfg=cfg) != "standard":
         return None
+    stamp = _run_worker_gate(conn, task_id)
+    if stamp.get("passed") is True:
+        return stamp
+    return None
+
+
+def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """B2 tip judgment: decide whether this review-tier slice defers its LLM
+    review to the chain tip (ONE judgment per feature, on the integrated diff).
+
+    Applies ONLY when all of: ``judge_at_chain_tip`` is on (opt-in), the task
+    belongs to a PlanSpec chain (``planspec_source`` set), its effective tier
+    participates (``review``; ``critical`` only when the operator explicitly
+    flipped ``critical_reviews_each_slice`` off), the chain still has OTHER
+    open code-bearing slices (i.e. this is NOT the tip — tip detection counts
+    code roles only, so a trailing docs/scribe task never swallows the chain's
+    single judgment), AND the deterministic worker gate ran GREEN. Returns the
+    green stamp on defer, ``None`` otherwise (park in review as before).
+    """
+    cfg = _review_gate_config()
+    if not cfg.get("judge_at_chain_tip", False):
+        return None
+    tier = _effective_review_tier(conn, task_id, cfg=cfg)
+    if tier == "standard":
+        return None
+    if tier == "critical" and cfg.get("critical_reviews_each_slice", True):
+        return None
+    row = conn.execute(
+        "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    source = (row["planspec_source"] or "").strip() if row else ""
+    if not source:
+        return None
+    code_roles = sorted(cfg.get("code_roles") or ())
+    if not code_roles:
+        return None
+    placeholders = ",".join("?" for _ in code_roles)
+    open_code_siblings = conn.execute(
+        "SELECT COUNT(*) FROM tasks "
+        "WHERE planspec_source = ? AND id != ? "
+        "  AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+        f"  AND lower(trim(assignee)) IN ({placeholders})",
+        (source, task_id, *code_roles),
+    ).fetchone()[0]
+    if not open_code_siblings:
+        return None  # this IS the tip — the one judgment fires here
     stamp = _run_worker_gate(conn, task_id)
     if stamp.get("passed") is True:
         return stamp
@@ -11055,6 +11114,12 @@ def complete_task(
             # below. None → park in review as before (safety floor). A RED
             # gate raises WorkerGateError exactly like the submission path.
             _skip_stamp = _deterministic_review_skip(conn, task_id)
+            # B2 tip judgment: a non-tip review-tier slice of a PlanSpec chain
+            # defers its LLM review to the chain tip — green deterministic
+            # gate required, audit-stamped, then falls through to done.
+            _defer_stamp = (
+                None if _skip_stamp is not None else _tip_defer_review(conn, task_id)
+            )
             if _skip_stamp is not None:
                 with write_txn(conn):
                     _append_event(
@@ -11062,6 +11127,14 @@ def complete_task(
                         task_id,
                         "review_skipped_deterministic",
                         {"worker_gate": _skip_stamp, "tier": "standard"},
+                    )
+            elif _defer_stamp is not None:
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "review_deferred_to_tip",
+                        {"worker_gate": _defer_stamp},
                     )
             else:
                 submitted = _submit_for_review(

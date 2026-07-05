@@ -214,3 +214,147 @@ def test_review_gate_config_parses_standard_flag(kanban_home, monkeypatch):
         )
     )
     assert kb._review_gate_config()["standard_uses_llm_verifier"] is False
+
+
+# ---------------------------------------------------------------------------
+# B2: judge once at the chain tip (review tier), not per slice
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tip_judgment_on(monkeypatch):
+    """Review gate ON + judge_at_chain_tip: review-tier slices defer to tip."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: _gate_cfg(judge_at_chain_tip=True)
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    return True
+
+
+def _planspec_chain(conn, repo, n=3, tier="review", source="/tmp/spec.md"):
+    tids = []
+    for i in range(n):
+        tid = kb.create_task(
+            conn,
+            title=f"slice {i + 1}",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier=tier,
+        )
+        conn.execute(
+            "UPDATE tasks SET planspec_source = ? WHERE id = ?", (source, tid)
+        )
+        tids.append(tid)
+    conn.commit()
+    return tids
+
+
+def test_review_fires_at_tip_not_per_slice(
+    kanban_home, tip_judgment_on, tmp_path, monkeypatch
+):
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        t1, t2, t3 = _planspec_chain(conn, repo)
+        for tid in (t1, t2):
+            kb.claim_task(conn, tid)
+            assert kb.complete_task(conn, tid, summary="s", review_gate=True)
+            assert kb.get_task(conn, tid).status == "done", tid
+            deferred = conn.execute(
+                "SELECT 1 FROM task_events "
+                "WHERE task_id = ? AND kind = 'review_deferred_to_tip'",
+                (tid,),
+            ).fetchone()
+            assert deferred is not None, tid
+        # last open code slice = the tip -> full review chain fires here
+        kb.claim_task(conn, t3)
+        assert kb.complete_task(conn, t3, summary="s", review_gate=True)
+        assert kb.get_task(conn, t3).status == "review"
+        submitted = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review'",
+            (t3,),
+        ).fetchone()
+        assert submitted is not None
+
+
+def test_critical_slice_still_reviewed_individually(
+    kanban_home, tip_judgment_on, tmp_path, monkeypatch
+):
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        t1, _t2, _t3 = _planspec_chain(conn, repo, tier="critical")
+        kb.claim_task(conn, t1)
+        assert kb.complete_task(conn, t1, summary="s", review_gate=True)
+        assert kb.get_task(conn, t1).status == "review"
+
+
+def test_tip_defer_requires_green_gate(kanban_home, tip_judgment_on, monkeypatch):
+    """Safety floor: non-tip review slice without gate evidence still parks."""
+    monkeypatch.setattr(
+        kb,
+        "_worker_gate_config",
+        lambda: {
+            "enabled": False,
+            "repos": {},
+            "default": [],
+            "timeout": 60,
+            "code_roles": frozenset({"coder"}),
+        },
+    )
+    with kb.connect() as conn:
+        t1, _t2, _t3 = _planspec_chain(conn, repo=Path("/nonexistent"))
+        kb.claim_task(conn, t1)
+        assert kb.complete_task(conn, t1, summary="s", review_gate=True)
+        assert kb.get_task(conn, t1).status == "review"
+
+
+def test_non_planspec_review_task_unaffected(
+    kanban_home, tip_judgment_on, tmp_path, monkeypatch
+):
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="solo",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="review",
+        )
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="s", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+
+
+def test_tip_flag_default_off_keeps_per_slice(kanban_home, tmp_path, monkeypatch):
+    monkeypatch.setattr(kb, "_review_gate_config", lambda: _gate_cfg())
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        t1, _t2, _t3 = _planspec_chain(conn, repo)
+        kb.claim_task(conn, t1)
+        assert kb.complete_task(conn, t1, summary="s", review_gate=True)
+        assert kb.get_task(conn, t1).status == "review"
+
+
+def test_open_noncode_sibling_does_not_block_tip(
+    kanban_home, tip_judgment_on, tmp_path, monkeypatch
+):
+    """Tip detection counts CODE siblings only — a trailing docs/scribe task
+    must not swallow the chain's single LLM judgment."""
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        (t1,) = _planspec_chain(conn, repo, n=1)
+        doc = kb.create_task(conn, title="write receipt", assignee="scribe")
+        conn.execute(
+            "UPDATE tasks SET planspec_source = ? WHERE id = ?", ("/tmp/spec.md", doc)
+        )
+        conn.commit()
+        kb.claim_task(conn, t1)
+        assert kb.complete_task(conn, t1, summary="s", review_gate=True)
+        # t1 is the last open CODE task -> it is the tip -> review fires
+        assert kb.get_task(conn, t1).status == "review"
