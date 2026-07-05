@@ -137,6 +137,10 @@ def test_usage_limit_detected(text):
         "Alles gut, 12 Tests grün",
         "limit_order.py angepasst",  # 'limit' allein reicht nicht
         "",
+        # Codex-CLI-Footer: "140,429" matchte \b429\b (Komma = Wortgrenze) —
+        # klassifizierte ein echtes Verifier-FAIL als usage-limit (2026-07-05).
+        "hook: Stop\nhook: Stop Completed\ntokens used\n140,429",
+        "FAIL holds ignore dispatcher config\ntokens used\n96,429",
     ],
 )
 def test_usage_limit_not_overtriggered(text):

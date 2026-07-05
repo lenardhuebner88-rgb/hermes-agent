@@ -16,9 +16,12 @@ from typing import Callable
 # 2026-07-02 live gelernt: neben "usage limit"/429 meldet die Claude-CLI auch
 # "You've hit your session limit · resets 9:50pm" — ohne diesen Wortlaut lief
 # der Planner mit leerem Ergebnis weiter statt zu stoppen.
+# "429" nur mit HTTP-/Fehler-Kontext: der Codex-CLI-Footer "tokens used 140,429"
+# matchte \b429\b (Komma = Wortgrenze) → Phantom-Stop trotz Tail-Scoping
+# (live 2026-07-05, Verifier-FAIL wurde als usage-limit fehlklassifiziert).
 USAGE_LIMIT_RE = re.compile(
     r"usage limit|session limit|hit your .{0,12}limit|reached your usage"
-    r"|rate.?limit exceeded|\b429\b",
+    r"|rate.?limit exceeded|(?:http|error|status|code|quota)\D{0,12}429\b",
     re.IGNORECASE,
 )
 
