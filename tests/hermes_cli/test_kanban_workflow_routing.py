@@ -52,6 +52,12 @@ def isolated_kanban_home(monkeypatch):
     # HERMES_HOME no profiles exist, so pretend they all do (we never spawn a
     # real worker — spawn_fn is a stub).
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: True)
+    # spawn_fn is a stub — the "worker pids" it returns (e.g. 99) never name a
+    # real process. The manual-completion orphan-reap path
+    # (fl-20260704-complete-orphan-reap) would otherwise call os.kill on that
+    # bogus pid and trip the conftest live-system guard. A stubbed worker has,
+    # by definition, already exited, so short-circuit the liveness probe.
+    monkeypatch.setattr(kanban_db, "_pid_alive", lambda pid: False)
     kanban_workflows.clear_workflow_cache()
     try:
         yield kanban_db, kanban_workflows, Path(wf_dir)
