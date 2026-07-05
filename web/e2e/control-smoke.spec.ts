@@ -447,6 +447,7 @@ test.describe("Control Smoke (live)", () => {
 
   for (const viewport of [
     { name: "Desktop", size: { width: 1440, height: 1000 } },
+    { name: "Tablet", size: { width: 820, height: 1180 } },
     { name: "Mobile", size: { width: 390, height: 844 } },
   ]) {
     test(`Statistik MotherLedger rendert responsive ohne Secret-Leak (${viewport.name})`, async ({ page }) => {
@@ -461,7 +462,10 @@ test.describe("Control Smoke (live)", () => {
       await expect(page.getByText("Abo-Wert verbraucht").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("Stats Mother Ledger").filter({ visible: true }).first()).toBeVisible();
 
-      await expect(page.locator(".sb-ledger")).toHaveAttribute("data-ledger-viewport", viewport.name.toLowerCase());
+      await expect(page.locator(".sb-ledger")).toHaveAttribute(
+        "data-ledger-viewport",
+        viewport.size.width <= 760 ? "mobile" : "desktop",
+      );
 
       await page.getByRole("button", { name: /Stats Mother Ledger/ }).filter({ visible: true }).first().click();
       await expect(page.getByRole("table", { name: "Worker-Aufschlüsselung" })).toBeVisible();
@@ -471,6 +475,17 @@ test.describe("Control Smoke (live)", () => {
       await coderWorker.click();
       await expect(page.getByText("#837").filter({ visible: true })).toBeVisible();
       await expect(page.getByText(/metered · 5m · Neuralwatt = Runtime/).filter({ visible: true })).toBeVisible();
+
+      const overflow = await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      }));
+      expect(overflow.documentWidth).toBeLessThanOrEqual(overflow.viewportWidth);
+
+      await page.screenshot({
+        path: test.info().outputPath(`statistik-${viewport.name.toLowerCase()}.png`),
+        fullPage: true,
+      });
 
       for (const secretMarker of [/\/home\//, /\.env\b/, /OPENAI_API_KEY/, /ANTHROPIC_API_KEY/, /sk-[A-Za-z0-9]/, /\.worktrees\//, /cmdline/]) {
         await expect(page.getByText(secretMarker)).toHaveCount(0);

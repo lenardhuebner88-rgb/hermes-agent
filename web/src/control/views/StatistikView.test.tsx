@@ -688,6 +688,34 @@ describe("EffizienzSection (ST5)", () => {
     expect(html).not.toContain("9.0 M");
   });
 
+  it("bindet Token-Burn an die echten /runs/costs-Felder statt an Tages-0-Dollar", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[]}
+        costs={[
+          costRow({
+            profile: "coder",
+            runs: 7,
+            cost_usd: 0,
+            actual_cost_usd: 0,
+            api_equivalent_usd: 0.91,
+            input_tokens: 1_234_567,
+            output_tokens: 765_433,
+          }),
+        ]}
+        reviewValue={[]}
+        chainRate={null}
+        queueWaitSeconds={null}
+      />,
+    );
+
+    expect(html).toContain("Token-Burn je Lane");
+    expect(html).toContain("Coder");
+    expect(html).toContain("2.0 M");
+    expect(html).toContain("7 Läufe");
+    expect(html).not.toContain("$0.00");
+  });
+
   it("stays calm with em-dashes and an empty-burn note when nothing ran", () => {
     const html = renderToStaticMarkup(
       <EffizienzSection profiles={[]} costs={[]} reviewValue={[]} chainRate={null} queueWaitSeconds={null} />,
