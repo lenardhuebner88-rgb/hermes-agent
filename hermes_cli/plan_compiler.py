@@ -16,7 +16,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import yaml
 from pydantic import (
@@ -136,6 +136,10 @@ class TaskgraphHints(BaseModel):
                 )
             if task.id in task.deps:
                 raise ValueError(f"taskgraph_hints.subtasks[{task.id}] cannot depend on itself")
+        try:
+            assert_acyclic(ids, {task.id: task.deps for task in self.subtasks})
+        except CompileBlocked as exc:
+            raise ValueError("; ".join(exc.findings)) from exc
         return self
 
 
@@ -242,6 +246,38 @@ class CompileBlocked(RuntimeError):
     def __init__(self, findings: list[str]):
         self.findings = findings
         super().__init__("; ".join(findings))
+
+
+def assert_acyclic(ids: Sequence[str], deps: Mapping[str, Iterable[str]]) -> None:
+    """Raise ``CompileBlocked`` when dependency ids contain a cycle."""
+    ordered_ids = [str(item).strip() for item in ids if str(item).strip()]
+    known = set(ordered_ids)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def visit(node: str) -> None:
+        if node in visited:
+            return
+        if node in visiting:
+            try:
+                start = stack.index(node)
+                cycle = [*stack[start:], node]
+            except ValueError:  # pragma: no cover - defensive fallback
+                cycle = [node, node]
+            raise CompileBlocked(["dependency cycle detected: " + " -> ".join(cycle)])
+        visiting.add(node)
+        stack.append(node)
+        for dep in deps.get(node, []):
+            dep_id = str(dep).strip()
+            if dep_id in known:
+                visit(dep_id)
+        stack.pop()
+        visiting.remove(node)
+        visited.add(node)
+
+    for task_id in ordered_ids:
+        visit(task_id)
 
 
 def _utc_now() -> str:
