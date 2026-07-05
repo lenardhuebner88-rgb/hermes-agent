@@ -3302,6 +3302,70 @@ def get_decision_queue(
         conn.close()
 
 
+@router.get("/release-status")
+def get_release_status(
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Read-only auto-release status (feeds a future dashboard tile).
+
+    Returns the current ``release.autonomous`` kill-switch state, the last 10
+    ``auto_release`` timeline events, and the last 5 ``release/pre-deploy/*``
+    git anchors. Fail-soft on the anchors (subprocess/git trouble never blocks
+    the endpoint).
+    """
+    from hermes_cli.auto_release import _release_config
+
+    board = _resolve_board(board)
+    cfg = _release_config()
+
+    conn = _conn(board=board)
+    try:
+        rows = conn.execute(
+            "SELECT task_id, created_at, payload FROM task_events "
+            "WHERE kind = 'auto_release' ORDER BY created_at DESC, id DESC LIMIT 10",
+        ).fetchall()
+        recent = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            recent.append(
+                {
+                    "task_id": row["task_id"],
+                    "created_at": row["created_at"],
+                    "payload": payload,
+                }
+            )
+    finally:
+        conn.close()
+
+    anchors: list[str] = []
+    try:
+        import subprocess
+
+        from hermes_cli.auto_release import _repo_root
+
+        proc = subprocess.run(
+            ["git", "tag", "-l", "release/pre-deploy/*"],
+            cwd=_repo_root(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        anchors = sorted(proc.stdout.split())[-5:]
+    except Exception:
+        anchors = []
+
+    return {
+        "autonomous": cfg.get("autonomous", False),
+        "max_tier_autonomous": cfg.get("max_tier_autonomous", "review"),
+        "recent": recent,
+        "anchors": anchors,
+    }
+
+
 @router.get("/epics")
 def list_epics_endpoint(
     include_closed: bool = Query(True, description="Include closed epics"),
