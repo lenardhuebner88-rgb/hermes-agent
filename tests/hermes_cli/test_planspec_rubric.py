@@ -1084,6 +1084,42 @@ def test_noncritical_rubric_findings_warn_not_block(
     assert any("AC-less subtask: R1-S2" in r.message for r in caplog.records)
 
 
+def test_noncritical_warnings_in_result(
+    kanban_home, tmp_path: Path, monkeypatch
+):
+    """B3: non-blocking rubric findings are also surfaced in the result dict."""
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", lambda spec: None)
+    body = CLEAN.replace(
+        """    - id: R1-S2
+      title: "Final verdict on the slice"
+      lane: reviewer
+      deps: [R1-S1]
+      acceptance_criteria:
+        - "Review verdict recorded with evidence"
+""",
+        """    - id: R1-S2
+      title: "Final verdict on the slice"
+      lane: reviewer
+      deps: [R1-S1]
+""",
+    )
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, body)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+    assert any("AC-less subtask: R1-S2" in finding for finding in result["rubric_warnings"])
+
+
+def test_clean_ingest_has_empty_rubric_warnings(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, CLEAN)
+
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert result["ok"] is True
+    assert result["rubric_warnings"] == []
+
+
 def test_critical_plan_still_fully_gated(kanban_home, tmp_path: Path):
     """A plan with a critical-classified slice keeps today's blocking rubric."""
     plans_root = tmp_path / "03-Agents"

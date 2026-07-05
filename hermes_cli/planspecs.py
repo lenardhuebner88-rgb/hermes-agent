@@ -1621,6 +1621,10 @@ def ingest_planspec(
     # Deterministic rubric gate — layered ON TOP of parse_binding_planspec's
     # structural validation and applied BEFORE any DB write. ``--force`` bypasses
     # it but the skipped reasons are logged so the override is never silent.
+    # B3: non-blocking rubric findings (operator-signed / non-critical unsigned
+    # branches) are surfaced in the result dict as ``rubric_warnings`` — empty
+    # for every other branch (force / critical) so the key is always present.
+    rubric_warnings: list[str] = []
     if force:
         bypassed = _collect_spec_rubric_findings(spec)
         if bypassed:
@@ -1642,6 +1646,7 @@ def ingest_planspec(
         # operator already approved). Structural validation already ran above
         # (parse_binding_planspec) and stays hard for everyone.
         warned = _collect_spec_rubric_findings(spec)
+        rubric_warnings = warned
         if warned:
             logger.warning(
                 "PlanSpec rubric findings WARNED (not blocked) for operator-signed "
@@ -1667,6 +1672,7 @@ def ingest_planspec(
         # (kanban_db._effective_review_tier). Structural validation already
         # ran above (parse_binding_planspec) and stays hard for everyone.
         warned = _collect_spec_rubric_findings(spec)
+        rubric_warnings = warned
         if warned:
             logger.warning(
                 "PlanSpec rubric findings WARNED (not blocked) for "
@@ -1701,6 +1707,7 @@ def ingest_planspec(
                 "live_test_depth": spec.live_test_depth,
                 "subtask_count": len(existing_children),
                 "idempotency_key": idempotency_key,
+                "rubric_warnings": rubric_warnings,
             }
 
         # F6: the exact-content chain didn't match, but a chain with the SAME
@@ -1818,6 +1825,7 @@ def ingest_planspec(
             "subtask_count": len(child_ids),
             "idempotency_key": idempotency_key,
             "superseded": superseded,
+            "rubric_warnings": rubric_warnings,
         }
     finally:
         conn.close()
