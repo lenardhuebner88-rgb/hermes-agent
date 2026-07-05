@@ -124,14 +124,95 @@ AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 MATURITY_DAYS: int = 3
 
 # Direction map for the known core metrics: +1 means ↑ is better (improved),
-# -1 means ↓ is better (improved). Unknown keys yield verdict="unmeasurable".
+# -1 means ↓ is better (improved). Looked up by :func:`_resolve_verdict_direction`
+# (exact match first, then the last dotted segment — flattened metric paths from
+# vision-metrics.json are fully qualified, e.g. ``autonomy.autonomy_pct``, but
+# most entries here key the short/basename form). Unknown keys (not here and not
+# in :data:`_DIRECTIONLESS`) yield verdict="unmeasurable" via
+# :func:`_compute_verdict`, and measurability="unmapped_metric" via
+# :func:`_lever_measurability` — LEVER-OUTCOMES-VALIDITY-S1.
+#
+# Direction table (reviewed 2026-07-06, source: real
+# ~/.hermes/state/vision-metrics.json schema_version 2):
+#   autonomy_pct                    +1  higher autonomy share is better
+#   escalations_per_week             -1  fewer operator escalations is better
+#   green_gate_streak.streak        +1  a longer green streak is better
+#   fail_nights                      -1  legacy short key (pre schema-v2 flatten
+#                                        put ``fail_nights`` directly under
+#                                        green_gate_streak; kept for that shape)
+#   recent_avg_cost_per_task         -1  cheaper average task cost is better
+#   unclassified_share                -1  smaller unclassified escalation share
+#                                        is better (classification coverage)
+#   error_escalations_per_week        -1  fewer error-class escalations/week
+#                                        is better
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
     "green_gate_streak.streak": 1,
     "fail_nights": -1,
     "recent_avg_cost_per_task": -1,
+    "unclassified_share": -1,
+    "error_escalations_per_week": -1,
 }
+
+# Keys with no defensible ROI direction: raw counts, denominators, coverage/
+# window metadata and cumulative ("Bestandszähler") totals. A lever should
+# never target one of these as its metric_key (delta on a denominator or a
+# monotonically-growing total is not a signal), but they are legitimate,
+# expected numeric leaves of vision-metrics.json — explicit here so the
+# Vollständigkeits-Test can assert every real metric key is a *deliberate*
+# omission from :data:`_VERDICT_DIRECTION`, not an accidental gap. Looked up
+# the same way as the direction map (exact match, then last dotted segment).
+#
+# Directionless table (reviewed 2026-07-06):
+#   autonomous_done          raw count; autonomy_pct already carries the ratio
+#   total_done               denominator (autonomy + cost_per_task.coverage)
+#   cost_usd_total           cumulative Bestandszähler — only ever grows
+#   tasks_with_cost          coverage numerator/denominator
+#   prior_avg_cost_per_task  rolling reference for pct_change, not itself a
+#                            target (recent_avg_cost_per_task is the target)
+#   with_metered_cost        coverage bucket count
+#   subscription_only        coverage bucket count
+#   no_cost_data             coverage bucket count
+#   coverage_pct             meta: how much of the metric is measured at all,
+#                            not the metric itself
+#   window_days              window size, not a signal
+#   classified_total         denominator
+#   escalations              raw count denominator (classification_coverage)
+#   classified_within_24h    raw count, subset of escalations
+#   green_nights             raw count; green_gate_streak.streak already
+#                            carries the direction
+#   total_recorded_nights    denominator
+#   *.counter.value          per-metric counter values (autonomy/cost_per_task/
+#                            escalation_rate/classification_coverage/
+#                            green_gate_streak) — each counter's real meaning
+#                            is a runtime string (its sibling "name"/
+#                            "description" field), not the static key path, so
+#                            a single fixed direction per path is unsound;
+#                            listed fully qualified (not the generic basename
+#                            "value") to avoid over-broad basename matches
+_DIRECTIONLESS: frozenset[str] = frozenset({
+    "autonomous_done",
+    "total_done",
+    "cost_usd_total",
+    "tasks_with_cost",
+    "prior_avg_cost_per_task",
+    "with_metered_cost",
+    "subscription_only",
+    "no_cost_data",
+    "coverage_pct",
+    "window_days",
+    "classified_total",
+    "escalations",
+    "classified_within_24h",
+    "green_nights",
+    "total_recorded_nights",
+    "autonomy.counter.value",
+    "cost_per_task.counter.value",
+    "escalation_rate.counter.value",
+    "classification_coverage.counter.value",
+    "green_gate_streak.counter.value",
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -1385,6 +1466,16 @@ def stamp_lever_outcome_shipped(
             if rec.get("status") == "proposed":
                 rec["status"] = "shipped"
                 changed = True
+                # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — warn
+                # now, ~MATURITY_DAYS before the operator would otherwise learn
+                # the metric_key can never yield a real verdict.
+                mk = rec.get("metric_key")
+                measurability = _lever_measurability(mk)
+                rec["measurability"] = measurability
+                _warn_if_unmeasurable(
+                    stage="ship-stamp", lever_key=rec.get("lever_key"),
+                    root_task_id=root_task_id, metric_key=mk, measurability=measurability,
+                )
         if not matched or not changed:
             return False
         _write_lever_outcomes_atomic(path, records)
@@ -1399,18 +1490,113 @@ def stamp_lever_outcome_shipped(
         return False
 
 
-def _compute_verdict(delta_val: float, metric_key: str, baseline_val: float | None = None) -> str:
-    """Return improved|neutral|worsened|unmeasurable for a metric delta.
+def _resolve_verdict_direction(metric_key: str) -> Optional[int]:
+    """Resolve a +1/-1 direction for *metric_key* via :data:`_VERDICT_DIRECTION`.
 
-    Uses :data:`_VERDICT_DIRECTION`; ``+1`` means ↑ is better, ``-1`` means
-    ↓ is better.  Unknown keys yield ``"unmeasurable"`` regardless of direction.
-    Deltas smaller than 5% relative to the baseline are neutral.
+    Tries an exact match first (some entries are stored fully qualified, e.g.
+    ``green_gate_streak.streak``), then falls back to the last dotted segment
+    — flattened metric paths are fully qualified (e.g. ``autonomy.autonomy_pct``)
+    but most map entries key the short/basename form. Shared by
+    :func:`_compute_verdict` and :func:`_lever_measurability` so both use
+    identical lookup logic (LEVER-OUTCOMES-VALIDITY-S1).
     """
     direction = _VERDICT_DIRECTION.get(metric_key)
     if direction is None and "." in metric_key:
-        # Geflattete Pfade sind voll qualifiziert (autonomy.autonomy_pct);
-        # die Richtungs-Map kennt die Kurz-Keys — Basename-Fallback.
         direction = _VERDICT_DIRECTION.get(metric_key.rsplit(".", 1)[-1])
+    return direction
+
+
+def _lever_measurability(metric_key: Optional[str]) -> str:
+    """Classify whether *metric_key* can ever produce a directional verdict.
+
+    ``ok``              — resolves to a known direction (same lookup as
+                           :func:`_compute_verdict`); reflect() will be able to
+                           measure it once mature.
+    ``no_metric``       — no metric_key at all (an Opus draft omitted it, or
+                           a deterministic baseline lever never set one).
+    ``unmapped_metric`` — metric_key is set but resolves to no direction —
+                           either genuinely unknown or one of the
+                           deliberately-directionless keys in
+                           :data:`_DIRECTIONLESS`. Either way the lever will
+                           only ever be stamped verdict="unmeasurable".
+    """
+    if not metric_key:
+        return "no_metric"
+    if _resolve_verdict_direction(metric_key) is None:
+        return "unmapped_metric"
+    return "ok"
+
+
+def _warn_if_unmeasurable(*, stage: str, lever_key: Any, root_task_id: Any, metric_key: Optional[str], measurability: str) -> None:
+    """Log a WARN when a lever's metric_key cannot ever yield a real verdict.
+
+    Visible in the run log at propose/ship time, before the operator releases
+    or the maturity window elapses — LEVER-OUTCOMES-VALIDITY-S1.
+    """
+    if measurability == "ok":
+        return
+    logger.warning(
+        "lever-outcomes %s: measurability=%s for lever_key=%s root_task_id=%s "
+        "metric_key=%r — this lever can only ever be stamped verdict=unmeasurable",
+        stage, measurability, lever_key, root_task_id, metric_key,
+    )
+
+
+def _confound_window(rec: dict[str, Any]) -> Optional[tuple[int, int]]:
+    """Return the (start, end) epoch bounds of *rec*'s maturity window.
+
+    Start = shipped_at. End = measured_at if the record has already been
+    measured (its influence on the metric is considered settled once
+    measured), else the full theoretical shipped_at + MATURITY_DAYS*86400
+    maturity window — LEVER-OUTCOMES-VALIDITY-S1 Confound-Guard.
+    """
+    shipped_at = rec.get("shipped_at")
+    if shipped_at is None:
+        return None
+    start = int(shipped_at)
+    measured_at = rec.get("measured_at")
+    end = int(measured_at) if measured_at is not None else start + MATURITY_DAYS * 86400
+    return start, end
+
+
+def _confounding_levers(
+    rec: dict[str, Any], others: Iterable[dict[str, Any]], metric_key: Optional[str]
+) -> list[str]:
+    """Return lever_keys of *others* sharing *metric_key* with an overlapping
+    maturity window against *rec* — two levers moving the same metric at the
+    same time make either verdict unattributable, regardless of what the
+    direction map says (Confound-Guard, LEVER-OUTCOMES-VALIDITY-S1).
+    """
+    if not metric_key:
+        return []
+    window = _confound_window(rec)
+    if window is None:
+        return []
+    start, end = window
+    root_id = rec.get("root_task_id")
+    confounded: list[str] = []
+    for other in others:
+        if other.get("root_task_id") == root_id:
+            continue
+        if other.get("metric_key") != metric_key:
+            continue
+        other_window = _confound_window(other)
+        if other_window is None:
+            continue
+        o_start, o_end = other_window
+        if start <= o_end and o_start <= end:
+            confounded.append(other.get("lever_key"))
+    return confounded
+
+
+def _compute_verdict(delta_val: float, metric_key: str, baseline_val: float | None = None) -> str:
+    """Return improved|neutral|worsened|unmeasurable for a metric delta.
+
+    Uses :func:`_resolve_verdict_direction`; ``+1`` means ↑ is better, ``-1``
+    means ↓ is better. Unknown keys yield ``"unmeasurable"`` regardless of
+    direction. Deltas smaller than 5% relative to the baseline are neutral.
+    """
+    direction = _resolve_verdict_direction(metric_key)
     if direction is None:
         return "unmeasurable"
     if baseline_val is not None:
@@ -1487,6 +1673,14 @@ def _outcomes_write_baselines(
             continue
         lever = next((lv for lv in capped if lv.key == item["key"]), None)
         mk = _lever_metric_key(lever, flat_metrics) if lever is not None else None
+        # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — computed at
+        # baseline creation so an unmeasurable metric_key surfaces in the run
+        # log before the operator ever releases the drafted PlanSpec.
+        measurability = _lever_measurability(mk)
+        _warn_if_unmeasurable(
+            stage="ingest", lever_key=item["key"], root_task_id=root_id,
+            metric_key=mk, measurability=measurability,
+        )
         records.append({
             "schema_version": 1,
             "lever_key": item["key"],
@@ -1494,6 +1688,7 @@ def _outcomes_write_baselines(
             "proposed_at": now_ts,
             "baseline": flat_metrics,
             "metric_key": mk,
+            "measurability": measurability,
             "shipped_at": None,
             "measured_at": None,
             "current": None,
@@ -1762,9 +1957,15 @@ def reflect(
     # outcomes counts can be included in the written note record.
     outcomes_shipped_stamped = 0
     outcomes_measured = 0
+    outcomes_verdicts: list[dict[str, Any]] = []
     if outcomes_path is not None:
         now_ts = int(time.time() if now is None else now)
         outcome_records = _read_lever_outcomes(outcomes_path)
+        # Confound-Guard reference: a snapshot of the on-disk state taken
+        # before this pass mutates anything, so overlap detection is
+        # deterministic regardless of list order / which record this loop
+        # happens to touch first (LEVER-OUTCOMES-VALIDITY-S1).
+        _records_snapshot = [dict(r) for r in outcome_records]
         # Lazy-read current metrics only when needed for measuring.
         _current_metrics: Optional[dict[str, Any]] = metrics
         changed = False
@@ -1791,6 +1992,17 @@ def reflect(
                             rec["status"] = "shipped"
                             outcomes_shipped_stamped += 1
                             changed = True
+                            # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity
+                            # check, warn now rather than after the maturity
+                            # window silently expires into "unmeasurable".
+                            ship_mk = rec.get("metric_key")
+                            ship_measurability = _lever_measurability(ship_mk)
+                            rec["measurability"] = ship_measurability
+                            _warn_if_unmeasurable(
+                                stage="reflect-ship-stamp", lever_key=rec.get("lever_key"),
+                                root_task_id=root_id, metric_key=ship_mk,
+                                measurability=ship_measurability,
+                            )
 
             # (b) Measure: shipped records past the maturity window.
             if rec.get("status") == "shipped" and rec.get("measured_at") is None:
@@ -1805,12 +2017,22 @@ def reflect(
                         current_val: float | None = None
                         baseline_val: float | None = None
                         delta_val: float | None = None
-                        verdict = "unmeasurable"
                         if mk and mk in flat_current and mk in flat_baseline:
                             current_val = float(flat_current[mk])
                             baseline_val = float(flat_baseline[mk])
                             delta_val = round(current_val - baseline_val, 9)
+
+                        # Confound-Guard: runs BEFORE the directional verdict —
+                        # two levers sharing metric_key with an overlapping
+                        # maturity window make the delta unattributable, even
+                        # when the direction map would otherwise resolve it.
+                        confounded_with = _confounding_levers(rec, _records_snapshot, mk)
+                        if confounded_with:
+                            verdict = "confounded"
+                        elif delta_val is not None:
                             verdict = _compute_verdict(delta_val, mk, baseline_val)
+                        else:
+                            verdict = "unmeasurable"
 
                         rec["current"] = current_val
                         rec["delta"] = delta_val
@@ -1822,7 +2044,15 @@ def reflect(
                         if gen_epoch is not None and now_ts - gen_epoch > 86400:
                             rec["stale_metrics"] = True
                         rec["verdict"] = verdict
+                        rec["measurability"] = _lever_measurability(mk)
+                        if confounded_with:
+                            rec["confounded_with"] = confounded_with
+                        else:
+                            rec.pop("confounded_with", None)
                         outcomes_measured += 1
+                        outcomes_verdicts.append(
+                            {"lever_key": rec.get("lever_key"), "verdict": verdict}
+                        )
                         changed = True
 
         if changed:
@@ -1839,7 +2069,14 @@ def reflect(
         "vetoed_autoresearch_signals": autoresearch_signals,
         # LEVER-OUTCOMES-S1: outcome counts in the note so they appear in the
         # reflections.jsonl record read by the Opus propose-prompt.
-        "outcomes": {"shipped_stamped": outcomes_shipped_stamped, "measured": outcomes_measured},
+        # LEVER-OUTCOMES-VALIDITY-S1: "verdicts" lists only the records
+        # measured *in this run* (not the whole outcomes file) so reflections
+        # document actual lever wirkung as it happens.
+        "outcomes": {
+            "shipped_stamped": outcomes_shipped_stamped,
+            "measured": outcomes_measured,
+            "verdicts": outcomes_verdicts,
+        },
     }
     suppressed_now: list[str] = []
     if notes_path is not None:

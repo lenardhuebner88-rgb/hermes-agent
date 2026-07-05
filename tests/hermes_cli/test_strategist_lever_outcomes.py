@@ -1120,4 +1120,172 @@ def test_reflect_without_outcomes_path_is_backward_compatible(board_home, tmp_pa
     with kb.connect() as conn:
         result = strategist.reflect(conn, since=0, notes_path=notes_path)
 
-    assert result["note"]["outcomes"] == {"shipped_stamped": 0, "measured": 0}
+    # LEVER-OUTCOMES-VALIDITY-S1: "verdicts" is additive (lists records
+    # measured in this run); without outcomes_path it stays empty.
+    assert result["note"]["outcomes"] == {"shipped_stamped": 0, "measured": 0, "verdicts": []}
+
+
+# --------------------------------------------------------------------------- #
+# 9. LEVER-OUTCOMES-VALIDITY-S1 — direction-map coverage, ship-time
+#    measurability, confound-guard, reflect-note verdicts.
+#
+# Fixtures below are VERBATIM copies of live strategist state, harvested
+# 2026-07-06 from:
+#   ~/.hermes/state/strategist/lever-outcomes.json  (9 records, schema_version 1)
+#   ~/.hermes/state/vision-metrics.json              (schema_version 2)
+# Never hand-edit these to make a test pass — re-harvest from live state if
+# the real schema changes.
+# --------------------------------------------------------------------------- #
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _load_fixture(name):
+    return json.loads((_FIXTURES_DIR / name).read_text(encoding="utf-8"))
+
+
+def _is_directionless(metric_key):
+    """Test-local mirror of the exact+basename lookup ``_resolve_verdict_direction``
+    uses, checked against ``strategist._DIRECTIONLESS``."""
+    if metric_key in strategist._DIRECTIONLESS:
+        return True
+    if "." in metric_key:
+        return metric_key.rsplit(".", 1)[-1] in strategist._DIRECTIONLESS
+    return False
+
+
+def test_direction_map_covers_every_real_vision_metrics_key():
+    """Every numeric key flattened from the real vision-metrics.json fixture
+    must resolve to a direction OR be an explicit _DIRECTIONLESS omission —
+    no accidental unmapped-and-unaudited gap. Vollständigkeits-Assertion over
+    ALL keys, no sampling."""
+    metrics = _load_fixture("vision_metrics_live_20260706.json")
+    flat = strategist._flatten_numeric(strategist._metrics_payload(metrics))
+    assert flat, "fixture flattened to nothing — fixture broken?"
+    unresolved = [
+        key for key in flat
+        if strategist._resolve_verdict_direction(key) is None and not _is_directionless(key)
+    ]
+    assert unresolved == []
+
+
+def test_direction_map_required_keys_mapped_minus_one():
+    """The two keys the slice calls out explicitly are mapped -1 (lower is better)."""
+    assert strategist._resolve_verdict_direction("classification_coverage.unclassified_share") == -1
+    assert strategist._resolve_verdict_direction("escalation_rate.error_escalations_per_week") == -1
+
+
+def test_live_fixture_confound_guard_and_measurability(board_home):
+    """E2E over reflect() against verbatim live fixtures, frozen at an epoch
+    equivalent to 2026-07-06T18:30:00Z (past MATURITY_DAYS for the three
+    already-shipped live records):
+
+    - disposition-di_3d045653 has metric_key=null -> verdict=unmeasurable,
+      measurability=no_metric.
+    - ESCALATION-OPERATOR-GATE-DECLASSIFY and ESCALATION-RELEASE-GATE-ERROR-
+      CONTEXT share metric_key "classification_coverage.unclassified_share"
+      with overlapping shipped windows. After the direction-map extension
+      their direction WOULD resolve (-1) — the Confound-Guard must still
+      preempt that and stamp verdict=confounded (measurability=ok, since the
+      metric_key itself is legitimate — only the attribution is unsafe).
+    """
+    frozen_now = 1783362600  # 2026-07-06T18:30:00Z
+    outcomes_path = board_home / "lever-outcomes.json"
+    notes_path = board_home / "reflections.jsonl"
+    records = _load_fixture("lever_outcomes_live_20260706.json")
+    outcomes_path.write_text(json.dumps(records), encoding="utf-8")
+    metrics = _load_fixture("vision_metrics_live_20260706.json")
+
+    with kb.connect() as conn:
+        result = strategist.reflect(
+            conn, since=0, notes_path=notes_path,
+            outcomes_path=outcomes_path, metrics=metrics, now=float(frozen_now),
+        )
+
+    by_key = {r["lever_key"]: r for r in json.loads(outcomes_path.read_text(encoding="utf-8"))}
+
+    disposition = by_key["disposition-di_3d045653"]
+    assert disposition["status"] == "measured"
+    assert disposition["verdict"] == "unmeasurable"
+    assert disposition["measurability"] == "no_metric"
+    assert "confounded_with" not in disposition
+
+    declassify = by_key["ESCALATION-OPERATOR-GATE-DECLASSIFY"]
+    error_context = by_key["ESCALATION-RELEASE-GATE-ERROR-CONTEXT"]
+    assert declassify["status"] == "measured"
+    assert error_context["status"] == "measured"
+    assert declassify["verdict"] == "confounded"
+    assert error_context["verdict"] == "confounded"
+    assert declassify["measurability"] == "ok"
+    assert error_context["measurability"] == "ok"
+    assert declassify["confounded_with"] == ["ESCALATION-RELEASE-GATE-ERROR-CONTEXT"]
+    assert error_context["confounded_with"] == ["ESCALATION-OPERATOR-GATE-DECLASSIFY"]
+    # delta/current are computed normally despite the confounded verdict.
+    assert declassify["current"] == pytest.approx(31.9)
+    assert declassify["delta"] == pytest.approx(9.7)
+    assert error_context["current"] == pytest.approx(31.9)
+    assert error_context["delta"] == pytest.approx(9.7)
+
+    verdict_lever_keys = {v["lever_key"] for v in result["note"]["outcomes"]["verdicts"]}
+    assert verdict_lever_keys == {
+        "disposition-di_3d045653",
+        "ESCALATION-OPERATOR-GATE-DECLASSIFY",
+        "ESCALATION-RELEASE-GATE-ERROR-CONTEXT",
+    }
+    assert result["note"]["outcomes"]["measured"] == 3
+
+
+def test_lever_measurability_helper():
+    """_lever_measurability classifies no_metric / unmapped_metric / ok using
+    the same exact+basename lookup as _compute_verdict."""
+    assert strategist._lever_measurability(None) == "no_metric"
+    assert strategist._lever_measurability("") == "no_metric"
+    assert strategist._lever_measurability("autonomy.autonomy_pct") == "ok"
+    assert strategist._lever_measurability("classification_coverage.unclassified_share") == "ok"
+    assert strategist._lever_measurability("autonomy.total_done") == "unmapped_metric"
+    assert strategist._lever_measurability("voellig.unbekannter_pfad") == "unmapped_metric"
+
+
+def test_ingest_baseline_stamps_measurability_and_warns(board_home, monkeypatch, tmp_path, caplog):
+    """A newly ingested baseline carries measurability; an unresolvable
+    metric_key WARNs in the run log before the operator ever releases it."""
+    _patch_budget(monkeypatch, 30.0)
+    with kb.connect() as conn:
+        _seed_ledger(conn, "dirty-overlap git lock contention")
+
+    out_dir = board_home / "specs"
+    outcomes_path = tmp_path / "lever-outcomes.json"
+    with caplog.at_level("WARNING", logger="hermes_cli.strategist"):
+        strategist.propose(
+            board=None, out_dir=out_dir, metrics=_BASE_METRICS, outcomes_path=outcomes_path,
+        )
+
+    records = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    rec = records[0]
+    assert rec["measurability"] == strategist._lever_measurability(rec["metric_key"])
+    if rec["measurability"] != "ok":
+        assert any("measurability" in r.message for r in caplog.records)
+    else:
+        assert not any("measurability" in r.message for r in caplog.records)
+
+
+def test_stamp_lever_outcome_shipped_sets_measurability(board_home):
+    """stamp_lever_outcome_shipped additively stamps measurability alongside
+    shipped_at/status (LEVER-OUTCOMES-VALIDITY-S1)."""
+    outcomes_path = _canonical_outcomes_path(board_home)
+    outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="PlanSpec TEST-LEVER: ship stamp",
+            body="held", assignee=None, created_by=strategist.STRATEGIST_AUTHOR,
+        )
+    outcomes_path.write_text(
+        json.dumps([_proposed_record(root)], ensure_ascii=False), encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        kb.complete_task(conn, root, result="integrated", summary="done")
+
+    [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    assert rec["status"] == "shipped"
+    # _proposed_record uses metric_key="autonomy_pct" — mapped -> "ok".
+    assert rec["measurability"] == "ok"

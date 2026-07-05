@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-07-05T04:00:01+00:00",
+  "generated_epoch": 1783224001,
+  "window_days": 7,
+  "metrics": {
+    "autonomy": {
+      "autonomy_pct": 80.5,
+      "autonomous_done": 904,
+      "total_done": 1123,
+      "counter": {
+        "name": "should_have_escalated_but_didnt",
+        "value": 0,
+        "description": "done tasks counted autonomous that carry a non-transient heiler_classification (real-bug/bad-spec/conflict) yet never raised operator_escalation"
+      }
+    },
+    "cost_per_task": {
+      "cost_usd_total": 11.747234,
+      "tasks_with_cost": 68,
+      "recent_avg_cost_per_task": null,
+      "prior_avg_cost_per_task": 0.052531,
+      "trend": "n/a",
+      "trend_basis": "insufficient_metered_data",
+      "pct_change": null,
+      "coverage": {
+        "total_done": 1123,
+        "with_metered_cost": 68,
+        "subscription_only": 1008,
+        "no_cost_data": 47,
+        "coverage_pct": 6.1
+      },
+      "counter": {
+        "name": "tasks_without_cost_data",
+        "value": 1055,
+        "description": "done tasks with no real metered cost — subscription-stamped $0 runs PLUS NULL-cost runs; the cost trend's blind spot. Shrinks only when a task gains real metered cost, never when a subscription run is stamped $0"
+      }
+    },
+    "escalation_rate": {
+      "escalations_per_week": 52,
+      "error_escalations_per_week": 48,
+      "window_days": 7,
+      "counter": {
+        "name": "silent_blocks",
+        "value": 0,
+        "description": "settled blocked tasks (self-healer done) with no operator_escalation event — blocks that bypass the operator; transient self-healing retries are excluded"
+      }
+    },
+    "classification_coverage": {
+      "coverage_pct": 100.0,
+      "unclassified_share": 31.9,
+      "classified_total": 69,
+      "escalations": 58,
+      "classified_within_24h": 58,
+      "window_days": 7,
+      "counter": {
+        "name": "operator_corrected_pct",
+        "value": 0.0,
+        "description": "share of classified escalations the operator later corrected (heiler_classification_corrected) — the misclassification guardrail; held under 10%"
+      }
+    },
+    "green_gate_streak": {
+      "streak": 0,
+      "green_nights": 4,
+      "total_recorded_nights": 17,
+      "last_result": "fail",
+      "last_ts": "2026-07-05T03:35:51+00:00",
+      "counter": {
+        "name": "fail_nights",
+        "value": 13,
+        "description": "recorded red gate nights — the streak's antagonist"
+      }
+    }
+  }
+}
