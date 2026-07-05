@@ -408,6 +408,50 @@ def test_skip_plan_override_falsy_still_plans(tmp_path, fake_engine):
     assert calls == ["plan", "build", "verify"]
 
 
+def test_cmd_night_consumes_overrides_env_after_start(tmp_path, fake_engine):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "consume", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "consume")
+    state = tmp_path / "state" / "consume"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("SKIP_PLAN=1\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    (runner.queue / "00-planned").mkdir(parents=True, exist_ok=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    runner.cmd_night()
+
+    # one-run semantics: overrides.env darf nach dem Start nicht mehr wirken.
+    assert not (state / "overrides.env").is_file()
+    assert (state / "overrides.consumed.env").read_text(encoding="utf-8") == "SKIP_PLAN=1\n"
+    # self.overrides bleibt für den laufenden Prozess in Kraft (bereits geparst).
+    assert runner.overrides.get("SKIP_PLAN") == "1"
+
+
+def test_cmd_land_does_not_touch_overrides_env(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "landconsume", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "landconsume")
+    state = tmp_path / "state" / "landconsume"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("PHASE_BUILD_ENGINE=codex\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner.cmd_land()
+
+    assert (state / "overrides.env").is_file()
+    assert not (state / "overrides.consumed.env").is_file()
+
+
 # ── (f) Pipeline-Mini-Läufe mit Fake-Engine ──────────────────────────────────
 
 def test_pipeline_happy_path_plan_build_verify(tmp_path, fake_engine):

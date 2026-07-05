@@ -23,11 +23,19 @@ der einzige verbleibende Freiheitsgrad. `--sandbox workspace-write` ist damit da
 Äquivalent zu Claudes `--permission-mode bypassPermissions`, ohne auf
 `danger-full-access` (Netzwerk + Dateisystem uneingeschränkt) zurückzugreifen.
 
-OFFEN (Kanban-Slice): `--dangerously-bypass-approvals-and-sandbox` böte volle Autonomie
-inkl. Netzwerkzugriff, widerspricht aber den Loop-Sicherheits-Invarianten (Worktree-
-exklusiv, begrenzter Blast-Radius) — bewusst nicht genutzt. Falls ein Pack später
-Netzwerkzugriff braucht (z. B. `npm install` im Build), ist das eine eigene
-Design-Entscheidung, kein stiller Default-Wechsel hier.
+2026-07-05 live geprüft (Nachtlauf builder-reviewer): `--sandbox workspace-write`
+begrenzte Schreibzugriffe auf cwd (+/tmp) und produzierte drei reale Fehlermodi:
+    (a) `git add`/`git commit` schlug fehl — der gitdir eines Git-Worktrees liegt
+        unter `.git/worktrees/…` des Haupt-Repos, außerhalb von cwd
+        (`index.lock`: EROFS).
+    (b) der prompt-vorgeschriebene Status-Write nach `{{STATE_DIR}}/last-status`
+        liegt außerhalb von cwd → der Runner sah einen leeren Status
+        ("build-fail: ?").
+    (c) Gate-Tests brauchen tmux-Sockets und Loopback-Binds — blockiert.
+Fix: `--sandbox danger-full-access`. Das ist Parität zu Claudes
+`--permission-mode bypassPermissions` (`loops/engines/claude_cli.py`) — die
+Loop-Isolation kommt vom dedizierten Worktree des Runners plus den
+Revert-/Land-Rails, nicht vom Engine-Sandbox.
 """
 
 from __future__ import annotations
@@ -49,7 +57,7 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
         "--model",
         model,
         "--sandbox",
-        "workspace-write",
+        "danger-full-access",
         prompt,
     ]
     try:

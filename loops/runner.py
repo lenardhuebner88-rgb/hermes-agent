@@ -255,6 +255,7 @@ class LoopRunner:
         self.stop_path = self.state / "STOP"
         self.overrides = parse_overrides(self.state / "overrides.env")
         self.phase_secs: dict[str, int] = {}
+        self._overrides_consumed = False
 
     # ── Infrastruktur ──
     def say(self, msg: str) -> None:
@@ -277,6 +278,20 @@ class LoopRunner:
             )
         except Exception:  # noqa: BLE001 — Notify ist nie lauf-kritisch
             pass
+
+    def consume_overrides(self) -> None:
+        """overrides.env gilt nur für EINEN Lauf (Dashboard-Start-Override) —
+        nach dem Start umbenennen, sonst wirkt z. B. SKIP_PLAN=1 für immer
+        weiter. `self.overrides` bleibt für den laufenden Prozess in Kraft."""
+        if self._overrides_consumed:
+            return
+        self._overrides_consumed = True
+        path = self.state / "overrides.env"
+        if not path.is_file():
+            return
+        consumed = self.state / "overrides.consumed.env"
+        path.replace(consumed)
+        self.say("overrides.env verbraucht (one-run) → overrides.consumed.env")
 
     def ensure_dirs(self) -> None:
         for stage in QUEUE_STAGES:
@@ -499,6 +514,7 @@ class LoopRunner:
         return True
 
     def cmd_run(self, fresh: bool = False) -> None:
+        self.consume_overrides()
         self.stop_path.unlink(missing_ok=True)
         self.ensure_dirs()
         self.ensure_wt(fresh=fresh)
@@ -628,6 +644,7 @@ class LoopRunner:
                 break
 
     def cmd_night(self, fresh: bool = False, skip_plan: bool = False) -> None:
+        self.consume_overrides()
         if not skip_plan and self.overrides.get("SKIP_PLAN", "").strip().lower() in ("1", "true", "yes"):
             skip_plan = True
             self.say("SKIP_PLAN-Override aktiv — Planung übersprungen.")

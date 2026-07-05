@@ -143,6 +143,26 @@ def test_usage_limit_not_overtriggered(text):
     assert engines.detect_usage_limit(text) is False
 
 
+def test_usage_limit_ignores_phantom_matches_outside_tail():
+    # Real 2026-07-05 night run: a 69k-line codex build output contained the
+    # agent's own test string and grep-style line refs in the MIDDLE, but a
+    # clean tail — must not be flagged as a real usage-limit hit.
+    middle = (
+        '("quota 429 from provider", guarded)\n'
+        "tests/hermes_cli/test_kanban_cli.py:429:    kc.build_parser(top)\n"
+    )
+    padding = "x" * 5000
+    text = padding + middle + padding + "\nAlles gut, 12 Tests grün.\n"
+    assert len(text) > 4000
+    assert engines.detect_usage_limit(text) is False
+
+
+def test_usage_limit_detects_real_message_in_tail():
+    padding = "x" * 5000
+    text = padding + "You've hit your session limit · resets 9:50pm"
+    assert engines.detect_usage_limit(text) is True
+
+
 def test_claude_cli_builds_headless_command(monkeypatch, tmp_path):
     seen = {}
 
@@ -262,7 +282,7 @@ def test_codex_cli_builds_headless_command(monkeypatch, tmp_path):
     assert cmd[0].endswith("codex")
     assert cmd[1] == "exec"
     assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
-    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
     assert "--full-auto" not in cmd
     assert cmd[-1] == "sag OK"
 
