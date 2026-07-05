@@ -99,10 +99,10 @@ const ERROR_LABEL: Record<string, string> = {
 
 const LANE_COLORS: Record<string, string> = {
   coder: "var(--color-brand)",
-  "coder-claude": "var(--color-live)",
-  premium: "var(--color-live)",
+  "coder-claude": "var(--color-ink-3)",
+  premium: "var(--color-brand)",
   reviewer: "var(--color-status-ok)",
-  verifier: "var(--color-live)",
+  verifier: "var(--color-status-ok)",
   critic: "var(--color-status-alert)",
   scout: "var(--color-status-warn)",
   research: "var(--color-brand)",
