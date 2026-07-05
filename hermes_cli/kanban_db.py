@@ -18960,127 +18960,6 @@ def summarize_dispatch_holds(
     return total, counts, dominant
 
 
-def _repo_holder_for_root(
-    conn: sqlite3.Connection,
-    repo_root: str,
-) -> Optional[dict[str, Any]]:
-    """Return the first non-terminal task occupying ``repo_root``.
-
-    Matches the ``repo_inflight_counts`` semantics used by the repo-serialization
-    guard: any task whose status is not terminal/parked (``done``, ``archived``,
-    ``ready``, ``scheduled``) and whose resolved workspace points to the same
-    repo_root is a holder.
-    """
-    for row in conn.execute(
-        "SELECT id, status, worker_pid, workspace_kind, workspace_path FROM tasks "
-        "WHERE status NOT IN ('done', 'archived', 'ready', 'scheduled')"
-    ):
-        rr = _repo_root_for_row(row["workspace_kind"], row["workspace_path"])
-        if rr == repo_root:
-            return {
-                "task_id": row["id"],
-                "status": row["status"],
-                "worker_pid": row["worker_pid"],
-            }
-    return None
-
-
-def list_dispatch_holds(
-    conn: sqlite3.Connection,
-    *,
-    board: Optional[str] = None,
-    **dispatch_kwargs: Any,
-) -> dict[str, Any]:
-    """Read-only report of tasks the dispatcher is currently holding.
-
-    Reuses the existing dry-run candidate scan so the report is bucket-generic
-    (``repo_serialized``, ``per_profile_capped``, ``respawn_guarded``,
-    ``budget_held``, ``role_mismatch``, ``chain_worktree_serialized``) without
-    duplicating dispatch-decision logic. The scan is side-effect free: no
-    reclaims, no spawns, no events appended, no status changes.
-    """
-    # Prevent accidental mutation: ``hold_scan_only`` forces ``dry_run`` and
-    # skips the reclaim/promote preamble.
-    dispatch_kwargs.pop("dry_run", None)
-    dispatch_kwargs.pop("hold_scan_only", None)
-
-    result = _dispatch_once_locked(
-        conn,
-        hold_scan_only=True,
-        dry_run=True,
-        board=board,
-        **dispatch_kwargs,
-    )
-
-    held_ids: set[str] = set()
-    for _label, attr in _DISPATCH_HOLD_BUCKETS:
-        vals = getattr(result, attr, None) or ()
-        for item in vals:
-            if isinstance(item, (list, tuple)):
-                held_ids.add(item[0])
-            else:
-                held_ids.add(item)
-
-    task_rows: dict[str, dict[str, Any]] = {}
-    if held_ids:
-        placeholders = ",".join("?" for _ in held_ids)
-        for row in conn.execute(
-            f"SELECT id, title, assignee, priority, created_at FROM tasks "
-            f"WHERE id IN ({placeholders})",
-            list(held_ids),
-        ):
-            task_rows[row["id"]] = {
-                "title": row["title"],
-                "assignee": row["assignee"],
-                "priority": row["priority"],
-                "created_at": row["created_at"],
-            }
-
-    holds: list[dict[str, Any]] = []
-    for label, attr in _DISPATCH_HOLD_BUCKETS:
-        vals = getattr(result, attr, None) or ()
-        for item in vals:
-            if isinstance(item, (list, tuple)):
-                task_id = item[0]
-                detail = item[1:]
-            else:
-                task_id = item
-                detail = ()
-            task = task_rows.get(task_id, {})
-            hold: dict[str, Any] = {
-                "task_id": task_id,
-                "title": task.get("title"),
-                "assignee": task.get("assignee"),
-                "priority": task.get("priority"),
-                "bucket": label,
-                "since": task.get("created_at"),
-            }
-            if label == "repo_serialized":
-                repo_root = detail[0] if detail else None
-                hold["repo_root"] = repo_root
-                hold["holder"] = (
-                    _repo_holder_for_root(conn, repo_root) if repo_root else None
-                )
-            elif label == "chain_worktree_serialized":
-                hold["chain_root_id"] = detail[0] if detail else None
-            elif label == "respawn_guarded":
-                hold["reason"] = detail[0] if detail else None
-            elif label == "budget_held":
-                hold["reason"] = detail[1] if len(detail) > 1 else None
-            elif label == "role_mismatch":
-                hold["reason"] = detail[0] if detail else None
-            elif label == "per_profile_capped":
-                hold["current"] = detail[1] if len(detail) > 1 else None
-                hold["cap"] = dispatch_kwargs.get("max_in_progress_per_profile")
-            holds.append(hold)
-
-    return {
-        "holds": holds,
-        "count": len(holds),
-        "checked_at": int(time.time()),
-    }
-
-
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     """Return True iff there is at least one ready+assigned+unclaimed task
     whose assignee maps to a real Hermes profile.
@@ -20286,7 +20165,6 @@ def _dispatch_once_locked(
     per_task_input_token_cap: Optional[int] = None,
     auto_retry_blocked: bool = False,
     auto_retry_blocked_backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
-    hold_scan_only: bool = False,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -20316,48 +20194,43 @@ def _dispatch_once_locked(
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
     """
+    # Reap zombie children from previously spawned workers. See
+    # reap_worker_zombies() for the full rationale.
+    reap_worker_zombies()
+
     result = DispatchResult()
-    if not hold_scan_only:
-        # Reap zombie children from previously spawned workers. See
-        # reap_worker_zombies() for the full rationale.
-        reap_worker_zombies()
-        # Refresh liveness for detached claude-CLI workers BEFORE the reclaimers
-        # run: a live ``claude -p`` child never self-heartbeats, so this keeps its
-        # ``last_heartbeat_at`` fresh and stops detect_stale_running from
-        # false-positive reclaiming a healthy long run. Hermes-runtime workers are
-        # skipped (they self-heartbeat). Fail-soft; never blocks dispatch.
-        result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
-        result.reclaimed = release_stale_claims(conn)
-        result.stale = detect_stale_running(
+    # Refresh liveness for detached claude-CLI workers BEFORE the reclaimers
+    # run: a live ``claude -p`` child never self-heartbeats, so this keeps its
+    # ``last_heartbeat_at`` fresh and stops detect_stale_running from
+    # false-positive reclaiming a healthy long run. Hermes-runtime workers are
+    # skipped (they self-heartbeat). Fail-soft; never blocks dispatch.
+    result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
+    result.reclaimed = release_stale_claims(conn)
+    result.stale = detect_stale_running(
+        conn,
+        stale_timeout_seconds=stale_timeout_seconds,
+    )
+    result.crashed = detect_crashed_workers(conn)
+    # detect_crashed_workers stashes protocol-violation auto-blocks on
+    # itself so the public list-return stays stable. Pull them into the
+    # DispatchResult here so telemetry / tests see the trip.
+    _crash_auto_blocked = getattr(detect_crashed_workers, "_last_auto_blocked", [])
+    if _crash_auto_blocked:
+        result.auto_blocked.extend(_crash_auto_blocked)
+    # Rate-limited requeues (quota wall, no failure counted) — surface for
+    # telemetry / tests. These tasks went back to ``ready`` and the respawn
+    # guard will defer them until the quota window clears.
+    _crash_rate_limited = getattr(detect_crashed_workers, "_last_rate_limited", [])
+    if _crash_rate_limited:
+        result.rate_limited.extend(_crash_rate_limited)
+    result.timed_out = enforce_max_runtime(conn)
+    if auto_retry_blocked:
+        result.auto_retried_blocked = auto_retry_blocked_tasks(
             conn,
-            stale_timeout_seconds=stale_timeout_seconds,
+            backoff_seconds=auto_retry_blocked_backoff_seconds,
+            failure_limit=failure_limit,
         )
-        result.crashed = detect_crashed_workers(conn)
-        # detect_crashed_workers stashes protocol-violation auto-blocks on
-        # itself so the public list-return stays stable. Pull them into the
-        # DispatchResult here so telemetry / tests see the trip.
-        _crash_auto_blocked = getattr(detect_crashed_workers, "_last_auto_blocked", [])
-        if _crash_auto_blocked:
-            result.auto_blocked.extend(_crash_auto_blocked)
-        # Rate-limited requeues (quota wall, no failure counted) — surface for
-        # telemetry / tests. These tasks went back to ``ready`` and the respawn
-        # guard will defer them until the quota window clears.
-        _crash_rate_limited = getattr(detect_crashed_workers, "_last_rate_limited", [])
-        if _crash_rate_limited:
-            result.rate_limited.extend(_crash_rate_limited)
-        result.timed_out = enforce_max_runtime(conn)
-        if auto_retry_blocked:
-            result.auto_retried_blocked = auto_retry_blocked_tasks(
-                conn,
-                backoff_seconds=auto_retry_blocked_backoff_seconds,
-                failure_limit=failure_limit,
-            )
-        result.promoted = recompute_ready(conn, failure_limit=failure_limit)
-    else:
-        # Hold-scan is a read-only report: it reuses the candidate-evaluation
-        # logic below but never mutates state. Force dry_run so every write
-        # guard inside the loop stays closed.
-        dry_run = True
+    result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full

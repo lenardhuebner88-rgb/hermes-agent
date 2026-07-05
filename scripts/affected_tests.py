@@ -115,16 +115,6 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
             # prevents a gate-tempo explosion (AC-2 counter-metric).
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
-                # hermes_cli/kanban.py maps to tests/hermes_cli/test_kanban_*.py
-                # (test_kanban_cli.py, test_kanban_holds.py, ...). Without this
-                # special case the 1:1 candidate test_kanban.py is missing and
-                # the fallback would select the entire tests/hermes_cli/
-                # directory, turning the targeted gate into a de-facto full
-                # suite and surfacing unrelated pre-existing failures.
-                if rel_dir == "hermes_cli" and name == "kanban.py":
-                    for p in (repo_root / pkg_test_dir).glob("test_kanban_*.py"):
-                        modules.add(str(p.relative_to(repo_root)))
-                    continue
                 test_file_count = sum(
                     1 for _p in (repo_root / pkg_test_dir).glob("test_*.py")
                 )
