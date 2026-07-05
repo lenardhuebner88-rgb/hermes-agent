@@ -108,3 +108,222 @@ def run_live_test(
         return LiveTestResult(depth=depth, passed=True, detail=f"contract on {path} holds")
     # Unknown depth: fail CLOSED — an unknown check must not count as passed.
     return LiveTestResult(depth=depth, passed=False, detail=f"unknown live_test_depth: {depth}")
+
+
+# ---------------------------------------------------------------------------
+# C3: release orchestrator + kill-switch + chain-tip integration
+# ---------------------------------------------------------------------------
+
+_TIER_ORDER = {"standard": 0, "review": 1, "critical": 2}
+
+
+def _release_config() -> dict:
+    """Resolve the ``release`` policy from the ROOT config.yaml (same
+    root-config discipline as ``kanban_db._review_gate_config`` — every
+    process must agree on one source of truth). Conservative defaults:
+    ``autonomous: false`` (the kill-switch), ``max_tier_autonomous: review``.
+    """
+    rel: dict = {}
+    try:
+        import yaml
+
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            candidate = root_cfg.get("release") or {}
+            if isinstance(candidate, dict):
+                rel = candidate
+    except Exception:
+        rel = {}
+    autonomous = rel.get("autonomous", False)
+    if isinstance(autonomous, str):
+        autonomous = autonomous.strip().lower() in ("1", "true", "yes", "on")
+    max_tier = str(rel.get("max_tier_autonomous") or "review").strip().lower()
+    if max_tier not in _TIER_ORDER:
+        max_tier = "review"
+    return {"autonomous": bool(autonomous), "max_tier_autonomous": max_tier}
+
+
+def _repo_root() -> "Path":
+    from pathlib import Path
+
+    return Path(__file__).resolve().parent.parent
+
+
+def _default_deploy() -> tuple[bool, str]:
+    """Run scripts/deploy_dashboard.sh; (ok, output tail)."""
+    import subprocess
+
+    script = _repo_root() / "scripts" / "deploy_dashboard.sh"
+    try:
+        proc = subprocess.run(
+            [str(script)], capture_output=True, text=True, timeout=900, check=False
+        )
+    except Exception as exc:
+        return False, f"deploy failed to run: {exc}"
+    tail = ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
+    return proc.returncode == 0, tail
+
+
+def _default_rollback() -> tuple[bool, str]:
+    """Roll back to the anchor BEFORE the failing deploy (the failing deploy
+    tagged its own commit, so the target is the second-newest anchor)."""
+    import subprocess
+
+    root = _repo_root()
+    try:
+        tags = subprocess.run(
+            ["git", "tag", "-l", "release/pre-deploy/*"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout.split()
+    except Exception as exc:
+        return False, f"could not list anchors: {exc}"
+    tags = sorted(tags)
+    if len(tags) < 2:
+        return False, "no previous pre-deploy anchor to roll back to"
+    target = tags[-2]
+    script = root / "scripts" / "rollback_dashboard.sh"
+    try:
+        proc = subprocess.run(
+            [str(script), target],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"rollback failed to run: {exc}"
+    tail = ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
+    return proc.returncode == 0, f"target={target}\n{tail}"
+
+
+def _default_notify(message: str) -> None:
+    """Operator alert: log + durable alert file. Delivery to Discord rides the
+    ``auto_release`` task event through the gateway notifier (never Telegram)."""
+    logger.error("AUTO-RELEASE ALERT: %s", message)
+    try:
+        from pathlib import Path
+
+        reports = Path.home() / ".hermes" / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        import datetime as _dt
+
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(reports / "auto-release-alerts.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {message}\n")
+    except Exception:
+        pass
+
+
+def release_chain(
+    *,
+    depth: str,
+    config: dict,
+    deploy: Callable[[], tuple[bool, str]],
+    rollback: Callable[[], tuple[bool, str]],
+    notify: Callable[[str], None],
+    fetch: Optional[Fetch] = None,
+) -> dict:
+    """Deploy a green chain and verify it live; roll back on live failure.
+
+    Flow: pre-deploy live test (baseline; ``held`` for ui-real) → deploy →
+    post-deploy live test (at least ``smoke``) → on red: rollback + notify.
+    Pure orchestration — every side effect is an injected callable.
+    """
+    depth = (depth or "").strip().lower()
+    pre = run_live_test(depth, fetch=fetch)
+    if pre.held:
+        return {"outcome": "held_live_test", "detail": pre.detail}
+    if not pre.passed:
+        notify(f"auto-release aborted: pre-deploy live test red ({pre.detail})")
+        return {"outcome": "aborted_pre_live_test", "detail": pre.detail}
+    ok, deploy_tail = deploy()
+    if not ok:
+        notify(f"auto-release: deploy script failed — no rollback needed: {deploy_tail[-300:]}")
+        return {"outcome": "deploy_failed", "detail": deploy_tail[-500:]}
+    post = run_live_test(depth or "smoke", fetch=fetch)
+    if post.passed:
+        return {"outcome": "deployed", "detail": post.detail}
+    rb_ok, rb_detail = rollback()
+    notify(
+        "auto-release: post-deploy live test RED — rolled back "
+        f"(rollback_ok={rb_ok}): {post.detail}"
+    )
+    return {
+        "outcome": "rolled_back",
+        "detail": post.detail,
+        "rollback_ok": rb_ok,
+        "rollback_detail": rb_detail[-500:],
+    }
+
+
+def maybe_auto_release(conn, task_id: str) -> Optional[dict]:
+    """Chain-tip hook: called by ``complete_task`` after a task reached ``done``.
+
+    Returns ``None`` when this completion does not autonomously release
+    (kill-switch off, not a PlanSpec chain, chain still open, no root, root not
+    ``freigabe: complete``), a ``held_critical`` outcome when the chain
+    contains a critical-tier task (never autonomous), or the
+    :func:`release_chain` outcome dict.
+    """
+    cfg = _release_config()
+    if not cfg.get("autonomous"):
+        return None
+    row = conn.execute(
+        "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    source = (row["planspec_source"] or "").strip() if row else ""
+    if not source:
+        return None
+    open_cnt = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE planspec_source = ? "
+        "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')",
+        (source,),
+    ).fetchone()[0]
+    if open_cnt:
+        return None  # not the tip — chain still has open slices
+    # Chain root via the sink convention (children are the root's tree-parents).
+    root = conn.execute(
+        "SELECT t.id, t.freigabe, t.live_test_depth FROM tasks t "
+        "JOIN task_links l ON l.child_id = t.id "
+        "WHERE l.parent_id = ? AND t.freigabe IS NOT NULL "
+        "ORDER BY t.created_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if root is None:
+        return None
+    if str(root["freigabe"] or "").strip().lower() != "complete":
+        return None  # operator-gated chains never auto-release
+    # Tier ceiling over the WHOLE chain: one critical slice pins the chain.
+    from hermes_cli import kanban_db as _kb
+
+    chain_ids = [
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM tasks WHERE planspec_source = ?", (source,)
+        ).fetchall()
+    ]
+    max_tier = "standard"
+    for cid in chain_ids:
+        tier = _kb._effective_review_tier(conn, cid)
+        if _TIER_ORDER.get(tier, 0) > _TIER_ORDER.get(max_tier, 0):
+            max_tier = tier
+    if max_tier == "critical" or (
+        _TIER_ORDER[max_tier] > _TIER_ORDER[cfg["max_tier_autonomous"]]
+    ):
+        return {"outcome": "held_critical", "detail": f"chain max tier {max_tier}"}
+    return release_chain(
+        depth=str(root["live_test_depth"] or ""),
+        config=cfg,
+        deploy=_default_deploy,
+        rollback=_default_rollback,
+        notify=_default_notify,
+        fetch=_default_fetch,
+    )

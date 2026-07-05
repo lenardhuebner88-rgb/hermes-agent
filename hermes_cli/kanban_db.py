@@ -11518,6 +11518,19 @@ def complete_task(
         run_id=run_id,
         summary=(summary if summary is not None else result),
     )
+    # C3 (auto-release): when this completion closes the LAST open slice of a
+    # freigabe:complete PlanSpec chain and the release.autonomous kill-switch
+    # is ON (default OFF), deploy + live-verify + rollback-on-red. Strictly
+    # fail-open — completion semantics must never depend on release plumbing.
+    try:
+        from hermes_cli import auto_release as _auto_release
+
+        _ar_outcome = _auto_release.maybe_auto_release(conn, task_id)
+        if _ar_outcome is not None:
+            with write_txn(conn):
+                _append_event(conn, task_id, "auto_release", _ar_outcome)
+    except Exception:
+        _log.error("auto-release hook failed for %s", task_id, exc_info=True)
     return True
 
 

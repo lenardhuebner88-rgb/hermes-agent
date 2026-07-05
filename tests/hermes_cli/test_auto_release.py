@@ -86,3 +86,197 @@ def test_empty_depth_trivially_passes():
     res = auto_release.run_live_test("", fetch=lambda p, timeout=8.0: {})
     assert res.passed is True
     assert res.detail == "no live test configured"
+
+
+# ---------------------------------------------------------------------------
+# C3: release orchestrator + kill-switch + chain-tip hook
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+import hermes_cli.profiles as profiles_mod  # noqa: E402
+from hermes_cli import kanban_db as kb  # noqa: E402
+
+
+def _write_profile(home: Path, name: str) -> None:
+    d = home / "profiles" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.yaml").write_text("model: {}\n")
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for name in ["coder", "verifier"]:
+        _write_profile(home, name)
+    kb.init_db()
+    return home
+
+
+def _mk_chain(conn, n=2, tier=None, freigabe="complete", depth="smoke"):
+    """PlanSpec-shaped chain: root carries freigabe/live_test_depth; children
+    carry planspec_source and link to the root via the sink convention
+    (task_links parent=chain task, child=root)."""
+    root = kb.create_task(
+        conn,
+        title="PlanSpec T: auto-release chain",
+        freigabe=freigabe,
+        live_test_depth=depth,
+    )
+    kids = []
+    for i in range(n):
+        kid = kb.create_task(
+            conn, title=f"slice {i + 1}", assignee="coder", review_tier=tier
+        )
+        conn.execute(
+            "UPDATE tasks SET planspec_source = ? WHERE id = ?", ("/tmp/ar.md", kid)
+        )
+        kb.link_tasks(conn, kid, root)
+        kids.append(kid)
+    conn.commit()
+    return root, kids
+
+
+def _green_config():
+    return {"autonomous": True, "max_tier_autonomous": "review"}
+
+
+def test_autonomous_off_by_default(kanban_home, monkeypatch):
+    """Kill-switch default false → chain-tip completion does NOT deploy."""
+    deploys = []
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: deploys.append(1) or (True, "")
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn)
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert deploys == []
+
+
+def test_green_chain_deploys_and_verifies(kanban_home, monkeypatch):
+    """Autonomous on, review tier, smoke green → deploy runs, health re-checked."""
+    events = []
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: events.append("deploy") or (True, "ok")
+    )
+    monkeypatch.setattr(
+        auto_release,
+        "_default_rollback",
+        lambda: events.append("rollback") or (True, ""),
+    )
+    monkeypatch.setattr(auto_release, "_default_notify", lambda msg: None)
+    fetches = []
+
+    def fake_fetch(path, timeout=8.0):
+        fetches.append(path)
+        return {"version": "0.18.0", "gateway_running": True}
+
+    monkeypatch.setattr(auto_release, "_default_fetch", fake_fetch)
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert events == ["deploy"]
+        # pre-deploy live test + post-deploy re-check both hit the payload
+        assert fetches.count("/api/status") >= 2
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = 'auto_release' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert ev is not None
+        assert json.loads(ev["payload"])["outcome"] == "deployed"
+
+
+def test_live_failure_triggers_rollback():
+    """Post-deploy smoke fails → rollback invoked + operator notified."""
+    events = []
+    payloads = iter(
+        [
+            {"version": "0.18.0"},  # pre-deploy smoke: green
+            OSError("dead after deploy"),  # post-deploy: red
+        ]
+    )
+
+    def fake_fetch(path, timeout=8.0):
+        item = next(payloads)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    outcome = auto_release.release_chain(
+        depth="smoke",
+        config=_green_config(),
+        deploy=lambda: events.append("deploy") or (True, "ok"),
+        rollback=lambda: events.append("rollback") or (True, "rolled back"),
+        notify=lambda msg: events.append(f"notify:{msg[:20]}"),
+        fetch=fake_fetch,
+    )
+    assert outcome["outcome"] == "rolled_back"
+    assert "deploy" in events and "rollback" in events
+    assert any(e.startswith("notify:") for e in events)
+
+
+def test_critical_tier_never_autonomous(kanban_home, monkeypatch):
+    """critical chain never auto-deploys regardless of kill-switch."""
+    deploys = []
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: deploys.append(1) or (True, "")
+    )
+    monkeypatch.setattr(
+        auto_release, "_default_fetch", lambda p, timeout=8.0: {"version": "1"}
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="critical")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert deploys == []
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = 'auto_release' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert ev is not None
+        assert json.loads(ev["payload"])["outcome"] == "held_critical"
+
+
+def test_ui_real_chain_held(kanban_home, monkeypatch):
+    deploys = []
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: deploys.append(1) or (True, "")
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review", depth="ui-real")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert deploys == []
+
+
+def test_incomplete_chain_does_not_deploy(kanban_home, monkeypatch):
+    """Hook fires per completion but only the LAST open slice releases."""
+    deploys = []
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: deploys.append(1) or (True, "")
+    )
+    monkeypatch.setattr(
+        auto_release, "_default_fetch", lambda p, timeout=8.0: {"version": "1"}
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review", n=3)
+        kb.claim_task(conn, kids[0])
+        assert kb.complete_task(conn, kids[0], summary="s")
+        assert deploys == []
+
+
+import json  # noqa: E402
