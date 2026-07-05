@@ -23,6 +23,7 @@ import {
   ReliabilityResponseSchema,
   RunsDailyResponseSchema,
   RunsCostsResponseSchema,
+  RunsCostsSeriesResponseSchema,
   SubscriptionTokenBurnResponseSchema,
   ChainCompletionResponseSchema,
   ChainCostsResponseSchema,
@@ -67,7 +68,7 @@ import {
 import type { TaskBodyResponse, TaskDeliverablesResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1702,6 +1703,18 @@ export function useHermesRunsCosts() {
       RunsCostsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/costs?days=7"),
       "runs/costs",
+    ),
+    60000,
+  );
+}
+
+export function useHermesRunsCostSeries() {
+  return usePolling<RunsCostsSeriesResponse>(
+    "runs/costs-series",
+    async () => parseOrThrow(
+      RunsCostsSeriesResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/costs-series?days=7"),
+      "runs/costs-series",
     ),
     60000,
   );
