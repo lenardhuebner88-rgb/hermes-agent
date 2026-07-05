@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -10,7 +10,7 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -52,6 +52,8 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
+  // System (S1-Fusion): Druck + Ops Radar + Puls in einer Leitstand-Ansicht.
+  { label: "System", path: "/control/system", icon: Server },
   { label: "Pressure", path: "/control/pressure", icon: Gauge },
   { label: "Ops Radar", path: "/control/ops", icon: Radar },
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit

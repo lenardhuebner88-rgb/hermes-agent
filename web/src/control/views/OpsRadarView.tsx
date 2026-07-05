@@ -1,8 +1,7 @@
-import type { ComponentType } from "react";
 import { Bot, GitBranch, Radar, ShieldCheck, Wrench } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { Led, StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { Card, Panel, SkeletonCard, Stat, Text } from "../components/primitives";
+import { StatusChip } from "../components/StatusChip";
 import { useOperatorInventory } from "../hooks/useControlData";
 import type { OperatorInventoryActor, OperatorInventoryResponse, OperatorInventoryWorktree, OperatorInventoryWorktreeState, ToneName } from "../lib/types";
 
@@ -42,25 +41,6 @@ function leverDot(tone: ToneName) {
   if (tone === "amber") return "warn";
   if (tone === "emerald") return "ready";
   return "idle";
-}
-
-function Chip({ icon: Icon, label, value, hint, tone = "zinc" }: {
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: ToneName;
-}) {
-  return (
-    <div className={cn("min-h-16 min-w-0 rounded-lg border px-2.5 py-2 sm:min-h-20 sm:px-3", tone === "red" || tone === "rose" ? "border-rose-500/25 bg-rose-500/10" : tone === "amber" ? "border-amber-500/25 bg-amber-500/10" : tone === "emerald" ? "border-emerald-500/25 bg-emerald-500/10" : tone === "cyan" ? "border-cyan-500/25 bg-cyan-500/10" : "border-white/10 bg-white/[.03]") }>
-      <div className="flex min-w-0 items-center gap-2">
-        <Icon className="h-3.5 w-3.5 shrink-0 hc-dim" />
-        <span className="truncate hc-type-label hc-dim">{label}</span>
-      </div>
-      <p className="mt-1 truncate hc-mono text-sm font-semibold text-white sm:mt-2">{value}</p>
-      {hint ? <p className="mt-0.5 line-clamp-1 hc-type-label hc-soft">{hint}</p> : null}
-    </div>
-  );
 }
 
 function worktreeRank(item: OperatorInventoryWorktree): number {
@@ -117,11 +97,14 @@ function ActorRow({ actor }: { actor: OperatorInventoryActor }) {
   );
 }
 
-export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
+export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }: {
   data: OperatorInventoryResponse | null;
   lastUpdated: number | null;
   isStale?: boolean;
   error?: string | null;
+  /** In der System-Fusion (S1) trägt der geteilte Kopf die Status-Zeile + Hebel —
+   *  eingebettet bleiben nur die Sektionen Worktrees + Akteure. */
+  embedded?: boolean;
 }) {
   if (!data) {
     return (
@@ -140,6 +123,8 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
 
   return (
     <div className="space-y-4">
+      {embedded ? null : (
+      <>
       <Card surface="raised" tone={next.tone} className="overflow-hidden p-0" ariaLabel="Ops Radar">
         <div className="flex flex-col gap-3 border-b border-[var(--hc-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -153,10 +138,10 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
         </div>
 
         <div className="grid grid-cols-2 gap-2 p-3 lg:grid-cols-4">
-          <Chip icon={GitBranch} label="Worktrees" value={`${summary.worktrees_total} total`} hint={`${summary.worktrees_locked} locked - ${summary.worktrees_dirty} dirty`} tone={summary.worktrees_dirty || summary.worktrees_orphaned ? "amber" : "zinc"} />
-          <Chip icon={Bot} label="Akteure" value={String(summary.actors_total)} hint={`${summary.actors_canonical} kanonisch`} tone={summary.actors_total ? "cyan" : "zinc"} />
-          <Chip icon={Radar} label="Mismatch" value={String(mismatchCount)} hint={`${summary.worktrees_orphaned} orphan - ${summary.worktrees_status_unknown} unklar`} tone={mismatchCount ? "rose" : "emerald"} />
-          <Chip icon={Wrench} label="Top-Hebel" value={next.label} hint={next.detail} tone={next.tone} />
+          <StatusChip icon={GitBranch} label="Worktrees" value={`${summary.worktrees_total} total`} hint={`${summary.worktrees_locked} locked - ${summary.worktrees_dirty} dirty`} tone={summary.worktrees_dirty || summary.worktrees_orphaned ? "amber" : "zinc"} />
+          <StatusChip icon={Bot} label="Akteure" value={String(summary.actors_total)} hint={`${summary.actors_canonical} kanonisch`} tone={summary.actors_total ? "cyan" : "zinc"} />
+          <StatusChip icon={Radar} label="Mismatch" value={String(mismatchCount)} hint={`${summary.worktrees_orphaned} orphan - ${summary.worktrees_status_unknown} unklar`} tone={mismatchCount ? "rose" : "emerald"} />
+          <StatusChip icon={Wrench} label="Top-Hebel" value={next.label} hint={next.detail} tone={next.tone} />
         </div>
       </Card>
 
@@ -174,6 +159,8 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
           ))}
         </div>
       </Panel>
+      </>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,.85fr)]">
         <Panel title="Worktree-Ledger" eyebrow="Git Inventar">
@@ -186,7 +173,7 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
               </div>
             </div>
           ) : (
-            <div className="grid gap-2">{worktrees.map((item) => <WorktreeRow key={item.id} item={item} />)}</div>
+            <div className="grid gap-2">{worktrees.map((item, idx) => <WorktreeRow key={`${item.id}:${item.branch}:${idx}`} item={item} />)}</div>
           )}
         </Panel>
 

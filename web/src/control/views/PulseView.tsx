@@ -1,21 +1,14 @@
-import { useMemo } from "react";
 import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { useCronObservability, useHermesRecentResults } from "../hooks/useControlData";
-import { buildPulse, groupPulseByDay, summarizePulse, type PulseEvent, type PulseKind } from "../lib/pulse";
-import { fmtAge, fmtClockTime, freshness, nowSec } from "../lib/derive";
+import { type PulseEvent, type PulseKind, type PulseSummary } from "../lib/pulse";
+import { fmtAge, fmtClockTime } from "../lib/derive";
 import { TONE_HEX } from "../lib/tones";
 import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { Hero } from "../components/Hero";
 import { SkeletonCard } from "../components/primitives";
 import { StaleBadge } from "../components/atoms";
+import { usePulseData, type PulseData, type PulseSource } from "../hooks/usePulseData";
 import { de } from "../i18n/de";
-import type { Proposal } from "../lib/types";
-
-interface Props {
-  proposals: Proposal[];
-  proposalsLastUpdated?: number | null;
-}
 
 const kindMeta: Record<PulseKind, { icon: React.ComponentType<{ className?: string }>; label: string }> = {
   run: { icon: Bot, label: de.pulse.kindRun },
@@ -26,45 +19,60 @@ const kindMeta: Record<PulseKind, { icon: React.ComponentType<{ className?: stri
   "cron-error": { icon: AlertTriangle, label: de.pulse.kindCronError },
 };
 
-// Fenster des Stroms: die Quellen liefern selbst ~48h (recent-results) bzw. den
-// letzten Lauf je Cron — wir zeigen, was da ist, und benennen das Fenster ehrlich.
-const WINDOW_HOURS = 48;
-
-export function PulseView({ proposals, proposalsLastUpdated }: Props) {
+/**
+ * PulseTimeline — die reine 48h-Zeitleiste (Skeleton / Leerzustand / nach Tagen
+ * gruppierte Ereignisliste), ohne Hero. Die PulseView setzt ihren Hero davor;
+ * die System-Fusion rahmt sie als "Ereignisse"-Sektion.
+ */
+export function PulseTimeline({ data }: { data: PulseData }) {
   const navigate = useNavigate();
-  const results = useHermesRecentResults();
-  const crons = useCronObservability();
-  const now = nowSec();
-
-  const events = useMemo(
-    () =>
-      buildPulse({
-        results: results.data?.results ?? [],
-        proposals,
-        crons: crons.data?.jobs ?? [],
-        sinceSec: now - WINDOW_HOURS * 3600,
-        nowSec: now,
-      }),
-    [results.data, proposals, crons.data, now],
+  if (data.loading) return <SkeletonCard rows={4} />;
+  if (data.events.length === 0) {
+    return <FleetEmptyState ok title={de.pulse.empty} desc={de.pulse.emptyHint(data.windowHours)} />;
+  }
+  return (
+    <div className="space-y-5">
+      {data.days.map((day) => (
+        <FleetPanel key={day.key} eyebrow={dayLabel(day.daysAgo, day.events[0].at)} meta={de.pulse.dayCount(day.events.length)}>
+          <ol className="space-y-2">
+            {day.events.map((event) => (
+              <EventRow key={event.id} event={event} now={data.now} onOpen={() => navigate(event.tab)} />
+            ))}
+          </ol>
+        </FleetPanel>
+      ))}
+    </div>
   );
-  const summary = useMemo(() => summarizePulse(events), [events]);
-  const days = useMemo(() => groupPulseByDay(events, now), [events, now]);
+}
 
-  // Frische: der älteste der drei Ströme bestimmt, wie aktuell der Puls ist.
-  const fresh = freshness(
-    Math.min(results.lastUpdated ?? now, crons.lastUpdated ?? now, proposalsLastUpdated ?? now),
-    20000,
-    now,
+/** Die 48h-Bilanz als Kachel-Zeile (Läufe / Angewandt / [Reverted] / Crons).
+ *  Geteilt zwischen dem Pulse-Hero und dem fusionierten System-Kopf. */
+export function PulseTally({ summary }: { summary: PulseSummary }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <FleetPod label={de.pulse.statRuns} value={summary.runs} dot={summary.runs > 0 ? "live" : "idle"} />
+      <FleetPod label={de.pulse.statApplied} value={summary.applied} dot={summary.applied > 0 ? "ready" : "idle"} />
+      {summary.reverted > 0 ? <FleetPod label={de.pulse.statReverted} value={summary.reverted} dot="warn" /> : null}
+      <FleetPod
+        label={de.pulse.statCrons}
+        value={summary.crons}
+        suffix={summary.cronErrors > 0 ? de.pulse.cronErrorSuffix(summary.cronErrors) : undefined}
+        dot={summary.cronErrors > 0 ? "error" : "live"}
+      />
+    </div>
   );
-  const loading = results.loading && crons.loading && events.length === 0;
-  const error = results.error && crons.error ? (results.error ?? crons.error) : null;
+}
+
+export function PulseView(props: PulseSource) {
+  const data = usePulseData(props);
+  const { summary, fresh, error, now, windowHours, results, crons } = data;
 
   return (
     <div className="space-y-5">
       <Hero
         eyebrow={de.pulse.eyebrow}
         title={de.pulse.title}
-        subtitle={de.pulse.subtitle(WINDOW_HOURS)}
+        subtitle={de.pulse.subtitle(windowHours)}
         tone={summary.cronErrors > 0 ? "amber" : "cyan"}
         status={{
           label: error ? de.pulse.sourceError : fresh.stale ? de.pulse.staleWarn(fresh.label.replace("vor ", "")) : fresh.label,
@@ -79,36 +87,10 @@ export function PulseView({ proposals, proposalsLastUpdated }: Props) {
         }
       >
         {/* Tally: eine ehrliche Zeile darüber, was die Maschine geleistet hat. */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <FleetPod label={de.pulse.statRuns} value={summary.runs} dot={summary.runs > 0 ? "live" : "idle"} />
-          <FleetPod label={de.pulse.statApplied} value={summary.applied} dot={summary.applied > 0 ? "ready" : "idle"} />
-          {summary.reverted > 0 ? <FleetPod label={de.pulse.statReverted} value={summary.reverted} dot="warn" /> : null}
-          <FleetPod
-            label={de.pulse.statCrons}
-            value={summary.crons}
-            suffix={summary.cronErrors > 0 ? de.pulse.cronErrorSuffix(summary.cronErrors) : undefined}
-            dot={summary.cronErrors > 0 ? "error" : "live"}
-          />
-        </div>
+        <PulseTally summary={summary} />
       </Hero>
 
-      {loading ? (
-        <SkeletonCard rows={4} />
-      ) : events.length === 0 ? (
-        <FleetEmptyState ok title={de.pulse.empty} desc={de.pulse.emptyHint(WINDOW_HOURS)} />
-      ) : (
-        <div className="space-y-5">
-          {days.map((day) => (
-            <FleetPanel key={day.key} eyebrow={dayLabel(day.daysAgo, day.events[0].at)} meta={de.pulse.dayCount(day.events.length)}>
-              <ol className="space-y-2">
-                {day.events.map((event) => (
-                  <EventRow key={event.id} event={event} now={now} onOpen={() => navigate(event.tab)} />
-                ))}
-              </ol>
-            </FleetPanel>
-          ))}
-        </div>
-      )}
+      <PulseTimeline data={data} />
     </div>
   );
 }

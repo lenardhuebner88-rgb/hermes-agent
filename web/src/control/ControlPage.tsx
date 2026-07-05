@@ -78,6 +78,9 @@ const SchmiedeView = lazy(() =>
 const StrategistView = lazy(() =>
   import("./views/StrategistView").then((m) => ({ default: m.StrategistView })),
 );
+const SystemView = lazy(() =>
+  import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
+);
 const PressureView = lazy(() =>
   import("./views/PressureView").then((m) => ({ default: m.PressureView })),
 );
@@ -101,6 +104,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/loops")) return "loops";
   if (pathname.includes("/control/lanes")) return "lanes";
+  if (pathname.includes("/control/system")) return "system";
   if (pathname.includes("/control/pressure")) return "pressure";
   if (pathname.includes("/control/ops")) return "ops";
   if (pathname.includes("/control/research")) return "research";
@@ -134,6 +138,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   crons: () => import("./views/CronView"),
   loops: () => import("./views/LoopsView"),
   lanes: () => import("./views/LanesView"),
+  system: () => import("./views/system/SystemView"),
   pressure: () => import("./views/PressureView"),
   ops: () => import("./views/OpsRadarView"),
   research: () => import("./views/ResearchView"),
@@ -164,6 +169,7 @@ const tabPath: Record<ControlTab, string> = {
   crons: "/control/crons",
   loops: "/control/loops",
   lanes: "/control/lanes",
+  system: "/control/system",
   pressure: "/control/pressure",
   ops: "/control/ops",
   research: "/control/research",
@@ -274,6 +280,7 @@ export default function ControlPage() {
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="loops" element={<LoopsView />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
+            <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="pressure" element={<PressureView />} />
             <Route path="ops" element={<OpsRadarView />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
