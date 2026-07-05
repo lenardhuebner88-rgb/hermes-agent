@@ -3787,6 +3787,7 @@ HEILER_SOURCE_SILENT_BLOCK = "silent_block_escalation"
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
 SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
+RELEASE_GATE_BLOCK_REASON = "awaiting release-gate GO"
 # Author the Stratege stamps on every PlanSpec chain it ingests (propose()).
 # Single source of truth for the silent-block strategist carve-out
 # (HEILER-SILENTBLOCK-REASON-FIDELITY-S1); ``strategist.STRATEGIST_AUTHOR``
@@ -18353,6 +18354,25 @@ def silent_block_task_ids(
     return out
 
 
+def _latest_release_gate_block_reason(conn: sqlite3.Connection, task_id: str) -> str:
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return ""
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    reason = str(payload.get("reason") or "").strip()
+    return reason if reason == RELEASE_GATE_BLOCK_REASON else ""
+
+
 def _silent_block_escalation_payload(
     *,
     row: sqlite3.Row,
@@ -18373,9 +18393,27 @@ def _silent_block_escalation_payload(
     auto_retry_count = (
         int(row["auto_retry_count"] or 0) if "auto_retry_count" in row.keys() else 0
     )
+    task_id = row["id"]
+    release_gate_candidate = (reason or "").strip() == RELEASE_GATE_BLOCK_REASON
+    evidence = {
+        "trigger_outcome": trigger_outcome,
+        "last_error": (reason or "")[:500],
+        "blocked_kind": blocked_kind,
+        "source": SILENT_BLOCK_ESCALATION_SOURCE,
+    }
+    recommended_human_action = (
+        "inspect the task, answer any operator question, and decide whether "
+        "to unblock/reassign/close — the worker loop cannot proceed alone"
+    )
+    if release_gate_candidate:
+        evidence["release_gate_candidate"] = True
+        recommended_human_action = (
+            f"run `hermes kanban release-gate {task_id}` to process the parked "
+            "release gate"
+        )
     return {
         "task": {
-            "id": row["id"],
+            "id": task_id,
             "title": row["title"] if "title" in row.keys() else None,
             "status": row["status"] if "status" in row.keys() else None,
             "assignee": row["assignee"] if "assignee" in row.keys() else None,
@@ -18386,16 +18424,8 @@ def _silent_block_escalation_payload(
             "(further) act on it"
         ),
         "attempts_already_made": auto_retry_count,
-        "evidence": {
-            "trigger_outcome": trigger_outcome,
-            "last_error": (reason or "")[:500],
-            "blocked_kind": blocked_kind,
-            "source": SILENT_BLOCK_ESCALATION_SOURCE,
-        },
-        "recommended_human_action": (
-            "inspect the task, answer any operator question, and decide whether "
-            "to unblock/reassign/close — the worker loop cannot proceed alone"
-        ),
+        "evidence": evidence,
+        "recommended_human_action": recommended_human_action,
         "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
     }
 
@@ -18474,6 +18504,8 @@ def escalate_silent_blocks_sweep(
                 reason = (last_run["summary"] or "").strip() or (
                     last_run["error"] or ""
                 ).strip()
+            if not reason:
+                reason = _latest_release_gate_block_reason(conn, tid)
             body_hash = _task_body_hash(row["body"])
             blocked_kind = _blocked_kind_for_auto_retry(
                 reason,
