@@ -225,6 +225,10 @@ def test_auto_release_rolled_back_alerts_with_task_id_and_detail(kanban_home):
     assert "🔴" in text
     assert "invalid status payload" in text
     assert "/control" in text
+    # successful rollback leaves the live checkout DETACHED — the alert must
+    # tell the operator/next agent to return it to main.
+    assert "DETACHED" in text
+    assert "git checkout main" in text
 
 
 def test_auto_release_deployed_outcome_stays_silent(kanban_home):

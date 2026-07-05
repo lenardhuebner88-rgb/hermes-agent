@@ -255,6 +255,13 @@ def _rule_auto_release_attention(
         if detail:
             line += f" — {detail}"
         lines.append(line)
+        if outcome == "rolled_back" and payload.get("rollback_ok"):
+            # rollback_dashboard.sh leaves the live checkout DETACHED on the
+            # anchor by design — the next human/agent must return it.
+            lines.append(
+                "⚠️ Live-Checkout ist DETACHED auf dem Anchor — nach Triage: "
+                "`git checkout main` in ~/.hermes/hermes-agent."
+            )
     if not lines:
         return None
     lines.append("Details: /control Fleet → Plan-Tab, Auto-Release-Kachel.")

@@ -233,6 +233,8 @@ Do not write change-detector tests for expected-to-change data (model lists, con
 - Tests must not write to a real `~/.hermes/`.
 - When wiring unused/dead code into a live path, E2E test the actual resolution chain with real imports and temp `HERMES_HOME`.
 - Squash-merging stale branches can silently revert unrelated fixes; inspect merge diffs for unexpected deletions.
+- An auto-release rollback (`scripts/rollback_dashboard.sh`, kill-switch `release.autonomous`) leaves this LIVE checkout DETACHED on the anchor by design — if `git status` shows detached HEAD, triage the rollback first, then `git checkout main`. Never build on the detached state.
+- Uncommitted/untracked files in this live checkout leak into integration gates (`tsc -b` picks up stray test files) and can park foreign kanban chains — keep WIP on short leashes; long-running builds belong in worktrees.
 
 ## Source Code Reference
 
