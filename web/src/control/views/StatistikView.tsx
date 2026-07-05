@@ -1,21 +1,17 @@
 /**
- * StatistikView (/control/statistik) — Richtung B · Broadsheet (PlanSpec
- * 2026-06-17, ST4). An editorial flotten-report printed on paper instead of a
- * wall of dark cards. The shell + primitives are ST3 (components/broadsheet);
- * this module binds the live numbers.
+ * StatistikView (/control/statistik) — Leitstand-Reskin (Rule 11+12): dieselbe
+ * dunkle Statistik wie Fleet/Start statt des Broadsheet-Vorgängers (ST3/ST4/
+ * ST5). Skin via [data-statistik] + statistik.css (Full-Bleed-Regeln analog
+ * `.ch-*`/`.fleet-bleed`); Flächen aus den Leitstand-Tokens (surface-0/1/2,
+ * ink/ink-2/ink-3, line, live, status-trio). IA/Funktion + alle Sektionen
+ * bleiben unverändert gegenüber dem Broadsheet-Vorgänger — nur die Präsentation
+ * wechselt von einer bedruckten Papier-Spalte auf Leitstand-Karten/KPI-Pods.
  *
- * ST4 owns the top of the sheet:
- *   Masthead   — Akzeptanzrate (verifier verdicts) + 3 Stütz-KPIs
- *                (Autonomie · Kosten je Lieferung · Nutzerwert).
- *   Latenz     — p50 / p90 als Zwei-Zahl-Karte (/runs/summary).
- *   Verläss.   — Leaderboard je Profil (/runs/reliability, phantom-gefiltert).
- *   Taxonomie  — wiederkehrende Fehler gebucketet (/runs/issues); Befund:
- *                alles Harness-Lifecycle.
- * ST5 inserts the Budget-Ledger + Effizienz sections at the marked seam below.
- *
- * Mobil-first: the column is capped at 27rem and reads top-to-bottom at 390px.
+ * Mobil-first: die Spalte liest sich bei 390px top-to-bottom ohne horizontales
+ * Scrollen.
  */
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { ChevronRight } from "lucide-react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
@@ -47,24 +43,8 @@ import type {
 } from "../lib/schemas";
 import { AccountUsageTile } from "../components/AccountUsageTile";
 import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
-import {
-  BroadsheetShell,
-  BroadsheetFooter,
-  EngpassLead,
-  ErrorBar,
-  ErrorLegend,
-  ErrorLegendItem,
-  LeaderRow,
-  LedgerRow,
-  Masthead,
-  SectionRule,
-  SupportingStat,
-  SupportingStats,
-  TwinStat,
-  TwinStats,
-  Verdict,
-} from "../components/broadsheet/Broadsheet";
-import { DrawerShell } from "../components/leitstand";
+import { DrawerShell, KpiTile, SectionHeader, FleetEmptyState } from "../components/leitstand";
+import { cn } from "@/lib/utils";
 import {
   acceptance,
   acceptanceDelta,
@@ -86,9 +66,11 @@ import {
   windowCostSummary,
   workerCost,
   workerTokens,
+  type FigureStatus,
   type LedgerEntry,
   type MotherLedgerSortKey,
 } from "../lib/statsBroadsheet";
+import "./statistik.css";
 
 const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}`);
 const usdText = (v: number | null) => (v == null ? "—" : `$ ${v.toFixed(2)}`);
@@ -112,15 +94,94 @@ const LANE_COLORS: Record<string, string> = {
   admin: "var(--color-ink-3)",
 };
 function laneStyle(profile: string): CSSProperties {
-  return { "--sb-lane": LANE_COLORS[profile] ?? "var(--color-ink-3)" } as CSSProperties;
+  return { "--st-lane": LANE_COLORS[profile] ?? "var(--color-ink-3)" } as CSSProperties;
 }
 
 function LaneLabel({ profile, label = profile }: { profile: string; label?: ReactNode }) {
   return (
-    <span className="sb-lane-label" style={laneStyle(profile)}>
-      <span className="sb-lane-dot" aria-hidden="true" />
+    <span className="st-lane-label" style={laneStyle(profile)}>
+      <span className="st-lane-dot" aria-hidden="true" />
       <span>{label}</span>
     </span>
+  );
+}
+
+// ── Leitstand-Primitive für die Statistik (lokal, DESIGN.md-token-only) ──────
+const FIG_CLASS: Record<FigureStatus, string> = {
+  ok: "text-status-ok",
+  warn: "text-status-warn",
+  crit: "text-status-alert",
+  neutral: "",
+};
+
+/** Ruhiger Verdikt-Absatz — calm bleibt still, warn/crit tragen die Status-Tönung. */
+function StNote({ children, tone = "calm" }: { children: ReactNode; tone?: "calm" | "warn" | "crit" }) {
+  return (
+    <p className={cn("st-note", tone === "warn" && "text-status-warn", tone === "crit" && "text-status-alert")}>
+      {children}
+    </p>
+  );
+}
+
+/** Der eine dringende Engpass-Callout — status-getönt, nie stumm. */
+function StLead({ children, tone }: { children: ReactNode; tone: "crit" | "warn" }) {
+  return (
+    <div className={cn("st-lead", tone === "crit" ? "st-lead-crit" : "st-lead-warn")} role="alert" aria-live="polite">
+      {children}
+    </div>
+  );
+}
+
+/** Leaderboard-Zeile: Rang · mono Lane-Label mit Status-Dot · großer mono Score
+ *  rechts · ruhige Meta-Zeile darunter. */
+function StLeaderRow({ rank, name, score, status, meta }: {
+  rank: ReactNode;
+  name: ReactNode;
+  score: ReactNode;
+  status: FigureStatus;
+  meta?: ReactNode;
+}) {
+  return (
+    <div className="st-lr">
+      <span className="st-lr-rank">{rank}</span>
+      <span className="st-lr-name min-w-0">{name}</span>
+      <span className={cn("st-lr-score", FIG_CLASS[status])}>{score}</span>
+      {meta != null ? <span className="st-lr-meta">{meta}</span> : null}
+    </div>
+  );
+}
+
+/** Ledger-Zeile: Name, mono Figur (status-getönt), dünner Meter, Fuß-Meta. */
+function StLedgerRow({ name, tag, figure, status, pct, footLeft, footRight }: {
+  name: ReactNode;
+  tag?: ReactNode;
+  figure: ReactNode;
+  status: FigureStatus;
+  pct: number | null;
+  footLeft?: ReactNode;
+  footRight?: ReactNode;
+}) {
+  return (
+    <div className="st-led-row">
+      <div className="st-led-top">
+        <span className="st-led-name">
+          {name}
+          {tag != null ? <span className="st-tag">{tag}</span> : null}
+        </span>
+        <span className={cn("st-fig", FIG_CLASS[status])}>{figure}</span>
+      </div>
+      {pct != null ? (
+        <div className="st-led-meter">
+          <i className={`st-meter-${status}`} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+        </div>
+      ) : null}
+      {footLeft != null || footRight != null ? (
+        <div className="st-led-foot">
+          <span>{footLeft}</span>
+          <span>{footRight}</span>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -154,44 +215,46 @@ export function StatsMasthead({
   const meta = `${germanDate(now)} · ${de.stats.mastWindow}${stale ? ` · ${de.stats.mastStale}` : ""}`;
   const note = acc.rate == null ? de.stats.mastNoteEmpty : de.stats.mastNote(acc.approved, acc.rejected);
   const deltaNode = delta == null ? de.stats.mastDeltaNone : `${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta)} ${de.stats.mastDeltaUnit}`;
-  const deltaStatus = delta == null ? "neutral" : delta >= 0 ? "ok" : "crit";
+  const deltaTone = delta == null ? "neutral" : delta >= 0 ? "up" : "down";
 
   return (
-    <>
-      <Masthead
-        kicker={de.stats.mastKicker}
-        meta={meta}
-        label={de.stats.mastLabel}
-        value={acc.rate == null ? "—" : pctText(acc.rate)}
-        unit={acc.rate == null ? undefined : "%"}
-        note={note}
-        delta={deltaNode}
-        deltaStatus={deltaStatus}
-      />
-      <SupportingStats>
-        <SupportingStat
-          value={pctText(aut)}
-          unit={aut == null ? undefined : "%"}
-          label={de.stats.suppAutonomie}
-          accent
-        />
-        <SupportingStat value={usdText(cpd)} label={de.stats.suppCost} />
-        <SupportingStat value={String(nutzer)} label={de.stats.suppNutzer} />
-      </SupportingStats>
-    </>
+    <div className="space-y-3">
+      <div className="st-mast-head">
+        <div>
+          <p className="st-eyebrow">{de.stats.mastKicker}</p>
+          <p className="st-mast-label">{de.stats.mastLabel}</p>
+        </div>
+        <span className="st-mast-meta">{meta}</span>
+      </div>
+      <div className="st-mast" data-testid="stats-masthead-figure">
+        <span className="st-mast-value">{acc.rate == null ? "—" : pctText(acc.rate)}</span>
+        {acc.rate != null ? <small>%</small> : null}
+      </div>
+      <div className="st-mast-foot">
+        <span className="st-note">{note}</span>
+        <span className={cn("st-mast-delta", deltaTone === "up" ? "text-status-ok" : deltaTone === "down" ? "text-status-alert" : "text-ink-3")}>
+          {deltaNode}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <KpiTile label={de.stats.suppAutonomie} value={pctText(aut)} suffix={aut == null ? undefined : "%"} deltaTone="neutral" dot="live" />
+        <KpiTile label={de.stats.suppCost} value={usdText(cpd)} />
+        <KpiTile label={de.stats.suppNutzer} value={String(nutzer)} />
+      </div>
+    </div>
   );
 }
 
-// ── Latenz (Zwei-Zahl-Karte) ─────────────────────────────────────────────────
+// ── Latenz (zwei KpiTiles) ───────────────────────────────────────────────────
 export function LatencySection({ p50, p90 }: { p50: number | null; p90: number | null }) {
   return (
-    <>
-      <SectionRule title={de.stats.secLatency} meta={de.stats.secLatencyMeta} />
-      <TwinStats>
-        <TwinStat label={de.stats.latP50} value={p50 == null ? "—" : fmtDur(p50)} />
-        <TwinStat label={de.stats.latP90} value={p90 == null ? "—" : fmtDur(p90)} />
-      </TwinStats>
-    </>
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secLatency} meta={de.stats.secLatencyMeta} />
+      <div className="grid grid-cols-2 gap-2">
+        <KpiTile label={de.stats.latP50} value={p50 == null ? "—" : fmtDur(p50)} />
+        <KpiTile label={de.stats.latP90} value={p90 == null ? "—" : fmtDur(p90)} />
+      </div>
+    </section>
   );
 }
 
@@ -199,23 +262,25 @@ export function LatencySection({ p50, p90 }: { p50: number | null; p90: number |
 export function ReliabilitySection({ profiles }: { profiles: ReliabilityProfile[] }) {
   const rows = useMemo(() => leaderboard(profiles), [profiles]);
   return (
-    <>
-      <SectionRule title={de.stats.secReliability} meta={de.stats.secReliabilityMeta} />
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secReliability} meta={de.stats.secReliabilityMeta} />
       {rows.length === 0 ? (
-        <Verdict tone="calm">{de.stats.leaderEmpty}</Verdict>
+        <FleetEmptyState title={de.stats.leaderEmpty} desc={de.stats.leaderEmpty} ok />
       ) : (
-        rows.map((r, i) => (
-          <LeaderRow
-            key={r.profile}
-            rank={i + 1}
-            name={<LaneLabel profile={r.profile} label={r.label} />}
-            score={r.rate == null ? "—" : `${Math.round(r.rate * 100)} %`}
-            status={r.status}
-            latency={de.stats.leaderRuns(r.runs)}
-          />
-        ))
+        <div className="st-panel space-y-1.5 p-2">
+          {rows.map((r, i) => (
+            <StLeaderRow
+              key={r.profile}
+              rank={i + 1}
+              name={<LaneLabel profile={r.profile} label={r.label} />}
+              score={r.rate == null ? "—" : `${Math.round(r.rate * 100)} %`}
+              status={r.status}
+              meta={de.stats.leaderRuns(r.runs)}
+            />
+          ))}
+        </div>
       )}
-    </>
+    </section>
   );
 }
 
@@ -224,43 +289,48 @@ export function ErrorTaxonomySection({ issues }: { issues: IssueGroup[] }) {
   const tax = useMemo(() => errorTaxonomy(issues), [issues]);
   let verdict: ReactNode;
   if (tax.buckets.length === 0) {
-    verdict = <Verdict tone="calm">{de.stats.errEmpty}</Verdict>;
+    verdict = <FleetEmptyState title={de.stats.errEmpty} desc={de.stats.errEmpty} ok />;
   } else if (tax.allLifecycle) {
     verdict = (
-      <Verdict tone="calm">
+      <StNote tone="calm">
         {de.stats.verdictPre}
         <b>{de.stats.verdictBold}</b>
         {de.stats.verdictPost}
-      </Verdict>
+      </StNote>
     );
   } else {
-    verdict = <Verdict tone="warn">{de.stats.verdictMixed}</Verdict>;
+    verdict = <StNote tone="warn">{de.stats.verdictMixed}</StNote>;
   }
   return (
-    <>
-      <SectionRule title={de.stats.secErrors} meta={de.stats.secErrorsMeta} />
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secErrors} meta={de.stats.secErrorsMeta} />
       {tax.buckets.length > 0 ? (
         <>
-          <ErrorBar segments={tax.buckets.map((b) => ({ pct: b.pct, color: b.color, key: b.key }))} />
-          <ErrorLegend>
+          <div className="st-estack">
             {tax.buckets.map((b) => (
-              <ErrorLegendItem key={b.key} color={b.color} label={ERROR_LABEL[b.key] ?? b.key} count={b.count} />
+              <i key={b.key} style={{ width: `${Math.max(0, Math.min(100, b.pct))}%`, background: b.color }} />
             ))}
-          </ErrorLegend>
+          </div>
+          <div className="st-legend">
+            {tax.buckets.map((b) => (
+              <div key={b.key} className="st-legend-item">
+                <span className="st-legend-sw" style={{ background: b.color }} />
+                {ERROR_LABEL[b.key] ?? b.key}
+                <b>{b.count}</b>
+              </div>
+            ))}
+          </div>
         </>
       ) : null}
       {verdict}
-      <a href="/control/issues" className="sb-kick sb-accent mt-4 inline-block min-h-9">
+      <a href="/control/issues" className="st-eyebrow st-link mt-2 inline-block min-h-9 text-live">
         {de.stats.issuesLink}
       </a>
-    </>
+    </section>
   );
 }
 
 // ── Budget-Ledger (Provider-Limits, Engpass zuerst) ──────────────────────────
-// GET /api/account-usage: je Provider die knappste Auslastung, Engpass-Zeile
-// oben. Claude/ChatGPT = echter OAuth-Fetch je window_key (session/weekly);
-// Kimi ist geschätzt (kein Provider-Limit) und so getaggt.
 function ledgerFoot(r: LedgerEntry): string {
   if (!r.available) return r.unavailableReason ?? de.stats.budgetUnavailable;
   if (r.window) return r.window;
@@ -269,41 +339,39 @@ function ledgerFoot(r: LedgerEntry): string {
 
 export function BudgetLedgerSection({ providers }: { providers: AccountUsageProvider[] }) {
   const rows = useMemo(() => budgetLedger(providers), [providers]);
-  // Engpass-Lead: die knappste Zeile, sofern sie schon spürbar (≠ ok) ist.
   const lead = rows.find((r) => r.usedPercent != null && r.status !== "ok") ?? null;
   return (
-    <>
-      <SectionRule title={de.stats.secBudget} meta={de.stats.secBudgetMeta} />
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secBudget} meta={de.stats.secBudgetMeta} />
       {lead && lead.usedPercent != null ? (
-        <EngpassLead tone={lead.status === "crit" ? "crit" : "warn"}>
+        <StLead tone={lead.status === "crit" ? "crit" : "warn"}>
           {de.stats.budgetLeadPre}
           <b>{de.stats.budgetLead(lead.label, lead.window, Math.round(lead.usedPercent))}</b>
-        </EngpassLead>
+        </StLead>
       ) : null}
       {rows.length === 0 ? (
-        <Verdict tone="calm">{de.stats.budgetEmpty}</Verdict>
+        <FleetEmptyState title={de.stats.budgetEmpty} desc={de.stats.budgetEmpty} ok />
       ) : (
-        rows.map((r) => (
-          <LedgerRow
-            key={r.provider}
-            name={r.label}
-            tag={r.estimated ? de.stats.budgetEstimated : undefined}
-            figure={r.usedPercent == null ? "—" : `${Math.round(r.usedPercent)} %`}
-            status={r.status}
-            pct={r.usedPercent ?? null}
-            footLeft={ledgerFoot(r)}
-            footRight={r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined}
-          />
-        ))
+        <div className="st-panel space-y-2 p-3">
+          {rows.map((r) => (
+            <StLedgerRow
+              key={r.provider}
+              name={r.label}
+              tag={r.estimated ? de.stats.budgetEstimated : undefined}
+              figure={r.usedPercent == null ? "—" : `${Math.round(r.usedPercent)} %`}
+              status={r.status}
+              pct={r.usedPercent ?? null}
+              footLeft={ledgerFoot(r)}
+              footRight={r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined}
+            />
+          ))}
+        </div>
       )}
-    </>
+    </section>
   );
 }
 
 // ── Flotten-Effizienz (Durchsatz, Gate, Token-Burn je Lane) ──────────────────
-// Drei Effizienz-KPIs (Ketten-Abschluss · Queue-Wartezeit · Gate-Quote) plus
-// Token-Burn je Lane. Bewusst KEINE Vanity-Metriken (Out-Tokens/Tag, roher
-// Abo-Verbrauch) — nur handlungsleitende Effizienz.
 export function EffizienzSection({
   profiles,
   costs,
@@ -318,129 +386,113 @@ export function EffizienzSection({
   queueWaitSeconds: number | null;
 }) {
   const lanes = useMemo(() => laneBurn(costs), [costs]);
-  // S1B: nur Stufen mit Läufen im Fenster zeigen; leere Stufen sind Rauschen.
   const stages = useMemo(() => reviewValue.filter((r) => r.runs > 0), [reviewValue]);
   const gate = gateEffectiveness(profiles);
   return (
-    <>
-      <SectionRule title={de.stats.secEffizienz} meta={de.stats.secEffizienzMeta} />
-      <SupportingStats>
-        <SupportingStat
-          value={pctText(chainRate)}
-          unit={chainRate == null ? undefined : "%"}
-          label={de.stats.effChain}
-          accent
-        />
-        <SupportingStat
-          value={queueWaitSeconds == null ? "—" : fmtDur(queueWaitSeconds)}
-          label={de.stats.effQueue}
-        />
-        <SupportingStat
-          value={pctText(gate)}
-          unit={gate == null ? undefined : "%"}
-          label={de.stats.effGate}
-        />
-      </SupportingStats>
-      <SectionRule title={de.stats.secBurn} meta={de.stats.secBurnMeta} />
+    <section className="space-y-4">
+      <SectionHeader label={de.stats.secEffizienz} meta={de.stats.secEffizienzMeta} />
+      <div className="grid grid-cols-3 gap-2">
+        <KpiTile label={de.stats.effChain} value={pctText(chainRate)} suffix={chainRate == null ? undefined : "%"} dot="live" />
+        <KpiTile label={de.stats.effQueue} value={queueWaitSeconds == null ? "—" : fmtDur(queueWaitSeconds)} />
+        <KpiTile label={de.stats.effGate} value={pctText(gate)} suffix={gate == null ? undefined : "%"} />
+      </div>
+
+      <SectionHeader label={de.stats.secBurn} meta={de.stats.secBurnMeta} rule={false} />
       {lanes.length === 0 ? (
-        <Verdict tone="calm">{de.stats.burnEmpty}</Verdict>
+        <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmpty} ok />
       ) : (
-        lanes.map((l, i) => {
-          // Tokens bleiben die führende Zahl (score); der $-Gegenwert ist
-          // sekundär und steht neben der Run-Zahl. estimated → "gesch." +
-          // Tooltip, abgeleitet aus costUsd === 0 && costEquivalent > 0.
-          const cost = formatEffectiveCost({
-            cost_usd: l.costUsd ?? 0,
-            cost_effective_usd: l.costEquivalent ?? 0,
-            tokens: l.tokens,
-          });
-          return (
-            <LeaderRow
-              key={l.profile}
-              rank={i + 1}
-              name={<LaneLabel profile={l.profile} label={l.label} />}
-              score={fmtTokens(l.tokens)}
-              status="neutral"
-              latency={
-                <>
-                  {cost.estimated ? (
-                    <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
-                  ) : (
-                    cost.text
-                  )}
-                  {" · "}
-                  {de.stats.leaderRuns(l.runs)}
-                </>
-              }
-            />
-          );
-        })
-      )}
-      {/* S1B: Review-Wert je Stufe — Funde & Kosten je Fund. Ergänzt die
-          Kosten-Sicht ($/Lane) um den WERT je Review-Stufe. */}
-      <SectionRule title={de.stats.secReviewValue} meta={de.stats.secReviewValueMeta} />
-      {stages.length === 0 ? (
-        <Verdict tone="calm">{de.stats.reviewValueEmpty}</Verdict>
-      ) : (
-        stages.map((r, i) => {
-          const name = <LaneLabel profile={r.profile} label={profileLabel[r.profile] ?? r.profile} />;
-          // Scout ist read-only Recon, keine Verdikt-Stufe: sein Wert ist die
-          // gelesene Evidenz (read_items als Score) plus Kosten je Item — es
-          // gibt weder Quote noch Funde. read_items ist NULL, wenn kein Lauf
-          // Read-Metadaten trug (Altbestand) → "—".
-          if (r.profile === "scout") {
+        <div className="st-panel space-y-1.5 p-2">
+          {lanes.map((l, i) => {
+            const cost = formatEffectiveCost({
+              cost_usd: l.costUsd ?? 0,
+              cost_effective_usd: l.costEquivalent ?? 0,
+              tokens: l.tokens,
+            });
             return (
-              <LeaderRow
-                key={r.profile}
+              <StLeaderRow
+                key={l.profile}
                 rank={i + 1}
-                name={name}
-                score={r.read_items == null ? "—" : String(r.read_items)}
+                name={<LaneLabel profile={l.profile} label={l.label} />}
+                score={fmtTokens(l.tokens)}
                 status="neutral"
-                latency={
+                meta={
                   <>
-                    {de.stats.leaderRuns(r.runs)}
+                    {cost.estimated ? (
+                      <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
+                    ) : (
+                      cost.text
+                    )}
                     {" · "}
-                    {r.tokens_per_read_item == null
-                      ? "—"
-                      : `${fmtTokens(r.tokens_per_read_item)} ${de.stats.reviewPerRead}`}
+                    {de.stats.leaderRuns(l.runs)}
                   </>
                 }
               />
             );
-          }
-          const judged = r.approved + r.request_changes;
-          const quote = judged > 0 ? Math.round((r.approved / judged) * 100) : null;
-          // findings_* sind gekoppelt NULL (Altbestand): keine Fund-Erfassung.
-          const findings =
-            r.findings_blocking == null || r.findings_observations == null
-              ? null
-              : r.findings_blocking + r.findings_observations;
-          return (
-            <LeaderRow
-              key={r.profile}
-              rank={i + 1}
-              name={name}
-              score={findings == null ? "—" : String(findings)}
-              status={findings != null && findings > 0 ? "warn" : "neutral"}
-              latency={
-                <>
-                  {de.stats.leaderRuns(r.runs)}
-                  {" · "}
-                  {de.stats.reviewQuote}{" "}
-                  {quote == null ? "—" : `${quote} %`}
-                  {" · "}
-                  {r.tokens_per_finding == null
-                    ? "—"
-                    : `${fmtTokens(r.tokens_per_finding)} ${de.stats.reviewPerFinding}`}
-                </>
-              }
-            />
-          );
-        })
+          })}
+        </div>
       )}
-    </>
+
+      <SectionHeader label={de.stats.secReviewValue} meta={de.stats.secReviewValueMeta} rule={false} />
+      {stages.length === 0 ? (
+        <FleetEmptyState title={de.stats.reviewValueEmpty} desc={de.stats.reviewValueEmpty} ok />
+      ) : (
+        <div className="st-panel space-y-1.5 p-2">
+          {stages.map((r, i) => {
+            const name = <LaneLabel profile={r.profile} label={profileLabel[r.profile] ?? r.profile} />;
+            if (r.profile === "scout") {
+              return (
+                <StLeaderRow
+                  key={r.profile}
+                  rank={i + 1}
+                  name={name}
+                  score={r.read_items == null ? "—" : String(r.read_items)}
+                  status="neutral"
+                  meta={
+                    <>
+                      {de.stats.leaderRuns(r.runs)}
+                      {" · "}
+                      {r.tokens_per_read_item == null
+                        ? "—"
+                        : `${fmtTokens(r.tokens_per_read_item)} ${de.stats.reviewPerRead}`}
+                    </>
+                  }
+                />
+              );
+            }
+            const judged = r.approved + r.request_changes;
+            const quote = judged > 0 ? Math.round((r.approved / judged) * 100) : null;
+            const findings =
+              r.findings_blocking == null || r.findings_observations == null
+                ? null
+                : r.findings_blocking + r.findings_observations;
+            return (
+              <StLeaderRow
+                key={r.profile}
+                rank={i + 1}
+                name={name}
+                score={findings == null ? "—" : String(findings)}
+                status={findings != null && findings > 0 ? "warn" : "neutral"}
+                meta={
+                  <>
+                    {de.stats.leaderRuns(r.runs)}
+                    {" · "}
+                    {de.stats.reviewQuote}{" "}
+                    {quote == null ? "—" : `${quote} %`}
+                    {" · "}
+                    {r.tokens_per_finding == null
+                      ? "—"
+                      : `${fmtTokens(r.tokens_per_finding)} ${de.stats.reviewPerFinding}`}
+                  </>
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
+
 // ── Kosten-/Token-Trend + Drill-down ───────────────────────────────────────
 function CostTrendSection({
   costs,
@@ -464,50 +516,50 @@ function CostTrendSection({
   const hasDrilldown = profiles.length > 0 || laneRows.length > 0;
 
   return (
-    <>
-      <SectionRule title={de.stats.secCostTrend} meta={de.stats.secCostTrendMeta} />
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secCostTrend} meta={de.stats.secCostTrendMeta} />
       {loading ? (
-        <Verdict tone="calm">{de.stats.costTrendLoading}</Verdict>
+        <FleetEmptyState title={de.stats.costTrendLoading} desc={de.stats.costTrendLoading} ok />
       ) : error ? (
-        <Verdict tone="warn">{de.stats.costTrendError} {error}</Verdict>
+        <StNote tone="warn">{de.stats.costTrendError} {error}</StNote>
       ) : !hasTrend ? (
-        <Verdict tone="calm">{de.stats.costTrendEmpty}</Verdict>
+        <FleetEmptyState title={de.stats.costTrendEmpty} desc={de.stats.costTrendEmpty} ok />
       ) : (
         <>
-          <div className="sb-cost-trend" data-testid="runs-costs-series-trend">
+          <div className="st-trend" data-testid="runs-costs-series-trend">
             {series.map((row) => {
               const tokens = row.total_tokens ?? 0;
               const cost = row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0;
               return (
-                <div key={row.day} className="sb-cost-trend-row">
-                  <span className="sb-mono">{row.day.slice(5)}</span>
-                  <div className="sb-cost-trend-bars" aria-label={`${row.day}: ${fmtTokens(tokens)} tokens, ${usdText(cost)}, ${row.runs ?? 0} runs`}>
-                    <span className="sb-cost-trend-token" style={{ "--sb-w": `${Math.max(3, Math.round((tokens / maxTokens) * 100))}%` } as CSSProperties} />
-                    <span className="sb-cost-trend-money" style={{ "--sb-w": `${Math.max(3, Math.round((cost / maxCost) * 100))}%` } as CSSProperties} />
+                <div key={row.day} className="st-trend-row">
+                  <span className="st-mono">{row.day.slice(5)}</span>
+                  <div className="st-trend-bars" aria-label={`${row.day}: ${fmtTokens(tokens)} tokens, ${usdText(cost)}, ${row.runs ?? 0} runs`}>
+                    <span className="st-trend-token" style={{ "--st-w": `${Math.max(3, Math.round((tokens / maxTokens) * 100))}%` } as CSSProperties} />
+                    <span className="st-trend-money" style={{ "--st-w": `${Math.max(3, Math.round((cost / maxCost) * 100))}%` } as CSSProperties} />
                   </div>
-                  <span className="sb-mono">{fmtTokens(tokens)}</span>
-                  <span className="sb-mono">{usdText(cost)}</span>
-                  <span className="sb-mono">{row.runs ?? 0}×</span>
+                  <span className="st-mono">{fmtTokens(tokens)}</span>
+                  <span className="st-mono">{usdText(cost)}</span>
+                  <span className="st-mono">{row.runs ?? 0}×</span>
                 </div>
               );
             })}
           </div>
-          <p className="sb-note"><b>{de.stats.costTrendSource}:</b> {de.stats.costTrendSourceCopy}</p>
-          <button type="button" className="sb-linkbutton" onClick={() => setDrawerOpen(true)}>
-            {de.stats.modelLaneDrilldown}
+          <p className="st-note"><b>{de.stats.costTrendSource}:</b> {de.stats.costTrendSourceCopy}</p>
+          <button type="button" className="st-linkbutton" onClick={() => setDrawerOpen(true)}>
+            {de.stats.modelLaneDrilldown}<ChevronRight className="h-3.5 w-3.5" />
           </button>
         </>
       )}
       {drawerOpen ? (
         <DrawerShell title={de.stats.modelLaneDrilldown} ariaLabel={de.stats.modelLaneDrilldown} onClose={() => setDrawerOpen(false)}>
           {!hasDrilldown ? (
-            <Verdict tone="calm">{de.stats.modelDrilldownEmpty}</Verdict>
+            <FleetEmptyState title={de.stats.modelDrilldownEmpty} desc={de.stats.modelDrilldownEmpty} ok />
           ) : (
-            <div className="sb-drilldown-grid">
+            <div className="st-drilldown-grid">
               <div>
-                <p className="sb-kick">Profile / Modelle</p>
+                <p className="st-eyebrow">Profile / Modelle</p>
                 {profiles.map((row) => (
-                  <div key={`${row.profile}:${row.subscription ?? "api"}`} className="sb-drilldown-row">
+                  <div key={`${row.profile}:${row.subscription ?? "api"}`} className="st-drilldown-row">
                     <span>{profileLabel[row.profile] ?? row.profile} · {row.subscription ?? "api"}</span>
                     <b>{fmtTokens(row.total_tokens ?? ((row.input_tokens ?? 0) + (row.output_tokens ?? 0) + (row.cached_tokens ?? 0)))}</b>
                     <span>{usdText(row.api_equivalent_usd ?? row.cost_usd_equivalent ?? row.cost_usd)}</span>
@@ -515,9 +567,9 @@ function CostTrendSection({
                 ))}
               </div>
               <div>
-                <p className="sb-kick">Lanes</p>
+                <p className="st-eyebrow">Lanes</p>
                 {laneRows.map((row) => (
-                  <div key={`${row.subscription}:${row.profile}`} className="sb-drilldown-row">
+                  <div key={`${row.subscription}:${row.profile}`} className="st-drilldown-row">
                     <span>{row.subscription} · {profileLabel[row.profile] ?? row.profile}</span>
                     <b>{fmtTokens(row.total_tokens)}</b>
                     <span>{row.runs} Runs</span>
@@ -528,7 +580,7 @@ function CostTrendSection({
           )}
         </DrawerShell>
       ) : null}
-    </>
+    </section>
   );
 }
 
@@ -545,48 +597,48 @@ export function SubscriptionBurnSection({
   const detail = useMemo(() => subscriptionBurnBreakdown(burn), [burn]);
   const hasBurn = detail.totals.total_tokens > 0;
   return (
-    <>
-      <SectionRule title={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
       {loading ? (
-        <Verdict tone="calm">{de.stats.burnLoading}</Verdict>
+        <FleetEmptyState title={de.stats.burnLoading} desc={de.stats.burnLoading} ok />
       ) : error ? (
-        <Verdict tone="warn">{error}</Verdict>
+        <StNote tone="warn">{error}</StNote>
       ) : !hasBurn ? (
-        <Verdict tone="calm">{de.stats.subscriptionBurnEmpty}</Verdict>
+        <FleetEmptyState title={de.stats.subscriptionBurnEmpty} desc={de.stats.subscriptionBurnEmpty} ok />
       ) : (
-        <div className="sb-subburn" data-testid="subscription-burn-breakdown">
-          <div className="sb-subburn-hero">
-            <span className="sb-kick">{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</span>
-            <strong className="sb-disp">{fmtTokens(detail.totals.total_tokens)}</strong>
-            <span>{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
+        <div className="st-panel st-subburn space-y-3 p-3" data-testid="subscription-burn-breakdown">
+          <div className="st-subburn-hero">
+            <span className="st-eyebrow">{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</span>
+            <strong className="st-subburn-disp">{fmtTokens(detail.totals.total_tokens)}</strong>
+            <span className="st-note">{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
           </div>
-          <div className="sb-subburn-grid">
+          <div className="st-subburn-grid">
             <div>
-              <p className="sb-kick">{de.stats.subscriptionBurnTop}</p>
+              <p className="st-eyebrow">{de.stats.subscriptionBurnTop}</p>
               {detail.topLanes.map((row) => (
-                <div key={`${row.subscription}:${row.profile}`} className="sb-subburn-row" style={laneStyle(row.profile)}>
+                <div key={`${row.subscription}:${row.profile}`} className="st-subburn-row" style={laneStyle(row.profile)}>
                   <span aria-label={`${row.profile} · ${row.subscription}`}><LaneLabel profile={row.profile} /> · {row.subscription}</span>
-                  <i style={{ "--sb-share": `${Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
-                  <b className="sb-mono">{fmtTokens(row.total_tokens)}</b>
+                  <i style={{ "--st-share": `${Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
+                  <b className="st-mono">{fmtTokens(row.total_tokens)}</b>
                   <small>{Math.round(row.share * 100)}%</small>
                 </div>
               ))}
             </div>
             <div>
-              <p className="sb-kick">{de.stats.subscriptionBurnClasses}</p>
+              <p className="st-eyebrow">{de.stats.subscriptionBurnClasses}</p>
               {detail.classes.map((row) => (
-                <div key={`${row.subscription}:${row.value_class}`} className="sb-subburn-row">
+                <div key={`${row.subscription}:${row.value_class}`} className="st-subburn-row">
                   <span>{row.value_class} · {row.subscription}</span>
                   <i />
-                  <b className="sb-mono">{fmtTokens(row.total_tokens)}</b>
-                  <small className="sb-mono">{Math.round(row.share * 100)} %</small>
+                  <b className="st-mono">{fmtTokens(row.total_tokens)}</b>
+                  <small className="st-mono">{Math.round(row.share * 100)} %</small>
                 </div>
               ))}
             </div>
           </div>
-          <div className="sb-subburn-flags" aria-label={de.stats.subscriptionBurnFlags}>
+          <div className="st-subburn-flags" aria-label={de.stats.subscriptionBurnFlags}>
             {detail.flags.map((flag) => (
-              <span key={`${flag.kind}:${flag.title}`} className={flag.kind === "anti" ? "sb-subburn-flag sb-subburn-anti" : "sb-subburn-flag"}>
+              <span key={`${flag.kind}:${flag.title}`} className={flag.kind === "anti" ? "st-flag st-flag-anti" : "st-flag"}>
                 <b>{flag.kind === "anti" ? de.stats.subscriptionBurnAnti : de.stats.subscriptionBurnTopFlag}</b>
                 {flag.title} · {flag.detail}
               </span>
@@ -594,22 +646,22 @@ export function SubscriptionBurnSection({
           </div>
           {detail.trend.length > 0 && (
             <div data-testid="subscription-burn-trend">
-              <p className="sb-kick">{de.stats.subscriptionBurnTrend}</p>
+              <p className="st-eyebrow">{de.stats.subscriptionBurnTrend}</p>
               {detail.trend.map((row) => (
-                <div key={row.date} className="sb-subburn-trend-row">
-                  <span className="sb-mono" style={{ fontSize: "11px", color: "var(--sb-ink2)" }}>{row.date}</span>
-                  <div className="sb-subburn-trend-bar">
+                <div key={row.date} className="st-subburn-trend-row">
+                  <span className="st-mono text-ink-3" style={{ fontSize: "11px" }}>{row.date}</span>
+                  <div className="st-subburn-trend-bar">
                     <i style={{ width: `${Math.round(row.share * 100)}%` }} />
                   </div>
-                  <b className="sb-mono" style={{ fontSize: "12px" }}>{fmtTokens(row.total_tokens)}</b>
-                  <small className="sb-mono" style={{ color: "var(--sb-ink3)" }}>{Math.round(row.share * 100)} %</small>
+                  <b className="st-mono" style={{ fontSize: "12px" }}>{fmtTokens(row.total_tokens)}</b>
+                  <small className="st-mono text-ink-3">{Math.round(row.share * 100)} %</small>
                 </div>
               ))}
             </div>
           )}
         </div>
       )}
-    </>
+    </section>
   );
 }
 
@@ -678,17 +730,17 @@ function useMediaQuery(query: string): boolean {
 export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
   const runners = root.runners.filter((runner) => runner.profile === worker.profile);
   if (runners.length === 0) {
-    return <div className="sb-ledger-runners sb-mono">{de.stats.motherLedgerNoRunners}</div>;
+    return <div className="st-ledger-runners st-mono">{de.stats.motherLedgerNoRunners}</div>;
   }
   return (
-    <div className="sb-ledger-runners">
+    <div className="st-ledger-runners">
       {runners.map((runner) => (
-        <div key={runner.id} className="sb-ledger-runner" title={ledgerDetailTitle(runner)}>
-          <span className="sb-mono">#{runner.id}</span>
+        <div key={runner.id} className="st-ledger-runner" title={ledgerDetailTitle(runner)}>
+          <span className="st-mono">#{runner.id}</span>
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
-          <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
-          <b className="sb-mono sb-ledger-abo">{fmtMaybeUsd(runner.cost_usd_equivalent)} <small>{de.stats.motherLedgerAboMarker}</small></b>
-          <b className="sb-mono sb-ledger-real">{(runner.cost_usd ?? 0) > 0 ? fmtMaybeUsd(runner.cost_usd) : "—"}</b>
+          <b className="st-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
+          <b className="st-mono st-ledger-abo">{fmtMaybeUsd(runner.cost_usd_equivalent)} <small>{de.stats.motherLedgerAboMarker}</small></b>
+          <b className="st-mono st-ledger-real">{(runner.cost_usd ?? 0) > 0 ? fmtMaybeUsd(runner.cost_usd) : "—"}</b>
           <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · {de.stats.motherLedgerNeuralwatt}</small>
         </div>
       ))}
@@ -728,66 +780,66 @@ export function MotherLedgerSection() {
   };
 
   return (
-    <>
-      <SectionRule title={de.stats.motherLedgerTitle} meta={metaText} />
-      <div className="sb-ledger-controls" aria-label="MotherLedger Controls">
-        <div className="sb-chipset" aria-label="Fenster">
+    <section className="space-y-2">
+      <SectionHeader label={de.stats.motherLedgerTitle} meta={metaText} />
+      <div className="st-ledger-controls" aria-label="MotherLedger Controls">
+        <div className="st-chipset" aria-label="Fenster">
           <button type="button" className={windowHours === 168 ? "is-active" : ""} onClick={() => setWindowHours(168)}>7T</button>
           <button type="button" className={windowHours === 24 ? "is-active" : ""} onClick={() => setWindowHours(24)}>24Std</button>
         </div>
-        <div className="sb-chipset" aria-label="Sortierung">
+        <div className="st-chipset" aria-label="Sortierung">
           <button type="button" className={sortKey === "usd" ? "is-active" : ""} onClick={() => setSortKey("usd")}>{de.stats.motherLedgerSortAbo}</button>
           <button type="button" className={sortKey === "tokens" ? "is-active" : ""} onClick={() => setSortKey("tokens")}>Tokens</button>
           <button type="button" className={sortKey === "runs" ? "is-active" : ""} onClick={() => setSortKey("runs")}>Runs</button>
         </div>
       </div>
       {rollup.loading && !rollup.data ? (
-        <Verdict tone="calm">{de.stats.burnLoading}</Verdict>
+        <FleetEmptyState title={de.stats.burnLoading} desc={de.stats.burnLoading} ok />
       ) : rollup.error && !rollup.data ? (
-        <Verdict tone="warn">{de.ketten.chainCostsLoadError}</Verdict>
+        <StNote tone="warn">{de.ketten.chainCostsLoadError}</StNote>
       ) : roots.length === 0 ? (
-        <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
+        <FleetEmptyState title={de.ketten.chainCostsEmpty} desc={de.ketten.chainCostsEmpty} ok />
       ) : (
-        <div className="sb-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
-          <div className="sb-ledger-hero">
-            <div className="sb-ledger-hero-primary">
+        <div className="st-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
+          <div className="st-ledger-hero">
+            <div className="st-ledger-hero-primary">
               <span>{de.stats.motherLedgerHeroAbo.replace("{window}", windowLabel)}</span>
-              <b className="sb-mono">{fmtUsd(windowCost.aboUsd)} <small>{de.stats.motherLedgerAboMarker}</small></b>
+              <b className="st-mono">{fmtUsd(windowCost.aboUsd)} <small>{de.stats.motherLedgerAboMarker}</small></b>
               <small>{de.stats.motherLedgerHeroAboSub}</small>
             </div>
-            <div className="sb-ledger-hero-real">
+            <div className="st-ledger-hero-real">
               <span>{de.stats.motherLedgerHeroReal.replace("{window}", windowLabel)}</span>
-              <b className="sb-mono">{fmtUsd(windowCost.echtUsd)}</b>
+              <b className="st-mono">{fmtUsd(windowCost.echtUsd)}</b>
             </div>
           </div>
-          <p className="sb-ledger-honesty">{ratioText}</p>
+          <p className="st-note">{ratioText}</p>
           {showStaleNotice ? (
-            <div className="sb-kick" role="status" title={rollup.error ?? undefined}>
+            <div className="st-eyebrow" role="status" title={rollup.error ?? undefined}>
               {de.stats.motherLedgerStaleNotice}
             </div>
           ) : null}
-          <div className="sb-ledger-chains" aria-label="Kettenkosten">
+          <div className="st-ledger-chains" aria-label="Kettenkosten">
             {roots.map((root) => {
               const openRoot = openRootId === root.id;
               const money = chainCost(root);
               const share = chainShare(root, topAbo);
               const providerText = root.providers.length ? root.providers.join(", ") : "—";
               return (
-                <article key={root.id} className="sb-ledger-chain" title={ledgerDetailTitle(root)}>
-                  <button type="button" className="sb-ledger-chain-head" onClick={() => toggleRoot(root.id)} aria-expanded={openRoot}>
-                    <span className="sb-ledger-chain-main">
+                <article key={root.id} className="st-ledger-chain" title={ledgerDetailTitle(root)}>
+                  <button type="button" className="st-ledger-chain-head" onClick={() => toggleRoot(root.id)} aria-expanded={openRoot}>
+                    <span className="st-ledger-chain-main min-w-0">
                       <b>{root.title ?? root.id}</b>
-                      <small className="sb-mono">{root.id} · {fmtRuntime(root.runtime_seconds)} · {rootRuns(root)} Runs · {providerText}</small>
+                      <small className="st-mono">{root.id} · {fmtRuntime(root.runtime_seconds)} · {rootRuns(root)} Runs · {providerText}</small>
                     </span>
-                    <span className="sb-ledger-chain-money">
-                      <span className="sb-ledger-abo"><b className="sb-mono">{fmtMaybeUsd(money.abo)}</b><small>{de.stats.motherLedgerAboMarker}</small></span>
-                      <span className={(money.echt ?? 0) > 0 ? "sb-ledger-real is-positive" : "sb-ledger-real"}>{de.stats.motherLedgerRealShort} {(money.echt ?? 0) > 0 ? fmtMaybeUsd(money.echt) : "—"}</span>
+                    <span className="st-ledger-chain-money">
+                      <span className="st-ledger-abo"><b className="st-mono">{fmtMaybeUsd(money.abo)}</b><small>{de.stats.motherLedgerAboMarker}</small></span>
+                      <span className={(money.echt ?? 0) > 0 ? "st-ledger-real is-positive" : "st-ledger-real"}>{de.stats.motherLedgerRealShort} {(money.echt ?? 0) > 0 ? fmtMaybeUsd(money.echt) : "—"}</span>
                     </span>
                   </button>
-                  <div className="sb-ledger-meter" aria-hidden="true"><span style={{ width: `${Math.round(share * 100)}%` }} /></div>
+                  <div className="st-ledger-meter" aria-hidden="true"><span style={{ width: `${Math.round(share * 100)}%` }} /></div>
                   {openRoot ? (
-                    <div className="sb-ledger-workers" role="table" aria-label="Worker-Aufschlüsselung">
-                      <div className="sb-ledger-workers-head" role="row">
+                    <div className="st-ledger-workers" role="table" aria-label="Worker-Aufschlüsselung">
+                      <div className="st-ledger-workers-head" role="row">
                         <span>{de.stats.motherLedgerColWorker}</span><span>{de.stats.motherLedgerColTokens}</span><span>{de.stats.motherLedgerColAbo}</span><span>{de.stats.motherLedgerColReal}</span>
                       </div>
                       {root.workers.map((worker) => {
@@ -795,12 +847,12 @@ export function MotherLedgerSection() {
                         const openWorker = openWorkerKey === key;
                         const cost = workerCost(worker);
                         return (
-                          <div key={key} className="sb-ledger-worker-block">
-                            <button type="button" className="sb-ledger-worker-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={openWorker} title={ledgerDetailTitle(worker)}>
-                              <span className="sb-ledger-worker-label"><LaneLabel profile={worker.profile} /><small>{worker.model ?? worker.provider ?? "—"}</small></span>
-                              <span className="sb-mono" data-label={de.stats.motherLedgerColTokens}>{fmtTokens(workerTokens(worker))}</span>
-                              <span className="sb-mono sb-ledger-abo" data-label={de.stats.motherLedgerAboMobile}>{fmtMaybeUsd(cost.abo)}</span>
-                              <span className={(cost.echt ?? 0) > 0 ? "sb-mono sb-ledger-real is-positive" : "sb-mono sb-ledger-real"} data-label={de.stats.motherLedgerRealMobile}>{(cost.echt ?? 0) > 0 ? fmtMaybeUsd(cost.echt) : "—"}</span>
+                          <div key={key} className="st-ledger-worker-block">
+                            <button type="button" className="st-ledger-worker-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={openWorker} title={ledgerDetailTitle(worker)}>
+                              <span className="st-ledger-worker-label"><LaneLabel profile={worker.profile} /><small>{worker.model ?? worker.provider ?? "—"}</small></span>
+                              <span className="st-mono" data-label={de.stats.motherLedgerColTokens}>{fmtTokens(workerTokens(worker))}</span>
+                              <span className="st-mono st-ledger-abo" data-label={de.stats.motherLedgerAboMobile}>{fmtMaybeUsd(cost.abo)}</span>
+                              <span className={(cost.echt ?? 0) > 0 ? "st-mono st-ledger-real is-positive" : "st-mono st-ledger-real"} data-label={de.stats.motherLedgerRealMobile}>{(cost.echt ?? 0) > 0 ? fmtMaybeUsd(cost.echt) : "—"}</span>
                             </button>
                             {openWorker ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
                           </div>
@@ -814,7 +866,7 @@ export function MotherLedgerSection() {
           </div>
         </div>
       )}
-    </>
+    </section>
   );
 }
 
@@ -842,13 +894,23 @@ export function StatistikView() {
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
+  const settling = !reliability.data && reliability.loading;
 
   return (
-    <>
-      {/* A7: AccountUsageTile lives OUTSIDE BroadsheetShell so its dark hc-*
-          tokens render in the dashboard context, not on the light paper sheet.
-          This is the PRIMARY live cockpit — bottleneck callout, session+weekly
-          bars, details collapse. */}
+    <div data-statistik className="space-y-5">
+      {/* ── MASTHEAD (Fleet/Start-Idiom) ────────────────────────────────────── */}
+      <div className={cn("st-masthead", settling && "st-live-idle")}>
+        <div className="st-brand">
+          <span className="st-brand-h">Hermes</span>
+          <span className="st-brand-f">Statistik</span>
+        </div>
+        <div className="st-live">
+          <span className="st-live-dot" />
+          {settling ? "SYNC" : "LIVE"}
+        </div>
+      </div>
+
+      {/* A7: AccountUsageTile bleibt der primäre Live-Cockpit-Block. */}
       <AccountUsageTile
         usage={accountUsage.data}
         loading={accountUsage.loading && !accountUsage.data}
@@ -856,63 +918,63 @@ export function StatistikView() {
         config={statsConfig.data ?? DEFAULT_STATS_CONFIG}
       />
 
-      <BroadsheetShell>
-        {hasLoadError ? (
-          <EngpassLead tone="warn">
-            <b>{de.stats.loadError}</b>
-          </EngpassLead>
-        ) : null}
+      {hasLoadError ? (
+        <StLead tone="warn">
+          <b>{de.stats.loadError}</b>
+        </StLead>
+      ) : null}
 
+      <section className="st-panel p-4">
         <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
+      </section>
 
-        <LatencySection
-          p50={summary.data?.cycle_time_p50_seconds ?? null}
-          p90={summary.data?.cycle_time_p90_seconds ?? null}
-        />
+      <LatencySection
+        p50={summary.data?.cycle_time_p50_seconds ?? null}
+        p90={summary.data?.cycle_time_p90_seconds ?? null}
+      />
 
-        <ReliabilitySection profiles={profiles} />
+      <ReliabilitySection profiles={profiles} />
 
-        <ErrorTaxonomySection issues={issueGroups} />
+      <ErrorTaxonomySection issues={issueGroups} />
 
-        {/* ── ST5: Budget-Ledger (Provider-Limits) + Flotten-Effizienz ───────── */}
-        {/* A4: BudgetLedgerSection is a broadsheet-styled summary of the same
-            source. Collapsed under a Details element so the primary cockpit
-            (AccountUsageTile above) is unambiguously the operative view; the
-            ledger format stays available for a printed/broadsheet read. */}
-        <details className="sb-budget-details">
-          <summary className="sb-kick sb-accent sb-budget-summary">
-            {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
-          </summary>
-          <BudgetLedgerSection providers={providers} />
-        </details>
+      {/* ST5: Budget-Ledger bleibt unter Details — AccountUsageTile oben ist die
+          primäre Ansicht; das Ledger-Format bleibt für den ausführlichen Blick. */}
+      <details className="st-details">
+        <summary className="st-eyebrow text-live">
+          {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
+        </summary>
+        <BudgetLedgerSection providers={providers} />
+      </details>
 
-        <CostTrendSection
-          costs={costSeries.data ?? null}
-          loading={costSeries.loading && !costSeries.data}
-          error={costSeries.error}
-          profiles={costProfiles}
-          burn={subscriptionBurn.data ?? null}
-        />
+      <CostTrendSection
+        costs={costSeries.data ?? null}
+        loading={costSeries.loading && !costSeries.data}
+        error={costSeries.error}
+        profiles={costProfiles}
+        burn={subscriptionBurn.data ?? null}
+      />
 
-        <SubscriptionBurnSection
-          burn={subscriptionBurn.data ?? null}
-          loading={subscriptionBurn.loading && !subscriptionBurn.data}
-          error={subscriptionBurn.error}
-        />
+      <SubscriptionBurnSection
+        burn={subscriptionBurn.data ?? null}
+        loading={subscriptionBurn.loading && !subscriptionBurn.data}
+        error={subscriptionBurn.error}
+      />
 
-        <EffizienzSection
-          profiles={profiles}
-          costs={costProfiles}
-          reviewValue={reviewValue}
-          chainRate={chain.data?.chain_completion_rate ?? null}
-          queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
-        />
+      <EffizienzSection
+        profiles={profiles}
+        costs={costProfiles}
+        reviewValue={reviewValue}
+        chainRate={chain.data?.chain_completion_rate ?? null}
+        queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
+      />
 
-        {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
-        <MotherLedgerSection />
+      {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
+      <MotherLedgerSection />
 
-        <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
-      </BroadsheetShell>
-    </>
+      <div className="st-foot">
+        <span>{de.stats.footLeft(fmtClock(now))}</span>
+        <span>/control/statistik</span>
+      </div>
+    </div>
   );
 }
