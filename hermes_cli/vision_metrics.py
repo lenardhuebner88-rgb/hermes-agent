@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -1181,6 +1182,137 @@ def _green_gate_metric(gate_records: list[dict]) -> dict:
     }
 
 
+# Authors that count as the human operator. Automatic authors (flow-gate,
+# dispatcher, stratege-gutachter, …) must NOT count as operator touches —
+# freigabe_released events on freigabe:complete chains are flow-gate-authored.
+OPERATOR_AUTHORS: tuple[str, ...] = ("operator", "piet", "piet-via-claude")
+
+
+def held_strategist_roots(conn: sqlite3.Connection) -> list[dict]:
+    """Undecided held strategist proposal ROOTS (OPERATOR-LOAD-S1).
+
+    A root is a ``scheduled`` task ``created_by='strategist-cron'`` with no
+    ``freigabe_released``/``freigabe_vetoed`` event yet, whose ``created``
+    event does NOT carry ``from_decompose_of`` — chain children are created by
+    the same profile, so the decompose marker is the root discriminator.
+    Shared by :func:`_operator_load_metric` and the strategist's propose
+    back-pressure gate (STRATEGIST-BACKPRESSURE-S1).
+    """
+    rows = conn.execute(
+        """
+        SELECT t.id, t.created_at
+          FROM tasks t
+         WHERE t.status = 'scheduled'
+           AND t.created_by = 'strategist-cron'
+           AND NOT EXISTS (
+                 SELECT 1 FROM task_events e
+                  WHERE e.task_id = t.id
+                    AND e.kind IN ('freigabe_released', 'freigabe_vetoed')
+               )
+        """
+    ).fetchall()
+    roots: list[dict] = []
+    for r in rows:
+        created = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+            "ORDER BY id LIMIT 1",
+            (r["id"],),
+        ).fetchone()
+        payload: dict = {}
+        if created and created["payload"]:
+            try:
+                loaded = json.loads(created["payload"])
+                if isinstance(loaded, dict):
+                    payload = loaded
+            except (TypeError, ValueError):
+                payload = {}
+        if payload.get("from_decompose_of"):
+            continue
+        roots.append({"id": r["id"], "created_at": r["created_at"]})
+    return roots
+
+
+def _operator_load_metric(
+    conn: sqlite3.Connection, *, now: int, window_days: int
+) -> dict:
+    """Operator-Last ↔ counter 'held_over_7d' (OPERATOR-LOAD-S1).
+
+    The north star is "Piet rarely has to intervene" — this measures the
+    operator side, which no other metric does. touches_per_week = operator-
+    authored freigabe decisions (event payload ``author``; automatic authors
+    like ``flow-gate`` do not count, see :data:`OPERATOR_AUTHORS`) plus
+    operator-authored task comments, both inside the window.
+    decision_latency_days_median = days from a strategist-cron task's creation
+    to its operator freigabe decision, over decisions inside the window.
+    The paired skeptic counter is the antagonist of "few touches": held
+    strategist roots older than 7 days still undecided — a silent operator is
+    only a good sign while the proposal queue isn't rotting.
+    """
+    cutoff = int(now) - int(window_days) * 86400
+    decisions = 0
+    latencies: list[float] = []
+    rows = conn.execute(
+        """
+        SELECT e.payload, e.created_at AS decided_at,
+               t.created_by, t.created_at AS task_created
+          FROM task_events e
+          JOIN tasks t ON t.id = e.task_id
+         WHERE e.kind IN ('freigabe_released', 'freigabe_vetoed')
+           AND e.created_at >= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    for r in rows:
+        author = None
+        idempotent_replay = False
+        if r["payload"]:
+            try:
+                loaded = json.loads(r["payload"])
+                if isinstance(loaded, dict):
+                    author = loaded.get("author")
+                    # A repeat release call appends a second event marked
+                    # {"idempotent": true} — that is not a second operator touch.
+                    idempotent_replay = bool(loaded.get("idempotent"))
+            except (TypeError, ValueError):
+                author = None
+        if author not in OPERATOR_AUTHORS or idempotent_replay:
+            continue
+        decisions += 1
+        if r["created_by"] == "strategist-cron" and r["task_created"]:
+            latencies.append(
+                (int(r["decided_at"]) - int(r["task_created"])) / 86400.0
+            )
+    placeholders = ",".join("?" * len(OPERATOR_AUTHORS))
+    comments = conn.execute(
+        f"SELECT COUNT(*) FROM task_comments "
+        f"WHERE created_at >= ? AND author IN ({placeholders})",
+        (cutoff, *OPERATOR_AUTHORS),
+    ).fetchone()[0]
+    latency = round(statistics.median(latencies), 2) if latencies else None
+    held = held_strategist_roots(conn)
+    held_over = sum(
+        1
+        for h in held
+        if h["created_at"] and int(now) - int(h["created_at"]) > 7 * 86400
+    )
+    return {
+        "touches_per_week": decisions + comments,
+        "freigabe_decisions": decisions,
+        "operator_comments": comments,
+        "decision_latency_days_median": latency,
+        "held_open": len(held),
+        "window_days": window_days,
+        "counter": {
+            "name": "held_over_7d",
+            "value": held_over,
+            "description": (
+                "held strategist proposals older than 7 days still undecided "
+                "— the antagonist of 'few operator touches'"
+            ),
+        },
+    }
+
+
 def compute_metrics_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -1214,6 +1346,9 @@ def compute_metrics_snapshot(
                 conn, now=ts, window_days=window_days
             ),
             "green_gate_streak": _green_gate_metric(gate_records),
+            "operator_load": _operator_load_metric(
+                conn, now=ts, window_days=window_days
+            ),
         },
     }
 
@@ -1260,6 +1395,7 @@ def render_snapshot_summary(snapshot: dict) -> str:
     e = m.get("escalation_rate", {})
     cc = m.get("classification_coverage", {})
     g = m.get("green_gate_streak", {})
+    o = m.get("operator_load", {})
     lines = [
         f"vision metrics @ {snapshot.get('generated_at')}",
         (
@@ -1290,6 +1426,13 @@ def render_snapshot_summary(snapshot: dict) -> str:
             f"  green-gate:      streak={g.get('streak')} nights  "
             f"↔ {g.get('counter', {}).get('name')}="
             f"{g.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  operator load:   {o.get('touches_per_week')} touches/wk  "
+            f"(held={o.get('held_open')}, latency="
+            f"{o.get('decision_latency_days_median')}d)  "
+            f"↔ {o.get('counter', {}).get('name')}="
+            f"{o.get('counter', {}).get('value')}"
         ),
     ]
     return "\n".join(lines)

@@ -1651,3 +1651,89 @@ def test_escalation_rate_relieved_of_operator_gates(conn):
         "metrics"]["escalation_rate"]
     assert e["escalations_per_week"] == 5          # all distinct tasks (preserved)
     assert e["error_escalations_per_week"] == 3    # relieved of the 2 operator gates
+
+
+# ---------------------------------------------------------------------------
+# operator_load metric (OPERATOR-LOAD-S1)
+# ---------------------------------------------------------------------------
+
+OL_NOW = 2_000_000
+
+
+def _add_strategist_task(conn, tid, *, status="scheduled", created_at,
+                         decompose_of=None):
+    """A strategist-cron task incl. its 'created' event — the event payload
+    shape ({"by": ...} / {"from_decompose_of": ...}) mirrors the live DB
+    (sampled 2026-07-06, e.g. child t_271c5c17 of root t_50bf2f83)."""
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, created_by, created_at) "
+        "VALUES (?, ?, ?, 'strategist-cron', ?)",
+        (tid, f"lever {tid}", status, created_at),
+    )
+    payload = {"by": "strategist-cron"}
+    if decompose_of:
+        payload["from_decompose_of"] = decompose_of
+    _add_event(conn, tid, "created", payload=payload, created_at=created_at)
+
+
+def _add_comment(conn, tid, author, *, created_at):
+    conn.execute(
+        "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+        "VALUES (?, ?, 'x', ?, 'comment')",
+        (tid, author, created_at),
+    )
+    conn.commit()
+
+
+def test_operator_load_counts_only_operator_authors(conn):
+    """flow-gate releases and worker comments are NOT operator touches; the
+    payload author shapes match the live DB ({"author": "flow-gate"} vs
+    {"author": "operator"}, sampled 2026-07-06)."""
+    _add_strategist_task(conn, "t_root1", created_at=OL_NOW - 4 * DAY)
+    _add_event(conn, "t_root1", "freigabe_vetoed",
+               payload={"author": "operator"}, created_at=OL_NOW - 1 * DAY)
+    conn.execute("UPDATE tasks SET status='archived' WHERE id='t_root1'")
+    _add_task(conn, "t_auto", status="done", created_at=OL_NOW - 3 * DAY)
+    _add_event(conn, "t_auto", "freigabe_released",
+               payload={"author": "flow-gate"}, created_at=OL_NOW - 1 * DAY)
+    _add_comment(conn, "t_root1", "operator", created_at=OL_NOW - 1 * DAY)
+    _add_comment(conn, "t_root1", "coder", created_at=OL_NOW - 1 * DAY)
+    # idempotent re-release replay (real payload shape from
+    # _release_freigabe_hold_root_in_txn) is not a second operator touch
+    _add_event(conn, "t_root1", "freigabe_released",
+               payload={"author": "operator", "idempotent": True},
+               created_at=OL_NOW - 1 * DAY)
+
+    m = vm._operator_load_metric(conn, now=OL_NOW, window_days=7)
+    assert m["freigabe_decisions"] == 1
+    assert m["operator_comments"] == 1
+    assert m["touches_per_week"] == 2
+    assert m["decision_latency_days_median"] == 3.0
+    assert m["held_open"] == 0
+
+
+def test_operator_load_held_queue_and_antagonist_counter(conn):
+    _add_strategist_task(conn, "t_fresh", created_at=OL_NOW - 2 * DAY)
+    _add_strategist_task(conn, "t_old", created_at=OL_NOW - 9 * DAY)
+    # decompose child of a held chain must NOT count as a root
+    _add_strategist_task(conn, "t_child", created_at=OL_NOW - 9 * DAY,
+                         decompose_of="t_old")
+    _add_strategist_task(conn, "t_done", created_at=OL_NOW - 9 * DAY)
+    _add_event(conn, "t_done", "freigabe_released",
+               payload={"author": "operator"}, created_at=OL_NOW - 8 * DAY)
+
+    m = vm._operator_load_metric(conn, now=OL_NOW, window_days=7)
+    assert m["held_open"] == 2
+    assert m["counter"]["name"] == "held_over_7d"
+    assert m["counter"]["value"] == 1
+    roots = {r["id"] for r in vm.held_strategist_roots(conn)}
+    assert roots == {"t_fresh", "t_old"}
+
+
+def test_operator_load_in_snapshot_and_summary(conn):
+    snap = vm.compute_metrics_snapshot(conn, now=OL_NOW, window_days=7)
+    ol = snap["metrics"]["operator_load"]
+    assert set(ol) >= {"touches_per_week", "freigabe_decisions",
+                       "operator_comments", "decision_latency_days_median",
+                       "held_open", "counter"}
+    assert "operator load" in vm.render_snapshot_summary(snap)

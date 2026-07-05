@@ -145,6 +145,11 @@ MATURITY_DAYS: int = 3
 #                                        is better (classification coverage)
 #   error_escalations_per_week        -1  fewer error-class escalations/week
 #                                        is better
+#   touches_per_week                  -1  north star: fewer operator touches
+#                                        (operator_load; its counter
+#                                        held_over_7d is the antagonist)
+#   decision_latency_days_median      -1  faster operator absorption of held
+#                                        proposals is better (operator_load)
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
@@ -153,6 +158,8 @@ _VERDICT_DIRECTION: dict[str, int] = {
     "recent_avg_cost_per_task": -1,
     "unclassified_share": -1,
     "error_escalations_per_week": -1,
+    "touches_per_week": -1,
+    "decision_latency_days_median": -1,
 }
 
 # Keys with no defensible ROI direction: raw counts, denominators, coverage/
@@ -212,6 +219,14 @@ _DIRECTIONLESS: frozenset[str] = frozenset({
     "escalation_rate.counter.value",
     "classification_coverage.counter.value",
     "green_gate_streak.counter.value",
+    # operator_load (OPERATOR-LOAD-S1): raw components of touches_per_week and
+    # the queue-depth signal — held_open is deliberately NOT a lever target
+    # (emptying the queue by auto-archive would game it; the touch/latency
+    # metrics carry the direction instead).
+    "freigabe_decisions",
+    "operator_comments",
+    "held_open",
+    "operator_load.counter.value",
 })
 
 
@@ -981,6 +996,48 @@ def _levers_from_drafts(drafts: Iterable[dict[str, Any]]) -> list[Lever]:
     return levers
 
 
+BACKPRESSURE_MAX_HELD_DEFAULT: int = 6
+
+
+def _held_backpressure(conn, max_held: Optional[int] = None) -> dict[str, Any]:
+    """STRATEGIST-BACKPRESSURE-S1 — deterministic ingest pre-gate on the held queue.
+
+    The operator is the pipeline's bottleneck (funnel evidence 2026-07-05:
+    187 proposals lifetime, 36 released, 178 archived) — generating into a
+    backed-up queue only grows the archive. When >= ``max_held`` undecided
+    held roots wait (:func:`vision_metrics.held_strategist_roots`), propose/
+    harvest ingest self-skips with ``skipped: true`` — same contract as the
+    budget self-skip, so the Opus wrapper treats it as a valid no-op. Dry-run
+    (``do_ingest=False``) and reflect are unaffected. Config:
+    ``strategist.propose_max_held`` (0 disables the gate).
+    """
+    if max_held is None:
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            strat_cfg = cfg.get("strategist", {}) if isinstance(cfg, dict) else {}
+            max_held = int(
+                strat_cfg.get("propose_max_held", BACKPRESSURE_MAX_HELD_DEFAULT)
+            )
+        except Exception:
+            max_held = BACKPRESSURE_MAX_HELD_DEFAULT
+    if max_held <= 0:
+        return {"skip": False, "held_open": None, "max_held": max_held, "reason": None}
+    held_open = len(vision_metrics.held_strategist_roots(conn))
+    if held_open >= max_held:
+        return {
+            "skip": True,
+            "held_open": held_open,
+            "max_held": max_held,
+            "reason": (
+                f"backpressure: {held_open} undecided held proposals "
+                f">= max_held {max_held}"
+            ),
+        }
+    return {"skip": False, "held_open": held_open, "max_held": max_held, "reason": None}
+
+
 def propose(
     *,
     board: Optional[str] = None,
@@ -1022,6 +1079,23 @@ def propose(
     if owns_conn:
         conn = kanban_db.connect(board=board)
     try:
+        # STRATEGIST-BACKPRESSURE-S1: only the ingest path is gated — a
+        # dry-run stays available so the Opus wrapper keeps its context step.
+        if do_ingest:
+            backpressure = _held_backpressure(conn)
+            if backpressure["skip"]:
+                return {
+                    "mode": "propose",
+                    "skipped": True,
+                    "reason": backpressure["reason"],
+                    "held_open": backpressure["held_open"],
+                    "max_held": backpressure["max_held"],
+                    "idle": False,
+                    "candidates": 0,
+                    "gated_out": [],
+                    "grounding_blocked": [],
+                    "ingested": [],
+                }
         context = gather_context(
             conn, metrics=metrics, cost=cost, notes_dir=notes_dir,
             ledger_since=ledger_since, outcomes_path=outcomes_path,
