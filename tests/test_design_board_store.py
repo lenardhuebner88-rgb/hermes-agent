@@ -53,3 +53,21 @@ def test_set_status(board):
 
 def test_get_missing_card_returns_none(board):
     assert board.get_card("c_deadbeef") is None
+
+
+def test_write_and_resolve_asset(board):
+    cid = board.create_card(kind="bug", title="x")
+    stored = board.write_asset(cid, "shot.png", b"\x89PNG data")
+    assert stored == "shot.png"
+    p = board.resolve_asset_path(cid, stored)
+    assert p.read_bytes() == b"\x89PNG data"
+
+
+def test_resolve_asset_rejects_traversal(board):
+    cid = board.create_card(kind="bug", title="x")
+    with pytest.raises(ValueError):
+        board.resolve_asset_path(cid, "../../etc/passwd")
+
+
+def test_sanitize_strips_dirs(board):
+    assert board.sanitize_asset_name("a/b/../c.png") == "c.png"

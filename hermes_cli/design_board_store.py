@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -105,3 +106,37 @@ def set_status(card_id: str, status: str) -> None:
         raise KeyError(card_id)
     card["status"] = status
     _save(card)
+
+
+def assets_dir(card_id: str) -> Path:
+    d = _card_dir(card_id) / "assets"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def sanitize_asset_name(name: str) -> str:
+    base = os.path.basename(name.replace("\\", "/"))
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base).lstrip(".")
+    if not base:
+        raise ValueError("empty asset name")
+    return base
+
+
+def resolve_asset_path(card_id: str, name: str) -> Path:
+    parts = name.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError("asset path escapes card dir")
+    root = assets_dir(card_id).resolve()
+    candidate = (root / sanitize_asset_name(name)).resolve()
+    if root not in candidate.parents and candidate != root:
+        raise ValueError("asset path escapes card dir")
+    return candidate
+
+
+def write_asset(card_id: str, name: str, data: bytes) -> str:
+    safe = sanitize_asset_name(name)
+    dest = resolve_asset_path(card_id, safe)
+    tmp = dest.with_suffix(dest.suffix + f".tmp-{uuid.uuid4().hex}")
+    tmp.write_bytes(data)
+    os.replace(tmp, dest)
+    return safe
