@@ -76,12 +76,12 @@ const SystemView = lazy(() =>
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/fleet")) return "fleet";
   if (pathname.includes("/control/overview")) return "overview";
-  if (pathname.includes("/control/pulse")) return "pulse";
+  if (pathname.includes("/control/pulse")) return "system";
   if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/agent-terminals")) return "agentTerminals";
-  // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
-  if (pathname.includes("/control/flow")) return "flow";
-  if (pathname.includes("/control/ketten")) return "ketten";
+  // Flow/Ketten/Hermes wurden ins Fleet-Cockpit absorbiert (Phase 2).
+  if (pathname.includes("/control/flow")) return "fleet";
+  if (pathname.includes("/control/ketten")) return "fleet";
   if (pathname.includes("/control/statistik")) return "statistik";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
@@ -90,8 +90,8 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/loops")) return "loops";
   if (pathname.includes("/control/lanes")) return "lanes";
   if (pathname.includes("/control/system")) return "system";
-  if (pathname.includes("/control/pressure")) return "pressure";
-  if (pathname.includes("/control/ops")) return "ops";
+  if (pathname.includes("/control/pressure")) return "system";
+  if (pathname.includes("/control/ops")) return "system";
   if (pathname.includes("/control/research")) return "research";
   if (pathname.includes("/control/bibliothek")) return "bibliothek";
   if (pathname.includes("/control/schmiede")) return "schmiede";
@@ -136,11 +136,11 @@ const tabPath: Record<ControlTab, string> = {
   fleet: "/control/fleet",
   inbox: "/control",
   overview: "/control/overview",
-  pulse: "/control/pulse",
+  pulse: "/control/system",
   workstreams: "/control/workstreams",
   agentTerminals: "/control/agent-terminals",
-  flow: "/control/flow",
-  ketten: "/control/ketten",
+  flow: "/control/fleet",
+  ketten: "/control/fleet",
   statistik: "/control/statistik",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
@@ -149,8 +149,8 @@ const tabPath: Record<ControlTab, string> = {
   loops: "/control/loops",
   lanes: "/control/lanes",
   system: "/control/system",
-  pressure: "/control/pressure",
-  ops: "/control/ops",
+  pressure: "/control/system",
+  ops: "/control/system",
   research: "/control/research",
   bibliothek: "/control/bibliothek",
   schmiede: "/control/schmiede",
@@ -204,11 +204,11 @@ export default function ControlPage() {
         setPaletteOpen(true);
         return;
       }
-      // Zwei-Tasten-Navigation "g <x>" (g s / g h / g a / g u).
+      // Zwei-Tasten-Navigation "g <x>" (g f / g h / g p -> Fleet/System).
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", k: "ketten", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "fleet", h: "fleet", k: "fleet", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "system", o: "system" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -250,8 +250,8 @@ export default function ControlPage() {
             <Route path="pulse" element={<Navigate to="/control/system" replace />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             <Route path="agent-terminals" element={<AgentTerminalsView />} />
-            {/* hermes wurde in Flow absorbiert (Phase 2) */}
-            <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
+            {/* hermes wurde in Fleet absorbiert (Phase 2) */}
+            <Route path="hermes" element={<Navigate to="/control/fleet" replace />} />
             <Route path="statistik" element={<StatistikView />} />
             {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
             <Route path="flow" element={<Navigate to="/control/fleet" replace />} />

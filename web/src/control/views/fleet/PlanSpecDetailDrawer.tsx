@@ -71,7 +71,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
             <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
             <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
             {item.kanban_root_task_id ? (
-              <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100 hover:brightness-110">
+              <Link to={`/control/fleet?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100 hover:brightness-110">
                 Root {item.kanban_root_task_id} → Kette
               </Link>
             ) : null}

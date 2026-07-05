@@ -100,10 +100,10 @@ describe("CommandPalette search index", () => {
     expect(filterCommandPaletteItems(items, "nightly")[0]?.group).toBe("Crons");
     expect(filterCommandPaletteItems(items, "0063")[0]?.hint).toContain("now");
     expect(filterCommandPaletteItems(items, "Control Center")[0]?.group).toBe("Epics");
-    expect(filterCommandPaletteItems(items, "g f").some((item) => item.label === "Worker (Flow)")).toBe(true);
+    expect(filterCommandPaletteItems(items, "g f").some((item) => item.label === "Fleet")).toBe(true);
 
     filterCommandPaletteItems(items, "task-42")[0]?.action();
-    expect(navigate).toHaveBeenCalledWith("/control/flow?task=task-42");
+    expect(navigate).toHaveBeenCalledWith("/control/fleet?task=task-42");
   });
 
   it("caps each group at eight matches", () => {

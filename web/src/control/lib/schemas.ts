@@ -863,7 +863,7 @@ const OperatorInventoryLeverSchema = z.object({
   detail: z.string().catch("Keine Inventar-Hebel erkannt."),
   tone: z.enum(["emerald", "cyan", "sky", "indigo", "amber", "rose", "red", "zinc", "violet"]).catch("zinc"),
   count: z.coerce.number().catch(0),
-  target: z.string().catch("/control/ops"),
+  target: z.string().catch("/control/system"),
   mutation: z.literal("none").catch("none"),
 });
 
@@ -905,7 +905,7 @@ const OperatorInventoryActorSchema = z.object({
   source: z.enum(["canonical", "process"]).catch("process"),
   confidence: z.string().catch("medium"),
   stale_count: z.coerce.number().catch(0),
-  target: z.string().catch("/control/ops"),
+  target: z.string().catch("/control/system"),
   controllable: z.boolean().catch(false),
 });
 

@@ -1,7 +1,7 @@
 // Ausgelagert aus CommandPalette.tsx (react-refresh/only-export-components):
 // Snapshot-Lese-, Item-Bau- und Filter-Logik der Palette, exportiert für
 // Tests und getrennt von der Komponente (Fast-Refresh-Boundary).
-import { Activity, ArrowRight, Bot, Clock, FlaskConical, Gauge, GitBranch, Inbox, KanbanSquare, LayoutDashboard, Radar, Search, Workflow } from "lucide-react";
+import { Activity, Anchor, ArrowRight, Bot, Clock, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, Search, Server, Workflow } from "lucide-react";
 import { getSnapshot } from "../hooks/pollingStore";
 import type { BacklogResponse, EpicsResponse, OrchestrationBacklogResponse } from "../lib/schemas";
 import type { BoardResponse, CronObservabilityResponse, Worker } from "../lib/types";
@@ -61,7 +61,7 @@ export function buildCommandPaletteItems({ workers, snapshots, onNavigate, onGen
       label: task.title || task.id,
       hint: `${task.id} · ${task.status}`,
       icon: <KanbanSquare className="h-4 w-4" />,
-      action: () => onNavigate(`/control/flow?task=${encodeURIComponent(task.id)}`),
+      action: () => onNavigate(`/control/fleet?task=${encodeURIComponent(task.id)}`),
     })),
   ) ?? [];
   const cronItems: CommandItem[] = snapshots.crons?.jobs.map((job) => ({
@@ -96,25 +96,24 @@ export function buildCommandPaletteItems({ workers, snapshots, onNavigate, onGen
     label: epic.title || epic.id,
     hint: `${epic.id} · ${epic.status} · ${epic.open_tasks}/${epic.task_count} offen`,
     icon: <GitBranch className="h-4 w-4" />,
-    action: () => onNavigate(`/control/flow?epic=${encodeURIComponent(epic.id)}`),
+    action: () => onNavigate(`/control/fleet?epic=${encodeURIComponent(epic.id)}`),
   })) ?? [];
   const nav: CommandItem[] = [
     { id: "nav-inbox", group: "Navigation", label: "Postfach", hint: "/control · g i", icon: <Inbox className="h-4 w-4" />, action: () => onNavigate("/control") },
     { id: "nav-overview", group: "Navigation", label: "Übersicht", hint: "/control/overview · g u", icon: <LayoutDashboard className="h-4 w-4" />, action: () => onNavigate("/control/overview") },
     { id: "nav-workstreams", group: "Navigation", label: "Arbeitsströme", hint: "/control/workstreams · g s", icon: <GitBranch className="h-4 w-4" />, action: () => onNavigate("/control/workstreams") },
-    { id: "nav-flow-workers", group: "Navigation", label: "Worker (Flow)", hint: "/control/flow · g f", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/flow") },
+    { id: "nav-fleet-workers", group: "Navigation", label: "Fleet", hint: "/control/fleet · g f", icon: <Anchor className="h-4 w-4" />, action: () => onNavigate("/control/fleet") },
     { id: "nav-statistik", group: "Navigation", label: "Statistik", hint: "/control/statistik · g t", icon: <Activity className="h-4 w-4" />, action: () => onNavigate("/control/statistik") },
-    { id: "nav-pressure", group: "Navigation", label: "Pressure", hint: "/control/pressure", icon: <Gauge className="h-4 w-4" />, action: () => onNavigate("/control/pressure") },
-    { id: "nav-ops", group: "Navigation", label: "Ops Radar", hint: "/control/ops", icon: <Radar className="h-4 w-4" />, action: () => onNavigate("/control/ops") },
+    { id: "nav-system", group: "Navigation", label: "System", hint: "/control/system · g p", icon: <Server className="h-4 w-4" />, action: () => onNavigate("/control/system") },
     { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch · g a", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
-    { id: "nav-pulse", group: "Navigation", label: "Pulse", hint: "/control/pulse · g p", icon: <Activity className="h-4 w-4" />, action: () => onNavigate("/control/pulse") },
+
     ...secondary.map(([label, path]) => ({ id: `more-${path}`, group: "Navigation", label, hint: path, icon: <ArrowRight className="h-4 w-4" />, action: () => onNavigate(path) })),
   ];
   const actions: CommandItem[] = [
     { id: "act-generate", group: "Aktionen", label: "Verbesserungen holen", hint: "Autoresearch", icon: <Search className="h-4 w-4" />, action: onGenerate },
     { id: "act-apply-all", group: "Aktionen", label: "Alle übernehmen", hint: "offene Skill-Vorschläge", icon: <ArrowRight className="h-4 w-4" />, action: onApplyAll },
   ];
-  const workerItems = workers.map((w) => ({ id: `worker-${w.run_id}`, group: "Worker", label: w.task_title || w.run_id, hint: `${w.task_id} · ${w.task_status} · ${w.profile}`, icon: <Bot className="h-4 w-4" />, action: () => onNavigate(`/control/flow?task=${encodeURIComponent(w.task_id)}`) }));
+  const workerItems = workers.map((w) => ({ id: `worker-${w.run_id}`, group: "Worker", label: w.task_title || w.run_id, hint: `${w.task_id} · ${w.task_status} · ${w.profile}`, icon: <Bot className="h-4 w-4" />, action: () => onNavigate(`/control/fleet?task=${encodeURIComponent(w.task_id)}`) }));
   return [...taskItems, ...cronItems, ...backlogItems, ...epicItems, ...nav, ...actions, ...workerItems];
 }
 

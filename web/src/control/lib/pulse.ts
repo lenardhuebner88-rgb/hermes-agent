@@ -56,7 +56,7 @@ export function runToEvent(r: KanbanResult): PulseEvent | null {
     title: r.task_title || r.task_id,
     detail: r.summary_preview || r.summary || null,
     tone: ok ? "emerald" : "amber",
-    tab: "/control/flow",
+    tab: "/control/fleet",
   };
 }
 
