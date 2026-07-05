@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -992,6 +993,12 @@ def _respec_parser():
     return parser
 
 
+def _respec_stdout_task_id(capsys):
+    out = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"t_[0-9a-f]+", out)
+    return out
+
+
 def test_respec_cli_updates_body(kanban_home, capsys):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", body="old")
@@ -999,9 +1006,15 @@ def test_respec_cli_updates_body(kanban_home, capsys):
     args = parser.parse_args(["kanban", "respec", tid, "--body", "new body"])
     rc = kc.kanban_command(args)
     assert rc == 0
-    assert "Respecified" in capsys.readouterr().out
+    new_id = _respec_stdout_task_id(capsys)
     with kb.connect() as conn:
-        assert kb.get_task(conn, tid).body == "new body"
+        old = kb.get_task(conn, tid)
+        new = kb.get_task(conn, new_id)
+    assert old is not None
+    assert new is not None
+    assert old.status == "archived"
+    assert old.body == "old"
+    assert new.body == "new body"
 
 
 def test_respec_cli_rejects_running_task(kanban_home, capsys):
@@ -1025,7 +1038,7 @@ def test_respec_cli_requires_a_field(kanban_home, capsys):
     args = parser.parse_args(["kanban", "respec", tid])
     rc = kc.kanban_command(args)
     assert rc == 2
-    assert "--body and/or --ac" in capsys.readouterr().err
+    assert "--body, --body-file, and/or --ac" in capsys.readouterr().err
 
 
 def test_respec_cli_bad_ac_reports_error(kanban_home, capsys):
@@ -1039,7 +1052,7 @@ def test_respec_cli_bad_ac_reports_error(kanban_home, capsys):
     assert "AC-" in capsys.readouterr().err
 
 
-def test_respec_cli_updates_acceptance_criteria(kanban_home):
+def test_respec_cli_updates_acceptance_criteria(kanban_home, capsys):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", body="old")
     parser = _respec_parser()
@@ -1047,9 +1060,10 @@ def test_respec_cli_updates_acceptance_criteria(kanban_home):
         ["kanban", "respec", tid, "--ac", "- AC-1: do the thing"]
     )
     assert kc.kanban_command(args) == 0
+    new_id = _respec_stdout_task_id(capsys)
     with kb.connect() as conn:
         row = conn.execute(
-            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (new_id,)
         ).fetchone()
     parsed = json.loads(row["acceptance_criteria"])
     assert any("do the thing" in str(i) for i in parsed)

@@ -652,23 +652,30 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     p_respec = sub.add_parser(
         "respec",
-        help="Rewrite the body and/or acceptance criteria of a non-running "
-             "task (triage/todo/scheduled/ready/blocked). The editable sibling "
-             "of `specify`; does NOT change the task's column.",
+        help="Archive a non-running task and create a replacement with a new body.",
     )
     p_respec.add_argument("task_id")
-    p_respec.add_argument(
+    body_group = p_respec.add_mutually_exclusive_group()
+    body_group.add_argument(
         "--body",
         default=None,
-        help="New task body (markdown). Replaces the existing body verbatim.",
+        help="New task body (markdown). Stored on the replacement task.",
+    )
+    body_group.add_argument(
+        "--body-file",
+        default=None,
+        help="Path to a markdown file containing the replacement task body.",
+    )
+    p_respec.add_argument(
+        "--title",
+        default=None,
+        help="Replacement task title (defaults to the old task title).",
     )
     p_respec.add_argument(
         "--ac",
         dest="ac",
         default=None,
-        help="New acceptance criteria as 'AC-<id>: <statement>' bullets (one "
-             "per line). Replaces the structured AC the verifier checks. "
-             "Text with no recognizable AC bullet is rejected.",
+        help="Optional replacement acceptance criteria as 'AC-<id>: <statement>' bullets.",
     )
     p_respec.add_argument(
         "--author",
@@ -2779,10 +2786,17 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 def _cmd_respec(args: argparse.Namespace) -> int:
     body = getattr(args, "body", None)
+    body_file = getattr(args, "body_file", None)
     ac = getattr(args, "ac", None)
+    if body_file:
+        try:
+            body = Path(body_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"kanban: --body-file: {exc}", file=sys.stderr)
+            return 2
     if body is None and ac is None:
         print(
-            "kanban: respec needs --body and/or --ac",
+            "kanban: respec needs --body, --body-file, and/or --ac",
             file=sys.stderr,
         )
         return 2
@@ -2790,21 +2804,23 @@ def _cmd_respec(args: argparse.Namespace) -> int:
     # A ValueError from a malformed --ac propagates to the dispatch wrapper,
     # which prints "kanban: <msg>" and returns 1 — a sprechende CLI-Meldung.
     with kb.connect_closing() as conn:
-        if not kb.respec_task(
+        new_id = kb.respec_task(
             conn,
             args.task_id,
             body=body,
+            title=getattr(args, "title", None),
             acceptance_criteria=ac,
             author=author,
-        ):
+        )
+        if not new_id:
             print(
                 f"cannot respec {args.task_id} (unknown id, or task is "
                 f"running/review/done/archived — only triage/todo/scheduled/"
-                f"ready/blocked are editable)",
+                f"ready/blocked are replaceable)",
                 file=sys.stderr,
             )
             return 1
-    print(f"Respecified {args.task_id}")
+    print(new_id)
     return 0
 
 

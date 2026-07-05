@@ -13019,11 +13019,10 @@ def _parse_acceptance_criteria(body: Optional[str]) -> Optional[str]:
         return None
 
 
-# Statuses whose ``body`` / ``acceptance_criteria`` may be re-specified in
-# place by :func:`respec_task`. This is an ALLOWLIST (not a denylist) so a
-# future status defaults to rejected: ``running``/``review`` are excluded
-# because a worker or the verifier is actively executing against the current
-# spec, and ``done``/``archived`` are terminal.
+# Statuses that may be replaced by :func:`respec_task`. This is an ALLOWLIST
+# (not a denylist) so a future status defaults to rejected: ``running``/
+# ``review`` are excluded because a worker or verifier is actively executing
+# against the current spec, and ``done``/``archived`` are terminal.
 RESPEC_ALLOWED_STATUSES = {"triage", "todo", "scheduled", "ready", "blocked"}
 
 
@@ -13032,102 +13031,188 @@ def respec_task(
     task_id: str,
     *,
     body: Optional[str] = None,
+    title: Optional[str] = None,
     acceptance_criteria: Optional[str] = None,
     author: Optional[str] = None,
-) -> bool:
-    """Re-specify the ``body`` / ``acceptance_criteria`` of a non-running task.
+) -> Optional[str]:
+    """Archive ``task_id`` and create a replacement task with a new spec.
 
-    The editable sibling of :func:`specify_triage_task`: where ``specify``
-    only touches a ``triage`` row (and promotes it to ``todo``), ``respec``
-    rewrites an already-specified task's ``body`` and/or structured
-    ``acceptance_criteria`` *in place* WITHOUT changing its column. This is the
-    supported way to re-fass a task whose spec turned out wrong — previously
-    the only recourse was completing the stale task and re-creating it from
-    scratch (the "Kanban-Task neu fassen" lesson).
+    This intentionally does **not** edit ``tasks.body`` in place. The old task
+    keeps its original body, is completed then archived, and receives a pointer
+    comment. The new task copies the old task's assignee/priority/kind/epic and
+    parent links, plus a provenance dependency ``old -> new``.
 
-    Status guard (:data:`RESPEC_ALLOWED_STATUSES`, an allowlist): only a task
-    in ``triage``/``todo``/``scheduled``/``ready``/``blocked`` may be edited.
-    ``running``/``review`` are excluded (a worker / the verifier is mid-flight
-    against the current spec), ``done``/``archived`` are terminal, and any
-    other status defaults to rejected. Returns ``False`` (touching nothing)
-    for an unknown id or a guarded status — the caller should surface that as
-    "cannot respec" rather than raising.
-
-    ``acceptance_criteria`` is passed as free-form ``AC-<id>: …`` bullet text
-    and normalized through the same parser ``decompose`` uses, so the stored
-    value stays the structured JSON the verifier checklist reads. Non-blank AC
-    text that yields no recognizable bullet raises ``ValueError`` rather than
-    silently clearing the column.
-
-    Mirroring ``specify``: ``author`` is recorded on an audit comment and the
-    ``respecified`` event payload only when at least one field actually
-    changed — passing identical values is a successful no-op with no spam.
+    Returns the replacement task id, or ``None`` for an unknown/guarded task.
     """
+    if body is None and acceptance_criteria is None:
+        raise ValueError("respec requires body or acceptance_criteria")
+    ac_json: Optional[str] = None
+    if acceptance_criteria is not None:
+        if not acceptance_criteria.strip():
+            raise ValueError(
+                "acceptance_criteria is blank; refusing to clear existing AC"
+                " — pass at least one 'AC-…:' bullet"
+            )
+        ac_json = _parse_acceptance_criteria(acceptance_criteria)
+        if ac_json is None:
+            raise ValueError(
+                "acceptance_criteria has no recognizable 'AC-<id>: …' "
+                "bullet — refusing to clear the criteria silently"
+            )
+
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT status, body, acceptance_criteria FROM tasks WHERE id = ?",
+            "SELECT * FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if existing is None:
-            return False
+            return None
         if existing["status"] not in RESPEC_ALLOWED_STATUSES:
-            return False
-        sets: list[str] = []
-        params: list[Any] = []
-        changed_fields: list[str] = []
-        if body is not None and (body or "") != (existing["body"] or ""):
-            sets.append("body = ?")
-            params.append(body)
-            changed_fields.append("body")
-        if acceptance_criteria is not None:
-            if not acceptance_criteria.strip():
-                raise ValueError(
-                    "acceptance_criteria is blank; refusing to clear existing AC"
-                    " — pass at least one 'AC-…:' bullet"
-                )
-            ac_json = _parse_acceptance_criteria(acceptance_criteria)
-            if ac_json is None and acceptance_criteria.strip():
-                raise ValueError(
-                    "acceptance_criteria has no recognizable 'AC-<id>: …' "
-                    "bullet — refusing to clear the criteria silently"
-                )
-            if (ac_json or None) != (existing["acceptance_criteria"] or None):
-                sets.append("acceptance_criteria = ?")
-                params.append(ac_json)
-                changed_fields.append("acceptance_criteria")
-        if not sets:
-            # Editable status, but nothing to change (no fields given, or all
-            # identical). A successful no-op — no UPDATE, comment, or event.
-            return True
-        params.append(task_id)
-        cur = conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
-            tuple(params),
+            return None
+
+        new_title = (title if title is not None else existing["title"]).strip()
+        if not new_title:
+            raise ValueError("title must not be blank")
+        new_body = body if body is not None else existing["body"]
+        new_ac = ac_json if acceptance_criteria is not None else existing["acceptance_criteria"]
+        now = int(time.time())
+        for _ in range(8):
+            new_id = _new_task_id()
+            if not conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?",
+                (new_id,),
+            ).fetchone():
+                break
+        else:  # pragma: no cover - random id collision storm
+            raise RuntimeError("could not allocate replacement task id")
+
+        old_parent_rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+            (task_id,),
+        ).fetchall()
+        old_parent_ids = [row["parent_id"] for row in old_parent_rows]
+        author_name = (author or "").strip() or "user"
+        pointer = f"respecced → {new_id}"
+
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'done',
+                   completed_at = ?,
+                   result = ?,
+                   claim_lock = NULL,
+                   claim_expires = NULL,
+                   worker_pid = NULL,
+                   current_run_id = NULL
+             WHERE id = ?
+            """,
+            (now, pointer, task_id),
         )
-        if cur.rowcount != 1:
-            return False
-        if changed_fields and author and author.strip():
-            # Inline INSERT (rather than ``add_comment``) because we're already
-            # inside this write_txn — a nested BEGIN IMMEDIATE would raise. We
-            # also skip the 'commented' event add_comment emits, since the
-            # 'respecified' event below already records the change.
-            conn.execute(
-                "INSERT INTO task_comments (task_id, author, body, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    task_id,
-                    author.strip(),
-                    "Respecified — updated " + ", ".join(changed_fields) + ".",
-                    int(time.time()),
-                ),
-            )
         _append_event(
             conn,
             task_id,
-            "respecified",
-            {"changed_fields": changed_fields} if changed_fields else None,
+            "completed",
+            {"result": pointer, "respecced_to": new_id},
         )
-    return True
+
+        conn.execute(
+            """
+            INSERT INTO tasks (
+                id, title, body, acceptance_criteria, assignee, status,
+                priority, created_by, created_at, workspace_kind,
+                workspace_path, branch_name, project_id, tenant,
+                max_runtime_seconds, workflow_template_id, current_step_key,
+                skills, model_override, max_retries, max_iterations,
+                max_continuations, goal_mode, goal_max_turns, session_id,
+                due_at, epic_id, kind, scope_contract, freigabe,
+                live_test_depth, review_tier, block_kind, block_recurrences
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id,
+                new_title,
+                new_body,
+                new_ac,
+                existing["assignee"],
+                existing["status"],
+                existing["priority"],
+                author_name,
+                now,
+                existing["workspace_kind"],
+                existing["workspace_path"],
+                existing["branch_name"],
+                existing["project_id"],
+                existing["tenant"],
+                existing["max_runtime_seconds"],
+                existing["workflow_template_id"],
+                existing["current_step_key"],
+                existing["skills"],
+                existing["model_override"],
+                existing["max_retries"],
+                existing["max_iterations"],
+                existing["max_continuations"],
+                existing["goal_mode"],
+                existing["goal_max_turns"],
+                existing["session_id"],
+                existing["due_at"],
+                existing["epic_id"],
+                existing["kind"],
+                existing["scope_contract"],
+                existing["freigabe"],
+                existing["live_test_depth"],
+                existing["review_tier"],
+                existing["block_kind"],
+                int(existing["block_recurrences"] or 0),
+            ),
+        )
+        _append_event(
+            conn,
+            new_id,
+            "created",
+            {
+                "assignee": existing["assignee"],
+                "status": existing["status"],
+                "parents": old_parent_ids,
+                "respecced_from": task_id,
+                "tenant": existing["tenant"],
+            },
+        )
+
+        for parent_id in old_parent_ids:
+            _link_tasks_in_txn(conn, parent_id, new_id)
+        _link_tasks_in_txn(conn, task_id, new_id)
+
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+            "VALUES (?, ?, ?, ?, 'comment')",
+            (task_id, author_name, pointer, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "commented",
+            {"author": author_name, "len": len(pointer), "kind": "comment"},
+        )
+        _append_event(
+            conn,
+            task_id,
+            "respecced",
+            {"new_task": new_id, "copied_parents": old_parent_ids},
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'archived',
+                   claim_lock = NULL,
+                   claim_expires = NULL,
+                   worker_pid = NULL,
+                   current_run_id = NULL
+             WHERE id = ?
+            """,
+            (task_id,),
+        )
+        _append_event(conn, task_id, "archived", {"respecced_to": new_id})
+        return new_id
 
 
 def decompose_triage_task(
