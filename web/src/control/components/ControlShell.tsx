@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -10,7 +10,7 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard";
 
 // The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
 // live in Fleet now, and System remains reachable through "Mehr" + deep-link.
@@ -54,6 +54,7 @@ const moreTabs = [
   // Prompt-Schmiede: Copy-Paste-Generator für Agent-Steuerbefehle (kein Dispatch).
   { label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
   { label: "Stratege", path: "/control/stratege", icon: Lightbulb },
+  { label: "Design", path: "/control/design-board", icon: PenTool },
 ];
 
 const secondaryNav = [

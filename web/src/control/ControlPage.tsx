@@ -64,6 +64,9 @@ const ResearchView = lazy(() =>
 const BibliothekView = lazy(() =>
   import("./views/BibliothekView").then((m) => ({ default: m.BibliothekView })),
 );
+const DesignBoardView = lazy(() =>
+  import("./views/DesignBoardView").then((m) => ({ default: m.DesignBoardView })),
+);
 const SchmiedeView = lazy(() =>
   import("./views/SchmiedeView").then((m) => ({ default: m.SchmiedeView })),
 );
@@ -95,6 +98,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/ops")) return "system";
   if (pathname.includes("/control/research")) return "research";
   if (pathname.includes("/control/bibliothek")) return "bibliothek";
+  if (pathname.includes("/control/design-board")) return "designBoard";
   if (pathname.includes("/control/schmiede")) return "schmiede";
   if (pathname.includes("/control/stratege")) return "stratege";
   // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
@@ -123,6 +127,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   system: () => import("./views/system/SystemView"),
   research: () => import("./views/ResearchView"),
   bibliothek: () => import("./views/BibliothekView"),
+  designBoard: () => import("./views/DesignBoardView"),
   schmiede: () => import("./views/SchmiedeView"),
   stratege: () => import("./views/StrategistView"),
 };
@@ -154,6 +159,7 @@ const tabPath: Record<ControlTab, string> = {
   ops: "/control/system",
   research: "/control/research",
   bibliothek: "/control/bibliothek",
+  designBoard: "/control/design-board",
   schmiede: "/control/schmiede",
   stratege: "/control/stratege",
 };
@@ -277,6 +283,7 @@ export default function ControlPage() {
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />
             <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
+            <Route path="design-board" element={<DesignBoardView density={density.density} />} />
             <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
             <Route path="stratege" element={<StrategistView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
