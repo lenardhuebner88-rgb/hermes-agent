@@ -314,6 +314,15 @@ def test_ensure_wt_guard_clean_and_revert(tmp_path, fake_engine):
     assert runner.guard_clean() is True
     assert g(runner.wt, "status", "--porcelain").stdout.strip() == ""
 
+    # GESTAGTE Reste (`git add -A` durchs Gate-Protokoll): checkout -- .
+    # stellt aus dem Index her — ohne vorheriges reset blieben sie kleben
+    # (live 2026-07-05: ABBRUCH nach usage-limit-Runde).
+    (runner.wt / "README.md").write_text("staged dirty\n", encoding="utf-8")
+    (runner.wt / "neu_staged.py").write_text("x = 1\n", encoding="utf-8")
+    g(runner.wt, "add", "-A")
+    assert runner.guard_clean() is True
+    assert g(runner.wt, "status", "--porcelain").stdout.strip() == ""
+
     # revert_range: Branch bleibt 'verified oder reverted'
     prehead = runner.rev_parse()
     commit_in(runner.wt, "t1")

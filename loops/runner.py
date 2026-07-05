@@ -355,6 +355,10 @@ class LoopRunner:
         if not self.git("status", "--porcelain").stdout.strip():
             return True
         self.say("Worktree dirty — räume Phase-Reste auf")
+        # Erst unstagen: Loop-Agenten stagen mit `git add -A` (Gate-Protokoll);
+        # `checkout -- .` stellt aus dem INDEX her, gestagte Reste blieben sonst
+        # unaufräumbar → ABBRUCH (live 2026-07-05).
+        self.git("reset", "--quiet", "HEAD", "--", ".")
         self.git("checkout", "--", ".")
         self.git("clean", "-fd")
         left = self.git("status", "--porcelain").stdout.strip()
