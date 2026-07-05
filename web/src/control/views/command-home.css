@@ -25,11 +25,9 @@ body:has([data-command-home]) { background: #05090f; }
 body:has([data-command-home]) [data-layout-variant] { background: #05090f; }
 body:has([data-command-home]) [data-control] { background: #05090f; }
 
-/* Shell-Header über dem dunklen Grund lesbar halten — die Papier-Tinte (.text-
- * white → dunkles --hc-text, .hc-soft/.hc-eyebrow) wäre sonst dunkel-auf-dunkel.
- * Identisch zur fleet.css-Behandlung. */
-.hc-page:has([data-command-home]) header .hc-soft,
-.hc-page:has([data-command-home]) header .hc-eyebrow { color: #94a0b8; }
+/* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
+ * kein Header-Pflaster mehr — die globalen .hc-soft/.hc-eyebrow ziehen jetzt die
+ * Leitstand-ink-Böden (--color-ink-2/-3, control-tokens.css). */
 .hc-page:has([data-command-home]) header h1 { color: #e8ecf4; }
 
 [data-command-home] { color: var(--color-ink); }

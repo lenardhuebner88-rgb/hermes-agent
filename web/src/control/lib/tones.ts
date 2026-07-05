@@ -19,7 +19,12 @@ const TONE_CLASS: Record<ToneName, string> = {
   amber:   'border-amber-500/20 bg-amber-500/10 text-amber-200',
   rose:    'border-rose-500/20 bg-rose-500/10 text-rose-200',
   red:     'border-red-500/20 bg-red-500/10 text-red-200',
-  zinc:    'border-zinc-600/20 bg-zinc-600/10 text-zinc-200',
+  // Neutral: nur der Rahmen wird kräftiger (zinc-600/20 verschwand auf dem
+  // dunklen Leitstand-Grund → "Geister"-Callout). Die Textfarbe (zinc-200)
+  // bleibt, weil dieser geteilte Ton auch auf den noch HELLEN Broadsheet-Tabs
+  // (Orchestrator/Backlog-Leerzustände) rendert — reine Border/Bg-Deckung ist
+  // auf beiden Gründen sicher. amber/red bleiben semantisch unverändert.
+  zinc:    'border-zinc-500/30 bg-zinc-500/10 text-zinc-200',
   // Violett = Marke. Nur für Akzent/Interaktion, nie als Status-Warnung.
   // Fix: vorher nicht-präfixierte --accent-* Vars (existieren nicht → unsichtbar);
   // jetzt die kanonischen --hc-accent-* aus control-tokens.css.

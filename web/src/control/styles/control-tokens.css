@@ -31,6 +31,11 @@ body:has([data-control]) header[role="banner"] { display: none; }
   --hc-border:       #ddd8cb;
   --hc-border-strong:#c7c1b1;
   --hc-text:         #1a1d28;
+  /* Broadsheet (light) muted-text floors. The DARK Leitstand views override
+     these to the Leitstand ink hierarchy at their theme root (see the
+     [data-statistik]/[data-command-home]/[data-fleet-theme] block below) —
+     scoped, NOT global, because ~14 /control tabs are still on the light paper
+     canvas mid-migration and rely on these greys reading on paper. */
   --hc-text-soft:    #555c6e;
   --hc-text-dim:     #8b8f9c;
   /* ── Ultramarine signal identity ──────────────────────────────────────────
@@ -193,6 +198,37 @@ body:has([data-control]) header[role="banner"] { display: none; }
 
 .hc-soft { color: var(--hc-text-soft); }
 .hc-dim { color: var(--hc-text-dim); }
+
+/* ── Dark-Leitstand ink floor (DESIGN.md Regel 4) ───────────────────────────
+   Re-bind the daylight ink triad to the Leitstand ink hierarchy AT THE DARK
+   THEME ROOT. The big `[data-control]` daylight remap layer below (lines ~495+)
+   rebinds the dark-era utilities the SHARED components still use to these three
+   tokens:
+     .text-white, .text-white/90..80, .text-zinc-100/200  → var(--hc-text)
+     .hc-soft, .text-zinc-400                              → var(--hc-text-soft)
+     .hc-dim, .hc-eyebrow, .text-zinc-500/600             → var(--hc-text-dim)
+   On the light broadsheet those tokens are paper-calibrated (dark ink), which
+   is why on the dark canvas a shared tile (AccountUsageTile: text-white %-values,
+   the ToneCallout-zinc "Höchste Auslastung" banner via text-zinc-200, .hc-soft
+   window labels) rendered near-black-on-navy. Flipping the three tokens here
+   makes every one of those descendants clear the AA floor in ONE canonical
+   place — replacing the former per-element [data-statistik]/[data-command-home]
+   .hc-soft{ink-2} patches.
+   Scoped to the three migrated dark roots on purpose: the light broadsheet tabs
+   still in migration keep the paper inks above. As more views go dark, add their
+   page selector here (or flip the root tokens once none stay light). Anchored on
+   the PAGE root (`.hc-page:has(...)` / `.fleet-bleed`), NOT the view wrapper, so
+   the override also reaches the shared ControlShell `header` (a sibling of the
+   view under .hc-page) — that is why the former per-view `header .hc-soft/
+   .hc-eyebrow` colour patches could be deleted. Body-portalled drawers mount
+   under [data-control] outside .hc-page and are unaffected (as before). */
+.hc-page:has([data-statistik]),
+.hc-page:has([data-command-home]),
+.hc-page.fleet-bleed {
+  --hc-text:      var(--color-ink);
+  --hc-text-soft: var(--color-ink-2);
+  --hc-text-dim:  var(--color-ink-3);
+}
 
 /* ── Type scale ───────────────────────────────────────────────────────────
    Six named steps. Components render a step via .hc-type-* (see <Text>),

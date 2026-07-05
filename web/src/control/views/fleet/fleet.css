@@ -56,14 +56,11 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   background: #05090f;
 }
 /* Der Shell-Header (Navigation) bleibt über dem dunklen Fleet-Grund stehen —
- * Airy ab lg, Compact immer (dort liegt er in der zweiten Grid-Spalte, daher
- * Nachfahren- statt Kind-Selektor). Papier-Theme-Tinte wäre dort unlesbar:
- * .text-white ist via [data-control] auf var(--hc-text) (dunkel) umgemappt
- * (Titel maß 1,14:1), .hc-soft (#555c6e) nur 2,9:1. */
-.hc-page.fleet-bleed header .hc-soft,
-.hc-page.fleet-bleed header .hc-eyebrow {
-  color: #94a0b8;
-}
+ * Airy ab lg, Compact immer (dort liegt er in der zweiten Grid-Spalte). Die
+ * .text-white-Tinte ist via [data-control] auf var(--hc-text) (dunkel) gemappt,
+ * daher h1 explizit hell. Soft/Eyebrow brauchen kein Header-Pflaster mehr —
+ * die globalen .hc-soft/.hc-eyebrow ziehen jetzt die Leitstand-ink-Böden
+ * (--color-ink-2/-3, control-tokens.css). */
 .hc-page.fleet-bleed header h1 {
   color: #e8ecf4;
 }

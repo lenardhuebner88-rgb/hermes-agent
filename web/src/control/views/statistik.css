@@ -20,26 +20,19 @@ body:has([data-statistik]) { background: #05090f; }
 body:has([data-statistik]) [data-layout-variant] { background: #05090f; }
 body:has([data-statistik]) [data-control] { background: #05090f; }
 
-/* Shell-Header über dem dunklen Grund lesbar halten (identisch zu command-home.css). */
-.hc-page:has([data-statistik]) header .hc-soft,
-.hc-page:has([data-statistik]) header .hc-eyebrow { color: #94a0b8; }
+/* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
+   KEIN Header-Pflaster mehr — die globalen .hc-soft/.hc-dim/.hc-eyebrow ziehen
+   jetzt die Leitstand-ink-Böden (control-tokens.css). */
 .hc-page:has([data-statistik]) header h1 { color: #e8ecf4; }
 
 [data-statistik] { color: var(--color-ink); }
 
-/* ── Kontrast-Boden (DESIGN.md Regel 4) ─────────────────────────────────────
-   Das Broadsheet-/Light-Erbe brachte die hellen control-tokens mit: `.hc-soft`
-   (#555c6e) und `.hc-dim` (#8b8f9c) sind für einen HELLEN Grund kalibriert und
-   fallen auf dem dunklen Leitstand-Canvas unter den ink-2-Boden ("dunkel auf
-   dunkel"). Flächig auf die Leitstand-ink-Tokens remappen, damit KEIN Body-Text
-   unter ink-2 rutscht — statt nur die 3 Fundstellen (Höchste-Auslastung-Zeile,
-   Fenster-%/-Labels, Provider-Strings) einzeln zu patchen. Höhere Spezifität
-   (0,2,0) schlägt die globalen `.hc-*` (0,1,0) aus control-tokens.css. */
-[data-statistik] .hc-soft { color: var(--color-ink-2); }
-[data-statistik] .hc-dim { color: var(--color-ink-3); }
-[data-statistik] .text-zinc-400 { color: var(--color-ink-2); }
-[data-statistik] .text-zinc-500,
-[data-statistik] .text-zinc-600 { color: var(--color-ink-3); }
+/* Kontrast-Boden (DESIGN.md Regel 4) sitzt jetzt kanonisch in control-tokens.css:
+   der .hc-page:has([data-statistik])-Block remappt --hc-text-soft/-dim auf
+   --color-ink-2/-3, womit .hc-soft/.hc-dim/.hc-eyebrow (und der [data-control]
+   .text-zinc-*-Remap) flächig über den AA-Boden kommen. Der ToneCallout-Ton
+   "zinc" bekommt seinen kräftigeren Rahmen in lib/tones.ts. Die früheren
+   [data-statistik]-Element-Pflaster sind damit redundant und entfernt. */
 
 /* ── Masthead (Fleet/Start-Idiom) ─────────────────────────────────────────── */
 .st-masthead {
