@@ -25,7 +25,8 @@ systemctl --user enable --now hermes-loop@<pack>.timer    # nächtlich 23:37
 ```
 
 **Steuerhebel:** `~/.hermes/loops/<pack>/SEED.md` (optionale Saat für Planner-Packs) ·
-`overrides.env` (schreibt das Dashboard) · `touch ~/.hermes/loops/<pack>/STOP` ·
+`overrides.env` (schreibt das Dashboard; gilt für EINEN Lauf — der Runner benennt sie
+beim night/run-Start nach `overrides.consumed.env` um) · `touch ~/.hermes/loops/<pack>/STOP` ·
 Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
 
 ## Archetypen & Protokoll
@@ -45,7 +46,7 @@ Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
 |---|---|---|
 | claude | `claude -p` (Abo) | Modell-Slug (claude-fable-5, claude-sonnet-5, …) |
 | kimi | kimi-code CLI (Abo, $0) | kimi-code/kimi-for-coding |
-| codex | `codex exec --sandbox workspace-write` (Abo) | gpt-5.5, gpt-5.3-codex |
+| codex | `codex exec --sandbox danger-full-access` (Abo; workspace-write scheiterte an Worktree-gitdir/STATE_DIR/tmux, 2026-07-05) | gpt-5.5, gpt-5.3-codex |
 | hermes | `hermes -p <profil> -z` (+ HERMES_SANDBOX_MODE=1) | **Hermes-PROFIL** (reviewer→NeuralWatt/glm-5.2, coder→Codex-Pool) |
 | neuralwatt | `hermes -m <model> --provider neuralwatt -z` (+ HERMES_SANDBOX_MODE=1) | NeuralWatt-Modell-Slug (glm-5.2, kimi-k2.7-code, …) |
 
