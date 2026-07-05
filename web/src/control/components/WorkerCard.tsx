@@ -144,8 +144,16 @@ function TimeAxisTrack({
   const p90Pct = p90 != null && p90 > 0 ? pct(p90) : null;
   const budgetPct = budget > 0 ? pct(budget) : null;
 
+  const ariaParts = [
+    `${de.worker.timeAxisNow} ${fmtDur(elapsed)}`,
+    p50 != null && p50 > 0 ? `${de.worker.timeAxisP50} ${fmtDur(p50)}` : null,
+    p90 != null && p90 > 0 ? `${de.worker.timeAxisP90} ${fmtDur(p90)}` : null,
+    budget > 0 ? `${de.worker.timeAxisBudget} ${fmtDur(budget)}` : null,
+  ].filter((part): part is string => part != null);
+  const ariaLabel = `${de.worker.timeAxisLabel}: ${ariaParts.join(", ")}`;
+
   return (
-    <div className="relative h-6 w-full" aria-label={de.worker.timeAxisLabel}>
+    <div className="relative h-6 w-full" role="img" aria-label={ariaLabel}>
       {/* Track-Hintergrund */}
       <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-white/10">
         {/* Elapsed-Füllung */}

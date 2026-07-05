@@ -207,7 +207,7 @@ interface UebersichtTabProps {
   deliverables: Array<{ filename: string; url: string; size: number }>;
 }
 
-function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: UebersichtTabProps) {
+export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: UebersichtTabProps) {
   if (!task) {
     return (
       <div className="fleet-empty" style={{ padding: "16px 4px" }}>
@@ -302,8 +302,8 @@ function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Uebersicht
           <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
             {de.fleet.detailBodyLabel}
           </div>
-          <div style={{ font: "400 12px/1.6 var(--hc-font-sans)", color: "var(--fleet-t2)", borderLeft: "2px solid var(--fleet-puls)", paddingLeft: 10, maxHeight: 120, overflow: "hidden", maskImage: "linear-gradient(to bottom, black 70%, transparent)" }}>
-            {task.body.slice(0, 400)}{task.body.length > 400 ? "…" : ""}
+          <div style={{ font: "400 12px/1.6 var(--hc-font-sans)", color: "var(--fleet-t2)", borderLeft: "2px solid var(--fleet-puls)", paddingLeft: 10, maxHeight: 160, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>
+            {task.body}
           </div>
         </div>
       ) : null}

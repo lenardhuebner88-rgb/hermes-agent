@@ -95,3 +95,31 @@ describe("WorkerCard error and status copy", () => {
     expect(html).toMatch(/<article[^>]*\bmin-w-0\b/);
   });
 });
+
+
+describe("WorkerCard time axis accessibility", () => {
+  it("exposes the time axis as an img with a label summarizing now, p50, p90 and budget", () => {
+    const html = renderWorker(mkWorker({
+      started_at: NOW - 300,
+      eta_p50_seconds: 480,
+      eta_p90_seconds: 900,
+      max_runtime_seconds: 1_800,
+    }));
+
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Zeit-Achse: jetzt 5m, p50 8m, p90 15m, Budget 30m"');
+  });
+
+  it("omits missing p50/p90 values from the accessible label", () => {
+    const html = renderWorker(mkWorker({
+      started_at: NOW - 300,
+      eta_p50_seconds: null,
+      eta_p90_seconds: null,
+      max_runtime_seconds: 1_800,
+    }));
+
+    expect(html).toContain('aria-label="Zeit-Achse: jetzt 5m, Budget 30m"');
+    expect(html).not.toContain("p50 0");
+    expect(html).not.toContain("p90 0");
+  });
+});

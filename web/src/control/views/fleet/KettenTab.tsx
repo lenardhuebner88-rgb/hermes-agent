@@ -96,7 +96,7 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
           <button
             key={chip.rootId}
             type="button"
-            className={`fleet-kchip${selectedRootId === chip.rootId ? " fleet-kchip-on" : ""}`}
+            className={`fleet-kchip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]${selectedRootId === chip.rootId ? " fleet-kchip-on" : ""}`}
             onClick={() => handleChipSelect(chip.rootId)}
             aria-pressed={selectedRootId === chip.rootId}
           >
@@ -258,7 +258,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
       {focusNode ? (
         <button
           type="button"
-          className="fleet-fokus text-left"
+          className="fleet-fokus text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
           onClick={() => onOpenNodeDetail(focusNode.id, nodes)}
           aria-label={`Node ${focusNode.title} öffnen`}
         >
@@ -267,7 +267,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
               {profileInitial(focusNode.assignee ?? "?")}
             </div>
             <div className="fleet-wk-name">
-              {focusNode.assignee ?? "—"}
+              {focusNode.assignee ? `${de.fleet.detailLabelAssignee}: ${focusNode.assignee}` : "—"}
               <span>{focusNode.id.slice(0, 10)}</span>
             </div>
             {focusNode.status === "running" && focusHbAge != null ? (
@@ -288,7 +288,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
 
           {focusNode.latest_run?.profile ? (
             <div className="fleet-wk-note">
-              {focusNode.latest_run.profile}
+              {de.fleet.detailLabelModell}: {focusNode.latest_run.profile}
               {focusNode.latest_run.heartbeat_age_seconds != null
                 ? ` · ♥ ${fmtSeconds(focusNode.latest_run.heartbeat_age_seconds)}`
                 : ""}
@@ -311,7 +311,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
           })()}
 
           <div className="fleet-wk-meta">
-            {focusNode.latest_run?.profile ? <b>{focusNode.latest_run.profile.replace(/^claude-/, "").split("-")[0] ?? focusNode.latest_run.profile}</b> : null}
+            {focusNode.latest_run?.profile ? <b>{de.fleet.detailLabelModell}: {focusNode.latest_run.profile.replace(/^claude-/, "").split("-")[0] ?? focusNode.latest_run.profile}</b> : null}
             {(focusNode.input_tokens > 0 || focusNode.output_tokens > 0) ? (
               <span>{fmtTokens(focusNode.input_tokens)} → {fmtTokens(focusNode.output_tokens)} tok</span>
             ) : null}
@@ -332,7 +332,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
             <button
               key={n.id}
               type="button"
-              className="fleet-q text-left"
+              className="fleet-q text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
               onClick={() => onOpenNodeDetail(n.id, nodes)}
               aria-label={`Node ${n.title} öffnen`}
             >
@@ -340,7 +340,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {n.title}
               </span>
-              <span className="fleet-q-assignee">{n.assignee ?? "—"}</span>
+              <span className="fleet-q-assignee">{n.assignee ? `${de.fleet.detailLabelAssignee}: ${n.assignee}` : "—"}</span>
             </button>
           ))}
         </div>
@@ -351,7 +351,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
         <div className="fleet-fertig-grp">
           <button
             type="button"
-            className="fleet-f-row"
+            className="fleet-f-row focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
             style={{ fontWeight: 600, color: "var(--fleet-t3)", opacity: 1, fontSize: 10.5 }}
             onClick={() => setFertigOpen((v) => !v)}
             aria-expanded={fertigOpen}
@@ -366,7 +366,7 @@ function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoadi
             <button
               key={n.id}
               type="button"
-              className="fleet-f-row"
+              className="fleet-f-row focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
               onClick={() => onOpenNodeDetail(n.id, nodes)}
               aria-label={`Node ${n.title} öffnen`}
             >
