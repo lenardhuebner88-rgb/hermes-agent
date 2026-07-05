@@ -1,32 +1,14 @@
 #!/usr/bin/env node
-import { createRequire } from "node:module";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { requirePlaywrightChromium, resolveChromiumExecutable } from "./lib/playwright_chromium.mjs";
 
-const require = createRequire(import.meta.url);
-const { chromium } = require("/home/piet/.hermes/hermes-agent/node_modules/playwright-core");
+const chromium = requirePlaywrightChromium();
 
 const CONTROL_URL = process.env.HERMES_VISUAL_GATE_URL || "http://127.0.0.1:9119/control";
 const CONNECT_TIMEOUT_MS = 5_000;
 const screenshotPath = process.env.HERMES_VISUAL_GATE_SCREENSHOT
   || path.join(os.tmpdir(), `hermes-visual-gate-mobile-${process.pid}.png`);
-
-function resolveChromiumExecutable() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  const entries = fs.readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith("chromium-"))
-    .map((entry) => entry.name)
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-
-  for (const name of entries.reverse()) {
-    for (const chromeDir of ["chrome-linux64", "chrome-linux"]) {
-      const candidate = path.join(root, name, chromeDir, "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  throw new Error(`Chromium binary not found under ${root}`);
-}
 
 async function clickFirstUsefulButton(page) {
   const preferred = page.getByRole("button", { name: /Flow|Statistik|Stats|Start/i })

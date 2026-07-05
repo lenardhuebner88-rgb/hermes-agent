@@ -48,3 +48,38 @@ The rules above are realised as one canonical component layer at
 (`FleetPod` / `FleetPanel` / `FleetEmptyState` / `RoleChip`). Import these from
 `components/leitstand` instead of re-deriving the idiom per view. Props and
 usage: `components/leitstand/README.md`.
+
+## VISUAL-SELF-VERIFY
+
+VISUAL-SELF-VERIFY runs through `scripts/visual-verify.sh`, never against the
+live `:9119` dashboard. The script creates a disposable `HERMES_HOME`, unsets
+live Kanban board environment, enables `HERMES_SANDBOX_MODE=1`, starts `hermes
+serve` on an ephemeral loopback port without an auth provider, and tears the
+instance down via `trap`.
+
+PlanSpec AC example:
+
+```bash
+scripts/visual-verify.sh --output-dir /tmp/hermes-visual-ac /control /control/agents
+```
+
+Use `--skip-build` only when `web/dist` already reflects the branch under test.
+Evidence is written as PNGs for 390px, 820px, and desktop plus `summary.json`;
+any console error or horizontal overflow makes the script exit non-zero.
+
+Optional seeds use a conservative writer schema inside the isolated home:
+
+```json
+{
+  "files": [
+    {
+      "path": "fixtures/example.json",
+      "json": { "records": [{ "id": "demo", "status": "ok" }] }
+    }
+  ]
+}
+```
+
+Every `path` is relative to the disposable `HERMES_HOME`; absolute paths and
+`..` are rejected. The whole seeded home is removed after the run, so seed data
+cannot touch the operator's live config or `kanban.db`.
