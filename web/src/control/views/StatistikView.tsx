@@ -25,6 +25,7 @@ import {
   useChainCompletion,
   useHermesReliability,
   useHermesRunsCosts,
+  useHermesRunsCostSeries,
   useHermesRunsDaily,
   useHermesRunsIssues,
   useHermesRunSummary,
@@ -39,6 +40,7 @@ import type {
   ReliabilityProfile,
   ReviewValueRow,
   RunsDailyPoint,
+  RunsCostsSeriesResponse,
   SubscriptionTokenBurnResponse,
   WindowedRollupRoot,
   WindowedRollupWorker,
@@ -62,6 +64,7 @@ import {
   TwinStats,
   Verdict,
 } from "../components/broadsheet/Broadsheet";
+import { DrawerShell } from "../components/leitstand";
 import {
   acceptance,
   acceptanceDelta,
@@ -438,7 +441,98 @@ export function EffizienzSection({
     </>
   );
 }
+// ── Kosten-/Token-Trend + Drill-down ───────────────────────────────────────
+function CostTrendSection({
+  costs,
+  loading = false,
+  error = null,
+  profiles,
+  burn,
+}: {
+  costs: RunsCostsSeriesResponse | null;
+  loading?: boolean;
+  error?: string | null;
+  profiles: CostProfileRow[];
+  burn: SubscriptionTokenBurnResponse | null;
+}) {
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const series = costs?.series ?? [];
+  const maxTokens = Math.max(1, ...series.map((row) => row.total_tokens ?? 0));
+  const maxCost = Math.max(1, ...series.map((row) => row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0));
+  const hasTrend = series.some((row) => (row.runs ?? 0) > 0 || (row.total_tokens ?? 0) > 0 || (row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0) > 0);
+  const laneRows = burn ? subscriptionBurnBreakdown(burn, 8).topLanes : [];
+  const hasDrilldown = profiles.length > 0 || laneRows.length > 0;
 
+  return (
+    <>
+      <SectionRule title={de.stats.secCostTrend} meta={de.stats.secCostTrendMeta} />
+      {loading ? (
+        <Verdict tone="calm">{de.stats.costTrendLoading}</Verdict>
+      ) : error ? (
+        <Verdict tone="warn">{de.stats.costTrendError} {error}</Verdict>
+      ) : !hasTrend ? (
+        <Verdict tone="calm">{de.stats.costTrendEmpty}</Verdict>
+      ) : (
+        <>
+          <div className="sb-cost-trend" data-testid="runs-costs-series-trend">
+            {series.map((row) => {
+              const tokens = row.total_tokens ?? 0;
+              const cost = row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0;
+              return (
+                <div key={row.day} className="sb-cost-trend-row">
+                  <span className="sb-mono">{row.day.slice(5)}</span>
+                  <div className="sb-cost-trend-bars" aria-label={`${row.day}: ${fmtTokens(tokens)} tokens, ${usdText(cost)}, ${row.runs ?? 0} runs`}>
+                    <span className="sb-cost-trend-token" style={{ "--sb-w": `${Math.max(3, Math.round((tokens / maxTokens) * 100))}%` } as CSSProperties} />
+                    <span className="sb-cost-trend-money" style={{ "--sb-w": `${Math.max(3, Math.round((cost / maxCost) * 100))}%` } as CSSProperties} />
+                  </div>
+                  <span className="sb-mono">{fmtTokens(tokens)}</span>
+                  <span className="sb-mono">{usdText(cost)}</span>
+                  <span className="sb-mono">{row.runs ?? 0}×</span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="sb-note"><b>{de.stats.costTrendSource}:</b> {de.stats.costTrendSourceCopy}</p>
+          <button type="button" className="sb-linkbutton" onClick={() => setDrawerOpen(true)}>
+            {de.stats.modelLaneDrilldown}
+          </button>
+        </>
+      )}
+      {drawerOpen ? (
+        <DrawerShell title={de.stats.modelLaneDrilldown} ariaLabel={de.stats.modelLaneDrilldown} onClose={() => setDrawerOpen(false)}>
+          {!hasDrilldown ? (
+            <Verdict tone="calm">{de.stats.modelDrilldownEmpty}</Verdict>
+          ) : (
+            <div className="sb-drilldown-grid">
+              <div>
+                <p className="sb-kick">Profile / Modelle</p>
+                {profiles.map((row) => (
+                  <div key={`${row.profile}:${row.subscription ?? "api"}`} className="sb-drilldown-row">
+                    <span>{profileLabel[row.profile] ?? row.profile} · {row.subscription ?? "api"}</span>
+                    <b>{fmtTokens(row.total_tokens ?? ((row.input_tokens ?? 0) + (row.output_tokens ?? 0) + (row.cached_tokens ?? 0)))}</b>
+                    <span>{usdText(row.api_equivalent_usd ?? row.cost_usd_equivalent ?? row.cost_usd)}</span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <p className="sb-kick">Lanes</p>
+                {laneRows.map((row) => (
+                  <div key={`${row.subscription}:${row.profile}`} className="sb-drilldown-row">
+                    <span>{row.subscription} · {profileLabel[row.profile] ?? row.profile}</span>
+                    <b>{fmtTokens(row.total_tokens)}</b>
+                    <span>{row.runs} Runs</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </DrawerShell>
+      ) : null}
+    </>
+  );
+}
+
+// ── Subscription-Burn (Abo-Token-Realität) ─────────────────────────────────
 export function SubscriptionBurnSection({
   burn,
   loading = false,
@@ -732,6 +826,7 @@ export function StatistikView() {
   const accountUsage = useAccountUsage();
   const statsConfig = useStatsConfig();
   const costs = useHermesRunsCosts();
+  const costSeries = useHermesRunsCostSeries();
   const subscriptionBurn = useHermesSubscriptionBurn();
   const chain = useChainCompletion();
   const board = useBoardStats();
@@ -784,12 +879,20 @@ export function StatistikView() {
             source. Collapsed under a Details element so the primary cockpit
             (AccountUsageTile above) is unambiguously the operative view; the
             ledger format stays available for a printed/broadsheet read. */}
-        <details style={{ marginTop: "8px" }}>
-          <summary className="sb-kick sb-accent" style={{ cursor: "pointer", display: "flex", gap: "8px", alignItems: "center", listStyle: "none", minHeight: "44px" }}>
+        <details className="sb-budget-details">
+          <summary className="sb-kick sb-accent sb-budget-summary">
             {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
           </summary>
           <BudgetLedgerSection providers={providers} />
         </details>
+
+        <CostTrendSection
+          costs={costSeries.data ?? null}
+          loading={costSeries.loading && !costSeries.data}
+          error={costSeries.error}
+          profiles={costProfiles}
+          burn={subscriptionBurn.data ?? null}
+        />
 
         <SubscriptionBurnSection
           burn={subscriptionBurn.data ?? null}

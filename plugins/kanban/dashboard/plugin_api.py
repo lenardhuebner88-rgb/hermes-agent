@@ -5468,6 +5468,20 @@ def get_runs_costs(
         conn.close()
 
 
+@router.get("/runs/costs-series")
+def get_runs_costs_series(
+    days: int = Query(7, ge=1, le=90),
+    board: Optional[str] = Query(None),
+):
+    """F4 (Statistik): per-day cost/token trend. Read-only, additive."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_costs_series(conn, days=days)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/subscription-burn")
 def get_runs_subscription_burn(
     days: int = Query(7, ge=1, le=90),
