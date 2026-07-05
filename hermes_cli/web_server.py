@@ -15081,7 +15081,6 @@ register_library_routes(app)
 
 from hermes_cli.design_board_view import register_design_board_routes  # noqa: E402
 register_design_board_routes(app)
-
 # In-process self-metrics (route-group latency/error rates) fed by
 # metrics_middleware above. Loopback-gated; never in PUBLIC_API_PATHS.
 from hermes_cli.metrics_lite import register_metrics_lite_routes  # noqa: E402
