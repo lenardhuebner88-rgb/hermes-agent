@@ -71,3 +71,21 @@ def test_resolve_asset_rejects_traversal(board):
 
 def test_sanitize_strips_dirs(board):
     assert board.sanitize_asset_name("a/b/../c.png") == "c.png"
+
+
+def test_link_and_unlink_task(board):
+    cid = board.create_card(kind="bug", title="x")
+    board.link_task(cid, "t_abc123")
+    assert board.get_card(cid)["linked_tasks"] == ["t_abc123"]
+    board.link_task(cid, "t_abc123")  # idempotent
+    assert board.get_card(cid)["linked_tasks"] == ["t_abc123"]
+    board.unlink_task(cid, "t_abc123")
+    assert board.get_card(cid)["linked_tasks"] == []
+
+
+def test_derive_card_status(board):
+    assert board.derive_card_status([]) is None
+    assert board.derive_card_status(["running"]) == "in_progress"
+    assert board.derive_card_status(["done"]) == "addressed"
+    assert board.derive_card_status(["done", "running"]) == "in_progress"
+    assert board.derive_card_status(["done", "archived"]) == "addressed"

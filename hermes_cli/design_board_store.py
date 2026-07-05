@@ -140,3 +140,32 @@ def write_asset(card_id: str, name: str, data: bytes) -> str:
     tmp.write_bytes(data)
     os.replace(tmp, dest)
     return safe
+
+
+_TERMINAL = {"done", "archived"}
+
+
+def link_task(card_id: str, task_id: str) -> None:
+    card = get_card(card_id)
+    if card is None:
+        raise KeyError(card_id)
+    if task_id not in card["linked_tasks"]:
+        card["linked_tasks"].append(task_id)
+        _save(card)
+
+
+def unlink_task(card_id: str, task_id: str) -> None:
+    card = get_card(card_id)
+    if card is None:
+        raise KeyError(card_id)
+    if task_id in card["linked_tasks"]:
+        card["linked_tasks"].remove(task_id)
+        _save(card)
+
+
+def derive_card_status(task_statuses: list[str]) -> str | None:
+    if not task_statuses:
+        return None
+    if all(s in _TERMINAL for s in task_statuses):
+        return "addressed"
+    return "in_progress"
