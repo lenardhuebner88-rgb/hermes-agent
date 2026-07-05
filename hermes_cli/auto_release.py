@@ -205,8 +205,11 @@ def _default_rollback() -> tuple[bool, str]:
 
 
 def _default_notify(message: str) -> None:
-    """Operator alert: log + durable alert file. Delivery to Discord rides the
-    ``auto_release`` task event through the gateway notifier (never Telegram)."""
+    """Operator alert: log + durable alert file. Discord delivery for
+    attention outcomes (``rolled_back``/``held_critical``/``deploy_failed``)
+    rides the ``auto_release`` task event through
+    ``gateway/kanban_alerts.py``'s ``auto_release_attention`` rule (never
+    Telegram) — this function itself never talks to Discord directly."""
     logger.error("AUTO-RELEASE ALERT: %s", message)
     try:
         from pathlib import Path

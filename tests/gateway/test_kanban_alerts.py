@@ -197,6 +197,100 @@ def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
 
 
 # ---------------------------------------------------------------------------
+# Rule (d): auto_release attention outcomes (Subsystem C3)
+# ---------------------------------------------------------------------------
+
+
+def test_auto_release_rolled_back_alerts_with_task_id_and_detail(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Dashboard chain tip")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "auto_release",
+                {
+                    "outcome": "rolled_back",
+                    "detail": "status payload valid → invalid status payload: {}",
+                    "rollback_ok": True,
+                    "rollback_detail": "target=release/pre-deploy/20260705T000000Z",
+                },
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    text = alerts[0]["text"]
+    assert "rolled_back" in text
+    assert tid in text
+    assert "🔴" in text
+    assert "invalid status payload" in text
+    assert "/control" in text
+
+
+def test_auto_release_deployed_outcome_stays_silent(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Happy path chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "auto_release",
+                {"outcome": "deployed", "detail": "status payload valid"},
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert all(a["rule"] != "auto_release_attention" for a in alerts)
+
+
+def test_auto_release_held_live_test_and_aborted_stay_silent(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="ui-real chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "held_live_test", "detail": "ui-real is operator-gated"},
+            )
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "aborted_pre_live_test", "detail": "fetch failed: timeout"},
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert all(a["rule"] != "auto_release_attention" for a in alerts)
+
+
+def test_auto_release_held_critical_uses_yellow_emoji(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Critical-tier chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "held_critical", "detail": "chain max tier critical"},
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    assert "🟡" in alerts[0]["text"]
+    assert "held_critical" in alerts[0]["text"]
+
+
+def test_auto_release_event_cursor_dedupes_same_event(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Deploy failed chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "deploy_failed", "detail": "deploy script failed"},
+            )
+        first = evaluate_alerts(conn, _acfg(), state, now=NOW)
+        # Re-evaluating without a new event must not re-push the same one.
+        second = evaluate_alerts(conn, _acfg(), state, now=NOW + 1)
+    assert [a["rule"] for a in first] == ["auto_release_attention"]
+    assert all(a["rule"] != "auto_release_attention" for a in second)
+
+
+# ---------------------------------------------------------------------------
 # Rule (b): error rate over rolling window
 # ---------------------------------------------------------------------------
 
@@ -438,3 +532,21 @@ def test_alerts_watcher_uses_alert_specific_channel(kanban_home, monkeypatch):
     assert len(adapter.sent) == 1
     assert adapter.sent[0]["chat_id"] == "999"
     assert adapter.sent[0]["text"] == "human needed"
+
+
+def test_auto_release_alert_prefers_escalation_channel(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Chain tip with escalation channel")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "auto_release",
+                {"outcome": "held_critical", "detail": "critical tier reached"},
+            )
+        alerts = evaluate_alerts(
+            conn, _acfg(escalation_channel_id="999"), state, now=NOW
+        )
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    assert alerts[0]["channel_id"] == "999"

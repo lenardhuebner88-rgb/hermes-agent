@@ -14,6 +14,10 @@ Rules (config: ``kanban.alerts:`` in the ROOT config.yaml, additive):
   (c) ``daily_cost``  — rolling-24h cost (K17 ``task_runs.cost_usd`` stamps,
       ``started_at`` window — same semantics as the C1 budget gate) above a
       configured USD threshold. No threshold configured = rule off.
+  (d) ``auto_release_attention`` — ``auto_release`` task events (Subsystem C3)
+      whose outcome needs operator attention (``rolled_back``,
+      ``held_critical``, ``deploy_failed``); ``deployed``/``held_live_test``/
+      ``aborted_pre_live_test`` stay silent (successes and expected holds).
 
 Rate limit: max one alert per rule per ``cooldown_seconds`` (default 15 min).
 A suppressed alert is dropped, not queued — the next qualifying event after
@@ -35,6 +39,16 @@ DEFAULT_ERROR_RATE_MIN_RUNS = 5
 _SNIPPET_MAX_CHARS = 280
 _MAX_FAILURES_LISTED = 5
 _OPERATOR_ESCALATION_EVENT = "operator_escalation"
+_AUTO_RELEASE_EVENT = "auto_release"
+# outcome -> emoji, attention-only (deployed / held_live_test /
+# aborted_pre_live_test are successes or expected operator-gated holds and
+# stay silent — operator time is scarce).
+_AUTO_RELEASE_ATTENTION_EMOJI = {
+    "rolled_back": "🔴",
+    "deploy_failed": "🔴",
+    "held_critical": "🟡",
+}
+_AUTO_RELEASE_DETAIL_MAX_CHARS = 200
 
 # Terminal failure classification. status covers the run row's own state;
 # outcome covers the dispatcher's verdict (same family the reliability stats
@@ -104,6 +118,7 @@ def new_alert_state() -> dict:
     return {
         "last_seen_run_id": None,
         "last_seen_operator_escalation_event_id": None,
+        "last_seen_auto_release_event_id": None,
         "last_sent": {},
     }
 
@@ -187,6 +202,65 @@ def _rule_operator_escalation(
     if len(rows) > _MAX_FAILURES_LISTED:
         lines.append(f"… und {len(rows) - _MAX_FAILURES_LISTED} weitere")
     alert = {"rule": _OPERATOR_ESCALATION_EVENT, "text": "\n".join(lines)}
+    if acfg.get("escalation_channel_id"):
+        alert["channel_id"] = acfg["escalation_channel_id"]
+    return alert
+
+
+def _rule_auto_release_attention(
+    conn: sqlite3.Connection,
+    acfg: dict,
+    state: dict,
+    now: int,
+) -> Optional[dict]:
+    """``auto_release`` task events that need operator attention.
+
+    Same cursor/dedupe shape as ``_rule_operator_escalation`` (event-id
+    cursor, not a time cooldown — each event alerts exactly once). Only
+    ``rolled_back`` / ``held_critical`` / ``deploy_failed`` outcomes push;
+    ``deployed`` / ``held_live_test`` / ``aborted_pre_live_test`` stay silent.
+    """
+    del now
+    last_seen = state.get("last_seen_auto_release_event_id")
+    if last_seen is None:
+        row = conn.execute(
+            "SELECT MAX(id) AS m FROM task_events WHERE kind = ?",
+            (_AUTO_RELEASE_EVENT,),
+        ).fetchone()
+        state["last_seen_auto_release_event_id"] = (
+            int(row["m"]) if row and row["m"] is not None else 0
+        )
+        return None
+
+    rows = conn.execute(
+        "SELECT id, task_id, payload FROM task_events "
+        "WHERE id > ? AND kind = ? ORDER BY id ASC",
+        (int(last_seen), _AUTO_RELEASE_EVENT),
+    ).fetchall()
+    if not rows:
+        return None
+    state["last_seen_auto_release_event_id"] = max(int(r["id"]) for r in rows)
+
+    lines = []
+    for r in rows:
+        payload = _payload_dict(r["payload"])
+        outcome = str(payload.get("outcome") or "").strip()
+        emoji = _AUTO_RELEASE_ATTENTION_EMOJI.get(outcome)
+        if emoji is None:
+            continue  # deployed / held_live_test / aborted_pre_live_test — no push
+        detail = " ".join(str(payload.get("detail") or "").split())
+        if len(detail) > _AUTO_RELEASE_DETAIL_MAX_CHARS:
+            detail = detail[: _AUTO_RELEASE_DETAIL_MAX_CHARS - 1] + "…"
+        line = f"{emoji} **Auto-Release {outcome}** (`{r['task_id']}`)"
+        if detail:
+            line += f" — {detail}"
+        lines.append(line)
+    if not lines:
+        return None
+    lines.append("Details: /control Fleet → Plan-Tab, Auto-Release-Kachel.")
+    alert = {"rule": "auto_release_attention", "text": "\n".join(lines)}
+    # Operator-attention alert: prefer the escalation channel (same routing as
+    # operator_escalation) so it delivers even when only that channel is set.
     if acfg.get("escalation_channel_id"):
         alert["channel_id"] = acfg["escalation_channel_id"]
     return alert
@@ -307,6 +381,7 @@ def evaluate_alerts(
         _rule_error_rate,
         _rule_daily_cost,
         _rule_operator_escalation,
+        _rule_auto_release_attention,
     ):
         try:
             alert = rule_fn(conn, acfg, state, ts)
