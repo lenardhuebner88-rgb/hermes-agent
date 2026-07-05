@@ -3,14 +3,14 @@ import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Inbox
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLite, useSystemHealth, useVaultProvenance } from "../hooks/useControlData";
+import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLite, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { ToneName, Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
-import { ProvenanceStrip } from "../components/ProvenanceStrip";
+
 import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { toneClasses } from "../lib/tones";
 import { Hero } from "../components/Hero";
@@ -38,7 +38,6 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   const health = useSystemHealth();
   const metrics = useMetricsLite();
   const autoresearch = useAutoresearchStatus();
-  const provenance = useVaultProvenance();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
@@ -100,8 +99,6 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
       ) : (
         <SystemHealthStrip data={health.data} error={health.error} now={now} metrics={metrics.data} />
       )}
-      <ProvenanceStrip data={provenance.data} error={provenance.error} />
-
       {/* Hero: ein-Satz-Lagebild + Diagnose-Kopie, auf dem geteilten Primitive. */}
       <Hero
         eyebrow={de.tabs.overview}

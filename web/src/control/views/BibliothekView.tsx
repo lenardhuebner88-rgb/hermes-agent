@@ -3,13 +3,16 @@ import { useSearchParams } from "react-router-dom";
 import { Library, ListTree, Newspaper } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
-import { ToneCallout } from "../components/atoms";
+import { Led, ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
+import { de } from "../i18n/de";
 import { extractToc, type TocEntry } from "../lib/slug";
 import type { Density } from "../hooks/useDensity";
+import { useVaultProvenance } from "../hooks/useControlData";
+import type { VaultProvenanceResponse } from "../lib/types";
 import {
   CATEGORY_LABEL,
   countByCategory,
@@ -576,6 +579,64 @@ function SortToggle({ sort, onChange }: { sort: LesesaalSort; onChange: (sort: L
   );
 }
 
+interface VaultProvenanceShelfProps {
+  data: VaultProvenanceResponse | null;
+  error?: string | null;
+}
+
+export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps) {
+  const detail = error ?? data?.error ?? null;
+  const opens = data?.open_sessions ?? [];
+  const receipts = data?.recent_receipts ?? [];
+  const stale = data?.stale_count ?? 0;
+  const isUnknown = !data || Boolean(detail);
+
+  return (
+    <FleetPanel eyebrow={de.provenance.title} meta={stale > 0 ? de.provenance.staleBadge(stale) : "Vault"}>
+      {detail ? (
+        <FleetEmptyState title="Vault-Provenienz nicht verfügbar" desc={detail} />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <article className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)]/60 p-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal hc-dim">
+              <Led kind={isUnknown ? "idle" : stale > 0 ? "warn" : "live"} size={8} />
+              <span>{de.provenance.openTitle}</span>
+            </div>
+            {opens.length === 0 ? (
+              <p className="mt-2 text-sm hc-dim">{de.provenance.openEmpty}</p>
+            ) : (
+              <ul className="mt-2 space-y-2">
+                {opens.map((session) => (
+                  <li key={session.path} className="min-w-0 truncate text-sm hc-soft" title={`${session.agent} · ${session.task}`}>
+                    <span className="hc-mono text-[11px] hc-dim">[{session.agent}]</span> {session.task}
+                    {session.stale ? <span className="ml-2 text-xs text-amber-200">⚠ {de.provenance.staleInline}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </article>
+
+          <article className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)]/60 p-3">
+            <div className="text-[11px] font-semibold uppercase tracking-normal hc-dim">{de.provenance.recentTitle}</div>
+            {receipts.length === 0 ? (
+              <p className="mt-2 text-sm hc-dim">—</p>
+            ) : (
+              <ul className="mt-2 space-y-2">
+                {receipts.slice(0, 5).map((receipt) => (
+                  <li key={receipt.path} className="min-w-0 truncate text-sm hc-soft" title={receipt.path}>
+                    <span className="hc-mono text-[11px] hc-dim">{receipt.when}</span>{" "}
+                    <span className="text-[var(--hc-text)]">[{receipt.agent}]</span> {receipt.file}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </article>
+        </div>
+      )}
+    </FleetPanel>
+  );
+}
+
 type Mode = "wissen" | "lesesaal";
 
 function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
@@ -611,6 +672,7 @@ export function BibliothekView({ density }: { density?: Density }) {
   // umschaltet) — so verwirft der Wechsel wissen↔lesesaal weder Suchtext/
   // Filter noch das offene Dokument des jeweils anderen Modus (S3).
   const [searchParams, setSearchParams] = useSearchParams();
+  const provenance = useVaultProvenance();
   const mode: Mode = searchParams.get("mode") === "lesesaal" ? "lesesaal" : "wissen";
   const wissen = mode === "wissen";
   const setMode = useCallback((next: Mode) => {
@@ -632,6 +694,7 @@ export function BibliothekView({ density }: { density?: Density }) {
       >
         <ModeSwitch mode={mode} onChange={setMode} />
       </Hero>
+      <VaultProvenanceShelf data={provenance.data} error={provenance.error} />
       <div id="bibliothek-panel-wissen" role="tabpanel" hidden={!wissen}><KnowledgeShelf /></div>
       <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={wissen}><LesesaalBody /></div>
     </div>

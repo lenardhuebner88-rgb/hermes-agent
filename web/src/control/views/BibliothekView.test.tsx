@@ -18,6 +18,7 @@ import {
 } from "./BibliothekView";
 
 const src = readFileSync(fileURLToPath(new URL("./BibliothekView.tsx", import.meta.url)), "utf8");
+const overviewSrc = readFileSync(fileURLToPath(new URL("./OverviewView.tsx", import.meta.url)), "utf8");
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -129,6 +130,20 @@ describe("Receipts-Regal (S2)", () => {
       />,
     );
     expect(row).toContain("Receipt — Härtungs-Lauf");
+  });
+});
+
+describe("Vault-Provenienz-Regal", () => {
+  it("zieht Vault-Provenienz-Daten in der Bibliothek und rendert sie im Regal-Look", () => {
+    expect(src).toContain("useVaultProvenance");
+    expect(src).toContain("VaultProvenanceShelf");
+    expect(src).toContain("FleetPanel eyebrow={de.provenance.title}");
+    expect(src).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+
+  it("entfernt die einzigartige Vault-Provenienz-Funktion aus der OverviewView", () => {
+    expect(overviewSrc).not.toContain("useVaultProvenance");
+    expect(overviewSrc).not.toContain("ProvenanceStrip");
   });
 });
 
