@@ -21,6 +21,11 @@ def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     return home
 
 
+def _task_count() -> int:
+    with kb.connect_closing() as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+
+
 def _write_planspec(root: Path, name: str = "2026-06-16-B1.md") -> Path:
     path = root / "Hermes" / "plans" / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +72,110 @@ gate: planGate
         encoding="utf-8",
     )
     return path
+
+
+def _write_prose_plan(root: Path, name: str = "prose-plan.md") -> Path:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """# Prose Pipeline Plan
+**Goal:** Turn prose into deterministic board children.
+
+## Slice: Parse prose
+- done-when: Parser returns a structured plan.
+
+## Slice: Compile children
+- done-when: Compiler returns child dictionaries.
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_compile_preview_prints_children(kanban_home, tmp_path: Path, capsys):
+    path = _write_prose_plan(tmp_path)
+
+    rc = plan_subcommand.plan_command(
+        Namespace(plan_action="compile", path=str(path), json=False)
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Proposed children" in out
+    assert "Parse prose" in out
+    assert "Compile children" in out
+    assert "repairs:" in out
+    assert _task_count() == 0
+
+
+def test_ingest_accepts_prose(kanban_home, tmp_path: Path, capsys):
+    path = _write_prose_plan(tmp_path)
+
+    rc = plan_subcommand.plan_command(
+        Namespace(
+            plan_action="ingest",
+            path=str(path),
+            board=None,
+            author="prose-test",
+            json=False,
+            force=False,
+            supersede=False,
+        )
+    )
+
+    assert rc == 0
+    assert "Ingested" in capsys.readouterr().out
+    assert _task_count() == 3
+    with kb.connect_closing() as conn:
+        rows = conn.execute(
+            "SELECT title, assignee, planspec_source FROM tasks ORDER BY created_at, id"
+        ).fetchall()
+    assert any(row["title"].startswith("PlanSpec prose-plan") for row in rows)
+    children = [row for row in rows if row["planspec_source"]]
+    assert [row["title"] for row in children] == ["Parse prose", "Compile children"]
+    assert {row["planspec_source"] for row in children} == {str(path.resolve(strict=False))}
+
+
+def test_ingest_binding_unchanged(monkeypatch, tmp_path: Path, capsys):
+    path = _write_planspec(tmp_path / "03-Agents")
+    captured: dict[str, object] = {}
+
+    def fake_ingest(path_arg, **kwargs):
+        captured["path"] = path_arg
+        captured["kwargs"] = kwargs
+        return {
+            "ok": True,
+            "already_ingested": False,
+            "path": str(path),
+            "root_task_id": "t_root",
+            "child_ids": ["t_child"],
+            "initial_child_status": "todo",
+            "superseded": [],
+        }
+
+    monkeypatch.setattr(plan_subcommand.planspecs, "ingest_planspec", fake_ingest)
+
+    rc = plan_subcommand.plan_command(
+        Namespace(
+            plan_action="ingest",
+            path=str(path),
+            board="board-a",
+            author="binding-test",
+            json=False,
+            force=True,
+            supersede=True,
+        )
+    )
+
+    assert rc == 0
+    assert "Ingested" in capsys.readouterr().out
+    assert captured["path"] == str(path)
+    assert captured["kwargs"] == {
+        "board": "board-a",
+        "author": "binding-test",
+        "force": True,
+        "supersede": True,
+    }
 
 
 def test_parse_binding_planspec_to_children(tmp_path: Path):

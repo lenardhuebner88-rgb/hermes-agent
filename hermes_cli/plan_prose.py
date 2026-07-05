@@ -48,6 +48,7 @@ class CompileResult:
     children: list[dict[str, Any]]
     repairs: list[str]
     warnings: list[str]
+    hints: TaskgraphHints
 
 
 _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -217,4 +218,4 @@ def compile_prose_plan(plan: ProsePlan) -> CompileResult:
 
     hints = TaskgraphHints(binding=True, subtasks=subtasks)
     children = taskgraph_hints_to_children(hints)
-    return CompileResult(children=children, repairs=repairs, warnings=warnings)
+    return CompileResult(children=children, repairs=repairs, warnings=warnings, hints=hints)

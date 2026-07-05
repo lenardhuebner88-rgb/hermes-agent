@@ -23,6 +23,7 @@ from hermes_cli.plan_compiler import (
     _normalize_acceptance_criteria,
     taskgraph_hints_to_children,
 )
+from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan
 
 logger = logging.getLogger(__name__)
 
@@ -1817,6 +1818,180 @@ def ingest_planspec(
             "subtask_count": len(child_ids),
             "idempotency_key": idempotency_key,
             "superseded": superseded,
+        }
+    finally:
+        conn.close()
+
+
+def ingest_prose_plan(
+    path: str | Path,
+    *,
+    board: str | None = None,
+    author: str = "prose-plan-ingest",
+    supersede: bool = False,
+) -> dict[str, Any]:
+    """Compile a prose Plan and ingest its deterministic children.
+
+    This is additive to ``ingest_planspec``: binding PlanSpecs still run through
+    their existing parse/rubric/judge path, while prose Plans skip that
+    frontmatter-specific machinery and feed the compiled child graph into the
+    same Kanban decomposition boundary.
+    """
+    resolved = Path(path).expanduser().resolve(strict=False)
+    try:
+        text = resolved.read_text(encoding="utf-8")
+        plan = parse_prose_plan(text)
+        compiled = compile_prose_plan(plan)
+    except CompileBlocked as exc:
+        raise PlanSpecBlocked(exc.findings) from exc
+    except UnicodeDecodeError as exc:
+        raise PlanSpecBlocked([f"prose plan is not valid utf-8: {exc}"]) from exc
+    except OSError as exc:
+        raise PlanSpecBlocked([f"prose plan cannot be read: {exc}"]) from exc
+
+    children = [dict(child, planspec_source=str(resolved)) for child in compiled.children]
+    frontmatter: dict[str, Any] = {
+        "status": "prose-plan",
+        "owner": "Hermes",
+        "slice": resolved.stem,
+        "topic": plan.title,
+        "freigabe": "complete",
+        "live_test_depth": "smoke",
+        "prose_plan": True,
+    }
+    spec = BindingPlanSpec(
+        path=resolved,
+        frontmatter=frontmatter,
+        topic=plan.title,
+        status="prose-plan",
+        freigabe="complete",
+        live_test_depth="smoke",
+        hints=compiled.hints,
+        children=children,
+    )
+    idempotency_key = ingest_idempotency_key(spec)
+    conn = kanban_db.connect(board=board)
+    try:
+        existing = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            root_id = existing["id"]
+            existing_children = kanban_db.parent_ids(conn, root_id)
+            return {
+                "ok": True,
+                "already_ingested": True,
+                "path": str(spec.path),
+                "root_task_id": root_id,
+                "child_ids": existing_children,
+                "children": spec.children,
+                "freigabe": spec.freigabe,
+                "live_test_depth": spec.live_test_depth,
+                "subtask_count": len(existing_children),
+                "idempotency_key": idempotency_key,
+                "repairs": compiled.repairs,
+                "warnings": compiled.warnings,
+            }
+
+        conflicts = _find_superseding_conflicts(conn, spec, idempotency_key)
+        superseded: list[str] = []
+        if conflicts:
+            if not supersede:
+                detail = _describe_chain_diff(conn, spec, conflicts[0])
+                findings = [
+                    "Prose Plan changed since it was last ingested — a live (non-archived) "
+                    f"chain already exists for this identity (root {conflicts[0]}"
+                    + (f", +{len(conflicts) - 1} more" if len(conflicts) > 1 else "")
+                    + "). Re-run with --supersede to archive the stale chain and ingest "
+                    "the new version. Changed:",
+                    *detail,
+                ]
+                raise PlanSpecBlocked(findings)
+            running_blockers: list[str] = []
+            for stale_root in conflicts:
+                running = kanban_db.planspec_chain_running_subtasks(conn, stale_root)
+                if running:
+                    running_blockers.append(
+                        f"root {stale_root}: running subtask(s) {', '.join(running)}"
+                    )
+            if running_blockers:
+                raise PlanSpecBlocked(
+                    [
+                        "--supersede refused: the prior chain has running children — "
+                        "an operator must let them finish or stop them before superseding.",
+                        *running_blockers,
+                    ]
+                )
+            for stale_root in conflicts:
+                _archive_planspec_chain(conn, stale_root)
+                superseded.append(stale_root)
+
+        root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
+        root_id = kanban_db.create_task(
+            conn,
+            title=root_title,
+            body=build_root_body(spec),
+            assignee=None,
+            created_by=author,
+            tenant="planspec",
+            priority=0,
+            triage=True,
+            idempotency_key=idempotency_key,
+            freigabe=spec.freigabe,
+            live_test_depth=spec.live_test_depth,
+        )
+        with kanban_db.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'triage'",
+                (root_id,),
+            )
+            if cur.rowcount != 1:
+                raise PlanSpecBlocked([f"root task {root_id} left triage before scheduling"])
+        kanban_db.add_event(
+            conn,
+            root_id,
+            "specified",
+            {
+                "source": "planspec_ingest",
+                "path": str(spec.path),
+                "slice": str(spec.frontmatter.get("slice") or "").strip(),
+            },
+        )
+        if not kanban_db.schedule_task(conn, root_id, reason="Prose Plan ingest: held before release"):
+            raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])
+        try:
+            child_ids = kanban_db.decompose_triage_task(
+                conn,
+                root_id,
+                root_assignee=None,
+                children=spec.children,
+                author=author,
+                auto_promote=False,
+                initial_child_status="todo",
+                expected_root_status="scheduled",
+                validate_assignees=True,
+            )
+        except ValueError as exc:
+            raise PlanSpecBlocked([f"DB rejected prose taskgraph: {exc}"]) from exc
+        if child_ids is None:
+            raise PlanSpecBlocked([f"could not ingest taskgraph for root {root_id}"])
+        return {
+            "ok": True,
+            "already_ingested": False,
+            "path": str(spec.path),
+            "root_task_id": root_id,
+            "child_ids": child_ids,
+            "children": spec.children,
+            "freigabe": spec.freigabe,
+            "live_test_depth": spec.live_test_depth,
+            "initial_child_status": "todo",
+            "subtask_count": len(child_ids),
+            "idempotency_key": idempotency_key,
+            "superseded": superseded,
+            "repairs": compiled.repairs,
+            "warnings": compiled.warnings,
         }
     finally:
         conn.close()

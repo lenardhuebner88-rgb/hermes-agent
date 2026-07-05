@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from hermes_cli import planspecs
+from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan
+
+
+def _has_binding_taskgraph_hints(path: str) -> bool:
+    text = Path(path).read_text(encoding="utf-8")
+    return text.lstrip().startswith("---") and "\ntaskgraph_hints:" in text
 
 
 def build_plan_parser(subparsers) -> None:
@@ -37,6 +44,10 @@ def build_plan_parser(subparsers) -> None:
             "has running children)"
         ),
     )
+
+    compile_parser = sub.add_parser("compile", help="Preview deterministic children from a prose Plan")
+    compile_parser.add_argument("path", help="Path to a prose Plan markdown file")
+    compile_parser.add_argument("--json", action="store_true", help="Emit JSON output")
 
     validate = sub.add_parser(
         "validate",
@@ -89,14 +100,46 @@ def plan_command(args: argparse.Namespace) -> int:
                     suffix = f" · {item['closed_reason']}" if item.get("closed_reason") else ""
                     print(f"{marker} {item['path']} · {item['freigabe'] or '-'} · {item['subtask_count']} subtasks{suffix}")
             return 0
+        if action == "compile":
+            text = Path(args.path).read_text(encoding="utf-8")
+            result = compile_prose_plan(parse_prose_plan(text))
+            payload = {
+                "ok": True,
+                "children": result.children,
+                "repairs": result.repairs,
+                "warnings": result.warnings,
+            }
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                print("Proposed children:")
+                for index, child in enumerate(result.children):
+                    parents = ", ".join(str(item) for item in child.get("parents") or [])
+                    assignee = child.get("assignee") or "-"
+                    print(f"- [{index}] {child.get('title')} · assignee={assignee} · parents=[{parents}]")
+                print("repairs:")
+                for repair in result.repairs or ["(none)"]:
+                    print(f"- {repair}")
+                print("warnings:")
+                for warning in result.warnings or ["(none)"]:
+                    print(f"- {warning}")
+            return 0
         if action == "ingest":
-            result = planspecs.ingest_planspec(
-                args.path,
-                board=args.board,
-                author=args.author,
-                force=getattr(args, "force", False),
-                supersede=getattr(args, "supersede", False),
-            )
+            if _has_binding_taskgraph_hints(args.path):
+                result = planspecs.ingest_planspec(
+                    args.path,
+                    board=args.board,
+                    author=args.author,
+                    force=getattr(args, "force", False),
+                    supersede=getattr(args, "supersede", False),
+                )
+            else:
+                result = planspecs.ingest_prose_plan(
+                    args.path,
+                    board=args.board,
+                    author=args.author,
+                    supersede=getattr(args, "supersede", False),
+                )
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
             elif result.get("already_ingested"):
