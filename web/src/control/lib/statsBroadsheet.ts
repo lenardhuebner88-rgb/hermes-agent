@@ -10,7 +10,6 @@
  * and the error taxonomy buckets the recurring failures — all of which are
  * harness-lifecycle endstates, never product-logic bugs.
  */
-import { broadsheet, type BroadsheetStatus } from "./broadsheetTokens";
 import { profileLabel } from "./tones";
 import type {
   AccountUsageProvider,
@@ -25,6 +24,16 @@ import type {
   WindowedRollupRoot,
   WindowedRollupWorker,
 } from "./schemas";
+
+/** Semantic status of a figure/meter. */
+export type FigureStatus = "ok" | "warn" | "crit" | "neutral";
+/** Error-taxonomy segment fills, severity order — Leitstand status tokens (no raw hex). */
+export const ERROR_SERIES = [
+  "var(--color-status-alert)",
+  "var(--color-status-warn)",
+  "var(--color-brand)",
+  "var(--color-ink-3)",
+] as const;
 
 // ── Phantom filter ──────────────────────────────────────────────────────────
 // The known worker roster — mirrors ~/.hermes/profiles/ and the control-wide
@@ -203,11 +212,11 @@ export interface LeaderEntry {
   /** completed_rate (0..1) or null when undamped/unknown. */
   rate: number | null;
   runs: number;
-  status: BroadsheetStatus;
+  status: FigureStatus;
   lowSample: boolean;
 }
 
-export function reliabilityStatus(rate: number | null, lowSample: boolean): BroadsheetStatus {
+export function reliabilityStatus(rate: number | null, lowSample: boolean): FigureStatus {
   if (lowSample || rate == null) return "neutral";
   if (rate >= 0.85) return "ok";
   if (rate >= 0.6) return "warn";
@@ -237,7 +246,7 @@ export function leaderboard(profiles: ReliabilityProfile[]): LeaderEntry[] {
 // ── Error taxonomy ──────────────────────────────────────────────────────────
 // Every failure surfaced by /runs/issues is a harness-lifecycle endstate (the
 // backend only groups these outcomes). We fold them into four severity buckets,
-// aligned to broadsheet.errorSeries [red, amber, navy, neutral].
+// aligned to ERROR_SERIES [red, amber, navy, neutral].
 export const LIFECYCLE_OUTCOMES: ReadonlySet<string> = new Set([
   "crashed",
   "spawn_failed",
@@ -293,7 +302,7 @@ export function errorTaxonomy(issues: IssueGroup[]): ErrorTaxonomy {
     return {
       key: b.key,
       count,
-      color: broadsheet.errorSeries[i],
+      color: ERROR_SERIES[i],
       pct: total > 0 ? (count / total) * 100 : 0,
     };
   }).filter((b) => b.count > 0);
@@ -337,7 +346,7 @@ export interface LedgerEntry {
   window: string;
   /** 0..100 used_percent der knappsten Zeile; null wenn unbekannt. */
   usedPercent: number | null;
-  status: BroadsheetStatus;
+  status: FigureStatus;
   /** Kimi-Schätzung — kein echtes Provider-Kontingent. */
   estimated: boolean;
   resetAt: string | null;
@@ -346,7 +355,7 @@ export interface LedgerEntry {
 }
 
 /** Auslastungs-Status: je näher am Limit, desto kritischer. */
-export function budgetStatus(usedPercent: number | null): BroadsheetStatus {
+export function budgetStatus(usedPercent: number | null): FigureStatus {
   if (usedPercent == null) return "neutral";
   if (usedPercent >= 90) return "crit";
   if (usedPercent >= 75) return "warn";

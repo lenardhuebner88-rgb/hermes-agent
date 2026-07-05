@@ -95,7 +95,7 @@ export const de = {
     issuesLink: "Issues — wiederkehrende Fehler →",
     // ST4: Masthead-Broadsheet — Akzeptanz-Headline, Stütz-KPIs, Verlässlich-
     // keits-Leaderboard, Fehler-Taxonomie. Bewusst wenig Text, saubere Copy.
-    mastKicker: "Hermes · Flotten-Report",
+    mastKicker: "Hermes · Statistik",
     mastLabel: "Akzeptanzrate",
     mastWindow: "7 Tage",
     mastStale: "veraltet",
@@ -194,7 +194,7 @@ export const de = {
     motherLedgerRealMobile: "echt",
     motherLedgerNoRunners: "Keine Läufer-Details in diesem Fenster.",
     motherLedgerNeuralwatt: "Neuralwatt = Runtime × Power-Proxy; Cost ist Provider-/Token-basiert, kein Stromzähler.",
-    budgetLedgerDetailLabel: "Broadsheet-Detail",
+    budgetLedgerDetailLabel: "Ledger-Detail",
   },
   runSummary: {
     eyebrow: "Lauf-Bilanz · Wurzeln",

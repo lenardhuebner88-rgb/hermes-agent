@@ -8,6 +8,7 @@ import {
   chainCost,
   chainShare,
   costPerDelivery,
+  ERROR_SERIES,
   errorTaxonomy,
   gateEffectiveness,
   germanDate,
@@ -27,7 +28,6 @@ import {
   workerTokens,
 } from "./statsBroadsheet";
 import { formatEffectiveCost } from "./derive";
-import { broadsheet } from "./broadsheetTokens";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
@@ -298,7 +298,7 @@ describe("errorTaxonomy", () => {
     expect(tax.allLifecycle).toBe(true);
     const dead = tax.buckets.find((b) => b.key === "dead");
     expect(dead?.count).toBe(5);
-    expect(dead?.color).toBe(broadsheet.errorSeries[0]);
+    expect(dead?.color).toBe(ERROR_SERIES[0]);
     expect(dead?.pct).toBeCloseTo(50, 5);
     expect(tax.buckets.find((b) => b.key === "timeout")?.count).toBe(3);
     expect(tax.buckets.find((b) => b.key === "budget")?.count).toBe(2);
@@ -310,7 +310,7 @@ describe("errorTaxonomy", () => {
     const tax = errorTaxonomy([issue({ blocked: 2, weird_state: 1 })]);
     const other = tax.buckets.find((b) => b.key === "other");
     expect(other?.count).toBe(3);
-    expect(other?.color).toBe(broadsheet.errorSeries[3]);
+    expect(other?.color).toBe(ERROR_SERIES[3]);
     expect(tax.allLifecycle).toBe(false); // weird_state is not a known endstate
   });
 

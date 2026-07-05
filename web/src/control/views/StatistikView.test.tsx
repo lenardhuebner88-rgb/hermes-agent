@@ -12,7 +12,7 @@ import {
   StatistikView,
   SubscriptionBurnSection,
 } from "./StatistikView";
-import { broadsheet } from "../lib/broadsheetTokens";
+import { ERROR_SERIES } from "../lib/statsBroadsheet";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
@@ -380,8 +380,8 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("$0.42");
     expect(html).toContain("Abo-Wert (gesch.): $0.42 gesch.");
     expect(html).toContain("Echt $: —");
-    expect(html).toContain("sb-ledger-abo");
-    expect(html).toContain("sb-ledger-real");
+    expect(html).toContain("st-ledger-abo");
+    expect(html).toContain("st-ledger-real");
     expect(html).toContain("<small>gesch.</small>");
   });
 
@@ -389,10 +389,10 @@ describe("MotherLedgerSection", () => {
     const html = renderStatistikAtViewport(390);
 
     expect(html).toContain('data-ledger-viewport="mobile"');
-    expect(html).toContain('class="sb-ledger" data-ledger-viewport="mobile"');
+    expect(html).toContain('class="st-ledger" data-ledger-viewport="mobile"');
     expect(html).toContain("Abo-Wert verbraucht · 7T");
     expect(html).toContain("Echt ausgegeben · 7T");
-    expect(html).toContain("sb-ledger-meter");
+    expect(html).toContain("st-ledger-meter");
     expect(html).toContain("Mother A");
     expect(html).toContain("echt —");
   });
@@ -401,10 +401,10 @@ describe("MotherLedgerSection", () => {
     const html = renderStatistikAtViewport(1440);
 
     expect(html).toContain('data-ledger-viewport="desktop"');
-    expect(html).toContain('class="sb-ledger" data-ledger-viewport="desktop"');
+    expect(html).toContain('class="st-ledger" data-ledger-viewport="desktop"');
     expect(html).toContain("Abo-Wert verbraucht · 7T");
     expect(html).toContain("Echt ausgegeben · 7T");
-    expect(html).toContain("sb-ledger-meter");
+    expect(html).toContain("st-ledger-meter");
     expect(html).toContain("Mother A");
     expect(html).toContain("echt —");
   });
@@ -435,16 +435,15 @@ describe("StatsMasthead (ST4)", () => {
     );
     // Acceptance = 118/130 = 91 %.
     expect(html).toContain("Akzeptanzrate");
-    expect(html).toContain('class="sb-mast"');
+    expect(html).toContain('class="st-mast"');
     expect(html).toContain("91");
     expect(html).toContain("118 abgenommen · 12 verworfen");
     // Δ vs the 90 % baseline → +1 pp, ok-status.
     expect(html).toContain("1 pp ggü. 30 Tg");
-    expect(html).toContain("sb-d sb-ok");
+    expect(html).toContain("st-mast-delta text-status-ok");
     // Masthead meta carries the German date + window.
     expect(html).toContain("18. Juni · 7 Tage");
-    // Supporting KPIs: Autonomie (accent) 27/30 = 90 %, $1.04/Lieferung, 5 Nutzer.
-    expect(html).toContain("sb-n sb-accent");
+    // Supporting KPIs: Autonomie 27/30 = 90 %, $1.04/Lieferung, 5 Nutzer.
     expect(html).toContain("Autonomie");
     expect(html).toContain("90");
     expect(html).toContain("Kosten je Lieferung");
@@ -465,7 +464,7 @@ describe("StatsMasthead (ST4)", () => {
 describe("LatencySection (ST4)", () => {
   it("renders p50/p90 as a two-figure card", () => {
     const html = renderToStaticMarkup(<LatencySection p50={240} p90={1020} />);
-    expect(html).toContain("sb-twin");
+    expect(html).toContain("Latenz");
     expect(html).toContain("Median · p50");
     expect(html).toContain("4m");
     expect(html).toContain("p90");
@@ -494,7 +493,7 @@ describe("ReliabilitySection (ST4)", () => {
     expect(html).not.toContain("99 Läufe");
     // Coder (well-sampled) ranks above low-sample Premium.
     expect(html.indexOf("Coder")).toBeLessThan(html.indexOf("Premium"));
-    expect(html).toContain("sb-sc sb-ok"); // coder 95 % → ok ink
+    expect(html).toContain("st-lr-score text-status-ok"); // coder 95 % → ok ink
     expect(html).toContain("20 Läufe");
   });
 
@@ -512,8 +511,8 @@ describe("ErrorTaxonomySection (ST4)", () => {
       />,
     );
     expect(html).toContain("Fehler-Taxonomie");
-    expect(html).toContain("sb-estack");
-    expect(html).toContain(`background:${broadsheet.errorSeries[0]}`);
+    expect(html).toContain("st-estack");
+    expect(html).toContain(`background:${ERROR_SERIES[0]}`);
     expect(html).toContain("Prozess tot");
     expect(html).toContain("Zeitüberschreitung");
     expect(html).toContain("Budget erschöpft");
@@ -526,7 +525,7 @@ describe("ErrorTaxonomySection (ST4)", () => {
   it("shows a clean-window verdict and no bar when there are no issues", () => {
     const html = renderToStaticMarkup(<ErrorTaxonomySection issues={[]} />);
     expect(html).toContain("sauberes Fenster");
-    expect(html).not.toContain("sb-estack");
+    expect(html).not.toContain("st-estack");
   });
 
   it("marks the unified MotherLedger responsive layout as desktop at the 1440px Statistik viewport", () => {
@@ -576,15 +575,15 @@ describe("BudgetLedgerSection", () => {
       />,
     );
     expect(html).toContain("Budget-Ledger");
-    expect(html).toContain("sb-led-row");
+    expect(html).toContain("st-led-row");
     // Engpass lead names the tightest window (Claude · Woche · 92 %).
-    expect(html).toContain("sb-lead");
+    expect(html).toContain("st-lead");
     expect(html).toContain("Claude Woche bei 92 %");
     // Claude (92 %) sorts before ChatGPT (40 %); both render.
     expect(html.indexOf("ChatGPT")).toBeGreaterThan(0);
-    expect(html).toContain("sb-led-fig sb-crit"); // 92 % → crit ink
+    expect(html).toContain("st-fig text-status-alert"); // 92 % → crit ink
     // Kimi is flagged estimated and has no provider limit.
-    expect(html).toContain("sb-tagm");
+    expect(html).toContain("st-tag");
     expect(html).toContain("geschätzt");
     expect(html).toContain("kein Provider-Limit");
   });
@@ -635,7 +634,7 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("coder · codex");
     expect(html).toContain("meta · codex");
     expect(html).toContain("1 k");
-    expect(html).toContain("sb-subburn-grid");
+    expect(html).toContain("st-subburn-grid");
     // No trend block when daily is empty.
     expect(html).not.toContain("data-testid=\"subscription-burn-trend\"");
   });
@@ -694,7 +693,7 @@ describe("A3: MotherLedger Summen-Ehrlichkeit", () => {
     expect(html).toContain("Unknown A");
     expect(html).toContain("Abo-Wert verbraucht · 7T");
     expect(html).toContain("Abo-Wert (gesch.): — gesch.");
-    expect(html).toContain("<b class=\"sb-mono\">—</b><small>gesch.</small>");
+    expect(html).toContain("<b class=\"st-mono\">—</b><small>gesch.</small>");
   });
 
   it("zeigt keine unbekannt-Meldung wenn alle Roots Kostenwerte haben", () => {
@@ -721,16 +720,15 @@ describe("EffizienzSection (ST5)", () => {
       />,
     );
     expect(html).toContain("Flotten-Effizienz");
-    // Chain-Completion 75 % (accent), Queue-Wait p50 = 4m, Gate 10/100 = 10 %.
+    // Chain-Completion 75 %, Queue-Wait p50 = 4m, Gate 10/100 = 10 %.
     expect(html).toContain("Ketten-Abschluss");
-    expect(html).toContain("sb-n sb-accent");
     expect(html).toContain("75");
     expect(html).toContain("Queue-Wartezeit");
     expect(html).toContain("4m");
     expect(html).toContain("Gate-Quote");
     // Token-Burn leaderboard: coder 1.2 M, phantom dropped.
     expect(html).toContain("Token-Burn je Lane");
-    expect(html).toContain("sb-lr");
+    expect(html).toContain("st-lr");
     expect(html).toContain("1.2 M");
     expect(html).toContain("Coder");
     expect(html).toContain("12 Läufe");
