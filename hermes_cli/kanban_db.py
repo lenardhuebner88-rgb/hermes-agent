@@ -140,6 +140,16 @@ BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = False
+_PROTOCOL_VIOLATION_ERROR = (
+    "worker exited cleanly (rc=0) without calling "
+    "kanban_complete or kanban_block — protocol violation"
+)
+_PROTOCOL_VIOLATION_REMINDER_MARKER = "[hermes-protocol-violation-reminder:v1]"
+_PROTOCOL_VIOLATION_REMINDER_BODY = (
+    f"{_PROTOCOL_VIOLATION_REMINDER_MARKER}\n"
+    "Vorheriger Run endete ohne kanban_complete/kanban_block und wurde "
+    "verworfen — diesen Run zwingend mit einem der beiden Verben abschließen."
+)
 
 
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
@@ -15310,10 +15320,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     # ``kanban_complete`` / ``kanban_block``. Retrying won't
                     # help.
                     protocol_violation = True
-                    error_text = (
-                        "worker exited cleanly (rc=0) without calling "
-                        "kanban_complete or kanban_block — protocol violation"
-                    )
+                    error_text = _PROTOCOL_VIOLATION_ERROR
                     event_kind = "protocol_violation"
                     event_payload = {
                         "pid": pid,
@@ -19743,6 +19750,62 @@ def _task_body_hash(body: Optional[str]) -> str:
     return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
 
 
+def _maybe_add_protocol_violation_reminder(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> bool:
+    with write_txn(conn):
+        run = conn.execute(
+            """
+            SELECT id, outcome, error
+              FROM task_runs
+             WHERE task_id = ?
+               AND ended_at IS NOT NULL
+             ORDER BY ended_at DESC, id DESC
+             LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if run is None:
+            return False
+        if run["outcome"] != "crashed":
+            return False
+        if (run["error"] or "").strip() != _PROTOCOL_VIOLATION_ERROR:
+            return False
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM task_comments
+             WHERE task_id = ?
+               AND author = 'dispatcher'
+               AND body LIKE ?
+             LIMIT 1
+            """,
+            (task_id, f"%{_PROTOCOL_VIOLATION_REMINDER_MARKER}%"),
+        ).fetchone()
+        if existing is not None:
+            return False
+        body = _PROTOCOL_VIOLATION_REMINDER_BODY
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, "dispatcher", body, int(time.time())),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "commented",
+            {
+                "author": "dispatcher",
+                "len": len(body),
+                "kind": "comment",
+                "source": "protocol_violation_reminder",
+                "previous_run_id": int(run["id"]),
+            },
+        )
+    return True
+
+
 def _latest_auto_retry_body_hash(
     conn: sqlite3.Connection,
     task_id: str,
@@ -20915,6 +20978,8 @@ def _dispatch_once_locked(
                                 {"reason": hold_reason},
                             )
                 continue
+        if not dry_run:
+            _maybe_add_protocol_violation_reminder(conn, row["id"])
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
             spawned += 1
