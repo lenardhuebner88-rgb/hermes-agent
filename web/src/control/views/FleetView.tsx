@@ -267,6 +267,8 @@ export function FleetView() {
                 reliability={reliability.data}
                 systemHealth={systemHealth.data}
                 pressureStatus={pressureStatus.data}
+                activeWorkers={activeWorkers}
+                lanesCatalog={lanesCatalog.data}
                 onNavigateToPlan={() => setSubtab("plan")}
                 onTaskChanged={board.reload}
               />

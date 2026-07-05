@@ -5,8 +5,10 @@
  */
 import { planSpecWaitsForOperator } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
-import type { ReliabilityResponse } from "../../lib/schemas";
-import type { SystemHealthResponse, PressureStatusResponse } from "../../lib/types";
+import { Disclosure } from "../../components/primitives";
+import { buildReliabilityRiskModel, buildSystemPulseRiskModel } from "../../lib/fleetRisk";
+import type { ReliabilityResponse, LanesCatalogResponse } from "../../lib/schemas";
+import type { SystemHealthResponse, PressureStatusResponse, Worker } from "../../lib/types";
 import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
@@ -28,6 +30,8 @@ interface RisikoTabProps {
   reliability: ReliabilityResponse | null;
   systemHealth: SystemHealthResponse | null;
   pressureStatus: PressureStatusResponse | null;
+  activeWorkers: Worker[];
+  lanesCatalog: LanesCatalogResponse | null;
   onNavigateToPlan: () => void;
   /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
   onTaskChanged?: () => void | Promise<void>;
@@ -45,6 +49,8 @@ export function RisikoTab({
   reliability,
   systemHealth,
   pressureStatus,
+  activeWorkers,
+  lanesCatalog,
   onNavigateToPlan,
   onTaskChanged,
 }: RisikoTabProps) {
@@ -65,14 +71,13 @@ export function RisikoTab({
   const totalBlockedCount = blockedTasks.length;
   const totalBoardTasks = 0; // Wir haben keinen Gesamtcount leicht verfügbar, daher weglassen
 
-  // (b) Zuverlässigkeit je Lane
-  const profiles = reliability?.profiles ?? [];
-
-  // (c) System-Puls
-  const gateway = systemHealth?.subsystems?.gateway;
-  const dispatcher = systemHealth?.subsystems?.kanban_dispatcher;
-  const host = pressureStatus?.host;
-  const tokenPressure = pressureStatus?.token_pressure;
+  // (b) Zuverlässigkeit je Lane / (c) System-Puls
+  const reliabilityModel = buildReliabilityRiskModel({
+    reliability,
+    laneCatalogProfiles: lanesCatalog?.profiles ?? [],
+    activeWorkerProfiles: activeWorkers.map((w) => w.profile),
+  });
+  const pulseModel = buildSystemPulseRiskModel({ systemHealth, pressureStatus });
 
   const hasAnything = pendingApprovals.length > 0 || operatorHalts.length > 0 || otherBlocked.length > 0;
 
@@ -85,6 +90,25 @@ export function RisikoTab({
           : <span className="fleet-amber">{de.fleet.risikoLageBlockiert(pendingApprovals.length + operatorHalts.length)}</span>
         }
       </p>
+
+      {/* (c) System-Puls */}
+      <section className={`fleet-risk-card fleet-risk-card-${pulseModel.overallTone}`} aria-label="System-Puls">
+        <div className="fleet-risk-card-head">
+          <div>
+            <div className="fleet-risiko-sec">{de.fleet.risikoSystemPulsTitle}</div>
+            <p className="fleet-risk-headline">{pulseModel.headline}</p>
+          </div>
+        </div>
+        <div className="fleet-puls-grid">
+          {pulseModel.rows.map((row) => (
+            <div key={row.key} className={`fleet-puls-tile fleet-puls-tile-${row.tone}`}>
+              <span className="fleet-puls-label">{row.label}</span>
+              <span className="fleet-puls-val">{row.value}</span>
+              {row.detail ? <span className="fleet-puls-detail">{row.detail}</span> : null}
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* (a) Operator-Entscheidungen: wartende Freigaben */}
       {pendingApprovals.length > 0 ? (
@@ -175,81 +199,38 @@ export function RisikoTab({
       ) : null}
 
       {/* (b) Zuverlässigkeit je Lane */}
-      {profiles.length > 0 ? (
-        <>
-          <div className="fleet-risiko-sec">{de.fleet.risikoZuverlässigkeitTitle}</div>
-          <div className="fleet-risiko-rel" aria-label="Zuverlässigkeit je Profil">
-            {profiles.map((p) => {
-              const isLowSample = p.low_sample || p.runs < 5;
-              const completedPct = p.completed_rate != null ? Math.round(p.completed_rate * 100) : null;
-              const failedPct = p.failed_rate != null ? Math.round(p.failed_rate * 100) : null;
-
-              return (
-                <div key={p.profile} className="fleet-risiko-rel-row">
-                  <span className="fleet-risiko-rel-lane">{p.profile}</span>
-                  {isLowSample ? (
-                    <span className="fleet-risiko-low-sample" aria-label="Wenig Daten — kein sicheres Urteil möglich">
-                      {de.fleet.risikoWenigDaten}
-                    </span>
-                  ) : (
-                    <span className="fleet-risiko-rel-val">
-                      {completedPct != null ? `${de.fleet.risikoAbschlussRate} ${completedPct} %` : "—"}
-                      {failedPct != null && failedPct > 0 ? ` · ${de.fleet.risikoFailed} ${failedPct} %` : ""}
-                      {p.retries > 0 ? ` · ${de.fleet.risikoRetries} ${p.retries}` : ""}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
+      {reliabilityModel.rows.length > 0 ? (
+        <Disclosure
+          className="fleet-risk-disclosure"
+          defaultOpen={reliabilityModel.defaultOpen}
+          summary={
+            <span className="fleet-risk-disclosure-summary">
+              <span>{de.fleet.risikoZuverlaessigkeitTitle}</span>
+              <span className="fleet-risk-disclosure-meta">{reliabilityModel.summary}</span>
+            </span>
+          }
+        >
+          <div className="fleet-risiko-rel" aria-label={`Zuverlässigkeit je Profil, ${reliabilityModel.windowLabel}`}>
+            {reliabilityModel.rows.map((row) => (
+              <div key={row.profile} className={`fleet-risiko-rel-row fleet-risiko-rel-row-${row.tone}`}>
+                <span className="fleet-risiko-rel-lane">{row.profile}</span>
+                <span className="fleet-risiko-rel-val">
+                  {row.sampleLabel ? row.sampleLabel : [
+                    row.completedPct != null ? `${de.fleet.risikoAbschlussRate} ${row.completedPct} %` : null,
+                    row.failedPct != null && row.failedPct > 0 ? `${de.fleet.risikoFailed} ${row.failedPct} %` : null,
+                    row.retries > 0 ? `${de.fleet.risikoRetries} ${row.retries}` : null,
+                  ].filter(Boolean).join(" · ") || "—"}
+                </span>
+              </div>
+            ))}
           </div>
-        </>
+          {reliabilityModel.hiddenCount > 0 ? (
+            <p className="fleet-risk-hidden-note">
+              {de.fleet.risikoProfileAusgeblendet(reliabilityModel.hiddenCount, reliabilityModel.windowLabel)}
+            </p>
+          ) : null}
+        </Disclosure>
       ) : null}
-
-      {/* (c) System-Puls */}
-      <div className="fleet-risiko-sec">{de.fleet.risikoSystemPulsTitle}</div>
-      <div className="fleet-puls-table" aria-label="System-Puls">
-        {/* Gateway */}
-        <div className="fleet-puls-row">
-          <span className="fleet-puls-label">{de.fleet.risikoGateway}</span>
-          <span className={`fleet-puls-val ${gateway?.heartbeat_age_s != null && gateway.heartbeat_age_s < 30 ? "fleet-puls-val-gruen" : gateway ? "fleet-puls-val-warn" : "fleet-puls-val-normal"}`}>
-            {gateway?.heartbeat_age_s != null
-              ? de.fleet.risikoHeartbeatFrisch(Math.round(gateway.heartbeat_age_s))
-              : gateway?.status === "healthy"
-              ? de.fleet.risikoGrün
-              : de.fleet.risikoHeartbeatNichtVerfügbar}
-          </span>
-        </div>
-
-        {/* Dispatcher */}
-        <div className="fleet-puls-row">
-          <span className="fleet-puls-label">{de.fleet.risikoDispatcher}</span>
-          <span className={`fleet-puls-val ${dispatcher?.heartbeat_age_s != null && dispatcher.heartbeat_age_s < 30 ? "fleet-puls-val-gruen" : dispatcher ? "fleet-puls-val-warn" : "fleet-puls-val-normal"}`}>
-            {dispatcher?.heartbeat_age_s != null
-              ? de.fleet.risikoHeartbeatFrisch(Math.round(dispatcher.heartbeat_age_s))
-              : dispatcher?.status === "healthy"
-              ? de.fleet.risikoGrün
-              : de.fleet.risikoHeartbeatNichtVerfügbar}
-          </span>
-        </div>
-
-        {/* CPU / RAM */}
-        <div className="fleet-puls-row">
-          <span className="fleet-puls-label">{de.fleet.risikoCpuRam}</span>
-          <span className="fleet-puls-val fleet-puls-val-normal">
-            {host?.cpu_percent != null || host?.memory_percent != null
-              ? `${host.cpu_percent != null ? Math.round(host.cpu_percent) : "—"} % · ${host.memory_percent != null ? Math.round(host.memory_percent) : "—"} %`
-              : "—"}
-          </span>
-        </div>
-
-        {/* Token-Pressure */}
-        <div className="fleet-puls-row">
-          <span className="fleet-puls-label">{de.fleet.risikoTokenPressure}</span>
-          <span className={`fleet-puls-val ${tokenPressure?.class === "normal" ? "fleet-puls-val-gruen" : tokenPressure ? "fleet-puls-val-warn" : "fleet-puls-val-normal"}`}>
-            {tokenPressure?.class ?? "—"}
-          </span>
-        </div>
-      </div>
 
       {/* (d) Gepflegter Leerzustand */}
       {!hasAnything ? (
