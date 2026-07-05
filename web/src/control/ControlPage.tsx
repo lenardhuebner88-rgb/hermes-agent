@@ -67,6 +67,9 @@ const BibliothekView = lazy(() =>
 const DesignBoardView = lazy(() =>
   import("./views/DesignBoardView").then((m) => ({ default: m.DesignBoardView })),
 );
+const DesignBoardCardDetail = lazy(() =>
+  import("./views/designboard/CardDetail").then((m) => ({ default: m.CardDetail })),
+);
 const SchmiedeView = lazy(() =>
   import("./views/SchmiedeView").then((m) => ({ default: m.SchmiedeView })),
 );
@@ -284,6 +287,7 @@ export default function ControlPage() {
             <Route path="research" element={<ResearchView density={density.density} />} />
             <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
             <Route path="design-board" element={<DesignBoardView density={density.density} />} />
+            <Route path="design-board/:cardId" element={<DesignBoardCardDetail density={density.density} />} />
             <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
             <Route path="stratege" element={<StrategistView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />

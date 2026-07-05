@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { SectionHeader, FleetPanel, FleetEmptyState } from "@/control/components/leitstand";
 
@@ -37,15 +38,17 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       )}
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((c) => (
-          <FleetPanel key={c.id} eyebrow={c.kind} meta={c.status}>
-            <div className="hc-mono text-sm font-semibold text-white">{c.title}</div>
-            {c.target?.view && (
-              <div className="mt-1 hc-type-label hc-dim">→ {c.target.view}</div>
-            )}
-            {c.linked_tasks.length > 0 && (
-              <div className="mt-1 hc-type-label hc-soft">{c.linked_tasks.length} task(s)</div>
-            )}
-          </FleetPanel>
+          <Link key={c.id} to={`/control/design-board/${c.id}`} className="block">
+            <FleetPanel eyebrow={c.kind} meta={c.status}>
+              <div className="hc-mono text-sm font-semibold text-white">{c.title}</div>
+              {c.target?.view && (
+                <div className="mt-1 hc-type-label hc-dim">→ {c.target.view}</div>
+              )}
+              {c.linked_tasks.length > 0 && (
+                <div className="mt-1 hc-type-label hc-soft">{c.linked_tasks.length} task(s)</div>
+              )}
+            </FleetPanel>
+          </Link>
         ))}
       </div>
     </div>
