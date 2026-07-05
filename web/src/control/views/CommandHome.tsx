@@ -1,18 +1,20 @@
 /**
- * CommandHome (/control) — the operator's cockpit.
+ * CommandHome (/control) — der Operator-Leitstand-Start.
  *
- * Replaces the flat Postfach list with one composed screen that answers the
- * three questions a solo fleet-operator actually has, in priority order:
- *   1. "Was braucht mich JETZT?"  → the #1 decision, promoted to an actionable
- *      hero (the rest queue below).               [useDecisionInbox]
- *   2. "Was tut die Flotte gerade?" → a live worker strip + today's throughput.
+ * Beantwortet die drei Fragen eines Solo-Flotten-Operators in Prioritätsreihung:
+ *   1. "Was braucht mich JETZT?"  → die #1-Entscheidung als aktionierbarer Hero
+ *      (der Rest reiht sich darunter).            [useDecisionInbox]
+ *   2. "Was tut die Flotte gerade?" → Live-Worker-Strip + heutiger Durchsatz.
  *                                                 [useHermesWorkers / board / digest]
- *   3. "Läuft die Maschine?"        → a compact health pulse.   [useSystemHealth]
+ *   3. "Läuft die Maschine?"        → ein kompakter System-/Kosten-Puls. [useSystemHealth]
  *
- * Everything is real, polled data (no mocks). One screen instead of the
- * inbox+overview+pulse triple that all re-rendered slices of the same sources.
+ * Design: dunkler Leitstand-Canvas — von Fleet nicht unterscheidbar. Skin via
+ * [data-command-home] + command-home.css (Full-Bleed-Regeln analog `.fleet-bleed`),
+ * Flächen aus den Leitstand-Tokens (surface-0/1/2, ink/ink-2/ink-3, line, live,
+ * status-trio). IA/Funktion unverändert gegenüber dem Broadsheet-Vorgänger (S2).
+ * Alles ist echte, gepollte Live-Daten (keine Mocks).
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ArrowRight, ChevronRight, HeartPulse, Inbox as InboxIcon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -36,10 +38,11 @@ import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge, StatusPill } from "../components/atoms";
-import { KpiTile, ListRow, RoleChip, SectionHeader } from "../components/leitstand";
-import { Eyebrow, Text } from "../components/primitives";
+import { KpiTile, RoleChip } from "../components/leitstand";
+import { Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
+import "./command-home.css";
 
 const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
   autoresearch: { label: "Autoresearch", tone: "cyan" },
@@ -50,6 +53,21 @@ const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
 
 function surfaceFromParam(value: string | null): InboxSurface | null {
   return value === "autoresearch" || value === "family" || value === "orchestrator" || value === "kanban" ? value : null;
+}
+
+/** Uppercase-mono Micro-Eyebrow — das eine Leitstand-Sektionslabel (DESIGN.md 5). */
+function ChEyebrow({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={cn("ch-eyebrow", className)}>{children}</p>;
+}
+
+/** Sektionskopf: Eyebrow links, ruhiges Meta rechts (SectionHeader-Idiom, dunkel). */
+function ChSection({ label, meta }: { label: ReactNode; meta?: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <ChEyebrow>{label}</ChEyebrow>
+      {meta ? <span className="truncate text-right text-[11px] text-ink-3">{meta}</span> : null}
+    </div>
+  );
 }
 
 export function CommandHome({ density }: { density: Density }) {
@@ -102,17 +120,29 @@ export function CommandHome({ density }: { density: Density }) {
   ];
 
   return (
-    <div className={cn("space-y-5", density === "compact" && "space-y-4")}>
+    <div data-command-home className={cn("space-y-5", density === "compact" && "space-y-4")}>
+      {/* ── MASTHEAD (Fleet-Idiom "Hermes Flotte" → "Hermes Start") ─────────── */}
+      <div className={cn("ch-masthead", settling && "ch-live-idle")}>
+        <div className="ch-brand">
+          <span className="ch-brand-h">Hermes</span>
+          <span className="ch-brand-f">Start</span>
+        </div>
+        <div className="ch-live">
+          <span className="ch-live-dot" />
+          {settling ? "SYNC" : "LIVE"}
+        </div>
+      </div>
+
       {/* ── ATTENTION FIRST ──────────────────────────────────────────────────
           Oben beantwortet CommandHome: ist alles ok und was braucht mich? */}
       <section
         aria-label="Aufmerksamkeit"
-        className="hc-hero p-4 sm:p-6"
-        style={{ "--hc-hero-accent": heroAccent(heroTone) } as React.CSSProperties}
+        className="ch-hero p-4 sm:p-6"
+        style={{ "--ch-accent": heroAccent(heroTone) } as React.CSSProperties}
       >
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <Eyebrow>Attention Inbox</Eyebrow>
+            <ChEyebrow>Attention Inbox</ChEyebrow>
             <StatusPill
               tone={calm ? "emerald" : heroTone === "red" || heroTone === "rose" ? "red" : "amber"}
               label={settling ? "lädt…" : calm ? "Alles ruhig" : "Aufmerksamkeit"}
@@ -121,8 +151,8 @@ export function CommandHome({ density }: { density: Density }) {
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
             <div>
-              <div className="hc-aurora-text hc-type-display tabular-nums">{settling ? "—" : inbox.summary.total}</div>
-              <Text as="h1" variant="title" className="hc-hero-statement mt-1 text-[var(--hc-text)]">
+              <div className="ch-count">{settling ? "—" : inbox.summary.total}</div>
+              <Text as="h1" variant="title" className="mt-1 text-ink">
                 {calm ? "Ruhig. Nichts wartet auf dich." : "Was braucht mich gerade?"}
               </Text>
             </div>
@@ -137,14 +167,14 @@ export function CommandHome({ density }: { density: Density }) {
           {top && !settling ? (
             <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} repair={repair} veto={veto} />
           ) : calm ? (
-            <p className="mt-4 max-w-md text-sm hc-soft">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
+            <p className="mt-4 max-w-md text-sm text-ink-2">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
           ) : null}
         </div>
       </section>
 
       {/* ── SYSTEM-/KOSTEN-PULS ─────────────────────────────────────────────── */}
       <section aria-label="System- und Kosten-Puls" className="space-y-3">
-        <SectionHeader label="System-/Kosten-Puls" meta="kompakt" />
+        <ChSection label="System-/Kosten-Puls" meta="kompakt" />
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,.65fr)]">
           <PulseRail
             health={health}
@@ -176,7 +206,7 @@ export function CommandHome({ density }: { density: Density }) {
       {!calm && !settling ? (
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <Eyebrow>Entscheidungen</Eyebrow>
+            <ChEyebrow>Entscheidungen</ChEyebrow>
             <div className="flex flex-wrap items-center gap-1.5">
               {chips.map((c) => (
                 <button
@@ -184,10 +214,7 @@ export function CommandHome({ density }: { density: Density }) {
                   type="button"
                   aria-pressed={surfaceFilter === c.id}
                   onClick={() => chooseSurfaceFilter(c.id)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition",
-                    surfaceFilter === c.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:border-white/20",
-                  )}
+                  className={cn("ch-chip", surfaceFilter === c.id && "ch-chip-on")}
                 >
                   {c.label}<span className="hc-mono opacity-70">{c.count}</span>
                 </button>
@@ -195,7 +222,7 @@ export function CommandHome({ density }: { density: Density }) {
             </div>
           </div>
           {rest.length === 0 ? (
-            <p className="rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-5 text-center text-sm hc-soft">Nichts weiter in dieser Ansicht.</p>
+            <p className="ch-dashed px-4 py-5 text-center text-sm text-ink-2">Nichts weiter in dieser Ansicht.</p>
           ) : (
             <div className="space-y-2">
               {rest.map((item) => (
@@ -207,7 +234,7 @@ export function CommandHome({ density }: { density: Density }) {
       ) : null}
 
       {inbox.sourceErrors.length ? (
-        <p className="text-xs text-amber-300/80">{inbox.sourceErrors.join(" · ")}</p>
+        <p className="text-xs text-status-warn">{inbox.sourceErrors.join(" · ")}</p>
       ) : null}
 
       <QuickJumps
@@ -225,9 +252,9 @@ export function CommandHome({ density }: { density: Density }) {
 
 function AttentionCount({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-black/15 px-2 py-2 text-center">
-      <div className="hc-mono text-base font-semibold tabular-nums text-white">{value}</div>
-      <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{label}</div>
+    <div className="ch-card px-2 py-2 text-center">
+      <div className="hc-mono text-base font-semibold tabular-nums text-ink">{value}</div>
+      <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] text-ink-3">{label}</div>
     </div>
   );
 }
@@ -240,13 +267,13 @@ function AccountUsagePulse({ usage, loading, error }: { usage?: AccountUsageResp
   const limited = providers.find((provider) => provider.windows.some((window) => (window.used_percent ?? 0) >= 80));
   const status = error ? "Fehler" : loading ? "lädt" : limited ? limited.title : `${available}/${providers.length || 0}`;
   return (
-    <div className="space-y-3 rounded-card border border-line bg-surface p-3">
-      <SectionHeader label="Kosten" meta={status} rule={false} />
+    <div className="ch-panel space-y-3 p-3">
+      <ChSection label="Kosten" meta={status} />
       <div className="grid grid-cols-2 gap-2">
         <KpiTile label="Accounts" value={loading ? "…" : available} suffix={providers.length ? `/ ${providers.length}` : undefined} dot={error ? "error" : limited ? "warn" : "live"} />
         <KpiTile label="Max Limit" value={maxPercent == null ? "—" : Math.round(maxPercent)} suffix={maxPercent == null ? undefined : "%"} dot={maxPercent != null && maxPercent >= 80 ? "warn" : "idle"} />
       </div>
-      <p className="line-clamp-2 text-xs hc-soft">{error ? error : limited ? `${limited.title}: Limit im Blick behalten.` : "Abo-/Provider-Puls ohne den alten Detail-Tiefgang; Details bleiben im Statistik-Tab."}</p>
+      <p className="line-clamp-2 text-xs text-ink-2">{error ? error : limited ? `${limited.title}: Limit im Blick behalten.` : "Abo-/Provider-Puls ohne den alten Detail-Tiefgang; Details bleiben im Statistik-Tab."}</p>
     </div>
   );
 }
@@ -266,16 +293,16 @@ function QuickJumps({ fleetCount, blocked, shippedToday, accountProviders, onNav
   ];
   return (
     <section aria-label="Quick-Jumps" className="space-y-3">
-      <SectionHeader label="Quick-Jumps" meta="Bottom-Bar Einstieg" />
+      <ChSection label="Quick-Jumps" meta="Bottom-Bar Einstieg" />
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {rows.map((row) => (
-          <ListRow
-            key={row.path}
-            title={row.label}
-            meta={row.detail}
-            onClick={() => onNavigate(row.path)}
-            trailing={<ChevronRight className="h-4 w-4 hc-dim" />}
-          />
+          <button key={row.path} type="button" onClick={() => onNavigate(row.path)} className="ch-jump">
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold text-ink">{row.label}</span>
+              <span className="mt-0.5 block hc-mono text-[0.7rem] text-ink-3">{row.detail}</span>
+            </span>
+            <ChevronRight className="h-4 w-4 shrink-0 text-ink-3" />
+          </button>
         ))}
       </div>
     </section>
@@ -290,20 +317,20 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
   return (
     <div
       className={cn(
-        "hc-decision group mt-5 flex w-full flex-col gap-3 rounded-xl px-4 py-3.5 text-left transition sm:flex-row sm:items-start sm:gap-4",
+        "ch-decision group mt-5 flex w-full flex-col gap-3 px-4 py-3.5 text-left sm:flex-row sm:items-start sm:gap-4",
         severitySpine[item.tone],
       )}
     >
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill tone={surface.tone} label={surface.label} />
-          <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">Als Erstes</span>
+          <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">Als Erstes</span>
           {item.ageSeconds != null ? (
-            <span className="hc-mono text-[10px] tabular-nums hc-dim">vor {fmtDur(item.ageSeconds)}</span>
+            <span className="hc-mono text-[10px] tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
           ) : null}
         </div>
-        <p title={item.title} className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug text-white sm:line-clamp-2">{item.title}</p>
-        <p title={item.why} className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
+        <p title={item.title} className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug text-ink sm:line-clamp-2">{item.title}</p>
+        <p title={item.why} className="mt-1 line-clamp-2 text-sm text-ink-2">{item.why}</p>
       </button>
       <span className="flex shrink-0 flex-col items-stretch gap-2 sm:mt-0.5 sm:items-end">
         {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
@@ -312,7 +339,7 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
         <button
           type="button"
           onClick={onOpen}
-          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2.5 text-sm font-medium text-[var(--hc-accent-text)] transition group-hover:brightness-110 sm:w-auto sm:py-2"
+          className="ch-btn ch-btn-primary w-full px-3 py-2.5 text-sm font-medium sm:w-auto sm:py-2"
         >
           {item.nextAction}<ArrowRight className="h-4 w-4" />
         </button>
@@ -331,9 +358,7 @@ function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<
   const err = fix.errorById[taskId];
   if (done) {
     return (
-      <span className="inline-flex items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">
-        Fix-Lauf gestartet
-      </span>
+      <span className="ch-btn ch-btn-done px-3 py-2 text-xs font-medium">Fix-Lauf gestartet</span>
     );
   }
   return (
@@ -348,16 +373,11 @@ function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<
           void fix.run(taskId);
         }}
         onBlur={() => setArming(false)}
-        className={cn(
-          "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60",
-          arming
-            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
-            : "border-[var(--hc-border-strong)] bg-[var(--hc-surface-2,rgba(255,255,255,0.04))] text-[var(--hc-text)] hover:border-[var(--hc-accent-border)]",
-        )}
+        className={cn("ch-btn px-3 py-2 text-xs font-medium", arming && "ch-btn-arming")}
       >
         {busy ? "startet…" : arming ? "Sicher? Erneut klicken" : "Fix-Lauf starten"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -372,9 +392,7 @@ function RepairButton({ taskId, repair }: { taskId: string; repair: ReturnType<t
   const err = repair.errorById[taskId];
   if (done) {
     return (
-      <span className="inline-flex items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">
-        Repariert
-      </span>
+      <span className="ch-btn ch-btn-done px-3 py-2 text-xs font-medium">Repariert</span>
     );
   }
   return (
@@ -389,16 +407,11 @@ function RepairButton({ taskId, repair }: { taskId: string; repair: ReturnType<t
           void repair.run(taskId);
         }}
         onBlur={() => setArming(false)}
-        className={cn(
-          "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60",
-          arming
-            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
-            : "border-[var(--hc-border-strong)] bg-[var(--hc-surface-2,rgba(255,255,255,0.04))] text-[var(--hc-text)] hover:border-[var(--hc-accent-border)]",
-        )}
+        className={cn("ch-btn px-3 py-2 text-xs font-medium", arming && "ch-btn-arming")}
       >
         {busy ? "repariert…" : arming ? "Sicher? Erneut klicken" : "Repair starten"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -412,9 +425,7 @@ function VetoSignalButton({ taskId, veto }: { taskId: string; veto: ReturnType<t
   const err = veto.errorById[taskId];
   if (done) {
     return (
-      <span className="inline-flex items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">
-        Signal unterdrückt
-      </span>
+      <span className="ch-btn ch-btn-done px-3 py-2 text-xs font-medium">Signal unterdrückt</span>
     );
   }
   return (
@@ -429,16 +440,11 @@ function VetoSignalButton({ taskId, veto }: { taskId: string; veto: ReturnType<t
           void veto.run(taskId);
         }}
         onBlur={() => setArming(false)}
-        className={cn(
-          "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60",
-          arming
-            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
-            : "border-[var(--hc-border-strong)] bg-[var(--hc-surface-2,rgba(255,255,255,0.04))] text-[var(--hc-text)] hover:border-[var(--hc-accent-border)]",
-        )}
+        className={cn("ch-btn px-3 py-2 text-xs font-medium", arming && "ch-btn-arming")}
       >
         {busy ? "unterdrücke…" : arming ? "Sicher? Erneut klicken" : "Signal künftig unterdrücken"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -458,16 +464,16 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
     ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
   ];
   return (
-    <div className="hc-glass flex flex-col gap-3 p-3">
+    <div className="ch-panel flex flex-col gap-3 p-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <KpiTile label="Laufen" value={running} dot={running > 0 ? "live" : "idle"} />
         <KpiTile label="Prüfung" value={inReview} dot={inReview > 0 ? "warn" : "idle"} />
         <KpiTile label="Blockiert" value={blocked} dot={blocked > 0 ? "error" : "idle"} />
         <KpiTile label="Geliefert" value={shippedToday} suffix="heute" dot="live" />
       </div>
-      <div className="border-t border-white/8 pt-3">
+      <div className="border-t border-line pt-3">
         <div className="mb-2 flex items-center justify-between">
-          <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">System</span>
+          <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">System</span>
           <StatusPill tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} dot={!health.data ? "idle" : overall === "healthy" ? "live" : overall === "degraded" ? "warn" : "error"} />
         </div>
         <div className="mb-2 flex flex-wrap gap-1.5">
@@ -479,9 +485,9 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
         <div className="flex flex-col gap-1.5">
           {sysLabel.map(([label, st]) => (
             <div key={label} className="flex items-center justify-between text-xs">
-              <span className="hc-soft">{label}</span>
-              <span className={cn("inline-flex items-center gap-1.5 hc-mono", st === "healthy" ? "text-emerald-300" : st === "degraded" ? "text-amber-300" : st === "offline" ? "text-red-300" : "hc-dim")}>
-                <span className={cn("h-1.5 w-1.5 rounded-full", st === "healthy" ? "bg-emerald-400" : st === "degraded" ? "bg-amber-400" : st === "offline" ? "bg-red-400" : "bg-zinc-500")} />
+              <span className="text-ink-2">{label}</span>
+              <span className={cn("inline-flex items-center gap-1.5 hc-mono", st === "healthy" ? "text-status-ok" : st === "degraded" ? "text-status-warn" : st === "offline" ? "text-status-alert" : "text-ink-3")}>
+                <span className={cn("h-1.5 w-1.5 rounded-full", st === "healthy" ? "bg-status-ok" : st === "degraded" ? "bg-status-warn" : st === "offline" ? "bg-status-alert" : "bg-ink-3")} />
                 {st ?? "—"}
               </span>
             </div>
@@ -498,33 +504,33 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <Eyebrow>Die Flotte arbeitet</Eyebrow>
+          <ChEyebrow>Die Flotte arbeitet</ChEyebrow>
           <StaleBadge isStale={freshness.isStale} lastUpdated={freshness.lastUpdated} errorObj={freshness.errorObj} error={freshness.error} now={now} />
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       {loading ? (
-        <div className="hc-skeleton h-16 w-full rounded-xl" />
+        <div className="ch-skeleton h-16 w-full" />
       ) : workers.length === 0 ? (
-        <div className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-4">
-          <InboxIcon className="h-4 w-4 hc-dim" />
-          <p className="text-sm hc-soft">Kein Worker läuft gerade. Erfasse einen Auftrag, und die Flotte nimmt ihn auf.</p>
+        <div className="ch-dashed flex items-center gap-3 px-4 py-4">
+          <InboxIcon className="h-4 w-4 text-ink-3" />
+          <p className="text-sm text-ink-2">Kein Worker läuft gerade. Erfasse einen Auftrag, und die Flotte nimmt ihn auf.</p>
         </div>
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-1">
           {workers.map((w) => {
             const role = roleChip(w.profile, null);
             return (
-              <div key={w.run_id} className="hc-surface-card min-w-[15rem] max-w-[18rem] shrink-0 p-3">
+              <div key={w.run_id} className="ch-card min-w-[15rem] max-w-[18rem] shrink-0 p-3">
                 <div className="flex items-center gap-2">
                   <RoleChip role={role} />
-                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.68rem] text-[var(--hc-emerald)]">
+                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.68rem] text-live">
                     <HeartPulse className="h-3 w-3 motion-safe:animate-pulse" aria-hidden />
                     {fmtAge(w.last_heartbeat_at, now)}
                   </span>
                 </div>
-                <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-white">{w.task_title}</p>
-                <p className="mt-1 hc-mono text-[0.66rem] hc-dim">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
+                <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-ink">{w.task_title}</p>
+                <p className="mt-1 hc-mono text-[0.66rem] text-ink-3">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
               </div>
             );
           })}
@@ -538,19 +544,19 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
 function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
   const surface = SURFACE[item.surface];
   return (
-    <div className={cn("hc-decision flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left", severitySpine[item.tone])}>
+    <div className={cn("ch-decision flex w-full items-center gap-3 px-3.5 py-3 text-left", severitySpine[item.tone])}>
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill tone={surface.tone} label={surface.label} />
-          <span className="truncate text-sm font-semibold text-white">{item.title}</span>
+          <span className="truncate text-sm font-semibold text-ink">{item.title}</span>
         </div>
-        <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.ageSeconds != null ? <span className="hc-mono tabular-nums hc-dim">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
+        <p className="mt-1 line-clamp-1 text-xs text-ink-2">{item.ageSeconds != null ? <span className="hc-mono tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-ink">{item.nextAction}</span></p>
       </button>
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
       {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
       {item.vetoEscalationTaskId ? <VetoSignalButton taskId={item.vetoEscalationTaskId} veto={veto} /> : null}
       <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="shrink-0">
-        <ChevronRight className="h-4 w-4 hc-dim" />
+        <ChevronRight className="h-4 w-4 text-ink-3" />
       </button>
     </div>
   );
@@ -569,19 +575,19 @@ function StatsPulse({ onOpen }: { onOpen: () => void }) {
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <Eyebrow>Statistik-Puls · 14 Tage</Eyebrow>
+          <ChEyebrow>Statistik-Puls · 14 Tage</ChEyebrow>
           <StaleBadge isStale={daily.isStale} lastUpdated={daily.lastUpdated} errorObj={daily.errorObj} error={daily.error} />
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       {hasSeries ? <div className="grid gap-3 sm:grid-cols-2">
-        <div className="hc-surface-card p-3">
-          <Text variant="label" className="hc-dim">Geliefert (Roots/Tag)</Text>
+        <div className="ch-card p-3">
+          <Text variant="label" className="text-ink-3">Geliefert (Roots/Tag)</Text>
           <DayBars points={series.map((p) => ({ label: p.date.slice(5), value: p.done_roots }))} />
         </div>
-        <div className="hc-surface-card p-3">
-          <Text variant="label" className="hc-dim">Token-Burn (out/Tag)</Text>
-          <Sparkline points={series.map((p) => ({ label: p.date.slice(5), value: p.output_tokens ?? 0 }))} stroke="var(--hc-accent-2)" valueFmt={fmtTokens} />
+        <div className="ch-card p-3">
+          <Text variant="label" className="text-ink-3">Token-Burn (out/Tag)</Text>
+          <Sparkline points={series.map((p) => ({ label: p.date.slice(5), value: p.output_tokens ?? 0 }))} stroke="var(--color-live)" valueFmt={fmtTokens} />
         </div>
       </div> : null}
     </section>
@@ -589,7 +595,7 @@ function StatsPulse({ onOpen }: { onOpen: () => void }) {
 }
 
 /** Signal-Kachel: Strategen-Vorschläge warten auf Entscheidung.
- *  Nur sichtbar wenn count > 0. Muster: StatsPulse (Zeilen 448-475). */
+ *  Nur sichtbar wenn count > 0. Muster: StatsPulse. */
 function StrategistSignalTile({ onOpen }: { onOpen: () => void }) {
   const strat = useStrategistCount();
   const count = strat.data?.count ?? 0;
@@ -598,12 +604,12 @@ function StrategistSignalTile({ onOpen }: { onOpen: () => void }) {
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <Eyebrow>Strategen-Vorschläge</Eyebrow>
+          <ChEyebrow>Strategen-Vorschläge</ChEyebrow>
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Stratege öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Stratege öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
-      <div className="hc-surface-card p-3">
-        <p className="text-sm hc-soft">{count} {count === 1 ? "wartet" : "warten"} auf deine Entscheidung</p>
+      <div className="ch-card p-3">
+        <p className="text-sm text-ink-2">{count} {count === 1 ? "wartet" : "warten"} auf deine Entscheidung</p>
       </div>
     </section>
   );
