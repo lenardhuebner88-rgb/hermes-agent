@@ -3,7 +3,7 @@
  *
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
-import { planSpecWaitsForOperator } from "../../lib/fleetHub";
+import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { Disclosure } from "../../components/primitives";
 import { buildReliabilityRiskModel, buildSystemPulseRiskModel } from "../../lib/fleetRisk";
@@ -55,7 +55,7 @@ export function RisikoTab({
   onTaskChanged,
 }: RisikoTabProps) {
   // (a) Wartende Freigaben
-  const pendingApprovals = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
+  const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
 
   // (a) Blockierte Tasks — Operator-Halts vs. sonstige blockierte
   const operatorHalts = blockedTasks.filter((t) => {

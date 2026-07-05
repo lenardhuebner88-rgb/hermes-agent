@@ -6,7 +6,8 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   fmtUsd,
-  planSpecWaitsForOperator,
+  planSpecAwaitsPlanAction,
+  planSpecHasParkedSignedChain,
   budgetTone,
   derivePlanLanes,
   buildApproveRequest,
@@ -33,8 +34,8 @@ interface PlanTabProps {
 }
 
 export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail }: PlanTabProps) {
-  // Nur PlanSpecs die auf Operator-Freigabe warten
-  const pendingSpecs = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state));
+  // PlanSpecs, die Operator-Freigabe oder den Start einer signierten, geparkten Kette brauchen.
+  const pendingSpecs = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
   const pendingPaths = pendingSpecs.map((ps) => ps.path);
 
   // selectedPath hält nur die aktive User-Wahl; effectivePath wird ABGELEITET:
@@ -116,6 +117,7 @@ interface PlanSpecCockpitProps {
 }
 
 function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSuccess, onHold, onShowDetail }: PlanSpecCockpitProps) {
+  const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   // PlanSpec-Detail (subtasks mit lane) laden
   const detail = usePlanSpecDetail(ps.path);
 
@@ -154,6 +156,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
   // Freigabe-State
   const [approveState, setApproveState] = useState<"idle" | "busy" | "success" | "error">("idle");
   const [approveError, setApproveError] = useState<string | null>(null);
+  const [releaseArmed, setReleaseArmed] = useState(false);
   const aliveRef = useRef(true);
   useEffect(() => {
     aliveRef.current = true;
@@ -197,6 +200,38 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
     }
   }
 
+  async function handleChainStart() {
+    if (!ps.kanban_root_task_id) return;
+    if (!releaseArmed) {
+      setReleaseArmed(true);
+      window.setTimeout(() => {
+        if (aliveRef.current) setReleaseArmed(false);
+      }, 4000);
+      return;
+    }
+    setApproveState("busy");
+    setApproveError(null);
+    try {
+      await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(ps.kanban_root_task_id)}/flow-release`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ release_level: "live" }),
+      });
+      if (!aliveRef.current) return;
+      setApproveState("success");
+      window.setTimeout(() => {
+        if (aliveRef.current) onApproveSuccess();
+      }, 600);
+    } catch (e: unknown) {
+      if (!aliveRef.current) return;
+      setApproveState("error");
+      const msg = e instanceof Error ? e.message : String(e);
+      setApproveError(msg.includes("404") ? de.fleet.planFreigebenFehler404 : de.fleet.planKetteStartenFehler);
+    } finally {
+      if (aliveRef.current) setReleaseArmed(false);
+    }
+  }
+
   // Worktree-Isolation: nur anzeigen wenn Feld existiert
   const hasWorktreeField = detail.data != null && "worktree_isolation" in (detail.data as object);
 
@@ -206,8 +241,8 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       <div className="fleet-plan-kopf">
         <div className="fleet-plan-kopf-n">
           {ps.topic || ps.filename}
-          <span className={`fleet-ps-badge fleet-ps-badge-amber`} style={{ marginLeft: "auto" }}>
-            freigabe: operator
+          <span className={`fleet-ps-badge ${isSignedParkedChain ? "fleet-ps-badge-ok" : "fleet-ps-badge-amber"}`} style={{ marginLeft: "auto" }}>
+            {isSignedParkedChain ? "signiert · geparkt" : "freigabe: operator"}
           </span>
         </div>
         {detail.data?.goal ? (
@@ -233,7 +268,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       </div>
 
       {/* Lane-Konfiguration */}
-      {lanes.length > 0 ? (
+      {!isSignedParkedChain && lanes.length > 0 ? (
         <div className="fleet-lane-cfg">
           {lanes.map(({ lane, description }) => {
             const currentModel = laneModels[lane] ?? presetDefaults[lane] ?? "";
@@ -256,6 +291,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       ) : null}
 
       {/* Toggles */}
+      {!isSignedParkedChain ? (
       <div className="fleet-lane-cfg">
         {/* Scout vorab */}
         <div className="fleet-tgl-row">
@@ -296,35 +332,28 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
           </div>
         ) : null}
       </div>
+      ) : (
+        <div className="fleet-lane-cfg" data-testid="signed-chain-start-card">
+          <div className="fleet-tgl-row" style={{ borderBottom: "none" }}>
+            <span style={{ fontWeight: 600, fontSize: 12 }}>{de.fleet.planKetteSigniert}</span>
+            <span className="fleet-tgl-td">{de.fleet.planKetteSigniertDesc}</span>
+            <span className="fleet-sel" style={{ pointerEvents: "none", opacity: 0.85 }}>
+              {ps.kanban_root_status || ps.kanban_state || "scheduled"}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Token-Budget-Block */}
       <TokenBudgetBlock accountUsage={accountUsage} costs={costs} />
 
       {/* Fehler-Anzeige */}
-      {approveError ? (
-        <div style={{
-          background: "rgba(255,93,115,.1)",
-          border: "1px solid rgba(255,93,115,.35)",
-          borderRadius: 11,
-          padding: "9px 12px",
-          font: "400 11.5px/1.5 var(--hc-font-sans)",
-          color: "var(--fleet-rot)",
-        }}>
-          {approveError}
-        </div>
-      ) : null}
+{approveError ? <div className="fleet-plan-msg fleet-plan-msg-error">{approveError}</div> : null}
 
       {/* Erfolgs-Anzeige */}
       {approveState === "success" ? (
-        <div style={{
-          background: "rgba(67,214,154,.1)",
-          border: "1px solid rgba(67,214,154,.35)",
-          borderRadius: 11,
-          padding: "9px 12px",
-          font: "400 11.5px/1.5 var(--hc-font-sans)",
-          color: "var(--fleet-gruen)",
-        }}>
-          {de.fleet.planFreigebenErfolg}
+        <div className="fleet-plan-msg fleet-plan-msg-success">
+          {isSignedParkedChain ? de.fleet.planKetteStartenErfolg : de.fleet.planFreigebenErfolg}
         </div>
       ) : null}
 
@@ -332,13 +361,17 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       <div className="fleet-actions">
         <button
           type="button"
-          className="fleet-btn fleet-btn-frei"
+          className={`fleet-btn ${isSignedParkedChain ? "fleet-btn-start" : "fleet-btn-frei"}`}
           style={{ flex: 2 }}
-          onClick={() => void handleApprove()}
+          onClick={() => void (isSignedParkedChain ? handleChainStart() : handleApprove())}
           disabled={approveState === "busy" || approveState === "success" || !ps.kanban_root_task_id}
           aria-busy={approveState === "busy"}
         >
-          {approveState === "busy" ? "Freigabe läuft …" : de.fleet.planFreigeben}
+          {approveState === "busy"
+            ? (isSignedParkedChain ? de.fleet.planKetteStartenBusy : "Freigabe läuft …")
+            : isSignedParkedChain
+            ? (releaseArmed ? de.fleet.planKetteStartenConfirm : de.fleet.planKetteStarten)
+            : de.fleet.planFreigeben}
         </button>
         <button
           type="button"

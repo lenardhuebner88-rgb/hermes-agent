@@ -13,6 +13,7 @@ import {
   fmtSeconds,
   deriveKpi,
   fmtTokens,
+  planSpecHasParkedSignedChain,
   planSpecWaitsForOperator,
   profileInitial,
   profileColorClass,
@@ -341,6 +342,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
 function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
   const fraction = ps.kanban_child_total > 0 ? ps.kanban_child_done / ps.kanban_child_total : null;
   const waitsForOp = planSpecWaitsForOperator(ps.freigabe, ps.kanban_state);
+  const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   const isRunning = ps.kanban_state === "running";
 
   let badgeClass = "fleet-ps-badge-gruen";
@@ -348,6 +350,9 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   if (waitsForOp) {
     badgeClass = "fleet-ps-badge-amber";
     badgeLabel = de.fleet.psWaitsForOperator;
+  } else if (isSignedParkedChain) {
+    badgeClass = "fleet-ps-badge-ok";
+    badgeLabel = de.fleet.planKetteStarten;
   } else if (isRunning) {
     badgeClass = "fleet-ps-badge-lauf";
     badgeLabel = `läuft${ps.kanban_child_total > 0 ? ` · ${ps.kanban_child_done}/${ps.kanban_child_total}` : ""}`;

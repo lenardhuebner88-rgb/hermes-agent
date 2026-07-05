@@ -13,7 +13,7 @@
  */
 import { useState, useMemo, useEffect } from "react";
 import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail } from "../hooks/useControlData";
-import { planSpecWaitsForOperator, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
+import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { Worker, ChainGraphResponse, PlanSpecRecord } from "../lib/types";
@@ -94,9 +94,9 @@ export function FleetView() {
   const blockedTasks = (board.data?.columns.find((c) => c.name === "blocked")?.tasks ?? []);
   const blockedCount = blockedTasks.length;
 
-  // Offene PlanSpecs die auf Operator warten
+  // Offene PlanSpecs die auf Operator-Freigabe oder Kettenstart warten
   const allPlanspecs = planspecs.data?.planspecs ?? [];
-  const pendingApprovals = allPlanspecs.filter((ps) => planSpecWaitsForOperator(ps.freigabe, ps.kanban_state)).length;
+  const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps)).length;
   const activePlanspecs = allPlanspecs.filter((ps) => ps.kanban_state === "running" || ps.kanban_state === "queued");
 
   // "Wartet auf dich"-Items: wartende Freigaben + Operator-Halts

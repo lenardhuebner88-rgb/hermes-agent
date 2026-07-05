@@ -5915,6 +5915,40 @@ def test_flow_release_unblocks_scheduled_children_dag_correct(client):
     assert r2.status_code == 200 and r2.json()["released"] == 0
 
 
+def test_flow_release_unparks_signed_complete_root_with_children(client):
+    root, child_ids = _setup_gated_root()
+    assert child_ids is not None
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='scheduled', freigabe='complete' WHERE id=?",
+                (root,),
+            )
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["root_released"] is True
+    released_ids = body["released_ids"]
+    assert isinstance(released_ids, list)
+    assert set(released_ids) == set(child_ids)
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root)
+        assert root_task is not None
+        child_statuses = {}
+        for child in child_ids:
+            child_task = kb.get_task(conn, child)
+            assert child_task is not None
+            child_statuses[child] = child_task.status
+        kinds = [event.kind for event in kb.list_events(conn, root)]
+    assert root_task.status == "todo"
+    assert child_statuses[child_ids[0]] == "ready"
+    assert child_statuses[child_ids[1]] == "ready"
+    assert child_statuses[child_ids[2]] == "todo"
+    assert "flow_gate_root_released" in kinds
+
+
 def test_flow_gate_proposal_surfaces_risk_cost_lanes_and_timeout(client):
     root, child_ids = _setup_gated_root()
 
