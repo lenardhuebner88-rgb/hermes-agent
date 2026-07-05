@@ -237,9 +237,24 @@ export function StatsMasthead({
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <KpiTile label={de.stats.suppAutonomie} value={pctText(aut)} suffix={aut == null ? undefined : "%"} deltaTone="neutral" dot="live" />
-        <KpiTile label={de.stats.suppCost} value={usdText(cpd)} />
-        <KpiTile label={de.stats.suppNutzer} value={String(nutzer)} />
+        <KpiTile
+          label={de.stats.suppAutonomie}
+          value={pctText(aut)}
+          suffix={aut == null ? undefined : "%"}
+          deltaTone="neutral"
+          dot="live"
+          delta={aut == null ? de.stats.suppAutonomieEmpty : undefined}
+        />
+        <KpiTile
+          label={de.stats.suppCost}
+          value={usdText(cpd)}
+          delta={cpd == null ? de.stats.suppCostEmpty : undefined}
+        />
+        <KpiTile
+          label={de.stats.suppNutzer}
+          value={String(nutzer)}
+          delta={nutzer === 0 ? de.stats.suppNutzerEmpty : undefined}
+        />
       </div>
     </div>
   );

@@ -87,10 +87,60 @@ describe("AccountUsageTile", () => {
     expect(html).toContain("Sonnet-Woche");
     expect(html).toContain("Extra usage: 417.00 / 2500.00 EUR");
 
-    // Kimi = lokale Schätzung → Fußzeile, nie als hartes Limit (§8)
-    expect(html).toContain("Ohne Fenster-Limit");
+    // Operator-Direktive: alle drei Abos als gleichwertige Karten — Kimi ist jetzt
+    // eine eigene Karte (kein Engpass, §8), nicht mehr in einer Strichel-Fußzeile.
     expect(html).toContain("Kimi");
-    expect(html).toContain("Kimi 7d tokens: 1.0M across 12 runs");
+    // Kimi trägt hier ein weekly-Fenster (5 %) → wird als Karte gerendert.
+    expect(html).toContain("5 %");
+    // Keine zusammengeworfene "Ohne Fenster-Limit"-Geisterkarte, solange nur Abos da sind.
+    expect(html).not.toContain("Ohne Fenster-Limit");
+  });
+
+  it("gibt Kimi ohne Provider-Fenster eine ehrliche Leerzustand-Karte (Operator-Direktive: 3 gleichwertige Abos)", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "kimi",
+          available: true,
+          source: "kanban_subscription_tokens",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Kimi subscription tokens",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
+    expect(html).toContain("Kimi");
+    expect(html).toContain("keine Fensterdaten vom Provider");
+    expect(html).not.toContain("Ohne Fenster-Limit");
+  });
+
+  it("hält OpenRouter (kein Abo-Fenster, $-Guthaben) in der ehrlich beschrifteten Fußzeile", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "openrouter",
+          available: true,
+          source: "credits",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "OpenRouter",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [],
+          details: ["Guthaben: 12.00 USD"],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
+    expect(html).toContain("Ohne Fenster-Limit");
+    expect(html).toContain("OpenRouter");
   });
 
   it("paart das Provider-% mit dem Worker-Run-Abgleich, wenn laneUsage durchgereicht wird", () => {

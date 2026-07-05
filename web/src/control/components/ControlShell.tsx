@@ -132,7 +132,11 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
   // daher entfällt der helle Shell-Header unter lg; die Bottom-Nav bleibt
   // unverändert die Mobil-Navigation.
   const fleetBleed = active === "fleet";
-  const commandHomeBleed = active === "inbox";
+  // Start (inbox) und Statistik bringen wie Fleet ihren eigenen dunklen Masthead
+  // mit ([data-command-home] .ch-masthead bzw. [data-statistik] .st-masthead) —
+  // der helle Legacy-Shell-Header ("Operator Dashboard / Hermes Control") würde
+  // sonst doppelt über dem eigenen Masthead stehen, daher unter lg unterdrückt.
+  const commandHomeBleed = active === "inbox" || active === "statistik";
   const mobileBleed = fleetBleed || commandHomeBleed;
   return (
     <div className={cn("hc-page flex min-h-0 flex-col pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))]", fleetBleed && "fleet-bleed", mobileBleed ? "px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8")}>
@@ -182,7 +186,7 @@ function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inbo
   // Start bringt wie Fleet seinen eigenen Masthead mit; der Legacy-Shell-Header
   // wird nur dort unterdrückt, damit die Rail/andere Views unverändert bleiben.
   const fleetBleed = active === "fleet";
-  const commandHomeBleed = active === "inbox";
+  const commandHomeBleed = active === "inbox" || active === "statistik";
   return (
     <div className={cn("hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0", fleetBleed && "fleet-bleed")}>
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
