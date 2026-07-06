@@ -2,13 +2,13 @@
 # Harnesses). Adaption der builder-reviewer-Pipeline mit Frontend-Fokus + Frontend-Gates.
 name: dashboard-polish
 type: pipeline
-description: Fable plant UI-Politur an web/src/control, Sonnet baut, Fable verifiziert mit Frontend-Gates
+description: Opus plant UI-Politur an web/src/control, Sonnet baut, Opus verifiziert mit Frontend-Gates
 stability: experimental
 repo: /home/piet/.hermes/hermes-agent
 phases:
   plan:
     engine: claude
-    model: claude-fable-5
+    model: claude-opus-4-8
     timeout: 2400
     prompt: PLANNER-PROMPT.md
   build:
@@ -18,7 +18,7 @@ phases:
     prompt: BUILDER-PROMPT.md
   verify:
     engine: claude
-    model: claude-fable-5
+    model: claude-opus-4-8
     timeout: 2400
     prompt: VERIFIER-PROMPT.md
 stop:

@@ -11,7 +11,7 @@ repo: /home/piet/.hermes/hermes-agent
 phases:
   round:
     engine: claude
-    model: claude-fable-5
+    model: claude-opus-4-8
     timeout: 3000
     prompt: ROUND-PROMPT.md
 stop:
