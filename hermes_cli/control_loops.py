@@ -136,10 +136,28 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
-    res = _git(pack.repo, "log", "--oneline", "--max-count=50", f"main..{pack.branch}")
+    """Return loop-branch commits that are still genuinely absent from main.
+
+    Loops can be reconciled by another session/worktree: the exact commit SHA then
+    differs, but the patch is already present on ``main``. ``git log main..branch``
+    counts those commits as still landable; ``git cherry`` compares stable patch-ids
+    and marks equivalent changes with ``-``. The dashboard should only offer
+    landing for ``+`` commits that are not patch-equivalent on main.
+    """
+    res = _git(pack.repo, "cherry", "-v", "main", pack.branch)
     if res.returncode != 0:
         return []  # Branch existiert (noch) nicht — kein Lauf bisher
-    return [line for line in res.stdout.splitlines() if line.strip()]
+    commits: list[str] = []
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("+"):
+            continue
+        _marker, _space, rest = line.partition(" ")
+        sha, _space, subject = rest.strip().partition(" ")
+        commits.append(f"{sha[:7]} {subject}".rstrip())
+        if len(commits) >= 50:
+            break
+    return commits
 
 
 def _heartbeat(state: Path) -> dict[str, Any] | None:

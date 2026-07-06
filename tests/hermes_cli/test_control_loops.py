@@ -98,6 +98,43 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
 
 
+
+def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
+    from hermes_cli import control_loops as cl
+    from loops.runner import Pack
+
+    pack = Pack(
+        name="dashboard-polish",
+        type="pipeline",
+        repo=Path("/repo"),
+        pack_dir=Path("/packs/dashboard-polish"),
+        description="",
+        stability="experimental",
+        phases={},
+        params={},
+        stop={},
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        assert args == ("cherry", "-v", "main", "loop/dashboard-polish")
+        return subprocess.CompletedProcess(
+            ["git", *args],
+            0,
+            stdout=(
+                "- 44a2814ea00000000000000000000000000000000 feat(control): port dashboard polish onto fleet view\n"
+                "+ 1234567890000000000000000000000000000000 fix(control): remaining loop polish\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(cl, "_git", fake_git)
+
+    assert cl._commits_ahead(pack) == ["1234567 fix(control): remaining loop polish"]
+    assert calls == [("cherry", "-v", "main", "loop/dashboard-polish")]
+
+
 def test_models_endpoint_serves_catalog(api):
     client, _calls, _tmp = api
     data = client.get("/api/loops/models").json()
