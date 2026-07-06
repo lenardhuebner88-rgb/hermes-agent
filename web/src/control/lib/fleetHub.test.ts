@@ -717,26 +717,26 @@ describe("derivePlanLanes", () => {
 // ─── buildApproveRequest ──────────────────────────────────────────────────────
 
 describe("buildApproveRequest", () => {
-  it("nur geänderte Lane-Models werden gesendet", () => {
+  it("nur geänderte Assignee-Overrides werden gesendet", () => {
     const req = buildApproveRequest(
       "t_abc123",
-      { coder: "claude-sonnet-4-5", reviewer: "claude-opus-4-5" },
-      { coder: "claude-sonnet-4-5", reviewer: "claude-sonnet-4-5" }, // reviewer abweicht
+      { coder: "coder", reviewer: "critic" },
+      { coder: "coder", reviewer: "reviewer" }, // reviewer abweicht
       false,
     );
     expect(req.root_task_id).toBe("t_abc123");
-    expect(req.lane_models).toEqual({ reviewer: "claude-opus-4-5" });
+    expect(req.assignee_overrides).toEqual({ reviewer: "critic" });
     expect(req.inject_scout).toBe(false);
   });
 
-  it("keine Änderungen → leeres lane_models-Objekt", () => {
+  it("keine Änderungen → leeres assignee_overrides-Objekt", () => {
     const req = buildApproveRequest(
       "t_def456",
-      { coder: "sonnet", reviewer: "opus" },
-      { coder: "sonnet", reviewer: "opus" },
+      { coder: "coder", reviewer: "reviewer" },
+      { coder: "coder", reviewer: "reviewer" },
       false,
     );
-    expect(req.lane_models).toEqual({});
+    expect(req.assignee_overrides).toEqual({});
   });
 
   it("inject_scout wird korrekt weitergegeben", () => {
@@ -744,15 +744,14 @@ describe("buildApproveRequest", () => {
     expect(req.inject_scout).toBe(true);
   });
 
-  it("leeres Model-Value wird nicht gesendet", () => {
+  it("leeres Profil-Value wird nicht gesendet", () => {
     const req = buildApproveRequest(
       "t_xyz",
       { coder: "" },
-      { coder: "sonnet" },
+      { coder: "coder" },
       false,
     );
-    // Leerer Wert → Abweichung vom Default, aber leer → wird trotzdem gefiltert
-    expect(req.lane_models).toEqual({});
+    expect(req.assignee_overrides).toEqual({});
   });
 });
 

@@ -8295,19 +8295,22 @@ def get_flow_plan(task_id: str):
 class PlanSpecApproveBody(BaseModel):
     root_task_id: ShortText
     lane_models: Optional[dict[str, ShortText]] = None
+    assignee_overrides: Optional[dict[str, ShortText]] = None
     inject_scout: Optional[bool] = None
     dry_run: bool = False
 
 
 @router.post("/planspecs/approve")
 def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(None)):
-    """Composed PlanSpec-release: validate hold, apply lane-model overrides, optionally
+    """Composed PlanSpec-release: validate hold, apply lane overrides, optionally
     inject a scout, then release the freigabe:operator hold.
 
     Body fields:
     - ``root_task_id``: the held ``freigabe: operator`` root task (required).
-    - ``lane_models``: mapping of lane/assignee → model_id; every chain task whose
-      assignee matches a key receives a ``model_override``.
+    - ``lane_models``: legacy mapping of lane/assignee → model_id; every chain task
+      whose assignee matches a key receives a ``model_override``.
+    - ``assignee_overrides``: mapping of lane/assignee → new profile; every chain task
+      whose assignee matches a key is reassigned and has ``model_override`` cleared.
     - ``inject_scout``: prepend exactly one scout task before the entry children;
       idempotent (no second scout if one already exists).
     - ``dry_run``: validate and report planned actions without writing anything.
@@ -8357,15 +8360,29 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         # --- Collect chain members (root + all transitive parents via chain graph) -
         chain_ids = kanban_db._chain_member_ids_from_sink(conn, root_task_id)
 
-        # --- Compute lane-model overrides for chain members -----------------------
+        # --- Compute lane/profile overrides for chain members ---------------------
         lane_models: dict[str, str] = dict(body.lane_models or {})
+        assignee_overrides: dict[str, str] = {}
+        for lane, assignee in dict(body.assignee_overrides or {}).items():
+            normalized_lane = str(lane or "").strip()
+            normalized_assignee = str(assignee or "").strip()
+            if not normalized_lane or not normalized_assignee:
+                continue
+            try:
+                assignee_overrides[normalized_lane] = kanban_db.validate_spawnable_assignee(normalized_assignee) or normalized_assignee
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
         override_targets: list[str] = []
+        assignee_targets: list[str] = []
         for tid in chain_ids:
             task = kanban_db.get_task(conn, tid)
             if task is None:
                 continue
             assignee = str(task.assignee or "").strip()
-            if assignee in lane_models:
+            if assignee in assignee_overrides:
+                assignee_targets.append(tid)
+            elif assignee in lane_models:
                 override_targets.append(tid)
 
         # --- Determine scout injection: entry tasks + global dedup ------------------
@@ -8416,6 +8433,17 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                         "assignee": assignee,
                         "model": lane_models[assignee],
                     })
+            for tid in assignee_targets:
+                task = kanban_db.get_task(conn, tid)
+                if task is not None:
+                    assignee = str(task.assignee or "").strip()
+                    planned.append({
+                        "action": "assignee_override",
+                        "task_id": tid,
+                        "from": assignee,
+                        "to": assignee_overrides[assignee],
+                        "model_override": None,
+                    })
             if scout_would_inject:
                 planned.append({
                     "action": "inject_scout",
@@ -8428,6 +8456,7 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
             return {
                 "released": False,
                 "overrides_applied": len(override_targets),
+                "assignee_overrides_applied": len(assignee_targets),
                 "scout_injected": False,
                 "dry_run": True,
                 "planned_actions": planned,
@@ -8445,6 +8474,7 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         # their *_in_txn cores instead (established pattern, see
         # _release_freigabe_hold_root_in_txn).
         overrides_applied = 0
+        assignee_overrides_applied = 0
         scout_injected = False
         with kanban_db.write_txn(conn):
             # Recheck the hold guard INSIDE the transaction: write_txn's
@@ -8467,6 +8497,31 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                     status_code=409,
                     detail={"error": f"{root_task_id} hat Status {guard_row['status']!r} und ist nicht freigabefähig (erwartet: scheduled)"},
                 )
+
+            for tid in assignee_targets:
+                task = kanban_db.get_task(conn, tid)
+                if task is None:
+                    continue
+                assignee = str(task.assignee or "").strip()
+                new_assignee = assignee_overrides[assignee]
+                cur = conn.execute(
+                    "SELECT assignee, model_override FROM tasks WHERE id = ?",
+                    (tid,),
+                ).fetchone()
+                if cur is None:
+                    continue
+                if cur["assignee"] != new_assignee or cur["model_override"] is not None:
+                    conn.execute(
+                        "UPDATE tasks SET assignee = ?, model_override = NULL WHERE id = ?",
+                        (new_assignee, tid),
+                    )
+                    kanban_db._append_event(
+                        conn,
+                        tid,
+                        "assignee_override",
+                        {"actor": "planspec-approve", "from": assignee, "to": new_assignee, "model_override": None},
+                    )
+                    assignee_overrides_applied += 1
 
             for tid in override_targets:
                 task = kanban_db.get_task(conn, tid)
@@ -8541,6 +8596,7 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         return {
             "released": True,
             "overrides_applied": overrides_applied,
+            "assignee_overrides_applied": assignee_overrides_applied,
             "scout_injected": scout_injected,
             "dry_run": False,
         }

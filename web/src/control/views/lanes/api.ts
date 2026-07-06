@@ -474,6 +474,17 @@ export function choiceFromEntry(
   return `${runtime}|${model}`;
 }
 
+export function providerAwareChoiceFromEntry(
+  entry: LaneProfileEntry | undefined,
+): string {
+  if (!entry || (entry.worker_runtime == null && entry.model == null)) return "";
+  const model = entry.model ?? "";
+  const runtime =
+    entry.worker_runtime ?? (model.startsWith("claude") ? "claude-cli" : "hermes");
+  const provider = runtime === "hermes" ? entry.provider ?? "" : "";
+  return `${runtime}|${provider}|${model}`;
+}
+
 /** Dropdown value → lane entry (null = drop the mapping, profile default). */
 export function entryFromChoice(
   choice: string,
@@ -485,17 +496,35 @@ export function entryFromChoice(
   return { worker_runtime: runtime, model: model === "" ? null : model };
 }
 
+export function entryFromProviderAwareChoice(
+  choice: string,
+): Partial<LaneProfileEntry> | null {
+  if (choice === "") return null;
+  const parts = choice.split("|");
+  if (parts.length !== 3 || !parts[0]) return entryFromChoice(choice);
+  const runtime = parts[0] as LaneRuntime;
+  const provider = parts[1] || null;
+  const model = parts[2] || null;
+  return {
+    worker_runtime: runtime,
+    provider: runtime === "hermes" ? provider : null,
+    model,
+  };
+}
+
 /** Operator-visible guard for persisted/free-form runtime/model combinations
  *  that contradict the curated model catalog. Unknown models stay fail-soft:
  *  the backend smoke check can still provide a clearer reason. */
 export function laneChoiceWarning(choice: string, models: LaneModelOption[]): string | null {
   if (!choice) return null;
-  const sep = choice.indexOf("|");
-  if (sep <= 0) return null;
-  const runtime = choice.slice(0, sep) as LaneRuntime;
-  const model = choice.slice(sep + 1);
-  if (!model) return null;
-  const expected = models.find((m) => m.id === model)?.runtime ?? null;
+  const parts = choice.split("|");
+  const runtime = parts[0] as LaneRuntime;
+  const provider = parts.length === 3 ? parts[1] : null;
+  const model = parts.length === 3 ? parts[2] : parts[1];
+  if (!runtime || !model) return null;
+  const expected = (models.find((m) =>
+    m.id === model && (!provider || !m.provider || m.provider === provider),
+  ) ?? models.find((m) => m.id === model))?.runtime ?? null;
   if (!expected || expected === runtime) return null;
   return `Worker-/Modell-Kombination passt nicht: ${model} gehört zu ${expected}, ausgewählt ist ${runtime}.`;
 }

@@ -42,6 +42,10 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_VISION_METRICS_PATH", raising=False)
     monkeypatch.delenv("HERMES_STRATEGIST_DIGEST_PATH", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for profile in ("coder", "premium", "reviewer", "critic", "research"):
+        profile_dir = home / "profiles" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        (profile_dir / "config.yaml").write_text("model: dummy\n", encoding="utf-8")
     kb.init_db()
     return home
 
@@ -141,6 +145,50 @@ def test_approve_releases_hold_and_applies_override(client):
     assert _model_override(root_id) == "claude-opus-4-5"
     assert _model_override(child_id) == "claude-opus-4-5"
 
+
+
+
+def test_approve_assignee_override_reassigns_and_clears_model_override(client):
+    root_id, child_id = _make_held_chain(assignee="coder")
+    with kb.connect() as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET model_override='stale-model' WHERE id IN (?, ?)",
+            (root_id, child_id),
+        )
+
+    resp = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={
+            "root_task_id": root_id,
+            "assignee_overrides": {"coder": "premium"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["released"] is True
+    assert body["assignee_overrides_applied"] >= 1
+    assert _assignee_of(root_id) == "premium"
+    assert _assignee_of(child_id) == "premium"
+    assert _model_override(root_id) is None
+    assert _model_override(child_id) is None
+
+
+def test_approve_assignee_override_wins_over_legacy_lane_model(client):
+    root_id, child_id = _make_held_chain(assignee="coder")
+
+    resp = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={
+            "root_task_id": root_id,
+            "assignee_overrides": {"coder": "premium"},
+            "lane_models": {"coder": "legacy-model"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert _assignee_of(root_id) == "premium"
+    assert _assignee_of(child_id) == "premium"
+    assert _model_override(root_id) is None
+    assert _model_override(child_id) is None
 
 def test_approve_without_overrides_still_releases(client):
     root_id, child_id = _make_held_chain()

@@ -283,26 +283,28 @@ export function derivePlanLanes(
  */
 export interface ApproveRequest {
   root_task_id: string;
-  lane_models: Record<string, string>;
+  lane_models?: Record<string, string>;
+  assignee_overrides?: Record<string, string>;
   inject_scout: boolean;
 }
 
 export function buildApproveRequest(
   rootTaskId: string,
-  laneModels: Record<string, string>,
+  assigneeOverrides: Record<string, string>,
   presetDefaults: Record<string, string>,
   injectScout: boolean,
 ): ApproveRequest {
   // Nur geänderte Lanes senden (Abweichung vom Preset)
-  const changedLanes: Record<string, string> = {};
-  for (const [lane, model] of Object.entries(laneModels)) {
-    if (model && model !== (presetDefaults[lane] ?? "")) {
-      changedLanes[lane] = model;
+  const changedAssignees: Record<string, string> = {};
+  for (const [lane, assignee] of Object.entries(assigneeOverrides)) {
+    const normalized = assignee.trim();
+    if (normalized && normalized !== (presetDefaults[lane] ?? "")) {
+      changedAssignees[lane] = normalized;
     }
   }
   return {
     root_task_id: rootTaskId,
-    lane_models: changedLanes,
+    assignee_overrides: changedAssignees,
     inject_scout: injectScout,
   };
 }

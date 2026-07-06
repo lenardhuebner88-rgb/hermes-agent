@@ -19,6 +19,7 @@ vi.mock("../lanes/api", async (importOriginal) => {
 const models = [
   { id: "openai/gpt-4.1-mini", label: "GPT 4.1 Mini", runtime: "hermes" as const, provider: "openrouter", group: "API" },
   { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes" as const, provider: "openrouter", group: "API" },
+  { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes" as const, provider: "neuralwatt", group: "API" },
 ];
 
 function lanes(updatedAt: number, model = "openai/gpt-4.1-mini") {
@@ -82,7 +83,7 @@ describe("LaneQuickSwitch", () => {
     render(<LaneQuickSwitch />);
 
     await screen.findByText("Fast lane");
-    fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|qwen/qwen3.7-max" } });
+    fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|openrouter|qwen/qwen3.7-max" } });
     fireEvent.click(screen.getByRole("button", { name: "Modell speichern" }));
 
     await waitFor(() => expect(smokeCheckLaneConfig).toHaveBeenCalledWith("coder", {
@@ -111,7 +112,7 @@ describe("LaneQuickSwitch", () => {
     render(<LaneQuickSwitch />);
 
     await screen.findByText("Fast lane");
-    fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|qwen/qwen3.7-max" } });
+    fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|openrouter|qwen/qwen3.7-max" } });
     fireEvent.click(screen.getByRole("button", { name: "Modell speichern" }));
 
     expect(await screen.findByText("Aktive Lane wurde parallel geändert — neu geladen. Bitte Auswahl prüfen und erneut speichern.")).toBeTruthy();

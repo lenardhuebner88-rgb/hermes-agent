@@ -132,24 +132,24 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
     return [];
   }, [detail.data]);
 
-  // Preset-Defaults je Lane aus lanesCatalog
+  // Profil-Defaults je Lane aus lanesCatalog
   const presetDefaults = useMemo<Record<string, string>>(() => {
     const profiles = lanesCatalog?.profiles ?? [];
     const result: Record<string, string> = {};
     for (const p of profiles) {
-      if (p.name && p.default_model) {
-        result[p.name] = p.default_model;
+      if (p.name) {
+        result[p.name] = p.name;
       }
     }
     return result;
   }, [lanesCatalog]);
 
-  // Modell-Optionen je Lane
-  const modelOptions = lanesCatalog?.models ?? [];
+  // Profil-Optionen je Lane
+  const profileOptions = lanesCatalog?.profiles ?? [];
 
-  // Lokaler Zustand: Modell-Auswahl je Lane (initial = Preset-Default)
+  // Lokaler Zustand: Profil-Auswahl je Lane (initial = Plan-Lane/Profil)
   // Reset wenn sich lanes ändern (neue PlanSpec ausgewählt)
-  const [laneModels, setLaneModels] = useState<Record<string, string>>(() => {
+  const [assigneeOverrides, setAssigneeOverrides] = useState<Record<string, string>>(() => {
     return {};
   });
 
@@ -173,7 +173,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
     const body = buildApproveRequest(
       ps.kanban_root_task_id,
       // Merge lokale Auswahl über Presets
-      { ...presetDefaults, ...laneModels },
+      { ...presetDefaults, ...assigneeOverrides },
       presetDefaults,
       injectScout,
     );
@@ -274,18 +274,18 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       {!isSignedParkedChain && lanes.length > 0 ? (
         <div className="fleet-lane-cfg">
           {lanes.map(({ lane, description }) => {
-            const currentModel = laneModels[lane] ?? presetDefaults[lane] ?? "";
-            const isChanged = laneModels[lane] != null && laneModels[lane] !== presetDefaults[lane];
+            const currentAssignee = assigneeOverrides[lane] ?? presetDefaults[lane] ?? lane;
+            const isChanged = assigneeOverrides[lane] != null && assigneeOverrides[lane] !== presetDefaults[lane];
             return (
               <div key={lane} className="fleet-lane-row">
                 <span className="fleet-lane-ln">{lane}</span>
                 <span className="fleet-lane-ld">{description.length > 30 ? description.slice(0, 30) + "…" : description}</span>
-                <ModelSelect
+                <ProfileSelect
                   lane={lane}
-                  value={currentModel}
-                  options={modelOptions}
+                  value={currentAssignee}
+                  options={profileOptions}
                   changed={isChanged}
-                  onChange={(model) => setLaneModels((prev) => ({ ...prev, [lane]: model }))}
+                  onChange={(assignee) => setAssigneeOverrides((prev) => ({ ...prev, [lane]: assignee }))}
                 />
               </div>
             );
@@ -389,22 +389,19 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
   );
 }
 
-// ─── Modell-Select (je Lane) ──────────────────────────────────────────────────
+// ─── Profil-Select (je Lane) ──────────────────────────────────────────────────
 
-interface ModelSelectProps {
+interface ProfileSelectProps {
   lane: string;
   value: string;
-  options: LanesCatalogResponse["models"];
+  options: LanesCatalogResponse["profiles"];
   changed: boolean;
-  onChange: (model: string) => void;
+  onChange: (assignee: string) => void;
 }
 
-function ModelSelect({ value, options, changed, onChange }: ModelSelectProps) {
-  // Der Lanes-Katalog listet dieselbe Modell-ID mehrfach (je Provider) —
-  // fürs <select> zählt nur die ID: erste Nennung gewinnt, sonst doppelte
-  // Einträge + React-duplicate-key-Errors bei jedem Poll.
+function ProfileSelect({ value, options, changed, onChange }: ProfileSelectProps) {
   const uniqueOptions = (options ?? []).filter(
-    (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
+    (o, i, arr) => o.name && arr.findIndex((x) => x.name === o.name) === i,
   );
   // Fallback: wenn keine Optionen, zeige freies Textfeld-ähnliches Display
   if (uniqueOptions.length === 0) {
@@ -429,13 +426,13 @@ function ModelSelect({ value, options, changed, onChange }: ModelSelectProps) {
         minHeight: 40,
         minWidth: 90,
       }}
-      aria-label={`Modell für Lane ${value}`}
+      aria-label={`Profil für Lane ${value}`}
     >
-      {value && !uniqueOptions.find((o) => o.id === value) ? (
+      {value && !uniqueOptions.find((o) => o.name === value) ? (
         <option value={value}>{value}</option>
       ) : null}
       {uniqueOptions.map((o) => (
-        <option key={o.id} value={o.id}>{o.label || o.id}</option>
+        <option key={o.name} value={o.name}>{o.name}</option>
       ))}
     </select>
   );

@@ -7,7 +7,7 @@ import {
   type LaneModelOption,
   type LanesResponse,
   editorRows,
-  entryFromChoice,
+  entryFromProviderAwareChoice,
   laneChoiceWarning,
   loadLanes,
   profilesFromEditorRows,
@@ -27,7 +27,12 @@ function laneRevision(lane: Lane): string {
 }
 
 function optionValue(option: LaneModelOption): string {
-  return `${option.runtime}|${option.id}`;
+  return `${option.runtime}|${option.provider ?? ""}|${option.id}`;
+}
+
+function rowChoice(row: EditorRow): string {
+  if (row.choice === "") return "";
+  return `${row.worker_runtime}|${row.provider ?? ""}|${row.model ?? ""}`;
 }
 
 function modelsForSelect(models: LaneModelOption[]): LaneModelOption[] {
@@ -40,7 +45,7 @@ function rowForProfile(rows: EditorRow[], profile: string | null): EditorRow | n
 }
 
 function applyChoice(row: EditorRow, choice: string, models: LaneModelOption[]): EditorRow {
-  const entry = entryFromChoice(choice);
+  const entry = entryFromProviderAwareChoice(choice);
   if (!entry) {
     return {
       ...row,
@@ -57,7 +62,7 @@ function applyChoice(row: EditorRow, choice: string, models: LaneModelOption[]):
     ...row,
     choice,
     worker_runtime: runtime,
-    provider: runtime === "hermes" ? model?.provider ?? row.defaultProvider ?? null : null,
+    provider: runtime === "hermes" ? model?.provider ?? entry.provider ?? row.defaultProvider ?? null : null,
     model: entry.model ?? null,
     fallbackProviders: runtime === "hermes" ? row.fallbackProviders : [],
   };
@@ -85,7 +90,7 @@ export function LaneQuickSwitch() {
   const editableRows = rows.filter((row) => !row.locked);
   const selectedRow = rowForProfile(rows, selectedProfile);
   const selectedChoice = selectedRow ? choice : "";
-  const hasChange = Boolean(selectedRow && selectedChoice !== selectedRow.choice);
+  const hasChange = Boolean(selectedRow && selectedChoice !== rowChoice(selectedRow));
 
   const refresh = useCallback(async (reason?: string) => {
     setState("loading");
@@ -96,7 +101,7 @@ export function LaneQuickSwitch() {
     const preferredRow = rowForProfile(nextRows, preferredProfile) ?? nextRows.find((row) => !row.locked) ?? null;
     setData(next);
     setSelectedProfile(preferredRow?.profile ?? null);
-    setChoice(preferredRow?.choice ?? "");
+    setChoice(preferredRow ? rowChoice(preferredRow) : "");
     setMessage(reason ?? null);
     setState("idle");
   }, [selectedProfile]);
@@ -112,7 +117,7 @@ export function LaneQuickSwitch() {
         const firstRow = nextRows.find((row) => !row.locked) ?? null;
         setData(next);
         setSelectedProfile(firstRow?.profile ?? null);
-        setChoice(firstRow?.choice ?? "");
+        setChoice(firstRow ? rowChoice(firstRow) : "");
         setState("idle");
       } catch (error) {
         if (cancelled) return;
@@ -129,7 +134,7 @@ export function LaneQuickSwitch() {
   const handleProfileChange = useCallback((profile: string) => {
     const row = rowForProfile(rows, profile);
     setSelectedProfile(profile);
-    setChoice(row?.choice ?? "");
+    setChoice(row ? rowChoice(row) : "");
     setMessage(null);
   }, [rows]);
 
