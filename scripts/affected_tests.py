@@ -65,6 +65,9 @@ def _imports_changed_module(test_path: Path, module_import: str) -> bool:
     direct_import = rf"^\s*import\s+.*\b{re.escape(module_import)}\b"
     if re.search(direct_import, content, re.MULTILINE):
         return True
+    submodule_from_import = rf"^\s*from\s+{re.escape(module_import)}\s+import\b"
+    if re.search(submodule_from_import, content, re.MULTILINE):
+        return True
     if package:
         package_import = rf"^\s*from\s+{re.escape(package)}\s+import\s+.*\b{re.escape(module_name)}\b"
         if re.search(package_import, content, re.MULTILINE):

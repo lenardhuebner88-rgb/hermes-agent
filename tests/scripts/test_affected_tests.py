@@ -118,3 +118,14 @@ def test_changed_module_selects_feature_named_sibling_tests_from_imports():
     assert "tests/hermes_cli/test_kanban_db.py" in selected
     assert "tests/hermes_cli/test_kanban_core_functionality.py" in selected
     assert "tests/hermes_cli/" not in selected
+
+
+def test_changed_module_selects_submodule_from_import_sibling_tests():
+    """Feature siblings often use ``from pkg.module import Symbol`` imports."""
+    mod = _load_module()
+
+    selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/commands.py"])
+
+    assert "tests/hermes_cli/test_commands.py" in selected
+    assert "tests/hermes_cli/test_goals.py" in selected
+    assert "tests/hermes_cli/" not in selected
