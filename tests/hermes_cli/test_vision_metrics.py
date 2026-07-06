@@ -1523,6 +1523,69 @@ def test_persistent_red_triage_suspect_range_none_without_sha():
     assert all(n["suspect_range"] is None for n in cause["red_files_by_night"])
 
 
+# ---------------------------------------------------------------------------
+# Actionable-anchor at an unattributed head (leaker-only / 'unknown' gate).
+# The LIVE 2026-07-06 shape: the head night is leaker-only harness noise (no
+# product cause -> gate 'unknown', no files) while the nights behind it failed
+# on concrete files with CHANGING causes. The triage still fires (persistent
+# red head), but its file list + gate + fingerprint must anchor on the most
+# recent night that HAS concrete files so the auto-opened PlanSpec is
+# actionable -- never "(unbekannt)" / 'Gate unknown'.
+# ---------------------------------------------------------------------------
+
+def test_persistent_red_triage_leaker_head_anchors_on_last_attributed_night():
+    records = [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),
+        _red_leaker_only("2026-07-06"),  # head: leaker-only, no product cause
+    ]
+    cause = vm.derive_persistent_red_triage(records)
+    assert cause is not None
+    # Anchored on the most recent ATTRIBUTED night (07-05), not the leaker head:
+    assert cause["gate"] == "python"  # not the 'unknown' sentinel
+    assert cause["red_files"] == {"tests/hermes_cli/test_kanban_workflow_routing.py"}
+    expected_fp = hashlib.sha1(
+        "tests/hermes_cli/test_kanban_workflow_routing.py".encode("utf-8")
+    ).hexdigest()
+    assert cause["fingerprint"] == expected_fp
+    # the full window still surfaces additively for dashboards
+    assert cause["red_files_window_union"] == {
+        "tests/hermes_cli/test_kanban_core_functionality.py",
+        "tests/hermes_cli/test_kanban_workflow_routing.py",
+    }
+
+
+def test_persistent_red_triage_leaker_head_fingerprint_stable_across_more_noise():
+    # AC-2 (no spam): a SECOND leaker-only night after the same attributed anchor
+    # must dedup -- the fingerprint stays put, so re-runs hit already_ingested
+    # instead of minting a fresh chain from pure harness noise.
+    base = [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),
+        _red_leaker_only("2026-07-06"),
+    ]
+    later = [
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),
+        _red_leaker_only("2026-07-06"),
+        _red_leaker_only("2026-07-07"),  # new head, still noise; anchor unchanged
+    ]
+    fp_a = vm.derive_persistent_red_triage(base)["fingerprint"]
+    fp_b = vm.derive_persistent_red_triage(later)["fingerprint"]
+    assert fp_a == fp_b
+
+
+def test_persistent_red_triage_all_leaker_window_keeps_unknown_sentinel():
+    # No attributed red night anywhere in the window (pure harness noise): the
+    # anchor has nothing concrete to list, so it keeps the legacy 'unknown' gate
+    # + empty red_files (honest) and still dedups to itself.
+    records = [_red_leaker_only("2026-07-05"), _red_leaker_only("2026-07-06")]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=2)
+    assert cause is not None
+    assert cause["gate"] == "unknown"
+    assert cause["red_files"] == set()
+    assert cause["fingerprint"] == hashlib.sha1(b"unknown").hexdigest()
+
+
 def test_consecutive_red_cause_suspect_range_mixed_with_and_without_sha():
     # Mixed ledger: an older pass record with NO head_sha, then two same-cause
     # red nights that DO carry one.

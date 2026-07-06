@@ -793,20 +793,33 @@ def derive_persistent_red_triage(
     When triggered, returns::
 
         {
-            "gate": <str>,                  # the head night's gate
-            "red_files": set[str],          # UNION of failing test files across
-                                             # every red night in the window
-                                             # (S3 red_files-honesty fix, see below)
+            "gate": <str>,                  # the ANCHOR night's gate (head's own,
+                                             # or the fallback night's — see below)
+            "red_files": set[str],          # the ANCHOR night's failing test files
+                                             # (head night's, or — when the head is
+                                             # leaker/unknown — the most recent
+                                             # window night that HAS concrete files)
+            "red_files_window_union": set[str],  # UNION across every red night in
+                                             # the window (additive; dashboards)
             "red_files_by_night": [
                 {"date": <str>, "files": [<str>, ...], "suspect_range": <str|None>},
                 ...
             ],                               # one entry per red night in the
                                               # window, oldest-to-newest order
-            "fingerprint": <str>,     # sha1 of the HEAD night's red-file set (dedup key)
+            "fingerprint": <str>,     # sha1 of the ANCHOR night's red-file set (dedup key)
             "red_count": <int>,       # reds in the window
             "window": <int>,          # M
             "dates": [<str>, ...],    # dates of the red nights in the window
         }
+
+    Actionable-anchor (leaker/unknown head): the operator-facing ``red_files``
+    and ``gate`` — and the fingerprint that keys the PlanSpec — anchor on the
+    HEAD night when it carries concrete failing files. When the head is a
+    leaker-only night (harness noise, no product cause) or an un-attributed
+    'unknown' gate, its own file set is empty, so the anchor falls back to the
+    most RECENT red night in the window that DOES carry concrete files. This
+    keeps the auto-opened triage actionable — it always lists real red files —
+    instead of rendering "(unbekannt)" for a persistently-red-but-noisy head.
 
     ``red_files``-honesty (S3): with chronic drift (a DIFFERENT test broke each
     red night — the common case per the 2026-07-05 log forensics), the
@@ -815,21 +828,21 @@ def derive_persistent_red_triage(
     repeatedly" even though the underlying cause changed every night. That is
     exactly what the same-cause path (:func:`derive_consecutive_red_cause`)
     is for; this trigger is the changing-cause complement, so its operator
-    surface must not silently imply repetition. ``red_files`` is now the
-    UNION of every red night's failing-file set in the window; the per-night
-    breakdown survives (additively) as ``red_files_by_night``.
+    surface must not silently imply repetition. The per-night breakdown lives
+    (additively) in ``red_files_by_night``, and the full window is available as
+    ``red_files_window_union`` — for dashboards/digest consumers, NOT the
+    idempotent PlanSpec body (a union drifts on every window slide, see below).
 
-    Fingerprint stays anchored to the HEAD night's own red-file set only (NOT
-    the union) — deliberately unchanged from pre-S3 behaviour. The union
-    widens/narrows on every window slide even when nothing about the
-    underlying failures changed (a night falls out of the window on one side,
-    a new one enters on the other), so hashing the union would open a fresh
-    triage chain purely from window movement, not new information — the
-    "Re-Trigger-Flut" this fix must NOT introduce. The head-night anchor keeps
-    the existing, already-tested dedup behaviour exactly as before: two
-    consecutive runs whose HEAD night shows the same red files still hit
-    ``already_ingested``; a head night whose OWN red files genuinely change
-    still (correctly) opens a fresh chain — new information for the operator.
+    Fingerprint stays anchored to the ANCHOR night's own red-file set only (NOT
+    the window union). The union widens/narrows on every window slide even when
+    nothing about the underlying failures changed (a night falls out of the
+    window on one side, a new one enters on the other), so hashing the union
+    would open a fresh triage chain purely from window movement, not new
+    information — the "Re-Trigger-Flut" this fix must NOT introduce. The anchor
+    keeps the existing, already-tested dedup behaviour: two consecutive runs
+    whose anchor night shows the same red files still hit ``already_ingested``;
+    an anchor whose OWN red files genuinely change still (correctly) opens a
+    fresh chain — new information for the operator.
     """
     if not records:
         return None
@@ -859,11 +872,40 @@ def derive_persistent_red_triage(
     # Reading them top-level would always miss → empty file set + "unknown" gate.
     head_first_fail = head.get("first_fail") or {}
     head_files = _extract_failing_test_files(head_first_fail.get("detail"))
-    # Fingerprint the HEAD night's red file set only — see the docstring's
+    head_gate = str(head_first_fail.get("gate") or "unknown")
+
+    # AC-1 actionability at an unattributed head. When the HEAD night carries no
+    # extractable product files — a leaker-only night (harness noise, first_fail
+    # suppressed) or an un-attributed 'unknown' gate — the head-only red_files
+    # would render "(unbekannt)" and a 'Gate unknown' title even though EARLIER
+    # nights in the window failed on concrete product files (the changing-cause
+    # case this trigger exists for). This left the very PlanSpec the trigger
+    # opens un-actionable — it listed no files for the operator to reproduce.
+    # Anchor instead on the most RECENT red night in the window that DOES carry
+    # concrete red files, so the surfaced triage is always actionable (real
+    # files + a real gate). The attributed-head case is untouched: head_files
+    # non-empty → anchor == head, exactly as before.
+    #
+    # The anchor also backs the fingerprint, so key and body co-vary on the SAME
+    # stable night (AC-2, no spam): while that attributed night stays in-window
+    # and is still the most-recent attributed red, re-runs render the identical
+    # spec and dedup (``already_ingested``); a newer attributed head is genuinely
+    # new information and (correctly) opens a fresh chain. A window with NO
+    # attributed red night keeps the legacy 'unknown' sentinel — honest, since
+    # there is nothing concrete to list (and it dedups to itself).
+    anchor_files, anchor_gate = head_files, head_gate
+    if not anchor_files:
+        for _idx, r in reversed(reds_with_index):
+            ff = r.get("first_fail") or {}
+            files = _extract_failing_test_files(ff.get("detail"))
+            if files:
+                anchor_files = files
+                anchor_gate = str(ff.get("gate") or "unknown")
+                break
+
+    # Fingerprint the ANCHOR night's red file set only — see the docstring's
     # "Fingerprint stays anchored..." rationale above (AC-2: no spam).
-    fingerprint_source = "|".join(sorted(head_files)) if head_files else (
-        str(head_first_fail.get("gate") or "unknown")
-    )
+    fingerprint_source = "|".join(sorted(anchor_files)) if anchor_files else anchor_gate
     fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
 
     prev_sha_at = _prev_sha_index(records)
@@ -898,8 +940,8 @@ def derive_persistent_red_triage(
             night["files"] = sorted(set(night["files"]) | set(files))
     red_files_by_night = [per_night[d] for d in sorted(per_night)]
     return {
-        "gate": str(head_first_fail.get("gate") or "unknown"),
-        "red_files": set(head_files),
+        "gate": anchor_gate,
+        "red_files": set(anchor_files),
         "red_files_window_union": red_files_window_union,
         "red_files_by_night": red_files_by_night,
         "fingerprint": fingerprint,
