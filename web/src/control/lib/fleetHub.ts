@@ -231,6 +231,42 @@ export function planSpecAwaitsPlanAction(plan: PlanSpecActionState): boolean {
     || planSpecHasParkedSignedChain(plan);
 }
 
+/**
+ * Fehlermeldung aus einem fehlgeschlagenen PlanSpec-Ingest destillieren.
+ *
+ * fetchJSON wirft bei !res.ok `new Error(`${status}: ${bodyText}`)`. Der Body ist
+ * bei 400 ein FastAPI-Envelope `{"detail":{"findings":[…]}}` (siehe
+ * ingest_planspec → PlanSpecBlocked), bei anderen Fehlern häufig `{"detail":"…"}`.
+ * Bevorzugt werden response.findings (verschachtelt oder top-level) und
+ * response.detail (String); ist der Body kein verwertbares JSON, bleibt die rohe
+ * Meldung (bzw. der Fallback, wenn diese leer ist).
+ */
+export function extractIngestError(e: unknown, fallback: string): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const jsonStart = msg.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(msg.slice(jsonStart)) as {
+        detail?: unknown;
+        findings?: unknown;
+      };
+      const detail = parsed.detail;
+      const nestedFindings =
+        detail && typeof detail === "object" && !Array.isArray(detail)
+          ? (detail as { findings?: unknown }).findings
+          : undefined;
+      const findings = nestedFindings ?? parsed.findings;
+      if (Array.isArray(findings) && findings.length > 0) {
+        return findings.map((f) => String(f)).join(" · ");
+      }
+      if (typeof detail === "string" && detail.trim()) return detail;
+    } catch {
+      /* Body war kein JSON — rohe Meldung nutzen */
+    }
+  }
+  return msg || fallback;
+}
+
 // ─── Plan-Cockpit Hilfsfunktionen ─────────────────────────────────────────────
 
 /**

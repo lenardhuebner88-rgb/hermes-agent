@@ -14,6 +14,7 @@ import {
   fmtResetAt,
   normalizeUsageWindowLabel,
   deriveEffectivePlanPath,
+  extractIngestError,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { usePlanSpecDetail } from "../../hooks/useControlData";
@@ -22,6 +23,14 @@ import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
+
+// Antwort der /planspecs/ingest-Route (plugin_api.ingest_planspec →
+// planspecs.ingest_planspec): root_task_id der neu erzeugten, gehaltenen Kette.
+interface PlanSpecIngestResponse {
+  root_task_id?: string;
+  child_ids?: string[];
+  rubric_warnings?: string[];
+}
 
 // ─── Plan-Cockpit (Freigabe) ──────────────────────────────────────────────────
 
@@ -166,12 +175,49 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
     return () => { aliveRef.current = false; };
   }, []);
 
+  // Ingest-State: eine noch nicht ingestierte PlanSpec (kanban_root_task_id == null)
+  // bekommt statt des deaktivierten Freigeben-Buttons einen aktiven Ingest-Button
+  // (AC-1). Nach erfolgreichem Ingest hält ingestedRootId die neue Root-ID lokal,
+  // bis der nächste Poll ps.kanban_root_task_id nachzieht — die Karte wechselt
+  // sofort in den Freigabe-Modus (AC-4). effectiveRootId ist die einzige Quelle,
+  // die Freigabe-Logik und Button-State lesen: solange ps.kanban_root_task_id
+  // gesetzt ist, ist es identisch zum Bestand (AC-6, keine Verhaltensänderung).
+  const [ingestedRootId, setIngestedRootId] = useState<string | null>(null);
+  const [ingestBusy, setIngestBusy] = useState(false);
+  const [ingestError, setIngestError] = useState<string | null>(null);
+  const effectiveRootId = ps.kanban_root_task_id ?? ingestedRootId;
+  const needsIngest = !effectiveRootId;
+
+  async function handleIngest() {
+    if (effectiveRootId || ingestBusy) return;
+    setIngestBusy(true);
+    setIngestError(null);
+    try {
+      const result = await fetchJSON<PlanSpecIngestResponse>("/api/plugins/kanban/planspecs/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: ps.path }),
+      });
+      if (!aliveRef.current) return;
+      if (result.root_task_id) {
+        setIngestedRootId(result.root_task_id);
+      } else {
+        setIngestError(de.fleet.planIngestFehlerUnbekannt);
+      }
+    } catch (e: unknown) {
+      if (!aliveRef.current) return;
+      setIngestError(extractIngestError(e, de.fleet.planIngestFehlerUnbekannt));
+    } finally {
+      if (aliveRef.current) setIngestBusy(false);
+    }
+  }
+
   async function handleApprove() {
-    if (!ps.kanban_root_task_id) return;
+    if (!effectiveRootId) return;
     setApproveState("busy");
     setApproveError(null);
     const body = buildApproveRequest(
-      ps.kanban_root_task_id,
+      effectiveRootId,
       // Merge lokale Auswahl über Presets
       { ...presetDefaults, ...assigneeOverrides },
       presetDefaults,
@@ -204,7 +250,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
   }
 
   async function handleChainStart() {
-    if (!ps.kanban_root_task_id) return;
+    if (!effectiveRootId) return;
     if (!releaseArmed) {
       setReleaseArmed(true);
       window.setTimeout(() => {
@@ -215,7 +261,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
     setApproveState("busy");
     setApproveError(null);
     try {
-      await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(ps.kanban_root_task_id)}/flow-release`, {
+      await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(effectiveRootId)}/flow-release`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ release_level: "live" }),
@@ -352,6 +398,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
 
       {/* Fehler-Anzeige */}
 {approveError ? <div className="fleet-plan-msg fleet-plan-msg-error">{approveError}</div> : null}
+      {ingestError ? <div className="fleet-plan-msg fleet-plan-msg-error">{ingestError}</div> : null}
 
       {/* Erfolgs-Anzeige */}
       {approveState === "success" ? (
@@ -361,30 +408,57 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       ) : null}
 
       {/* Aktions-Buttons */}
-      <div className="fleet-actions">
-        <button
-          type="button"
-          className={`fleet-btn ${isSignedParkedChain ? "fleet-btn-start" : "fleet-btn-frei"}`}
-          style={{ flex: 2 }}
-          onClick={() => void (isSignedParkedChain ? handleChainStart() : handleApprove())}
-          disabled={approveState === "busy" || approveState === "success" || !ps.kanban_root_task_id}
-          aria-busy={approveState === "busy"}
-        >
-          {approveState === "busy"
-            ? (isSignedParkedChain ? de.fleet.planKetteStartenBusy : "Freigabe läuft …")
-            : isSignedParkedChain
-            ? (releaseArmed ? de.fleet.planKetteStartenConfirm : de.fleet.planKetteStarten)
-            : de.fleet.planFreigeben}
-        </button>
-        <button
-          type="button"
-          className="fleet-btn"
-          onClick={onHold}
-          disabled={approveState === "busy"}
-        >
-          {de.fleet.planHalten}
-        </button>
-      </div>
+      {needsIngest ? (
+        <>
+          <div className="fleet-actions">
+            <button
+              type="button"
+              className="fleet-btn fleet-btn-frei"
+              style={{ flex: 2 }}
+              onClick={() => void handleIngest()}
+              disabled={ingestBusy}
+              aria-busy={ingestBusy}
+            >
+              {ingestBusy ? de.fleet.planIngestBusy : de.fleet.planIngestKarte}
+            </button>
+            <button
+              type="button"
+              className="fleet-btn"
+              onClick={onHold}
+              disabled={ingestBusy}
+            >
+              {de.fleet.planHalten}
+            </button>
+          </div>
+          {/* AC-2: Hinweistext unter dem Button */}
+          <p className="fleet-plan-hint">{de.fleet.planIngestHinweis}</p>
+        </>
+      ) : (
+        <div className="fleet-actions">
+          <button
+            type="button"
+            className={`fleet-btn ${isSignedParkedChain ? "fleet-btn-start" : "fleet-btn-frei"}`}
+            style={{ flex: 2 }}
+            onClick={() => void (isSignedParkedChain ? handleChainStart() : handleApprove())}
+            disabled={approveState === "busy" || approveState === "success" || !effectiveRootId}
+            aria-busy={approveState === "busy"}
+          >
+            {approveState === "busy"
+              ? (isSignedParkedChain ? de.fleet.planKetteStartenBusy : "Freigabe läuft …")
+              : isSignedParkedChain
+              ? (releaseArmed ? de.fleet.planKetteStartenConfirm : de.fleet.planKetteStarten)
+              : de.fleet.planFreigeben}
+          </button>
+          <button
+            type="button"
+            className="fleet-btn"
+            onClick={onHold}
+            disabled={approveState === "busy"}
+          >
+            {de.fleet.planHalten}
+          </button>
+        </div>
+      )}
     </>
   );
 }

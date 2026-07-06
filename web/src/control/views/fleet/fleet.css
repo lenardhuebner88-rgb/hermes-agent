@@ -1396,6 +1396,11 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   border: 1px solid color-mix(in oklab, var(--fleet-gruen) 35%, transparent);
   color: var(--fleet-gruen);
 }
+.fleet-plan-hint {
+  margin: 6px 2px 0;
+  font: 400 11px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t3);
+}
 
 /* Kopfkarte (amber Glow) */
 .fleet-plan-kopf {
