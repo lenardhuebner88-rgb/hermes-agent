@@ -1763,6 +1763,22 @@ def test_affected_pytest_module_mapping(repo):
     assert mods == ["tests/hermes_cli/", "tests/hermes_cli/test_kanban_db.py"]
 
 
+def test_affected_pytest_module_matches_submodule_from_import_sibling(repo):
+    (repo / "hermes_cli").mkdir(parents=True)
+    (repo / "tests" / "hermes_cli").mkdir(parents=True)
+    (repo / "tests" / "hermes_cli" / "test_commands.py").write_text("")
+    (repo / "tests" / "hermes_cli" / "test_goals.py").write_text(
+        "from hermes_cli.commands import resolve_command\n"
+    )
+
+    mods = kwt._affected_pytest_modules(repo, ["hermes_cli/commands.py"])
+
+    assert mods == [
+        "tests/hermes_cli/test_commands.py",
+        "tests/hermes_cli/test_goals.py",
+    ]
+
+
 def test_affected_pytest_module_fallback_for_monolith(repo):
     """A monolith source file with no 1:1 test selects the package test dir."""
     (repo / "gateway").mkdir(parents=True)

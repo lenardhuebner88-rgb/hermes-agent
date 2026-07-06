@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -50,6 +51,39 @@ from typing import Callable, Optional, Sequence
 # 500 covers all current directories; anything larger would exceed the
 # targeted-gate walltime budget.
 _FALLBACK_MAX_TEST_FILES = 500
+
+
+def _imports_changed_module(test_path: Path, module_import: str) -> bool:
+    try:
+        content = test_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    package, _, module_name = module_import.rpartition(".")
+    direct_import = rf"^\s*import\s+.*\b{re.escape(module_import)}\b"
+    if re.search(direct_import, content, re.MULTILINE):
+        return True
+    submodule_from_import = rf"^\s*from\s+{re.escape(module_import)}\s+import\b"
+    if re.search(submodule_from_import, content, re.MULTILINE):
+        return True
+    if package:
+        package_import = rf"^\s*from\s+{re.escape(package)}\s+import\s+.*\b{re.escape(module_name)}\b"
+        if re.search(package_import, content, re.MULTILINE):
+            return True
+    return False
+
+
+def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) -> list[str]:
+    pkg_test_dir = Path("tests") / rel_dir
+    absolute_pkg_test_dir = repo_root / pkg_test_dir
+    if pkg_test_dir == Path("tests") or not absolute_pkg_test_dir.is_dir():
+        return []
+    module_import = str(source.with_suffix("")).replace("/", ".")
+    return [
+        str(path.relative_to(repo_root))
+        for path in sorted(absolute_pkg_test_dir.glob("test_*.py"))
+        if _imports_changed_module(path, module_import)
+    ]
 
 _log = logging.getLogger(__name__)
 
@@ -2346,12 +2380,13 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
             if (repo_root / f).is_file():
                 modules.add(f)
             continue
-        rel_dir = str(Path(f).parent)
+        source = Path(f)
+        rel_dir = str(source.parent)
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
-        else:
-            # Fallback: no 1:1 test file. Select the package test directory.
+        modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
+        if not (repo_root / candidate).is_file():
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
                 # Cap: if the directory has too many test files, downgrade to

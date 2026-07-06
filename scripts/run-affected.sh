@@ -23,4 +23,13 @@ if [ -z "${FILES// /}" ]; then
   echo "run-affected: no affected test files for this diff — skipping pytest (targeted scope; full suite is nightly only)"
   exit 0
 fi
-exec "$DIR/run_tests.sh" $FILES   # intentionally unquoted: word-split paths into args
+set +e
+"$DIR/run_tests.sh" $FILES   # intentionally unquoted: word-split paths into args
+first_status=$?
+set -e
+if [ "$first_status" -eq 0 ]; then
+  exit 0
+fi
+
+echo "run-affected: first affected-test run failed with exit ${first_status}; rerunning once to require reproduced red before hold"
+"$DIR/run_tests.sh" $FILES

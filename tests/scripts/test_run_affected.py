@@ -105,3 +105,25 @@ def test_mapped_diff_forwards_exactly_the_affected_test(tmp_path: Path) -> None:
     assert sentinel.exists(), "run_tests.sh was not invoked for a mapped diff"
     forwarded = sentinel.read_text().split()
     assert forwarded == ["tests/pkg/test_foo.py"], forwarded
+
+
+def test_red_is_held_only_after_reproduced_second_run(tmp_path: Path) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "scripts" / "run_tests.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo \"$*\" >> \"$(dirname \"$0\")/_run_tests_called\"\n"
+        "exit 7\n"
+    )
+    (repo / "scripts" / "run_tests.sh").chmod(0o755)
+    (repo / "pkg" / "foo.py").write_text("VALUE = 3\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change source")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 7
+    assert "rerunning once" in proc.stdout
+    assert sentinel.read_text().splitlines() == [
+        "tests/pkg/test_foo.py",
+        "tests/pkg/test_foo.py",
+    ]
