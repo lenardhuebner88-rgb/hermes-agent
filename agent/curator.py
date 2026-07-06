@@ -25,12 +25,17 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
-from hermes_constants import get_hermes_home
+from hermes_constants import (
+    _get_platform_default_hermes_home,
+    get_hermes_home,
+    get_hermes_home_override,
+)
 from tools import skill_usage
 from utils import atomic_json_write
 
@@ -99,8 +104,50 @@ def load_state() -> Dict[str, Any]:
     return _default_state()
 
 
+def _is_unpinned_real_home_write(path: Path) -> bool:
+    """Return True when *path* would land under the real, unpinned HERMES_HOME.
+
+    Pure/testable core of the pytest write guard (bug class #14261): a
+    straggler background thread — or any test that forgets to pin
+    ``HERMES_HOME`` — can resolve ``get_hermes_home()`` *after* a test's
+    monkeypatch has already unwound, landing back on the operator's real
+    ``~/.hermes`` and silently corrupting production curator state. This
+    mirrors ``get_hermes_home()``'s own precedence so a legitimately pinned
+    home (context-local override, or ``HERMES_HOME`` pointing elsewhere) is
+    never mistaken for a leak: only a path that both (a) has no active pin
+    and (b) actually resolves under the platform-default home counts.
+    """
+    if get_hermes_home_override():
+        return False
+    if os.environ.get("HERMES_HOME", "").strip():
+        # An explicit pin, whatever its value — even one that happens to
+        # coincide with the platform default — is a deliberate choice, not
+        # the leak. The leak specifically needs HERMES_HOME to be unset (the
+        # state after a test's monkeypatch has unwound).
+        return False
+
+    default_home = _get_platform_default_hermes_home()
+    try:
+        path.resolve().relative_to(default_home.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def save_state(data: Dict[str, Any]) -> None:
     path = _state_file()
+    # Last-line-of-defense against bug class #14261: production writes are
+    # untouched (the "pytest" in sys.modules check never fires outside a test
+    # process), but under pytest — where a stale daemon thread or a test that
+    # failed to pin HERMES_HOME can still resolve this path to the operator's
+    # real ~/.hermes — skip the write instead of corrupting live state.
+    if "pytest" in sys.modules and _is_unpinned_real_home_write(path):
+        logger.warning(
+            "Refusing to write curator state to %s: running under pytest and "
+            "the path resolves to the unpinned real HERMES_HOME (see #14261)",
+            path,
+        )
+        return
     try:
         atomic_json_write(path, data, indent=2, sort_keys=True)
     except Exception as e:

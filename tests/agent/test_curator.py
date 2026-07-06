@@ -855,6 +855,98 @@ def test_state_preserves_last_report_path(curator_env):
     assert state["last_report_path"] == "/tmp/curator-report"
 
 
+# ---------------------------------------------------------------------------
+# _is_unpinned_real_home_write — pure guard core (bug class #14261)
+#
+# save_state() resolves its path from get_hermes_home() at write time, so a
+# straggler daemon thread or an under-pinned test can write into the real
+# ~/.hermes after monkeypatch teardown. These tests exercise the pure
+# classifier directly with constructed paths/env, never touching the actual
+# real home, plus one integration-style check that save_state() honors it.
+# ---------------------------------------------------------------------------
+
+def test_unpinned_real_home_write_detects_leak_shaped_path(curator_env, monkeypatch, tmp_path):
+    """No HERMES_HOME pin + a path under Path.home()/.hermes → flagged."""
+    c = curator_env["curator"]
+    fake_real_home = tmp_path / "fake-real-home"
+    fake_real_home.mkdir()
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: fake_real_home)
+
+    leak_path = fake_real_home / ".hermes" / "skills" / ".curator_state"
+    assert c._is_unpinned_real_home_write(leak_path) is True
+
+
+def test_unpinned_real_home_write_allows_pinned_tmp_home(curator_env, monkeypatch, tmp_path):
+    """A properly-pinned HERMES_HOME pointing at a tmp dir is never flagged,
+    even though the path still ends in skills/.curator_state."""
+    c = curator_env["curator"]
+    fake_real_home = tmp_path / "fake-real-home"
+    fake_real_home.mkdir()
+    pinned_home = tmp_path / "pinned-tmp-home"
+    pinned_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_real_home)
+    monkeypatch.setenv("HERMES_HOME", str(pinned_home))
+
+    pinned_path = pinned_home / "skills" / ".curator_state"
+    assert c._is_unpinned_real_home_write(pinned_path) is False
+
+
+def test_unpinned_real_home_write_ignores_unrelated_path(curator_env, monkeypatch, tmp_path):
+    """A path outside the real-home shape is never flagged, even unpinned."""
+    c = curator_env["curator"]
+    fake_real_home = tmp_path / "fake-real-home"
+    fake_real_home.mkdir()
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: fake_real_home)
+
+    unrelated_path = tmp_path / "somewhere-else" / ".curator_state"
+    assert c._is_unpinned_real_home_write(unrelated_path) is False
+
+
+def test_unpinned_real_home_write_respects_context_override(curator_env, monkeypatch, tmp_path):
+    """A context-local override (set_hermes_home_override) counts as pinned
+    even with HERMES_HOME env unset — matches get_hermes_home()'s own
+    precedence (override beats env beats platform default)."""
+    c = curator_env["curator"]
+    fake_real_home = tmp_path / "fake-real-home"
+    fake_real_home.mkdir()
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: fake_real_home)
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(tmp_path / "override-home"))
+    try:
+        leak_shaped_path = fake_real_home / ".hermes" / "skills" / ".curator_state"
+        assert c._is_unpinned_real_home_write(leak_shaped_path) is False
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_save_state_skips_write_when_guard_fires(curator_env, monkeypatch):
+    """Integration: save_state() must not write when the guard fires."""
+    c = curator_env["curator"]
+    monkeypatch.setattr(c, "_is_unpinned_real_home_write", lambda path: True)
+    write_calls = []
+    monkeypatch.setattr(
+        c, "atomic_json_write",
+        lambda *a, **kw: write_calls.append((a, kw)),
+    )
+
+    c.save_state({"paused": True})
+    assert write_calls == [], "save_state must skip atomic_json_write when the guard fires"
+
+
+def test_save_state_writes_normally_when_pinned(curator_env):
+    """Sanity: with HERMES_HOME properly pinned (as the fixture does), the
+    guard never fires and save_state() performs its real write — zero
+    behavior change for the common (test AND production) pinned case."""
+    c = curator_env["curator"]
+    assert c._is_unpinned_real_home_write(c._state_file()) is False
+    c.save_state({"paused": True})
+    assert c.load_state()["paused"] is True
+
+
 def test_curator_review_prompt_has_invariants():
     """Core invariants must be in the review prompt text."""
     from agent.curator import CURATOR_REVIEW_PROMPT
