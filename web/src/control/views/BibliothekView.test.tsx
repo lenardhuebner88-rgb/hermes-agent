@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { CATEGORY_LABEL, countByCategory, dedupeById, groupBySeries, newestPerCategory, seriesNeighbors, sortItems } from "./BibliothekView.helpers";
+import { CATEGORY_LABEL, countByCategory, dedupeById, filterBriefings, groupBySeries, newestBriefing, newestPerCategory, seriesNeighbors, sortItems } from "./BibliothekView.helpers";
 import {
   BibliothekView,
   ItemRow,
@@ -133,8 +133,7 @@ describe("Receipts-Regal (S2)", () => {
 });
 
 describe("Vault-Provenienz-Regal", () => {
-  it("zieht Vault-Provenienz-Daten in der Bibliothek und rendert sie im Regal-Look", () => {
-    expect(src).toContain("useVaultProvenance");
+  it("Vault-ProvenanceShelf ist weiterhin verfügbar und rendert im Regal-Look", () => {
     expect(src).toContain("VaultProvenanceShelf");
     expect(src).toContain("SectionHeader");
     expect(src).toContain("ListRow");
@@ -220,37 +219,42 @@ describe("LesesaalBody Erst-Lade-Skeleton (B1)", () => {
 });
 
 describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3, angepasst für S2/S3)", () => {
-  it("Wissen-Modus (default, keine URL-Params): beide Tab-Buttons tragen aria-controls; beide Panels sind gemountet, Lesesaal ist hidden", () => {
+  it("Briefings-Modus (default, keine URL-Params): alle Tab-Buttons tragen aria-controls; alle Panels sind gemountet, Wissen und Lesesaal sind hidden", () => {
     const html = renderToStaticMarkup(<MemoryRouter><BibliothekView /></MemoryRouter>);
-    // Beide Tab-Buttons haben aria-controls
+    // Alle Tab-Buttons haben aria-controls
+    expect(html).toContain('aria-controls="bibliothek-panel-briefings"');
     expect(html).toContain('aria-controls="bibliothek-panel-wissen"');
     expect(html).toContain('aria-controls="bibliothek-panel-lesesaal"');
-    // S3: beide Panels bleiben IMMER gemountet (nur `hidden` schaltet um) —
+    // S3: alle Panels bleiben IMMER gemountet (nur `hidden` schaltet um) —
     // sonst verwirft der Moduswechsel den Zustand des jeweils anderen Modus.
+    expect(html).toContain('id="bibliothek-panel-briefings"');
     expect(html).toContain('id="bibliothek-panel-wissen"');
     expect(html).toContain('id="bibliothek-panel-lesesaal"');
     expect(html).toContain('role="tabpanel"');
-    expect(html).not.toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
+    expect(html).not.toMatch(/id="bibliothek-panel-briefings"[^>]*hidden/);
+    expect(html).toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
     expect(html).toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
   });
 
-  it("Lesesaal-Modus über ?mode=lesesaal (S2, Deep-Link): Wissen-Panel ist jetzt hidden, Lesesaal nicht", () => {
+  it("Lesesaal-Modus über ?mode=lesesaal (S2, Deep-Link): Briefings und Wissen sind hidden, Lesesaal nicht", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}>
         <BibliothekView />
       </MemoryRouter>,
     );
+    expect(html).toMatch(/id="bibliothek-panel-briefings"[^>]*hidden/);
     expect(html).toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
     expect(html).not.toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
   });
 
-  it("unbekannter mode-Wert fällt sicher auf Wissen zurück", () => {
+  it("unbekannter mode-Wert fällt sicher auf Briefings zurück", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter initialEntries={["/control/bibliothek?mode=quatsch"]}>
         <BibliothekView />
       </MemoryRouter>,
     );
-    expect(html).not.toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
+    expect(html).not.toMatch(/id="bibliothek-panel-briefings"[^>]*hidden/);
+    expect(html).toMatch(/id="bibliothek-panel-wissen"[^>]*hidden/);
     expect(html).toMatch(/id="bibliothek-panel-lesesaal"[^>]*hidden/);
   });
 });
@@ -261,7 +265,7 @@ describe("BibliothekView URL-Zustand — Wiring (S2/S3, Quelltext-Beweis wie Cha
   // interaktiv (Klick → setSearchParams) sichtbar wird und hier zusätzlich
   // durch BibliothekView.render.test.tsx (jsdom) verhaltensgeprüft wird.
   it("Moduswechsel und Item-Schließen sind ein replace (kein Verlaufseintrag)", () => {
-    expect(src).toContain('if (next === "wissen") p.delete("mode");');
+    expect(src).toContain('if (next === "briefings") p.delete("mode");');
     expect(src).toContain('p.set("mode", next);');
     expect(src).toContain('p.delete("item");');
     // Beide replace-Aufrufe (setMode + closeItem) sind verdrahtet.
@@ -289,6 +293,22 @@ describe("BibliothekView URL-Zustand — Wiring (S2/S3, Quelltext-Beweis wie Cha
     expect(src).toMatch(/extractToc/);
     expect(src).toMatch(/toc\.length >= 3/);
     expect(src).toMatch(/<TocNav /);
+  });
+});
+
+describe("filterBriefings und newestBriefing (Briefings-First)", () => {
+  it("filterBriefings liefert nur Items mit category === briefings", () => {
+    const items = [
+      item({ id: "b1", category: "briefings", ts: 300 }),
+      item({ id: "n1", category: "news", ts: 250 }),
+      item({ id: "b2", category: "briefings", ts: 200 }),
+    ];
+    expect(filterBriefings(items).map((i) => i.id)).toEqual(["b1", "b2"]);
+  });
+
+  it("newestBriefing liefert das erste Briefing oder null", () => {
+    expect(newestBriefing([item({ id: "b1", category: "briefings" }), item({ id: "b2", category: "briefings" })])?.id).toBe("b1");
+    expect(newestBriefing([item({ id: "n1", category: "news" })])).toBeNull();
   });
 });
 

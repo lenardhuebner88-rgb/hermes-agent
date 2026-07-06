@@ -10,7 +10,7 @@
 // BibliothekView.test.tsx) — zusätzlich selbst gebaut und gelaufen, siehe
 // Rückgabe-Notiz.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
@@ -91,22 +91,28 @@ function mockLibraryFetch(extra?: (url: string) => unknown) {
 }
 
 describe("BibliothekView: Zustand bleibt beim Moduswechsel erhalten (S3)", () => {
-  it("Lesesaal-Suchtext übersteht Nachschlagewerk→Lesesaal→Nachschlagewerk→Lesesaal", async () => {
+  it("Lesesaal-Suchtext übersteht Briefings→Lesesaal→Briefings→Lesesaal", async () => {
     mockLibraryFetch();
     render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Lesesaal" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Lesesaal/ }));
     const search = await screen.findByPlaceholderText("Suche in Titel + Text …");
     fireEvent.change(search, { target: { value: "quokkafund" } });
     expect((search as HTMLInputElement).value).toBe("quokkafund");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Nachschlagewerk" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Lesesaal" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Briefings/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Lesesaal/ }));
 
     const searchAfter = screen.getByPlaceholderText("Suche in Titel + Text …") as HTMLInputElement;
     expect(searchAfter.value).toBe("quokkafund");
   });
 });
+
+function lesesaalPanel() {
+  const el = document.getElementById("bibliothek-panel-lesesaal");
+  if (!el) throw new Error("Lesesaal-Panel nicht gefunden");
+  return within(el);
+}
 
 describe("ReadingView: Inhaltsverzeichnis erst ab 3 Überschriften (S4)", () => {
   it("zeigt das Inhaltsverzeichnis bei 3 Überschriften", async () => {
@@ -118,7 +124,7 @@ describe("ReadingView: Inhaltsverzeichnis erst ab 3 Überschriften (S4)", () => 
     });
     render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
 
-    const card = await screen.findByText(ITEM.title);
+    const card = await lesesaalPanel().findByText(ITEM.title);
     fireEvent.click(card);
 
     await waitFor(() => screen.getByText("Inhalt"));
@@ -134,7 +140,7 @@ describe("ReadingView: Inhaltsverzeichnis erst ab 3 Überschriften (S4)", () => 
     });
     render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
 
-    const card = await screen.findByText(ITEM.title);
+    const card = await lesesaalPanel().findByText(ITEM.title);
     fireEvent.click(card);
 
     await waitFor(() => screen.getByText(/Eins/));
@@ -142,23 +148,25 @@ describe("ReadingView: Inhaltsverzeichnis erst ab 3 Überschriften (S4)", () => 
   });
 });
 
-describe("BibliothekView: Regal-Provenienz und Reader-Drawer (S4)", () => {
-  it("rendert echte Knowledge-/Provenienz-Payloads und öffnet den Reader im Drawer", async () => {
-    mockLibraryFetch((url) => {
-      if (url.startsWith("/api/library/item?id=")) {
-        return { ...ITEM, body_md: "# Eins\ntext\n\n## Zwei\ntext\n\n## Drei\ntext\n" };
-      }
-      return undefined;
-    });
-    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+function briefingsPanel() {
+  const el = document.getElementById("bibliothek-panel-briefings");
+  if (!el) throw new Error("Briefings-Panel nicht gefunden");
+  return within(el);
+}
 
-    expect(await screen.findByText("Regal-Testfixture")).toBeTruthy();
-    expect(screen.getByText("regal-receipt.md")).toBeTruthy();
+describe("BibliothekView: Regal-Provenienz im Briefings-Tab (S4)", () => {
+  it("rendert echte Vault-Provenienz-Payloads in der aufgeklappten Provenienz-Sektion", async () => {
+    mockLibraryFetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
 
-    fireEvent.click(await screen.findByText(ITEM.title));
+    // Provenienz-Vorschau (Mittelzeile) UND die eingeklappte Provenienz-Sektion
+    // speisen sich aus denselben open_sessions → auf die Disclosure-Schaltfläche
+    // (role=button, das Vorschau-Label ist ein span) zielen und über die
+    // eindeutige Receipt-Datei prüfen, dass die volle VaultProvenanceShelf nach
+    // dem Aufklappen rendert.
+    fireEvent.click(await briefingsPanel().findByRole("button", { name: /Provenienz/ }));
 
-    await waitFor(() => screen.getByRole("dialog", { name: new RegExp(ITEM.title) }));
-    expect(screen.getByText("Inhalt")).toBeTruthy();
+    expect(await briefingsPanel().findByText("regal-receipt.md")).toBeTruthy();
   });
 });
 
