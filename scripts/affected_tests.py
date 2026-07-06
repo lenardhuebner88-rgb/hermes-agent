@@ -34,6 +34,7 @@ through ``scripts/run-affected.sh``, which skips pytest on empty output — a ba
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,38 @@ from pathlib import Path
 # 500 covers all current directories with headroom; anything larger would
 # push walltime past the targeted-gate budget.
 _FALLBACK_MAX_TEST_FILES = 500
+
+
+def _imports_changed_module(test_path: Path, module_import: str) -> bool:
+    """Return True when ``test_path`` imports the changed source module."""
+    try:
+        content = test_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    package, _, module_name = module_import.rpartition(".")
+    direct_import = rf"^\s*import\s+.*\b{re.escape(module_import)}\b"
+    if re.search(direct_import, content, re.MULTILINE):
+        return True
+    if package:
+        package_import = rf"^\s*from\s+{re.escape(package)}\s+import\s+.*\b{re.escape(module_name)}\b"
+        if re.search(package_import, content, re.MULTILINE):
+            return True
+    return False
+
+
+def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) -> list[str]:
+    """Bounded import-based sibling tests for a changed module."""
+    pkg_test_dir = Path("tests") / rel_dir
+    absolute_pkg_test_dir = repo_root / pkg_test_dir
+    if pkg_test_dir == Path("tests") or not absolute_pkg_test_dir.is_dir():
+        return []
+    module_import = str(source.with_suffix("")).replace("/", ".")
+    return [
+        str(path.relative_to(repo_root))
+        for path in sorted(absolute_pkg_test_dir.glob("test_*.py"))
+        if _imports_changed_module(path, module_import)
+    ]
 
 
 def _git(repo_root: Path, *args: str) -> str:
@@ -100,11 +133,13 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
             if (repo_root / f).is_file():
                 modules.add(f)
             continue
-        rel_dir = str(Path(f).parent)
+        source = Path(f)
+        rel_dir = str(source.parent)
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
-        else:
+        modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
+        if not (repo_root / candidate).is_file():
             # Fallback: no 1:1 test file. Monolith source files like
             # gateway/run.py or hermes_cli/kanban_db.py have feature-named
             # tests (test_shutdown_cache_cleanup.py, test_kanban_core*.py),

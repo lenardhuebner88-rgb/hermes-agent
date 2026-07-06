@@ -107,3 +107,14 @@ def test_matches_kanban_worktrees_mapping():
     assert mod.affected_pytest_modules(REPO_ROOT, sample) == _affected_pytest_modules(
         REPO_ROOT, sample
     )
+
+
+def test_changed_module_selects_feature_named_sibling_tests_from_imports():
+    """Historical stale-sibling shape: direct test green, feature test stale."""
+    mod = _load_module()
+
+    selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/kanban_db.py"])
+
+    assert "tests/hermes_cli/test_kanban_db.py" in selected
+    assert "tests/hermes_cli/test_kanban_core_functionality.py" in selected
+    assert "tests/hermes_cli/" not in selected
