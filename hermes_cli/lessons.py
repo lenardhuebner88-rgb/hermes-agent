@@ -563,3 +563,209 @@ def run_harvest(
         "candidate_count": meeting,
         "total_clusters": len(candidates),
     }
+
+
+# ---------------------------------------------------------------------------
+# Promote — turn harvested candidates into held docs-edit Kanban tasks (L3)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PROMOTE_CAP = 5
+"""Maximum number of docs-edit tasks to create per promote run."""
+
+DOCS_DEDUP_FILES = [
+    "AGENTS.md",
+    "docs/agent-dev-guide.md",
+]
+
+
+def _load_cluster_docs(repo_dir: Path) -> str:
+    """Read the combined text of the pitfall-bearing docs for dedup.
+
+    Reads AGENTS.md (Important Pitfalls section) and docs/agent-dev-guide.md
+    from ``repo_dir``. Missing files are silently skipped — dedup just
+    won't match against them.
+    """
+    chunks: list[str] = []
+    for rel in DOCS_DEDUP_FILES:
+        candidate = repo_dir / rel
+        try:
+            if candidate.is_file():
+                chunks.append(candidate.read_text(encoding="utf-8"))
+        except OSError:
+            logger.warning("promote: could not read %s for dedup", candidate)
+    return "\n".join(chunks)
+
+
+def _slug_from_cluster(cluster: str) -> str:
+    """Turn a cluster label like ``release-gate/born-blocked-holds`` into a
+    filesystem-safe slug ``release-gate-born-blocked-holds``."""
+    return re.sub(r"[^a-z0-9-]+", "-", cluster.lower()).strip("-")
+
+
+def _is_cluster_documented(cluster: str, signature: tuple[str, ...], docs_text: str) -> bool:
+    """Return True if any signature keyword already appears in the docs.
+
+    The cluster label is slugified and also checked, so a candidate whose
+    label is already mentioned in prose is considered documented.
+    """
+    if not docs_text:
+        return False
+    slug = _slug_from_cluster(cluster)
+    if slug and slug in docs_text.lower():
+        return True
+    lower_docs = docs_text.lower()
+    for kw in signature:
+        if kw and kw.lower() in lower_docs:
+            return True
+    return False
+
+
+def _build_task_body(candidate: dict[str, Any], cluster_slug: str) -> str:
+    """Compose the docs-edit task brief for a promoted candidate."""
+    cluster = candidate.get("cluster", cluster_slug)
+    evidence_count = candidate.get("evidence_point_count", 0)
+    source_ids = candidate.get("source_ids", [])
+    source_types = candidate.get("source_types", [])
+    samples = candidate.get("evidence_samples", [])
+
+    lines = [
+        f"## Lessons-to-Docs Promote (auto-generated)",
+        "",
+        f"Recurring trap-class cluster **{cluster}** reached {evidence_count} "
+        f"evidence points (>= {MIN_EVIDENCE_FOR_CANDIDATE}) in the latest harvest.",
+        "",
+        "### Target",
+        f"Add a one-line pitfall entry to **AGENTS.md** (Important Pitfalls section) "
+        f"or the affected **SKILL.md**, depending on where the trap surfaces.",
+        "Do NOT commit directly — this task is a held docs-edit request awaiting review.",
+        "",
+        "### Evidence (from harvest_candidates.json)",
+        f"- Source types: {', '.join(sorted(set(source_types))) or 'n/a'}",
+        f"- Source IDs ({len(source_ids)}): {', '.join(source_ids[:10])}",
+    ]
+    if samples:
+        lines.append("")
+        lines.append("### Evidence samples (max 3)")
+        for i, s in enumerate(samples, 1):
+            text = str(s).strip()
+            # Truncate long samples to keep the task body compact.
+            if len(text) > 500:
+                text = text[:497] + "..."
+            lines.append(f"{i}. {text}")
+    lines.append("")
+    lines.append("### Acceptance")
+    lines.append("- Pitfall is documented in AGENTS.md or the relevant SKILL.md.")
+    lines.append("- One sentence capturing the trap and the mitigation.")
+    lines.append("- No speculative content — only what the evidence supports.")
+    return "\n".join(lines)
+
+
+def run_promote(
+    harvest_path: Optional[Path] = None,
+    repo_dir: Optional[Path] = None,
+    cap: int = DEFAULT_PROMOTE_CAP,
+    dry_run: bool = False,
+    board: Optional[str] = None,
+) -> dict[str, Any]:
+    """Promote harvest candidates to held docs-edit Kanban tasks.
+
+    Reads ``harvest_candidates.json``, filters clusters with
+    ``meets_threshold=True`` (>= 2 evidence points), deduplicates against
+    existing pitfalls in AGENTS.md and docs/agent-dev-guide.md, and creates
+    **held** Kanban tasks (``initial_status='blocked'``) for the top-N
+    candidates. The assignee is ``coder`` — these are docs-edit requests,
+    not direct commits.
+
+    Idempotent via ``idempotency_key='lessons:<slug>'`` — re-running with
+    the same harvest artefact produces no duplicate tasks.
+
+    Returns a summary dict with counts of promoted, skipped (documented),
+    and capped.
+    """
+    from hermes_cli import kanban_db
+
+    if harvest_path is None:
+        hp: Path = get_hermes_home() / DEFAULT_OUTPUT_PATH
+    else:
+        hp = harvest_path
+    if not hp.is_file():
+        raise FileNotFoundError(
+            f"Harvest artefact not found: {hp}. "
+            "Run 'hermes lessons harvest' first."
+        )
+
+    data = json.loads(hp.read_text(encoding="utf-8"))
+    raw_candidates = data.get("candidates", [])
+
+    # Determine repo_dir for dedup — fall back to the worktree's repo root.
+    if repo_dir is None:
+        repo_dir = Path(__file__).resolve().parent.parent
+
+    docs_text = _load_cluster_docs(repo_dir)
+
+    eligible: list[dict[str, Any]] = []
+    skipped_documented: list[str] = []
+
+    for cand in raw_candidates:
+        if not cand.get("meets_threshold", False):
+            continue
+        cluster = cand.get("cluster", "")
+        if not cluster or cluster == "unclustered":
+            continue
+        signature = tuple(cand.get("signature", []))
+        if _is_cluster_documented(cluster, signature, docs_text):
+            skipped_documented.append(cluster)
+            continue
+        eligible.append(cand)
+
+    # Sort by evidence count descending, then alphabetically for stability.
+    eligible.sort(
+        key=lambda c: (-c.get("evidence_point_count", 0), c.get("cluster", ""))
+    )
+
+    capped = max(0, len(eligible) - cap)
+    to_promote = eligible[:cap]
+
+    created: list[dict[str, Any]] = []
+    skipped_existing: list[str] = []
+
+    for cand in to_promote:
+        cluster = cand.get("cluster", "")
+        slug = _slug_from_cluster(cluster)
+        title = f"Docs-Edit: document recurring trap-class '{cluster}' as pitfall"
+        body = _build_task_body(cand, slug)
+        idem = f"lessons:{slug}"
+
+        if dry_run:
+            created.append({"title": title, "idempotency_key": idem, "dry_run": True})
+            continue
+
+        with kanban_db.connect_closing(board=board) as conn:
+            created_id = kanban_db.create_task(
+                conn,
+                title=title,
+                body=body,
+                assignee="coder",
+                created_by="lessons-promote",
+                workspace_kind="dir",
+                idempotency_key=idem,
+                initial_status="blocked",
+                kind="code",
+                tenant="planspec",
+            )
+        created.append({"task_id": created_id, "cluster": cluster, "title": title})
+
+    summary = {
+        "promoted": len(created),
+        "skipped_documented": len(skipped_documented),
+        "documented_clusters": skipped_documented,
+        "capped": capped,
+        "created": created,
+    }
+    logger.info(
+        "Lessons promote: %d promoted, %d already documented, %d capped",
+        len(created),
+        len(skipped_documented),
+        capped,
+    )
+    return summary
