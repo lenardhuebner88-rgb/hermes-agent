@@ -17,6 +17,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs
 from hermes_cli import strategist
 from hermes_cli import strategist_surface
+from hermes_cli import vision_metrics as vm
 
 
 @pytest.fixture
@@ -718,6 +719,42 @@ def test_persistent_red_triage_is_idempotent_while_window_ramps(board_home):
     assert r1["ingested"]["root_task_id"] == r2["ingested"]["root_task_id"]
     with kb.connect() as conn:
         assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_persistent_red_triage_leaker_head_planspec_is_actionable(board_home):
+    """AC-1 (operator layer, LIVE 2026-07-06 shape): a leaker-only head with
+    attributed nights behind it must render an ACTIONABLE Triage-PlanSpec — real
+    gate + real files listed, never 'Gate unknown' / '(unbekannt)'. The auto-
+    opened spec that motivated this task listed no files precisely because the
+    head night was leaker-only harness noise."""
+    out_dir = board_home / "specs"
+    records = [
+        {"date": "2026-07-04", "result": "fail", "ts": "2026-07-04T03:00:00+00:00",
+         "first_fail": {"gate": "python",
+                        "detail": "  tests/hermes_cli/test_a.py  (1 test failed)\n"}},
+        {"date": "2026-07-05", "result": "fail", "ts": "2026-07-05T03:00:00+00:00",
+         "first_fail": {"gate": "python",
+                        "detail": "  tests/hermes_cli/test_b.py  (2 tests failed)\n"}},
+        # head night: leaker-only harness noise (no product first_fail cause)
+        {"date": "2026-07-06", "result": "fail", "ts": "2026-07-06T03:00:00+00:00",
+         "leaker_only": True, "leakers": ["python: tests/flaky.py"]},
+    ]
+    result = strategist.propose_persistent_red_triage(
+        board=None, out_dir=out_dir, gate_records=records, do_ingest=False
+    )
+    assert result["triggered"] is True
+    assert result["gate"] == "python"  # not the 'unknown' sentinel
+    # anchored on the most recent attributed night (07-05):
+    assert result["red_files"] == ["tests/hermes_cli/test_b.py"]
+    assert result["key"].startswith("GATE-TRIAGE-PYTHON-")
+
+    # the human-facing PlanSpec body lists the real file, never "(unbekannt)"
+    lever = strategist._persistent_red_triage_lever(
+        vm.derive_persistent_red_triage(records)
+    )
+    assert "(unbekannt)" not in lever.rationale
+    assert "tests/hermes_cli/test_b.py" in lever.rationale
+    assert "Gate 'python'" in lever.title
 
 
 # --------------------------------------------------------------------------- #
