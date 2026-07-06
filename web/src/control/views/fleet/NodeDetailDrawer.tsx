@@ -3,7 +3,7 @@
  *
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   fmtSeconds,
   fmtTokens,
@@ -14,14 +14,15 @@ import {
   profileColorClass,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
-import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand } from "../../hooks/useControlData";
+import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
-import { openAuthedApiFile } from "@/lib/api";
+import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
+import { TaskReassignResponseSchema, parseOrThrow } from "../../lib/schemas";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -162,6 +163,12 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
         {/* Steuerung — Unblock/Retry/Cancel Task/Cancel Kette (S3, tab-übergreifend) */}
         {task ? (
           <div className="fleet-dr-actions">
+            <TaskReassignControl
+              taskId={taskId}
+              status={task.status ?? ""}
+              currentProfile={task.assignee ?? null}
+              onChanged={onChanged}
+            />
             <FleetTaskActions
               taskId={taskId}
               status={task.status ?? ""}
@@ -177,6 +184,141 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
         ) : null}
       </div>
     </Overlay>
+  );
+}
+
+const TERMINAL_REASSIGN_STATUSES = new Set(["done", "archived"]);
+
+function TaskReassignControl({
+  taskId,
+  status,
+  currentProfile,
+  onChanged,
+}: {
+  taskId: string;
+  status: string;
+  currentProfile: string | null;
+  onChanged?: () => void | Promise<void>;
+}) {
+  const lanesCatalog = useLanesCatalog();
+  const [targetProfile, setTargetProfile] = useState("");
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+
+  const profiles = useMemo(() => (
+    (lanesCatalog.data?.profiles ?? [])
+      .map((profile) => profile.name.trim())
+      .filter((name) => name.length > 0)
+  ), [lanesCatalog.data?.profiles]);
+
+  const normalizedStatus = status.trim().toLowerCase();
+  const normalizedCurrentProfile = currentProfile?.trim() ?? "";
+  const defaultProfile = profiles.includes(normalizedCurrentProfile)
+    ? normalizedCurrentProfile
+    : profiles[0] ?? "";
+  const selectedProfile = profiles.includes(targetProfile) ? targetProfile : defaultProfile;
+
+  if (TERMINAL_REASSIGN_STATUSES.has(normalizedStatus) || profiles.length === 0) return null;
+
+  const changedProfile = selectedProfile && selectedProfile !== normalizedCurrentProfile;
+  const disabled = busy || !changedProfile;
+
+  async function fire() {
+    if (!selectedProfile) return;
+    setBusy(true);
+    setError("");
+    setNote("");
+    setArmed(false);
+    try {
+      const raw = await fetchJSON<unknown>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/reassign`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            profile: selectedProfile,
+            reclaim_first: false,
+            reason: "Fleet Cockpit: Profil geändert",
+          }),
+        },
+      );
+      const result = parseOrThrow(TaskReassignResponseSchema, raw, "Task-Reassign");
+      setNote(de.fleet.reassignDone(result.assignee ?? "—"));
+      await onChanged?.();
+    } catch (e) {
+      setError(extractDetail(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fleet-task-actions" aria-label={de.fleet.reassignTitle}>
+      {armed ? (
+        <div className="fleet-ta-confirm">
+          <span className="fleet-ta-confirm-text">
+            {de.fleet.reassignConfirm(selectedProfile)}
+          </span>
+          <button
+            type="button"
+            className="fleet-ta-btn"
+            style={{ color: "var(--fleet-puls)", borderColor: "rgba(55,224,255,.45)" }}
+            disabled={busy}
+            onClick={() => void fire()}
+          >
+            {busy ? de.fleet.actionBusy : de.fleet.actionConfirm}
+          </button>
+          <button type="button" className="fleet-ta-btn" disabled={busy} onClick={() => setArmed(false)}>
+            {de.fleet.actionDismiss}
+          </button>
+        </div>
+      ) : (
+        <div className="fleet-ta-row" style={{ alignItems: "center" }}>
+          <label
+            htmlFor={`fleet-reassign-${taskId}`}
+            style={{ font: "500 10px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", textTransform: "uppercase" }}
+          >
+            {de.fleet.reassignProfileLabel}
+          </label>
+          <select
+            id={`fleet-reassign-${taskId}`}
+            value={selectedProfile}
+            onChange={(event) => {
+              setTargetProfile(event.target.value);
+              setError("");
+              setNote("");
+            }}
+            disabled={busy || lanesCatalog.loading}
+            style={{
+              flex: "1 1 150px",
+              minHeight: 32,
+              borderRadius: 9,
+              border: "1px solid var(--fleet-linie-stark)",
+              background: "var(--fleet-karte)",
+              color: "var(--fleet-t1)",
+              font: "500 11px/1 var(--hc-font-sans)",
+              padding: "7px 9px",
+            }}
+          >
+            {profiles.map((profile) => (
+              <option key={profile} value={profile}>{profile}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="fleet-ta-btn"
+            disabled={disabled}
+            onClick={() => { setError(""); setNote(""); setArmed(true); }}
+          >
+            {de.fleet.reassignButton}
+          </button>
+        </div>
+      )}
+      {error ? <p className="fleet-ta-error">{error}</p> : null}
+      {note ? <p className="fleet-ta-note">{note}</p> : null}
+    </div>
   );
 }
 

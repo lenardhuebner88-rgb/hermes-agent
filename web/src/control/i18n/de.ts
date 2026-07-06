@@ -422,6 +422,11 @@ export const de = {
     actionBusy: "…",
     actionChainCancelled: (terminated: number, held: number, skipped: number) =>
       `Kette abgebrochen: ${terminated} beendet · ${held} gehalten · ${skipped} übersprungen`,
+    reassignTitle: "Profil ändern",
+    reassignProfileLabel: "Zielprofil",
+    reassignButton: "Profil ändern",
+    reassignConfirm: (profile: string) => `Task auf ${profile} umhängen?`,
+    reassignDone: (profile: string) => `Profil geändert: ${profile}`,
     // Operator-Frage beantworten (S6)
     answerTitle: "Operator-Frage beantworten",
     answerPlaceholder: "Antwort eingeben …",

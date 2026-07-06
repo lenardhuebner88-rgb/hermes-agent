@@ -1833,6 +1833,15 @@ export const TaskBodySchema = z.object({
 }).passthrough().catch({ task: null, runs: [], deliverables: [] });
 export type TaskBodyResponse = z.infer<typeof TaskBodySchema>;
 
+// POST /api/plugins/kanban/tasks/{id}/reassign.
+// 409 guards throw before parsing; 200 carries the new nullable assignee.
+export const TaskReassignResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  task_id: z.string().catch(""),
+  assignee: z.string().nullable().catch(null),
+}).passthrough();
+export type TaskReassignResponse = z.infer<typeof TaskReassignResponseSchema>;
+
 // ─── Lane-Preset-Catalog (GET /api/plugins/kanban/lanes) ──────────────────────
 // Benötigt für das Plan-Cockpit: Modell-Optionen je Lane-Profil.
 // Tolerant: ältere Server ohne models-Feld liefern leere Liste.
