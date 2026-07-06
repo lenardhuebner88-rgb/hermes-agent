@@ -16,12 +16,31 @@ Rules (config: ``kanban.alerts:`` in the ROOT config.yaml, additive):
       configured USD threshold. No threshold configured = rule off.
   (d) ``auto_release_attention`` — ``auto_release`` task events (Subsystem C3)
       whose outcome needs operator attention (``rolled_back``,
-      ``held_critical``, ``deploy_failed``); ``deployed``/``held_live_test``/
-      ``aborted_pre_live_test`` stay silent (successes and expected holds).
+      ``held_critical``, ``deploy_failed``, ``held_red_gate``), plus the
+      distinct ``auto_release_hook_crashed`` event kind (a hook crash never
+      produced an outcome, so it rides the same rule as an always-alert
+      case); ``deployed``/``held_live_test``/``aborted_pre_live_test`` stay
+      silent (successes and expected holds).
 
 Rate limit: max one alert per rule per ``cooldown_seconds`` (default 15 min).
 A suppressed alert is dropped, not queued — the next qualifying event after
 the cooldown alerts again. Alerts go to Discord only (Telegram ist ab).
+
+Send-confirmation cursor gating (A1, 2026-07-06): the two event-cursor rules
+(``operator_escalation``, ``auto_release_attention``) accept an
+optional ``send_fn`` — when given, the cursor for a rule only commits AFTER
+``send_fn(alert)`` confirms delivery (truthy, no exception); a failed send
+leaves the cursor untouched so the next tick re-fetches and retries the SAME
+(possibly grown) batch instead of silently losing it. After
+``_MAX_SEND_ATTEMPTS`` consecutive failures for that rule the retry gives up
+and writes a digest-backstop entry (default: ``~/.hermes/reports/
+kanban-alerts-backstop.log``, same durable-alert-file precedent as
+``auto_release._default_notify``) instead — the event is documented, not
+lost forever, and the cursor commits then too. ``send_fn``/``backstop_fn``
+default to ``None``/the file writer; a caller that omits ``send_fn`` keeps
+the PRE-fix eager-advance-before-send behavior unchanged (the production
+watcher DOES pass it since the A2 wiring, 2026-07-06 — see
+``gateway/kanban_watchers.py::_kanban_alerts_watcher``).
 """
 
 from __future__ import annotations
@@ -29,7 +48,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 DEFAULT_INTERVAL_SECONDS = 300       # 5-min tick
 DEFAULT_COOLDOWN_SECONDS = 900       # max 1 alert per rule per 15 min
@@ -40,6 +59,8 @@ _SNIPPET_MAX_CHARS = 280
 _MAX_FAILURES_LISTED = 5
 _OPERATOR_ESCALATION_EVENT = "operator_escalation"
 _AUTO_RELEASE_EVENT = "auto_release"
+_AUTO_RELEASE_HOOK_CRASHED_EVENT = "auto_release_hook_crashed"
+_AUTO_RELEASE_HOOK_CRASHED_EMOJI = "🔴"
 # outcome -> emoji, attention-only (deployed / held_live_test /
 # aborted_pre_live_test are successes or expected operator-gated holds and
 # stay silent — operator time is scarce).
@@ -47,8 +68,24 @@ _AUTO_RELEASE_ATTENTION_EMOJI = {
     "rolled_back": "🔴",
     "deploy_failed": "🔴",
     "held_critical": "🟡",
+    "held_red_gate": "🟡",
 }
 _AUTO_RELEASE_DETAIL_MAX_CHARS = 200
+# K: bounded consecutive-send-failure retries before a rule's digest-backstop
+# takes over (A1, 2026-07-06). At the default 5-min tick interval, 3 tries
+# spans ~10-15 min of retrying through a transient Discord blip (rate limit,
+# momentary 5xx) — long enough to self-heal, short enough to not spam-hold an
+# operator-attention event indefinitely. Same order of magnitude as this
+# codebase's other small failure bounds (kanban_db.DEFAULT_FAILURE_LIMIT=2,
+# auto_release's CONFLICT_FIXER_MAX_ATTEMPTS=2) rather than an arbitrary pick.
+_MAX_SEND_ATTEMPTS = 3
+# The two rules whose ``alert["rule"]`` this module already attempts to
+# deliver ITSELF via ``send_fn`` (see ``_confirm_or_defer``) when a caller
+# passes one. A caller wiring ``send_fn`` in must not also re-send an alert
+# whose rule is in this set through its own post-hoc send loop — public so
+# ``gateway.kanban_watchers`` can filter on it without duplicating the
+# rule-name strings.
+SEND_GATED_RULES = frozenset({_OPERATOR_ESCALATION_EVENT, "auto_release_attention"})
 
 # Terminal failure classification. status covers the run row's own state;
 # outcome covers the dispatcher's verdict (same family the reliability stats
@@ -120,6 +157,9 @@ def new_alert_state() -> dict:
         "last_seen_operator_escalation_event_id": None,
         "last_seen_auto_release_event_id": None,
         "last_sent": {},
+        # rule -> consecutive confirmed-send-failure count (A1, send-gated
+        # cursor rules only; reset to 0 on a confirmed send or a backstop).
+        "send_attempts": {},
     }
 
 
@@ -156,11 +196,97 @@ def _payload_dict(raw: Optional[str]) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _default_send_backstop(entry: dict) -> None:
+    """Durable fallback once a rule's send keeps failing (``_MAX_SEND_ATTEMPTS``
+    consecutive tries): append to a log file so the event is documented
+    instead of silently dropped. Same precedent as ``auto_release``'s
+    ``_default_notify`` (``~/.hermes/reports/*.log``, fail-soft, UTC stamp) —
+    a distinct file so the two backstops never interleave/clobber."""
+    try:
+        import datetime as _dt
+        from pathlib import Path
+
+        reports = Path.home() / ".hermes" / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rule = entry.get("rule", "?")
+        attempts = entry.get("attempts", "?")
+        text = " ".join(str(entry.get("text", "")).split())
+        with open(
+            reports / "kanban-alerts-backstop.log", "a", encoding="utf-8",
+        ) as fh:
+            fh.write(f"{stamp} rule={rule} attempts={attempts} {text}\n")
+    except Exception:
+        pass
+
+
+def _confirm_or_defer(
+    state: dict,
+    rule: str,
+    cursor_key: str,
+    new_cursor: int,
+    alert: Optional[dict],
+    send_fn: Optional[Callable[[dict], bool]],
+    max_send_attempts: int,
+    backstop_fn: Optional[Callable[[dict], None]],
+) -> Optional[dict]:
+    """Send-confirmation cursor gate shared by the two event-cursor rules.
+
+    No-op / legacy path — ``alert is None`` (a silent batch: rows were found
+    but none needed a push) or ``send_fn is None`` (caller did not opt into
+    gating): commit ``state[cursor_key] = new_cursor`` unconditionally,
+    exactly like before this fix (F2's original eager advance).
+
+    Send-gated path (``send_fn`` given and there IS an alert): the cursor
+    only commits after ``send_fn(alert)`` confirms delivery (truthy, no
+    exception). A failed send leaves the cursor at its old value, so the next
+    tick re-fetches and retries the SAME (possibly grown) batch instead of
+    losing it. After ``max_send_attempts`` consecutive failures for this rule,
+    stop retrying: write a backstop entry (default :func:`_default_send_backstop`)
+    and commit the cursor anyway — documented, not lost forever.
+    """
+    if alert is None or send_fn is None:
+        state[cursor_key] = new_cursor
+        return alert
+    attempts_by_rule = state.setdefault("send_attempts", {})
+    # Codex review 2026-07-06 finding 2: the retry budget is keyed by BATCH
+    # IDENTITY (rule + new_cursor), not by rule alone. new_cursor = max(id)
+    # over the fetched batch, so when a NEW event arrives mid-retry the
+    # batch identity changes and the counter resets — otherwise the new
+    # event would inherit the old batch's failures and could be backstopped
+    # after a single actual Discord attempt.
+    entry = attempts_by_rule.get(rule)
+    if not isinstance(entry, dict) or entry.get("cursor") != new_cursor:
+        entry = {"cursor": new_cursor, "n": 0}
+        attempts_by_rule[rule] = entry
+    try:
+        sent_ok = bool(send_fn(alert))
+    except Exception:
+        sent_ok = False
+    if sent_ok:
+        attempts_by_rule.pop(rule, None)
+        state[cursor_key] = new_cursor
+        return alert
+    entry["n"] += 1
+    if entry["n"] < max_send_attempts:
+        return None  # deferred — cursor stays put, retry next tick
+    (backstop_fn or _default_send_backstop)(
+        {"rule": rule, "text": alert["text"], "attempts": entry["n"]}
+    )
+    attempts_by_rule.pop(rule, None)
+    state[cursor_key] = new_cursor  # documented via backstop, not lost
+    return None
+
+
 def _rule_operator_escalation(
     conn: sqlite3.Connection,
     acfg: dict,
     state: dict,
     now: int,
+    *,
+    send_fn: Optional[Callable[[dict], bool]] = None,
+    max_send_attempts: int = _MAX_SEND_ATTEMPTS,
+    backstop_fn: Optional[Callable[[dict], None]] = None,
 ) -> Optional[dict]:
     del now
     last_seen = state.get("last_seen_operator_escalation_event_id")
@@ -183,7 +309,7 @@ def _rule_operator_escalation(
     ).fetchall()
     if not rows:
         return None
-    state["last_seen_operator_escalation_event_id"] = max(int(r["id"]) for r in rows)
+    new_cursor = max(int(r["id"]) for r in rows)
 
     lines = [
         f"🚨 **Kanban operator escalation:** {len(rows)} task(s) need human action"
@@ -204,7 +330,11 @@ def _rule_operator_escalation(
     alert = {"rule": _OPERATOR_ESCALATION_EVENT, "text": "\n".join(lines)}
     if acfg.get("escalation_channel_id"):
         alert["channel_id"] = acfg["escalation_channel_id"]
-    return alert
+    return _confirm_or_defer(
+        state, _OPERATOR_ESCALATION_EVENT,
+        "last_seen_operator_escalation_event_id", new_cursor,
+        alert, send_fn, max_send_attempts, backstop_fn,
+    )
 
 
 def _rule_auto_release_attention(
@@ -212,20 +342,27 @@ def _rule_auto_release_attention(
     acfg: dict,
     state: dict,
     now: int,
+    *,
+    send_fn: Optional[Callable[[dict], bool]] = None,
+    max_send_attempts: int = _MAX_SEND_ATTEMPTS,
+    backstop_fn: Optional[Callable[[dict], None]] = None,
 ) -> Optional[dict]:
-    """``auto_release`` task events that need operator attention.
+    """``auto_release`` task events that need operator attention, plus the
+    distinct ``auto_release_hook_crashed`` event kind (A1, 2026-07-06).
 
     Same cursor/dedupe shape as ``_rule_operator_escalation`` (event-id
     cursor, not a time cooldown — each event alerts exactly once). Only
-    ``rolled_back`` / ``held_critical`` / ``deploy_failed`` outcomes push;
-    ``deployed`` / ``held_live_test`` / ``aborted_pre_live_test`` stay silent.
+    ``rolled_back`` / ``held_critical`` / ``deploy_failed`` / ``held_red_gate``
+    outcomes push; ``deployed`` / ``held_live_test`` / ``aborted_pre_live_test``
+    stay silent. ``auto_release_hook_crashed`` never carries an ``outcome``
+    (a hook crash produced no verdict at all) so it always pushes, fixed 🔴.
     """
     del now
     last_seen = state.get("last_seen_auto_release_event_id")
     if last_seen is None:
         row = conn.execute(
-            "SELECT MAX(id) AS m FROM task_events WHERE kind = ?",
-            (_AUTO_RELEASE_EVENT,),
+            "SELECT MAX(id) AS m FROM task_events WHERE kind IN (?, ?)",
+            (_AUTO_RELEASE_EVENT, _AUTO_RELEASE_HOOK_CRASHED_EVENT),
         ).fetchone()
         state["last_seen_auto_release_event_id"] = (
             int(row["m"]) if row and row["m"] is not None else 0
@@ -233,17 +370,26 @@ def _rule_auto_release_attention(
         return None
 
     rows = conn.execute(
-        "SELECT id, task_id, payload FROM task_events "
-        "WHERE id > ? AND kind = ? ORDER BY id ASC",
-        (int(last_seen), _AUTO_RELEASE_EVENT),
+        "SELECT id, task_id, kind, payload FROM task_events "
+        "WHERE id > ? AND kind IN (?, ?) ORDER BY id ASC",
+        (int(last_seen), _AUTO_RELEASE_EVENT, _AUTO_RELEASE_HOOK_CRASHED_EVENT),
     ).fetchall()
     if not rows:
         return None
-    state["last_seen_auto_release_event_id"] = max(int(r["id"]) for r in rows)
+    new_cursor = max(int(r["id"]) for r in rows)
 
     lines = []
     for r in rows:
         payload = _payload_dict(r["payload"])
+        if r["kind"] == _AUTO_RELEASE_HOOK_CRASHED_EVENT:
+            # No "outcome" — a hook crash never produced a verdict at all —
+            # so this always alerts, fixed emoji, no outcome-emoji lookup.
+            error = _snippet(payload.get("error")) or "kein Fehlertext"
+            lines.append(
+                f"{_AUTO_RELEASE_HOOK_CRASHED_EMOJI} **Auto-Release Hook "
+                f"Crashed** (`{r['task_id']}`) — {error}"
+            )
+            continue
         outcome = str(payload.get("outcome") or "").strip()
         emoji = _AUTO_RELEASE_ATTENTION_EMOJI.get(outcome)
         if emoji is None:
@@ -262,15 +408,19 @@ def _rule_auto_release_attention(
                 "⚠️ Live-Checkout ist DETACHED auf dem Anchor — nach Triage: "
                 "`git checkout main` in ~/.hermes/hermes-agent."
             )
-    if not lines:
-        return None
-    lines.append("Details: /control Fleet → Plan-Tab, Auto-Release-Kachel.")
-    alert = {"rule": "auto_release_attention", "text": "\n".join(lines)}
-    # Operator-attention alert: prefer the escalation channel (same routing as
-    # operator_escalation) so it delivers even when only that channel is set.
-    if acfg.get("escalation_channel_id"):
-        alert["channel_id"] = acfg["escalation_channel_id"]
-    return alert
+    alert = None
+    if lines:
+        lines.append("Details: /control Fleet → Plan-Tab, Auto-Release-Kachel.")
+        alert = {"rule": "auto_release_attention", "text": "\n".join(lines)}
+        # Operator-attention alert: prefer the escalation channel (same
+        # routing as operator_escalation) so it delivers even when only that
+        # channel is set.
+        if acfg.get("escalation_channel_id"):
+            alert["channel_id"] = acfg["escalation_channel_id"]
+    return _confirm_or_defer(
+        state, "auto_release_attention", "last_seen_auto_release_event_id",
+        new_cursor, alert, send_fn, max_send_attempts, backstop_fn,
+    )
 
 
 def _rule_run_failed(conn: sqlite3.Connection, acfg: dict, state: dict, now: int) -> Optional[dict]:
@@ -375,23 +525,44 @@ def evaluate_alerts(
     state: dict,
     *,
     now: Optional[int] = None,
+    send_fn: Optional[Callable[[dict], bool]] = None,
+    max_send_attempts: int = _MAX_SEND_ATTEMPTS,
+    backstop_fn: Optional[Callable[[dict], None]] = None,
 ) -> list[dict]:
     """Run all rules against the board; returns ``[{rule, text}, ...]``.
 
     Mutates ``state`` (run cursor + per-rule rate-limit stamps). Each rule is
     individually fail-soft — one broken rule never blocks the others.
+
+    ``send_fn`` (A1, 2026-07-06, opt-in): when given, it gates the cursor for
+    the two EVENT-cursor rules (``operator_escalation``,
+    ``auto_release_attention`` — see ``_confirm_or_defer``) on a confirmed
+    send instead of advancing eagerly; ``run_failed``/``error_rate``/
+    ``daily_cost`` are unaffected (cooldown-based, not one-shot event
+    cursors). Callers that do NOT pass ``send_fn`` (today: ``gateway.
+    kanban_watchers._kanban_alerts_watcher``, which sends AFTER this
+    function already returned) keep the pre-fix eager-advance-before-send
+    behavior — closing that gap in production needs the watcher's tick loop
+    itself to adopt ``send_fn`` (out of this module's scope; see the
+    docstring note above).
     """
     ts = int(now if now is not None else time.time())
     alerts: list[dict] = []
-    for rule_fn in (
-        _rule_run_failed,
-        _rule_error_rate,
-        _rule_daily_cost,
-        _rule_operator_escalation,
-        _rule_auto_release_attention,
-    ):
+    for rule_fn in (_rule_run_failed, _rule_error_rate, _rule_daily_cost):
         try:
             alert = rule_fn(conn, acfg, state, ts)
+        except Exception:
+            continue
+        if alert is not None:
+            alerts.append(alert)
+    for rule_fn in (_rule_operator_escalation, _rule_auto_release_attention):
+        try:
+            alert = rule_fn(
+                conn, acfg, state, ts,
+                send_fn=send_fn,
+                max_send_attempts=max_send_attempts,
+                backstop_fn=backstop_fn,
+            )
         except Exception:
             continue
         if alert is not None:

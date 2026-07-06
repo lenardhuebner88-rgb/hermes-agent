@@ -295,6 +295,260 @@ def test_auto_release_event_cursor_dedupes_same_event(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# A1 (2026-07-06) closures: held_red_gate outcome + auto_release_hook_crashed
+# kind. Payload shapes copied verbatim from the real producers (S3, merged
+# 2125e6041): auto_release.maybe_auto_release()'s held_red_gate dict and
+# kanban_db.py's hook-crash-recording block.
+# ---------------------------------------------------------------------------
+
+
+def test_auto_release_held_red_gate_uses_yellow_emoji(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Chronic-red chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            # Real shape: hermes_cli/auto_release.py maybe_auto_release(),
+            # held_red_gate branch.
+            kb._append_event(
+                conn, tid, "auto_release",
+                {
+                    "outcome": "held_red_gate",
+                    "detail": "last 3 recorded green-gate nights all red",
+                },
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    assert "🟡" in alerts[0]["text"]
+    assert "held_red_gate" in alerts[0]["text"]
+    assert "green-gate nights all red" in alerts[0]["text"]
+
+
+def test_auto_release_hook_crashed_always_alerts_red_with_error_snippet(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Chain tip whose hook crashed")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            # Real shape: hermes_cli/kanban_db.py complete_task()'s
+            # auto-release-hook-crashed except-block
+            # (`{"error": str(_ar_exc)[:500], "chain_root": chain_root}`).
+            # No "outcome" key at all — a crash never produced a verdict.
+            kb._append_event(
+                conn, tid, "auto_release_hook_crashed",
+                {"error": "KeyError: 'planspec_source'", "chain_root": tid},
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    assert "🔴" in alerts[0]["text"]
+    assert "KeyError" in alerts[0]["text"]
+    assert tid in alerts[0]["text"]
+
+
+def test_auto_release_hook_crashed_first_tick_does_not_replay_historic(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Old crash before gateway restart")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release_hook_crashed",
+                {"error": "old crash", "chain_root": tid},
+            )
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW + 1) == []
+
+
+def test_auto_release_hook_crashed_and_outcome_event_share_one_cursor(kanban_home):
+    """Both kinds ride ``last_seen_auto_release_event_id`` — a batch mixing
+    both must alert on both and advance the cursor past the higher id."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Mixed batch chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "rolled_back", "detail": "invalid status payload"},
+            )
+            kb._append_event(
+                conn, tid, "auto_release_hook_crashed",
+                {"error": "boom", "chain_root": tid},
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+        again = evaluate_alerts(conn, _acfg(), state, now=NOW + 1)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    text = alerts[0]["text"]
+    assert "rolled_back" in text and "🔴" in text
+    assert "Hook Crashed" in text and "boom" in text
+    assert again == []  # cursor advanced past BOTH events, no replay
+
+
+# ---------------------------------------------------------------------------
+# A1 (2026-07-06): send-confirmation cursor gating. The watcher (gateway/
+# kanban_watchers.py) used to advance the event cursor INSIDE evaluate_alerts
+# and only attempt the Discord send afterwards — a failed send permanently
+# dropped the alert. ``send_fn`` (opt-in) makes the cursor commit ONLY after
+# a confirmed send; these tests drive that mechanic directly through the
+# public evaluate_alerts() API (no watcher/asyncio involved).
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedSend:
+    """Send stub: fails ``fail_times`` times then succeeds, or always fails."""
+
+    def __init__(self, fail_times: int = 0, always_fail: bool = False):
+        self.calls: list[dict] = []
+        self.fail_times = fail_times
+        self.always_fail = always_fail
+
+    def __call__(self, alert: dict) -> bool:
+        self.calls.append(alert)
+        if self.always_fail or len(self.calls) <= self.fail_times:
+            raise RuntimeError("discord 503")
+        return True
+
+
+def _escalation_payload(title="Human needs to decide", why="retry ladder exhausted"):
+    return {
+        "task": {"id": "irrelevant", "title": title},
+        "why_now": why,
+        "attempts_already_made": 3,
+        "evidence": {"last_error": "boom"},
+        "recommended_human_action": "inspect and unblock if safe",
+        "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+    }
+
+
+def test_send_failure_defers_cursor_and_retries_same_event_next_tick(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []  # prime
+        cursor_before = state["last_seen_operator_escalation_event_id"]
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT, _escalation_payload(),
+            )
+        send = _ScriptedSend(always_fail=True)
+
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert alerts == []  # deferred — never reached the (mocked) caller
+        assert len(send.calls) == 1
+        assert state["last_seen_operator_escalation_event_id"] == cursor_before
+
+        # Next tick: cursor never moved, so the SAME event is retried, not lost.
+        again = evaluate_alerts(conn, _acfg(), state, now=NOW + 2, send_fn=send)
+        assert again == []
+        assert len(send.calls) == 2
+        assert state["last_seen_operator_escalation_event_id"] == cursor_before
+
+
+def test_send_success_advances_cursor_exactly_once_no_double_send(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT, _escalation_payload(),
+            )
+        send = _ScriptedSend()
+
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
+        assert len(send.calls) == 1
+
+        # No new event — a following tick must NOT resend the same one.
+        again = evaluate_alerts(conn, _acfg(), state, now=NOW + 2, send_fn=send)
+        assert again == []
+        assert len(send.calls) == 1  # idempotent — no double-send
+
+
+def test_send_failure_recovers_on_a_later_tick_once_discord_is_back(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Deploy failed chain")
+        state = _primed_state(conn)
+        cursor_before = state["last_seen_auto_release_event_id"]
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "deploy_failed", "detail": "deploy script failed"},
+            )
+        send = _ScriptedSend(fail_times=1)  # fails once, then succeeds
+
+        first = evaluate_alerts(conn, _acfg(), state, now=NOW, send_fn=send)
+        assert first == []
+        assert state["last_seen_auto_release_event_id"] == cursor_before
+
+        second = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert [a["rule"] for a in second] == ["auto_release_attention"]
+        assert state["last_seen_auto_release_event_id"] > cursor_before
+        assert len(send.calls) == 2
+
+
+def test_backstop_after_max_send_attempts_writes_log_and_advances_cursor(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide, Discord is down")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
+        cursor_before = state["last_seen_operator_escalation_event_id"]
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT, _escalation_payload(),
+            )
+        send = _ScriptedSend(always_fail=True)
+
+        for i in range(3):  # K == _MAX_SEND_ATTEMPTS default
+            alerts = evaluate_alerts(
+                conn, _acfg(), state, now=NOW + i, send_fn=send,
+                max_send_attempts=3,
+            )
+            assert alerts == []
+        assert len(send.calls) == 3
+
+        # The 3rd failure gives up retrying: cursor commits (documented via
+        # backstop, not lost) and a later tick does not retry the same batch.
+        assert state["last_seen_operator_escalation_event_id"] > cursor_before
+        again = evaluate_alerts(
+            conn, _acfg(), state, now=NOW + 100, send_fn=send, max_send_attempts=3,
+        )
+        assert again == []
+        assert len(send.calls) == 3  # no further attempts
+
+        # Default backstop writer: real file, real content — kanban_home's
+        # fixture redirects Path.home() to tmp_path, so this stays sandboxed.
+        backstop_log = kanban_home / "reports" / "kanban-alerts-backstop.log"
+        assert backstop_log.exists()
+        content = backstop_log.read_text(encoding="utf-8")
+        assert "operator_escalation" in content
+        assert "Human needs to decide" in content
+        assert "attempts=3" in content
+
+
+def test_backstop_fn_override_receives_rule_text_and_attempts(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Deploy failed, Discord is down")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, "auto_release",
+                {"outcome": "rolled_back", "detail": "invalid status payload"},
+            )
+        send = _ScriptedSend(always_fail=True)
+        backstopped: list[dict] = []
+
+        for i in range(2):  # small K to keep the test snappy
+            evaluate_alerts(
+                conn, _acfg(), state, now=NOW + i, send_fn=send,
+                max_send_attempts=2, backstop_fn=backstopped.append,
+            )
+        assert len(backstopped) == 1
+        entry = backstopped[0]
+        assert entry["rule"] == "auto_release_attention"
+        assert entry["attempts"] == 2
+        assert "rolled_back" in entry["text"]
+
+
+# ---------------------------------------------------------------------------
 # Rule (b): error rate over rolling window
 # ---------------------------------------------------------------------------
 
@@ -509,12 +763,21 @@ def test_alerts_watcher_uses_alert_specific_channel(kanban_home, monkeypatch):
             }
         },
     )
+    # A1 (2026-07-06): operator_escalation/auto_release_attention are now
+    # send-gated — evaluate_alerts() delivers them itself via send_fn, and
+    # the watcher filters their rule names out of THIS post-hoc loop (see
+    # test_watcher_* below for that path). This test's actual target — an
+    # alert carrying its own ``channel_id`` overriding the default — still
+    # flows through the post-hoc loop for the three cooldown rules, so
+    # ``daily_cost`` stands in for "any non-gated rule" here. The mocked
+    # ``evaluate_alerts`` also needs to accept the new kwargs (send_fn/
+    # max_send_attempts/backstop_fn) the watcher now always passes.
     monkeypatch.setattr(
         kanban_alerts,
         "evaluate_alerts",
-        lambda conn, acfg, state: [
+        lambda conn, acfg, state, **kwargs: [
             {
-                "rule": kb.OPERATOR_ESCALATION_EVENT,
+                "rule": "daily_cost",
                 "text": "human needed",
                 "channel_id": acfg["escalation_channel_id"],
             }
@@ -538,6 +801,249 @@ def test_alerts_watcher_uses_alert_specific_channel(kanban_home, monkeypatch):
     assert adapter.sent[0]["text"] == "human needed"
 
 
+# ---------------------------------------------------------------------------
+# A1 (2026-07-06): watcher-level send-confirmation wiring. Exercises the REAL
+# _kanban_alerts_watcher() (asyncio.run, no mocked evaluate_alerts) with a
+# scriptable Discord-adapter double, driven by the same fake-``asyncio.sleep``
+# tick-counting harness as test_alerts_watcher_sends_via_discord_adapter
+# above. ``interval_seconds`` is set to the config floor (30 — see
+# load_alerts_config's ``max(30.0, ...)`` clamp) purely to keep the number of
+# fake-sleep iterations per real tick small; it changes no behavior under
+# test.
+# ---------------------------------------------------------------------------
+
+
+class ScriptedAdapter:
+    """Discord-adapter-shaped double whose ``send`` can be scripted to fail
+    ``fail_times`` times before succeeding, or fail forever.
+
+    Mirrors the REAL DiscordAdapter contract (adapter trace 2026-07-06):
+    ``send`` never raises on delivery failure — it returns
+    ``SendResult(success=False, error=...)`` (plugins/platforms/discord/
+    adapter.py:2044-2046). ``raise_mode=True`` additionally covers the
+    schedule/timeout failure class where an exception DOES reach the caller.
+    """
+
+    def __init__(self, fail_times: int = 0, always_fail: bool = False,
+                 raise_mode: bool = False):
+        self.sent: list[dict] = []
+        self.attempts = 0
+        self.fail_times = fail_times
+        self.always_fail = always_fail
+        self.raise_mode = raise_mode
+
+    async def send(self, chat_id, text, reply_to=None, metadata=None):
+        from gateway.platforms.base import SendResult
+
+        self.attempts += 1
+        if self.always_fail or self.attempts <= self.fail_times:
+            if self.raise_mode:
+                raise RuntimeError("discord 503")
+            return SendResult(success=False, error="discord 503")
+        self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata})
+        return SendResult(success=True, message_id=f"m{self.attempts}")
+
+
+def _watcher_escalation_payload(tid: str) -> dict:
+    return {
+        "task": {"id": tid, "title": "Human needs to decide"},
+        "why_now": "retry ladder exhausted",
+        "attempts_already_made": 3,
+        "evidence": {},
+        "recommended_human_action": "inspect",
+        "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+    }
+
+
+def test_watcher_send_gated_delivery_has_no_posthoc_double_send(
+    kanban_home, monkeypatch,
+):
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config",
+        lambda: {
+            "kanban": {
+                "alerts": {
+                    "enabled": True, "channel_id": "555", "interval_seconds": 30,
+                },
+            },
+        },
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Human needs to decide")
+    finally:
+        conn.close()
+
+    adapter = ScriptedAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    real_sleep = asyncio.sleep
+    tick = {"n": 0}
+
+    async def fake_sleep(delay):
+        if delay == 10:
+            return None
+        tick["n"] += 1
+        if tick["n"] == 1:
+            conn = kb.connect()
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                        _watcher_escalation_payload(tid),
+                    )
+            finally:
+                conn.close()
+        if adapter.sent or tick["n"] > 200:
+            runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    asyncio.run(runner._kanban_alerts_watcher())
+
+    # Delivered exactly once via the send-gated path (send_fn confirmed it
+    # INSIDE evaluate_alerts()) — the post-hoc loop must not resend it.
+    assert adapter.attempts == 1
+    assert len(adapter.sent) == 1
+    assert "Human needs to decide" in adapter.sent[0]["text"]
+    assert adapter.sent[0]["chat_id"] == "555"
+
+
+def test_watcher_send_gated_failure_defers_and_retries_without_crashing_tick(
+    kanban_home, monkeypatch,
+):
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config",
+        lambda: {
+            "kanban": {
+                "alerts": {
+                    "enabled": True, "channel_id": "555", "interval_seconds": 30,
+                },
+            },
+        },
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Human needs to decide, Discord down")
+    finally:
+        conn.close()
+
+    # raise_mode: this test's intent is the EXCEPTION failure class
+    # (schedule/timeout/crash) — the soft-fail SendResult class has its
+    # own dedicated test below.
+    adapter = ScriptedAdapter(always_fail=True, raise_mode=True)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    real_sleep = asyncio.sleep
+    tick = {"n": 0}
+
+    async def fake_sleep(delay):
+        if delay == 10:
+            return None
+        tick["n"] += 1
+        if tick["n"] == 1:
+            conn = kb.connect()
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                        _watcher_escalation_payload(tid),
+                    )
+            finally:
+                conn.close()
+        if adapter.attempts >= 2 or tick["n"] > 200:
+            runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    # A crashing send_fn must never crash the watcher's tick loop — if it
+    # did, this asyncio.run() call itself would raise and fail the test.
+    asyncio.run(runner._kanban_alerts_watcher())
+
+    assert adapter.attempts >= 2  # retried across multiple real ticks
+    assert adapter.sent == []  # never confirmed — nothing pushed
+
+
+def test_watcher_send_gated_backstop_after_max_attempts_writes_log(
+    kanban_home, monkeypatch,
+):
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config",
+        lambda: {
+            "kanban": {
+                "alerts": {
+                    "enabled": True, "channel_id": "555", "interval_seconds": 30,
+                },
+            },
+        },
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Human needs to decide, Discord stays down")
+    finally:
+        conn.close()
+
+    adapter = ScriptedAdapter(always_fail=True)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    real_sleep = asyncio.sleep
+    tick = {"n": 0}
+
+    async def fake_sleep(delay):
+        if delay == 10:
+            return None
+        tick["n"] += 1
+        if tick["n"] == 1:
+            conn = kb.connect()
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                        _watcher_escalation_payload(tid),
+                    )
+            finally:
+                conn.close()
+        # Run a bit past the 3rd (K==_MAX_SEND_ATTEMPTS) failed attempt so a
+        # FOLLOWING tick can prove the cursor already committed via the
+        # backstop (no further attempts).
+        if adapter.attempts >= 4 or tick["n"] > 300:
+            runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    asyncio.run(runner._kanban_alerts_watcher())
+
+    # The backstop takes over after exactly K=3 consecutive failures — a
+    # later tick (cursor already committed) makes no further attempt.
+    assert adapter.attempts == 3
+    assert adapter.sent == []
+
+    backstop_log = kanban_home / "reports" / "kanban-alerts-backstop.log"
+    assert backstop_log.exists()
+    content = backstop_log.read_text(encoding="utf-8")
+    assert "operator_escalation" in content
+    assert "Human needs to decide" in content
+    assert "attempts=3" in content
+
+
 def test_auto_release_alert_prefers_escalation_channel(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="Chain tip with escalation channel")
@@ -554,3 +1060,107 @@ def test_auto_release_alert_prefers_escalation_channel(kanban_home):
         )
     assert [a["rule"] for a in alerts] == ["auto_release_attention"]
     assert alerts[0]["channel_id"] == "999"
+
+
+def test_watcher_soft_fail_sendresult_defers_cursor_not_confirmed(
+    kanban_home, monkeypatch,
+):
+    """Adapter trace 2026-07-06: the REAL DiscordAdapter returns
+    SendResult(success=False) on delivery failure instead of raising — and a
+    bare dataclass is always truthy. The confirmed-send contract must read
+    .success: a soft-fail must defer the cursor (retry next tick, then
+    deliver), never confirm on the failed attempt."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config",
+        lambda: {
+            "kanban": {
+                "alerts": {
+                    "enabled": True, "channel_id": "555", "interval_seconds": 30,
+                },
+            },
+        },
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Human needs to decide, soft-fail")
+    finally:
+        conn.close()
+
+    adapter = ScriptedAdapter(fail_times=1)  # 1st send: SendResult(success=False)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    real_sleep = asyncio.sleep
+    tick = {"n": 0}
+
+    async def fake_sleep(delay):
+        if delay == 10:
+            return None
+        tick["n"] += 1
+        if tick["n"] == 1:
+            conn = kb.connect()
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                        _watcher_escalation_payload(tid),
+                    )
+            finally:
+                conn.close()
+        if len(adapter.sent) >= 1 or tick["n"] > 200:
+            runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    asyncio.run(runner._kanban_alerts_watcher())
+
+    # Attempt 1 returned SendResult(success=False) -> NOT confirmed; the
+    # cursor stayed put and attempt 2 (next tick) delivered the SAME event.
+    assert adapter.attempts == 2
+    assert len(adapter.sent) == 1
+
+
+def test_new_event_mid_retry_resets_attempt_budget(kanban_home):
+    """Codex review 2026-07-06 finding 2: the retry budget is keyed by batch
+    identity (rule + new_cursor). A batch that failed twice must NOT pass its
+    attempts on to a GROWN batch (new event arrived mid-retry) — the grown
+    batch gets a fresh budget instead of being backstopped after one more
+    attempt."""
+    backstopped: list[dict] = []
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []  # prime
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT, _escalation_payload(),
+            )
+        send = _ScriptedSend(always_fail=True)
+        kw = {"send_fn": send, "backstop_fn": backstopped.append}
+
+        # Two failed attempts on the original batch (budget K=3).
+        evaluate_alerts(conn, _acfg(), state, now=NOW + 1, **kw)
+        evaluate_alerts(conn, _acfg(), state, now=NOW + 2, **kw)
+        assert len(send.calls) == 2 and backstopped == []
+
+        # A NEW event arrives -> batch identity (max id) changes.
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT, _escalation_payload(),
+            )
+
+        # Third overall failure, but FIRST for the grown batch: no backstop.
+        evaluate_alerts(conn, _acfg(), state, now=NOW + 3, **kw)
+        assert len(send.calls) == 3
+        assert backstopped == []  # fresh budget — not inherited
+
+        # Two more failures exhaust the grown batch's own budget -> backstop.
+        evaluate_alerts(conn, _acfg(), state, now=NOW + 4, **kw)
+        evaluate_alerts(conn, _acfg(), state, now=NOW + 5, **kw)
+        assert len(backstopped) == 1
+        assert backstopped[0]["attempts"] == 3
