@@ -30,15 +30,46 @@ interface WorkerTabProps {
   onOpenChain: (rootId: string) => void;
 }
 
+interface WorkerSelection {
+  taskId: string;
+  snapshot: Worker;
+}
+
 export function WorkerTab({ activeWorkers, board, reliability, now, initialOpen, onOpenChain }: WorkerTabProps) {
-  const [selected, setSelected] = useState<Worker | null>(initialOpen);
+  const [selection, setSelection] = useState<WorkerSelection | null>(
+    () => initialOpen ? { taskId: initialOpen.task_id, snapshot: initialOpen } : null,
+  );
+
+  const selectedWorker = selection ? activeWorkers.find((w) => w.task_id === selection.taskId) ?? null : null;
+  const drawerWorker = selectedWorker ?? selection?.snapshot ?? null;
+
+  const emptyState = (
+    <div className="fleet-empty">
+      <p className="fleet-empty-title">{de.fleet.workerEmptyTitle}</p>
+      <p className="fleet-empty-sub">{de.fleet.workerEmptyDesc}</p>
+    </div>
+  );
+
+  if (activeWorkers.length === 0 && !drawerWorker) {
+    return emptyState;
+  }
 
   if (activeWorkers.length === 0) {
     return (
-      <div className="fleet-empty">
-        <p className="fleet-empty-title">{de.fleet.workerEmptyTitle}</p>
-        <p className="fleet-empty-sub">{de.fleet.workerEmptyDesc}</p>
-      </div>
+      <>
+        {emptyState}
+        {drawerWorker ? (
+          <WorkerDrawer
+            worker={drawerWorker}
+            active={false}
+            board={board}
+            reliability={reliability}
+            now={now}
+            onClose={() => setSelection(null)}
+            onOpenChain={onOpenChain}
+          />
+        ) : null}
+      </>
     );
   }
 
@@ -49,7 +80,9 @@ export function WorkerTab({ activeWorkers, board, reliability, now, initialOpen,
           key={w.run_id}
           type="button"
           className="fleet-wk fleet-wk-lebt text-left"
-          onClick={() => setSelected(w)}
+          onClick={() => {
+            setSelection({ taskId: w.task_id, snapshot: w });
+          }}
           aria-label={`Worker ${w.profile} Details`}
         >
           <div className="fleet-wk-top">
@@ -73,13 +106,14 @@ export function WorkerTab({ activeWorkers, board, reliability, now, initialOpen,
         </button>
       ))}
 
-      {selected ? (
+      {drawerWorker ? (
         <WorkerDrawer
-          worker={selected}
+          worker={drawerWorker}
+          active={selectedWorker != null}
           board={board}
           reliability={reliability}
           now={now}
-          onClose={() => setSelected(null)}
+          onClose={() => setSelection(null)}
           onOpenChain={onOpenChain}
         />
       ) : null}
@@ -191,6 +225,7 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
 
 interface WorkerDrawerProps {
   worker: Worker;
+  active: boolean;
   board: BoardResponse | null;
   reliability: ReliabilityResponse | null;
   now: number;
@@ -198,7 +233,7 @@ interface WorkerDrawerProps {
   onOpenChain: (rootId: string) => void;
 }
 
-function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain }: WorkerDrawerProps) {
+function WorkerDrawer({ worker: w, active, board, reliability, now, onClose, onOpenChain }: WorkerDrawerProps) {
   const elapsedSec = Math.max(0, now - w.started_at);
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const initial = profileInitial(w.profile);
@@ -246,7 +281,7 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
         {/* Task: title + task_id + branch_name (Requirement: title + task_id + branch) */}
         <div className="fleet-dr-task">
           {w.task_title}
-          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}</code>
+          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{active ? ` · Run ${w.run_id}` : ""}</code>
         </div>
 
         {/* KV-Grid */}
@@ -303,8 +338,15 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
           </div>
         ) : null}
 
+        {active ? null : (
+          <div className="fleet-kv" role="status">
+            <div className="fleet-kv-k">{de.fleet.workerEndedTitle}</div>
+            <div className="fleet-kv-v">{de.fleet.workerEndedDesc}</div>
+          </div>
+        )}
+
         {/* Worker-Steuerung: Unlock/Nudge/Restart/Terminate (Gap 1) */}
-        <WorkerLifecycleActions runId={w.run_id} />
+        {active ? <WorkerLifecycleActions runId={w.run_id} /> : null}
 
         {/* Action-Buttons */}
         <div className="fleet-actions">
@@ -317,20 +359,22 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
               {de.fleet.drawerKetteOeffnen}
             </button>
           ) : null}
-          <button
-            type="button"
-            className="fleet-btn"
-            onClick={() => setLogOpen((v) => !v)}
-          >
-            {logOpen ? de.worker.logHide : de.fleet.drawerLog}
-          </button>
+          {active ? (
+            <button
+              type="button"
+              className="fleet-btn"
+              onClick={() => setLogOpen((v) => !v)}
+            >
+              {logOpen ? de.worker.logHide : de.fleet.drawerLog}
+            </button>
+          ) : null}
           <button type="button" className="fleet-btn" onClick={onClose}>
             {de.fleet.drawerSchliessen}
           </button>
         </div>
 
         {/* Log-Tail (nur bei offenem Drawer pollend, wie WorkerCard/NodeDetailDrawer) */}
-        {logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
+        {active && logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
       </div>
     </Overlay>
   );

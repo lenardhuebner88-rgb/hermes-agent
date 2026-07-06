@@ -17,7 +17,7 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { WorkerTab } from "./WorkerTab";
-import type { Worker } from "../../lib/types";
+import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 
 afterEach(() => {
   cleanup();
@@ -53,20 +53,117 @@ const FIXTURE_WORKER: Worker = {
   run_progress: null,
 };
 
-function renderDrawer() {
+const UPDATED_WORKER: Worker = {
+  ...FIXTURE_WORKER,
+  run_id: "777",
+  profile: "verifier",
+  task_assignee: "verifier",
+  started_at: 1782500100,
+  last_heartbeat_at: 1782500360,
+  effective_model: "claude-sonnet-4",
+  input_tokens: 1200,
+  output_tokens: 80,
+};
+
+const BOARD_TASK: BoardTask = {
+  id: "t_abc123",
+  title: "Fix flaky test",
+  status: "running",
+  assignee: "coder",
+  priority: 0,
+  created_at: 1782499900,
+  started_at: 1782500000,
+  completed_at: null,
+  branch_name: "fleet-worker-drawer",
+  latest_summary: null,
+  link_counts: { parents: 0, children: 1 },
+  comment_count: 0,
+  progress: null,
+  age: null,
+  tenant: "orchestrator",
+  root_id: "root_abc123",
+  epic_id: null,
+};
+
+const BOARD_WITH_CHAIN: BoardResponse = {
+  columns: [{ name: "running", tasks: [BOARD_TASK] }],
+  tenants: ["orchestrator"],
+  assignees: ["coder"],
+  latest_event_id: 1,
+  source_errors: [],
+  now: 1782500300,
+};
+
+function renderDrawer(activeWorkers: Worker[] = [FIXTURE_WORKER], board: BoardResponse | null = null, onOpenChain = () => {}) {
   return render(
     <WorkerTab
-      activeWorkers={[FIXTURE_WORKER]}
-      board={null}
+      activeWorkers={activeWorkers}
+      board={board}
       reliability={null}
       now={1782500300}
       initialOpen={FIXTURE_WORKER}
-      onOpenChain={() => {}}
+      onOpenChain={onOpenChain}
     />,
   );
 }
 
 describe("Worker-Drawer-Steuerung (Gap 1)", () => {
+  it("bindet den offenen Drawer an task_id und nutzt nach Poll-Update den frischen Run", async () => {
+    fetchJSONMock.mockResolvedValue({ ok: true, action: "nudge", run_id: 777, task_id: "t_abc123", detail: "Nudge auf neuem Run." });
+
+    const { rerender } = renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    expect(screen.getByText(/Run 482/)).toBeTruthy();
+
+    rerender(
+      <WorkerTab
+        activeWorkers={[UPDATED_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500360}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/Run 777/)).toBeTruthy();
+    expect(screen.getAllByText("verifier").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Anstoßen" }));
+
+    await waitFor(() => expect(fetchJSONMock).toHaveBeenCalledTimes(1));
+    const [url, opts] = fetchJSONMock.mock.calls[0];
+    expect(url).toBe("/api/plugins/kanban/workers/777/action");
+    expect(JSON.parse(opts.body)).toEqual({ action: "nudge", confirm: true });
+  });
+
+  it("zeigt bei verschwundenem Task den Beendet-Zustand und keine Worker-Aktionsbuttons", () => {
+    const onOpenChain = vi.fn();
+    const { rerender } = renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN, onOpenChain);
+
+    rerender(
+      <WorkerTab
+        activeWorkers={[]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500400}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={onOpenChain}
+      />,
+    );
+
+    expect(screen.getByText("Worker beendet")).toBeTruthy();
+    expect(screen.getByText(/nicht mehr in den aktiven Workern/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Anstoßen" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Entsperren" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Anhalten" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Neu starten" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Beenden" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Kette öffnen" }));
+    expect(onOpenChain).toHaveBeenCalledWith("root_abc123");
+    expect(screen.getByRole("button", { name: "Schließen" })).toBeTruthy();
+  });
+
   it("Nudge feuert direkt POST /workers/{run_id}/action mit action=nudge (kein Arming — einzige No-Kill-Aktion)", async () => {
     fetchJSONMock.mockResolvedValue({ ok: true, action: "nudge", run_id: 482, task_id: "t_abc123", detail: "Nudge als Kommentar gesetzt (kein Kill)." });
 

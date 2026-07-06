@@ -279,6 +279,8 @@ export const de = {
     drawerKetteOeffnen: "Kette öffnen",
     drawerLog: "Log",
     drawerSchliessen: "Schließen",
+    workerEndedTitle: "Worker beendet",
+    workerEndedDesc: "Dieser Task ist nicht mehr in den aktiven Workern. Laufdaten und Steueraktionen sind ausgeblendet; die Kette kannst du weiter öffnen.",
     // Worker-Drawer-Steuerung (Gap 1) — nur Nudge feuert direkt (Kommentar,
     // kein Kill). Unlock/Hold/Restart/Terminate nehmen den Worker-Prozess weg
     // (reclaim_task/hold_task in plugin_api.py) und sind deshalb zwei-Klick-
