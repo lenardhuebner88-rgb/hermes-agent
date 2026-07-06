@@ -101,6 +101,14 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-sm hc-soft">{detail.anti_scope.map((x) => <li key={x}>{x}</li>)}</ul>
                 </section>
               ) : null}
+              {/* Dashboard-Prose-Plan: kein YAML-Frontmatter, kein AC/Anti-Scope —
+                  der Volltext-Button muss trotzdem den geschriebenen Markdown zeigen. */}
+              {detail.prose_plan && detail.full_text ? (
+                <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+                  <Eyebrow>Volltext</Eyebrow>
+                  <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed hc-soft">{detail.full_text}</pre>
+                </section>
+              ) : null}
               <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
                 <Eyebrow>Subtask-Kette</Eyebrow>
                 <ol className="mt-2 grid gap-2">

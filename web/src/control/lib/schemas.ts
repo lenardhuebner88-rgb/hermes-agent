@@ -1617,6 +1617,11 @@ export const PlanSpecDetailResponseSchema = z.object({
   freigabe: z.string().catch(""),
   live_test_depth: z.string().catch(""),
   subtasks: z.array(PlanSpecDetailSubtaskSchema).catch([]),
+  // Additive: only present for a dashboard prose-plan source (no YAML
+  // frontmatter — see hermes_cli.planspecs.parse_prose_plan_detail);
+  // absent/undefined for every binding PlanSpec, unchanged.
+  prose_plan: z.boolean().optional(),
+  full_text: z.string().optional(),
 });
 export type PlanSpecDetailResponse = z.infer<typeof PlanSpecDetailResponseSchema>;
 export type PlanSpecDetailSubtask = z.infer<typeof PlanSpecDetailSubtaskSchema>;

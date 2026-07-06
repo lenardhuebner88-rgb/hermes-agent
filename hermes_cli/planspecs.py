@@ -367,6 +367,181 @@ def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str,
         conn.close()
 
 
+def _prose_root_freigabe(root_task_id: str, *, board: str | None) -> str:
+    """Read the live ``freigabe`` DB column for a prose-plan's Kanban root.
+
+    Not on the ``Task`` dataclass (DB-only column, same as the approve
+    endpoint's own guard query) and never written back to the prose source
+    file — a prose file has no frontmatter at all, so the hold state can only
+    ever be read from the Kanban row it was ingested into.
+    """
+    conn = kanban_db.connect(board=board)
+    try:
+        row = conn.execute("SELECT freigabe FROM tasks WHERE id = ?", (root_task_id,)).fetchone()
+        return str((row["freigabe"] if row is not None else "") or "").strip().lower()
+    finally:
+        conn.close()
+
+
+def _dashboard_prose_planspec_record(path: Path, *, board: str | None) -> dict[str, Any]:
+    """Build a ``list_planspecs`` record for a dashboard prose-plan source.
+
+    Unlike a Vault PlanSpec, a prose file (see ``_persist_dashboard_prose_plan``
+    / ``ingest_prose_plan``) carries no YAML frontmatter — ``freigabe``/status
+    live only on the Kanban root row it was ingested into, keyed via the same
+    ``specified``/``planspec_ingest`` event ``_planspec_kanban_state`` already
+    resolves for Vault records. ``open`` is intentionally gated on the LIVE
+    root row (``status == 'scheduled' and freigabe == 'operator'``) rather
+    than the generic ``_planspec_kanban_state`` 'queued' bucket: 'todo'/'ready'
+    children also count as 'queued' there, which would keep a just-approved
+    chain pending until a child actually starts running. Gating on the root
+    row mirrors ``kanban_db._is_operator_held``'s direct check and makes the
+    dashboard's pending list clear the instant the operator approves.
+    """
+    resolved = path.resolve(strict=False)
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {
+            "path": str(resolved),
+            "agent": "dashboard",
+            "filename": resolved.name,
+            "topic": resolved.stem,
+            "status": "",
+            "freigabe": "",
+            "live_test_depth": None,
+            "binding": False,
+            "subtask_count": 0,
+            "valid": False,
+            "open": False,
+            "closed_reason": "invalid PlanSpec",
+            "closed_at": None,
+            "closed_by": None,
+            "receipt": None,
+            "release_evidence": None,
+            "kanban_root_task_id": None,
+            "kanban_root_status": None,
+            "kanban_state": "not_ingested",
+            "kanban_child_total": 0,
+            "kanban_child_done": 0,
+            "kanban_child_blocked": 0,
+            "kanban_child_running": 0,
+            "kanban_ingested_at": None,
+            "ingest_disposition": "invalid",
+            "ingest_would_block": True,
+            "ingest_findings": [],
+            "errors": [str(exc)],
+        }
+
+    plan = parse_prose_plan(text)
+    topic = plan.title or resolved.stem
+    kanban_state = _planspec_kanban_state(resolved, board=board)
+    root_task_id = (kanban_state or {}).get("root_task_id")
+    root_status = (kanban_state or {}).get("root_status")
+    kanban_terminal_state = (kanban_state or {}).get("state") or "not_ingested"
+    freigabe = _prose_root_freigabe(str(root_task_id), board=board) if root_task_id else ""
+
+    open_record = bool(root_task_id) and root_status == "scheduled" and freigabe == "operator"
+
+    return {
+        "path": str(resolved),
+        "agent": "dashboard",
+        "filename": resolved.name,
+        "topic": topic,
+        "status": "prose-plan",
+        "freigabe": freigabe,
+        "live_test_depth": "smoke",
+        "binding": False,
+        "subtask_count": len(plan.slices),
+        "valid": False,
+        "open": open_record,
+        "closed_reason": None if open_record else "not awaiting operator release",
+        "closed_at": None,
+        "closed_by": None,
+        "receipt": None,
+        "release_evidence": None,
+        "kanban_root_task_id": root_task_id,
+        "kanban_root_status": root_status,
+        "kanban_state": kanban_terminal_state,
+        "kanban_child_total": (kanban_state or {}).get("child_total", 0),
+        "kanban_child_done": (kanban_state or {}).get("child_done", 0),
+        "kanban_child_blocked": (kanban_state or {}).get("child_blocked", 0),
+        "kanban_child_running": (kanban_state or {}).get("child_running", 0),
+        "kanban_ingested_at": (kanban_state or {}).get("ingested_at"),
+        "ingest_disposition": "not_ingestable",
+        "ingest_would_block": True,
+        "ingest_findings": [],
+        "errors": [],
+    }
+
+
+def parse_prose_plan_detail(
+    path: str | Path, *, prose_plans_root: Path
+) -> dict[str, Any] | None:
+    """Read-only ``planspecs/detail`` payload for a dashboard prose-plan source.
+
+    Returns ``None`` when *path* does not resolve strictly inside
+    *prose_plans_root* — the caller (the ``/planspecs/detail`` endpoint) then
+    falls back to :func:`parse_binding_planspec`'s vault-root resolution,
+    which keeps today's containment / 404 / 400 behaviour byte-for-byte for
+    every other path, including one outside BOTH roots.
+
+    A dashboard prose file (see ``_persist_dashboard_prose_plan`` /
+    :func:`ingest_prose_plan`) carries no YAML frontmatter at all, so this
+    mirrors ``_dashboard_prose_planspec_record`` rather than
+    :func:`parse_binding_planspec`: goal/subtasks are derived from
+    :func:`parse_prose_plan` / :func:`compile_prose_plan`, and the
+    binding-only fields (acceptance_criteria / anti_scope / evidence_required
+    / freigabe) stay empty so the shared frontend
+    ``PlanSpecDetailResponseSchema`` parses unchanged. ``prose_plan: True``
+    and the raw ``full_text`` are additive fields the frontend may render.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+    except ValueError as exc:
+        # Same #13 rationale as resolve_planspec_path: stay path-free.
+        raise PlanSpecBlocked(["planspec path is malformed"]) from exc
+    root = prose_plans_root.expanduser().resolve(strict=False)
+    if not _is_relative_to(resolved, root):
+        return None
+    if resolved.suffix.lower() != ".md":
+        raise PlanSpecBlocked(["planspec path must point to a markdown file"])
+    if not resolved.is_file():
+        raise PlanSpecNotFound(["planspec file not found"])
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise PlanSpecBlocked([f"planspec is not valid utf-8: {exc}"]) from exc
+
+    plan = parse_prose_plan(text)
+    try:
+        children = compile_prose_plan(plan).children
+    except CompileBlocked:
+        # Detail is a read-only viewer, not a gate — an unresolved dep/cycle
+        # still shows goal + full text, just without a subtask breakdown.
+        children = []
+    subtasks = [
+        {
+            "id": child.get("planspec_subtask_id") or "",
+            "title": child.get("title") or "",
+            "lane": child.get("planspec_lane") or child.get("assignee") or "",
+            "deps": child.get("planspec_deps") or [],
+        }
+        for child in children
+    ]
+    return {
+        "goal": plan.goal or plan.title,
+        "acceptance_criteria": [],
+        "anti_scope": [],
+        "evidence_required": [],
+        "freigabe": "",
+        "live_test_depth": "smoke",
+        "subtasks": subtasks,
+        "prose_plan": True,
+        "full_text": text,
+    }
+
+
 def list_planspecs(
     *,
     plans_root: Path = DEFAULT_PLANS_ROOT,
@@ -376,7 +551,19 @@ def list_planspecs(
     search: str | None = None,
     include_kanban_status: bool = False,
     board: str | None = None,
+    prose_plans_root: Path | None = None,
 ) -> list[dict[str, Any]]:
+    """List discoverable PlanSpecs.
+
+    ``prose_plans_root`` is additive and opt-in (default ``None`` = untouched,
+    matching the long-standing behaviour): when given, every ``*.md`` file
+    directly under it (the dashboard's persisted prose-plan sources, see
+    ``_persist_dashboard_prose_plan``) is enumerated as a second candidate
+    source alongside the Vault glob below, using its own
+    ``freigabe: operator`` hold-classification instead of the binding-PlanSpec
+    frontmatter rules (a prose file carries no ``taskgraph_hints``/``gate``
+    frontmatter at all — see :func:`_dashboard_prose_planspec_record`).
+    """
     if scope not in ("open", "all"):
         raise ValueError("scope must be 'open' or 'all'")
     valid_filter = valid
@@ -497,6 +684,11 @@ def list_planspecs(
                     "errors": [str(exc)],
                 }
             )
+    if prose_plans_root is not None:
+        prose_root = prose_plans_root.expanduser().resolve(strict=False)
+        if prose_root.is_dir():
+            for prose_path in sorted(prose_root.glob("*.md"), key=lambda p: str(p).lower()):
+                records.append(_dashboard_prose_planspec_record(prose_path, board=board))
     if scope == "open":
         records = [item for item in records if item["open"]]
     if valid_filter is not None:

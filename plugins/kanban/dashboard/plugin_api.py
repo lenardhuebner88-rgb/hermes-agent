@@ -6834,6 +6834,7 @@ def list_planspecs(
     board: Optional[str] = Query(None),
 ):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+    from hermes_constants import get_hermes_home  # noqa: WPS433 (intentional)
 
     board = _resolve_board(board)
     records = planspecs.list_planspecs(
@@ -6843,6 +6844,7 @@ def list_planspecs(
         search=q,
         include_kanban_status=True,
         board=board,
+        prose_plans_root=get_hermes_home() / "dashboard" / "prose-plans",
     )
     return {"planspecs": records, "count": len(records)}
 
@@ -6955,8 +6957,28 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
     findings never carry the resolved server path (see resolve_planspec_path).
 
     Source = file parse only.  No DB read.
+
+    A dashboard prose-plan source (under ``get_hermes_home()/dashboard/
+    prose-plans/`` — see ``_persist_dashboard_prose_plan``) carries no YAML
+    frontmatter, so it can never satisfy ``parse_binding_planspec``. It is
+    tried FIRST via ``parse_prose_plan_detail``, which returns ``None`` (not
+    an exception) for any path outside that dir — falling through to the
+    unchanged binding-PlanSpec vault resolution below for every other path,
+    including one outside BOTH roots (still 400, exactly as before).
     """
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+    from hermes_constants import get_hermes_home  # noqa: WPS433 (intentional)
+
+    try:
+        prose_detail = planspecs.parse_prose_plan_detail(
+            path, prose_plans_root=get_hermes_home() / "dashboard" / "prose-plans"
+        )
+    except planspecs.PlanSpecNotFound as exc:
+        raise HTTPException(status_code=404, detail={"findings": exc.findings})
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+    if prose_detail is not None:
+        return prose_detail
 
     # Single resolution+read. Distinguish 404 (file missing) from 400 (traversal /
     # bad path / malformed spec) off the *exception type* — not by substring-
