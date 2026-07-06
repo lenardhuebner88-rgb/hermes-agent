@@ -89,3 +89,13 @@ export function dedupeById<T extends { id: string }>(items: T[]): T[] {
   }
   return out;
 }
+
+/** Briefings-Filter: alle Items der Kategorie `briefings`, neueste zuerst. */
+export function filterBriefings(items: LibraryItem[]): LibraryItem[] {
+  return items.filter((i) => i.category === "briefings");
+}
+
+/** Neuestes Briefing (für Featured-Kachel). */
+export function newestBriefing(items: LibraryItem[]): LibraryItem | null {
+  return filterBriefings(items)[0] ?? null;
+}

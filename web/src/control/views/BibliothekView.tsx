@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Library, ListTree, Newspaper } from "lucide-react";
+import { ListTree } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { Hero } from "../components/Hero";
 import { Led, ToneCallout } from "../components/atoms";
 import {
   DrawerShell,
@@ -18,7 +17,6 @@ import { fmtClock } from "../lib/derive";
 import { de } from "../i18n/de";
 import { extractToc, type TocEntry } from "../lib/slug";
 import type { Density } from "../hooks/useDensity";
-import { useVaultProvenance } from "../hooks/useControlData";
 import type { VaultProvenanceResponse } from "../lib/types";
 import {
   CATEGORY_LABEL,
@@ -31,6 +29,7 @@ import {
   type LesesaalSort,
 } from "./BibliothekView.helpers";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
+import { BriefingsShelf } from "./briefings/BriefingsShelf";
 // TocNav ist im Nachschlagewerk (KnowledgeReader) implementiert und exportiert
 // — read-only importiert (KEINE Edits an views/knowledge/, paralleler
 // Builder arbeitet dort), damit der Lesesaal dieselbe Inhaltsverzeichnis-UI
@@ -96,7 +95,7 @@ export interface LibraryItem {
   series_meta: string;
 }
 
-interface LibraryListResponse {
+export interface LibraryListResponse {
   items: LibraryItem[];
   count: number;
   truncated: boolean;
@@ -684,30 +683,46 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   );
 }
 
-type Mode = "wissen" | "lesesaal";
+type Mode = "briefings" | "wissen" | "lesesaal";
 
-function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
-  const tab = (value: Mode, label: string, Icon: typeof Library) => (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={mode === value}
-      aria-controls={`bibliothek-panel-${value}`}
-      onClick={() => onChange(value)}
-      className={`inline-flex min-h-9 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[0.8rem] font-medium transition-colors ${
-        mode === value
-          ? "bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-sm"
-          : "hc-soft hover:bg-white/5"
-      }`}
-    >
-      <Icon className="h-4 w-4" />
-      {label}
-    </button>
-  );
+const MODE_TABS: { id: Mode; label: string; count?: (data: LibraryListResponse | null) => number }[] = [
+  { id: "briefings", label: "Briefings", count: (data) => data?.count ?? 0 },
+  { id: "wissen", label: "Nachschlagewerk" },
+  { id: "lesesaal", label: "Lesesaal", count: (data) => data?.count ?? 0 },
+];
+
+function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode: Mode) => void; lesesaalData: LibraryListResponse | null }) {
   return (
-    <div role="tablist" aria-label={t.eyebrow} className="inline-flex items-center gap-1 rounded-full border border-[var(--hc-border)] bg-black/20 p-1">
-      {tab("wissen", t.modeWissen, Library)}
-      {tab("lesesaal", t.modeLesesaal, Newspaper)}
+    <div role="tablist" aria-label={t.eyebrow} className="flex gap-1 border-b border-[var(--hc-border)]">
+      {MODE_TABS.map((tab) => {
+        const active = mode === tab.id;
+        const count = tab.count?.(tab.id === "lesesaal" ? lesesaalData : null) ?? 0;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-controls={`bibliothek-panel-${tab.id}`}
+            onClick={() => onChange(tab.id)}
+            className={`relative px-4 py-2.5 text-sm font-medium transition-colors ${
+              active
+                ? "text-[var(--hc-accent)]"
+                : "hc-soft hover:text-[var(--hc-text)]"
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              {tab.label}
+              {count > 0 ? (
+                <span className={`inline-flex min-w-[1.25rem] items-center justify-center rounded-full px-1.5 py-0.5 text-[0.65rem] font-bold ${active ? "bg-[var(--hc-accent)] text-black" : "bg-white/10 text-[var(--hc-text-soft)]"}`}>
+                  {count}
+                </span>
+              ) : null}
+            </span>
+            {active ? <span className="absolute inset-x-0 -bottom-px h-0.5 bg-[var(--hc-aurora)]" /> : null}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -715,35 +730,61 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
 export function BibliothekView({ density }: { density?: Density }) {
   // Modus als URL-Search-Param (S2, Deep-Links): Reload/Link-Teilen stellt den
   // Modus wieder her. Moduswechsel ist ein "Filterwechsel" → replace, kein
-  // Verlaufseintrag. Beide Panels bleiben IMMER gemountet (nur `hidden`
-  // umschaltet) — so verwirft der Wechsel wissen↔lesesaal weder Suchtext/
-  // Filter noch das offene Dokument des jeweils anderen Modus (S3).
+  // Verlaufseintrag. Alle Panels bleiben IMMER gemountet (nur `hidden`
+  // umschaltet) — so verwirft der Wechsel weder Suchtext/Filter noch das
+  // offene Dokument des jeweils anderen Modus (S3).
   const [searchParams, setSearchParams] = useSearchParams();
-  const provenance = useVaultProvenance();
-  const mode: Mode = searchParams.get("mode") === "lesesaal" ? "lesesaal" : "wissen";
-  const wissen = mode === "wissen";
+  const mode: Mode = useMemo(() => {
+    const m = searchParams.get("mode");
+    if (m === "lesesaal" || m === "wissen") return m;
+    return "briefings";
+  }, [searchParams]);
   const setMode = useCallback((next: Mode) => {
     setSearchParams((prev) => {
       const p = new URLSearchParams(prev);
-      if (next === "wissen") p.delete("mode");
+      if (next === "briefings") p.delete("mode");
       else p.set("mode", next);
       return p;
     }, { replace: true });
   }, [setSearchParams]);
+
+  // Lesesaal-Daten für den Badge (Live-Count) — lightweight, da LesesaalBody
+  // selbstständig lädt. Hier nur für die Tab-Bar.
+  const [lesesaalData, setLesesaalData] = useState<LibraryListResponse | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchJSON<LibraryListResponse>("/api/library/items?limit=1&offset=0");
+        if (!cancelled) setLesesaalData(res);
+      } catch {
+        // Badge bleibt leer bei Fehler — kein Blocker.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const openItem = useCallback((item: LibraryItem) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set("mode", "lesesaal");
+      p.set("item", item.id);
+      return p;
+    });
+  }, [setSearchParams]);
+
   return (
-    <div className="space-y-4">
-      <Hero
-        eyebrow={t.eyebrow}
-        title={wissen ? t.wissenTitle : t.lesesaalTitle}
-        subtitle={wissen ? t.wissenSubtitle : t.lesesaalSubtitle}
-        tone={wissen ? "cyan" : "amber"}
-        density={density}
-      >
-        <ModeSwitch mode={mode} onChange={setMode} />
-      </Hero>
-      <VaultProvenanceShelf data={provenance.data} error={provenance.error} />
-      <div id="bibliothek-panel-wissen" role="tabpanel" hidden={!wissen}><KnowledgeShelf /></div>
-      <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={wissen}><LesesaalBody /></div>
+    <div className="space-y-5">
+      <TabBar mode={mode} onChange={setMode} lesesaalData={lesesaalData} />
+      <div id="bibliothek-panel-briefings" role="tabpanel" hidden={mode !== "briefings"}>
+        <BriefingsShelf onOpenItem={openItem} density={density} />
+      </div>
+      <div id="bibliothek-panel-wissen" role="tabpanel" hidden={mode !== "wissen"}>
+        <KnowledgeShelf />
+      </div>
+      <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={mode !== "lesesaal"}>
+        <LesesaalBody />
+      </div>
     </div>
   );
 }
