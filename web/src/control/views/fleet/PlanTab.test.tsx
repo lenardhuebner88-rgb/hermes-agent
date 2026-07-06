@@ -95,6 +95,22 @@ const notIngestedSpec: PlanSpecRecord = {
   errors: [],
 };
 
+// Regression-Fixture (AC-5): dieselbe PlanSpec, aber bereits ingestiert —
+// kanban_root_task_id gesetzt, Kette queued. Freigabe wartet weiter auf den
+// Operator (freigabe="operator"), darf also den Freigeben-Modus zeigen und NIE
+// den Ingest-Button. freigabe bleibt "operator" (≠ "complete") → kein signierter
+// Parked-Chain, der Freigeben-Button (nicht "Kette starten") erscheint.
+const ingestedSpec: PlanSpecRecord = {
+  ...notIngestedSpec,
+  path: "vault/03-Agents/Claude/plans/2026-07-07-ingested-demo.md",
+  filename: "2026-07-07-ingested-demo.md",
+  topic: "Ingested-Demo",
+  kanban_root_task_id: "t_existing_root",
+  kanban_root_status: "queued",
+  kanban_state: "queued",
+  kanban_child_total: 3,
+};
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -102,10 +118,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderPlanTab() {
+function renderPlanTab(specs: PlanSpecRecord[] = [notIngestedSpec]) {
   return render(
     <PlanTab
-      allPlanspecs={[notIngestedSpec]}
+      allPlanspecs={specs}
       costs={null}
       lanesCatalog={null}
       accountUsage={null}
@@ -176,5 +192,18 @@ describe("PlanTab ingest behaviour", () => {
     await waitFor(() => expect(screen.getByText(/Slice A ohne done-when/)).toBeTruthy());
     // Bleibt im Ingest-Modus — kein Freigeben-Button.
     expect(screen.queryByRole("button", { name: de.fleet.planFreigeben })).toBeNull();
+  });
+
+  it("AC-5 (Regression): Karte mit gesetztem kanban_root_task_id zeigt weiter Freigeben, keinen Ingest-Button", async () => {
+    renderPlanTab([ingestedSpec]);
+
+    // Freigeben-Modus: aktiver Freigeben-Button, kein Ingest-Button/-Hinweis.
+    const freigeben = await screen.findByRole("button", { name: de.fleet.planFreigeben });
+    expect((freigeben as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: de.fleet.planIngestKarte })).toBeNull();
+    expect(screen.queryByText(de.fleet.planIngestHinweis)).toBeNull();
+
+    // Reine Anzeige (kein Klick) darf die Ingest-Route nie berühren.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/planspecs/ingest"))).toBe(false);
   });
 });
