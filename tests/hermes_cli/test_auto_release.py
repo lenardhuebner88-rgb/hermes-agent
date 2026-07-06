@@ -96,6 +96,7 @@ from pathlib import Path  # noqa: E402
 
 import hermes_cli.profiles as profiles_mod  # noqa: E402
 from hermes_cli import kanban_db as kb  # noqa: E402
+from hermes_cli import vision_metrics as vm  # noqa: E402
 
 
 def _write_profile(home: Path, name: str) -> None:
@@ -277,6 +278,142 @@ def test_incomplete_chain_does_not_deploy(kanban_home, monkeypatch):
         kb.claim_task(conn, kids[0])
         assert kb.complete_task(conn, kids[0], summary="s")
         assert deploys == []
+
+
+# ---------------------------------------------------------------------------
+# A2 (S3 chronic-red-refinement): fail-open hook must never break completion,
+# and must leave a forensic task_event behind.
+# ---------------------------------------------------------------------------
+
+def test_hook_crash_completion_still_succeeds_and_records_forensic_event(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+
+    def _boom(conn, task_id):
+        raise RuntimeError("simulated hook crash")
+
+    monkeypatch.setattr(auto_release, "maybe_auto_release", _boom)
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            # completion must succeed despite the hook crashing
+            assert kb.complete_task(conn, kid, summary="s")
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = 'auto_release_hook_crashed' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert ev is not None
+        payload = json.loads(ev["payload"])
+        assert "simulated hook crash" in payload["error"]
+        assert "chain_root" in payload
+        # no auto_release event at all this run — the outcome dict was never
+        # produced (the hook crashed before returning one)
+        no_ar = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_events WHERE kind = 'auto_release'"
+        ).fetchone()
+        assert no_ar["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# release.pause_on_red_streak (S3)
+# ---------------------------------------------------------------------------
+
+def _config_with_pause(n):
+    def _cfg():
+        cfg = dict(_green_config())
+        cfg["pause_on_red_streak"] = n
+        return cfg
+
+    return _cfg
+
+
+def test_pause_on_red_streak_default_off_is_unchanged(kanban_home, monkeypatch):
+    """Regression: no pause_on_red_streak key at all -> deploy runs exactly
+    as before this slice (default 0 = off)."""
+    events = []
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: events.append("deploy") or (True, "ok")
+    )
+    monkeypatch.setattr(
+        auto_release, "_default_rollback", lambda: events.append("rollback") or (True, "")
+    )
+    monkeypatch.setattr(auto_release, "_default_notify", lambda msg: None)
+    monkeypatch.setattr(
+        auto_release,
+        "_default_fetch",
+        lambda p, timeout=8.0: {"version": "1", "gateway_running": True},
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert events == ["deploy"]
+
+
+def test_pause_on_red_streak_holds_when_last_n_nights_all_red(kanban_home, monkeypatch):
+    monkeypatch.setattr(auto_release, "_release_config", _config_with_pause(3))
+    deploys = []
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: deploys.append(1) or (True, "ok")
+    )
+    monkeypatch.setattr(
+        vm,
+        "read_gate_records",
+        lambda: [
+            {"date": "2026-07-03", "result": "fail"},
+            {"date": "2026-07-04", "result": "fail"},
+            {"date": "2026-07-05", "result": "fail"},
+        ],
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert deploys == []
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = 'auto_release' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert ev is not None
+        assert json.loads(ev["payload"])["outcome"] == "held_red_gate"
+
+
+def test_pause_on_red_streak_releases_when_fewer_than_n_red(kanban_home, monkeypatch):
+    """N=3 but only 2 consecutive red nights at the head -> release runs."""
+    monkeypatch.setattr(auto_release, "_release_config", _config_with_pause(3))
+    events = []
+    monkeypatch.setattr(
+        auto_release, "_default_deploy", lambda: events.append("deploy") or (True, "ok")
+    )
+    monkeypatch.setattr(
+        auto_release, "_default_rollback", lambda: events.append("rollback") or (True, "")
+    )
+    monkeypatch.setattr(auto_release, "_default_notify", lambda msg: None)
+    monkeypatch.setattr(
+        auto_release,
+        "_default_fetch",
+        lambda p, timeout=8.0: {"version": "1", "gateway_running": True},
+    )
+    monkeypatch.setattr(
+        vm,
+        "read_gate_records",
+        lambda: [
+            {"date": "2026-07-03", "result": "pass"},
+            {"date": "2026-07-04", "result": "fail"},
+            {"date": "2026-07-05", "result": "fail"},
+        ],
+    )
+    with kb.connect() as conn:
+        _root, kids = _mk_chain(conn, tier="review")
+        for kid in kids:
+            kb.claim_task(conn, kid)
+            assert kb.complete_task(conn, kid, summary="s")
+        assert events == ["deploy"]
 
 
 import json  # noqa: E402

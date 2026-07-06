@@ -11529,8 +11529,54 @@ def complete_task(
         if _ar_outcome is not None:
             with write_txn(conn):
                 _append_event(conn, task_id, "auto_release", _ar_outcome)
-    except Exception:
+    except Exception as _ar_exc:
         _log.error("auto-release hook failed for %s", task_id, exc_info=True)
+        # A2 (S3 chronic-red-refinement): a swallowed hook crash used to be a
+        # SILENT non-release — a chain that SHOULD have deployed just sits
+        # `done` with nothing to show for it and no forensic trail. Record a
+        # forensic event, best-effort: this whole block is its OWN inner
+        # try/except so a failure recording the failure can never turn into a
+        # broken `complete_task` (completion semantics must never depend on
+        # release plumbing, same fail-open contract as above).
+        #
+        # Visibility (traced, not closed here — outside this slice's file
+        # scope): the only existing push-to-operator path for auto-release
+        # events is gateway/kanban_alerts.py::_rule_auto_release_attention,
+        # which watches ``task_events.kind == "auto_release"`` (constant
+        # ``_AUTO_RELEASE_EVENT``) and pushes to Discord only when
+        # ``payload["outcome"]`` is a key of ``_AUTO_RELEASE_ATTENTION_EMOJI``
+        # (today: rolled_back / deploy_failed / held_critical). This event's
+        # kind (``auto_release_hook_crashed``) is deliberately a DISTINCT kind
+        # — a hook crash never produced an "outcome" at all, so folding it
+        # under ``auto_release`` would misrepresent what happened — which
+        # means it does NOT yet ride that rule as-is. Making it push needs one
+        # small, config/constant-level follow-up in
+        # ``gateway/kanban_alerts.py`` (extend the rule's ``kind`` filter to
+        # also include ``auto_release_hook_crashed`` and give it a fixed
+        # always-alert emoji, mirroring how ``held_critical`` already pushes)
+        # — flagged to the orchestrator rather than done here, since that
+        # file is outside this slice's declared Zieldateien.
+        try:
+            chain_root = None
+            try:
+                from hermes_cli import kanban_worktrees as _kwt
+
+                chain_root = _kwt.chain_root_id(conn, task_id)
+            except Exception:
+                chain_root = None
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "auto_release_hook_crashed",
+                    {"error": str(_ar_exc)[:500], "chain_root": chain_root},
+                )
+        except Exception:
+            _log.error(
+                "auto-release-hook-crashed event append also failed for %s",
+                task_id,
+                exc_info=True,
+            )
     return True
 
 

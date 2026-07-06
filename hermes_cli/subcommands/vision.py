@@ -251,6 +251,15 @@ def build_vision_parser(subparsers) -> None:
             "suppressed). The red verdict / streak is unchanged."
         ),
     )
+    record.add_argument(
+        "--head-sha",
+        default=None,
+        help=(
+            "Repo HEAD commit the gate ran at. Stored on pass AND fail "
+            "records so a later red night's suspect_range can bracket "
+            "against the nearest earlier sha-carrying record."
+        ),
+    )
     record.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- isolate-fails (GREEN-GATE-LEAKER-CAUSE-PURITY-S1) ---
@@ -467,6 +476,7 @@ def vision_command(args: argparse.Namespace) -> int:
             first_fail_detail=getattr(args, "first_fail_detail", None),
             leakers=leakers,
             leaker_only=getattr(args, "leaker_only", False),
+            head_sha=getattr(args, "head_sha", None),
         )
         if getattr(args, "json", False):
             print(json.dumps(record, ensure_ascii=False))

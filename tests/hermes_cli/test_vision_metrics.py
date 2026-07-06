@@ -11,6 +11,7 @@ isolated kanban DB — never the live state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -557,6 +558,29 @@ def test_streak_night_with_any_fail_is_red():
 
 
 # ---------------------------------------------------------------------------
+# red_streak_from_head (S3: release.pause_on_red_streak's ledger-side check)
+# ---------------------------------------------------------------------------
+
+def test_red_streak_from_head_counts_consecutive_red_nights():
+    records = [
+        _rec("2026-06-17", "pass"),
+        _rec("2026-06-18", "fail"),
+        _rec("2026-06-19", "fail"),
+        _rec("2026-06-20", "fail"),
+    ]
+    assert vm.red_streak_from_head(records) == 3
+
+
+def test_red_streak_from_head_zero_when_head_green():
+    records = [_rec("2026-06-19", "fail"), _rec("2026-06-20", "pass")]
+    assert vm.red_streak_from_head(records) == 0
+
+
+def test_red_streak_from_head_empty_ledger():
+    assert vm.red_streak_from_head([]) == 0
+
+
+# ---------------------------------------------------------------------------
 # Recurring same-cause red detection (GREEN-GATE-AUTOHEAL-LOOP-S1)
 # ---------------------------------------------------------------------------
 
@@ -987,6 +1011,37 @@ def test_cli_record_gate_result_fail_with_first_fail(tmp_path, monkeypatch, stat
 
 
 # ---------------------------------------------------------------------------
+# S3: commit attribution — record_gate_result(head_sha=...) + CLI --head-sha
+# ---------------------------------------------------------------------------
+
+def test_record_gate_result_stores_head_sha(state_dir):
+    rec = vm.record_gate_result(
+        "pass", ts="2026-06-19T03:00:00+00:00", head_sha="abc123"
+    )
+    assert rec["head_sha"] == "abc123"
+    loaded = vm.read_gate_records()[-1]
+    assert loaded["head_sha"] == "abc123"
+
+
+def test_record_gate_result_omits_head_sha_when_not_given(state_dir):
+    rec = vm.record_gate_result("pass", ts="2026-06-19T03:00:00+00:00")
+    assert "head_sha" not in rec
+    loaded = vm.read_gate_records()[-1]
+    assert "head_sha" not in loaded
+
+
+def test_cli_record_gate_result_head_sha_roundtrip(tmp_path, monkeypatch, state_dir):
+    db_path = tmp_path / "kanban.db"
+    rc = _run_cli(
+        ["vision", "record-gate-result", "pass", "--head-sha", "deadbeef123"],
+        monkeypatch, db_path,
+    )
+    assert rc == 0
+    rec = vm.read_gate_records()[-1]
+    assert rec["head_sha"] == "deadbeef123"
+
+
+# ---------------------------------------------------------------------------
 # Snapshot file: valid JSON, all fields, counters, streak wired in
 # ---------------------------------------------------------------------------
 
@@ -1291,6 +1346,208 @@ def test_persistent_red_triage_fires_with_all_three_red():
 
 def test_persistent_red_triage_empty_ledger():
     assert vm.derive_persistent_red_triage([]) is None
+
+
+# ---------------------------------------------------------------------------
+# S3 chronic-red-refinement: red_files-honesty (union across the window,
+# red_files_by_night) + suspect_range (commit attribution) + fingerprint
+# anchored to the head night only (anti-flood).
+#
+# Detail strings below are trimmed from REAL ~/.hermes/state/green-gate-ledger.jsonl
+# entries (2026-06-27 / 2026-06-28 / 2026-06-30 / 2026-07-05 — copied 2026-07-06,
+# each night a DIFFERENT failing file: the live chronic-drift pattern), not
+# hand-invented shapes.
+# ---------------------------------------------------------------------------
+
+_REAL_DETAIL_A = (
+    "python (isolated): tests/hermes_cli/test_kanban_core_functionality.py\n"
+    "FAILED tests/hermes_cli/test_kanban_core_functionality.py::"
+    "test_multiple_attempts_preserved_as_runs\n"
+    "================== 4 failed, 189 passed, 3 warnings in 26.47s ==================\n"
+    "\n"
+    "=== 1 file with test failures (4 tests failed) ===\n"
+    "  tests/hermes_cli/test_kanban_core_functionality.py  (4 tests failed)\n"
+)
+_REAL_DETAIL_B = (
+    "python (isolated): tests/hermes_cli/test_kanban_worker_env_allowlist.py\n"
+    "FAILED tests/hermes_cli/test_kanban_worker_env_allowlist.py::"
+    "test_hermes_worker_env_strips_inherited_secrets\n"
+    "========================= 2 failed, 3 passed in 1.16s ==========================\n"
+    "\n"
+    "=== 1 file with test failures (2 tests failed) ===\n"
+    "  tests/hermes_cli/test_kanban_worker_env_allowlist.py  (2 tests failed)\n"
+)
+_REAL_DETAIL_C = (
+    "python (isolated): tests/hermes_cli/test_kanban_workflow_routing.py\n"
+    "FAILED tests/hermes_cli/test_kanban_workflow_routing.py::"
+    "test_no_template_completes_straight_to_done\n"
+    "========================= 2 failed, 14 passed in 3.39s =========================\n"
+    "\n"
+    "=== 1 file with test failures (2 tests failed) ===\n"
+    "  tests/hermes_cli/test_kanban_workflow_routing.py  (2 tests failed)\n"
+)
+_REAL_DETAIL_D = (
+    "python (isolated): tests/hermes_cli/test_web_server_fs.py\n"
+    "FAILED tests/hermes_cli/test_web_server_fs.py::"
+    "test_fs_git_root_returns_null_outside_repo\n"
+    "========================= 1 failed, 12 passed in 1.69s =========================\n"
+    "\n"
+    "=== 1 file with test failures (1 test failed) ===\n"
+    "  tests/hermes_cli/test_web_server_fs.py  (1 test failed)\n"
+)
+
+
+def test_persistent_red_triage_red_files_is_union_across_drifting_nights():
+    # Three consecutive red nights, three DIFFERENT root causes (the live
+    # 2026-07-05 log-forensics pattern: 13-14/17-18 nights red, a DIFFERENT
+    # cause almost every time). Pre-S3, red_files reported ONLY the head
+    # night's file -- reading as "this ONE file keeps failing" when the true
+    # story is three unrelated breakages.
+    records = [
+        _red("2026-06-27", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-06-28", gate="python", detail=_REAL_DETAIL_B),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),
+    ]
+    cause = vm.derive_persistent_red_triage(records)
+    assert cause is not None
+    # Codex review 2026-07-06 finding 1: red_files KEEPS head-night semantics
+    # (the PlanSpec body renders it; a union would drift the body bytes under
+    # a stable fingerprint key and break planspecs' byte idempotency). The
+    # window-wide honesty lives in the ADDITIVE red_files_window_union.
+    assert cause["red_files"] == {"tests/hermes_cli/test_kanban_workflow_routing.py"}
+    assert cause["red_files_window_union"] == {
+        "tests/hermes_cli/test_kanban_core_functionality.py",
+        "tests/hermes_cli/test_kanban_worker_env_allowlist.py",
+        "tests/hermes_cli/test_kanban_workflow_routing.py",
+    }
+    by_night = cause["red_files_by_night"]
+    assert [n["date"] for n in by_night] == ["2026-06-27", "2026-06-28", "2026-07-05"]
+    assert by_night[0]["files"] == ["tests/hermes_cli/test_kanban_core_functionality.py"]
+    assert by_night[1]["files"] == ["tests/hermes_cli/test_kanban_worker_env_allowlist.py"]
+    assert by_night[2]["files"] == ["tests/hermes_cli/test_kanban_workflow_routing.py"]
+    # fingerprint stays anchored to the HEAD night's own file only (see the
+    # function docstring's anti-flood rationale) -- NOT the 3-file union.
+    expected_fp = hashlib.sha1(
+        "tests/hermes_cli/test_kanban_workflow_routing.py".encode("utf-8")
+    ).hexdigest()
+    assert cause["fingerprint"] == expected_fp
+
+
+def test_persistent_red_triage_fingerprint_ignores_non_head_window_drift():
+    # AC-2 anti-flood (S3): the fingerprint must not churn merely because an
+    # OLDER night inside the window has a different cause -- only a change in
+    # the HEAD night's own red files may open a new triage chain. red_files
+    # (the union) DOES still change when the window's older content differs.
+    records_a = [
+        _red("2026-06-27", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-06-28", gate="python", detail=_REAL_DETAIL_B),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),  # head
+    ]
+    records_b = [
+        _red("2026-06-27", gate="python", detail=_REAL_DETAIL_D),  # different
+        _red("2026-06-28", gate="python", detail=_REAL_DETAIL_B),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),  # SAME head
+    ]
+    cause_a = vm.derive_persistent_red_triage(records_a)
+    cause_b = vm.derive_persistent_red_triage(records_b)
+    assert cause_a is not None and cause_b is not None
+    assert cause_a["fingerprint"] == cause_b["fingerprint"]
+    # red_files (head-anchored, PlanSpec-body-stable) must be IDENTICAL under
+    # non-head drift; only the additive union reflects it (Codex finding 1).
+    assert cause_a["red_files"] == cause_b["red_files"]
+    assert cause_a["red_files_window_union"] != cause_b["red_files_window_union"]
+
+
+def test_persistent_red_triage_one_noisy_night_does_not_satisfy_min_reds():
+    # Codex review 2026-07-06 finding 2: three fail RECORDS on one UTC date
+    # (e.g. manual heartbeat re-runs) are ONE red night — an N-of-M *nights*
+    # trigger must not fire from a single noisy night.
+    records = [
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_A,
+             ts="2026-07-05T03:30:00+00:00"),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_B,
+             ts="2026-07-05T09:00:00+00:00"),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C,
+             ts="2026-07-05T15:00:00+00:00"),
+    ]
+    assert vm.derive_persistent_red_triage(records, min_reds=3, window=5) is None
+
+
+def test_persistent_red_triage_same_date_records_merge_into_one_night():
+    # Two fail records on the SAME date merge into one by_night entry (files
+    # unioned); a second distinct date completes min_reds=2.
+    records = [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A,
+             ts="2026-07-04T03:30:00+00:00"),
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_B,
+             ts="2026-07-04T09:00:00+00:00"),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C,
+             ts="2026-07-05T03:30:00+00:00"),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=5)
+    assert cause is not None
+    assert cause["red_count"] == 2
+    by_night = cause["red_files_by_night"]
+    assert [n["date"] for n in by_night] == ["2026-07-04", "2026-07-05"]
+    assert len(by_night[0]["files"]) == 2  # merged union of the noisy night
+
+
+def test_persistent_red_triage_suspect_range_from_consecutive_shas():
+    records = [
+        {**_rec("2026-06-26", "pass", ts="2026-06-26T03:00:00+00:00"), "head_sha": "aaa111"},
+        {
+            **_red("2026-06-27", gate="python", detail=_REAL_DETAIL_A),
+            "head_sha": "bbb222",
+        },
+        {
+            **_red("2026-06-28", gate="python", detail=_REAL_DETAIL_B),
+            "head_sha": "ccc333",
+        },
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    by_night = {n["date"]: n["suspect_range"] for n in cause["red_files_by_night"]}
+    assert by_night["2026-06-27"] == "aaa111..bbb222"
+    assert by_night["2026-06-28"] == "bbb222..ccc333"
+
+
+def test_persistent_red_triage_suspect_range_none_without_sha():
+    # Graceful: a ledger that predates head_sha attribution yields range=None,
+    # never a crash or a guessed range.
+    records = [
+        _red("2026-06-27", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-06-28", gate="python", detail=_REAL_DETAIL_B),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=2)
+    assert cause is not None
+    assert all(n["suspect_range"] is None for n in cause["red_files_by_night"])
+
+
+def test_consecutive_red_cause_suspect_range_mixed_with_and_without_sha():
+    # Mixed ledger: an older pass record with NO head_sha, then two same-cause
+    # red nights that DO carry one.
+    records = [
+        _rec("2026-06-18", "pass"),
+        {**_red("2026-06-19", gate="python", detail="boom"), "head_sha": "sha0619"},
+        {**_red("2026-06-20", gate="python", detail="boom"), "head_sha": "sha0620"},
+    ]
+    cause = vm.derive_consecutive_red_cause(records, min_nights=2)
+    assert cause is not None
+    ranges = {r["date"]: r["range"] for r in cause["suspect_ranges"]}
+    # no earlier sha-carrying record precedes 06-19 (06-18 has none) -> null
+    assert ranges["2026-06-19"] is None
+    assert ranges["2026-06-20"] == "sha0619..sha0620"
+
+
+def test_consecutive_red_cause_suspect_range_none_when_night_missing_sha():
+    records = [
+        {**_red("2026-06-19", gate="python", detail="boom"), "head_sha": "sha0619"},
+        _red("2026-06-20", gate="python", detail="boom"),  # this night has no sha
+    ]
+    cause = vm.derive_consecutive_red_cause(records, min_nights=2)
+    assert cause is not None
+    ranges = {r["date"]: r["range"] for r in cause["suspect_ranges"]}
+    assert ranges["2026-06-20"] is None
 
 
 def test_cli_triage_check_dry_run(tmp_path, monkeypatch, state_dir, capsys):

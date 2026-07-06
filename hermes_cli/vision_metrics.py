@@ -198,6 +198,7 @@ def record_gate_result(
     first_fail_detail: Optional[str] = None,
     leakers: Optional[list] = None,
     leaker_only: bool = False,
+    head_sha: Optional[str] = None,
 ) -> dict:
     """Append one structured green-gate record to the ledger.
 
@@ -219,6 +220,15 @@ def record_gate_result(
     autoheal loop to act on. The red *verdict* is never suppressed — only the
     cause attribution is cleaned (AC-2).
 
+    Commit attribution (S3 chronic-red-refinement): ``head_sha`` (optional) is
+    the repo HEAD commit the gate ran at. Stored on EVERY record — pass or
+    fail, not just fails — because ``derive_persistent_red_triage`` /
+    ``derive_consecutive_red_cause`` need the nearest EARLIER sha-carrying
+    record (any result) to bracket a ``"<prev_sha>..<sha>"`` suspect range for
+    a red night; a pass-only night still needs to contribute its sha as the
+    "prev" anchor for the next red one. No git call happens here — the caller
+    (the nightly heartbeat) already knows its own HEAD.
+
     ``pass`` records never carry ``first_fail``/``leakers``/``leaker_only`` —
     pass behaviour is unchanged — and a ``fail`` without any payload is also
     unchanged (backward-compatible). Returns the record that was written.
@@ -235,6 +245,9 @@ def record_gate_result(
         "epoch": int(dt.timestamp()),
         "date": dt.date().isoformat(),
     }
+    cleaned_sha = str(head_sha).strip() if head_sha else ""
+    if cleaned_sha:
+        record["head_sha"] = cleaned_sha
     if normalized == "fail":
         if leaker_only:
             # whole night was harness noise -> red, but no product cause
@@ -330,6 +343,38 @@ def derive_gate_streak(records: list[dict]) -> dict:
     }
 
 
+def red_streak_from_head(records: list[dict]) -> int:
+    """Consecutive RED nights counting back from the most recently recorded
+    night — the complementary axis to :func:`derive_gate_streak`'s green
+    streak. A night (one UTC ``date``) is red iff ANY record for that date is
+    ``fail`` (same rule). Returns 0 when there are no recorded nights or the
+    head night is green.
+
+    Used by ``release.pause_on_red_streak`` (``auto_release.maybe_auto_release``,
+    S3): a robust check straight over the ledger records rather than the
+    precomputed ``vision-metrics.json`` snapshot, which can be stale or
+    missing (e.g. before the first ``metrics-snapshot`` run of the day).
+    """
+    per_date: dict[str, bool] = {}
+    for rec in records:
+        date = str(rec.get("date") or "")
+        if not date:
+            continue
+        is_fail = str(rec.get("result", "")).lower() != "pass"
+        if is_fail:
+            per_date[date] = True
+        else:
+            per_date.setdefault(date, False)
+    dates_desc = sorted(per_date.keys(), reverse=True)
+    streak = 0
+    for date in dates_desc:
+        if per_date[date]:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 # ---------------------------------------------------------------------------
 # Recurring red-cause detection (GREEN-GATE-AUTOHEAL-LOOP-S1)
 #
@@ -385,6 +430,26 @@ def _record_epoch(rec: dict) -> Optional[int]:
         return None
 
 
+def _prev_sha_index(records: list[dict]) -> list[Optional[str]]:
+    """For each ledger record (by position), the nearest EARLIER record's
+    ``head_sha`` — any date, any result (pass or fail) — or ``None`` when no
+    sha-carrying record precedes it.
+
+    Pure ledger derivation (S3 commit attribution): no git call happens here,
+    only a linear scan of whatever ``head_sha`` the caller already recorded.
+    A ``pass`` record's sha counts too — it is the correct "prev" anchor for a
+    red night that follows a green one.
+    """
+    out: list[Optional[str]] = []
+    prev: Optional[str] = None
+    for rec in records:
+        out.append(prev)
+        sha = str(rec.get("head_sha") or "").strip()
+        if sha:
+            prev = sha
+    return out
+
+
 def _normalize_cause_detail(detail: str) -> str:
     """Normalize a first-failure detail tail into a STABLE cause token.
 
@@ -415,11 +480,19 @@ def _first_fail_cause(first_fail: Optional[dict]) -> Optional[dict]:
     return {"gate": gate, "fingerprint": fingerprint, "detail": detail}
 
 
-def _night_cause(fails: list[tuple[Optional[int], Optional[dict]]]) -> Optional[dict]:
+def _night_cause(
+    fails: list[tuple[Optional[int], Optional[dict], bool, int]]
+) -> Optional[dict]:
     """Representative cause for one red night: the EARLIEST fail record's
     ``first_fail`` (by epoch; records without an epoch sort last). A night that
-    failed with no first_fail payload at all returns ``None``."""
-    for _ep, ff, _leaker_only in sorted(fails, key=_night_sort_key):
+    failed with no first_fail payload at all returns ``None``.
+
+    Each ``fails`` entry is ``(epoch, first_fail, leaker_only, record_index)``
+    — ``record_index`` (S3) is the fail record's position in the ledger list
+    the caller derived from, used elsewhere to look up its ``head_sha`` /
+    ``suspect_range``; unused here, kept for a single shared tuple shape.
+    """
+    for _ep, ff, _leaker_only, _idx in sorted(fails, key=_night_sort_key):
         cause = _first_fail_cause(ff)
         if cause is not None:
             return cause
@@ -427,14 +500,14 @@ def _night_cause(fails: list[tuple[Optional[int], Optional[dict]]]) -> Optional[
 
 
 def _night_sort_key(
-    item: tuple[Optional[int], Optional[dict], bool]
+    item: tuple[Optional[int], Optional[dict], bool, int]
 ) -> tuple[bool, int]:
     ep = item[0]
     return (ep is None, ep if ep is not None else 0)
 
 
 def _night_cause_and_purity(
-    fails: list[tuple[Optional[int], Optional[dict], bool]]
+    fails: list[tuple[Optional[int], Optional[dict], bool, int]]
 ) -> tuple[Optional[dict], bool]:
     """Cause + ``pure_leaker`` flag for one red night.
 
@@ -449,7 +522,7 @@ def _night_cause_and_purity(
     cause = _night_cause(fails)
     if cause is not None:
         return cause, False
-    has_leaker_only = any(flag for _ep, _ff, flag in fails)
+    has_leaker_only = any(flag for _ep, _ff, flag, _idx in fails)
     return None, (len(fails) > 0 and has_leaker_only)
 
 
@@ -594,12 +667,22 @@ def derive_consecutive_red_cause(
     unchanged (pure ledger), and an UN-attributed head keeps the legacy
     ``"unknown"`` coalescing untouched.
 
-    The returned dict — ``{gate, fingerprint, detail, red_nights, dates}`` — is
-    pure detection; the volatile ``red_nights``/``detail`` are for logging only.
-    The stable ``gate`` + ``fingerprint`` are what the idempotent ingest keys on.
+    The returned dict — ``{gate, fingerprint, detail, red_nights, dates,
+    suspect_ranges}`` — is pure detection; the volatile ``red_nights``/
+    ``detail``/``suspect_ranges`` are for logging only. The stable ``gate`` +
+    ``fingerprint`` are what the idempotent ingest keys on.
+
+    Commit attribution (S3): ``suspect_ranges`` is
+    ``[{"date": <str>, "range": "<prev_sha>..<sha>" | None}, ...]`` — one entry
+    per matched date (same order as ``dates``). ``sha`` is the ``head_sha`` of
+    that night's representative fail record (the same earliest-fail record
+    :func:`_night_cause` reads for the cause); ``prev_sha`` is the nearest
+    EARLIER ledger record's ``head_sha`` (any date, any result). Either side
+    missing (older ledger entries predate the ``head_sha`` field) yields
+    ``range: None`` — graceful, no git call, pure ledger derivation.
     """
     per_date: dict[str, dict] = {}
-    for rec in records:
+    for idx, rec in enumerate(records):
         date = str(rec.get("date") or "")
         if not date:
             continue
@@ -607,7 +690,7 @@ def derive_consecutive_red_cause(
         if str(rec.get("result")).lower() != "pass":
             slot["red"] = True
             slot["fails"].append(
-                (_record_epoch(rec), rec.get("first_fail"), bool(rec.get("leaker_only")))
+                (_record_epoch(rec), rec.get("first_fail"), bool(rec.get("leaker_only")), idx)
             )
 
     if not per_date:
@@ -664,12 +747,27 @@ def derive_consecutive_red_cause(
     if len(matched) < max(1, int(min_nights)):
         return None
 
+    prev_sha_at = _prev_sha_index(records)
+    suspect_ranges: list[dict] = []
+    for date in matched:
+        fails = per_date[date]["fails"]
+        rng = None
+        if fails:
+            rep = sorted(fails, key=_night_sort_key)[0]
+            rep_idx = rep[3]
+            sha = str(records[rep_idx].get("head_sha") or "").strip() or None
+            prev_sha = prev_sha_at[rep_idx]
+            if sha and prev_sha:
+                rng = f"{prev_sha}..{sha}"
+        suspect_ranges.append({"date": date, "range": rng})
+
     return {
         "gate": target_cause["gate"] if target_cause else "unknown",
         "fingerprint": target_fp,
         "detail": target_cause["detail"] if target_cause else "",
         "red_nights": len(matched),
         "dates": matched,
+        "suspect_ranges": suspect_ranges,
     }
 
 
@@ -695,17 +793,43 @@ def derive_persistent_red_triage(
     When triggered, returns::
 
         {
-            "gate": <str>,            # the head night's gate
-            "red_files": set[str],    # currently-red test files from head first_fail
-            "fingerprint": <str>,     # sha1 of the sorted red_files set (dedup key)
+            "gate": <str>,                  # the head night's gate
+            "red_files": set[str],          # UNION of failing test files across
+                                             # every red night in the window
+                                             # (S3 red_files-honesty fix, see below)
+            "red_files_by_night": [
+                {"date": <str>, "files": [<str>, ...], "suspect_range": <str|None>},
+                ...
+            ],                               # one entry per red night in the
+                                              # window, oldest-to-newest order
+            "fingerprint": <str>,     # sha1 of the HEAD night's red-file set (dedup key)
             "red_count": <int>,       # reds in the window
             "window": <int>,          # M
             "dates": [<str>, ...],    # dates of the red nights in the window
         }
 
-    The ``fingerprint`` is a pure function of the CURRENT red file set (not the
-    historical causes), so re-runs / follow-up nights with the same red file set
-    produce the same fingerprint and the ingest dedups — no spam (AC-2).
+    ``red_files``-honesty (S3): with chronic drift (a DIFFERENT test broke each
+    red night — the common case per the 2026-07-05 log forensics), the
+    pre-S3 behaviour reported only the HEAD night's failing files as
+    ``red_files``, which reads as "this ONE set of files has been failing
+    repeatedly" even though the underlying cause changed every night. That is
+    exactly what the same-cause path (:func:`derive_consecutive_red_cause`)
+    is for; this trigger is the changing-cause complement, so its operator
+    surface must not silently imply repetition. ``red_files`` is now the
+    UNION of every red night's failing-file set in the window; the per-night
+    breakdown survives (additively) as ``red_files_by_night``.
+
+    Fingerprint stays anchored to the HEAD night's own red-file set only (NOT
+    the union) — deliberately unchanged from pre-S3 behaviour. The union
+    widens/narrows on every window slide even when nothing about the
+    underlying failures changed (a night falls out of the window on one side,
+    a new one enters on the other), so hashing the union would open a fresh
+    triage chain purely from window movement, not new information — the
+    "Re-Trigger-Flut" this fix must NOT introduce. The head-night anchor keeps
+    the existing, already-tested dedup behaviour exactly as before: two
+    consecutive runs whose HEAD night shows the same red files still hit
+    ``already_ingested``; a head night whose OWN red files genuinely change
+    still (correctly) opens a fresh chain — new information for the operator.
     """
     if not records:
         return None
@@ -715,32 +839,73 @@ def derive_persistent_red_triage(
     head = recent[-1]
     if str(head.get("result", "")).lower() != "fail":
         return None
-    reds = [r for r in recent if str(r.get("result", "")).lower() == "fail"]
-    if len(reds) < min_reds:
+    base_index = len(records) - len(recent)
+    reds_with_index = [
+        (base_index + i, r)
+        for i, r in enumerate(recent)
+        if str(r.get("result", "")).lower() == "fail"
+    ]
+    # Codex review 2026-07-06 finding 2: ``min_reds`` counts distinct red
+    # NIGHTS (UTC dates), not fail records — a single noisy night with
+    # multiple recorded fails (e.g. a manual re-run of the heartbeat) must
+    # not satisfy an N-of-M *nights* trigger on its own.
+    distinct_red_dates = {
+        str(r.get("date") or r.get("epoch") or "?") for _i, r in reds_with_index
+    }
+    if len(distinct_red_dates) < min_reds:
         return None
     # ``detail`` and ``gate`` live under the record's ``first_fail`` payload
     # (mirrors derive_consecutive_red_cause, which reads first_fail["detail"]).
     # Reading them top-level would always miss → empty file set + "unknown" gate.
     head_first_fail = head.get("first_fail") or {}
     head_files = _extract_failing_test_files(head_first_fail.get("detail"))
-    # Fingerprint the CURRENT red file set — the dedup axis. Two runs whose head
-    # night shows the same red files produce the same fingerprint, so the ingest
-    # reports already_ingested instead of opening a second chain (AC-2). When the
-    # red file set changes (a new test broke, a different subset is red), the
-    # fingerprint changes and a fresh triage chain opens — correct: the operator
-    # SHOULD see a new item for a new failure pattern.
+    # Fingerprint the HEAD night's red file set only — see the docstring's
+    # "Fingerprint stays anchored..." rationale above (AC-2: no spam).
     fingerprint_source = "|".join(sorted(head_files)) if head_files else (
         str(head_first_fail.get("gate") or "unknown")
     )
     fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
-    red_dates = [str(r.get("date") or r.get("epoch") or "?") for r in reds]
+
+    prev_sha_at = _prev_sha_index(records)
+    # Codex review 2026-07-06 finding 1: ``red_files`` KEEPS its pre-S3
+    # head-night-only semantics — strategist.propose_persistent_red_triage
+    # renders it verbatim into the PlanSpec body while the idempotency key
+    # stays head-fingerprint-anchored; a window union here would drift the
+    # body bytes on every window slide and turn ``already_ingested`` re-runs
+    # into supersede conflicts (planspecs hashes file bytes). The window-wide
+    # honesty lives in the ADDITIVE keys ``red_files_window_union`` and
+    # ``red_files_by_night`` for dashboards/digest consumers instead.
+    red_files_window_union: set[str] = set()
+    per_night: dict[str, dict] = {}
+    for idx, r in reds_with_index:
+        ff = r.get("first_fail") or {}
+        files = sorted(_extract_failing_test_files(ff.get("detail")))
+        red_files_window_union.update(files)
+        date = str(r.get("date") or r.get("epoch") or "?")
+        night = per_night.get(date)
+        if night is None:
+            # One entry per NIGHT (finding 2): the suspect_range anchors on
+            # the night's earliest record — same representative convention as
+            # _night_cause.
+            sha = str(r.get("head_sha") or "").strip() or None
+            prev_sha = prev_sha_at[idx]
+            per_night[date] = {
+                "date": date,
+                "files": list(files),
+                "suspect_range": f"{prev_sha}..{sha}" if (sha and prev_sha) else None,
+            }
+        else:
+            night["files"] = sorted(set(night["files"]) | set(files))
+    red_files_by_night = [per_night[d] for d in sorted(per_night)]
     return {
         "gate": str(head_first_fail.get("gate") or "unknown"),
-        "red_files": head_files,
+        "red_files": set(head_files),
+        "red_files_window_union": red_files_window_union,
+        "red_files_by_night": red_files_by_night,
         "fingerprint": fingerprint,
-        "red_count": len(reds),
+        "red_count": len(distinct_red_dates),
         "window": window,
-        "dates": red_dates,
+        "dates": sorted(distinct_red_dates),
     }
 
 

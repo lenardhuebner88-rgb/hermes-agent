@@ -144,7 +144,24 @@ def _release_config() -> dict:
     max_tier = str(rel.get("max_tier_autonomous") or "review").strip().lower()
     if max_tier not in _TIER_ORDER:
         max_tier = "review"
-    return {"autonomous": bool(autonomous), "max_tier_autonomous": max_tier}
+    # S3 chronic-red-refinement: pause_on_red_streak (int, default 0 = off).
+    # >0 holds a would-be release when the last N recorded green-gate nights
+    # are ALL red — a chronically-red gate is not a safe base to release from
+    # even though THIS chain's own tests are green (the nightly full suite
+    # catches cross-chain regressions a per-chain run cannot see). Default 0
+    # keeps today's behaviour byte-for-byte unchanged with no config key set.
+    pause_on_red_streak = rel.get("pause_on_red_streak", 0)
+    try:
+        pause_on_red_streak = int(pause_on_red_streak)
+    except (TypeError, ValueError):
+        pause_on_red_streak = 0
+    if pause_on_red_streak < 0:
+        pause_on_red_streak = 0
+    return {
+        "autonomous": bool(autonomous),
+        "max_tier_autonomous": max_tier,
+        "pause_on_red_streak": pause_on_red_streak,
+    }
 
 
 def _repo_root() -> "Path":
@@ -273,8 +290,10 @@ def maybe_auto_release(conn, task_id: str) -> Optional[dict]:
     Returns ``None`` when this completion does not autonomously release
     (kill-switch off, not a PlanSpec chain, chain still open, no root, root not
     ``freigabe: complete``), a ``held_critical`` outcome when the chain
-    contains a critical-tier task (never autonomous), or the
-    :func:`release_chain` outcome dict.
+    contains a critical-tier task (never autonomous), a ``held_red_gate``
+    outcome (S3) when ``release.pause_on_red_streak`` is set and the last N
+    recorded green-gate nights are all red, or the :func:`release_chain`
+    outcome dict.
     """
     cfg = _release_config()
     if not cfg.get("autonomous"):
@@ -322,6 +341,22 @@ def maybe_auto_release(conn, task_id: str) -> Optional[dict]:
         _TIER_ORDER[max_tier] > _TIER_ORDER[cfg["max_tier_autonomous"]]
     ):
         return {"outcome": "held_critical", "detail": f"chain max tier {max_tier}"}
+    # S3: pause_on_red_streak precondition — mirrors held_critical exactly
+    # (same outcome-dict shape, same task_event/visibility path: the caller,
+    # kanban_db.complete_task, appends whatever dict this function returns as
+    # a task_event(kind="auto_release", payload=<this dict>) unconditionally;
+    # that event is what gateway/kanban_alerts.py's auto_release_attention
+    # rule reads). Default (pause_on_red_streak=0) never runs this check —
+    # today's behaviour is unchanged with no config key set.
+    pause_n = int(cfg.get("pause_on_red_streak") or 0)
+    if pause_n > 0:
+        from hermes_cli import vision_metrics as _vm
+
+        if _vm.red_streak_from_head(_vm.read_gate_records()) >= pause_n:
+            return {
+                "outcome": "held_red_gate",
+                "detail": f"last {pause_n} recorded green-gate nights all red",
+            }
     return release_chain(
         depth=str(root["live_test_depth"] or ""),
         config=cfg,
