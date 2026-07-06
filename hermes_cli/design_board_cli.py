@@ -28,6 +28,15 @@ def build_brief(card: dict) -> str:
             lines.append(
                 f"  pin {pin['id']} @ ({pin['x']},{pin['y']}): {pin.get('note', '')}"
             )
+    lines.append(
+        "\n## Design-DoD (acceptance gates for UI changes from this card)\n"
+        "- Dark skin, theme tokens only (web/src/control/theme.css) — no raw hex (gate ratchet enforces)\n"
+        "- Verified at mobile 390px AND desktop 1440px viewport\n"
+        "- States handled and shown: empty, loading, overflow (long words, 3x item count)\n"
+        "- Text contrast readable on dark surfaces\n"
+        "- Evidence: after-screenshot via scripts/control_shot.py attached back to this card\n"
+        "  (see ~/.hermes/skills/design-board/SKILL.md)"
+    )
     lines.append("\n(Assets on disk under ~/.hermes/design-board/cards/<id>/assets/)")
     return "\n".join(lines)
 

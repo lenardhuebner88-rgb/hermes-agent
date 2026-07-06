@@ -23,6 +23,11 @@ def test_build_brief_includes_pins_and_target():
     assert "overlaps puls chip" in brief
     assert "0.42" in brief
     assert "assets/e1.png" in brief
+    assert "## Design-DoD" in brief
+    assert "Verified at mobile 390px AND desktop 1440px viewport" in brief
+    dod_index = brief.index("## Design-DoD")
+    assets_index = brief.index("(Assets on disk under")
+    assert dod_index < assets_index
 
 
 def test_promote_creates_and_links(monkeypatch):
