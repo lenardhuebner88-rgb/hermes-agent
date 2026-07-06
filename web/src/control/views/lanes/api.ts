@@ -571,6 +571,11 @@ export interface EditorRow {
   description: string;
   /** Label of the profile's config default, for the "Standard (…)" option. */
   defaultLabel: string;
+  /** Runtime the profile's config default resolves to (catalog `worker_runtime`,
+   *  or the same derived runtime as `worker_runtime` for lane-only extras) — the
+   *  target the "Standard" choice must revert to, not whatever runtime the row
+   *  is currently switched to. */
+  defaultRuntime: LaneRuntime;
   defaultProvider: string | null;
   defaultFallbackProviders: LaneFallbackProvider[];
   worker_runtime: LaneRuntime;
@@ -598,6 +603,7 @@ export function editorRows(
       profile: p.name,
       description: p.description,
       defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
+      defaultRuntime: p.worker_runtime,
       defaultProvider: p.default_provider ?? null,
       defaultFallbackProviders: cloneFallbacks(p.fallback_providers),
       worker_runtime: runtime,
@@ -619,6 +625,7 @@ export function editorRows(
       profile: name,
       description: "",
       defaultLabel: "automatisch",
+      defaultRuntime: runtime,
       defaultProvider: null,
       defaultFallbackProviders: [],
       worker_runtime: runtime,
@@ -631,6 +638,38 @@ export function editorRows(
     });
   }
   return rows;
+}
+
+function modelOptionValue(option: LaneModelOption): string {
+  return `${option.runtime}|${option.provider ?? ""}|${option.id}`;
+}
+
+/** Applies a Fleet quick-switch dropdown choice to a row. Empty choice ("" =
+ *  "Standard") reverts to the profile's catalog default runtime, not whatever
+ *  runtime the row is currently switched to — otherwise a lane stays trapped
+ *  in a flipped runtime after reverting (live bug, 2026-07-06). */
+export function applyChoice(row: EditorRow, choice: string, models: LaneModelOption[]): EditorRow {
+  const entry = entryFromProviderAwareChoice(choice);
+  if (!entry) {
+    return {
+      ...row,
+      choice: "",
+      worker_runtime: row.defaultRuntime ?? row.worker_runtime,
+      provider: null,
+      model: null,
+      fallbackProviders: [],
+    };
+  }
+  const model = models.find((candidate) => modelOptionValue(candidate) === choice);
+  const runtime = entry.worker_runtime ?? row.worker_runtime;
+  return {
+    ...row,
+    choice,
+    worker_runtime: runtime,
+    provider: runtime === "hermes" ? model?.provider ?? entry.provider ?? row.defaultProvider ?? null : null,
+    model: entry.model ?? null,
+    fallbackProviders: runtime === "hermes" ? row.fallbackProviders : [],
+  };
 }
 
 /** Editor rows → API payload. Default rows ("") are dropped entirely.
@@ -651,7 +690,7 @@ export function profilesFromEditorRows(
       row.choice !== "";
     if (!hasStructuredOverride) continue;
     if (row.locked || row.worker_runtime === "claude-cli") {
-      const entry = entryFromChoice(row.choice);
+      const entry = entryFromProviderAwareChoice(row.choice);
       out[row.profile] = entry ?? {
         worker_runtime: "claude-cli",
         model: row.model,

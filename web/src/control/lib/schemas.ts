@@ -93,6 +93,29 @@ export const WorkersResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+// Worker-Drawer-Steuerung (Gap 1) — POST /workers/{run_id}/action's response.
+// A guard refusal (e.g. "confirm required", "no active claim") comes back as
+// `ok: false` at HTTP 200, NOT a thrown error — see plugin_api.py's own doc
+// comment on the endpoint. `task_id` is absent for action="dispatch" (a bare
+// dispatcher tick has no single task); every other action carries it.
+export const WorkerActionResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  action: z.string().optional(),
+  run_id: z.coerce.string().optional(),
+  task_id: z.string().nullable().optional(),
+  detail: z.string().optional(),
+});
+export type WorkerActionResponse = z.infer<typeof WorkerActionResponseSchema>;
+
+// POST /runs/{run_id}/terminate's response — 404/409 raise HTTPException (fetchJSON
+// throws before this ever parses); 200 is always ok:true.
+export const TerminateRunResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  run_id: z.coerce.string().optional(),
+  task_id: z.string().optional(),
+});
+export type TerminateRunResponse = z.infer<typeof TerminateRunResponseSchema>;
+
 // F1: Aktivitäts-Timeline — Task-Events (neueste zuerst).
 export const WorkerActivityEventSchema = z.object({
   id: z.coerce.number().catch(0),

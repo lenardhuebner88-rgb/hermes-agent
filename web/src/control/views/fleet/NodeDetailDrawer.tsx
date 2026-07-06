@@ -168,6 +168,10 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
               chainRootId={chainRootId}
               onChanged={onChanged}
               onCancelled={onClose}
+              // Der Drawer zeigt die Verifier-Urteile im Ergebnis-Tab direkt
+              // daneben — hier ist Ship/Rework für `review` also kein blindes
+              // Approve, sondern eine informierte Operator-Entscheidung.
+              allowReviewStage
             />
           </div>
         ) : null}

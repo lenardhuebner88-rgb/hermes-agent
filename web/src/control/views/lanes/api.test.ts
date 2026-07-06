@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateLane,
+  applyChoice,
   choiceFromEntry,
   choiceOverrideLabel,
   deleteLane,
@@ -17,6 +18,7 @@ import {
   profilesFromEditorRows,
   providerOptions,
   smokeCheckLaneConfig,
+  type EditorRow,
   type Lane,
   type LaneCatalogProfile,
   type LaneModelOption,
@@ -374,5 +376,70 @@ describe("editor rows", () => {
     expect(laneEntryWarnings(coder!)).toEqual([]);
     expect(profilesFromEditorRows(rows).coder).toEqual({ worker_runtime: "claude-cli", model: "claude-opus-4-8" });
     expect(profilesFromEditorRows(rows).altprofil).toMatchObject({ worker_runtime: "hermes", provider: "neuralwatt", model: "glm-5.2-fast" });
+  });
+
+  // Bug 1 (live, 2026-07-06): the Fleet quick-switch produces provider-aware
+  // 3-part choices ("runtime|provider|model"); the claude-cli branch of
+  // profilesFromEditorRows used to parse them with the legacy 2-part
+  // `entryFromChoice`, which sliced at the FIRST pipe and persisted
+  // model: "|claude-haiku-4-5" (leading pipe) into the lane config.
+  function claudeCliRow(choice: string, model: string | null): EditorRow {
+    return {
+      profile: "admin",
+      description: "",
+      defaultLabel: "automatisch",
+      defaultRuntime: "claude-cli",
+      defaultProvider: null,
+      defaultFallbackProviders: [],
+      worker_runtime: "claude-cli",
+      provider: null,
+      model,
+      fallbackProviders: [],
+      locked: false,
+      lockedReason: null,
+      choice,
+    };
+  }
+
+  it("profilesFromEditorRows parses provider-aware 3-part claude-cli choices without a stray leading pipe", () => {
+    const row = claudeCliRow("claude-cli||claude-haiku-4-5", "claude-haiku-4-5");
+    const profiles = profilesFromEditorRows([row]);
+    expect(profiles.admin?.model).toBe("claude-haiku-4-5");
+    expect(profiles.admin?.worker_runtime).toBe("claude-cli");
+  });
+
+  it("profilesFromEditorRows still parses legacy 2-part claude-cli choices", () => {
+    const row = claudeCliRow("claude-cli|claude-opus-4-8", "claude-opus-4-8");
+    const profiles = profilesFromEditorRows([row]);
+    expect(profiles.admin?.model).toBe("claude-opus-4-8");
+    expect(profiles.admin?.worker_runtime).toBe("claude-cli");
+  });
+
+  // Bug 2 (live, 2026-07-06): lane `api-standard` profile `admin` started as
+  // runtime hermes + no model override. After switching to "Claude Haiku 4.5"
+  // (runtime flips to claude-cli) and then reverting to "Standard" (choice ""),
+  // applyChoice used to KEEP the flipped worker_runtime, which made the
+  // spawn-check reject the profile's own default model forever.
+  it("applyChoice reverts worker_runtime to the profile's catalog default when choice is empty", () => {
+    const claudeHaiku: LaneModelOption = {
+      id: "claude-haiku-4-5",
+      label: "Claude Haiku 4.5",
+      runtime: "claude-cli",
+      group: "Claude (Max-Abo)",
+      provider: null,
+      locked: false,
+      source: "claude-cli",
+    };
+    const switchedRow = claudeCliRow("claude-cli||claude-haiku-4-5", "claude-haiku-4-5");
+    // simulate the row having been switched away from its catalog default (hermes)
+    switchedRow.defaultRuntime = "hermes";
+    switchedRow.worker_runtime = "claude-cli";
+
+    const reverted = applyChoice(switchedRow, "", [claudeHaiku]);
+
+    expect(reverted.worker_runtime).toBe("hermes");
+    expect(reverted.model).toBeNull();
+    expect(reverted.provider).toBeNull();
+    expect(reverted.choice).toBe("");
   });
 });

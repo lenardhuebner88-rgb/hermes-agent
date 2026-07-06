@@ -129,7 +129,7 @@ export function FleetView() {
   const kettenChipsForAside = buildChainChips(allBoardTasksForKetten);
 
   return (
-    <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ minHeight: "100%", maxWidth: "100%", overflow: "hidden" }}>
+    <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
       {/* Fleet-Header */}
       <div className="fleet-header">
         <div className="fleet-brand">

@@ -17,6 +17,7 @@ import type { Worker, BoardResponse, BoardTask } from "../../lib/types";
 import type { ReliabilityResponse } from "../../lib/schemas";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
+import { useWorkerLifecycle } from "../../hooks/useControlData";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -83,6 +84,106 @@ export function WorkerTab({ activeWorkers, board, reliability, now, initialOpen,
         />
       ) : null}
     </>
+  );
+}
+
+// ─── Worker-Lifecycle-Steuerung (Gap 1) ──────────────────────────────────────
+// Nur Nudge feuert direkt (Kommentar am Task, kein Kill — plugin_api.py). Alle
+// anderen Aktionen nehmen den Worker-Prozess weg (unlock/hold/restart/terminate
+// laufen über reclaim_task bzw. hold_task) und sind deshalb zwei-Klick-scharf
+// wie FleetTaskActions (fleet-ta-btn-Hausmuster, TaskActions.tsx). Fehler
+// werden wörtlich gezeigt (AC-2 — nie verschlucken); Erfolg zeigt den deutschen
+// detail-Einzeiler des Backends.
+
+type ArmableWorkerAction = "unlock" | "hold" | "restart" | "terminate";
+
+const ARMED_META: Record<ArmableWorkerAction, { label: () => string; confirm: () => string }> = {
+  unlock: { label: () => de.fleet.workerUnlock, confirm: () => de.fleet.workerUnlockConfirm },
+  hold: { label: () => de.fleet.workerHold, confirm: () => de.fleet.workerHoldConfirm },
+  restart: { label: () => de.fleet.workerRestart, confirm: () => de.fleet.workerRestartConfirm },
+  terminate: { label: () => de.fleet.workerTerminate, confirm: () => de.fleet.workerTerminateConfirm },
+};
+
+export function WorkerLifecycleActions({ runId }: { runId: string }) {
+  const { busyId, errorById, run, terminate, clearError } = useWorkerLifecycle();
+  const [armed, setArmed] = useState<ArmableWorkerAction | null>(null);
+  const [note, setNote] = useState("");
+
+  const busy = busyId === runId;
+  const error = errorById[runId] || "";
+
+  const fireNudge = async () => {
+    clearError(runId);
+    setNote("");
+    const res = await run(runId, "nudge");
+    if (res.ok) setNote(res.detail || "");
+  };
+
+  const fireArmed = async () => {
+    const action = armed;
+    setArmed(null);
+    if (!action) return;
+    setNote("");
+    const res = action === "terminate" ? await terminate(runId) : await run(runId, action);
+    if (res.ok) setNote(res.detail || "");
+  };
+
+  const arm = (action: ArmableWorkerAction) => {
+    clearError(runId);
+    setNote("");
+    setArmed(action);
+  };
+
+  return (
+    <div className="fleet-task-actions">
+      {armed ? (
+        <div className="fleet-ta-confirm">
+          <span className="fleet-ta-confirm-text">{ARMED_META[armed].confirm()}</span>
+          <button
+            type="button"
+            className="fleet-ta-btn"
+            style={{ color: "var(--fleet-rot)", borderColor: "rgba(255,93,115,.5)" }}
+            disabled={busy}
+            onClick={() => void fireArmed()}
+          >
+            {busy ? de.fleet.workerActionBusy : de.fleet.actionConfirm}
+          </button>
+          <button type="button" className="fleet-ta-btn" disabled={busy} onClick={() => setArmed(null)}>
+            {de.fleet.actionDismiss}
+          </button>
+        </div>
+      ) : (
+        <div className="fleet-ta-row">
+          <button
+            type="button"
+            className="fleet-ta-btn"
+            style={{ color: "var(--fleet-puls)", borderColor: "rgba(55,224,255,.35)" }}
+            disabled={busy}
+            onClick={() => void fireNudge()}
+          >
+            {busy ? de.fleet.workerActionBusy : de.fleet.workerNudge}
+          </button>
+          {(["unlock", "hold", "restart", "terminate"] as ArmableWorkerAction[]).map((action) => (
+            <button
+              key={action}
+              type="button"
+              className="fleet-ta-btn"
+              style={
+                action === "terminate"
+                  ? { color: "var(--fleet-rot)", borderColor: "rgba(255,93,115,.4)" }
+                  : { color: "var(--fleet-puls)", borderColor: "rgba(55,224,255,.35)" }
+              }
+              disabled={busy}
+              onClick={() => arm(action)}
+            >
+              {ARMED_META[action].label()}
+            </button>
+          ))}
+        </div>
+      )}
+      {error ? <p className="fleet-ta-error" role="alert">{error}</p> : null}
+      {!error && note ? <p className="fleet-ta-note">{note}</p> : null}
+    </div>
   );
 }
 
@@ -201,6 +302,9 @@ function WorkerDrawer({ worker: w, board, reliability, now, onClose, onOpenChain
             })}
           </div>
         ) : null}
+
+        {/* Worker-Steuerung: Unlock/Nudge/Restart/Terminate (Gap 1) */}
+        <WorkerLifecycleActions runId={w.run_id} />
 
         {/* Action-Buttons */}
         <div className="fleet-actions">

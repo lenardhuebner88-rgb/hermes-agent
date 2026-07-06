@@ -2,6 +2,7 @@ import { CheckCircle2, GitCompareArrows, Loader2, UploadCloud } from "lucide-rea
 import { useState } from "react";
 
 import { fetchJSON } from "../../../lib/api";
+import { de } from "../../i18n/de";
 
 const DEFAULT_PROSE = `# Plan title
 **Goal:** One sentence.
@@ -93,7 +94,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
     <section className="mb-3 grid min-w-0 gap-3 rounded-lg border border-line bg-surface-1 p-3 text-ink">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <label htmlFor="plan-composer-prose" className="text-xs font-semibold text-ink-2">
-          Prose Plan
+          {de.fleet.planProseLabel}
         </label>
         {ingestedRoot ? (
           <span className="inline-flex max-w-full items-center gap-1 truncate rounded-lg border border-status-ok/30 bg-status-ok/10 px-2 py-1 text-[11px] text-status-ok">
@@ -105,7 +106,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
 
       <textarea
         id="plan-composer-prose"
-        aria-label="Prose Plan"
+        aria-label={de.fleet.planProseLabel}
         value={prose}
         onChange={(event) => {
           setProse(event.target.value);
@@ -122,10 +123,10 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
           onClick={() => void handlePreview()}
           disabled={!canPreview}
           aria-busy={previewBusy}
-          title="Compile preview"
+          title={de.fleet.planCompilePreview}
         >
           {previewBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <GitCompareArrows className="h-4 w-4" aria-hidden="true" />}
-          <span>Compile preview</span>
+          <span>{de.fleet.planCompilePreview}</span>
         </button>
         <button
           type="button"
@@ -133,10 +134,10 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
           onClick={() => void handleIngest()}
           disabled={!canIngest}
           aria-busy={ingestBusy}
-          title="Ingest compiled plan"
+          title={de.fleet.planIngest}
         >
           {ingestBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <UploadCloud className="h-4 w-4" aria-hidden="true" />}
-          <span>Ingest compiled plan</span>
+          <span>{de.fleet.planIngest}</span>
         </button>
       </div>
 
@@ -147,25 +148,25 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
       ) : null}
 
       {preview ? (
-        <section aria-label="Compile preview result" className="grid min-w-0 gap-3 rounded-lg border border-line bg-surface-2 p-3">
+        <section aria-label={de.fleet.planCompilePreviewResult} className="grid min-w-0 gap-3 rounded-lg border border-line bg-surface-2 p-3">
           <div className="grid min-w-0 gap-2">
-            <div className="text-xs font-semibold text-ink-2">Children</div>
+            <div className="text-xs font-semibold text-ink-2">{de.fleet.planChildren}</div>
             <div className="grid min-w-0 gap-1.5">
               {preview.children.map((child, index) => (
                 <div key={`${child.title}-${index}`} className="grid min-w-0 gap-1 border-b border-line-soft pb-2 last:border-b-0 last:pb-0">
                   <div className="min-w-0 truncate text-sm font-medium text-ink">{child.title}</div>
                   <div className="flex min-w-0 flex-wrap gap-1.5 text-[11px] text-ink-3">
-                    <span className="rounded-lg border border-line px-2 py-0.5">lane: {child.assignee || "coder"}</span>
-                    <span className="rounded-lg border border-line px-2 py-0.5">parents: {(child.parents ?? []).join(", ") || "none"}</span>
-                    {child.review_tier ? <span className="rounded-lg border border-line px-2 py-0.5">tier: {child.review_tier}</span> : null}
+                    <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildLane}: {child.assignee || "coder"}</span>
+                    <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildParents}: {(child.parents ?? []).join(", ") || de.fleet.planChildNone}</span>
+                    {child.review_tier ? <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildTier}: {child.review_tier}</span> : null}
                   </div>
                 </div>
               ))}
             </div>
           </div>
 
-          <SignalList title="Repairs" items={preview.repairs} tone="ok" />
-          <SignalList title="Warnings" items={preview.warnings} tone="warn" />
+          <SignalList title={de.fleet.planRepairs} items={preview.repairs} tone="ok" />
+          <SignalList title={de.fleet.planWarnings} items={preview.warnings} tone="warn" />
         </section>
       ) : null}
     </section>

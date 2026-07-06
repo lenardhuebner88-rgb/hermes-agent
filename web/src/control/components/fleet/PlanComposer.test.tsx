@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PlanComposer } from "./PlanComposer";
+import { de } from "../../i18n/de";
 
 const previewResponse = {
   ok: true,
@@ -57,20 +58,20 @@ describe("PlanComposer", () => {
   it("previews prose children, repairs, warnings, then confirms ingest", async () => {
     render(<PlanComposer onIngestSuccess={onIngestSuccess} />);
 
-    fireEvent.change(screen.getByLabelText("Prose Plan"), {
+    fireEvent.change(screen.getByLabelText(de.fleet.planProseLabel), {
       target: {
         value: "# Demo\n**Goal:** Build it.\n\n## Slice: Parse prose\n- done-when: Parsed.",
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Compile preview" }));
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.planCompilePreview }));
 
     await screen.findByText("Parse prose");
-    const preview = screen.getByRole("region", { name: "Compile preview result" });
+    const preview = screen.getByRole("region", { name: de.fleet.planCompilePreviewResult });
     expect(within(preview).getByText("Compile children"));
     expect(within(preview).getByText(/lane missing/));
     expect(within(preview).getByText(/ambiguous slice/));
 
-    fireEvent.click(screen.getByRole("button", { name: "Ingest compiled plan" }));
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.planIngest }));
 
     await waitFor(() => expect(onIngestSuccess).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenNthCalledWith(

@@ -46,6 +46,8 @@ import {
   SystemHealthResponseSchema,
   WorkersResponseSchema,
   WorkerActivityResponseSchema,
+  WorkerActionResponseSchema,
+  TerminateRunResponseSchema,
   VaultProvenanceResponseSchema,
   StrategistCountSchema,
   StrategistLastRunsSchema,
@@ -1018,6 +1020,74 @@ export function useFixRedispatch() {
     }
   }, []);
   return { busyId, doneIds, errorById, run };
+}
+
+// Worker-Drawer-Steuerung (Gap 1, Fleet Worker-Tab): unlock/nudge/hold/resume/
+// restart via POST /workers/{run_id}/action, terminate via the sibling POST
+// /runs/{run_id}/terminate — see plugin_api.py for both endpoints' full
+// semantics. A guard refusal comes back as {ok:false} at HTTP 200 (never a
+// thrown error) and is surfaced exactly like useRepairDeliverable handles it;
+// a thrown error (404/409/5xx) goes through extractDetail so the backend's
+// own detail text is shown verbatim (AC-2 — never swallow).
+export type WorkerLifecycleAction = "unlock" | "nudge" | "hold" | "resume" | "restart" | "dispatch";
+
+export function useWorkerLifecycle() {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const run = useCallback(async (runId: string, action: WorkerLifecycleAction) => {
+    setBusyId(runId);
+    setErrorById((prev) => ({ ...prev, [runId]: "" }));
+    try {
+      const raw = await fetchJSON<unknown>(
+        `/api/plugins/kanban/workers/${encodeURIComponent(runId)}/action`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, confirm: true }) },
+      );
+      const res = parseOrThrow(WorkerActionResponseSchema, raw, "Worker-Aktion");
+      if (!res.ok) {
+        const detail = res.detail || "Aktion abgelehnt.";
+        if (aliveRef.current) setErrorById((prev) => ({ ...prev, [runId]: detail }));
+        return { ok: false as const, detail };
+      }
+      return { ok: true as const, detail: res.detail };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [runId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+
+  const terminate = useCallback(async (runId: string) => {
+    setBusyId(runId);
+    setErrorById((prev) => ({ ...prev, [runId]: "" }));
+    try {
+      const raw = await fetchJSON<unknown>(
+        `/api/plugins/kanban/runs/${encodeURIComponent(runId)}/terminate`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      );
+      const res = parseOrThrow(TerminateRunResponseSchema, raw, "Worker-Terminate");
+      if (!res.ok) {
+        const detail = "Beenden abgelehnt.";
+        if (aliveRef.current) setErrorById((prev) => ({ ...prev, [runId]: detail }));
+        return { ok: false as const, detail };
+      }
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [runId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+
+  const clearError = useCallback((runId: string) => setErrorById((prev) => ({ ...prev, [runId]: "" })), []);
+
+  return { busyId, errorById, run, terminate, clearError };
 }
 
 // R1: Inline-Repair für ein deliverable_posted_not_completed direkt am

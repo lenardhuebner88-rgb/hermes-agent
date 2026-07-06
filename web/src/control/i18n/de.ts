@@ -279,6 +279,33 @@ export const de = {
     drawerKetteOeffnen: "Kette öffnen",
     drawerLog: "Log",
     drawerSchliessen: "Schließen",
+    // Worker-Drawer-Steuerung (Gap 1) — nur Nudge feuert direkt (Kommentar,
+    // kein Kill). Unlock/Hold/Restart/Terminate nehmen den Worker-Prozess weg
+    // (reclaim_task/hold_task in plugin_api.py) und sind deshalb zwei-Klick-
+    // scharf wie die TaskActions (fleet-ta-btn-Muster). Bestätigungstexte
+    // spiegeln exakt, was das Backend tut.
+    workerUnlock: "Entsperren",
+    workerNudge: "Anstoßen",
+    workerHold: "Anhalten",
+    workerRestart: "Neu starten",
+    workerTerminate: "Beenden",
+    workerUnlockConfirm: "Worker stoppen und Claim lösen — Task wird wieder beanspruchbar (ready)?",
+    workerHoldConfirm: "Worker stoppen und Task als operator_hold parken (kein Auto-Redispatch)?",
+    workerRestartConfirm: "Worker zurückholen (SIGTERM) und Task neu einplanen?",
+    workerTerminateConfirm: "Worker-Prozess beenden (SIGTERM→SIGKILL) und Lauf zurückholen?",
+    workerActionBusy: "…",
+    // PlanComposer (Prosa-Plan kompilieren/übernehmen, oberhalb des Plan-Subtabs)
+    planProseLabel: "Plan-Text",
+    planCompilePreview: "Vorschau kompilieren",
+    planCompilePreviewResult: "Vorschau-Ergebnis",
+    planIngest: "Plan übernehmen",
+    planChildren: "Karten",
+    planChildLane: "Lane",
+    planChildParents: "Eltern",
+    planChildTier: "Tier",
+    planChildNone: "keine",
+    planRepairs: "Reparaturen",
+    planWarnings: "Warnungen",
     // "Wartet auf dich"-Leiste
     pendingBarSingle: (topic: string) => `1 Entscheidung wartet: ${topic}`,
     pendingBarMultiple: (n: number) => `${n} Entscheidungen warten`,

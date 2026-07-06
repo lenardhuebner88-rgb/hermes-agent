@@ -6,8 +6,8 @@ import {
   type Lane,
   type LaneModelOption,
   type LanesResponse,
+  applyChoice,
   editorRows,
-  entryFromProviderAwareChoice,
   laneChoiceWarning,
   loadLanes,
   profilesFromEditorRows,
@@ -42,30 +42,6 @@ function modelsForSelect(models: LaneModelOption[]): LaneModelOption[] {
 function rowForProfile(rows: EditorRow[], profile: string | null): EditorRow | null {
   if (!profile) return null;
   return rows.find((row) => row.profile === profile) ?? null;
-}
-
-function applyChoice(row: EditorRow, choice: string, models: LaneModelOption[]): EditorRow {
-  const entry = entryFromProviderAwareChoice(choice);
-  if (!entry) {
-    return {
-      ...row,
-      choice: "",
-      worker_runtime: row.worker_runtime,
-      provider: null,
-      model: null,
-      fallbackProviders: [],
-    };
-  }
-  const model = models.find((candidate) => optionValue(candidate) === choice);
-  const runtime = entry.worker_runtime ?? row.worker_runtime;
-  return {
-    ...row,
-    choice,
-    worker_runtime: runtime,
-    provider: runtime === "hermes" ? model?.provider ?? entry.provider ?? row.defaultProvider ?? null : null,
-    model: entry.model ?? null,
-    fallbackProviders: runtime === "hermes" ? row.fallbackProviders : [],
-  };
 }
 
 function guardEntry(row: EditorRow) {

@@ -27,33 +27,46 @@
 /* Kein body:has override nötig — nur der View-Inhalt ist dunkel */
 
 /* ── Full-Bleed-Shell (Fleet-Tab) ─────────────────────────────────────────────
- * Der ShellAiry/ShellCompact-Wrapper (.hc-page) rendert das helle Instrument-
- * papier — ControlShell setzt `.fleet-bleed` nur, während der Fleet-Tab aktiv
- * ist. Custom Properties aus [data-fleet-theme] vererben sich nicht nach oben
- * an .hc-page (Vorfahr, kein Nachfahre) — deshalb hier dieselben Werte wie
- * [data-fleet-theme] literal wiederholt statt referenziert. */
+ * Der ShellAiry/ShellCompact-Wrapper (.hc-page) ist seit der Voll-Dark-
+ * Migration (b7919f2ae, 2026-07-05) selbst dunkel (--hc-bg = --color-surface-0)
+ * — ControlShell setzt `.fleet-bleed` trotzdem nur, solange der Fleet-Tab aktiv
+ * ist, weil Fleet sein eigenes Radial-Gradient-Grün statt der flachen
+ * hc-page-Fläche will. Custom Properties aus [data-fleet-theme] vererben sich
+ * nicht nach oben an .hc-page (Vorfahr, kein Nachfahre) — deshalb hier
+ * dieselben Werte wie [data-fleet-theme] literal wiederholt statt referenziert. */
 .hc-page.fleet-bleed {
   background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--color-surface-0) 55%);
+  /* [data-control] reserviert calc(100dvh - 5rem), .hc-page nur -7rem (s.u.) —
+   * 2rem Slack, den vorher nur die body:has()-Patches darunter dunkel
+   * übermalten. Hier direkt angeglichen, damit .fleet-root unten echten Boden
+   * zum Ausfüllen hat statt in eine kürzere Box zu wachsen. */
+  min-height: calc(100dvh - 5rem);
 }
 .hc-page.fleet-bleed::before {
   opacity: 0;
 }
-/* Hinter .hc-page malen control-tokens.css body:has([data-control]) und der
- * [data-layout-variant]-Wrapper Papier-Beige (#f0eee7) — das leckte als heller
- * Streifen zwischen Panel-Ende und Bottom-Nav sowie im scrollbar-gutter am
- * rechten Rand durch. Höhere :has()-Spezifität (2 Klassen > 1 Attribut)
- * gewinnt gegen die Token-Regeln. */
+/* Diese drei body(-Vorfahren)-Patches bleiben auch nach der Voll-Dark-
+ * Migration nötig — aus zwei geänderten Gründen (kein Beige-Leck mehr):
+ * 1) Browser ohne :has()-Support: body:has([data-control]) aus
+ *    control-tokens.css greift dann gar nicht, body fällt auf den
+ *    Browser-Default (weiß) zurück.
+ * 2) Selbst mit :has()-Support ist .hc-page (min-height -7rem) 2rem niedriger
+ *    als [data-control] (-5rem) — ohne Patch schimmert die Fläche darunter
+ *    (welche Farbe sie auch hat) als Streifen über der Bottom-Nav durch.
+ * Literal derselbe Wert wie --color-surface-0 (theme.css:19) — hier stand
+ * vorher der leicht abweichende Hex #05090f, der gegen den in
+ * --color-surface-0 endenden Fleet-Gradienten einen sichtbaren Farbsprung
+ * erzeugte. Über var() referenziert statt dupliziert: Tailwind-v4 `@theme`
+ * emittiert die Custom Properties auf :root, sichtbar auch außerhalb von
+ * [data-fleet-theme]. */
 body:has(.hc-page.fleet-bleed) {
-  background: #05090f;
+  background: var(--color-surface-0);
 }
 body:has(.hc-page.fleet-bleed) [data-layout-variant] {
-  background: #05090f;
+  background: var(--color-surface-0);
 }
-/* Der [data-control]-Wrapper malt selbst var(--hc-bg) (#f2f0ea) und ist 2rem
- * höher als .hc-page (100dvh-5rem vs. -7rem) — ohne diese Regel schimmert er
- * als heller Streifen zwischen Panel-Ende und Bottom-Nav durch. */
 body:has(.hc-page.fleet-bleed) [data-control] {
-  background: #05090f;
+  background: var(--color-surface-0);
 }
 /* Der Shell-Header (Navigation) bleibt über dem dunklen Fleet-Grund stehen —
  * Airy ab lg, Compact immer (dort liegt er in der zweiten Grid-Spalte). Die
@@ -63,6 +76,22 @@ body:has(.hc-page.fleet-bleed) [data-control] {
  * (--color-ink-2/-3, control-tokens.css). */
 .hc-page.fleet-bleed header h1 {
   color: #e8ecf4;
+}
+
+/* fleet-root (FleetView.tsx) soll .hc-page wirklich bis unten füllen statt,
+ * wie vorher per inline `minHeight:"100%"`, gegen einen Auto-Height-Vorfahren
+ * zu laufen (löst dort nichts auf — .fleet-root endete sichtbar vor dem
+ * hc-page-Boden). ControlShell.tsx bleibt unangetastet (Anti-Scope): <main>
+ * dort ist zwar Flex-Item von .hc-page (Klasse `flex-1`), aber selbst KEIN
+ * Flex-Container — deshalb hier per Fleet-scoped Selektor nachgerüstet
+ * (an .fleet-bleed gebunden, kein Effekt auf andere Tabs). */
+.hc-page.fleet-bleed main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.fleet-root {
+  flex: 1 0 auto;
 }
 
 /* ── Chips (Subtabs) ──────────────────────────────────────────────────────── */
@@ -181,6 +210,24 @@ body:has(.hc-page.fleet-bleed) [data-control] {
 }
 .fleet-kp-button:focus-visible {
   box-shadow: inset 0 0 0 2px var(--color-live);
+}
+/* Die Kosten-Kachel ist bei 390px die 4. von 4 Spalten (.fleet-kpanel bleibt
+ * bis 380px vierspaltig) — Zahl + "$" + optionales " äquiv."-Suffix kollidieren
+ * dort in der schmalen Spalte. "$" bleibt neben der Zahl (kurz), das
+ * " äquiv."-Suffix bricht per Flex-Trick (flex-basis: 100% auf dem letzten
+ * Kind zwingt es in die nächste Zeile) in eine eigene Zeile um. */
+@media (max-width: 480px) {
+  .fleet-kp-button .fleet-kp-num {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 3px;
+  }
+  /* small + small statt :last-child: ohne kosten24hEquiv gibt es nur EIN
+   * small ("$"), das soll neben der Zahl bleiben, nicht umbrechen. */
+  .fleet-kp-button .fleet-kp-num small + small {
+    flex-basis: 100%;
+  }
 }
 
 /* ── Kosten-Drawer ───────────────────────────────────────────────────────── */
@@ -956,6 +1003,11 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   overflow-x: auto;
   scrollbar-width: none;
   padding-bottom: 2px;
+  -webkit-overflow-scrolling: touch;
+  /* Kante fadet aus als Scroll-Affordance (33+ Ketten-Chips) — statische
+   * Annäherung statt Scroll-Position-Tracking, subtil genug fürs Dark-Theme. */
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
 }
 .fleet-kchips::-webkit-scrollbar { display: none; }
 
@@ -1797,7 +1849,14 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 0 0 80px; /* Platz für Pending-Bar + Safe-Area */
+  /* War 80px "Platz für Pending-Bar + Safe-Area" — die mobile PendingBar ist
+   * aber ein normales Flex-Sibling NACH diesem Scroll-Container (kein Overlay,
+   * FleetView.tsx), und .hc-page selbst reserviert schon
+   * pb-[calc(5.5rem+safe-area)] (88px+) unter der gesamten Fleet-Spalte, mehr
+   * als die ~61px hohe Bottom-Nav braucht. Die 80px hier waren also zusätzlich
+   * zu dieser bereits ausreichenden Reserve — nur noch eine kleine Atemluft
+   * vor der Pending-Bar/Bottom-Nav. */
+  padding: 0 0 calc(1rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* Rechte Spalte: persistente Kette (ab lg) */
@@ -2058,6 +2117,23 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   padding: 9px 10px;
 }
 
+/* Label/Wert liefen bislang als Inline-Spans zusammen ("Gatewayhealthy") —
+ * hier auf eigene Zeile gesetzt und wie die KPI-Kacheln hierarchisiert
+ * (Wert prominent, Label darunter klein/Versalien). */
+.fleet-puls-tile .fleet-puls-label {
+  display: block;
+  font: 500 9px/1 var(--hc-font-sans);
+  color: var(--fleet-t3);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.fleet-puls-tile .fleet-puls-val {
+  display: block;
+  margin-top: 3px;
+  font: 600 14px/1.2 var(--hc-font-mono);
+  color: var(--fleet-t1);
+}
+
 .fleet-puls-detail {
   display: block;
   margin-top: 3px;
@@ -2114,5 +2190,20 @@ body:has(.hc-page.fleet-bleed) [data-control] {
     align-items: flex-start;
     flex-direction: column;
     gap: 3px;
+  }
+}
+
+/* Touch-Bedienung (Tablet): Subtab-Pills und Task-Action-Buttons wachsen auf
+ * eine bequeme Trefferfläche — Desktop-Look bleibt unverändert. Die
+ * umgebenden Chip-Streifen (.fleet-root .py-2.5, .fleet-ta-row) haben keine
+ * feste Höhe, klippen also nicht. */
+@media (pointer: coarse) {
+  .fleet-chip {
+    min-height: 40px;
+    padding: 9px 14px;
+  }
+  .fleet-ta-btn {
+    min-height: 40px;
+    padding: 9px 14px;
   }
 }
