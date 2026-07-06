@@ -33,6 +33,19 @@ Parameter: {{PARAMS}}. Führe GENAU EINE Runde aus (ein Fund), dann beende den T
 6. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
    `FIXED <datei>` · `DRY` (ehrlich nichts Belegbares gefunden) · `BLOCKED <grund>`.
 
+## Eskalation (Pflicht bei BLOCKED mit echtem Fund)
+Ein BLOCKED, der nur im Ledger steht, ist ein toter Fund (Beleg 07-03 im error-sweep:
+ein 40×-Auth-500-Bug blieb ohne Adressaten im Ledger liegen). Gilt hier besonders für
+`BLOCKED prod-bug`: hänge ZUSÄTZLICH an {{STATE_DIR}}/ESCALATIONS.md an:
+
+    ## <datum> — <fund-titel>
+    - Evidenz: <Datei:Zeile / Testlauf-Output / Vorkommen-Zahl>
+    - Blockiert weil: <Scope-Grund>
+    - Fix-Skizze: <1–3 Zeilen>
+    - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
+
+Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
+
 ## Verbote
 NIE: push, merge, deploy, Vollsuite, Produktions-Code ändern um einen Test grün zu
 bekommen (nur echte Bugfixes mit Regressionstest sind erlaubt — im Zweifel BLOCKED),

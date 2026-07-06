@@ -51,7 +51,8 @@ retry: 0
 created_by: loop-planner
 done_when: |
   <testbar + beweisbar: WELCHER Test/Gate belegt es; Test gegen ECHTES Datenformat
-   (Fixture aus Live-Artefakt), nicht synthetisch>
+   (Fixture aus Live-Artefakt), nicht synthetisch; der Test läuft über den Aufrufpfad/
+   die Parameter, die die PRODUKTION nutzt — benenne die reale Call-Site>
 anti_scope: |
   <was dieser Plan explizit NICHT anfasst>
 tests: |
@@ -64,6 +65,12 @@ files_hint: <Module/Dateien, die voraussichtlich berührt werden>
 ## Ansatz
 <skizziert; Detail-Entscheidungen trifft der Builder>
 ```
+
+**Annahmen-Check (Pflicht pro Plan):** jede strukturelle Annahme (Spalte/Tabelle/Symbol/
+Signatur „existiert schon") ist mit rg/grep gegen den WORKTREE-CODE belegt — Live-DB
+oder Doku zählen NICHT als Beleg (BUILD_FAIL 07-04: Plan nahm `worker_exit_kind`-Spalten
+aus Live-DB-Drift eines verworfenen Branches an, im Code-Schema fehlten sie → Plan
+unbaubar, Build-Slot verloren).
 
 ## Globale Verbote (gelten für dich UND jeden Plan — in anti_scope mitdenken)
 - KEINE DB-Schema-Änderungen/Migrationen, keine DROP/ALTER-Pfade.

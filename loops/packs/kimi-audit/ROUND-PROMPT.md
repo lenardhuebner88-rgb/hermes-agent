@@ -27,6 +27,19 @@ Parameter: {{PARAMS}} (FOKUS = zu auditierendes Subsystem). Führe GENAU EINE Ru
 7. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
    `FIXED <modul>` · `DRY` (ehrlich nichts Beweisbares mehr) · `BLOCKED <grund>`.
 
+## Eskalation (Pflicht bei BLOCKED mit echtem Fund)
+Ein BLOCKED, der nur im Ledger steht, ist ein toter Fund (Beleg 07-03 im error-sweep:
+ein 40×-Auth-500-Bug blieb ohne Adressaten im Ledger liegen). Dokumentiert dein BLOCKED
+einen echten Bug / ein echtes Risiko, hänge ZUSÄTZLICH an {{STATE_DIR}}/ESCALATIONS.md an:
+
+    ## <datum> — <fund-titel>
+    - Evidenz: <Datei:Zeile / Eingabemuster / Vorkommen-Zahl>
+    - Blockiert weil: <Scope-Grund>
+    - Fix-Skizze: <1–3 Zeilen>
+    - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
+
+Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
+
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, DB-Schreibpfade/Dispatch/Auth
 anfassen (→ BLOCKED + Ledger), Schema-Migrationen, kanban.db-Schreibzugriff, Secrets,

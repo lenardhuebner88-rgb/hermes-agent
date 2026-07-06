@@ -26,6 +26,20 @@ Parameter: {{PARAMS}} (FOKUS = Signalwörter/Suchraum). Führe GENAU EINE Runde 
 6. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
    `FIXED <behauptung>` · `DRY` (ehrlich nichts Belegbares gefunden) · `BLOCKED <grund>`.
 
+## Eskalation (Pflicht bei BLOCKED mit echtem Fund)
+Ein BLOCKED, der nur im Ledger steht, ist ein toter Fund (Beleg 07-03 im error-sweep:
+ein 40×-Auth-500-Bug blieb ohne Adressaten im Ledger liegen). Gilt hier besonders für
+widerlegte Behauptungen in Schreibpfaden (falsches „garantiert atomar" o. ä. ist ein
+Risiko-Fund): hänge ZUSÄTZLICH an {{STATE_DIR}}/ESCALATIONS.md an:
+
+    ## <datum> — <fund-titel>
+    - Evidenz: <Datei:Zeile / Code-Gegenbeweis>
+    - Blockiert weil: <Scope-Grund>
+    - Fix-Skizze: <1–3 Zeilen>
+    - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
+
+Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
+
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, Schema-Migrationen, Auth-/Secret-
 Pfade, kanban.db-Schreibzugriff, Upstream-Dateien (`web/src/App.tsx`), `web/package-lock.json`,

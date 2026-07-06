@@ -37,6 +37,11 @@ Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
   Queue-Stufen: `00-planned → 10-building → 20-verified → 30-landed · 90-bounced`.
 - **sweep** (eine round-Phase wiederholt): finden + fixen + committen, Status
   `FIXED|DRY|BLOCKED` (Stop nach `dry_rounds` DRY bzw. `fail_streak` BLOCKED).
+- **Eskalations-Konvention** (seit 2026-07-06): ein BLOCKED mit echtem Fund (Bug/
+  Risiko außerhalb des Pack-Mandats) schreibt zusätzlich einen strukturierten Block
+  nach `~/.hermes/loops/<pack>/ESCALATIONS.md` (Evidenz · Blockiert-weil · Fix-Skizze ·
+  Kanal-Vorschlag). Die Morgen-Review liest diese Datei VOR dem Land-Urteil — sonst
+  sterben Funde im Ledger (07-03: 40×-Auth-500-Bug blieb unadressiert).
 - `last-status` (eine Zeile) ist das einzige Statussignal der Agenten; Git-HEAD und
   Exit-Codes sind die Wahrheit des Drivers.
 

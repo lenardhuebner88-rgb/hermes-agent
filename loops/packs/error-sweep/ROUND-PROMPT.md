@@ -17,7 +17,8 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
 4. **Scope-Regel (hart, Per-Funktions-Regel aus dem Kimi-Loop):** reine Lese-/Parse-/
    Validier-/Format-Pfade darfst du fixen. Liegt die Ursache in einem **DB-Schreibpfad,
    im Dispatch oder in Auth/Credentials** → NICHT fixen: Fund mit Evidenz + Fix-Skizze
-   in den Ledger, `BLOCKED schreibpfad <modul>` melden.
+   in den Ledger UND nach {{STATE_DIR}}/ESCALATIONS.md (s. Eskalation unten),
+   `BLOCKED schreibpfad <modul>` melden.
 5. **Fixen**: minimaler Diff + Regressionstest, dessen Fixture das ECHTE Fehler-Artefakt
    nachstellt (Log-Payload/Input aus Schritt 2, nicht synthetisch). Test muss auf dem
    alten Code rot sein.
@@ -28,6 +29,19 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
    + Ledger-Zeile: Muster, Vorkommen-Zahl, Evidenz-Zeitstempel, Datei:Zeile, Testpfad.
 8. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
    `FIXED <muster>` · `DRY` (nichts Wiederkehrendes gefunden) · `BLOCKED <grund>`.
+
+## Eskalation (Pflicht bei BLOCKED mit echtem Fund)
+Ein BLOCKED, der nur im Ledger steht, ist ein toter Fund (Beleg 07-03: der 40×-Auth-500-
+Bug aus R2 blieb ohne Adressaten im Ledger liegen). Dokumentiert dein BLOCKED einen
+echten Bug / ein echtes Risiko, hänge ZUSÄTZLICH an {{STATE_DIR}}/ESCALATIONS.md an:
+
+    ## <datum> — <fund-titel>
+    - Evidenz: <Datei:Zeile / Log-Zeile mit Zeitstempel / Vorkommen-Zahl>
+    - Blockiert weil: <Scope-Grund>
+    - Fix-Skizze: <1–3 Zeilen>
+    - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
+
+Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts (auch nicht „zum Testen"), Vollsuite,

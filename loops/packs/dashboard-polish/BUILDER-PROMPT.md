@@ -12,6 +12,10 @@ dann beende den Turn.
 2. **Test zuerst**: schreib/erweitere den vitest-Test aus `tests:` so, dass er das
    `done_when` belegt und auf dem aktuellen Code ROT ist. Match bestehende Testmuster
    in `web/src/control` (Testing Library, keine synthetischen Snapshot-Tautologien).
+   Der Test assertet das SICHTBARE Ergebnis aus dem `done_when` (Label/Text/Attribut,
+   das der Nutzer sieht), nicht einen internen Roh-String (Verifier-Fail 07-05: Test
+   matchte den Roh-String "hermes", das Lane/Assignee-Label blieb trotzdem unsichtbar
+   → Runde verloren).
 3. Implementiere mit **minimalem Diff** — ausschließlich innerhalb `web/src/control/**`.
    Match Stil/Naming der Umgebung (bestehende `hc-*`-Tokens nutzen, kein neues
    Ad-hoc-Styling). Kein Refactor, kein Drive-by-Aufräumen, nichts außerhalb des
@@ -25,7 +29,11 @@ dann beende den Turn.
    ```bash
    git add -A && ./loops/gate.sh
    ```
-5. **Alles grün** → GENAU EIN Commit:
+5. **Caller-Check (Pflicht, wenn du Props/Exports/Signaturen BESTEHENDER Komponenten
+   geändert hast)**: `rg -n "<symbol>" web/src/control` — jede Verwendungsstelle
+   außerhalb deines Diffs wird mitgezogen oder ist nachweislich kompatibel. Grüne
+   Gates ersetzen diesen Check nicht.
+6. **Alles grün** → GENAU EIN Commit:
    ```
    git commit -m "loop(dashboard-polish): <plan-id> <kurztitel>
 

@@ -16,6 +16,10 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
    tatsächliche Verhalten zeigt). Ohne beide Belege kein Fix.
 4. **Fixen**: korrigiere NUR die Doku, damit sie dem Code entspricht — der Code wird
    NIEMALS an die Doku angepasst (das wäre ein Verhaltens-Change durch die Hintertür).
+   ABER: wirkt das CODE-Verhalten als der eigentliche Bug (die Doku beschreibt den
+   offensichtlich gewollten Vertrag, z. B. sicherheits- oder datenverlust-relevant),
+   dann die Doku NICHT an das kaputte Verhalten anpassen — das würde eine Regression
+   legitimieren. Stattdessen `BLOCKED prod-bug <datei>` + Eskalation (s. unten).
    CHANGELOG-artige Dateien (Historie/Releasenotes) nicht rückwirkend umschreiben, auch
    wenn sie inzwischen veraltet wirken.
 5. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt; bei reinen Doku-Änderungen
@@ -24,6 +28,20 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
    + Ledger-Zeile: Doku-Stelle, Code-Beleg, was korrigiert wurde.
 7. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
    `FIXED <datei>` · `DRY` (ehrlich keine Drift gefunden) · `BLOCKED <grund>`.
+
+## Eskalation (Pflicht bei BLOCKED mit echtem Fund)
+Ein BLOCKED, der nur im Ledger steht, ist ein toter Fund (Beleg 07-03 im error-sweep:
+ein 40×-Auth-500-Bug blieb ohne Adressaten im Ledger liegen). Gilt hier besonders für
+`BLOCKED prod-bug` (Code widerspricht dem dokumentierten Vertrag): hänge ZUSÄTZLICH an
+{{STATE_DIR}}/ESCALATIONS.md an:
+
+    ## <datum> — <fund-titel>
+    - Evidenz: <Doku Datei:Zeile + Code Datei:Zeile, die sich widersprechen>
+    - Blockiert weil: <Code-Fix nötig, außerhalb doc-sweep-Mandat>
+    - Fix-Skizze: <1–3 Zeilen>
+    - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
+
+Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, Schema-Migrationen, Auth-/Secret-

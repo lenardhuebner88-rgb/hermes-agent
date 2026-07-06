@@ -12,7 +12,10 @@ dann beende den Turn.
 2. **Test zuerst**: schreib/erweitere den Test aus `tests:` so, dass er das `done_when`
    belegt und auf dem aktuellen Code ROT ist (bei Bugfixes zwingend; bei neuen Features
    der Kern-Testfall zuerst). Fixture aus ECHTEM Datenformat (Live-Artefakt), nicht
-   synthetisch erfunden.
+   synthetisch erfunden. Der Test nutzt die Parameter-Kombination des ECHTEN
+   Produktions-Aufrufpfads — lies die realen Call-Sites, BEVOR du den Test schreibst
+   (Verifier-Fail 07-04: nur `end_run=True` getestet, die Crash-/Timeout-Pfade der
+   Produktion rufen `end_run=False` → Feature wirkungslos, Nacht verloren).
 3. Implementiere mit **minimalem Diff**. Match Stil/Naming der Umgebung. Kein Refactor,
    kein Drive-by-Aufräumen, nichts außerhalb des `files_hint`-Umfelds ohne Not.
 4. **Gates** (Exit-Code ist die Wahrheit, nie Prosa):
@@ -28,7 +31,14 @@ dann beende den Turn.
    ```
    (NIE die volle pytest-Suite, NIE `vitest` ohne Pfad-Scope, NIE Upstream-Dateien
    wie `src/App.tsx` „mit aufräumen".)
-5. **Alles grün** → GENAU EIN Commit:
+5. **Caller-Check (Pflicht, wenn du Signatur/Semantik/Rückgabe eines BESTEHENDEN
+   Symbols geändert hast)** — die häufigste Verifier-Ablehnung dieses Loops:
+   `rg -n "<symbol>" --type py` über das GANZE Repo; jeder Aufrufer außerhalb deines
+   Diffs wird mitgezogen oder ist nachweislich kompatibel (Verifier-Fail 07-05:
+   `_operator_escalation_payload` bekam `conn=`, der Autoresearch-Caller nicht →
+   TypeError in Produktion). Grüne Gates ersetzen diesen Check NICHT — das affected-Set
+   erfasst entfernte Caller nicht zuverlässig.
+6. **Alles grün** → GENAU EIN Commit:
    ```
    git commit -m "loop(builder-reviewer): <plan-id> <kurztitel>
 

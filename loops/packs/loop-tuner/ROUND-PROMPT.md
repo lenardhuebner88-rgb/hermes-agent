@@ -18,6 +18,9 @@ unabhängige Belege ist Meinung, keine Optimierung → dann lieber DRY.
      Phasen (Dauern stehen in den Zeilen)? bounced-Häufungen eines Pack-Typs?
    - Gebouncte Pläne samt Feedback: `ls ~/.hermes/loops/*/queue/90-bounced/` + die
      `## Verifier-Feedback`/`## Loop-Fail`-Abschnitte darin lesen.
+   - Eskalations-Dateien: `cat ~/.hermes/loops/*/ESCALATIONS.md 2>/dev/null` —
+     häufen sich Eskalationen einer Klasse, die ein Pack-Prompt vermeiden könnte
+     (z. B. Fund-Auswahl läuft immer wieder in verbotenen Scope)?
    - Phase-Logs der letzten Läufe: `ls -t ~/.hermes/loops/*/logs/ | head` — brechen
      Phasen an Missverständnissen der Prompts ab?
 3. **Diagnose**: Formuliere die EINE systematische Schwäche (nicht Symptom): z. B.

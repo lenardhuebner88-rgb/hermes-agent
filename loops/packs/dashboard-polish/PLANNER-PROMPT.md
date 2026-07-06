@@ -51,7 +51,10 @@ priority: P1
 retry: 0
 created_by: loop-planner
 done_when: |
-  <testbar + beweisbar: welcher vitest-Testpfad es belegt>
+  <testbar + beweisbar: welcher vitest-Testpfad es belegt UND welches SICHTBARE
+   Ergebnis (Label/Text/Attribut aus Nutzersicht) der Test asserten muss — ein
+   interner Roh-String genügt nicht (Verifier-Fail 07-05: Label blieb unsichtbar,
+   Test war trotzdem grün)>
 anti_scope: |
   <was dieser Plan explizit NICHT anfasst>
 tests: |

@@ -17,6 +17,9 @@ Kein Pack „weil es cool wäre" — Beschäftigungstherapie-Loops verbrennen N�
    - Ledger ALLER Pack-States: `for f in ~/.hermes/loops/*/LEDGER.md; do echo "== $f"; tail -30 "$f"; done`
      — wiederkehrende BLOCKED-Gründe und Bounce-Muster sind Loop-Kandidaten erster Klasse
      („dieser Loop bounct ständig an X" → vielleicht braucht X einen eigenen Loop).
+   - Eskalations-Dateien: `cat ~/.hermes/loops/*/ESCALATIONS.md 2>/dev/null` —
+     dort landen BLOCKED-Funde mit echtem Bug; wiederkehrende Eskalations-Klassen
+     ohne Besitzer sind Loop-Kandidaten.
    - Alt-Familien: `tail -30 ~/.hermes/fable-loop/LEDGER.md ~/.hermes/kimi-loop/focus/*/LEDGER.md 2>/dev/null`
    - Board read-only (mode=ro-URI, created_at=Unix-Epoch): wiederkehrende op_escalations/
      gave_up-Klassen der letzten 14 Tage — was eskaliert immer wieder zum Operator?
@@ -38,8 +41,10 @@ Kein Pack „weil es cool wäre" — Beschäftigungstherapie-Loops verbrennen N�
      schreib sie im neuen Pack GENAU SO als Literale (kopiere die Schreibweise aus
      der _blank-Vorlage; in DIESEM Prompt hier sind sie bereits durch echte Pfade
      ersetzt, also NICHT von hier abschreiben). Dazu: Dedup-Schritt, Evidenz-Pflicht,
-     `git add -A && ./loops/gate.sh`, last-status-Protokoll (FIXED/DRY/BLOCKED bzw.
-     PLANNED/BUILT/PASS/FAIL), Verbote-Block (push/merge/deploy/Vollsuite/Schema/Auth/
+     Test-rot-vor-Fix, `git add -A && ./loops/gate.sh`, adversariales Selbst-Review,
+     last-status-Protokoll (FIXED/DRY/BLOCKED bzw. PLANNED/BUILT/PASS/FAIL),
+     Eskalations-Abschnitt (BLOCKED mit echtem Fund → ESCALATIONS.md-Block, wie in
+     der _blank-Vorlage), Verbote-Block (push/merge/deploy/Vollsuite/Schema/Auth/
      kanban.db/Upstream/package-lock) + aufgabenspezifische Verbote.
 5. **Lint (Exit-Code zählt)**:
    ```bash
