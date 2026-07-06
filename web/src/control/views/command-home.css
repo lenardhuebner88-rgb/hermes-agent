@@ -18,12 +18,18 @@
  * Papier-Regeln aus control-tokens.css, ohne die Shell zu verändern. */
 .hc-page:has([data-command-home]) {
   background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--color-surface-0) 55%);
+  /* [data-control] reserviert calc(100dvh - 5rem), .hc-page nur -7rem:
+   * Start braucht denselben dunklen Boden bis zur Bottom-Nav wie Fleet. */
+  min-height: calc(100dvh - 5rem);
 }
 .hc-page:has([data-command-home])::before { opacity: 0; }
 .hc-page:has([data-command-home])::after { display: none; }
-body:has([data-command-home]) { background: #05090f; }
-body:has([data-command-home]) [data-layout-variant] { background: #05090f; }
-body:has([data-command-home]) [data-control] { background: #05090f; }
+/* Diese body(-Vorfahren)-Patches halten den Bereich unterhalb der kürzeren
+ * .hc-page dunkel. Tailwind-v4 `@theme` emittiert --color-surface-0 auf :root,
+ * daher var() statt eines abweichenden Hex-Literals. */
+body:has([data-command-home]) { background: var(--color-surface-0); }
+body:has([data-command-home]) [data-layout-variant] { background: var(--color-surface-0); }
+body:has([data-command-home]) [data-control] { background: var(--color-surface-0); }
 
 /* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
  * kein Header-Pflaster mehr — die globalen .hc-soft/.hc-eyebrow ziehen jetzt die

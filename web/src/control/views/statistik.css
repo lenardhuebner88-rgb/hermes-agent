@@ -13,12 +13,18 @@
 /* ── Full-Bleed dunkler Canvas ──────────────────────────────────────────────── */
 .hc-page:has([data-statistik]) {
   background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--color-surface-0) 55%);
+  /* [data-control] reserviert calc(100dvh - 5rem), .hc-page nur -7rem:
+   * Statistik braucht denselben dunklen Boden bis zur Bottom-Nav wie Fleet. */
+  min-height: calc(100dvh - 5rem);
 }
 .hc-page:has([data-statistik])::before { opacity: 0; }
 .hc-page:has([data-statistik])::after { display: none; }
-body:has([data-statistik]) { background: #05090f; }
-body:has([data-statistik]) [data-layout-variant] { background: #05090f; }
-body:has([data-statistik]) [data-control] { background: #05090f; }
+/* Diese body(-Vorfahren)-Patches halten den Bereich unterhalb der kürzeren
+   .hc-page dunkel. Tailwind-v4 `@theme` emittiert --color-surface-0 auf :root,
+   daher var() statt eines abweichenden Hex-Literals. */
+body:has([data-statistik]) { background: var(--color-surface-0); }
+body:has([data-statistik]) [data-layout-variant] { background: var(--color-surface-0); }
+body:has([data-statistik]) [data-control] { background: var(--color-surface-0); }
 
 /* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
    KEIN Header-Pflaster mehr — die globalen .hc-soft/.hc-dim/.hc-eyebrow ziehen
