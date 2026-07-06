@@ -6822,6 +6822,7 @@ class PlanSpecCompilePreviewBody(BaseModel):
 class PlanSpecProseIngestBody(BaseModel):
     prose: FreeText
     author: Optional[ShortText] = "dashboard"
+    freigabe: Literal["operator", "sofort"] = "operator"
 
 
 @router.get("/planspecs")
@@ -6882,10 +6883,14 @@ def ingest_prose_planspec(payload: PlanSpecProseIngestBody, board: Optional[str]
     board = _resolve_board(board)
     try:
         source_path = _persist_dashboard_prose_plan(payload.prose)
+        prose_freigabe: Literal["complete", "operator"] = (
+            "complete" if payload.freigabe == "sofort" else "operator"
+        )
         return planspecs.ingest_prose_plan(
             source_path,
             board=board,
             author=payload.author or "dashboard",
+            freigabe=prose_freigabe,
         )
     except planspecs.PlanSpecBlocked as exc:
         raise HTTPException(status_code=400, detail={"findings": exc.findings})

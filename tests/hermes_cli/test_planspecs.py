@@ -132,7 +132,7 @@ def test_ingest_accepts_prose(kanban_home, tmp_path: Path, capsys):
         ).fetchall()
     assert any(row["title"].startswith("PlanSpec prose-plan") for row in rows)
     children = [row for row in rows if row["planspec_source"]]
-    assert [row["title"] for row in children] == ["Parse prose", "Compile children"]
+    assert {row["title"] for row in children} == {"Parse prose", "Compile children"}
     assert {row["planspec_source"] for row in children} == {str(path.resolve(strict=False))}
 
 

@@ -1837,6 +1837,7 @@ def ingest_prose_plan(
     board: str | None = None,
     author: str = "prose-plan-ingest",
     supersede: bool = False,
+    freigabe: Literal["complete", "operator"] = "complete",
 ) -> dict[str, Any]:
     """Compile a prose Plan and ingest its deterministic children.
 
@@ -1857,13 +1858,17 @@ def ingest_prose_plan(
     except OSError as exc:
         raise PlanSpecBlocked([f"prose plan cannot be read: {exc}"]) from exc
 
+    freigabe_value = str(freigabe or "complete").strip().lower()
+    if freigabe_value not in {"complete", "operator"}:
+        raise PlanSpecBlocked([f"unsupported prose plan freigabe: {freigabe!r}"])
+
     children = [dict(child, planspec_source=str(resolved)) for child in compiled.children]
     frontmatter: dict[str, Any] = {
         "status": "prose-plan",
         "owner": "Hermes",
         "slice": resolved.stem,
         "topic": plan.title,
-        "freigabe": "complete",
+        "freigabe": freigabe_value,
         "live_test_depth": "smoke",
         "prose_plan": True,
     }
@@ -1872,7 +1877,7 @@ def ingest_prose_plan(
         frontmatter=frontmatter,
         topic=plan.title,
         status="prose-plan",
-        freigabe="complete",
+        freigabe=freigabe_value,
         live_test_depth="smoke",
         hints=compiled.hints,
         children=children,
@@ -1969,6 +1974,8 @@ def ingest_prose_plan(
         )
         if not kanban_db.schedule_task(conn, root_id, reason="Prose Plan ingest: held before release"):
             raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])
+        child_held_for_operator = spec.freigabe.strip().lower() == "operator"
+        initial_child_status = "scheduled" if child_held_for_operator else "todo"
         try:
             child_ids = kanban_db.decompose_triage_task(
                 conn,
@@ -1977,7 +1984,7 @@ def ingest_prose_plan(
                 children=spec.children,
                 author=author,
                 auto_promote=False,
-                initial_child_status="todo",
+                initial_child_status=initial_child_status,
                 expected_root_status="scheduled",
                 validate_assignees=True,
             )
@@ -1994,7 +2001,7 @@ def ingest_prose_plan(
             "children": spec.children,
             "freigabe": spec.freigabe,
             "live_test_depth": spec.live_test_depth,
-            "initial_child_status": "todo",
+            "initial_child_status": initial_child_status,
             "subtask_count": len(child_ids),
             "idempotency_key": idempotency_key,
             "superseded": superseded,

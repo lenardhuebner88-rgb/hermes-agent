@@ -36,6 +36,8 @@ interface IngestProseResponse {
   child_ids?: string[];
 }
 
+type FreigabeMode = "operator" | "sofort";
+
 interface PlanComposerProps {
   onIngestSuccess: () => void;
 }
@@ -46,6 +48,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
   const [busy, setBusy] = useState<"idle" | "preview" | "ingest">("idle");
   const [error, setError] = useState<string | null>(null);
   const [ingestedRoot, setIngestedRoot] = useState<string | null>(null);
+  const [freigabeMode, setFreigabeMode] = useState<FreigabeMode>("operator");
 
   async function handlePreview() {
     setBusy("preview");
@@ -74,7 +77,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
       const result = await fetchJSON<IngestProseResponse>("/api/plugins/kanban/planspecs/ingest-prose", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prose }),
+        body: JSON.stringify({ prose, freigabe: freigabeMode }),
       });
       setIngestedRoot(result.root_task_id ?? "ok");
       onIngestSuccess();
@@ -128,17 +131,32 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
           {previewBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <GitCompareArrows className="h-4 w-4" aria-hidden="true" />}
           <span>{de.fleet.planCompilePreview}</span>
         </button>
-        <button
-          type="button"
-          className="inline-flex min-h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 hover:border-live/40 hover:text-live disabled:cursor-not-allowed disabled:opacity-45"
-          onClick={() => void handleIngest()}
-          disabled={!canIngest}
-          aria-busy={ingestBusy}
-          title={de.fleet.planIngest}
-        >
-          {ingestBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <UploadCloud className="h-4 w-4" aria-hidden="true" />}
-          <span>{de.fleet.planIngest}</span>
-        </button>
+        <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
+          <label htmlFor="plan-composer-freigabe" className="sr-only">
+            {de.fleet.planFreigabeModeLabel}
+          </label>
+          <select
+            id="plan-composer-freigabe"
+            value={freigabeMode}
+            onChange={(event) => setFreigabeMode(event.target.value as FreigabeMode)}
+            disabled={ingestBusy}
+            className="min-h-10 min-w-0 rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs font-medium text-ink-2 outline-none focus:border-live/60 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <option value="operator">{de.fleet.planFreigabeOperator}</option>
+            <option value="sofort">{de.fleet.planFreigabeSofort}</option>
+          </select>
+          <button
+            type="button"
+            className="inline-flex min-h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 hover:border-live/40 hover:text-live disabled:cursor-not-allowed disabled:opacity-45"
+            onClick={() => void handleIngest()}
+            disabled={!canIngest}
+            aria-busy={ingestBusy}
+            title={de.fleet.planIngest}
+          >
+            {ingestBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <UploadCloud className="h-4 w-4" aria-hidden="true" />}
+            <span>{de.fleet.planIngest}</span>
+          </button>
+        </div>
       </div>
 
       {error ? (

@@ -84,5 +84,32 @@ describe("PlanComposer", () => {
       "/api/plugins/kanban/planspecs/ingest-prose",
       expect.objectContaining({ method: "POST" }),
     );
+    const [, ingestOptions] = fetchMock.mock.calls[1];
+    expect(JSON.parse(String(ingestOptions?.body))).toMatchObject({
+      freigabe: "operator",
+    });
+  });
+
+  it("sendet die Sofort-Freigabeauswahl beim Ingest", async () => {
+    render(<PlanComposer onIngestSuccess={onIngestSuccess} />);
+
+    fireEvent.change(screen.getByLabelText(de.fleet.planProseLabel), {
+      target: {
+        value: "# Demo\n**Goal:** Build it now.\n\n## Slice: Parse prose\n- done-when: Parsed.",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.planCompilePreview }));
+
+    await screen.findByText("Parse prose");
+    fireEvent.change(screen.getByLabelText(de.fleet.planFreigabeModeLabel), {
+      target: { value: "sofort" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.planIngest }));
+
+    await waitFor(() => expect(onIngestSuccess).toHaveBeenCalledTimes(1));
+    const [, ingestOptions] = fetchMock.mock.calls[1];
+    expect(JSON.parse(String(ingestOptions?.body))).toMatchObject({
+      freigabe: "sofort",
+    });
   });
 });

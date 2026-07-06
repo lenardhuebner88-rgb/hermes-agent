@@ -80,6 +80,58 @@ def test_ingest_prose_endpoint(plugin_module):
 
     assert payload["ok"] is True
     assert payload["subtask_count"] == 1
+    assert payload["freigabe"] == "operator"
+    assert payload["initial_child_status"] == "scheduled"
     source_path = Path(payload["path"])
     assert source_path.name.startswith("dashboard-prose-")
     assert source_path.read_text(encoding="utf-8") == prose
+
+    with kb.connect_closing() as conn:
+        root = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (payload["root_task_id"],),
+        ).fetchone()
+        child = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (payload["child_ids"][0],),
+        ).fetchone()
+
+    assert root["status"] == "scheduled"
+    assert root["freigabe"] == "operator"
+    assert child["status"] == "scheduled"
+
+
+def test_ingest_prose_endpoint_sofort_preserves_dispatchable_behavior(plugin_module):
+    prose = """# Ingest Plan Sofort
+**Goal:** Create the pre-existing immediate kanban chain.
+
+## Slice: Ship immediately
+- done-when: Chain can run without operator approval.
+"""
+
+    payload = plugin_module.ingest_prose_planspec(
+        plugin_module.PlanSpecProseIngestBody(
+            prose=prose,
+            author="pytest",
+            freigabe="sofort",
+        ),
+        board=None,
+    )
+
+    assert payload["ok"] is True
+    assert payload["freigabe"] == "complete"
+    assert payload["initial_child_status"] == "todo"
+
+    with kb.connect_closing() as conn:
+        root = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (payload["root_task_id"],),
+        ).fetchone()
+        child = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (payload["child_ids"][0],),
+        ).fetchone()
+
+    assert root["status"] == "todo"
+    assert root["freigabe"] == "complete"
+    assert child["status"] == "todo"
