@@ -1565,6 +1565,7 @@ def test_persistent_red_triage_leaker_head_fingerprint_stable_across_more_noise(
         _red_leaker_only("2026-07-06"),
     ]
     later = [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A),
         _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C),
         _red_leaker_only("2026-07-06"),
         _red_leaker_only("2026-07-07"),  # new head, still noise; anchor unchanged
@@ -1574,16 +1575,13 @@ def test_persistent_red_triage_leaker_head_fingerprint_stable_across_more_noise(
     assert fp_a == fp_b
 
 
-def test_persistent_red_triage_all_leaker_window_keeps_unknown_sentinel():
-    # No attributed red night anywhere in the window (pure harness noise): the
-    # anchor has nothing concrete to list, so it keeps the legacy 'unknown' gate
-    # + empty red_files (honest) and still dedups to itself.
+def test_persistent_red_triage_all_leaker_window_is_idle():
+    # AC: An all-leaker-only window has zero RED nights. With min_reds=2 the
+    # trigger correctly returns None — pure harness noise never opens a triage.
+    # (Under NEUTRAL classification, leaker-only nights are not RED.)
     records = [_red_leaker_only("2026-07-05"), _red_leaker_only("2026-07-06")]
     cause = vm.derive_persistent_red_triage(records, min_reds=2, window=2)
-    assert cause is not None
-    assert cause["gate"] == "unknown"
-    assert cause["red_files"] == set()
-    assert cause["fingerprint"] == hashlib.sha1(b"unknown").hexdigest()
+    assert cause is None
 
 
 def test_consecutive_red_cause_suspect_range_mixed_with_and_without_sha():
@@ -2057,3 +2055,188 @@ def test_operator_load_in_snapshot_and_summary(conn):
                        "operator_comments", "decision_latency_days_median",
                        "held_open", "counter"}
     assert "operator load" in vm.render_snapshot_summary(snap)
+
+
+# ---------------------------------------------------------------------------
+# GATE-LEAKER-STREAK-HONESTY-V2: leaker-only nights are NEUTRAL — transparent to
+# the green streak, the release-brake red streak and the triage red-count, and
+# tracked only as a low-severity, visible leaker-debt channel.
+#
+# The fixture below is a faithful slice of the live green-gate ledger tail
+# (copied 2026-07-06): product-red nights culminating in the REAL 2026-07-06
+# leaker-only night whose sole "failure" was tests/hermes_cli/test_planspecs.py
+# passing when re-run alone.
+# ---------------------------------------------------------------------------
+
+def _leaker(date, files, *, ts=None):
+    """A leaker-only fail record (the whole night was test-isolation noise)."""
+    return {
+        "date": date,
+        "result": "fail",
+        "ts": ts or f"{date}T03:34:13+00:00",
+        "leaker_only": True,
+        "leakers": list(files),
+    }
+
+
+def _real_ledger_with_leaker_head():
+    # Two real product-red nights + the real 2026-07-06 leaker-only night.
+    return [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A,
+             ts="2026-07-04T03:34:29+00:00"),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_C,
+             ts="2026-07-05T03:35:51+00:00"),
+        _leaker("2026-07-06", ["python: tests/hermes_cli/test_planspecs.py"],
+                ts="2026-07-06T03:34:13+00:00"),
+    ]
+
+
+def test_classify_gate_nights_green_red_neutral():
+    records = [
+        _rec("2026-07-03", "pass"),
+        _red("2026-07-04", gate="python", detail="boom"),
+        _leaker("2026-07-05", ["python: tests/x.py"]),
+    ]
+    assert vm.classify_gate_nights(records) == {
+        "2026-07-03": vm.NIGHT_GREEN,
+        "2026-07-04": vm.NIGHT_RED,
+        "2026-07-05": vm.NIGHT_NEUTRAL,
+    }
+
+
+def test_classify_night_with_survivor_and_leaker_stays_red():
+    # AC-1 symmetry: a surviving product fail sharing a night with a leaker must
+    # keep the night RED — leaker demotion may never hide a real regression.
+    records = [
+        _leaker("2026-07-05", ["python: tests/x.py"], ts="2026-07-05T03:00:00+00:00"),
+        _red("2026-07-05", gate="python", detail="real boom",
+             ts="2026-07-05T04:00:00+00:00"),
+    ]
+    assert vm.classify_gate_nights(records) == {"2026-07-05": vm.NIGHT_RED}
+
+
+def test_streak_leaker_night_is_neutral_not_green_not_red():
+    # AC-1: a leaker-only night at the head does NOT break the green streak and
+    # is NOT counted as a green night.
+    records = [
+        _rec("2026-07-03", "pass"),
+        _rec("2026-07-04", "pass"),
+        _leaker("2026-07-05", ["python: tests/x.py"]),
+    ]
+    out = vm.derive_gate_streak(records)
+    assert out["streak"] == 2          # two greens survive the transparent leaker
+    assert out["green_nights"] == 2    # leaker night is NOT a green night
+    assert out["fail_nights"] == 0     # ...nor a red night
+    assert out["neutral_nights"] == 1
+
+
+def test_streak_leaker_between_greens_does_not_advance():
+    # A leaker night embedded between greens is skipped, not counted as green.
+    records = [
+        _rec("2026-07-03", "pass"),
+        _leaker("2026-07-04", ["python: tests/x.py"]),
+        _rec("2026-07-05", "pass"),
+    ]
+    out = vm.derive_gate_streak(records)
+    assert out["streak"] == 2
+    assert out["green_nights"] == 2
+    assert out["neutral_nights"] == 1
+
+
+def test_streak_survivor_night_stays_fully_red():
+    # AC-1 regression: a night with a surviving product first_fail stays fully
+    # red even if a leaker was also recorded that night.
+    records = [
+        _rec("2026-07-03", "pass"),
+        _leaker("2026-07-04", ["python: tests/x.py"], ts="2026-07-04T03:00:00+00:00"),
+        _red("2026-07-04", gate="python", detail="real boom",
+             ts="2026-07-04T04:00:00+00:00"),
+    ]
+    out = vm.derive_gate_streak(records)
+    assert out["streak"] == 0
+    assert out["fail_nights"] == 1
+    assert out["neutral_nights"] == 0
+
+
+def test_red_streak_leaker_head_does_not_extend_or_reset():
+    # AC-1: a leaker-only night at the head neither extends the release-brake red
+    # streak nor resets it — it is transparent, so a standing hold is preserved.
+    records = [
+        _red("2026-07-03", gate="python", detail="boom"),
+        _red("2026-07-04", gate="python", detail="boom"),
+        _red("2026-07-05", gate="python", detail="boom"),
+        _leaker("2026-07-06", ["python: tests/x.py"]),
+    ]
+    # 3 reds → a pause_on_red_streak=3 hold holds; the leaker keeps it at 3
+    # (not 4 = extended, not 0 = dissolved).
+    assert vm.red_streak_from_head(records) == 3
+
+
+def test_red_streak_leaker_head_over_green_stays_zero():
+    # A leaker-only night after a green night must not manufacture a red streak.
+    records = [
+        _rec("2026-07-04", "pass"),
+        _leaker("2026-07-05", ["python: tests/x.py"]),
+    ]
+    assert vm.red_streak_from_head(records) == 0
+
+
+def test_persistent_red_triage_leaker_head_is_idle():
+    # AC-2: a lone leaker-only night at the head over a green history is neutral,
+    # not a red head — no triage opens.
+    records = [
+        _rec("2026-07-03", "pass"),
+        _rec("2026-07-04", "pass"),
+        _leaker("2026-07-05", ["python: tests/x.py"]),
+    ]
+    assert vm.derive_persistent_red_triage(records) is None
+
+
+def test_persistent_red_triage_single_red_plus_leaker_head_is_idle():
+    # AC-2 guard survives neutrality: one real red + a leaker head is still a
+    # single red night, not a persistent-red trigger.
+    records = [
+        _rec("2026-07-03", "pass"),
+        _red("2026-07-04", gate="python", detail="boom"),
+        _leaker("2026-07-05", ["python: tests/x.py"]),
+    ]
+    assert vm.derive_persistent_red_triage(records, min_reds=2, window=3) is None
+
+
+def test_persistent_red_triage_leaker_night_not_counted_in_min_reds():
+    # AC-2 core: the real 2026-07-06 leaker night must NOT count toward min_reds.
+    # The head is the most recent MEANINGFUL night (07-05, red); the two real
+    # product reds fire the trigger, and the leaker is absent from the dates.
+    records = _real_ledger_with_leaker_head()
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["red_count"] == 2
+    assert cause["dates"] == ["2026-07-04", "2026-07-05"]
+    assert "2026-07-06" not in cause["dates"]
+    # The leaker file never enters the triage surface.
+    assert "tests/hermes_cli/test_planspecs.py" not in cause["red_files_window_union"]
+
+
+def test_green_gate_metric_surfaces_leaker_debt_from_real_leaker_night():
+    # AC-2: the leaker-debt counter appears in its own channel (which the
+    # dashboard tile reads) while the red-night counter excludes it.
+    records = _real_ledger_with_leaker_head()
+    m = vm._green_gate_metric(records)
+    assert m["streak"] == 0
+    assert m["counter"]["name"] == "fail_nights"
+    assert m["counter"]["value"] == 2          # only the two product-red nights
+    assert m["neutral_nights"] == 1
+    assert m["leaker_debt_nights"] == 1        # flat mirror the tile pulls by path
+    assert m["leaker_debt"]["value"] == 1
+    assert m["leaker_debt"]["severity"] == "low"
+
+
+def test_full_snapshot_carries_leaker_debt_channel(conn):
+    # End-to-end: the written snapshot's green_gate_streak block exposes both the
+    # flat tile field and the structured low-severity debt entry.
+    records = _real_ledger_with_leaker_head()
+    snap = vm.compute_metrics_snapshot(conn, now=OL_NOW, gate_records=records)
+    g = snap["metrics"]["green_gate_streak"]
+    assert g["leaker_debt_nights"] == 1
+    assert g["leaker_debt"]["severity"] == "low"
+    assert g["counter"]["value"] == 2

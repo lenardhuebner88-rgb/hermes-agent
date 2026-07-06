@@ -51,6 +51,41 @@ describe("metricSnapshotRows", () => {
     expect(rows[4]).toEqual({ key: "classification_coverage.coverage_pct",           label: "Klassifik.-Abdeckung",   value: "88.5%" });
   });
 
+  it("surfaces the leaker-debt night count as its own tile when present (GATE-LEAKER-STREAK-HONESTY-V2)", () => {
+    // Real ledger fixture shape: the 2026-07-06 leaker-only night is neutral,
+    // so the streak stays honest while the debt shows in its own tile.
+    const withDebt = {
+      metrics: {
+        ...NESTED_SNAPSHOT.metrics,
+        green_gate_streak: { streak: 0, green_nights: 4, leaker_debt_nights: 1 },
+      },
+    };
+    const rows = metricSnapshotRows(withDebt);
+    const debt = rows.find((r) => r.key === "green_gate_streak.leaker_debt_nights");
+    expect(debt).toEqual({
+      key: "green_gate_streak.leaker_debt_nights",
+      label: "Leaker-Debt (Nächte)",
+      value: "1",
+    });
+    // It sits directly after the streak tile and does not displace the others.
+    const labels = rows.map((r) => r.label);
+    expect(labels).toEqual([
+      "Autonomie",
+      "Green-Gate-Streak",
+      "Leaker-Debt (Nächte)",
+      "Eskalationen/Woche",
+      "Kosten/Aufgabe",
+      "Klassifik.-Abdeckung",
+    ]);
+  });
+
+  it("omits the leaker-debt tile entirely when the field is absent (older snapshots)", () => {
+    // NESTED_SNAPSHOT has no leaker_debt_nights → the tile must not appear as a
+    // phantom zero; the curated set stays at the original five.
+    const rows = metricSnapshotRows(NESTED_SNAPSHOT);
+    expect(rows.find((r) => r.key === "green_gate_streak.leaker_debt_nights")).toBeUndefined();
+  });
+
   it("skips rows whose nested path is missing — no throw", () => {
     const partial = {
       metrics: {

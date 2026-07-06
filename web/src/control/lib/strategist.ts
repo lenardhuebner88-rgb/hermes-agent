@@ -88,6 +88,10 @@ const round1 = (v: number) => String(Math.round(v * 10) / 10);
 const CURATED_METRICS: MetricSpec[] = [
   { path: ["autonomy", "autonomy_pct"],                              label: "Autonomie",               fmt: (v) => `${round1(v)}%` },
   { path: ["green_gate_streak", "streak"],                           label: "Green-Gate-Streak",       fmt: (v) => String(Math.round(v)) },
+  // Leaker-debt channel (GATE-LEAKER-STREAK-HONESTY-V2): leaker-only nights are
+  // neutral for the streak; the debt stays visible in its own tile. Absent from
+  // older snapshots → the row is simply skipped (never a throw / phantom zero).
+  { path: ["green_gate_streak", "leaker_debt_nights"],               label: "Leaker-Debt (Nächte)",    fmt: (v) => String(Math.round(v)) },
   { path: ["escalation_rate", "escalations_per_week"],               label: "Eskalationen/Woche",      fmt: (v) => String(Math.round(v)) },
   { path: ["cost_per_task", "recent_avg_cost_per_task"],             label: "Kosten/Aufgabe",          fmt: (v) => `$${v.toFixed(2)}` },
   { path: ["classification_coverage", "coverage_pct"],               label: "Klassifik.-Abdeckung",    fmt: (v) => `${round1(v)}%` },

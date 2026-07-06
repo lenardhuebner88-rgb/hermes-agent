@@ -285,29 +285,77 @@ def read_gate_records(path: Optional[Path] = None) -> list[dict]:
     return records
 
 
-def derive_gate_streak(records: list[dict]) -> dict:
-    """Derive the consecutive-green-nights streak from gate records.
+# ---------------------------------------------------------------------------
+# Night disposition: green / red / NEUTRAL (leaker-only)
+#
+# GATE-LEAKER-STREAK-HONESTY-V2: a night whose ONLY gate failures were
+# test-isolation *leakers* (every fail record flagged ``leaker_only`` — the file
+# passed when re-run alone, so the failure was concurrency/harness noise, not a
+# product regression) is NEUTRAL. Neutral is the honest middle between green and
+# red: it must neither build trust (NOT a green night, does NOT advance the green
+# streak) nor dissolve it (does NOT count as a red night, does NOT extend the
+# release-brake red streak, is NOT counted in the persistent-red triage, does
+# NOT resolve a standing red-streak hold). It is transparent to all three
+# consumers and surfaces only as low-severity leaker debt. A night with ANY
+# surviving fail — a product ``first_fail`` OR an unattributed red — stays fully
+# RED (symmetry: leaker demotion may never hide a real regression).
+# ---------------------------------------------------------------------------
 
-    A *night* (one UTC ``date``) is green only if **every** record for that
-    date is ``pass`` — a single ``fail`` makes the whole night red. The
-    streak counts back from the most recent recorded night and stops at the
-    first red night. Gaps (nights with no record) are simply absent; the
-    streak is measured over recorded nights.
+NIGHT_GREEN = "green"
+NIGHT_RED = "red"
+NIGHT_NEUTRAL = "neutral"
+
+
+def classify_gate_nights(records: list[dict]) -> dict[str, str]:
+    """Classify each UTC ``date`` in the ledger as green / red / neutral.
+
+    - :data:`NIGHT_RED`: the night has at least one *surviving* fail — a fail
+      record that is NOT flagged ``leaker_only`` (a product ``first_fail`` or an
+      unattributed red). A real regression can never be demoted to neutral.
+    - :data:`NIGHT_NEUTRAL` (leaker-only): the night has fail record(s) and
+      EVERY one of them is a ``leaker_only`` harness-noise fail. Such a night is
+      transparent to the green streak, the red streak and the triage red-count;
+      it surfaces only as low-severity leaker debt.
+    - :data:`NIGHT_GREEN`: every record for the date is ``pass``.
+
+    Records without a ``date`` are ignored (they cannot be attributed to a
+    night). The classification is global (window-independent), so every consumer
+    derives the SAME disposition for the same night — the symmetry the v2 spec
+    requires across streak, triage and release brake.
     """
-    per_date: dict[str, str] = {}
+    has_survivor: dict[str, bool] = {}
+    has_leaker: dict[str, bool] = {}
+    seen: dict[str, bool] = {}
+    for rec in records:
+        date = str(rec.get("date") or "")
+        if not date:
+            continue
+        seen[date] = True
+        if str(rec.get("result", "")).lower() == "pass":
+            continue
+        if bool(rec.get("leaker_only")):
+            has_leaker[date] = True
+        else:
+            has_survivor[date] = True
+    out: dict[str, str] = {}
+    for date in seen:
+        if has_survivor.get(date):
+            out[date] = NIGHT_RED
+        elif has_leaker.get(date):
+            out[date] = NIGHT_NEUTRAL
+        else:
+            out[date] = NIGHT_GREEN
+    return out
+
+
+def _latest_record_result(records: list[dict]) -> tuple[Optional[str], Optional[str]]:
+    """(result, ts) of the newest record by epoch — for the raw ``last_result``
+    surface (unchanged by neutral semantics: it reports what the most recent run
+    literally did, while the streak below skips neutral nights)."""
     latest_ts: Optional[str] = None
     latest_epoch = None
     latest_result: Optional[str] = None
     for rec in records:
-        date = str(rec.get("date"))
-        result = "pass" if str(rec.get("result")).lower() == "pass" else "fail"
-        # any fail flips the night red
-        if per_date.get(date) == "fail":
-            pass
-        elif result == "fail":
-            per_date[date] = "fail"
-        else:
-            per_date.setdefault(date, "pass")
         epoch = rec.get("epoch")
         if epoch is None:
             try:
@@ -321,23 +369,47 @@ def derive_gate_streak(records: list[dict]) -> dict:
         if epoch is not None and (latest_epoch is None or epoch >= latest_epoch):
             latest_epoch = epoch
             latest_ts = rec.get("ts")
-            latest_result = result
+            latest_result = "pass" if str(rec.get("result")).lower() == "pass" else "fail"
+    return latest_result, latest_ts
 
-    dates_desc = sorted(per_date.keys(), reverse=True)
+
+def derive_gate_streak(records: list[dict]) -> dict:
+    """Derive the consecutive-green-nights streak from gate records.
+
+    A *night* (one UTC ``date``) is green only if **every** record for that
+    date is ``pass``; a surviving ``fail`` makes the whole night red. The streak
+    counts back from the most recent recorded night and stops at the first red
+    night. Gaps (nights with no record) are simply absent; the streak is
+    measured over recorded nights.
+
+    Neutral (leaker-only) nights (:func:`classify_gate_nights`) are TRANSPARENT:
+    they neither advance the green streak nor break it, and they are NOT counted
+    as green nights — they are tallied separately as ``neutral_nights`` (the
+    leaker-debt channel). ``fail_nights`` counts RED nights only (product /
+    unattributed reds), so leaker debt never masquerades as a red night either.
+    """
+    nights = classify_gate_nights(records)
+    latest_result, latest_ts = _latest_record_result(records)
+
     streak = 0
-    for date in dates_desc:
-        if per_date[date] == "pass":
+    for date in sorted(nights.keys(), reverse=True):
+        disp = nights[date]
+        if disp == NIGHT_NEUTRAL:
+            continue  # transparent — neither breaks nor advances the green streak
+        if disp == NIGHT_GREEN:
             streak += 1
-        else:
+        else:  # NIGHT_RED
             break
 
-    green_nights = sum(1 for v in per_date.values() if v == "pass")
-    fail_nights = sum(1 for v in per_date.values() if v == "fail")
+    green_nights = sum(1 for v in nights.values() if v == NIGHT_GREEN)
+    fail_nights = sum(1 for v in nights.values() if v == NIGHT_RED)
+    neutral_nights = sum(1 for v in nights.values() if v == NIGHT_NEUTRAL)
     return {
         "streak": streak,
         "green_nights": green_nights,
         "fail_nights": fail_nights,
-        "total_recorded_nights": len(per_date),
+        "neutral_nights": neutral_nights,
+        "total_recorded_nights": len(nights),
         "last_result": latest_result,
         "last_ts": latest_ts,
     }
@@ -354,23 +426,22 @@ def red_streak_from_head(records: list[dict]) -> int:
     S3): a robust check straight over the ledger records rather than the
     precomputed ``vision-metrics.json`` snapshot, which can be stale or
     missing (e.g. before the first ``metrics-snapshot`` run of the day).
+
+    Neutral (leaker-only) nights (:func:`classify_gate_nights`) are TRANSPARENT:
+    a leaker-only night neither extends the red streak nor resets it (v2:
+    ``verlaengert den Rot-Streak nicht und loest deren Hold nicht``). Counting
+    back from the head, a neutral night is skipped so a standing hold is
+    preserved — leaker debt can neither build the hold nor dissolve it.
     """
-    per_date: dict[str, bool] = {}
-    for rec in records:
-        date = str(rec.get("date") or "")
-        if not date:
-            continue
-        is_fail = str(rec.get("result", "")).lower() != "pass"
-        if is_fail:
-            per_date[date] = True
-        else:
-            per_date.setdefault(date, False)
-    dates_desc = sorted(per_date.keys(), reverse=True)
+    nights = classify_gate_nights(records)
     streak = 0
-    for date in dates_desc:
-        if per_date[date]:
+    for date in sorted(nights.keys(), reverse=True):
+        disp = nights[date]
+        if disp == NIGHT_NEUTRAL:
+            continue  # transparent — neither extends nor resets the red streak
+        if disp == NIGHT_RED:
             streak += 1
-        else:
+        else:  # NIGHT_GREEN
             break
     return streak
 
@@ -786,9 +857,18 @@ def derive_persistent_red_triage(
     changing-cause case is exactly what the same-cause path deliberately skips,
     leaving the operator with a persistent red head and no triage item.
 
+    Leaker-only nights (GATE-LEAKER-STREAK-HONESTY-V2) are NEUTRAL and fully
+    transparent here: they are excluded from the window, never counted toward
+    ``min_reds``, and a neutral head (the most recent recorded night is a
+    leaker-only red) never opens a triage — the "head" is the most recent
+    *meaningful* (green/red) night. Test-isolation debt can therefore neither
+    mint a triage PlanSpec on its own nor pad an N-of-M count.
+
     Returns ``None`` (idle) when:
-      - the head night is green (no red head to triage), or
-      - fewer than ``min_reds`` reds in the window (isolated flake — AC-2 guard).
+      - the most recent meaningful night is green (no red head to triage), or
+      - there is no meaningful night at all (empty / all leaker-only), or
+      - fewer than ``min_reds`` red nights in the window (isolated flake —
+        AC-2 guard).
 
     When triggered, returns::
 
@@ -846,108 +926,114 @@ def derive_persistent_red_triage(
     """
     if not records:
         return None
-    recent = list(records[-window:]) if window > 0 else list(records)
-    if not recent:
+    nights = classify_gate_nights(records)
+    # Neutral (leaker-only) nights are transparent: excluded from the window and
+    # from the head check (GATE-LEAKER-STREAK-HONESTY-V2). Only green/red nights
+    # are "meaningful"; the window is the last ``window`` meaningful nights.
+    meaningful_dates = [d for d in sorted(nights) if nights[d] != NIGHT_NEUTRAL]
+    if not meaningful_dates:
         return None
-    head = recent[-1]
-    if str(head.get("result", "")).lower() != "fail":
+    head_date = meaningful_dates[-1]
+    if nights[head_date] != NIGHT_RED:
+        return None  # head is green (or only leaker-noise since) — nothing to triage
+    recent_dates = meaningful_dates[-window:] if window > 0 else meaningful_dates
+    # ``min_reds`` counts distinct RED nights only — leaker-only nights are
+    # already filtered out, so test-isolation debt is never part of the count
+    # (AC-2). This preserves the pre-existing "distinct NIGHTS, not fail records"
+    # semantics: a single noisy night with multiple fail records is still one.
+    red_dates = [d for d in recent_dates if nights[d] == NIGHT_RED]
+    if len(red_dates) < max(1, int(min_reds)):
         return None
-    base_index = len(records) - len(recent)
-    reds_with_index = [
-        (base_index + i, r)
-        for i, r in enumerate(recent)
-        if str(r.get("result", "")).lower() == "fail"
-    ]
+    # Group the RED nights' fail records (index preserved for suspect_range sha
+    # lookup). A leaker-only fail that shares a RED night carries no first_fail,
+    # so it contributes no files — harmless, and never a phantom cause.
+    # NEUTRAL (leaker-only) nights are already excluded from red_dates by the
+    # NIGHT classification, so only genuinely-RED nights reach this path.
+    red_records_by_date: dict[str, list[tuple[int, dict]]] = {}
+    for idx, rec in enumerate(records):
+        date = str(rec.get("date") or "")
+        if not date or nights.get(date) != NIGHT_RED:
+            continue
+        if str(rec.get("result", "")).lower() == "pass":
+            continue
+        red_records_by_date.setdefault(date, []).append((idx, rec))
+
+    def _night_records(date: str) -> list[tuple[int, dict]]:
+        return sorted(
+            red_records_by_date.get(date, []),
+            key=lambda ir: (_record_epoch(ir[1]) is None, _record_epoch(ir[1]) or 0),
+        )
+
     # Codex review 2026-07-06 finding 2: ``min_reds`` counts distinct red
     # NIGHTS (UTC dates), not fail records — a single noisy night with
-    # multiple recorded fails (e.g. a manual re-run of the heartbeat) must
-    # not satisfy an N-of-M *nights* trigger on its own.
-    distinct_red_dates = {
-        str(r.get("date") or r.get("epoch") or "?") for _i, r in reds_with_index
-    }
-    if len(distinct_red_dates) < min_reds:
+    # multiple recorded fails must not satisfy an N-of-M *nights* trigger.
+    if len(red_records_by_date) < min_reds:
         return None
-    # ``detail`` and ``gate`` live under the record's ``first_fail`` payload
-    # (mirrors derive_consecutive_red_cause, which reads first_fail["detail"]).
-    # Reading them top-level would always miss → empty file set + "unknown" gate.
-    head_first_fail = head.get("first_fail") or {}
-    head_files = _extract_failing_test_files(head_first_fail.get("detail"))
-    head_gate = str(head_first_fail.get("gate") or "unknown")
+
+    # Collect the HEAD night's own red-file set (anti-flood: ``red_files`` is
+    # what strategist renders into the PlanSpec body; window-wide honesty lives
+    # in the ADDITIVE ``red_files_window_union`` / ``red_files_by_night``).
+    head_files: set[str] = set()
+    head_gate = "unknown"
+    for _idx, rec in _night_records(head_date):
+        ff = rec.get("first_fail") or {}
+        head_files |= _extract_failing_test_files(ff.get("detail"))
+        g = str(ff.get("gate") or "").strip().lower()
+        if g and head_gate == "unknown":
+            head_gate = g
 
     # AC-1 actionability at an unattributed head. When the HEAD night carries no
-    # extractable product files — a leaker-only night (harness noise, first_fail
-    # suppressed) or an un-attributed 'unknown' gate — the head-only red_files
-    # would render "(unbekannt)" and a 'Gate unknown' title even though EARLIER
-    # nights in the window failed on concrete product files (the changing-cause
-    # case this trigger exists for). This left the very PlanSpec the trigger
-    # opens un-actionable — it listed no files for the operator to reproduce.
-    # Anchor instead on the most RECENT red night in the window that DOES carry
-    # concrete red files, so the surfaced triage is always actionable (real
-    # files + a real gate). The attributed-head case is untouched: head_files
-    # non-empty → anchor == head, exactly as before.
-    #
-    # The anchor also backs the fingerprint, so key and body co-vary on the SAME
-    # stable night (AC-2, no spam): while that attributed night stays in-window
-    # and is still the most-recent attributed red, re-runs render the identical
-    # spec and dedup (``already_ingested``); a newer attributed head is genuinely
-    # new information and (correctly) opens a fresh chain. A window with NO
-    # attributed red night keeps the legacy 'unknown' sentinel — honest, since
-    # there is nothing concrete to list (and it dedups to itself).
+    # extractable product files — an un-attributed 'unknown' gate — anchor on
+    # the most RECENT red night in the window that DOES carry concrete red files,
+    # so the surfaced triage is always actionable. The attributed-head case is
+    # untouched: head_files non-empty -> anchor == head, exactly as before.
+    # NEUTRAL nights never reach this path (excluded by NIGHT_RED filter above).
     anchor_files, anchor_gate = head_files, head_gate
     if not anchor_files:
-        for _idx, r in reversed(reds_with_index):
-            ff = r.get("first_fail") or {}
-            files = _extract_failing_test_files(ff.get("detail"))
-            if files:
-                anchor_files = files
-                anchor_gate = str(ff.get("gate") or "unknown")
+        for date in reversed(red_dates):
+            for _idx, rec in _night_records(date):
+                ff = rec.get("first_fail") or {}
+                files = _extract_failing_test_files(ff.get("detail"))
+                if files:
+                    anchor_files = files
+                    anchor_gate = str(ff.get("gate") or "unknown")
+                    break
+            if anchor_files:
                 break
 
-    # Fingerprint the ANCHOR night's red file set only — see the docstring's
-    # "Fingerprint stays anchored..." rationale above (AC-2: no spam).
     fingerprint_source = "|".join(sorted(anchor_files)) if anchor_files else anchor_gate
     fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
 
     prev_sha_at = _prev_sha_index(records)
-    # Codex review 2026-07-06 finding 1: ``red_files`` KEEPS its pre-S3
-    # head-night-only semantics — strategist.propose_persistent_red_triage
-    # renders it verbatim into the PlanSpec body while the idempotency key
-    # stays head-fingerprint-anchored; a window union here would drift the
-    # body bytes on every window slide and turn ``already_ingested`` re-runs
-    # into supersede conflicts (planspecs hashes file bytes). The window-wide
-    # honesty lives in the ADDITIVE keys ``red_files_window_union`` and
-    # ``red_files_by_night`` for dashboards/digest consumers instead.
     red_files_window_union: set[str] = set()
-    per_night: dict[str, dict] = {}
-    for idx, r in reds_with_index:
-        ff = r.get("first_fail") or {}
-        files = sorted(_extract_failing_test_files(ff.get("detail")))
-        red_files_window_union.update(files)
-        date = str(r.get("date") or r.get("epoch") or "?")
-        night = per_night.get(date)
-        if night is None:
-            # One entry per NIGHT (finding 2): the suspect_range anchors on
-            # the night's earliest record — same representative convention as
-            # _night_cause.
-            sha = str(r.get("head_sha") or "").strip() or None
-            prev_sha = prev_sha_at[idx]
-            per_night[date] = {
-                "date": date,
-                "files": list(files),
-                "suspect_range": f"{prev_sha}..{sha}" if (sha and prev_sha) else None,
-            }
-        else:
-            night["files"] = sorted(set(night["files"]) | set(files))
-    red_files_by_night = [per_night[d] for d in sorted(per_night)]
+    red_files_by_night: list[dict] = []
+    for date in sorted(red_dates):
+        recs = _night_records(date)
+        files: set[str] = set()
+        for _idx, rec in recs:
+            files |= _extract_failing_test_files((rec.get("first_fail") or {}).get("detail"))
+        red_files_window_union |= files
+        rng = None
+        if recs:
+            # suspect_range anchors on the night's earliest record — same
+            # representative convention as _night_cause.
+            rep_idx = recs[0][0]
+            sha = str(records[rep_idx].get("head_sha") or "").strip() or None
+            prev_sha = prev_sha_at[rep_idx]
+            if sha and prev_sha:
+                rng = f"{prev_sha}..{sha}"
+        red_files_by_night.append(
+            {"date": date, "files": sorted(files), "suspect_range": rng}
+        )
     return {
         "gate": anchor_gate,
         "red_files": set(anchor_files),
         "red_files_window_union": red_files_window_union,
         "red_files_by_night": red_files_by_night,
         "fingerprint": fingerprint,
-        "red_count": len(distinct_red_dates),
+        "red_count": len(red_dates),
         "window": window,
-        "dates": sorted(distinct_red_dates),
+        "dates": sorted(red_dates),
     }
 
 
@@ -1367,15 +1453,26 @@ def _cost_per_task_metric(
 
 
 def _green_gate_metric(gate_records: list[dict]) -> dict:
-    """Green-Gate-Streak ↔ counter 'fail_nights'.
+    """Green-Gate-Streak ↔ counter 'fail_nights' + leaker-debt channel.
 
     Headline = consecutive green nights from the ledger. Counter = total
-    recorded red nights (the streak's antagonist).
+    recorded RED nights (product / unattributed reds — the streak's antagonist).
+
+    Leaker-debt (GATE-LEAKER-STREAK-HONESTY-V2): nights whose ONLY gate failures
+    were test-isolation leakers are NEUTRAL — they do not build the streak and
+    are not red nights, so they never appear in ``fail_nights``. They are tracked
+    in their OWN low-severity, visible channel (``leaker_debt`` + the flat
+    ``leaker_debt_nights`` the dashboard tile reads) so the debt stays visible
+    without building or dissolving trust.
     """
     streak = derive_gate_streak(gate_records)
+    neutral_nights = streak.get("neutral_nights", 0)
     return {
         "streak": streak["streak"],
         "green_nights": streak["green_nights"],
+        "neutral_nights": neutral_nights,
+        # Flat, numeric mirror the curated dashboard tile pulls by path.
+        "leaker_debt_nights": neutral_nights,
         "total_recorded_nights": streak["total_recorded_nights"],
         "last_result": streak["last_result"],
         "last_ts": streak["last_ts"],
@@ -1383,7 +1480,20 @@ def _green_gate_metric(gate_records: list[dict]) -> dict:
             "name": "fail_nights",
             "value": streak["fail_nights"],
             "description": (
-                "recorded red gate nights — the streak's antagonist"
+                "recorded red gate nights (product / unattributed reds only; "
+                "test-isolation leaker-only nights are neutral, not red) — the "
+                "streak's antagonist"
+            ),
+        },
+        "leaker_debt": {
+            "name": "leaker_debt_nights",
+            "value": neutral_nights,
+            "severity": "low",
+            "channel": "test-isolation-leaker",
+            "description": (
+                "nights whose ONLY gate failures were test-isolation leakers — "
+                "neutral for streak/triage/release, tracked as low-severity "
+                "debt so it stays visible without building or dissolving trust"
             ),
         },
     }
