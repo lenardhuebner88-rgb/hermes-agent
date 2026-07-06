@@ -25,6 +25,7 @@ import {
   LayoutGrid,
   Maximize2,
   Minimize2,
+  Paperclip,
   Pencil,
   PlugZap,
   Plus,
@@ -56,7 +57,14 @@ import {
   type ToolsetInfo,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { createHermesXtermSurface, TERMINAL_THEME_STATIC } from "@/lib/xtermSurface";
+import {
+  createHermesXtermSurface,
+  SGR_WHEEL_DOWN,
+  SGR_WHEEL_UP,
+  TERMINAL_THEME_STATIC,
+  touchScrollSteps,
+} from "@/lib/xtermSurface";
+import { de } from "../i18n/de";
 import { Sparkline } from "../components/fleet/Sparkline";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 
@@ -594,6 +602,7 @@ export function AgentTerminalsView() {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const tmuxCopyModeRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -623,6 +632,8 @@ export function AgentTerminalsView() {
   const [createKind, setCreateKind] = useState<AgentTerminalKind>("hermes");
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachNonce, setAttachNonce] = useState(0);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [socketReady, setSocketReady] = useState(false);
@@ -831,6 +842,7 @@ export function AgentTerminalsView() {
       scrollback: 4000,
       loggerName: "agent-terminals",
       onWheelScrollBuffer: true,
+      appAwareWheel: true,
       terminalOptions: storedFont ? { fontSize: storedFont } : undefined,
     });
     termRef.current = term;
@@ -881,10 +893,65 @@ export function AgentTerminalsView() {
     observer.observe(host);
     window.visualViewport?.addEventListener("resize", scheduleResize);
     window.addEventListener("resize", scheduleResize);
+
+    // Touch-drag scroll bridge: xterm v6 has no touch→application path at all
+    // (touch-drag only scrolls the local viewport, a no-op on the alternate
+    // buffer tmux runs fullscreen in). Translate vertical drag into tmux's
+    // SGR wheel reports instead, one report per row-sized step. `sendRaw`
+    // isn't defined yet at this point in the component body — this mirrors
+    // its exact WS-send logic via `wsRef` directly rather than depending on
+    // declaration order.
+    let touchLastY: number | null = null;
+    let touchAccumPx = 0;
+    let touchStepPx = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      if (term.buffer.active.type !== "alternate") return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      touchLastY = touch.clientY;
+      touchAccumPx = 0;
+      touchStepPx = Math.max(8, Math.round(host.clientHeight / Math.max(1, term.rows)));
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (term.buffer.active.type !== "alternate") return;
+      if (touchLastY == null) return;
+      // Without mouse tracking there is nothing we could send (raw SGR would
+      // leak into the app) — bail BEFORE preventDefault so the gesture isn't
+      // consumed for nothing; the scroll buttons remain the fallback.
+      if (term.modes.mouseTrackingMode === "none") return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      // Stop the native (no-op on the alt buffer) viewport scroll and
+      // pull-to-refresh from fighting the gesture.
+      event.preventDefault();
+      const deltaY = touch.clientY - touchLastY;
+      touchLastY = touch.clientY;
+      const { steps, remainder } = touchScrollSteps(touchAccumPx + deltaY, touchStepPx);
+      touchAccumPx = remainder;
+      if (steps === 0) return;
+      // Finger moves DOWN (steps > 0) -> wheel UP -> back in history.
+      const sequence = steps > 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
+      const ws = wsRef.current;
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      for (let i = 0; i < Math.abs(steps); i += 1) ws.send(sequence);
+    };
+    const onTouchEnd = () => {
+      touchLastY = null;
+      touchAccumPx = 0;
+    };
+    host.addEventListener("touchstart", onTouchStart, { passive: false });
+    host.addEventListener("touchmove", onTouchMove, { passive: false });
+    host.addEventListener("touchend", onTouchEnd, { passive: false });
+    host.addEventListener("touchcancel", onTouchEnd, { passive: false });
+
     return () => {
       observer.disconnect();
       window.visualViewport?.removeEventListener("resize", scheduleResize);
       window.removeEventListener("resize", scheduleResize);
+      host.removeEventListener("touchstart", onTouchStart);
+      host.removeEventListener("touchmove", onTouchMove);
+      host.removeEventListener("touchend", onTouchEnd);
+      host.removeEventListener("touchcancel", onTouchEnd);
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);
       if (settleRaf2) cancelAnimationFrame(settleRaf2);
@@ -1240,6 +1307,27 @@ export function AgentTerminalsView() {
     },
     [composerText, sendRaw],
   );
+
+  // Phone → terminal upload: photo-picker button, paste, and drag&drop all
+  // funnel through here. Sequential (not Promise.all) so the composer text
+  // gets each path appended in drop order and one slow/huge upload doesn't
+  // block the others from ever finishing.
+  const uploadFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (!list.length) return;
+    setUploadBusy(true);
+    setUploadError(null);
+    try {
+      for (const file of list) {
+        const result = await api.uploadAgentTerminalFile(file);
+        setComposerText((current) => `${current}${result.path} `);
+      }
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadBusy(false);
+    }
+  }, []);
 
   const toggleZen = useCallback(() => {
     setZen((current) => !current);
@@ -1659,6 +1747,11 @@ export function AgentTerminalsView() {
         compactLayout && !keysOpen && "pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))]",
       )}
     >
+      {uploadError && (
+        <div className="mb-1.5 rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-xs text-status-alert">
+          {de.agentTerminals.uploadError} {uploadError}
+        </div>
+      )}
       <div className="flex items-end gap-1.5">
         {compactLayout && (
           <button
@@ -1676,6 +1769,33 @@ export function AgentTerminalsView() {
             <Keyboard className="h-4 w-4" />
           </button>
         )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            const { files } = event.target;
+            if (files && files.length) void uploadFiles(files);
+            // Reset so re-picking the same photo still fires onChange.
+            event.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          aria-label={de.agentTerminals.attachFile}
+          title={uploadBusy ? de.agentTerminals.uploading : de.agentTerminals.attachFile}
+          disabled={uploadBusy}
+          onClick={() => fileInputRef.current?.click()}
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:bg-surface-3 disabled:opacity-40"
+        >
+          {uploadBusy ? (
+            <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-ink-3 border-t-transparent" />
+          ) : (
+            <Paperclip className="h-4 w-4" />
+          )}
+        </button>
         <textarea
           aria-label="Text an Terminal senden"
           value={composerText}
@@ -1684,6 +1804,13 @@ export function AgentTerminalsView() {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               sendComposer(true);
+            }
+          }}
+          onPaste={(event) => {
+            const files = event.clipboardData?.files;
+            if (files && files.length) {
+              event.preventDefault();
+              void uploadFiles(files);
             }
           }}
           placeholder={socketReady ? "Prompt oder Befehl … (Enter sendet)" : "Terminal nicht verbunden"}
@@ -2162,6 +2289,12 @@ export function AgentTerminalsView() {
               )}
               <div
                 ref={hostRef}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const files = event.dataTransfer?.files;
+                  if (files && files.length) void uploadFiles(files);
+                }}
                 className="min-h-0 min-w-0 flex-1 w-full overflow-hidden [&_.xterm]:box-border [&_.xterm]:px-2 [&_.xterm]:py-1 [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:touch-pan-y"
               />
               {composer}

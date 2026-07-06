@@ -13255,6 +13255,89 @@ def _agent_terminal_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=status, detail=detail)
 
 
+# ----- phone → terminal file/screenshot upload -------------------------------
+# Same streamed-chunks-to-temp-file-then-rename pattern as
+# upload_managed_file_stream (see comment above that endpoint) — constant
+# memory, no base64 inflation, no partial file left in place on failure.
+_TERMINAL_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_TERMINAL_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+_TERMINAL_UPLOAD_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _terminal_uploads_dir() -> Path:
+    uploads_dir = get_hermes_home() / "uploads"
+    if not uploads_dir.exists():
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            uploads_dir.chmod(0o700)
+        except OSError:
+            pass
+    return uploads_dir
+
+
+def _sanitize_terminal_upload_name(name: str) -> str:
+    # Basename only — drops any path components a crafted filename (e.g.
+    # `../../evil name.png`) tries to smuggle in — then replaces every
+    # non-allowlisted char and caps the length.
+    base = os.path.basename((name or "").strip())
+    base = _TERMINAL_UPLOAD_SAFE_CHARS_RE.sub("_", base)
+    base = base[:80]
+    return base or "upload.bin"
+
+
+def _unique_terminal_upload_path(uploads_dir: Path, stamped_name: str) -> Path:
+    candidate = uploads_dir / stamped_name
+    if not candidate.exists():
+        return candidate
+    stem, suffix = Path(stamped_name).stem, Path(stamped_name).suffix
+    n = 1
+    while True:
+        candidate = uploads_dir / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+@app.post("/api/agent-terminals/upload")
+async def agent_terminal_upload(file: UploadFile = File(...)) -> Dict[str, object]:
+    uploads_dir = _terminal_uploads_dir()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_name = _sanitize_terminal_upload_name(file.filename or "")
+    target = _unique_terminal_upload_path(uploads_dir, f"{stamp}-{safe_name}")
+
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".upload", dir=str(uploads_dir))
+    tmp_path = Path(tmp_name)
+    total = 0
+    renamed = False
+    try:
+        with os.fdopen(tmp_fd, "wb") as out:
+            while True:
+                chunk = await file.read(_TERMINAL_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _TERMINAL_UPLOAD_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="File is too large")
+                out.write(chunk)
+        os.replace(tmp_path, target)
+        renamed = True
+    except HTTPException:
+        raise
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="File is not writable")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
+    finally:
+        # Clean up the temp file on every non-success exit, including
+        # BaseException paths the `except` clauses above don't catch —
+        # e.g. asyncio.CancelledError when the client aborts mid-upload.
+        if not renamed:
+            tmp_path.unlink(missing_ok=True)
+        await file.close()
+
+    return {"ok": True, "path": str(target), "name": target.name, "size": total}
+
+
 @app.get("/api/agent-terminals/capabilities")
 async def agent_terminal_capabilities() -> Dict[str, object]:
     return _agent_terminal_service().capabilities().to_dict()
@@ -13441,11 +13524,15 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
     try:
         session = TmuxAgentSessionService.validate_name(ws.query_params.get("session") or "", field="session")
         window = TmuxAgentSessionService.validate_name(ws.query_params.get("window") or "", field="window")
-        argv = _agent_terminal_service().attach_argv(session, window)
+        service = _agent_terminal_service()
+        argv = service.attach_argv(session, window)
     except AgentTerminalError as exc:
         await ws.send_text(f"\r\n\x1b[31mInvalid tmux target: {scrub_detail(str(exc))}\x1b[0m\r\n")
         await ws.close(code=1008)
         return
+    # Covers sessions created before this option existed / a foreign tmux
+    # session the dashboard didn't spawn — best-effort, never fails attach.
+    service.ensure_session_options(session)
 
     attach_cols = _attach_dimension(ws.query_params.get("cols"), default=80)
     attach_rows = _attach_dimension(ws.query_params.get("rows"), default=24)

@@ -465,6 +465,13 @@ export interface AgentTerminalCaptureResponse {
   content: string;
 }
 
+export interface AgentTerminalUploadResponse {
+  ok: boolean;
+  path: string;
+  name: string;
+  size: number;
+}
+
 export interface ControlOverviewHealthResponse {
   overall?: string;
   subsystems?: Record<string, { status?: string; detail?: string; error?: string | null }>;
@@ -600,6 +607,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window, text }),
     }),
+  uploadAgentTerminalFile: (file: File) => {
+    // Same raw multipart/form-data pattern as uploadFile above — no
+    // Content-Type header, the browser sets the multipart boundary itself.
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return fetchJSON<AgentTerminalUploadResponse>("/api/agent-terminals/upload", {
+      method: "POST",
+      body: form,
+    });
+  },
   getControlOverviewHealth: () =>
     fetchJSON<ControlOverviewHealthResponse>("/api/health-status"),
   getControlOverviewVault: () =>

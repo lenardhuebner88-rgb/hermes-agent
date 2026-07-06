@@ -56,12 +56,33 @@ export function hardenTerminalTextInput(host: HTMLElement): void {
   requestAnimationFrame(apply);
 }
 
+/**
+ * True when wheel input should be handed to xterm's own report/arrow-key
+ * logic instead of being consumed by the local scrollLines() fallback.
+ *
+ * xterm's alternate buffer (what fullscreen TUIs like tmux/vim run in) has
+ * no scrollback of its own — `scrollLines()` on it is a structural no-op.
+ * Deferring lets xterm run its internal wheel handling (SGR mouse reports
+ * when the app has mouse tracking on, or its wheel→arrow-key fallback
+ * otherwise), which is the only path that can scroll such an app at all.
+ */
+export function shouldDeferWheelToTerminal(bufferType: "normal" | "alternate"): boolean {
+  return bufferType === "alternate";
+}
+
 export interface HermesXtermSurfaceOptions {
   host: HTMLElement;
   theme: ITheme;
   scrollback?: number;
   loggerName: string;
   onWheelScrollBuffer?: boolean;
+  /**
+   * Opt-in: defer wheel events to xterm's own handling while the alternate
+   * buffer is active (see `shouldDeferWheelToTerminal`). Off by default so
+   * ChatPage's mouse-disabled TUI keeps its existing local-scroll behavior
+   * byte-identical.
+   */
+  appAwareWheel?: boolean;
   terminalOptions?: Partial<ITerminalOptions>;
 }
 
@@ -76,6 +97,7 @@ export function createHermesXtermSurface({
   scrollback = 5000,
   loggerName,
   onWheelScrollBuffer = true,
+  appAwareWheel = false,
   terminalOptions = {},
 }: HermesXtermSurfaceOptions): HermesXtermSurface {
   const tierW0 = terminalTierWidthPx(host);
@@ -108,6 +130,12 @@ export function createHermesXtermSurface({
 
   if (onWheelScrollBuffer) {
     term.attachCustomWheelEventHandler((ev) => {
+      if (appAwareWheel && shouldDeferWheelToTerminal(term.buffer.active.type)) {
+        // Let xterm run its own wheel handling (SGR mouse report or its
+        // built-in wheel→arrow fallback) — returning true here means we did
+        // NOT suppress it, unlike the `return false` path below.
+        return true;
+      }
       const delta = ev.deltaY;
       if (!delta) return false;
       const step = Math.max(1, Math.round(Math.abs(delta) / 50));
@@ -136,4 +164,33 @@ export function createHermesXtermSurface({
   }
 
   return { term, fit };
+}
+
+// ----- touch-drag scroll bridge (alternate-buffer TUIs only) ----------------
+// SGR mouse wheel reports (`CSI < Cb ; Cx ; Cy M`) — button code 64 is wheel
+// UP (scroll back in history), 65 is wheel DOWN (tmux: MOUSE_WHEEL_UP == 64
+// in tmux.h). Column/row (1;1) are irrelevant for wheel scroll bindings, tmux
+// only inspects the button code, but a valid coordinate pair is required by
+// the SGR encoding.
+export const SGR_WHEEL_UP = "\x1b[<64;1;1M";
+export const SGR_WHEEL_DOWN = "\x1b[<65;1;1M";
+
+/**
+ * Turns an accumulated touch-drag delta (px) into whole scroll "steps" plus
+ * the leftover remainder to carry into the next call. Pure so the touch
+ * gesture math is unit-testable without a DOM/xterm instance.
+ *
+ * Caller convention: `accumulatedPx` is the previous call's `remainder` plus
+ * the newest per-move delta — each call consumes as many whole `stepPx`
+ * increments as fit and hands back what's left. Sign is preserved (negative
+ * `accumulatedPx` yields negative `steps`), so callers can tell scroll
+ * direction from the sign of `steps`.
+ */
+export function touchScrollSteps(accumulatedPx: number, stepPx: number): { steps: number; remainder: number } {
+  if (stepPx <= 0) return { steps: 0, remainder: accumulatedPx };
+  // `|| 0` normalizes -0 (e.g. Math.trunc(-15 / 20)) to plain 0 — the sign
+  // only matters once at least one whole step has accumulated.
+  const steps = Math.trunc(accumulatedPx / stepPx) || 0;
+  const remainder = accumulatedPx - steps * stepPx;
+  return { steps, remainder };
 }

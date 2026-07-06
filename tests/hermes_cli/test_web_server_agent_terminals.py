@@ -73,6 +73,9 @@ class FakeAgentTerminalService:
     def detach_client(self, client_id):
         assert client_id == "client1"
 
+    def ensure_session_options(self, session):
+        pass
+
     def overview(self, *, tail_lines=10):
         assert tail_lines == 10
         return {
@@ -221,6 +224,33 @@ def _setup_attach_monkeypatches(monkeypatch, spawned: dict):
     monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
     monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
     monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+
+def test_agent_terminal_attach_ensures_session_options_before_spawn(monkeypatch):
+    """WS attach must best-effort `mouse on`/history-limit an already-existing
+    session on every reattach — not just at window-spawn time."""
+    calls: list[str] = []
+
+    class AttachService(FakeAgentTerminalService):
+        def attach_argv(self, session, window):
+            return ["tmux", "attach-session", "-t", f"{session}:{window}"]
+
+        def ensure_session_options(self, session):
+            calls.append(session)
+
+    spawned: dict = {}
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: AttachService())
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "PtyBridge", _make_attach_bridge_class(spawned))
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes"):
+        pass
+
+    assert calls == ["work"]
 
 
 def test_agent_terminal_attach_spawns_with_client_dimensions(monkeypatch):

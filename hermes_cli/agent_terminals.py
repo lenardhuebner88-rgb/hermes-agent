@@ -6,6 +6,7 @@ clients choose an agent kind/window, while argv/cwd/env are resolved here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -500,12 +501,42 @@ class TmuxAgentSessionService:
         return self._run("list-panes", "-t", target, "-F", "#{window_name}", check=False).returncode == 0
 
     # ----- lifecycle / IO -------------------------------------------------
+    def ensure_session_options(self, session: str) -> None:
+        """Best-effort, idempotent scrollback/mouse setup for one tmux session.
+
+        Sets `mouse on` and `history-limit 10000` SCOPED to *session* (`-t
+        <session>`, never `-g`) so wheel/touch scrolling can drive tmux's
+        native SGR mouse tracking without touching the user's other tmux
+        sessions. Re-applying the same value is a tmux no-op, so this is
+        safe to call on every spawn and every WS attach. Must never fail the
+        caller — any tmux error is logged and swallowed.
+        """
+        try:
+            session = self.validate_name(session, field="session")
+            for name, value in (("mouse", "on"), ("history-limit", "10000")):
+                proc = self._run("set-option", "-t", session, name, value, check=False)
+                if proc.returncode != 0:
+                    self._log_event(
+                        "ensure_session_options_failed",
+                        session=session,
+                        option=name,
+                        stderr=proc.stderr.strip()[:200],
+                    )
+        except Exception:
+            # The never-fail contract must hold even when the failure path
+            # itself fails (validate_name, tmux exec, or _log_event on a
+            # full/read-only disk) — a broken option setup may not take the
+            # spawn/attach down with it.
+            with contextlib.suppress(Exception):
+                self._log_event("ensure_session_options_error", session=str(session))
+
     def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
         """Create a tmux window from a resolved definition and return it."""
         if not definition.argv:
             raise CapabilityError(f"baseline window {definition.session}:{definition.window} is missing")
         if definition.session not in self.list_sessions():
             self._run("new-session", "-d", "-s", definition.session, "-c", str(definition.cwd))
+        self.ensure_session_options(definition.session)
         env_args: list[str] = []
         for key, value in definition.env.items():
             env_args.extend(["-e", f"{key}={value}"])

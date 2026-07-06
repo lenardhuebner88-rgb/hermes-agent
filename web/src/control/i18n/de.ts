@@ -1294,4 +1294,11 @@ export const de = {
     // der Ketten-Tab bleibt die reine Live-Sicht.
     openInFlow: "Im Flow öffnen",
   },
+  agentTerminals: {
+    // Phone → Terminal Datei-/Screenshot-Upload (Composer-Anhang-Button,
+    // Paste, Drag&Drop).
+    attachFile: "Datei anhängen",
+    uploading: "Wird hochgeladen …",
+    uploadError: "Datei-Upload fehlgeschlagen.",
+  },
 } as const;

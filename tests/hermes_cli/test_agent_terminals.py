@@ -721,3 +721,46 @@ def test_overview_capture_does_not_log_per_window_capture_events(
     log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
     assert '"event": "capture"' not in log
     assert '"event": "overview"' in log
+
+
+def _tmux_show_option(service: TmuxAgentSessionService, session: str, option: str) -> str:
+    proc = service._run("show-options", "-t", session, option, check=False)
+    return proc.stdout.strip()
+
+
+def test_spawn_window_sets_session_scoped_mouse_and_history_limit(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    fake = _fake_hermes(tmp_path)
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_binary=fake, hermes_home=tmp_path)
+
+    service.ensure("hermes")
+
+    assert _tmux_show_option(service, "work", "mouse") == "mouse on"
+    assert _tmux_show_option(service, "work", "history-limit") == "history-limit 10000"
+
+
+def test_ensure_session_options_is_session_scoped_not_global(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    fake = _fake_hermes(tmp_path)
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_binary=fake, hermes_home=tmp_path)
+    service._run("new-session", "-d", "-s", "work")
+    # A second, foreign session must stay untouched — options are set with
+    # `-t <session>`, never `-g`.
+    service._run("new-session", "-d", "-s", "other")
+
+    service.ensure_session_options("work")
+
+    assert _tmux_show_option(service, "work", "mouse") == "mouse on"
+    assert _tmux_show_option(service, "other", "mouse") == ""
+
+
+def test_ensure_session_options_swallows_failure_for_missing_session(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    # No "ghost" session exists yet — must not raise, only log.
+    service.ensure_session_options("ghost")
+    log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
+    assert "ensure_session_options_failed" in log
