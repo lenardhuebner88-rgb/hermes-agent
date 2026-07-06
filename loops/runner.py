@@ -27,6 +27,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -38,15 +39,19 @@ from pathlib import Path
 
 import yaml
 
+from hermes_constants import get_hermes_home
 from loops import engines
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO_ROOT / "loops" / "packs"
 # Werkstatt-Substrat (v2.1): vom Operator/Dashboard angelegte Packs leben im State,
 # nie im Repo — Browser-Edits dürfen den Live-Checkout nicht dirty machen.
-CUSTOM_PACKS_DIR = Path("~/.hermes/loops/packs-custom").expanduser()
-DEFAULT_STATE_ROOT = Path("~/.hermes/loops").expanduser()
-NOTIFY_SCRIPT = Path("~/.hermes/scripts/discord-notify.py").expanduser()
+_HERMES_HOME = get_hermes_home()
+CUSTOM_PACKS_DIR = _HERMES_HOME / "loops" / "packs-custom"
+DEFAULT_STATE_ROOT = _HERMES_HOME / "loops"
+NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
 DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
@@ -256,6 +261,30 @@ class LoopRunner:
         self.overrides = parse_overrides(self.state / "overrides.env")
         self.phase_secs: dict[str, int] = {}
         self._overrides_consumed = False
+        self._repo_validated = False
+
+    def _validate_repo(self) -> None:
+        """Fail fast when the configured pack repo is missing or not a Git repo.
+
+        Catches the most common configuration drift (moved/deleted repo path,
+        typo in pack.yaml) before any destructive git operation runs. Called
+        from the command path, NOT __init__, so read-only ``status`` still works
+        against a moved/missing repo instead of crashing on construction.
+        """
+        if self._repo_validated:
+            return
+        if not self.pack.repo.is_dir():
+            raise RuntimeError(f"Pack-Repo existiert nicht: {self.pack.repo}")
+        res = subprocess.run(
+            ["git", "-C", str(self.pack.repo), "rev-parse", "--git-dir"],
+            capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if res.returncode != 0:
+            detail = res.stderr.strip() or "keine Fehlerdetails"
+            raise RuntimeError(
+                f"Pack-Repo {self.pack.repo} ist kein Git-Repository ({detail})"
+            )
+        self._repo_validated = True
 
     # ── Infrastruktur ──
     def say(self, msg: str) -> None:
@@ -276,8 +305,8 @@ class LoopRunner:
                 input=msg, encoding="utf-8", timeout=20, check=False,
                 capture_output=True,
             )
-        except Exception:  # noqa: BLE001 — Notify ist nie lauf-kritisch
-            pass
+        except Exception as exc:  # noqa: BLE001 — Notify ist nie lauf-kritisch
+            logger.warning("Discord-Notify fehlgeschlagen: %s", exc)
 
     def consume_overrides(self) -> None:
         """overrides.env gilt nur für EINEN Lauf (Dashboard-Start-Override) —
@@ -853,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
         runner.cmd_status()
         return 0
     try:
+        runner._validate_repo()
         with runner.locked():
             runner.say(f"START cmd={args.cmd} {datetime.now().strftime('%F %H:%M:%S')}")
             rc = 0

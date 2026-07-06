@@ -7,6 +7,7 @@ eine Fake-Engine (keine CLI-Prozesse in Tests).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -895,3 +896,77 @@ def test_cli_unknown_pack_exits_2(tmp_path, capsys):
     rc = main(["--pack", "nope", "--cmd", "status", "--state-root", str(tmp_path)])
     assert rc == 2
     assert "MANIFEST-FEHLER" in capsys.readouterr().err
+
+
+# ── Profile-/Pfad-Konsistenz ─────────────────────────────────────────────────
+
+def test_default_paths_derive_from_hermes_home(monkeypatch):
+    """DEFAULT_STATE_ROOT, CUSTOM_PACKS_DIR und NOTIFY_SCRIPT müssen aus
+    get_hermes_home() kommen, nicht hartkodiert ~/.hermes verwenden."""
+    import importlib
+
+    from hermes_constants import get_hermes_home
+    from loops import runner
+
+    original_hermes_home = os.environ.get("HERMES_HOME")
+    fake_home = Path("/tmp/fake-hermes-home-for-test")
+    monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    try:
+        importlib.reload(runner)
+        assert runner.DEFAULT_STATE_ROOT == fake_home / "loops"
+        assert runner.CUSTOM_PACKS_DIR == fake_home / "loops" / "packs-custom"
+        assert runner.NOTIFY_SCRIPT == fake_home / "scripts" / "discord-notify.py"
+    finally:
+        # Modul wieder mit ursprünglichem HERMES_HOME laden, damit nachfolgende
+        # Tests nicht mit dem Fake-Pfad laufen.
+        if original_hermes_home is None:
+            monkeypatch.delenv("HERMES_HOME", raising=False)
+        else:
+            monkeypatch.setenv("HERMES_HOME", original_hermes_home)
+        importlib.reload(runner)
+
+
+def _make_minimal_pack(packs_dir: Path, name: str, repo: Path) -> None:
+    """Pack-Datei mit echter 'hermes'-Engine, damit load_pack ohne fake_engine funktioniert."""
+    pack_dir = packs_dir / name
+    pack_dir.mkdir(parents=True)
+    prompt = pack_dir / "round.md"
+    prompt.write_text("PHASE=round\n", encoding="utf-8")
+    manifest = {
+        "name": name,
+        "type": "sweep",
+        "repo": str(repo),
+        "phases": {
+            "round": {"engine": "hermes", "model": "reviewer", "timeout": 60, "prompt": "round.md"},
+        },
+    }
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest, allow_unicode=True), encoding="utf-8")
+
+
+def test_runner_rejects_missing_repo(tmp_path):
+    missing = tmp_path / "nicht-da"
+    _make_minimal_pack(tmp_path / "packs", "missing", missing)
+    pack = load_pack(tmp_path / "packs", "missing")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    with pytest.raises(RuntimeError, match="existiert nicht"):
+        runner._validate_repo()
+
+
+def test_runner_rejects_non_git_repo(tmp_path):
+    not_git = tmp_path / "kein-git"
+    not_git.mkdir()
+    _make_minimal_pack(tmp_path / "packs", "keingit", not_git)
+    pack = load_pack(tmp_path / "packs", "keingit")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    with pytest.raises(RuntimeError, match="kein Git-Repository"):
+        runner._validate_repo()
+
+
+def test_status_survives_missing_repo(tmp_path):
+    """Read-only status must not require a valid repo — construction and
+    cmd_status run even when the pack repo is gone (config-drift resilience)."""
+    missing = tmp_path / "nicht-da"
+    _make_minimal_pack(tmp_path / "packs", "missing", missing)
+    pack = load_pack(tmp_path / "packs", "missing")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.cmd_status()  # must not raise

@@ -26,14 +26,39 @@ Belegkette (Audit 2026-07-02, Datei:Zeile im Repo):
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from . import EngineResult, detect_usage_limit, register
 
-HERMES_BIN = os.environ.get(
-    "HERMES_BIN", "/home/piet/.hermes/hermes-agent/venv/bin/hermes"
-)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_hermes_bin() -> str:
+    """Return the Hermes CLI executable to use for one-shot runs.
+
+    Resolution order:
+    1. ``HERMES_BIN`` environment variable (explicit operator override).
+    2. ``hermes`` found on ``PATH`` (installed/aliased binary).
+    3. The ``venv/bin/hermes`` sibling of this repository (development checkout).
+    4. Fall back to the bare name ``hermes`` so subprocess raises a clear
+       ``FileNotFoundError`` instead of using a hardcoded user path.
+    """
+    env_bin = os.environ.get("HERMES_BIN", "").strip()
+    if env_bin:
+        return env_bin
+    from_path = shutil.which("hermes")
+    if from_path:
+        return from_path
+    repo_venv_bin = REPO_ROOT / "venv" / "bin" / "hermes"
+    if repo_venv_bin.is_file():
+        return str(repo_venv_bin)
+    return "hermes"
+
+
+HERMES_BIN = _resolve_hermes_bin()
 
 
 @register("hermes")

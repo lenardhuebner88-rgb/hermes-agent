@@ -329,3 +329,46 @@ def test_models_yaml_loads_and_registered_engines_have_adapter():
             assert name in engines.ENGINES, (
                 f"Katalog-Engine {name!r} hat Modelle, aber keinen registrierten Adapter"
             )
+
+
+# ── Hermes-Engine: Binärpfad-Auflösung ───────────────────────────────────────
+
+def test_resolve_hermes_bin_prefers_env_var(monkeypatch, tmp_path):
+    from loops.engines import hermes_profile
+
+    explicit = str(tmp_path / "my-hermes")
+    monkeypatch.setenv("HERMES_BIN", explicit)
+    assert hermes_profile._resolve_hermes_bin() == explicit
+
+
+def test_resolve_hermes_bin_falls_back_to_repo_venv(monkeypatch, tmp_path):
+    from loops.engines import hermes_profile
+
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    # Wir simulieren, dass weder HERMES_BIN noch ein 'hermes' auf PATH existiert.
+    monkeypatch.setattr(hermes_profile.shutil, "which", lambda _name: None)
+
+    fake_venv_bin = tmp_path / "venv" / "bin" / "hermes"
+    fake_venv_bin.parent.mkdir(parents=True)
+    fake_venv_bin.write_text("#!/bin/sh\necho fake", encoding="utf-8")
+    fake_venv_bin.chmod(0o755)
+
+    real_repo_root = hermes_profile.REPO_ROOT
+    try:
+        hermes_profile.REPO_ROOT = tmp_path
+        assert hermes_profile._resolve_hermes_bin() == str(fake_venv_bin)
+    finally:
+        hermes_profile.REPO_ROOT = real_repo_root
+
+
+def test_resolve_hermes_bin_falls_back_to_bare_name(monkeypatch):
+    from loops.engines import hermes_profile
+
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(hermes_profile.shutil, "which", lambda _name: None)
+    real_repo_root = hermes_profile.REPO_ROOT
+    try:
+        hermes_profile.REPO_ROOT = Path("/nonexistent/repo")
+        assert hermes_profile._resolve_hermes_bin() == "hermes"
+    finally:
+        hermes_profile.REPO_ROOT = real_repo_root
