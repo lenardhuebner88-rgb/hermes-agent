@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { SectionHeader, FleetEmptyState } from "@/control/components/leitstand";
 import { PinOverlay, type Pin } from "./PinOverlay";
+import { STATUS_LABELS, statusBadge, statusLabel } from "./status";
 
 type Facet = { id: string; status: string; assignee: string | null; terminal: boolean };
 type Entry = {
@@ -26,6 +27,8 @@ export function CardDetail(_props: { density?: string } = {}) {
   const [draftAsset, setDraftAsset] = useState<string | null>(null);
   const [draftPins, setDraftPins] = useState<Pin[]>([]);
   const [note, setNote] = useState("");
+  const [commentDraft, setCommentDraft] = useState("");
+  const [statusDraft, setStatusDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -76,14 +79,101 @@ export function CardDetail(_props: { density?: string } = {}) {
     }
   }
 
-  if (error) return <div className="p-4"><FleetEmptyState title="Failed to load" desc={error} /></div>;
-  if (!card) return <div className="p-4 hc-type-label hc-dim">Loading…</div>;
+  async function submitComment() {
+    if (!commentDraft.trim()) return;
+    setBusy(true);
+    try {
+      await fetchJSON(`/api/design-board/cards/${cardId}/entries`, {
+        method: "POST",
+        body: JSON.stringify({
+          author: "piet", kind: "comment", note: commentDraft.trim(), pins: [],
+        }),
+      });
+      setCommentDraft("");
+      load();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateStatus(newStatus: string) {
+    setBusy(true);
+    try {
+      await fetchJSON(`/api/design-board/cards/${cardId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: newStatus }),
+      });
+      setStatusDraft(null);
+      load();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error) return <div className="p-4"><FleetEmptyState title="Laden fehlgeschlagen" desc={error} /></div>;
+  if (!card) return <div className="p-4 hc-type-label hc-dim">Laden…</div>;
 
   return (
     <div className="min-h-full bg-surface-0 p-4">
-      <SectionHeader label={card.title} meta={card.derived_status ?? card.status} />
+      <SectionHeader label={card.title} meta={statusBadge(card.derived_status ?? card.status)} />
       {card.target?.view && (
         <div className="mt-1 hc-type-label hc-dim">→ {card.target.view}</div>
+      )}
+      {card.derived_status && card.derived_status !== card.status && (
+        <div className="mt-1 hc-type-label hc-soft">
+          Kartenstatus: {statusLabel(card.status)}
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center gap-2">
+        <span className="hc-type-label hc-dim">Status:</span>
+        {statusDraft === null ? (
+          <button
+            data-testid="status-edit"
+            onClick={() => setStatusDraft(card.status)}
+            disabled={busy}
+            className="rounded-card border border-line px-2 py-1 hc-type-label text-live disabled:opacity-45"
+          >
+            {statusLabel(card.status)} ✎
+          </button>
+        ) : (
+          <>
+            <select
+              aria-label="Status"
+              value={statusDraft}
+              onChange={(e) => setStatusDraft(e.target.value)}
+              disabled={busy}
+              className="rounded-card border border-line bg-surface-1 px-2 py-1 text-sm text-white"
+            >
+              {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => void updateStatus(statusDraft)}
+              disabled={busy || statusDraft === card.status}
+              className="rounded-card border border-live px-2 py-1 hc-type-label text-live disabled:opacity-45"
+            >
+              Speichern
+            </button>
+            <button
+              onClick={() => setStatusDraft(null)}
+              disabled={busy}
+              className="rounded-card border border-line px-2 py-1 hc-type-label text-ink-3"
+            >
+              Abbrechen
+            </button>
+          </>
+        )}
+      </div>
+      {card.derived_status && (
+        <div className="mt-1 hc-type-label hc-soft">
+          Abgeleitet aus verknüpften Aufgaben: {statusLabel(card.derived_status)}
+        </div>
       )}
 
       {card.task_facets.length > 0 && (
@@ -113,7 +203,25 @@ export function CardDetail(_props: { density?: string } = {}) {
       </div>
 
       <div className="mt-6 hc-surface-card p-3">
-        <div className="hc-type-label hc-dim">Add a screenshot</div>
+        <div className="hc-type-label hc-dim">Kommentar hinzufügen</div>
+        <textarea
+          value={commentDraft}
+          onChange={(e) => setCommentDraft(e.target.value)}
+          placeholder="Notiz zur Karte…"
+          disabled={busy}
+          className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white placeholder:text-ink-3"
+        />
+        <button
+          onClick={() => void submitComment()}
+          disabled={busy || !commentDraft.trim()}
+          className="mt-2 rounded-card border border-live px-3 py-1 text-sm text-live disabled:opacity-45"
+        >
+          Kommentar speichern
+        </button>
+      </div>
+
+      <div className="mt-6 hc-surface-card p-3">
+        <div className="hc-type-label hc-dim">Screenshot hinzufügen</div>
         <input ref={fileRef} type="file" accept="image/*" onChange={onFile}
           className="mt-2 text-sm text-white" disabled={busy} />
         {draftAsset && (
@@ -122,13 +230,13 @@ export function CardDetail(_props: { density?: string } = {}) {
               onAddPin={(p) => setDraftPins((prev) => [
                 ...prev, { id: `p${prev.length + 1}`, x: p.x, y: p.y, note: "" },
               ])} />
-            <div className="mt-1 hc-type-label hc-soft">{draftPins.length} pin(s) — click the image to add</div>
+            <div className="mt-1 hc-type-label hc-soft">{draftPins.length} Markierung(en) — ins Bild klicken, um hinzuzufügen</div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)}
-              placeholder="Describe the issue…"
+              placeholder="Beschreibe das Problem…"
               className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white" />
             <button onClick={submitEntry} disabled={busy}
               className="mt-2 rounded-card border border-line px-3 py-1 text-sm text-live">
-              Add entry
+              Eintrag speichern
             </button>
           </div>
         )}
@@ -143,7 +251,7 @@ function MockupToggle(props: { cardId: string; html: string; png: string | null 
     <div className="mt-2">
       <button onClick={() => setLive((v) => !v)}
         className="mb-2 rounded-card border border-line px-2 py-1 hc-type-label text-live">
-        {live ? "Show PNG" : "Show live HTML"}
+        {live ? "PNG anzeigen" : "Live-HTML anzeigen"}
       </button>
       {live ? (
         <iframe title="mockup" sandbox="allow-same-origin"

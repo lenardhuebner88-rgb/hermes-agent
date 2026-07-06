@@ -29,3 +29,29 @@ def task_facets(task_ids: list[str]) -> list[dict]:
                 "assignee": task.assignee, "terminal": task.status in TERMINAL,
             })
     return out
+
+
+_BATCH_CHUNK = 900
+
+
+def batch_task_facets(task_ids: list[str]) -> dict[str, dict]:
+    """Return a mapping task_id -> facet for all found tasks.
+
+    Uses one query per chunk to stay below SQLite host-parameter limits.
+    """
+    if not task_ids:
+        return {}
+    unique_ids = list(dict.fromkeys(task_ids))
+    out: dict[str, dict] = {}
+    with _open_ro() as conn:
+        for i in range(0, len(unique_ids), _BATCH_CHUNK):
+            chunk = unique_ids[i:i + _BATCH_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            query = f"SELECT id, status, assignee FROM tasks WHERE id IN ({placeholders})"
+            for row in conn.execute(query, chunk).fetchall():
+                status = row["status"]
+                out[row["id"]] = {
+                    "id": row["id"], "status": status,
+                    "assignee": row["assignee"], "terminal": status in TERMINAL,
+                }
+    return out

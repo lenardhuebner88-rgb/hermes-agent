@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { SectionHeader, FleetPanel, FleetEmptyState } from "@/control/components/leitstand";
+import { statusBadge } from "./designboard/status";
 
 type CardSummary = {
   id: string;
@@ -9,6 +10,7 @@ type CardSummary = {
   title: string;
   target: { view?: string } | null;
   status: string;
+  derived_status: string | null;
   linked_tasks: string[];
   updated_at: number;
 };
@@ -53,7 +55,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
   return (
     <div className="min-h-full bg-surface-0 p-4">
       <div className="flex items-baseline justify-between gap-3">
-        <SectionHeader label="Design Board" meta={`${cards.length} cards`} className="flex-1" />
+        <SectionHeader label="Design Board" meta={`${cards.length} Karten`} className="flex-1" />
         <button
           onClick={() => setShowForm((v) => !v)}
           className="shrink-0 rounded-card border border-line px-3 py-1 text-sm text-live"
@@ -102,24 +104,24 @@ export function DesignBoardView(_props: { density?: string } = {}) {
 
       {error && (
         <div className="mt-4">
-          <FleetEmptyState title="Failed to load" desc={error} />
+          <FleetEmptyState title="Laden fehlgeschlagen" desc={error} />
         </div>
       )}
       {!error && cards.length === 0 && (
         <div className="mt-4">
-          <FleetEmptyState title="No design cards yet" desc="Tippe ＋ Neue Karte, um zu starten." />
+          <FleetEmptyState title="Noch keine Design-Karten" desc="Tippe ＋ Neue Karte, um zu starten." />
         </div>
       )}
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((c) => (
           <Link key={c.id} to={`/control/design-board/${c.id}`} className="block">
-            <FleetPanel eyebrow={c.kind} meta={c.status}>
+            <FleetPanel eyebrow={c.kind} meta={statusBadge(c.derived_status ?? c.status)}>
               <div className="hc-mono text-sm font-semibold text-white">{c.title}</div>
               {c.target?.view && (
                 <div className="mt-1 hc-type-label hc-dim">→ {c.target.view}</div>
               )}
               {c.linked_tasks.length > 0 && (
-                <div className="mt-1 hc-type-label hc-soft">{c.linked_tasks.length} task(s)</div>
+                <div className="mt-1 hc-type-label hc-soft">{c.linked_tasks.length} verknüpfte Aufgabe(n)</div>
               )}
             </FleetPanel>
           </Link>

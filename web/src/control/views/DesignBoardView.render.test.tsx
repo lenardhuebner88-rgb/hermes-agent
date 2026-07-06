@@ -18,11 +18,13 @@ describe("DesignBoardView (jsdom)", () => {
     fetchJSONMock.mockResolvedValueOnce([
       { id: "c_1", kind: "bug", title: "Header overlaps",
         target: { view: "FleetView" }, status: "open",
+        derived_status: "in_progress",
         linked_tasks: ["t_1"], updated_at: 1 },
     ]);
     render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText("Header overlaps")).toBeTruthy());
     expect(screen.getByText("→ FleetView")).toBeTruthy();
+    expect(screen.getByText("in arbeit")).toBeTruthy();
   });
 
   it("creates a card via the new-card form and posts to the API", async () => {
