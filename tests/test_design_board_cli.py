@@ -31,9 +31,10 @@ def test_promote_creates_and_links(monkeypatch):
                     pins=[{"id": "p1", "x": 0.1, "y": 0.2, "note": "y"}])
     created = {}
 
-    def fake_create_task(conn, *, title, body, assignee=None, **kw):
+    def fake_create_task(conn, *, title, body, assignee=None, idempotency_key=None, **kw):
         created["title"] = title
         created["body"] = body
+        created["idempotency_key"] = idempotency_key
         return "t_new123"
 
     monkeypatch.setattr(cli.kanban_db, "create_task", fake_create_task)
@@ -43,6 +44,30 @@ def test_promote_creates_and_links(monkeypatch):
     assert tid == "t_new123"
     assert store.get_card(cid)["linked_tasks"] == ["t_new123"]
     assert "0.1" in created["body"]
+    assert created["idempotency_key"] == f"design-board:{cid}"
+
+
+def test_promote_idempotency_key_dedupes_repeat_calls(monkeypatch):
+    cid = store.create_card(kind="bug", title="x")
+    seen_keys = []
+    existing = {}
+
+    def fake_create_task(conn, *, title, body, assignee=None, idempotency_key=None, **kw):
+        seen_keys.append(idempotency_key)
+        if idempotency_key and idempotency_key in existing:
+            return existing[idempotency_key]
+        tid = f"t_{len(existing) + 1}"
+        existing[idempotency_key] = tid
+        return tid
+
+    monkeypatch.setattr(cli.kanban_db, "create_task", fake_create_task)
+    monkeypatch.setattr(cli.kanban_db, "connect_closing", lambda *a, **k: _Ctx())
+
+    tid1 = cli.promote(cid)
+    tid2 = cli.promote(cid)
+    assert tid1 == tid2
+    assert seen_keys == [f"design-board:{cid}"] * 2
+    assert store.get_card(cid)["linked_tasks"] == [tid1]
 
 
 def test_render_html_to_png_invokes_chromium(monkeypatch, tmp_path):

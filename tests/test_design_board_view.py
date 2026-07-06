@@ -143,3 +143,109 @@ def test_patch_invalid_status_returns_400(client):
     cid = client.post("/api/design-board/cards", json={"kind": "bug", "title": "x"}).json()["id"]
     r = client.patch(f"/api/design-board/cards/{cid}", json={"status": "invalid"})
     assert r.status_code == 400
+
+
+def test_list_and_detail_carry_kanban_ok(client):
+    cid = client.post("/api/design-board/cards", json={"kind": "bug", "title": "x"}).json()["id"]
+    cards = client.get("/api/design-board/cards").json()
+    assert cards[0]["kanban_ok"] is True
+    card = client.get(f"/api/design-board/cards/{cid}").json()
+    assert card["kanban_ok"] is True
+
+
+def test_list_reports_kanban_ok_false_on_lookup_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import sqlite3
+
+    def _raise(_ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(view, "batch_task_facets", _raise)
+    app = FastAPI()
+    view.register_design_board_routes(app)
+    client = _CompatTestClient(app)
+    client.post("/api/design-board/cards", json={"kind": "bug", "title": "x"})
+    cards = client.get("/api/design-board/cards").json()
+    assert cards[0]["kanban_ok"] is False
+
+
+# Fixture mirrors the shape of a real card harvested from
+# ~/.hermes/design-board/cards/c_abfa284a/card.json (values copied, not
+# synthesized — same key layout, same pin structure incl. empty notes).
+_REAL_CARD_ENTRY = {
+    "author": "piet", "kind": "screenshot",
+    "note": "Navigation  - front- colors ",
+    "pins": [
+        {"id": "p1", "x": 0.8121597096188747, "y": 0.802750487750848, "note": ""},
+        {"id": "p2", "x": 0.7431941923774955, "y": 0.6312017798774212, "note": "overlaps puls chip"},
+    ],
+}
+
+
+def test_promote_creates_task_and_links(client, monkeypatch):
+    cid = client.post("/api/design-board/cards",
+                      json={"kind": "bug", "title": "Design an Fleet immernoch nicht gefixt"}).json()["id"]
+    client.post(f"/api/design-board/cards/{cid}/entries", json=_REAL_CARD_ENTRY)
+
+    from hermes_cli import design_board_cli
+
+    monkeypatch.setattr(design_board_cli.kanban_db, "connect_closing", lambda *a, **k: _FakeCtx())
+    calls = []
+
+    def fake_create_task(conn, *, title, body, assignee=None, idempotency_key=None, **kw):
+        calls.append(idempotency_key)
+        return "t_promoted1"
+
+    monkeypatch.setattr(design_board_cli.kanban_db, "create_task", fake_create_task)
+
+    r = client.post(f"/api/design-board/cards/{cid}/promote")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task_id"] == "t_promoted1"
+    assert body["card"]["linked_tasks"] == ["t_promoted1"]
+    assert "kanban_ok" in body["card"]
+    assert calls == [f"design-board:{cid}"]
+
+    # idempotency: a second promote on an already-linked card is rejected
+    r2 = client.post(f"/api/design-board/cards/{cid}/promote")
+    assert r2.status_code == 409
+
+
+def test_promote_missing_card_404(client):
+    assert client.post("/api/design-board/cards/c_nope/promote").status_code == 404
+
+
+def test_promote_reports_kanban_unavailable(client, monkeypatch):
+    cid = client.post("/api/design-board/cards", json={"kind": "bug", "title": "x"}).json()["id"]
+    from hermes_cli import design_board_cli
+    import sqlite3
+
+    def _raise(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(design_board_cli.kanban_db, "connect_closing", _raise)
+    r = client.post(f"/api/design-board/cards/{cid}/promote")
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "kanban_unavailable"
+
+
+def test_promote_blank_title_returns_400(client, monkeypatch):
+    cid = client.post("/api/design-board/cards", json={"kind": "bug", "title": ""}).json()["id"]
+    from hermes_cli import design_board_cli
+
+    def _raise(*a, **k):
+        raise ValueError("title is required")
+
+    monkeypatch.setattr(design_board_cli.kanban_db, "connect_closing", lambda *a, **k: _FakeCtx())
+    monkeypatch.setattr(design_board_cli.kanban_db, "create_task", _raise)
+    r = client.post(f"/api/design-board/cards/{cid}/promote")
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "invalid_card"
+
+
+class _FakeCtx:
+    def __enter__(self):
+        return object()
+
+    def __exit__(self, *a):
+        return False

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { SectionHeader, FleetPanel, FleetEmptyState } from "@/control/components/leitstand";
+import { de } from "@/control/i18n/de";
 import { statusBadge } from "./designboard/status";
 
 type CardSummary = {
@@ -13,6 +14,7 @@ type CardSummary = {
   derived_status: string | null;
   linked_tasks: string[];
   updated_at: number;
+  kanban_ok?: boolean;
 };
 
 const KINDS = ["bug", "wish", "mockup", "reference"] as const;
@@ -99,6 +101,12 @@ export function DesignBoardView(_props: { density?: string } = {}) {
           >
             Karte anlegen & Screenshot hinzufügen
           </button>
+        </div>
+      )}
+
+      {!error && cards.some((c) => c.kanban_ok === false) && (
+        <div className="mt-3 rounded-card border border-status-warn/20 bg-status-warn/10 p-2 text-xs text-status-warn">
+          {de.designBoard.kanbanUnavailable}
         </div>
       )}
 

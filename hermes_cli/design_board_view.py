@@ -8,6 +8,7 @@ import sqlite3
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
 
+from hermes_cli import design_board_cli
 from hermes_cli import design_board_store as store
 from hermes_cli.design_board_kanban import batch_task_facets
 
@@ -17,6 +18,15 @@ _CHUNK = 1024 * 1024
 _MAX_BYTES = 100 * 1024 * 1024
 
 
+def _safe_batch_facets(task_ids: list[str]) -> tuple[dict, bool]:
+    """batch_task_facets, degrading to {} + kanban_ok=False on a DB hiccup."""
+    try:
+        return batch_task_facets(task_ids), True
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("design-board batch facet lookup failed: %s", exc)
+        return {}, False
+
+
 def register_design_board_routes(app: FastAPI) -> None:
     @app.get("/api/design-board/cards")
     async def _list():
@@ -24,11 +34,7 @@ def register_design_board_routes(app: FastAPI) -> None:
         all_task_ids = [
             tid for c in cards for tid in c.get("linked_tasks", [])
         ]
-        try:
-            facet_map = batch_task_facets(all_task_ids)
-        except (sqlite3.Error, OSError) as exc:
-            logger.warning("design-board batch facet lookup failed: %s", exc)
-            facet_map = {}
+        facet_map, kanban_ok = _safe_batch_facets(all_task_ids)
         out = []
         for c in cards:
             item = {k: c[k] for k in ("id", "kind", "title", "target", "status",
@@ -39,6 +45,7 @@ def register_design_board_routes(app: FastAPI) -> None:
                 if tid in facet_map
             ]
             item["derived_status"] = store.derive_card_status(statuses)
+            item["kanban_ok"] = kanban_ok
             out.append(item)
         return out
 
@@ -56,14 +63,11 @@ def register_design_board_routes(app: FastAPI) -> None:
         card = store.get_card(card_id)
         if card is None:
             raise HTTPException(404, "card not found")
-        try:
-            facet_map = batch_task_facets(card["linked_tasks"])
-        except (sqlite3.Error, OSError) as exc:
-            logger.warning("design-board batch facet lookup failed: %s", exc)
-            facet_map = {}
+        facet_map, kanban_ok = _safe_batch_facets(card["linked_tasks"])
         facets = list(facet_map.values())
         card["task_facets"] = facets
         card["derived_status"] = store.derive_card_status([f["status"] for f in facets])
+        card["kanban_ok"] = kanban_ok
         return card
 
     @app.patch("/api/design-board/cards/{card_id}")
@@ -78,15 +82,36 @@ def register_design_board_routes(app: FastAPI) -> None:
             except ValueError:
                 raise HTTPException(400, "bad status")
         card = store.get_card(card_id)
-        try:
-            facet_map = batch_task_facets(card["linked_tasks"])
-        except (sqlite3.Error, OSError) as exc:
-            logger.warning("design-board batch facet lookup failed: %s", exc)
-            facet_map = {}
+        facet_map, kanban_ok = _safe_batch_facets(card["linked_tasks"])
         facets = list(facet_map.values())
         card["task_facets"] = facets
         card["derived_status"] = store.derive_card_status([f["status"] for f in facets])
+        card["kanban_ok"] = kanban_ok
         return card
+
+    @app.post("/api/design-board/cards/{card_id}/promote")
+    async def _promote(card_id: str):
+        card = store.get_card(card_id)
+        if card is None:
+            raise HTTPException(404, "card not found")
+        if card.get("linked_tasks"):
+            raise HTTPException(409, "card already promoted")
+        try:
+            task_id = design_board_cli.promote(card_id)
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("design-board promote failed: %s", exc)
+            raise HTTPException(
+                503, {"error": "kanban_unavailable", "message": str(exc)}
+            )
+        except ValueError as exc:
+            raise HTTPException(400, {"error": "invalid_card", "message": str(exc)})
+        card = store.get_card(card_id)
+        facet_map, kanban_ok = _safe_batch_facets(card["linked_tasks"])
+        facets = list(facet_map.values())
+        card["task_facets"] = facets
+        card["derived_status"] = store.derive_card_status([f["status"] for f in facets])
+        card["kanban_ok"] = kanban_ok
+        return {"task_id": task_id, "card": card}
 
     @app.post("/api/design-board/cards/{card_id}/entries")
     async def _add_entry(card_id: str, request: Request):

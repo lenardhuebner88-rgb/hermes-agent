@@ -41,6 +41,7 @@ def promote(card_id: str, *, assignee: str | None = None) -> str:
         task_id = kanban_db.create_task(
             conn, title=card["title"], body=brief, assignee=assignee,
             created_by="design-board",
+            idempotency_key=f"design-board:{card_id}",
         )
     store.link_task(card_id, task_id)
     return task_id

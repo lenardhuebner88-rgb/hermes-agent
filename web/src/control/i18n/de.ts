@@ -1301,4 +1301,13 @@ export const de = {
     uploading: "Wird hochgeladen …",
     uploadError: "Datei-Upload fehlgeschlagen.",
   },
+  designBoard: {
+    promote: "Als Task promoten",
+    promoting: "Wird promotet …",
+    promoted: (taskId: string) => `Task ${taskId} angelegt`,
+    promoteAlreadyLinked: "Karte hat bereits eine verknüpfte Aufgabe.",
+    promoteUnavailable: "Kanban nicht erreichbar — bitte später erneut versuchen.",
+    kanbanUnavailable: "Kanban-Status nicht verfügbar — Verknüpfungen evtl. unvollständig",
+    pinNotePlaceholder: "Notiz zur Markierung (optional)",
+  },
 } as const;

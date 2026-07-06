@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { SectionHeader, FleetEmptyState } from "@/control/components/leitstand";
+import { de } from "@/control/i18n/de";
 import { PinOverlay, type Pin } from "./PinOverlay";
 import { STATUS_LABELS, statusBadge, statusLabel } from "./status";
 
@@ -14,6 +15,7 @@ type CardDetailData = {
   id: string; kind: string; title: string; status: string;
   target: { view?: string } | null; linked_tasks: string[];
   entries: Entry[]; task_facets: Facet[]; derived_status: string | null;
+  kanban_ok: boolean;
 };
 
 function assetUrl(cardId: string, asset: string): string {
@@ -30,6 +32,9 @@ export function CardDetail(_props: { density?: string } = {}) {
   const [commentDraft, setCommentDraft] = useState("");
   const [statusDraft, setStatusDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [promoteBusy, setPromoteBusy] = useState(false);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [promotedTaskId, setPromotedTaskId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
@@ -98,6 +103,25 @@ export function CardDetail(_props: { density?: string } = {}) {
     }
   }
 
+  async function promote() {
+    setPromoteBusy(true);
+    setPromoteError(null);
+    try {
+      const res = await fetchJSON<{ task_id: string; card: CardDetailData }>(
+        `/api/design-board/cards/${cardId}/promote`, { method: "POST" },
+      );
+      setPromotedTaskId(res.task_id);
+      setCard(res.card);
+    } catch (err) {
+      const msg = String(err);
+      if (msg.includes("409")) setPromoteError(de.designBoard.promoteAlreadyLinked);
+      else if (msg.includes("503")) setPromoteError(de.designBoard.promoteUnavailable);
+      else setPromoteError(msg);
+    } finally {
+      setPromoteBusy(false);
+    }
+  }
+
   async function updateStatus(newStatus: string) {
     setBusy(true);
     try {
@@ -126,6 +150,29 @@ export function CardDetail(_props: { density?: string } = {}) {
       {card.derived_status && card.derived_status !== card.status && (
         <div className="mt-1 hc-type-label hc-soft">
           Kartenstatus: {statusLabel(card.status)}
+        </div>
+      )}
+      {!card.kanban_ok && (
+        <div className="mt-2 rounded-card border border-status-warn/20 bg-status-warn/10 p-2 text-xs text-status-warn">
+          {de.designBoard.kanbanUnavailable}
+        </div>
+      )}
+
+      {card.linked_tasks.length === 0 && card.status !== "archived" && (
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={() => void promote()}
+            disabled={promoteBusy}
+            className="rounded-card border border-live px-3 py-1 text-sm text-live disabled:opacity-45"
+          >
+            {promoteBusy ? de.designBoard.promoting : de.designBoard.promote}
+          </button>
+          {promotedTaskId && (
+            <span className="hc-type-label text-status-ok">{de.designBoard.promoted(promotedTaskId)}</span>
+          )}
+          {promoteError && (
+            <span className="hc-type-label text-status-warn">{promoteError}</span>
+          )}
         </div>
       )}
 
@@ -231,6 +278,27 @@ export function CardDetail(_props: { density?: string } = {}) {
                 ...prev, { id: `p${prev.length + 1}`, x: p.x, y: p.y, note: "" },
               ])} />
             <div className="mt-1 hc-type-label hc-soft">{draftPins.length} Markierung(en) — ins Bild klicken, um hinzuzufügen</div>
+            {draftPins.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {draftPins.map((p, i) => (
+                  <div key={p.id} className="flex items-center gap-2">
+                    <span className="hc-type-label hc-dim">#{i + 1}</span>
+                    <input
+                      data-testid={`pin-note-${p.id}`}
+                      value={p.note}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setDraftPins((prev) =>
+                          prev.map((pp) => (pp.id === p.id ? { ...pp, note: v } : pp)),
+                        );
+                      }}
+                      placeholder={de.designBoard.pinNotePlaceholder}
+                      className="flex-1 rounded-card border border-line bg-surface-1 px-2 py-1 text-xs text-white placeholder:text-ink-3"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea value={note} onChange={(e) => setNote(e.target.value)}
               placeholder="Beschreibe das Problem…"
               className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white" />

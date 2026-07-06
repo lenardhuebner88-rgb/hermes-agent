@@ -44,4 +44,16 @@ describe("DesignBoardView (jsdom)", () => {
       expect(JSON.parse(postCall![1].body)).toMatchObject({ kind: "bug", title: "Neuer Bug" });
     });
   });
+
+  it("shows a warning banner when a card reports kanban_ok=false", async () => {
+    fetchJSONMock.mockResolvedValueOnce([
+      { id: "c_1", kind: "bug", title: "Header overlaps",
+        target: null, status: "open", derived_status: null,
+        linked_tasks: ["t_1"], updated_at: 1, kanban_ok: false },
+    ]);
+    render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
+    await waitFor(() =>
+      expect(screen.getByText(/Kanban-Status nicht verfügbar/)).toBeTruthy(),
+    );
+  });
 });
