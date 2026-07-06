@@ -12806,11 +12806,15 @@ def release_freigabe_hold(
     with write_txn(conn):
         if not _release_freigabe_hold_root_in_txn(conn, task_id, author=author):
             return False
-    # Release the held children OUTSIDE the root write_txn — unblock_task and
+    # Release the held chain members OUTSIDE the root write_txn — unblock_task and
     # recompute_ready open their own write_txns (nested write_txn is a
-    # documented pitfall). Mirrors plugin_api._release_flow_gate's child loop:
-    # the chain's children are linked as the root's parents.
-    for child_id in parent_ids(conn, task_id):
+    # documented pitfall). Do not look only at the root's direct parents: deeper
+    # PlanSpec chains can link as grand-parents of the sink/root, and approving
+    # the PlanSpec must release the complete held chain, not just one visible task.
+    chain_member_ids = [
+        tid for tid in _chain_member_ids_from_sink(conn, task_id) if tid != task_id
+    ]
+    for child_id in chain_member_ids:
         child = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (child_id,)
         ).fetchone()
@@ -12825,7 +12829,7 @@ def release_freigabe_hold(
     # flow-release. Deduped (scout_predecessor_id + idempotency_key); outside txn.
     _rg_cfg = _review_gate_config()
     if _rg_cfg.get("auto_scout_on_critical", False):
-        for child_id in parent_ids(conn, task_id):
+        for child_id in chain_member_ids:
             _maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
     return True
 

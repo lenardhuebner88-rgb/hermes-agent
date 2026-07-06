@@ -8581,7 +8581,8 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         # wrapper again would just re-stamp a redundant idempotent
         # 'freigabe_released' event for every approve. Mirrors
         # release_freigabe_hold's tail exactly.
-        for child_id in kanban_db.parent_ids(conn, root_task_id):
+        chain_child_ids = [tid for tid in chain_ids if tid != root_task_id]
+        for child_id in chain_child_ids:
             child = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?", (child_id,)
             ).fetchone()
@@ -8590,7 +8591,7 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         kanban_db.recompute_ready(conn)
         _rg_cfg = kanban_db._review_gate_config()
         if _rg_cfg.get("auto_scout_on_critical", False):
-            for child_id in kanban_db.parent_ids(conn, root_task_id):
+            for child_id in chain_child_ids:
                 kanban_db._maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
 
         return {

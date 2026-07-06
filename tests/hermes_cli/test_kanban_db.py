@@ -9277,6 +9277,29 @@ def test_4a_decompose_failure_exemption_is_scoped_to_active_hold(kanban_home):
     assert root_task.status == "blocked"
 
 
+
+def test_release_freigabe_hold_releases_transitive_chain_members(kanban_home):
+    # Regression for operator PlanSpec approval: a sink/root can have only the
+    # final review task as a direct parent while earlier build tasks are ancestors
+    # of that review. Releasing only parent_ids(root) leaves the real first task
+    # stuck in scheduled, so the chain appears to start as a single task.
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="held planspec root", triage=True, freigabe="operator")
+        build = kb.create_task(conn, title="build", assignee="premium")
+        review = kb.create_task(conn, title="review", assignee="reviewer", parents=[build])
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (review, root))
+            conn.execute(
+                "UPDATE tasks SET status='scheduled' WHERE id IN (?, ?, ?)",
+                (root, build, review),
+            )
+
+        assert kb.release_freigabe_hold(conn, root) is True
+
+        assert kb.get_task(conn, root).status == "todo"
+        assert kb.get_task(conn, build).status == "ready"
+        assert kb.get_task(conn, review).status == "todo"
+
 def test_decompose_failure_is_transient_pure_rule():
     # HEILER-DECOMPOSE-FALLBACK-S1: pure classifier that tells a transient/infra
     # decompose failure (aux client down, LLM error, benign race) from a genuine
