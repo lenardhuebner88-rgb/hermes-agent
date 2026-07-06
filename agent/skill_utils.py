@@ -40,6 +40,9 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",
+        # Auto-generated proposal letterbox (bin/skill_promote_pipeline.py):
+        # drafts pending human review/promotion, never loadable skills.
+        "_proposed",
     )
 )
 

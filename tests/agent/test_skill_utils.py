@@ -108,6 +108,37 @@ def test_iter_skill_index_files_prunes_dependency_dirs(tmp_path):
     assert found == [real / "SKILL.md"]
 
 
+def test_iter_skill_index_files_excludes_proposed_dir(tmp_path):
+    """_proposed/ is a promote-pipeline letterbox for unreviewed drafts —
+    it must never surface as a loadable skill in the index."""
+    real = tmp_path / "real-skill"
+    real.mkdir()
+    (real / "SKILL.md").write_text(
+        "---\nname: real-skill\ndescription: A real reviewed skill.\n---\n",
+        encoding="utf-8",
+    )
+
+    proposed = tmp_path / "_proposed" / "repeated-action-pattern"
+    proposed.mkdir(parents=True)
+    (proposed / "SKILL.md").write_text(
+        "---\n"
+        "name: repeated-action-pattern\n"
+        "description: \"Proposed skill — extracted heuristically from 3 "
+        "coordinator receipts matching pattern 'repeated-action-pattern'. "
+        "Move to skills/<category>/repeated-action-pattern/ after manual "
+        "review.\"\n"
+        "version: 0.1.0\n"
+        "status: proposed\n"
+        "proposed_at: 2026-05-17T06:26:59+00:00\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [real / "SKILL.md"]
+
+
 def test_skill_config_helpers_share_raw_config_parse_cache(tmp_path, monkeypatch):
     """Repeated skill config helpers should parse config.yaml only once."""
     from agent import skill_utils
