@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+// Unter Voll-Suite-Last fällt die async Capture-/Validate-/Ingest-Kette (React-
+// Re-Render nach Mock-Resolve) hinter den waitFor-Default-Timeout (1s) zurück —
+// das war der post-merge Bounce (Fremd-Flake in t_7b260029). Timeout auf 5s
+// hochsetzen härtet alle waitFor-Instanzen dieser Datei, analog
+// AgentTerminalsView.render.test.tsx.
+configure({ asyncUtilTimeout: 5000 });
 
 const { captureMock, fetchJSONMock } = vi.hoisted(() => ({
   captureMock: vi.fn(),
