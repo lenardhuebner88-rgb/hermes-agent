@@ -180,6 +180,7 @@ Skills:
 - Skills are procedural memory, not a logbook. Put reusable workflows in skills, not `AGENTS.md`.
 - Skill commands are injected as user messages to preserve prompt caching.
 - Do not add lazy pagination to skill-loading semantics.
+- A skill for a decommissioned/deprecated system gets a self-gating header (decommission note + "read-only legacy reference" framing, see `openclaw-runtime-operations`) — do not delete it and do not leave it silently misleading.
 
 Curator/Cron/Kanban:
 
