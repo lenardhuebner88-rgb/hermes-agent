@@ -22103,20 +22103,23 @@ def _spawn_claude_worker(
             )
     except Exception:
         git_contract = ""
-    # Comment thread + parent results + role history: a claude-CLI worker
-    # has NO kanban tools and never sees task context via kanban_show —
-    # unlike the Hermes worker path, which gets the full build_worker_context.
-    # Bake the most-recent comments AND the parent-results / role-history
-    # blocks into the prompt using the SAME renderers so the claude-CLI
-    # worker gets context parity with the Hermes worker path, including
-    # the scout-parent advisory labeling and tenant-scoped role history.
-    # Fail-soft: a DB hiccup must never block the spawn — fall back to no
-    # block. Board-scoped (not os.environ) so the fetch matches the board
-    # the dispatcher claimed the task from.
+    # Prior attempts + comment thread + parent results + role history: a
+    # claude-CLI worker has NO kanban tools and never sees task context via
+    # kanban_show — unlike the Hermes worker path, which gets the full
+    # build_worker_context. Bake the prior-attempts, comment, and
+    # parent-results / role-history blocks into the prompt using the SAME
+    # renderers so the claude-CLI worker gets context parity with the Hermes
+    # worker path, including a retried worker seeing WHY its predecessor
+    # failed/was rejected, the scout-parent advisory labeling, and the
+    # tenant-scoped role history. Fail-soft: a DB hiccup must never block the
+    # spawn — fall back to no block. Board-scoped (not os.environ) so the
+    # fetch matches the board the dispatcher claimed the task from.
+    prior_attempts_block = ""
     comment_block = ""
     parent_history_block = ""
     try:
         with connect_closing(board=board) as _cconn:
+            _prior_attempts_lines = _render_prior_attempts(_cconn, task.id)
             _comment_lines = _render_comment_thread(list_comments(_cconn, task.id))
             _parent_history_lines = _render_parent_results_and_role_history(
                 _cconn,
@@ -22124,11 +22127,14 @@ def _spawn_claude_worker(
                 field_bytes=_CTX_MAX_FIELD_BYTES,
                 role_history_limit=5,
             )
+        if _prior_attempts_lines:
+            prior_attempts_block = "\n".join(_prior_attempts_lines).rstrip() + "\n\n"
         if _comment_lines:
             comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
         if _parent_history_lines:
             parent_history_block = "\n".join(_parent_history_lines).rstrip() + "\n\n"
     except Exception:
+        prior_attempts_block = ""
         comment_block = ""
         parent_history_block = ""
     profile_instructions = _claude_profile_instructions(env.get("HERMES_HOME"))
@@ -22143,6 +22149,7 @@ def _spawn_claude_worker(
         f"{profile_block}"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
+        f"{prior_attempts_block}"
         f"{parent_history_block}"
         f"{comment_block}"
         "Work in the current directory.\n\n"
@@ -22981,6 +22988,81 @@ def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     return _kanban_context.cap_text(s, limit)
 
 
+def _render_prior_attempts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    prior_attempts_limit: int = _CTX_MAX_PRIOR_ATTEMPTS,
+    field_bytes: int = _CTX_MAX_FIELD_BYTES,
+    now: Optional[int] = None,
+) -> list[str]:
+    """Render a task's closed prior attempts as worker-context lines.
+
+    Single source of truth for the prior-attempts block shared by the Hermes
+    worker path (:func:`build_worker_context`) and the claude-CLI worker path
+    (:func:`_spawn_claude_worker`) — both inherit identical framing so a
+    retried claude-CLI worker sees WHY its predecessor failed/was rejected,
+    just like a native Hermes worker does.
+
+    Shows closed runs (``ended_at is not None``) only — the currently-active
+    run (this worker) is never included. Caps at ``prior_attempts_limit``
+    most-recent closed runs; older attempts collapse into a one-line marker
+    so the worker knows more exist without bloating the prompt. Each
+    attempt's ``summary`` / ``error`` / ``metadata`` capped at
+    ``field_bytes``.
+
+    Returns ``[]`` when there are no closed prior runs so callers emit no
+    block (first attempts stay unadorned).
+    """
+    lines: list[str] = []
+    _now = int(time.time()) if now is None else int(now)
+
+    all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
+    # list_runs returns ascending by started_at; "most recent" = last N
+    if len(all_prior) > prior_attempts_limit:
+        omitted = len(all_prior) - prior_attempts_limit
+        shown = all_prior[-prior_attempts_limit:]
+        first_shown_idx = omitted + 1
+    else:
+        omitted = 0
+        shown = all_prior
+        first_shown_idx = 1
+    if shown:
+        lines.append("## Prior attempts on this task")
+        if omitted:
+            lines.append(
+                f"_({omitted} earlier attempt{'s' if omitted != 1 else ''} "
+                f"omitted; showing most recent {len(shown)})_"
+            )
+        for offset, run in enumerate(shown):
+            idx = first_shown_idx + offset
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(run.started_at))
+            age = _relative_age(run.started_at, _now)
+            ts_disp = f"{ts}, {age}" if age else ts
+            profile = run.profile or "(unknown)"
+            outcome = run.outcome or run.status
+            lines.append(f"### Attempt {idx} — {outcome} ({profile}, {ts_disp})")
+            if run.summary and run.summary.strip():
+                lines.append(_cap(run.summary, field_bytes))
+            if run.error and run.error.strip():
+                lines.append(f"_error_: {_cap(run.error, field_bytes)}")
+            if run.metadata:
+                try:
+                    # Render-guarantee: mandatory bundle fields (schema_version,
+                    # gates.exit_code, AC, residual_risk) must survive the
+                    # per-field cap so the reviewer always sees them, even when a
+                    # large disposition/changed_files array would otherwise push
+                    # them off the tail. See disposition.render_completion_metadata.
+                    meta_str = _disposition_mod.render_completion_metadata(
+                        run.metadata, field_bytes
+                    )
+                    lines.append(f"_metadata_: `{meta_str}`")
+                except Exception:
+                    pass
+            lines.append("")
+    return lines
+
+
 def _render_comment_thread(
     comments: list[Comment],
     *,
@@ -23496,53 +23578,18 @@ def build_worker_context(
         lines.append("")
 
     # Prior attempts — show closed runs so a retrying worker sees the
-    # history. Skip the currently-active run (that's this worker).
-    # Cap at _CTX_MAX_PRIOR_ATTEMPTS most-recent closed runs; older
-    # attempts get collapsed into a one-line marker so the worker knows
-    # more exist without bloating the prompt.
-    all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
-    # list_runs returns ascending by started_at; "most recent" = last N
-    if len(all_prior) > prior_attempts_limit:
-        omitted = len(all_prior) - prior_attempts_limit
-        shown = all_prior[-prior_attempts_limit:]
-        first_shown_idx = omitted + 1
-    else:
-        omitted = 0
-        shown = all_prior
-        first_shown_idx = 1
-    if shown:
-        lines.append("## Prior attempts on this task")
-        if omitted:
-            lines.append(
-                f"_({omitted} earlier attempt{'s' if omitted != 1 else ''} "
-                f"omitted; showing most recent {len(shown)})_"
-            )
-        for offset, run in enumerate(shown):
-            idx = first_shown_idx + offset
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(run.started_at))
-            age = _relative_age(run.started_at, _now)
-            ts_disp = f"{ts}, {age}" if age else ts
-            profile = run.profile or "(unknown)"
-            outcome = run.outcome or run.status
-            lines.append(f"### Attempt {idx} — {outcome} ({profile}, {ts_disp})")
-            if run.summary and run.summary.strip():
-                lines.append(_cap(run.summary, field_bytes))
-            if run.error and run.error.strip():
-                lines.append(f"_error_: {_cap(run.error, field_bytes)}")
-            if run.metadata:
-                try:
-                    # Render-guarantee: mandatory bundle fields (schema_version,
-                    # gates.exit_code, AC, residual_risk) must survive the
-                    # per-field cap so the reviewer always sees them, even when a
-                    # large disposition/changed_files array would otherwise push
-                    # them off the tail. See disposition.render_completion_metadata.
-                    meta_str = _disposition_mod.render_completion_metadata(
-                        run.metadata, field_bytes
-                    )
-                    lines.append(f"_metadata_: `{meta_str}`")
-                except Exception:
-                    pass
-            lines.append("")
+    # history. Skip the currently-active run (that's this worker). Rendering
+    # is shared with the claude-CLI worker path (see _render_prior_attempts)
+    # so both runtimes show the identical view.
+    lines.extend(
+        _render_prior_attempts(
+            conn,
+            task_id,
+            prior_attempts_limit=prior_attempts_limit,
+            field_bytes=field_bytes,
+            now=_now,
+        )
+    )
 
     # Parent task results + cross-task role history.
     # Rendering is shared with the claude-CLI worker path

@@ -4649,6 +4649,36 @@ def test_worker_context_full_without_continuation_keeps_full_profile_caps(kanban
     assert "full-summary-2" in ctx
 
 
+def test_worker_context_prior_attempts_unchanged_by_shared_renderer_refactor(kanban_home):
+    """Parity guard: build_worker_context's 'Prior attempts on this task'
+    section (now backed by the shared _render_prior_attempts helper) must
+    keep the exact same strings/ordering as before the refactor that
+    extracted it for reuse by the claude-CLI worker path."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="ship the widget", assignee="coder")
+        kb.claim_task(conn, t)
+        meta = {
+            "verdict": "REQUEST_CHANGES",
+            "blocking_findings": ["null deref in foo()", "missing test for bar"],
+        }
+        kb.block_task(conn, t, reason="lint failed, see foo()", reviewer_metadata=meta)
+        kb.unblock_task(conn, t)
+
+        ctx = kb.build_worker_context(conn, t, profile="full")
+
+    assert "## Prior attempts on this task" in ctx
+    assert "### Attempt 1 —" in ctx
+    assert "lint failed, see foo()" in ctx
+    assert "null deref in foo()" in ctx
+    assert "REQUEST_CHANGES" in ctx
+    # Ordering unchanged: prior attempts render after the header/knowledge
+    # pointers block and before the end of the context (no parents/comments
+    # here, so this pins the section stays where it always has).
+    assert ctx.index("## Knowledge pointers") < ctx.index(
+        "## Prior attempts on this task"
+    )
+
+
 def test_worker_context_retry_suppresses_recent_work(kanban_home):
     """Continuation workers do not receive cross-task recent-work history."""
     with kb.connect_closing() as conn:
@@ -7711,6 +7741,63 @@ class TestClaudeCliWorkerSpawn:
         assert prompt.index("OPERATOR DIRECTIVE") < prompt.index(
             "Work in the current directory."
         )
+
+    # --- prior attempts baked into the -p prompt ---------------------------
+
+    def test_claude_worker_appends_prior_attempts(self, kanban_home, monkeypatch):
+        """A retried claude-CLI worker has NO kanban tools and never sees a
+        rejected predecessor's reason via kanban_show — unlike the Hermes
+        worker path, which gets 'Prior attempts on this task' via
+        build_worker_context. Bake the same section into the -p prompt so a
+        retried claude-CLI worker sees WHY its predecessor was rejected."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect_closing() as conn:
+            tid = kb.create_task(
+                conn, title="ship the widget",
+                body="implement the widget", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            kb.claim_task(conn, tid)
+            meta = {
+                "verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["null deref in foo()", "missing test for bar"],
+            }
+            kb.block_task(conn, tid, reason="lint failed, see foo()", reviewer_metadata=meta)
+            kb.unblock_task(conn, tid)
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "## Prior attempts on this task" in prompt
+        assert "lint failed, see foo()" in prompt
+        assert "null deref in foo()" in prompt
+        assert "REQUEST_CHANGES" in prompt
+        # The block sits AFTER the body and BEFORE the work instruction.
+        assert prompt.index("implement the widget") < prompt.index(
+            "## Prior attempts on this task"
+        )
+        assert prompt.index("## Prior attempts on this task") < prompt.index(
+            "Work in the current directory."
+        )
+
+    def test_claude_worker_no_prior_attempts_block_on_fresh_task(
+        self, kanban_home, monkeypatch
+    ):
+        """A fresh task (no closed runs) gets no prior-attempts section at
+        all — first attempts stay unadorned."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect_closing() as conn:
+            tid = kb.create_task(
+                conn, title="fresh task",
+                body="do the thing", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "## Prior attempts on this task" not in prompt
+        assert "Attempt 1 —" not in prompt
 
     # --- default (hermes) path stays byte-identical -----------------------
 
