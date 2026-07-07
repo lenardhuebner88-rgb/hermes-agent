@@ -3521,6 +3521,65 @@ def get_release_status(
     }
 
 
+class ReleaseModeBody(BaseModel):
+    autonomous: bool
+
+
+def _release_mode_view() -> dict:
+    """Read-only snapshot of the ``release.autonomous`` kill-switch and its
+    companion policy knobs, sourced from the ROOT config.yaml via the same
+    ``_release_config()`` used by the auto-release loop."""
+    from hermes_cli.auto_release import _release_config
+
+    cfg = _release_config()
+    return {
+        "autonomous": cfg["autonomous"],
+        "max_tier_autonomous": cfg["max_tier_autonomous"],
+        "pause_on_red_streak": cfg["pause_on_red_streak"],
+    }
+
+
+@router.get("/release-mode")
+def get_release_mode_endpoint():
+    """GET /release-mode — autonomous, max_tier_autonomous, pause_on_red_streak.
+
+    The read-side of the Risiko-Tab toggle; the POST twin flips
+    ``release.autonomous`` in the root config.yaml atomically.
+    """
+    return _release_mode_view()
+
+
+@router.post("/release-mode")
+def set_release_mode_endpoint(payload: ReleaseModeBody):
+    """POST /release-mode — flip ``release.autonomous`` atomically.
+
+    Backup → write → reload → return new state.  Same auth/loopback
+    protection as every other mutating kanban endpoint (enforced centrally
+    by the web-server middleware on ``/api/plugins/kanban/...``).
+    """
+    from hermes_cli.auto_release import _release_config
+    from hermes_constants import get_default_hermes_root
+    from utils import atomic_roundtrip_yaml_update
+
+    cfg_path = get_default_hermes_root() / "config.yaml"
+    backup_path = cfg_path.with_suffix(".yaml.bak")
+    if cfg_path.is_file():
+        backup_path.write_bytes(cfg_path.read_bytes())
+
+    atomic_roundtrip_yaml_update(cfg_path, "release.autonomous", payload.autonomous)
+
+    # Reload through the same path the auto-release loop uses so the
+    # returned state reflects what the next activation will observe.
+    new_state = _release_config()
+    return {
+        "ok": True,
+        "autonomous": new_state["autonomous"],
+        "max_tier_autonomous": new_state["max_tier_autonomous"],
+        "pause_on_red_streak": new_state["pause_on_red_streak"],
+        "backup": str(backup_path),
+    }
+
+
 @router.get("/epics")
 def list_epics_endpoint(
     include_closed: bool = Query(True, description="Include closed epics"),
