@@ -95,6 +95,34 @@ def test_render_html_to_png_invokes_chromium(monkeypatch, tmp_path):
     assert any(a.startswith("file://") for a in calls["cmd"])
 
 
+def test_add_mockup_inlines_tailwind_before_store_and_render(monkeypatch, tmp_path):
+    cid = store.create_card(kind="mockup", title="Tailwind")
+
+    rendered = {}
+
+    def fake_inline(html):
+        assert "cdn.tailwindcss.com" in html
+        return "<style data-design-board-tailwind-inline>.text-red-500{color:red}</style><h1>hi</h1>"
+
+    def fake_render(html_path, png_path, **kw):
+        rendered["html"] = open(html_path, encoding="utf-8").read()
+        open(png_path, "wb").write(b"PNG")
+
+    monkeypatch.setattr(cli, "inline_tailwind_cdn_mockup_html", fake_inline)
+    monkeypatch.setattr(cli, "render_html_to_png", fake_render)
+    html = tmp_path / "mockup.html"
+    html.write_text('<script src="https://cdn.tailwindcss.com"></script><h1 class="text-red-500">hi</h1>', encoding="utf-8")
+
+    cli.add_mockup(cid, str(html))
+
+    card = store.get_card(cid)
+    html_name = card["entries"][-1]["html"].split("/")[-1]
+    stored = store.resolve_asset_path(cid, html_name).read_text(encoding="utf-8")
+    assert "cdn.tailwindcss.com" not in stored
+    assert "data-design-board-tailwind-inline" in stored
+    assert rendered["html"] == stored
+
+
 class _Ctx:
     def __enter__(self): return object()
     def __exit__(self, *a): return False

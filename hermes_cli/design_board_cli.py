@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from hermes_cli import design_board_store as store
+from hermes_cli.design_board_tailwind import inline_tailwind_cdn_mockup_html
 from hermes_cli import kanban_db
 
 _CHROMIUM_SHOT = os.path.expanduser("~/bin/chromium-shot")
@@ -71,6 +72,8 @@ def add_mockup(card_id: str, html_file: str, *, note: str = "") -> str:
         raise KeyError(card_id)
     with open(html_file, "rb") as fh:
         html_bytes = fh.read()
+    html_text = html_bytes.decode("utf-8")
+    html_bytes = inline_tailwind_cdn_mockup_html(html_text).encode("utf-8")
     html_name = store.write_asset(card_id, os.path.basename(html_file), html_bytes)
     png_stem = html_name.rsplit(".", 1)[0] or html_name
     with tempfile.TemporaryDirectory() as td:

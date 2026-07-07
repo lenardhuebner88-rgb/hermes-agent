@@ -309,6 +309,30 @@ def test_upload_mockup_missing_card_404(client):
     assert r.status_code == 404
 
 
+def test_upload_mockup_inlines_tailwind_cdn_before_serving(client, monkeypatch):
+    from hermes_cli import design_board_cli
+
+    _stub_render(monkeypatch)
+
+    def fake_inline(html):
+        assert "cdn.tailwindcss.com" in html
+        return "<style data-design-board-tailwind-inline>.p-4{padding:1rem}</style><main>hi</main>"
+
+    monkeypatch.setattr(design_board_cli, "inline_tailwind_cdn_mockup_html", fake_inline)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "Tailwind"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("tailwind.html", b'<script src="https://cdn.tailwindcss.com"></script><main class="p-4">hi</main>', "text/html")},
+    )
+    assert up.status_code == 200
+    card = client.get(f"/api/design-board/cards/{cid}").json()
+    html_name = card["entries"][-1]["html"].split("/")[-1]
+    served = client.get(f"/api/design-board/cards/{cid}/assets/{html_name}")
+    assert served.status_code == 200
+    assert b"cdn.tailwindcss.com" not in served.content
+    assert b"data-design-board-tailwind-inline" in served.content
+
+
 def test_upload_mockup_too_large_returns_413(client, monkeypatch):
     _stub_render(monkeypatch)
     monkeypatch.setattr(view, "_MAX_HTML_BYTES", 8)
