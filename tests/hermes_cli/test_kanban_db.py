@@ -98,6 +98,106 @@ def test_create_task_rejects_unknown_review_tier(kanban_home):
             kb.create_task(conn, title="bad tier", assignee="coder", review_tier="bogus")
 
 
+# --- ui_impact: additive column + accessor + setter (PlanSpec AD-S1) ---
+
+def test_ui_impact_column_exists_and_defaults_null(kanban_home):
+    """AC-1: additive ui_impact column present on every board, default NULL."""
+    with kb.connect_closing() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "ui_impact" in cols
+        tid = kb.create_task(conn, title="t", assignee="coder")
+        row = conn.execute(
+            "SELECT ui_impact FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        assert row["ui_impact"] is None
+
+
+def test_ui_impact_column_migration_is_idempotent(kanban_home):
+    with kb.connect_closing() as conn:
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+    assert cols.count("ui_impact") == 1
+
+
+def test_create_task_persists_and_reads_ui_impact(kanban_home):
+    """AC-2: create_task accepts ui_impact and get_task reads it back; default NULL."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder", ui_impact="redesign")
+        assert kb.get_task(conn, tid).ui_impact == "redesign"
+        tid2 = kb.create_task(conn, title="t2", assignee="coder")
+        assert kb.get_task(conn, tid2).ui_impact is None
+
+
+def test_create_task_rejects_unknown_ui_impact(kanban_home):
+    with kb.connect_closing() as conn:
+        with pytest.raises(ValueError, match="unknown ui_impact"):
+            kb.create_task(conn, title="bad impact", assignee="coder", ui_impact="bogus")
+
+
+def test_create_task_normalises_ui_impact_case(kanban_home):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder", ui_impact="  Redesign  ")
+        assert kb.get_task(conn, tid).ui_impact == "redesign"
+
+
+def test_effective_ui_impact_mapping(kanban_home):
+    """AC-2: NULL/none/minor → autonomous; redesign → operator-gated."""
+    with kb.connect_closing() as conn:
+        tid_none = kb.create_task(conn, title="n", assignee="coder", ui_impact=None)
+        tid_minor = kb.create_task(conn, title="m", assignee="coder", ui_impact="minor")
+        tid_redesign = kb.create_task(conn, title="r", assignee="coder", ui_impact="redesign")
+        tid_explicit_none = kb.create_task(conn, title="en", assignee="coder", ui_impact="none")
+    with kb.connect_closing() as conn:
+        assert kb.effective_ui_impact(kb.get_task(conn, tid_none)) == "autonomous"
+        assert kb.effective_ui_impact(kb.get_task(conn, tid_minor)) == "autonomous"
+        assert kb.effective_ui_impact(kb.get_task(conn, tid_redesign)) == "operator-gated"
+        assert kb.effective_ui_impact(kb.get_task(conn, tid_explicit_none)) == "autonomous"
+
+
+def test_effective_ui_impact_none_task_is_autonomous():
+    """A missing task must not block callers — treated as autonom-capable."""
+    assert kb.effective_ui_impact(None) == "autonomous"
+
+
+def test_set_task_ui_impact_updates_and_clears(kanban_home):
+    """AC-2: set_task_ui_impact sets, then clears (NULL → treated as none)."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder")
+        assert kb.effective_ui_impact(kb.get_task(conn, tid)) == "autonomous"
+        assert kb.set_task_ui_impact(conn, tid, "redesign") is True
+        assert kb.get_task(conn, tid).ui_impact == "redesign"
+        assert kb.effective_ui_impact(kb.get_task(conn, tid)) == "operator-gated"
+        # clear back to NULL
+        assert kb.set_task_ui_impact(conn, tid, None) is True
+        assert kb.get_task(conn, tid).ui_impact is None
+        assert kb.effective_ui_impact(kb.get_task(conn, tid)) == "autonomous"
+
+
+def test_set_task_ui_impact_rejects_unknown(kanban_home):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder")
+        with pytest.raises(ValueError, match="unknown ui_impact"):
+            kb.set_task_ui_impact(conn, tid, "bogus")
+
+
+def test_set_task_ui_impact_missing_task_returns_false(kanban_home):
+    with kb.connect_closing() as conn:
+        assert kb.set_task_ui_impact(conn, "does-not-exist", "redesign") is False
+
+
+def test_respec_preserves_ui_impact(kanban_home):
+    """AC-3 sanity: respec copies ui_impact from the source task."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="orig", assignee="coder", ui_impact="redesign",
+            initial_status="blocked",
+        )
+        new_id = kb.respec_task(conn, tid, body="respunned", author="operator")
+        assert new_id is not None
+        assert kb.get_task(conn, new_id).ui_impact == "redesign"
+
+
 def test_parse_vault_memory_links_recognizes_obsidian_and_memory_targets(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     canon = vault / "00-Canon"

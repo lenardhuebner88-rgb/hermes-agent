@@ -431,6 +431,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "subscribed so its terminal state (and its "
                                "decompose children's, via inheritance) reaches "
                                "the home channel without a manual notify-subscribe.")
+    p_create.add_argument("--ui-impact", default=None, dest="ui_impact",
+                          metavar="IMPACT", choices=sorted(kb._UI_IMPACT_VALUES),
+                          help="UI-impact classifier (PlanSpec): none | minor | "
+                               "redesign. NULL/none/minor → autonom-faehig; "
+                               "redesign marks the task operator-gated (UI "
+                               "rework needs human eyes). Read back via "
+                               "'hermes kanban show' or effective_ui_impact().")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1918,6 +1925,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
             epic_id=getattr(args, "epic_id", None),
             kind=getattr(args, "kind", None),
+            ui_impact=getattr(args, "ui_impact", None),
             # P1-S3: a standalone `kanban create` couples a scout to a resolved-critical
             # task (flag/tier-gated, idempotent; held/triage statuses defer inside).
             # Live smoke tasks and other no-file/non-code cards can opt out so they
@@ -2141,6 +2149,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         payload = {
             "task": _task_to_dict(task),
+            "ui_impact": task.ui_impact,
+            "effective_ui_impact": kb.effective_ui_impact(task),
             "latest_summary": latest_summary,
             "parents": parents,
             "children": children,
@@ -2193,6 +2203,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  skills:    {', '.join(task.skills)}")
     if task.model_override:
         print(f"  model:     {task.model_override}")
+    if task.ui_impact:
+        print(f"  ui-impact: {task.ui_impact} → {kb.effective_ui_impact(task)}")
     # Effective retry threshold. Show the per-task override if set,
     # otherwise the dispatcher's resolved value from config (or the
     # default if config doesn't set it either). Helps operators see

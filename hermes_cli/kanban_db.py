@@ -1096,6 +1096,12 @@ class Task:
     # unspecified → treated as ``standard`` (single verifier stage), unless the
     # auto-risk classifier is enabled (kanban.review_gate.auto_tier).
     review_tier: Optional[str] = None
+    # UI-impact classifier (PlanSpec): none | minor | redesign. NULL/unset is
+    # treated as ``none`` by ``effective_ui_impact``. ``redesign`` marks a task
+    # as operator-gated (UI rework needs human eyes); ``none``/``minor`` stay
+    # autonom-capable. Additive column, expand-only — no behaviour change
+    # unless a downstream follow-up slice reads ``effective_ui_impact``.
+    ui_impact: Optional[str] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -1238,6 +1244,7 @@ class Task:
             if "model_override" in keys and row["model_override"]
             else None,
             review_tier=row["review_tier"] if "review_tier" in keys else None,
+            ui_impact=row["ui_impact"] if "ui_impact" in keys else None,
             max_retries=(row["max_retries"] if "max_retries" in keys else None),
             max_iterations=(
                 row["max_iterations"] if "max_iterations" in keys else None
@@ -2202,7 +2209,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 5  # B: tasks.review_tier added to the migration pass only
+_SCHEMA_GENERATION = 6  # B: tasks.ui_impact added to the migration pass only
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -3169,6 +3176,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "tasks", "live_test_depth", "live_test_depth TEXT")
     if "review_tier" not in cols:
         _add_column_if_missing(conn, "tasks", "review_tier", "review_tier TEXT")
+    if "ui_impact" not in cols:
+        _add_column_if_missing(conn, "tasks", "ui_impact", "ui_impact TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -4367,6 +4376,7 @@ def create_task(
     freigabe: Optional[str] = None,
     live_test_depth: Optional[str] = None,
     review_tier: Optional[str] = None,
+    ui_impact: Optional[str] = None,
     auto_scout: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
@@ -4434,6 +4444,11 @@ def create_task(
     if review_tier_value is not None and review_tier_value not in _TIER_ORDER:
         raise ValueError(
             f"unknown review_tier {review_tier_value!r}; expected one of {sorted(_TIER_ORDER)}"
+        )
+    ui_impact_value = (ui_impact or "").strip().lower() or None
+    if ui_impact_value is not None and ui_impact_value not in _UI_IMPACT_VALUES:
+        raise ValueError(
+            f"unknown ui_impact {ui_impact_value!r}; expected one of {sorted(_UI_IMPACT_VALUES)}"
         )
     parents = tuple(p for p in parents if p)
 
@@ -4656,8 +4671,9 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        scope_contract, model_override, freigabe, live_test_depth, review_tier
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        scope_contract, model_override, freigabe, live_test_depth, review_tier,
+                        ui_impact
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -4695,6 +4711,7 @@ def create_task(
                         freigabe,
                         live_test_depth,
                         review_tier_value,
+                        ui_impact_value,
                     ),
                 )
                 for pid in parents:
@@ -9548,6 +9565,11 @@ def _review_gate_config() -> dict:
 
 _TIER_ORDER = {"standard": 0, "review": 1, "critical": 2}
 
+# Recognised ui_impact values stored on a task row. NULL/missing is treated as
+# ``none`` by ``effective_ui_impact``; ``redesign`` flips a task to
+# operator-gated. Expand-only — new values are additive.
+_UI_IMPACT_VALUES = {"none", "minor", "redesign"}
+
 
 def _task_plan_spec(task: "Task") -> dict:
     """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads.
@@ -9642,6 +9664,28 @@ def _review_tier_downgrade_acked(
         isinstance(data, dict)
         and str(data.get("to_tier", "")).strip().lower() == target_tier
     )
+
+
+def effective_ui_impact(task: Optional["Task"]) -> str:
+    """Resolve a task's effective UI-impact classification.
+
+    A pure accessor over the stored ``tasks.ui_impact`` column — no config
+    heuristic, no floor, no side effects. The mapping is:
+
+    - ``None``/empty/unknown (including legacy NULL rows) → ``"autonom"``
+    - ``"none"`` / ``"minor"`` → ``"autonomous"`` (autonom-fähig)
+    - ``"redesign"`` → ``"operator-gated"`` (UI rework needs human eyes)
+
+    Downstream follow-up slices gate autonomous release on this value.
+    Returns ``"autonomous"`` for a ``None`` task so callers can treat a
+    missing task as non-blocking without extra guarding.
+    """
+    if task is None:
+        return "autonomous"
+    raw = (task.ui_impact or "").strip().lower()
+    if raw == "redesign":
+        return "operator-gated"
+    return "autonomous"
 
 
 def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
@@ -13562,8 +13606,8 @@ def respec_task(
                 skills, model_override, max_retries, max_iterations,
                 max_continuations, goal_mode, goal_max_turns, session_id,
                 due_at, epic_id, kind, scope_contract, freigabe,
-                live_test_depth, review_tier, block_kind, block_recurrences
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                live_test_depth, review_tier, ui_impact, block_kind, block_recurrences
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 new_id,
@@ -13598,6 +13642,7 @@ def respec_task(
                 existing["freigabe"],
                 existing["live_test_depth"],
                 existing["review_tier"],
+                existing["ui_impact"],
                 existing["block_kind"],
                 int(existing["block_recurrences"] or 0),
             ),
@@ -27159,6 +27204,37 @@ def set_task_review_tier(
     # link_tasks open their own BEGIN IMMEDIATE, which is not re-entrant.
     if value == "critical":
         _maybe_inject_critical_scout(conn, task_id)
+    return True
+
+
+def set_task_ui_impact(
+    conn: sqlite3.Connection,
+    task_id: str,
+    ui_impact: Optional[str],
+) -> bool:
+    """Set/clear ``tasks.ui_impact`` — the UI-impact classifier that
+    ``effective_ui_impact`` reads. Pure store + event, no heuristic floor, no
+    side coupling: the accessor maps NULL/none/minor → autonom-capable and
+    ``redesign`` → operator-gated.
+
+    ``ui_impact=None``/leer clears the stored value (NULL → treated as
+    ``none``). A non-empty value is normalised to the canonical lowercase
+    token and validated against ``_UI_IMPACT_VALUES``; an unknown value raises
+    ``ValueError``. Returns False if the task doesn't exist.
+    """
+    value = (ui_impact or "").strip().lower() or None
+    if value is not None and value not in _UI_IMPACT_VALUES:
+        raise ValueError(
+            f"unknown ui_impact {value!r}; expected one of {sorted(_UI_IMPACT_VALUES)}"
+        )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET ui_impact = ? WHERE id = ?",
+            (value, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "ui_impact_set", {"ui_impact": value})
     return True
 
 

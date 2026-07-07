@@ -432,6 +432,39 @@ def test_create_kind_argparse_choices_include_analysis():
     assert ns.kind == "analysis"
 
 
+def test_create_ui_impact_flag_argparse_and_roundtrip(kanban_home):
+    """AC-2: ``--ui-impact`` is exposed on ``kanban create``, choices validated,
+    and the value reaches the stored row + kanban show read-back."""
+    # argparse surface: flag accepts the allowed choices.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.exit_on_error = False  # type: ignore[attr-defined]
+    top = parser.add_subparsers(dest="_top")
+    kc.build_parser(top)
+    ns = parser.parse_args(
+        ["kanban", "create", "probe", "--ui-impact", "redesign"]
+    )
+    assert ns.ui_impact == "redesign"
+
+    # invalid choice is rejected by argparse
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        parser.parse_args(["kanban", "create", "probe", "--ui-impact", "bogus"])
+
+    # end-to-end: create + read-back via show --json
+    out = kc.run_slash("create 'ui task' --assignee alice --ui-impact redesign --json")
+    payload = json.loads(out)
+    tid = payload["id"]
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.ui_impact == "redesign"
+    assert kb.effective_ui_impact(task) == "operator-gated"
+
+    show_out = kc.run_slash(f"show {tid} --json")
+    show = json.loads(show_out)
+    assert show["ui_impact"] == "redesign"
+    assert show["effective_ui_impact"] == "operator-gated"
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")
