@@ -7945,7 +7945,11 @@ def _schedule_continuation_after_closed_run(
     return True
 
 
-_CODER_HANDOFF_REQUIRED_MARKERS = ("CODER_HANDOFF", "PATCH_TARGET", "TEST_TARGET", "AVOID")
+_CODER_HANDOFF_REQUIRED_FIELDS = ("PATCH_TARGET", "TEST_TARGET", "AVOID")
+_CODER_HANDOFF_FIELD_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?P<key>PATCH_TARGET|TEST_TARGET|AVOID)\s*:\s*(?P<value>\S.*)?$",
+    re.IGNORECASE,
+)
 
 
 def _has_complete_coder_handoff(text: Optional[str]) -> bool:
@@ -7953,8 +7957,99 @@ def _has_complete_coder_handoff(text: Optional[str]) -> bool:
 
     if not text:
         return False
-    upper = text.upper()
-    return all(marker in upper for marker in _CODER_HANDOFF_REQUIRED_MARKERS)
+    lines = text.splitlines()
+    handoff_start = next(
+        (
+            idx
+            for idx, line in enumerate(lines)
+            if line.strip().upper().startswith("CODER_HANDOFF")
+        ),
+        None,
+    )
+    if handoff_start is None:
+        return False
+
+    fields: dict[str, str] = {}
+    for line in lines[handoff_start + 1 :]:
+        match = _CODER_HANDOFF_FIELD_RE.match(line)
+        if not match:
+            continue
+        value = (match.group("value") or "").strip()
+        if value:
+            fields[match.group("key").upper()] = value
+    return all(fields.get(field) for field in _CODER_HANDOFF_REQUIRED_FIELDS)
+
+
+def _recover_scout_coder_handoff(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: Optional[str],
+    metadata: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+    reason: str = "iteration_budget_exhausted",
+) -> bool:
+    """Mark a scout budget-exhaustion run complete when it emitted a handoff."""
+
+    row = conn.execute(
+        "SELECT status, current_run_id, assignee FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["status"] != "running" or not row["current_run_id"]:
+        return False
+    current_run_id = int(row["current_run_id"])
+    if expected_run_id is not None and int(expected_run_id) != current_run_id:
+        return False
+    if row["assignee"] != "scout" or not _has_complete_coder_handoff(summary):
+        return False
+
+    recovery_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    recovery_metadata.update(
+        {
+            "recovered_from": reason,
+            "recovery_reason": "complete_coder_handoff_present",
+        }
+    )
+    run_id = _end_run(
+        conn,
+        task_id,
+        outcome="completed",
+        summary=summary,
+        metadata=recovery_metadata,
+    )
+    now = int(time.time())
+    conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'done',
+               result = ?,
+               completed_at = ?,
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               current_run_id = NULL
+         WHERE id = ?
+        """,
+        (summary, now, task_id),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "scout_handoff_recovered",
+        {
+            "from": reason,
+            "required_fields": list(_CODER_HANDOFF_REQUIRED_FIELDS),
+        },
+        run_id=run_id,
+    )
+    _append_event(
+        conn,
+        task_id,
+        "completed",
+        {"result": summary, "metadata": recovery_metadata},
+        run_id=run_id,
+    )
+    return True
 
 
 def record_iteration_budget_exhausted(
@@ -7981,53 +8076,14 @@ def record_iteration_budget_exhausted(
         current_run_id = int(row["current_run_id"])
         if expected_run_id is not None and int(expected_run_id) != current_run_id:
             return False
-        if row["assignee"] == "scout" and _has_complete_coder_handoff(summary):
-            recovery_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-            recovery_metadata.update(
-                {
-                    "recovered_from": reason,
-                    "recovery_reason": "complete_coder_handoff_present",
-                }
-            )
-            run_id = _end_run(
-                conn,
-                task_id,
-                outcome="completed",
-                summary=summary,
-                metadata=recovery_metadata,
-            )
-            now = int(time.time())
-            conn.execute(
-                """
-                UPDATE tasks
-                   SET status = 'done',
-                       result = ?,
-                       completed_at = ?,
-                       claim_lock = NULL,
-                       claim_expires = NULL,
-                       worker_pid = NULL,
-                       current_run_id = NULL
-                 WHERE id = ?
-                """,
-                (summary, now, task_id),
-            )
-            _append_event(
-                conn,
-                task_id,
-                "scout_handoff_recovered",
-                {
-                    "from": reason,
-                    "required_markers": list(_CODER_HANDOFF_REQUIRED_MARKERS),
-                },
-                run_id=run_id,
-            )
-            _append_event(
-                conn,
-                task_id,
-                "completed",
-                {"result": summary, "metadata": recovery_metadata},
-                run_id=run_id,
-            )
+        if _recover_scout_coder_handoff(
+            conn,
+            task_id,
+            summary=summary,
+            metadata=metadata,
+            expected_run_id=expected_run_id,
+            reason=reason,
+        ):
             return True
         run_id = _end_run(
             conn,
@@ -16321,6 +16377,7 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
     count_failure: bool = True,
+    summary: Optional[str] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -16374,6 +16431,23 @@ def _record_task_failure(
         ).fetchone()
         if row is None:
             return False
+
+        if outcome == "timed_out" and release_claim and end_run:
+            recovery_metadata = {
+                "trigger_outcome": outcome,
+                "error": error[:500],
+            }
+            if event_payload_extra:
+                recovery_metadata.update(event_payload_extra)
+            if _recover_scout_coder_handoff(
+                conn,
+                task_id,
+                summary=summary,
+                metadata=recovery_metadata,
+                reason=outcome,
+            ):
+                return False
+
         # Transient path (count_failure=False) leaves the counter untouched;
         # everything else increments it toward the breaker threshold.
         failures = int(row["consecutive_failures"])

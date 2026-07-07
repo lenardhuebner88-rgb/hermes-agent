@@ -147,6 +147,7 @@ def finalize_turn(
                                 "budget_used": api_call_count,
                                 "budget_max": agent.max_iterations,
                             },
+                            summary=final_response,
                         )
                         logger.info(
                             "recorded budget-exhausted failure for task %s (%d/%d)",
