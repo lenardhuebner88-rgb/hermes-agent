@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 import anyio
 import httpx
@@ -249,3 +251,119 @@ class _FakeCtx:
 
     def __exit__(self, *a):
         return False
+
+
+def _stub_render(monkeypatch, png_bytes: bytes = b"PNGDATA"):
+    """Replace the real chromium render so add_mockup runs without a browser."""
+    from hermes_cli import design_board_cli
+
+    def _fake(html_path, png_path, **kw):
+        with open(png_path, "wb") as fh:
+            fh.write(png_bytes)
+
+    monkeypatch.setattr(design_board_cli, "render_html_to_png", _fake)
+
+
+def test_upload_mockup_creates_html_entry_and_serves_asset(client, monkeypatch):
+    _stub_render(monkeypatch)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "Hero"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("hero.html", b"<h1>hi</h1>", "text/html")},
+        data={"note": "hero mockup"},
+    )
+    assert up.status_code == 200
+    card = client.get(f"/api/design-board/cards/{cid}").json()
+    entry = card["entries"][-1]
+    assert entry["kind"] == "mockup_html"
+    assert entry["note"] == "hero mockup"
+    assert entry["html"] and entry["html"].endswith(".html")
+    assert entry["asset"] and entry["asset"].endswith(".png")
+    # the stored HTML asset is served back verbatim (drives the live iframe)
+    html_name = entry["html"].split("/")[-1]
+    served = client.get(f"/api/design-board/cards/{cid}/assets/{html_name}")
+    assert served.status_code == 200
+    assert served.content == b"<h1>hi</h1>"
+    # and the rendered PNG sibling is served too
+    png_name = entry["asset"].split("/")[-1]
+    assert client.get(f"/api/design-board/cards/{cid}/assets/{png_name}").status_code == 200
+
+
+def test_upload_mockup_forces_html_extension(client, monkeypatch):
+    _stub_render(monkeypatch)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("noext", b"<h1/>", "application/octet-stream")},
+    )
+    assert up.status_code == 200
+    entry = client.get(f"/api/design-board/cards/{cid}").json()["entries"][-1]
+    assert entry["html"].endswith(".html")
+
+
+def test_upload_mockup_missing_card_404(client):
+    r = client.post(
+        "/api/design-board/cards/c_nope/mockups",
+        files={"file": ("m.html", b"<h1/>", "text/html")},
+    )
+    assert r.status_code == 404
+
+
+def test_upload_mockup_too_large_returns_413(client, monkeypatch):
+    _stub_render(monkeypatch)
+    monkeypatch.setattr(view, "_MAX_HTML_BYTES", 8)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    r = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("big.html", b"<h1>far too long for the tiny cap</h1>", "text/html")},
+    )
+    assert r.status_code == 413
+    assert r.json()["detail"]["error"] == "file_too_large"
+
+
+def test_upload_mockup_render_unavailable_returns_502(client, monkeypatch):
+    from hermes_cli import design_board_cli
+
+    def _missing(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "chromium-shot")
+
+    monkeypatch.setattr(design_board_cli, "render_html_to_png", _missing)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    r = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("m.html", b"<h1/>", "text/html")},
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"]["error"] == "render_unavailable"
+
+
+def test_upload_mockup_render_failed_returns_502(client, monkeypatch):
+    from hermes_cli import design_board_cli
+
+    def _boom(*a, **k):
+        raise RuntimeError("chromium render failed: b'boom'")
+
+    monkeypatch.setattr(design_board_cli, "render_html_to_png", _boom)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    r = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("m.html", b"<h1/>", "text/html")},
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"]["error"] == "render_failed"
+
+
+def test_upload_mockup_render_timeout_returns_504(client, monkeypatch):
+    from hermes_cli import design_board_cli
+
+    def _slow(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="chromium-shot", timeout=60)
+
+    monkeypatch.setattr(design_board_cli, "render_html_to_png", _slow)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    r = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("m.html", b"<h1/>", "text/html")},
+    )
+    assert r.status_code == 504
+    assert r.json()["detail"]["error"] == "render_timeout"

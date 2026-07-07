@@ -1,9 +1,21 @@
-"""Read-only kanban adapter for the Design Board — never writes task state."""
+"""Kanban adapter for Design Board cards."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+from hermes_cli import design_board_store as store
 from hermes_cli import kanban_db
 
 TERMINAL = {"done", "archived"}
+_CHROMIUM_SHOT = os.path.expanduser("~/bin/chromium-shot")
+_AFTER_MARKER_PREFIX = "after-screenshot task:"
+_RECEIPT_MARKER_PREFIX = "task-receipt task:"
 
 _get_task = kanban_db.get_task
 
@@ -55,3 +67,213 @@ def batch_task_facets(task_ids: list[str]) -> dict[str, dict]:
                     "assignee": row["assignee"], "terminal": status in TERMINAL,
                 }
     return out
+
+
+def register_lifecycle_hooks() -> None:
+    """Register Design Board Kanban lifecycle observers."""
+    from hermes_cli.plugins import get_plugin_manager
+
+    hooks = get_plugin_manager()._hooks
+    callbacks = hooks.setdefault("kanban_task_completed", [])
+    if handle_task_completed not in callbacks:
+        callbacks.append(handle_task_completed)
+
+
+def handle_task_completed(task_id: str, **kwargs: object) -> None:
+    """Attach automatic Design Board updates when a linked task is done."""
+    run_id = kwargs.get("run_id")
+    attach_completion_receipts_for_task(
+        task_id,
+        status="done",
+        run_id=run_id if isinstance(run_id, int) else None,
+    )
+    attach_after_screenshots_for_task(task_id, status="done")
+
+
+def attach_completion_receipts_for_task(
+    task_id: str,
+    *,
+    status: str,
+    run_id: int | None = None,
+) -> list[str]:
+    """Write one idempotent completion receipt comment per linked card."""
+    if status not in TERMINAL:
+        return []
+
+    created: list[str] = []
+    note = _completion_receipt_note(task_id, run_id=run_id)
+    for card in _cards_linked_to_task(task_id):
+        card_id = card.get("id")
+        if not isinstance(card_id, str) or _has_receipt_entry(card, task_id):
+            continue
+        created.append(store.add_entry(
+            card_id,
+            author="system",
+            kind="comment",
+            note=note,
+        ))
+    return created
+
+
+def attach_after_screenshots_for_task(task_id: str, *, status: str) -> list[str]:
+    """Attach fresh after-screenshots or error comments for cards linked to task_id.
+
+    Returns the Design Board entry ids created. The function is best-effort per
+    card so one unavailable view/chromium binary does not block Kanban completion.
+    """
+    if status not in TERMINAL:
+        return []
+
+    created: list[str] = []
+    for card in _cards_linked_to_task(task_id):
+        card_id = card.get("id")
+        if not isinstance(card_id, str) or _has_after_entry(card, task_id):
+            continue
+        try:
+            png = _render_dashboard_view(card)
+            asset_name = store.write_asset(card_id, f"after-{task_id}.png", png)
+            created.append(store.add_entry(
+                card_id,
+                author="system",
+                kind="screenshot",
+                note=f"{_AFTER_MARKER_PREFIX}{task_id}",
+                asset_name=asset_name,
+            ))
+        except Exception as exc:
+            created.append(store.add_entry(
+                card_id,
+                author="system",
+                kind="comment",
+                note=f"{_AFTER_MARKER_PREFIX}{task_id} failed: {exc}",
+            ))
+    return created
+
+
+def _cards_linked_to_task(task_id: str) -> list[dict]:
+    return [
+        card for card in store.list_cards()
+        if task_id in (card.get("linked_tasks") or [])
+    ]
+
+
+def _has_after_entry(card: dict, task_id: str) -> bool:
+    marker = f"{_AFTER_MARKER_PREFIX}{task_id}"
+    for entry in card.get("entries") or []:
+        if isinstance(entry, dict) and str(entry.get("note") or "").startswith(marker):
+            return True
+    return False
+
+
+def _has_receipt_entry(card: dict, task_id: str) -> bool:
+    marker = f"{_RECEIPT_MARKER_PREFIX}{task_id}"
+    for entry in card.get("entries") or []:
+        if isinstance(entry, dict) and str(entry.get("note") or "").startswith(marker):
+            return True
+    return False
+
+
+def _completion_receipt_note(task_id: str, *, run_id: int | None = None) -> str:
+    completed_at, commit = _completion_receipt_metadata(task_id, run_id=run_id)
+    completed = _format_completed_at(completed_at) if completed_at else "unknown"
+    note = f"{_RECEIPT_MARKER_PREFIX}{task_id} completed_at:{completed}"
+    if commit:
+        note += f" commit:{commit}"
+    return note
+
+
+def _completion_receipt_metadata(task_id: str, *, run_id: int | None = None) -> tuple[int | None, str | None]:
+    completed_at: int | None = None
+    commit: str | None = None
+    try:
+        with _open_ro() as conn:
+            task = _get_task(conn, task_id)
+            completed_at = task.completed_at if task is not None else None
+            if run_id is not None:
+                row = conn.execute(
+                    "SELECT metadata, ended_at FROM task_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is not None:
+                    completed_at = completed_at or row["ended_at"]
+                    commit = _commit_from_payload(row["metadata"])
+            if commit is None:
+                row = conn.execute(
+                    """
+                    SELECT payload FROM task_events
+                    WHERE task_id = ? AND kind IN ('completed', 'done')
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if row is not None:
+                    commit = _commit_from_payload(row["payload"])
+    except Exception:
+        return completed_at, commit
+    return completed_at, commit
+
+
+def _commit_from_payload(raw: object) -> str | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("commit") or data.get("commit_hash")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    nested = data.get("metadata")
+    if isinstance(nested, dict):
+        value = nested.get("commit") or nested.get("commit_hash")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _format_completed_at(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _render_dashboard_view(card: dict) -> bytes:
+    url = _dashboard_url_for_card(card)
+    exe = Path(_CHROMIUM_SHOT)
+    if not exe.is_file():
+        raise RuntimeError("chromium-shot not found")
+
+    with tempfile.TemporaryDirectory(prefix="design-board-after-") as tmpdir:
+        output = Path(tmpdir) / "after.png"
+        result = subprocess.run(
+            [
+                str(exe),
+                f"--screenshot={output}",
+                "--window-size=1440,1200",
+                "--virtual-time-budget=12000",
+                url,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip()[-500:]
+            raise RuntimeError(f"chromium-shot failed: {tail or result.returncode}")
+        if not output.is_file():
+            raise RuntimeError("chromium-shot produced no screenshot")
+        return output.read_bytes()
+
+
+def _dashboard_url_for_card(card: dict) -> str:
+    target = card.get("target") or {}
+    if not isinstance(target, dict):
+        raise ValueError("card target is missing")
+    raw_view = str(target.get("view") or "").strip()
+    if not raw_view:
+        raise ValueError("card target.view is missing")
+    parsed = urlparse(raw_view)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw_view
+    base = os.environ.get("HERMES_DESIGN_BOARD_DASHBOARD_BASE_URL", "http://127.0.0.1:9119").rstrip("/")
+    path = raw_view if raw_view.startswith("/") else f"/{raw_view}"
+    return f"{base}{path}"

@@ -22,6 +22,10 @@ function assetUrl(cardId: string, asset: string): string {
   return `/api/design-board/cards/${cardId}/assets/${asset.split("/").pop()}`;
 }
 
+function entryTime(entry: Entry): string {
+  return new Date(entry.created_at * 1000).toISOString().replace("T", " ").replace(".000Z", "Z");
+}
+
 export function CardDetail(_props: { density?: string } = {}) {
   const { cardId = "" } = useParams<{ cardId: string }>();
   const [card, setCard] = useState<CardDetailData | null>(null);
@@ -32,10 +36,13 @@ export function CardDetail(_props: { density?: string } = {}) {
   const [commentDraft, setCommentDraft] = useState("");
   const [statusDraft, setStatusDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [mockupBusy, setMockupBusy] = useState(false);
+  const [mockupError, setMockupError] = useState<string | null>(null);
   const [promoteBusy, setPromoteBusy] = useState(false);
   const [promoteError, setPromoteError] = useState<string | null>(null);
   const [promotedTaskId, setPromotedTaskId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const mockupRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
     fetchJSON<CardDetailData>(`/api/design-board/cards/${cardId}`)
@@ -60,6 +67,28 @@ export function CardDetail(_props: { density?: string } = {}) {
       setError(String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onMockupFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setMockupBusy(true);
+    setMockupError(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      await fetchJSON(`/api/design-board/cards/${cardId}/mockups`, {
+        method: "POST", body: fd,
+      });
+      if (mockupRef.current) mockupRef.current.value = "";
+      load();
+    } catch (err) {
+      setMockupError(mockupErrorMessage(String(err)));
+    } finally {
+      setBusy(false);
+      setMockupBusy(false);
     }
   }
 
@@ -140,6 +169,13 @@ export function CardDetail(_props: { density?: string } = {}) {
 
   if (error) return <div className="p-4"><FleetEmptyState title="Laden fehlgeschlagen" desc={error} /></div>;
   if (!card) return <div className="p-4 hc-type-label hc-dim">Laden…</div>;
+
+  const beforeScreenshot = card.entries.find((entry) =>
+    entry.kind === "screenshot" && entry.asset && entry.author !== "system",
+  );
+  const afterScreenshot = [...card.entries].reverse().find((entry) =>
+    entry.kind === "screenshot" && entry.asset && entry.author === "system",
+  );
 
   return (
     <div className="min-h-full bg-surface-0 p-4">
@@ -234,10 +270,23 @@ export function CardDetail(_props: { density?: string } = {}) {
         </div>
       )}
 
+      {beforeScreenshot && afterScreenshot && (
+        <div className="mt-4 grid gap-3 md:grid-cols-2" aria-label="Vorher-Nachher Screenshots">
+          <div className="hc-surface-card p-3">
+            <div className="hc-type-label hc-dim">Vorher · Operator-Screenshot</div>
+            <PinOverlay src={assetUrl(card.id, beforeScreenshot.asset!)} pins={beforeScreenshot.pins} editable={false} />
+          </div>
+          <div className="hc-surface-card p-3">
+            <div className="hc-type-label hc-dim">Nachher · System-Screenshot</div>
+            <PinOverlay src={assetUrl(card.id, afterScreenshot.asset!)} pins={afterScreenshot.pins} editable={false} />
+          </div>
+        </div>
+      )}
+
       <div className="mt-4 space-y-4">
         {card.entries.map((entry) => (
-          <div key={entry.id} className="hc-surface-card p-3">
-            <div className="hc-type-label hc-dim">{entry.author} · {entry.kind}</div>
+          <div key={entry.id} data-testid={`entry-${entry.id}`} className="hc-surface-card p-3" aria-label="Verlaufszeile">
+            <div className="hc-type-label hc-dim">{entryTime(entry)} · {entry.author} · {entry.kind}</div>
             {entry.note && <div className="mt-1 text-sm text-white">{entry.note}</div>}
             {entry.asset && (
               <div className="mt-2">
@@ -309,8 +358,30 @@ export function CardDetail(_props: { density?: string } = {}) {
           </div>
         )}
       </div>
+
+      <div className="mt-6 hc-surface-card p-3">
+        <div className="hc-type-label hc-dim">{de.designBoard.mockupUploadLabel}</div>
+        <input ref={mockupRef} type="file" accept=".html,.htm,text/html"
+          data-testid="mockup-upload" onChange={onMockupFile}
+          className="mt-2 text-sm text-white" disabled={busy} />
+        <div className="mt-1 hc-type-label hc-soft">{de.designBoard.mockupUploadHint}</div>
+        {mockupBusy && <div className="mt-1 hc-type-label hc-dim">{de.designBoard.mockupUploading}</div>}
+        {mockupError && (
+          <div className="mt-2 rounded-card border border-status-warn/20 bg-status-warn/10 p-2 text-xs text-status-warn">
+            {mockupError}
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+function mockupErrorMessage(raw: string): string {
+  if (raw.includes("413") || raw.includes("file_too_large")) return de.designBoard.mockupTooLarge;
+  if (raw.includes("render_unavailable")) return de.designBoard.mockupRenderUnavailable;
+  if (raw.includes("render_failed") || raw.includes("render_timeout") || raw.includes("502") || raw.includes("504"))
+    return de.designBoard.mockupRenderFailed;
+  return raw;
 }
 
 function MockupToggle(props: { cardId: string; html: string; png: string | null }) {

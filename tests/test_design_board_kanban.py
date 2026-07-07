@@ -1,4 +1,5 @@
 from hermes_cli import design_board_kanban as dbk
+from hermes_cli import design_board_store as store
 
 
 def test_terminal_set():
@@ -24,14 +25,12 @@ class _Dummy:
     def __enter__(self): return object()
     def __exit__(self, *a): return False
 
-
 class _FakeRow:
     def __init__(self, id, status, assignee):
         self._data = {"id": id, "status": status, "assignee": assignee}
 
     def __getitem__(self, key):
         return self._data[key]
-
 
 class _FakeConn:
     def __init__(self, rows):
@@ -48,7 +47,6 @@ class _FakeConn:
 
     def __exit__(self, *a):
         return False
-
 
 def test_batch_task_facets(monkeypatch):
     rows = [
@@ -120,3 +118,118 @@ def test_batch_task_facets_chunks_large_id_lists(monkeypatch):
     assert len(calls) == 2
     assert len(calls[0]) == 900
     assert len(calls[1]) == 600
+
+
+def test_after_screenshot_attaches_system_entry(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+
+    monkeypatch.setattr(dbk, "_render_dashboard_view", lambda card: b"png")
+
+    entries = dbk.attach_after_screenshots_for_task("t_done", status="done")
+
+    assert len(entries) == 1
+    updated = store.get_card(card_id)
+    entry = updated["entries"][0]
+    assert entry["author"] == "system"
+    assert entry["kind"] == "screenshot"
+    assert entry["asset"].endswith("after-t_done.png")
+    assert entry["note"] == "after-screenshot task:t_done"
+
+
+def test_completion_receipt_attaches_system_comment(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    entries = dbk.attach_completion_receipts_for_task("t_done", status="done", run_id=42)
+
+    assert len(entries) == 1
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
+    assert entry["author"] == "system"
+    assert entry["kind"] == "comment"
+    assert entry["note"] == "task-receipt task:t_done completed_at:2025-01-01T00:00:00Z commit:abc123"
+
+
+def test_completion_receipt_is_idempotent_per_task(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    assert len(dbk.attach_completion_receipts_for_task("t_done", status="done")) == 1
+    assert dbk.attach_completion_receipts_for_task("t_done", status="done") == []
+
+
+def test_completion_receipt_skips_non_terminal(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_running")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    assert dbk.attach_completion_receipts_for_task("t_running", status="running") == []
+    updated = store.get_card(card_id)
+    assert updated is not None
+    assert updated["entries"] == []
+
+
+def test_after_screenshot_degrades_to_comment_on_render_error(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+
+    def fail(_card):
+        raise RuntimeError("chromium missing")
+
+    monkeypatch.setattr(dbk, "_render_dashboard_view", fail)
+
+    entries = dbk.attach_after_screenshots_for_task("t_done", status="done")
+
+    assert len(entries) == 1
+    entry = store.get_card(card_id)["entries"][0]
+    assert entry["author"] == "system"
+    assert entry["kind"] == "comment"
+    assert "chromium missing" in entry["note"]
+
+
+def test_after_screenshot_is_idempotent_per_task(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+
+    calls = []
+    monkeypatch.setattr(dbk, "_render_dashboard_view", lambda card: calls.append(card) or b"png")
+
+    assert len(dbk.attach_after_screenshots_for_task("t_done", status="done")) == 1
+    assert dbk.attach_after_screenshots_for_task("t_done", status="done") == []
+    assert len(calls) == 1
+
+
+def test_dashboard_url_for_target_view(monkeypatch):
+    monkeypatch.setenv("HERMES_DESIGN_BOARD_DASHBOARD_BASE_URL", "http://127.0.0.1:9119/")
+
+    assert dbk._dashboard_url_for_card({"target": {"view": "/control/fleet"}}) == "http://127.0.0.1:9119/control/fleet"
+    assert dbk._dashboard_url_for_card({"target": {"view": "control/fleet"}}) == "http://127.0.0.1:9119/control/fleet"
+    assert dbk._dashboard_url_for_card({"target": {"view": "https://example.test/x"}}) == "https://example.test/x"

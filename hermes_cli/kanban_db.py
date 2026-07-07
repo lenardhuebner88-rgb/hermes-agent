@@ -169,7 +169,7 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
 
 
 def _ensure_push_hook_consumers_registered() -> None:
-    """Register bundled Web Push lifecycle observers, fully best-effort."""
+    """Register bundled lifecycle observers, fully best-effort."""
     global _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED
     if _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED:
         return
@@ -180,6 +180,12 @@ def _ensure_push_hook_consumers_registered() -> None:
         _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = True
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban push hook consumer bootstrap failed: %s", exc)
+    try:
+        from hermes_cli.design_board_kanban import register_lifecycle_hooks
+
+        register_lifecycle_hooks()
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("design board kanban hook consumer bootstrap failed: %s", exc)
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:

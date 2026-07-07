@@ -1313,5 +1313,11 @@ export const de = {
     promoteUnavailable: "Kanban nicht erreichbar — bitte später erneut versuchen.",
     kanbanUnavailable: "Kanban-Status nicht verfügbar — Verknüpfungen evtl. unvollständig",
     pinNotePlaceholder: "Notiz zur Markierung (optional)",
+    mockupUploadLabel: "HTML-Mockup hinzufügen",
+    mockupUploadHint: "HTML-Datei wird serverseitig zu PNG gerendert (Live-Vorschau bleibt ohne Skripte).",
+    mockupUploading: "Wird gerendert …",
+    mockupTooLarge: "HTML-Datei zu groß (max. 5 MB).",
+    mockupRenderUnavailable: "HTML→PNG-Renderer nicht verfügbar — bitte Operator informieren.",
+    mockupRenderFailed: "HTML-Vorschau konnte nicht gerendert werden.",
   },
 } as const;
