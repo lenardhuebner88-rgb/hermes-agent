@@ -11,6 +11,7 @@ import {
   StatsMasthead,
   StatistikView,
   SubscriptionBurnSection,
+  WorkerEfficiencySection,
 } from "./StatistikView";
 import { ERROR_SERIES } from "../lib/statsBroadsheet";
 import type {
@@ -337,6 +338,124 @@ function rollupResponse(root: WindowedRollupRoot = rollupRoot()): WindowedRollup
     roots: [root],
   };
 }
+
+describe("WorkerEfficiencySection (B3)", () => {
+  it("renders worker-efficiency metrics from rollup roots and attributed review verdicts", () => {
+    const root = rollupRoot({
+      id: "t_b3",
+      workers: [
+        rollupWorker({
+          profile: "coder",
+          input_tokens: 9000,
+          output_tokens: 1000,
+          run_count: 2,
+          cost_usd_equivalent: 1.5,
+          api_equivalent_usd: 1.5,
+          cost_effective_usd: 1.5,
+        }),
+        rollupWorker({
+          profile: "premium",
+          input_tokens: 4000,
+          output_tokens: 1000,
+          run_count: 1,
+          cost_usd_equivalent: 2,
+          api_equivalent_usd: 2,
+          cost_effective_usd: 2,
+        }),
+      ],
+      runners: [
+        {
+          id: 501,
+          task_id: "t_worker",
+          profile: "coder",
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+          provider_model_source: "run_metadata",
+          input_tokens: 9000,
+          output_tokens: 1000,
+          cost_usd: 0,
+          cost_usd_equivalent: 1.5,
+          cost_effective_usd: 1.5,
+          billing_mode: "subscription_included",
+          neuralwatt: null,
+          started_at: 120,
+          ended_at: 180,
+          runtime_seconds: 60,
+        },
+        {
+          id: 502,
+          task_id: "t_premium",
+          profile: "premium",
+          provider: "openai",
+          model: "gpt-5.5",
+          provider_model_source: "run_metadata",
+          input_tokens: 4000,
+          output_tokens: 1000,
+          cost_usd: 0,
+          cost_usd_equivalent: 2,
+          cost_effective_usd: 2,
+          billing_mode: "subscription_included",
+          neuralwatt: null,
+          started_at: 130,
+          ended_at: 190,
+          runtime_seconds: 60,
+        },
+      ],
+    });
+
+    const html = renderToStaticMarkup(
+      <WorkerEfficiencySection
+        roots={[root]}
+        profiles={[
+          profile({ profile: "coder", judged: 10, approved: 6, rejected: 4 }),
+          profile({ profile: "premium", judged: 10, approved: 9, rejected: 1 }),
+        ]}
+      />,
+    );
+
+    expect(html).toContain('data-testid="worker-efficiency"');
+    expect(html).toContain("Worker vergleichen");
+    expect(html).toContain("Token/Task");
+    expect(html).toContain("Token/min");
+    expect(html).toContain("$/Task");
+    expect(html).toContain("Review zurück");
+    expect(html).toContain("Coder-Review-Schleifen senken");
+    expect(html).toContain("Premium für riskante Tasks");
+    expect(html).not.toContain("Nutzerwert");
+    expect(html).not.toContain("Meta Burn");
+    expect(html).not.toContain("API-Äquivalent");
+    expect(html).not.toContain("gesch.");
+  });
+
+  it("keeps review-return honest when a worker has no attributed review outputs", () => {
+    const html = renderToStaticMarkup(
+      <WorkerEfficiencySection
+        roots={[rollupRoot()]}
+        profiles={[profile({ profile: "coder", judged: 0, approved: 0, rejected: 0 })]}
+      />,
+    );
+
+    expect(html).toContain("Review zurück offen");
+    expect(html).toContain("Token/Task");
+    expect(html).toContain("—");
+  });
+
+  it("places B3 before the legacy Statistik masthead", () => {
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+    controlDataMock.reliability = controlState({
+      now: 1_780_000_000,
+      profiles: [profile({ profile: "coder", judged: 3, approved: 2, rejected: 1 })],
+      baseline: [],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    const b3 = html.indexOf('data-testid="worker-efficiency"');
+    const masthead = html.indexOf('data-testid="stats-masthead-figure"');
+    expect(b3).toBeGreaterThanOrEqual(0);
+    expect(masthead).toBeGreaterThan(b3);
+  });
+});
 
 describe("MotherLedgerSection", () => {
   it("zeigt den harten Fehlerzustand nur wenn noch keine Rollup-Daten vorliegen", () => {

@@ -70,6 +70,13 @@ import {
   type LedgerEntry,
   type MotherLedgerSortKey,
 } from "../lib/statsBroadsheet";
+import {
+  DEFAULT_MIN_REVIEW_SAMPLE,
+  WORKER_EFFICIENCY_BENCH_PROFILES,
+  buildWorkerEfficiencyRows,
+  workerEfficiencyLevers,
+  type WorkerEfficiencyRow,
+} from "../lib/workerEfficiency";
 import "./statistik.css";
 
 const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}`);
@@ -130,6 +137,29 @@ function StLead({ children, tone }: { children: ReactNode; tone: "crit" | "warn"
       {children}
     </div>
   );
+}
+
+function fmtWorkerTokens(value: number | null): string {
+  return value == null ? "—" : fmtTokens(Math.round(value));
+}
+
+function fmtWorkerRate(value: number | null): string {
+  if (value == null) return "—";
+  if (value >= 1000) return fmtTokens(Math.round(value));
+  return Math.round(value).toLocaleString("de-DE");
+}
+
+function fmtWorkerUsd(value: number | null): string {
+  return value == null ? "—" : `$${value.toFixed(2)}`;
+}
+
+function fmtWorkerPct(value: number | null): string {
+  return value == null ? "—" : `${Math.round(value * 100)} %`;
+}
+
+function metricShare(value: number | null, max: number): string {
+  if (value == null || max <= 0) return "0%";
+  return `${Math.max(4, Math.min(100, Math.round((value / max) * 100)))}%`;
 }
 
 /** Leaderboard-Zeile: Rang · mono Lane-Label mit Status-Dot · großer mono Score
@@ -381,6 +411,237 @@ export function BudgetLedgerSection({ providers }: { providers: AccountUsageProv
             />
           ))}
         </div>
+      )}
+    </section>
+  );
+}
+
+function WorkerEfficiencyMap({ rows }: { rows: WorkerEfficiencyRow[] }) {
+  const chartRows = rows.filter((row) => row.token_per_min != null && row.review_return_rate != null);
+  const hasReviewSignal = rows.some((row) => row.reviewed_outputs != null && row.reviewed_outputs > 0);
+  if (!hasReviewSignal) {
+    return (
+      <div className="st-we-map st-we-map-empty">
+        <FleetEmptyState title="Review zurück offen" desc="Review zurück offen" ok />
+      </div>
+    );
+  }
+  if (chartRows.length === 0) {
+    return (
+      <div className="st-we-map st-we-map-empty">
+        <FleetEmptyState title="Token/min offen" desc="Token/min offen" ok />
+      </div>
+    );
+  }
+
+  const maxTokenPerMin = Math.max(1, ...chartRows.map((row) => row.token_per_min ?? 0));
+  const maxReview = Math.max(0.05, ...chartRows.map((row) => row.review_return_rate ?? 0));
+  const maxCost = Math.max(0.01, ...chartRows.map((row) => row.cost_per_task ?? 0));
+
+  return (
+    <div className="st-we-map" role="img" aria-label="Worker Efficiency Map">
+      <span className="st-we-axis st-we-axis-x">Token/min</span>
+      <span className="st-we-axis st-we-axis-y">Review zurück</span>
+      <div className="st-we-grid" aria-hidden="true" />
+      {chartRows.map((row) => {
+        const x = 12 + Math.min(1, (row.token_per_min ?? 0) / maxTokenPerMin) * 76;
+        const y = 12 + Math.min(1, (row.review_return_rate ?? 0) / maxReview) * 74;
+        const size = 38 + Math.min(1, (row.cost_per_task ?? 0) / maxCost) * 28;
+        const title = `${row.label}: ${fmtWorkerRate(row.token_per_min)} Token/min · ${fmtWorkerPct(row.review_return_rate)} Review zurück · ${fmtWorkerUsd(row.cost_per_task)} $/Task`;
+        return (
+          <span
+            key={row.profile}
+            className="st-we-bubble"
+            style={{
+              ...laneStyle(row.profile),
+              "--we-x": `${x}%`,
+              "--we-y": `${y}%`,
+              "--we-size": `${size}px`,
+            } as CSSProperties}
+            title={title}
+          >
+            <b>{row.label}</b>
+            <small>{fmtWorkerUsd(row.cost_per_task)}</small>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkerMetricBar({ value, max }: { value: number | null; max: number }) {
+  return (
+    <span className="st-we-metric-bar" aria-hidden="true">
+      <i style={{ width: metricShare(value, max) }} />
+    </span>
+  );
+}
+
+function WorkerComparison({ rows }: { rows: WorkerEfficiencyRow[] }) {
+  const byProfile = new Map(rows.map((row) => [row.profile, row]));
+  const coder = byProfile.get("coder") ?? null;
+  const premium = byProfile.get("premium") ?? null;
+  const metrics = [
+    { key: "token_per_task", label: "Token/Task", format: fmtWorkerTokens },
+    { key: "token_per_min", label: "Token/min", format: fmtWorkerRate },
+    { key: "cost_per_task", label: "$/Task", format: fmtWorkerUsd },
+    { key: "review_return_rate", label: "Review zurück", format: fmtWorkerPct },
+  ] as const;
+
+  return (
+    <div className="st-we-compare">
+      <div className="st-we-compare-head">
+        <span />
+        <b>coder</b>
+        <b>premium</b>
+      </div>
+      {metrics.map((metric) => {
+        const coderValue = coder?.[metric.key] ?? null;
+        const premiumValue = premium?.[metric.key] ?? null;
+        const max = Math.max(coderValue ?? 0, premiumValue ?? 0);
+        return (
+          <div key={metric.key} className="st-we-compare-row">
+            <span>{metric.label}</span>
+            <span>
+              <b>{metric.format(coderValue)}</b>
+              <WorkerMetricBar value={coderValue} max={max} />
+            </span>
+            <span>
+              <b>{metric.format(premiumValue)}</b>
+              <WorkerMetricBar value={premiumValue} max={max} />
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkerLevers({ rows }: { rows: WorkerEfficiencyRow[] }) {
+  const levers = workerEfficiencyLevers(rows);
+  return (
+    <div className="st-we-levers">
+      {levers.length === 0 ? (
+        <span className="st-we-lever st-we-lever-empty">Noch kein belastbarer Hebel</span>
+      ) : (
+        levers.map((lever) => (
+          <span key={lever.key} className="st-we-lever">
+            <b>{lever.label}</b>
+            <small>{lever.detail}</small>
+          </span>
+        ))
+      )}
+    </div>
+  );
+}
+
+function emptyWorkerEfficiencyRow(profile: string): WorkerEfficiencyRow {
+  return {
+    profile,
+    label: profileLabel[profile] ?? profile,
+    tasks: 0,
+    runs: 0,
+    tokens_total: 0,
+    runtime_seconds: null,
+    cost_effective_usd: null,
+    token_per_task: null,
+    token_per_min: null,
+    cost_per_task: null,
+    reviewed_outputs: null,
+    review_request_changes: null,
+    review_return_rate: null,
+    data_quality: "partial",
+  };
+}
+
+function WorkerBench({ rows }: { rows: WorkerEfficiencyRow[] }) {
+  const byProfile = new Map(rows.map((row) => [row.profile, row]));
+  const benchRows = WORKER_EFFICIENCY_BENCH_PROFILES.map((profile) => byProfile.get(profile) ?? emptyWorkerEfficiencyRow(profile));
+
+  return (
+    <div className="st-we-bench" role="table" aria-label="Worker Bench">
+      <div className="st-we-bench-head" role="row">
+        <span>Worker</span>
+        <span>Tok/Task</span>
+        <span>Tok/min</span>
+        <span>$/Task</span>
+        <span>Zurück</span>
+      </div>
+      {benchRows.map((row) => (
+        <div key={row.profile} className="st-we-bench-row" role="row" style={laneStyle(row.profile)}>
+          <span><LaneLabel profile={row.profile} label={row.label} /></span>
+          <b>{fmtWorkerTokens(row.token_per_task)}</b>
+          <b>{fmtWorkerRate(row.token_per_min)}</b>
+          <b>{fmtWorkerUsd(row.cost_per_task)}</b>
+          <b>{fmtWorkerPct(row.review_return_rate)}</b>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function WorkerEfficiencySection({
+  roots,
+  profiles,
+  minReviewSample = DEFAULT_MIN_REVIEW_SAMPLE,
+  loading = false,
+  error = null,
+  stale = false,
+}: {
+  roots: WindowedRollupRoot[];
+  profiles: ReliabilityProfile[];
+  minReviewSample?: number;
+  loading?: boolean;
+  error?: string | null;
+  stale?: boolean;
+}) {
+  const rows = useMemo(
+    () => buildWorkerEfficiencyRows(roots, profiles, minReviewSample),
+    [roots, profiles, minReviewSample],
+  );
+  const levers = useMemo(() => workerEfficiencyLevers(rows), [rows]);
+  const leadLever = levers[0] ?? null;
+  const empty = rows.length === 0;
+
+  return (
+    <section className="st-we" data-testid="worker-efficiency">
+      <div className="st-we-hero st-panel">
+        <div className="st-we-hero-top">
+          <div className="st-we-chips" aria-label="Worker Efficiency Dimensionen">
+            <span>Worker</span>
+            <span>Kosten</span>
+            <span>Review</span>
+            <span>Ketten</span>
+          </div>
+          <span className="st-mast-meta">{stale ? "veraltet" : "7 Tage"}</span>
+        </div>
+        <div className="st-we-title">
+          <div>
+            <p className="st-eyebrow">Worker Efficiency Map</p>
+            <h2>Worker vergleichen</h2>
+            <p><b>Token</b><span>Geld</span><b>Rework</b></p>
+          </div>
+          {leadLever ? (
+            <span className="st-we-lead-chip">
+              größter Hebel: <b>{leadLever.label}</b>
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {loading && empty ? (
+        <FleetEmptyState title="Worker-Daten laden" desc="Worker-Daten laden" ok />
+      ) : error && empty ? (
+        <StNote tone="warn">Worker-Daten nicht frisch</StNote>
+      ) : empty ? (
+        <FleetEmptyState title="Noch keine Worker-Daten im Fenster." desc="Noch keine Worker-Daten im Fenster." ok />
+      ) : (
+        <>
+          <WorkerEfficiencyMap rows={rows} />
+          <WorkerComparison rows={rows} />
+          <WorkerLevers rows={rows} />
+          <WorkerBench rows={rows} />
+        </>
       )}
     </section>
   );
@@ -895,6 +1156,7 @@ export function StatistikView() {
   const costs = useHermesRunsCosts();
   const costSeries = useHermesRunsCostSeries();
   const subscriptionBurn = useHermesSubscriptionBurn();
+  const workerRollup = useHermesWindowedRollup({ hours: 168, limit: 20 });
   const chain = useChainCompletion();
   const board = useBoardStats();
 
@@ -938,6 +1200,15 @@ export function StatistikView() {
           <b>{de.stats.loadError}</b>
         </StLead>
       ) : null}
+
+      <WorkerEfficiencySection
+        roots={workerRollup.data?.roots ?? []}
+        profiles={profiles}
+        minReviewSample={reliability.data?.min_n ?? DEFAULT_MIN_REVIEW_SAMPLE}
+        loading={workerRollup.loading && !workerRollup.data}
+        error={workerRollup.error}
+        stale={workerRollup.isStale}
+      />
 
       <section className="st-panel p-4">
         <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
