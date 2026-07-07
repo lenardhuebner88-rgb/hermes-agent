@@ -63,6 +63,9 @@ export interface Worker {
   output_tokens?: number | null;
   /** S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime). null → etaFraction-Fallback. */
   run_progress?: number | null;
+  /** S1 (Puls-Leitstand): Heartbeat-Zeitstempel (Unix-Sek, chronologisch, Cap 20)
+   * für die Swimlane-Band-Ticks. Fehlt bei alten Payloads. */
+  heartbeat_ticks?: number[];
 }
 
 export interface WorkersResponse {
@@ -70,6 +73,27 @@ export interface WorkersResponse {
   count: number;
   /** Round C: kanban.max_in_progress — null when not configured. */
   cap: number | null;
+  checked_at: number;
+}
+
+/** Ein Cross-Worker-Ereignis aus GET /runs/live-events (Puls-Leitstand-Ticker). */
+export interface LiveEvent {
+  id: number;
+  run_id: number | null;
+  task_id: string | null;
+  task_title: string | null;
+  profile: string | null;
+  kind: string;
+  note: string | null;
+  /** Unix-Sekunden. */
+  at: number;
+}
+
+export interface LiveEventsResponse {
+  events: LiveEvent[];
+  count: number;
+  /** Höchste Event-ID der Antwort — Cursor für den since_id-Inkrement-Poll. */
+  latest_id: number | null;
   checked_at: number;
 }
 
