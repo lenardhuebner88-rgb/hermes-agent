@@ -22327,12 +22327,14 @@ def _spawn_claude_worker(
         if profile_instructions
         else ""
     )
+    knowledge_pointers_block = "\n".join(_render_knowledge_pointers()).rstrip() + "\n\n"
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
         f"{profile_block}"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
+        f"{knowledge_pointers_block}"
         f"{prior_attempts_block}"
         f"{parent_history_block}"
         f"{comment_block}"
@@ -23175,6 +23177,22 @@ def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     return _kanban_context.cap_text(s, limit)
 
 
+def _render_knowledge_pointers() -> list[str]:
+    """Render static external knowledge pointers for worker context.
+
+    Single source of truth shared by the Hermes-worker context
+    (:func:`build_worker_context`) and the claude-CLI worker prompt
+    (:func:`_spawn_claude_worker`). The pointers name on-disk resources only;
+    their content is never inlined.
+    """
+    return [
+        "## Knowledge pointers",
+        "- Current model landscape (cron-maintained, ~30min fresh): /home/piet/llm-wiki/wiki/models/model-landscape.md — read it only when a model/routing/pricing question arises.",
+        "- Canonical cross-agent facts: /home/piet/vault/00-Canon/ (start at _index.md)",
+        "",
+    ]
+
+
 def _render_prior_attempts(
     conn: sqlite3.Connection,
     task_id: str,
@@ -23714,14 +23732,7 @@ def build_worker_context(
     # Knowledge pointers — static pointers to external resources workers may
     # consult on demand. No content is inlined here; workers read on-disk files
     # only when the pointer is relevant to their specific task.
-    lines.append("## Knowledge pointers")
-    lines.append(
-        "- Current model landscape (cron-maintained, ~30min fresh): /home/piet/llm-wiki/wiki/models/model-landscape.md — read it only when a model/routing/pricing question arises."
-    )
-    lines.append(
-        "- Canonical cross-agent facts: /home/piet/vault/00-Canon/ (start at _index.md)"
-    )
-    lines.append("")
+    lines.extend(_render_knowledge_pointers())
 
     if task.body and task.body.strip():
         # PlanSpec B: when the body references a known contract_profile (and
