@@ -25609,6 +25609,68 @@ def decision_queue(
     except Exception:
         pass
 
+    # release_gate_parked — tasks carrying a 'release_gate_parked' event that
+    #    are NOT in a terminal state (not done/archived). Must run BEFORE the
+    #    generic operator_escalation _add() below: the no-silent-stall sweep
+    #    (4A) emits a 'release_gate_parked' event when a gate parks AND, ~1min
+    #    later, an 'operator_escalation' event for the SAME task — same
+    #    "specific beats generic" precedence as section 0 above, otherwise
+    #    _add()'s seen-set lets the generic escalation claim the row first and
+    #    the release-gate button never surfaces. The suggested_command is the
+    #    FULL gate sequence: the event payload's own ``commands`` list (what
+    #    the gate actually parked on) joined with ``&&``, falling back to the
+    #    canonical _RELEASE_GATE_COMMANDS. The old ``next(iter(...))`` surfaced
+    #    only the leading ``cd`` — a no-op alone.
+    try:
+        from hermes_cli import kanban_worktrees as _kwt  # lazy: avoids import cycle
+
+        _fallback_cmd = (
+            " && ".join(_kwt._RELEASE_GATE_COMMANDS) or "hermes kanban show <id>"
+        )
+        for row in conn.execute(
+            "SELECT e.task_id, e.payload, e.created_at AS event_at, "
+            "t.title AS title, MAX(e.id) "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = 'release_gate_parked' "
+            "  AND t.status NOT IN ('done', 'archived') "
+            "GROUP BY e.task_id",
+        ).fetchall():
+            if row["task_id"] in seen:
+                continue
+            payload = _payload_dict(row["payload"])
+            reason = (
+                str(payload.get("reason") or "").strip()
+                or "Release gate parked — awaiting GO"
+            )
+            cmds = payload.get("commands")
+            if isinstance(cmds, list) and cmds:
+                suggested = " && ".join(str(c) for c in cmds)
+            else:
+                suggested = _fallback_cmd
+            _add(
+                "release_gate_parked",
+                row["task_id"],
+                row["title"],
+                reason,
+                _age(row["event_at"]),
+                suggested,
+                extra={
+                    "release_gate": {
+                        "root_id": payload.get("root_id"),
+                        "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
+                        "merge_commit": payload.get("merge_commit"),
+                        "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
+                        "suggested_command": suggested,
+                    },
+                    "root_id": payload.get("root_id"),
+                    "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
+                    "merge_commit": payload.get("merge_commit"),
+                    "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
+                },
+            )
+    except Exception:
+        pass
+
     # operator_escalation — coalesced counter view (ESCALATION-IDEMPOTENT-
     # COALESCE-S1). Each task still surfaces its NEWEST escalation payload, but
     # the seen-set no longer silently hides repeats: the inline write path keeps
@@ -25915,62 +25977,6 @@ def decision_queue(
                 "Decompose root is ready — all subtasks done; root awaits finalization",
                 _age(row["created_at"]),
                 f"hermes kanban show {row['task_id']}",
-            )
-    except Exception:
-        pass
-
-    # 7) release_gate_parked — tasks carrying a 'release_gate_parked' event
-    #    that are NOT in a terminal state (not done/archived).  The
-    #    suggested_command is the FULL gate sequence: the event payload's own
-    #    ``commands`` list (what the gate actually parked on) joined with
-    #    ``&&``, falling back to the canonical _RELEASE_GATE_COMMANDS.  The old
-    #    ``next(iter(...))`` surfaced only the leading ``cd`` — a no-op alone.
-    try:
-        from hermes_cli import kanban_worktrees as _kwt  # lazy: avoids import cycle
-
-        _fallback_cmd = (
-            " && ".join(_kwt._RELEASE_GATE_COMMANDS) or "hermes kanban show <id>"
-        )
-        for row in conn.execute(
-            "SELECT e.task_id, e.payload, e.created_at AS event_at, "
-            "t.title AS title, MAX(e.id) "
-            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
-            "WHERE e.kind = 'release_gate_parked' "
-            "  AND t.status NOT IN ('done', 'archived') "
-            "GROUP BY e.task_id",
-        ).fetchall():
-            if row["task_id"] in seen:
-                continue
-            payload = _payload_dict(row["payload"])
-            reason = (
-                str(payload.get("reason") or "").strip()
-                or "Release gate parked — awaiting GO"
-            )
-            cmds = payload.get("commands")
-            if isinstance(cmds, list) and cmds:
-                suggested = " && ".join(str(c) for c in cmds)
-            else:
-                suggested = _fallback_cmd
-            _add(
-                "release_gate_parked",
-                row["task_id"],
-                row["title"],
-                reason,
-                _age(row["event_at"]),
-                suggested,
-                extra={
-                    "release_gate": {
-                        "root_id": payload.get("root_id"),
-                        "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
-                        "merge_commit": payload.get("merge_commit"),
-                        "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
-                        "suggested_command": suggested,
-                    },
-                    "root_id": payload.get("root_id"),
-                    "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
-                    "merge_commit": payload.get("merge_commit"),
-                    "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
-                },
             )
     except Exception:
         pass

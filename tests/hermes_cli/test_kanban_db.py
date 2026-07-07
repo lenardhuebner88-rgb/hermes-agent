@@ -13392,6 +13392,74 @@ def test_c1_release_gate_suggested_command_falls_back_without_payload_commands(k
         assert cmd in suggested
 
 
+def test_c1_release_gate_parked_beats_generic_operator_escalation(kanban_home):
+    """Regression (2026-07-07 live find): the no-silent-stall safety net
+    (``escalate_silent_blocks_sweep``) auto-emits a GENERIC ``operator_escalation``
+    event for every settled blocked task — including a release-gate child, which
+    has no task_runs at all and so is treated as settled immediately. On the live
+    board this lands ~1min after the gate parks, giving the task BOTH a
+    ``release_gate_parked`` event (real payload shape from
+    ``_create_parked_release_gate_child``) and a real ``operator_escalation``
+    event (real payload shape from ``escalate_silent_blocks_sweep`` itself, not a
+    hand-authored fake). Before the fix, decision_queue's seen-set let the
+    earlier-running generic operator_escalation _add() claim the row first, so
+    the more specific release_gate_parked decision — and the ``release_gate``
+    button metadata the frontend renders "Release-Gate ausführen" from — never
+    surfaced for that task again."""
+    from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
+
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="root task", assignee="orchestrator")
+        task = kb.create_task(
+            conn,
+            title="release gate task",
+            assignee="verifier",
+            parents=(root,),
+            initial_status="blocked",
+        )
+        merge_commit = "abc123def4560"
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task,
+                "release_gate_parked",
+                {
+                    "state": "GREEN_CODE_NOT_RUNTIME_ACTIVATED",
+                    "source_task": root,
+                    "root_id": root,
+                    "merge_commit": merge_commit,
+                    "reason": "awaiting release-gate GO",
+                    "commands": list(_RELEASE_GATE_COMMANDS),
+                },
+            )
+
+        # Real production write path (not a hand-authored event): the silent-
+        # block safety net escalates any settled blocked task it finds.
+        sweep_summary = kb.escalate_silent_blocks_sweep(conn)
+        assert any(e["task_id"] == task for e in sweep_summary["escalated"]), (
+            "test setup invalid: the sweep did not escalate the parked task — "
+            "the scenario this regression guards against was not reproduced"
+        )
+        # Confirm the real operator_escalation event actually landed, so the
+        # test is provably exercising the precedence race, not a no-op sweep.
+        assert conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'operator_escalation'",
+            (task,),
+        ).fetchone() is not None
+
+        result = kb.decision_queue(conn)
+
+    # The specific release_gate_parked decision must win — not the generic
+    # operator_escalation the sweep also wrote for the very same task.
+    assert _kinds_for(task, result) == ["release_gate_parked"]
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    assert row["kind"] == "release_gate_parked"
+    assert "release_gate" in row, "release-gate button metadata missing from row"
+    assert row["release_gate"]["root_id"] == root
+    assert row["release_gate"]["source_task_id"] == root
+    assert row["release_gate"]["merge_commit"] == merge_commit
+
+
 # ---------------------------------------------------------------------------
 # F5 (night-sprint): scores-Tabelle + Review-Verdicts als Eval-Baseline
 # ---------------------------------------------------------------------------
