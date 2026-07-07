@@ -2237,6 +2237,22 @@ def _make_release_gate_child(conn, *, root_id=None, merge_commit="abc123def456")
     return source_id, child_id, root
 
 
+def _fake_activation(*, ok=True, pre=1111, post=2222):
+    """Injectable ``activation_runner`` seam for tests: mimics the real
+    deploy_dashboard.sh runner's ``(ok, output, meta)`` contract with a changed
+    dashboard PID (pre != post) as the 'restart happened' evidence. No real
+    build/restart runs."""
+    calls = []
+
+    def _run():
+        calls.append(True)
+        output = "deploy_dashboard.sh: OK" if ok else "activation: deploy_dashboard.sh exit 1"
+        return ok, output, {"pre_pid": pre, "post_pid": post, "deploy_exit": 0 if ok else 1}
+
+    _run.calls = calls  # type: ignore[attr-defined]
+    return _run
+
+
 
 # ---------------------------------------------------------------------------
 # S6 — end-to-end capstone: park -> clear -> auto-merge against a REAL repo
@@ -2563,30 +2579,40 @@ def test_decompose_root_with_open_child_not_finalized(
 
 
 def test_release_gate_executor_green_path(kanban_home):
-    """Gate green on first run -> success event, no fixer, child done."""
+    """Gate green on first run -> real activation -> success event, no fixer,
+    child done."""
     calls = []
 
     def fake_fixer(**kw):
         calls.append(kw)
 
+    activation = _fake_activation()
     with kb.connect() as conn:
         _, child_id, root = _make_release_gate_child(conn)
         result = kwt.execute_release_gate(
             conn, child_id,
             gate_runner=lambda: (True, "build ok"),
             fixer_runner=fake_fixer,
+            activation_runner=activation,
         )
         executed = _events(conn, child_id, "release_gate_executed")
         fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
+        activated = _events(conn, child_id, "release_gate_activated")
         child = kb.get_task(conn, child_id)
 
     assert result["status"] == "green"
     assert result["fixer_attempts"] == 0
     assert calls == []  # fixer never spawned
+    assert activation.calls == [True]  # activation ran exactly once
     assert len(executed) == 1
     assert executed[0]["ok"] is True
     assert executed[0]["attempt"] == 0
     assert fix_attempts == []
+    # green now REQUIRES a real activation: the child is done only after the
+    # backend restart landed (pre != post PID) and health passed.
+    assert len(activated) == 1
+    assert activated[0]["pre_pid"] == 1111
+    assert activated[0]["post_pid"] == 2222
     assert child.status == "done"
 
 
@@ -2607,14 +2633,17 @@ def test_release_gate_executor_red_then_fixer_then_green(kanban_home):
             conn, child_id,
             gate_runner=fake_gate,
             fixer_runner=fake_fixer,
+            activation_runner=_fake_activation(),
             max_retries=2,
         )
         executed = _events(conn, child_id, "release_gate_executed")
         fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
+        activated = _events(conn, child_id, "release_gate_activated")
         child = kb.get_task(conn, child_id)
 
     assert result["status"] == "green"
     assert result["fixer_attempts"] == 1
+    assert len(activated) == 1  # activation runs once, after the code went green
     # exactly one fixer spawn, on the chain worktree/branch (NOT live-main)
     assert len(fixer_calls) == 1
     fc = fixer_calls[0]
@@ -2803,6 +2832,176 @@ def test_release_gate_executor_max_retries_zero_immediate_escalation(kanban_home
     assert result["status"] == "escalated"
     assert fixer_calls == []
     assert len(escalations) == 1
+
+
+def test_release_gate_backend_change_activates_and_greens(kanban_home):
+    """S1 capstone (AC-2/AC-3/AC-5): a green code gate does NOT finish on 'builds'
+    — it drives a REAL runtime activation (backend restart) and only then greens
+    the child. The reproducible 'backend change -> restart happened -> child green'
+    path: the activation seam records that it ran, a release_gate_activated event
+    carries the changed :9119 PID (restart evidence), and the child is done."""
+    activation = _fake_activation(pre=4242, post=9191)
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (True, "npm build ok"),
+            fixer_runner=lambda **kw: None,
+            activation_runner=activation,
+        )
+        activated = _events(conn, child_id, "release_gate_activated")
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "green"
+    assert result["activation"]["pre_pid"] == 4242
+    assert result["activation"]["post_pid"] == 9191
+    # activation ran exactly once, AFTER the code gate proved green
+    assert activation.calls == [True]
+    assert len(activated) == 1
+    assert activated[0]["ok"] is True
+    assert activated[0]["root_id"] == root
+    assert activated[0]["pre_pid"] != activated[0]["post_pid"]  # restart took
+    # the child is deterministically done — the result survives the (simulated)
+    # restart because the writer is the activation process, not a dying request
+    assert child.status == "done"
+
+
+def test_release_gate_activation_failure_escalates_and_keeps_child_blocked(kanban_home):
+    """AC-4: green CODE but a failed runtime activation (backend restart / health)
+    escalates to the operator and keeps the child BLOCKED — a green build is never
+    silently reported as activated. The escalation carries the activation error and
+    an activation_failed event, distinct from a persistent-red gate escalation."""
+    def failing_activation():
+        return (
+            False,
+            "activation: dashboard not running after restart (no MainPID)",
+            {"pre_pid": 100, "post_pid": None, "deploy_exit": 0},
+        )
+
+    fixer_calls = []
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (True, "build ok"),
+            fixer_runner=lambda **kw: fixer_calls.append(kw),
+            activation_runner=failing_activation,
+        )
+        activated = _events(conn, child_id, "release_gate_activated")
+        activation_failed = _events(conn, child_id, "release_gate_activation_failed")
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "escalated"
+    # code was green on attempt 0, so the bounded fixer budget was never spent
+    assert fixer_calls == []
+    assert result["fixer_attempts"] == 0
+    assert activated == []  # no success event
+    assert len(activation_failed) == 1
+    assert activation_failed[0]["ok"] is False
+    assert len(escalations) == 1
+    assert "activation" in escalations[0]["evidence"]["last_error"].lower()
+    assert child.status == "blocked"
+
+
+def test_default_release_gate_activation_runs_deploy_and_verifies_new_pid(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """AC-1: the default activation runner invokes deploy_dashboard.sh and treats
+    a deploy exit 0 WITH a changed dashboard PID (a genuinely new :9119 process)
+    as success, surfacing the pre/post PIDs as evidence."""
+    deploy = tmp_path / "deploy_dashboard.sh"
+    deploy.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setattr(kwt, "DEPLOY_SCRIPT", deploy)
+
+    ran = {}
+
+    def fake_run(argv, **kwargs):
+        ran["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout="[deploy] OK", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    pids = iter([54321, 67890])  # pre, then post — a real restart forks a new PID
+    monkeypatch.setattr(kwt, "_dashboard_service_pid", lambda: next(pids))
+
+    ok, output, meta = kwt._default_release_gate_activation()
+
+    assert ok is True
+    assert ran["argv"][0] == "bash"
+    assert ran["argv"][1] == str(deploy)  # canonical deploy script, not a bare build
+    assert meta == {"pre_pid": 54321, "post_pid": 67890, "deploy_exit": 0}
+
+
+def test_default_release_gate_activation_pid_unchanged_is_failure(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """A deploy that exits 0 but leaves the dashboard PID unchanged means the
+    restart did not take (stale backend) → activation FAILS, so the child never
+    greens on a build-only run that skipped the real restart (AC-2 safeguard)."""
+    deploy = tmp_path / "deploy_dashboard.sh"
+    deploy.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setattr(kwt, "DEPLOY_SCRIPT", deploy)
+    monkeypatch.setattr(
+        kwt.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(kwt, "_dashboard_service_pid", lambda: 4444)  # same pre==post
+
+    ok, output, meta = kwt._default_release_gate_activation()
+
+    assert ok is False
+    assert "unchanged" in output.lower()
+    assert meta["pre_pid"] == meta["post_pid"] == 4444
+
+
+def test_spawn_release_gate_activation_launches_detached_transient_unit():
+    """AC-3/AC-5: the endpoint/auto path launches the activation as a systemd
+    --user transient unit (its own cgroup → survives the restart it triggers)
+    running the SAME `hermes kanban release-gate` core the CLI runs, threading the
+    board through. The systemd-run launcher is injected so nothing really starts."""
+    captured = {}
+
+    def fake_runner(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    result = kwt.spawn_release_gate_activation(
+        "t_gate/9", board="ops", runner=fake_runner, hermes_bin="/opt/hermes",
+    )
+
+    argv = captured["argv"]
+    assert result["ok"] is True
+    assert argv[0].endswith("systemd-run")
+    assert "--user" in argv and "--collect" in argv
+    # sanitized, stable unit name (dedup guard) — no '/' in a unit name
+    assert "--unit=hermes-release-gate-t_gate_9" in argv
+    # the detached command IS the shared CLI activation core, board-scoped. The
+    # global --board MUST sit before the subcommand or argparse rejects it.
+    tail = argv[argv.index("/opt/hermes"):]
+    assert tail == ["/opt/hermes", "kanban", "--board", "ops",
+                    "release-gate", "t_gate/9", "--json"]
+    # Regression guard: the emitted CLI portion must actually parse (a --board
+    # after the subcommand would raise "unrecognized arguments").
+    import argparse
+    from hermes_cli import kanban as kc
+    parser = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(parser.add_subparsers(dest="cmd"))
+    ns = parser.parse_args(tail[1:])  # drop the hermes binary path
+    assert ns.task_id == "t_gate/9" and ns.board == "ops"
+    # PATH is passed through so npm/node/git/systemctl resolve in the clean unit env
+    assert any(a.startswith("--setenv=PATH=") for a in argv)
+
+
+def test_spawn_release_gate_activation_reports_launch_failure():
+    """A launcher that fails (e.g. a unit of the same name already running — the
+    dedup guard) is reported as ok=False, not silently swallowed."""
+    def fake_runner(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="Unit already exists.")
+
+    result = kwt.spawn_release_gate_activation("t_gate", runner=fake_runner)
+
+    assert result["ok"] is False
+    assert "already exists" in result["detail"].lower()
 
 
 def test_release_gate_executor_rejects_non_gate_task(kanban_home):

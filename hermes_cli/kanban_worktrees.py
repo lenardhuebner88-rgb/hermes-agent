@@ -943,7 +943,23 @@ def _create_parked_release_gate_child(
                     "release_gate_auto_execute_started",
                     {"mode": "auto", **payload},
                 )
-            execute_release_gate(conn, child_id)
+            # AC-5: auto-mode uses EXACTLY the same activation path as the CLI —
+            # a detached transient unit runs ``execute_release_gate`` (gate +
+            # real backend restart via deploy_dashboard.sh) and writes the child
+            # result itself. Detaching (rather than the old inline call) keeps
+            # the integration process from blocking on the deploy AND makes the
+            # activation immune to the restart it triggers (self-termination
+            # trap). board=None → the unit resolves the current board (the
+            # default board release gates live on).
+            spawn = spawn_release_gate_activation(child_id)
+            if not spawn.get("ok"):
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn,
+                        child_id,
+                        "release_gate_auto_execute_failed",
+                        {"error": spawn.get("detail"), **payload},
+                    )
         except Exception as exc:
             with kb.write_txn(conn):
                 kb._append_event(
@@ -978,6 +994,22 @@ LIVE_CHECKOUT_ROOT = Path("/home/piet/.hermes/hermes-agent")
 # build is not misreported as red.
 RELEASE_GATE_COMMAND_TIMEOUT = 1800
 RELEASE_GATE_FIXER_TIMEOUT = 1800
+
+# Runtime activation (S1): a GREEN release gate must ACTIVATE the merged code, not
+# merely prove it builds — build + backend restart + post-restart health, run
+# through the canonical ``scripts/deploy_dashboard.sh`` (which also lays down the
+# pre-deploy rollback anchor tag and polls ``/api/status`` after the restart, so a
+# 200 + valid JSON proves the *Python* backend, not just the static SPA, is live).
+# The activation is launched as a DETACHED transient unit (see
+# :func:`spawn_release_gate_activation`) so the restart it triggers cannot kill the
+# process that writes the child's terminal result — the self-termination trap.
+DEPLOY_SCRIPT = LIVE_CHECKOUT_ROOT / "scripts" / "deploy_dashboard.sh"
+DASHBOARD_SERVICE = "hermes-dashboard.service"
+# lint + build + restart + health poll — generous, mirrors the gate build timeout.
+RELEASE_GATE_ACTIVATION_TIMEOUT = 1800
+# Time budget for the ``systemd-run`` launcher itself (it starts the transient
+# unit and returns immediately; this only bounds the launch, not the activation).
+RELEASE_GATE_SPAWN_TIMEOUT = 30
 
 
 class ReleaseGateError(RuntimeError):
@@ -1425,6 +1457,88 @@ def _default_release_gate_runner(
     return ok, tail
 
 
+def _dashboard_service_pid() -> Optional[int]:
+    """Current ``MainPID`` of the durable dashboard systemd unit, or ``None``.
+
+    The pre/post activation PIDs are the AC-1 evidence that a genuine backend
+    restart happened: a ``restart`` always forks a fresh process, so a
+    changed, non-zero MainPID proves fresh Python is live (a bare rebuild would
+    leave the PID untouched). Best-effort — any failure returns ``None`` and the
+    caller falls back to the deploy script's own health verdict."""
+    ctl = os.environ.get("HERMES_SYSTEMCTL_BIN") or "systemctl"
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv
+            [ctl, "--user", "show", "-p", "MainPID", "--value", DASHBOARD_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = (proc.stdout or "").strip()
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid or None
+
+
+def _default_release_gate_activation() -> tuple[bool, str, dict]:
+    """Perform the REAL runtime activation and return ``(ok, output_tail, meta)``.
+
+    Captures the dashboard service PID, runs ``deploy_dashboard.sh`` (lint +
+    build + pre-deploy anchor tag + ``systemctl --user restart`` + post-restart
+    ``/api/status`` health), then captures the new PID.
+
+    ``ok`` requires the deploy script to exit 0 (its own post-restart health
+    gate) AND a present PID afterwards; when both pre- and post-PIDs are known it
+    also requires them to differ (a genuinely new backend process — the restart
+    took, AC-1/AC-2). ``meta`` carries the pre/post PIDs and the deploy exit code
+    for the event trail. This is the injectable seam tests replace so no real
+    restart runs under pytest."""
+    pre_pid = _dashboard_service_pid()
+    if not DEPLOY_SCRIPT.is_file():
+        return (
+            False,
+            f"activation: deploy script missing: {DEPLOY_SCRIPT}",
+            {"pre_pid": pre_pid},
+        )
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, code-defined path
+            ["bash", str(DEPLOY_SCRIPT)],
+            cwd=str(LIVE_CHECKOUT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=RELEASE_GATE_ACTIVATION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            False,
+            f"activation: deploy timed out after {RELEASE_GATE_ACTIVATION_TIMEOUT}s",
+            {"pre_pid": pre_pid},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"activation: deploy command error: {exc}", {"pre_pid": pre_pid}
+    post_pid = _dashboard_service_pid()
+    tail = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
+    meta = {"pre_pid": pre_pid, "post_pid": post_pid, "deploy_exit": proc.returncode}
+    if proc.returncode != 0:
+        return False, f"activation: deploy_dashboard.sh exit {proc.returncode}\n{tail}", meta
+    if post_pid is None:
+        return (
+            False,
+            f"activation: dashboard not running after restart (no MainPID)\n{tail}",
+            meta,
+        )
+    if pre_pid is not None and post_pid == pre_pid:
+        return (
+            False,
+            f"activation: dashboard PID unchanged ({post_pid}) — restart did not take\n{tail}",
+            meta,
+        )
+    return True, tail, meta
+
+
 def _release_gate_fixer_prompt(
     *, gate_error: str, attempt: int, task_id: str, root_id: str,
 ) -> str:
@@ -1598,15 +1712,55 @@ def _record_release_gate_fix_attempt(
                      task_id, exc_info=True)
 
 
+def _record_release_gate_activation(
+    conn: sqlite3.Connection, task_id: str, *,
+    ok: bool, output: str, meta: Optional[dict], root_id: str,
+) -> None:
+    """Append the runtime-activation outcome (build + backend restart + health)
+    to the child's event trail. ``release_gate_activated`` on success carries the
+    pre/post dashboard PIDs (AC-1 evidence); ``release_gate_activation_failed``
+    on a failed deploy/health carries the same PIDs plus the error tail."""
+    from hermes_cli import kanban_db as kb
+
+    meta = meta or {}
+    payload = {
+        "ok": bool(ok),
+        "root_id": root_id,
+        "pre_pid": meta.get("pre_pid"),
+        "post_pid": meta.get("post_pid"),
+        "deploy_exit": meta.get("deploy_exit"),
+        "output_tail": (output or "")[-2000:],
+    }
+    kind = "release_gate_activated" if ok else "release_gate_activation_failed"
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, kind, payload)
+    except Exception:
+        _log.warning("could not record %s for %s", kind, task_id, exc_info=True)
+
+
 def _finish_release_gate_green(
     conn: sqlite3.Connection, task_id: str, root_id: str, fixer_attempts: int,
+    *, activation: Optional[dict] = None,
 ) -> None:
     from hermes_cli import kanban_db as kb
 
+    if activation is not None:
+        pre = activation.get("pre_pid")
+        post = activation.get("post_pid")
+        activation_line = (
+            "Runtime activation succeeded: backend restarted via "
+            f"deploy_dashboard.sh (:9119 PID {pre} → {post}), post-restart health "
+            "passed."
+        )
+    else:
+        activation_line = (
+            "Dashboard build + artifact check + loopback smoke passed in the "
+            "live checkout."
+        )
     note = (
         f"✅ Release-gate green for chain `{root_id}` after {fixer_attempts} "
-        "bounded fixer attempt(s). Dashboard build + artifact check + "
-        "loopback smoke passed in the live checkout."
+        f"bounded fixer attempt(s). {activation_line}"
     )
     try:
         kb.add_comment(conn, task_id, "verifier", note)
@@ -1653,6 +1807,15 @@ def _finish_release_gate_green(
 _RELEASE_GATE_INFRA_SENTINELS = (
     "release-gate timed out",
     "release-gate command error",
+    # Runtime-activation operational faults (S1): a deploy that could not even
+    # run to a verdict (launcher/subprocess error, wall-clock timeout, missing
+    # script) is infrastructure → transient. A deploy that RAN and failed its
+    # health gate ("activation: deploy_dashboard.sh exit N" / "dashboard not
+    # running" / "PID unchanged") is a genuine blocking defect and stays
+    # ``release_gate_red`` (real-bug).
+    "activation: deploy timed out",
+    "activation: deploy command error",
+    "activation: deploy script missing",
 )
 
 
@@ -1683,16 +1846,41 @@ def _release_gate_trigger_outcome(last_error: str) -> str:
 
 def _escalate_release_gate(
     conn: sqlite3.Connection, task_id: str, root_id: str, *,
-    attempts: int, last_error: str,
+    attempts: int, last_error: str, phase: str = "gate",
 ) -> None:
     from hermes_cli import kanban_db as kb
 
-    payload = {
-        "task": {"id": task_id},
-        "why_now": (
+    # ``phase`` distinguishes a persistent-RED gate (the merged code never built/
+    # smoked green) from a failed runtime ACTIVATION (code was green but the
+    # backend restart / post-restart health failed). Both escalate to the
+    # operator and keep the child blocked; only the human-facing wording and the
+    # re-block reason differ. Default ``"gate"`` keeps the pre-S1 path byte-identical.
+    if phase == "activation":
+        why_now = (
+            f"Runtime activation for chain {root_id} failed (backend restart / "
+            "post-restart health) after the code gate was green"
+        )
+        comment = (
+            f"⛔ Release-gate code was green but runtime activation failed → "
+            "operator_escalation. The pre-deploy rollback anchor is in place; "
+            "inspect the deploy/health output and roll back or re-activate."
+        )
+        block_reason = "release-gate activation failed"
+    else:
+        why_now = (
             f"Release gate for chain {root_id} still red after {attempts} "
             "bounded fixer attempt(s)"
-        ),
+        )
+        comment = (
+            f"⛔ Release-gate still red after {attempts} bounded fixer "
+            "attempt(s) → operator_escalation. The fixer worked only in the "
+            "chain worktree; live-main was never edited."
+        )
+        block_reason = "release-gate persistent red"
+
+    payload = {
+        "task": {"id": task_id},
+        "why_now": why_now,
         "attempts_already_made": attempts,
         "evidence": {
             "last_error": (last_error or "")[-2000:],
@@ -1735,12 +1923,7 @@ def _escalate_release_gate(
         _log.warning("could not record operator_escalation for %s",
                      task_id, exc_info=True)
     try:
-        kb.add_comment(
-            conn, task_id, "verifier",
-            f"⛔ Release-gate still red after {attempts} bounded fixer "
-            "attempt(s) → operator_escalation. The fixer worked only in the "
-            "chain worktree; live-main was never edited.",
-        )
+        kb.add_comment(conn, task_id, "verifier", comment)
     except Exception:
         _log.debug("release-gate escalation comment failed", exc_info=True)
     # Keep the child blocked (it already is). Re-block defensively if some
@@ -1748,9 +1931,52 @@ def _escalate_release_gate(
     try:
         task = kb.get_task(conn, task_id)
         if task is not None and task.status not in ("blocked", "archived"):
-            kb.block_task(conn, task_id, reason="release-gate persistent red")
+            kb.block_task(conn, task_id, reason=block_reason)
     except Exception:
         _log.debug("release-gate re-block failed", exc_info=True)
+
+
+def _activate_and_finalize(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    fixer_attempts: int,
+    activation_runner,
+) -> dict:
+    """Green CODE → REAL runtime activation → finish (done) or escalate.
+
+    The gate proved the merged code builds/smokes; this step makes it *live* —
+    build + backend restart + post-restart health via ``deploy_dashboard.sh``.
+    On activation success the child is marked done (with the pre→post PID as
+    evidence); on activation failure the child escalates to the operator and
+    stays blocked (the deploy script's pre-deploy anchor tag is the rollback
+    handle). Returns the ``execute_release_gate`` result dict."""
+    act_ok, act_output, act_meta = activation_runner()
+    _record_release_gate_activation(
+        conn, task_id, ok=act_ok, output=act_output, meta=act_meta, root_id=root_id,
+    )
+    if act_ok:
+        _finish_release_gate_green(
+            conn, task_id, root_id, fixer_attempts, activation=act_meta,
+        )
+        return {
+            "ok": True,
+            "status": "green",
+            "fixer_attempts": fixer_attempts,
+            "root_id": root_id,
+            "activation": act_meta,
+        }
+    _escalate_release_gate(
+        conn, task_id, root_id, attempts=fixer_attempts,
+        last_error=act_output, phase="activation",
+    )
+    return {
+        "ok": False,
+        "status": "escalated",
+        "fixer_attempts": fixer_attempts,
+        "root_id": root_id,
+        "activation": act_meta,
+    }
 
 
 def execute_release_gate(
@@ -1759,21 +1985,32 @@ def execute_release_gate(
     *,
     gate_runner=None,
     fixer_runner=None,
+    activation_runner=None,
     max_retries: Optional[int] = None,
     repo_root: Optional[Path] = None,
     board: Optional[str] = None,
 ) -> dict:
     """Process a parked release-gate child end to end.
 
-    Runs the gate in the live checkout. On green: report success + mark the
-    child done. On red: spawn up to *max_retries* bounded premium fixers
-    inside the chain worktree/branch (never live-main), re-running the gate
-    after each. Persistent red → ``operator_escalation`` and the child stays
-    blocked.
+    Runs the gate in the live checkout. On red: spawn up to *max_retries*
+    bounded premium fixers inside the chain worktree/branch (never live-main),
+    re-running the gate after each. Persistent red → ``operator_escalation`` and
+    the child stays blocked.
 
-    ``gate_runner``/``fixer_runner`` are injectable seams (defaults wire to the
-    live subprocess gate and the claude-CLI fixer). Returns a result dict with
-    ``status`` (``"green"`` | ``"escalated"``) and ``fixer_attempts``.
+    On green CODE it does NOT stop at "builds" — it performs the REAL runtime
+    activation (build + backend restart + post-restart health via
+    ``deploy_dashboard.sh``); only after the restart lands and health passes is
+    the child marked done. A failed activation escalates to the operator (the
+    child stays blocked) — a green build is never silently reported as activated.
+
+    This function is the SHARED activation core: the CLI runs it directly and the
+    endpoint / auto-mode run it inside a detached transient unit (see
+    :func:`spawn_release_gate_activation`) so the restart cannot kill the writer.
+
+    ``gate_runner``/``fixer_runner``/``activation_runner`` are injectable seams
+    (defaults wire to the live subprocess gate, the claude-CLI fixer, and the
+    ``deploy_dashboard.sh`` restart). Returns a result dict with ``status``
+    (``"green"`` | ``"escalated"``) and ``fixer_attempts``.
     """
     ctx = _release_gate_context(conn, task_id)
     if ctx is None:
@@ -1788,6 +2025,7 @@ def execute_release_gate(
     max_retries = max(0, int(max_retries))
     gate_runner = gate_runner or _default_release_gate_runner
     fixer_runner = fixer_runner or _default_release_gate_fixer
+    activation_runner = activation_runner or _default_release_gate_activation
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
 
     def _retry_budget_for(output: str) -> int:
@@ -1801,8 +2039,9 @@ def execute_release_gate(
         conn, task_id, attempt=0, ok=ok, output=output, root_id=root_id,
     )
     if ok:
-        _finish_release_gate_green(conn, task_id, root_id, 0)
-        return {"ok": True, "status": "green", "fixer_attempts": 0, "root_id": root_id}
+        return _activate_and_finalize(
+            conn, task_id, root_id, 0, activation_runner,
+        )
 
     fixer_attempts = 0
     while fixer_attempts < _retry_budget_for(output):
@@ -1829,13 +2068,9 @@ def execute_release_gate(
             root_id=root_id, fixer_error=fix_error,
         )
         if ok:
-            _finish_release_gate_green(conn, task_id, root_id, fixer_attempts)
-            return {
-                "ok": True,
-                "status": "green",
-                "fixer_attempts": fixer_attempts,
-                "root_id": root_id,
-            }
+            return _activate_and_finalize(
+                conn, task_id, root_id, fixer_attempts, activation_runner,
+            )
 
     _escalate_release_gate(
         conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
@@ -1845,6 +2080,106 @@ def execute_release_gate(
         "status": "escalated",
         "fixer_attempts": fixer_attempts,
         "root_id": root_id,
+    }
+
+
+def _release_gate_activation_unit(task_id: str) -> str:
+    """Stable, sanitized transient-unit name for a task's activation. Doubles as
+    a dedup guard: a second trigger while one is running fails to start (systemd:
+    unit already exists) instead of racing two backend restarts."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id))
+    return f"hermes-release-gate-{safe}"
+
+
+def spawn_release_gate_activation(
+    task_id: str,
+    board: Optional[str] = None,
+    *,
+    runner=None,
+    hermes_bin: Optional[str] = None,
+) -> dict:
+    """Launch the release-gate activation as a DETACHED systemd transient unit.
+
+    The activation restarts the dashboard backend. Run synchronously inside the
+    dashboard request (``release_gate_endpoint``) the ``systemctl restart`` would
+    kill the very process that must write the child's terminal result BEFORE it
+    runs — the self-termination trap. ``systemd-run --user`` places the run in its
+    OWN transient unit/cgroup, so it outlives both the request and the restart and
+    writes the child done/escalated itself (the CLI process has kanban.db access).
+
+    A bare ``setsid``/``Popen`` child would NOT survive: it stays in the dashboard
+    unit's cgroup, and systemd's default ``KillMode=control-group`` reaps the whole
+    cgroup on restart. The transient unit — not a double-fork — is the mechanism.
+
+    The detached unit runs ``hermes kanban release-gate <task_id> --json`` which is
+    the SAME :func:`execute_release_gate` core the CLI runs directly (AC-5). Returns
+    ``{"ok", "unit", "detail"}``. ``runner`` is an injectable seam (defaults to
+    ``subprocess.run``) so tests assert the argv without launching a unit."""
+    bin_path = (
+        hermes_bin
+        or os.environ.get("HERMES_BIN")
+        or shutil.which("hermes")
+        or "hermes"
+    )
+    systemd_run = os.environ.get("HERMES_SYSTEMD_RUN_BIN") or "systemd-run"
+    unit = _release_gate_activation_unit(task_id)
+
+    # systemd --user transient units start from the user manager's environment,
+    # not the caller's, so pass through the vars the CLI + deploy_dashboard.sh
+    # need: an augmented PATH (npm/node/git/curl/systemctl/python3 must resolve),
+    # the user-bus handles so ``systemctl --user restart`` works inside the unit,
+    # and HERMES_HOME when the caller pins a non-default runtime root.
+    path_prefix = [
+        os.path.expanduser("~/.local/bin"),
+        str(LIVE_CHECKOUT_ROOT / "venv" / "bin"),
+        "/usr/local/bin", "/usr/bin", "/bin",
+    ]
+    existing_path = os.environ.get("PATH", "")
+    merged_path = ":".join(path_prefix + ([existing_path] if existing_path else []))
+    setenv = [f"--setenv=PATH={merged_path}"]
+    for key in ("HERMES_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        val = os.environ.get(key)
+        if val:
+            setenv.append(f"--setenv={key}={val}")
+
+    # ``--board`` is a GLOBAL kanban option and argparse only accepts it BEFORE
+    # the ``release-gate`` subcommand — appending it after the subcommand fails
+    # with "unrecognized arguments". Build the CLI portion with the board slug in
+    # front of the subcommand.
+    cli_args = [bin_path, "kanban"]
+    if board:
+        cli_args += ["--board", str(board)]
+    cli_args += ["release-gate", str(task_id), "--json"]
+    argv = [
+        systemd_run, "--user", "--collect",
+        f"--unit={unit}",
+        f"--description=Hermes release-gate activation {task_id}",
+        *setenv,
+        *cli_args,
+    ]
+
+    run = runner or subprocess.run
+    try:
+        proc = run(  # noqa: S603 -- argv is a fixed list built above
+            argv, capture_output=True, text=True,
+            timeout=RELEASE_GATE_SPAWN_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "unit": unit, "detail": f"activation spawn failed: {exc}"}
+    if proc.returncode == 0:
+        return {
+            "ok": True,
+            "unit": unit,
+            "detail": (
+                "runtime activation started (detached); watch the release-gate "
+                "task for green/escalation"
+            ),
+        }
+    err = ((proc.stderr or "") + (proc.stdout or "")).strip()[-500:]
+    return {
+        "ok": False,
+        "unit": unit,
+        "detail": f"could not start activation unit (exit {proc.returncode}): {err}",
     }
 
 

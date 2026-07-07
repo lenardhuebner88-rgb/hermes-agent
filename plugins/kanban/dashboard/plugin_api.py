@@ -8421,14 +8421,17 @@ def release_gate_endpoint(
 
         from hermes_cli import kanban_worktrees  # noqa: WPS433 (intentional lazy import)
 
-        result = kanban_worktrees.execute_release_gate(conn, task_id)
-        detail = result.get("detail") or result.get("result") or result.get("status")
+        # Launch the activation DETACHED (systemd transient unit), never inline:
+        # the activation restarts THIS dashboard backend, and a synchronous run
+        # would be killed by its own ``systemctl restart`` before it could write
+        # the child's result — the self-termination trap. The detached unit runs
+        # the gate + real restart and writes the child green/escalated itself.
+        result = kanban_worktrees.spawn_release_gate_activation(task_id, board=board)
         return {
             "ok": bool(result.get("ok")),
-            "status": result.get("status"),
-            "fixer_attempts": result.get("fixer_attempts"),
-            "root_id": result.get("root_id"),
-            "detail": detail,
+            "status": "activating" if result.get("ok") else "spawn_failed",
+            "unit": result.get("unit"),
+            "detail": result.get("detail"),
         }
     finally:
         conn.close()

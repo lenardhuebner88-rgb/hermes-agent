@@ -8381,20 +8381,19 @@ def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client
 
     calls = []
 
-    def fake_execute(exec_conn, task_id):
+    def fake_spawn(task_id, board=None):
+        # The endpoint must LAUNCH the activation detached, never run it inline
+        # (a synchronous restart would kill this very request — self-termination).
         calls.append(task_id)
-        assert exec_conn is not None
         return {
             "ok": True,
-            "status": "green",
-            "fixer_attempts": 0,
-            "root_id": "t_root",
-            "result": "dashboard green",
+            "unit": f"hermes-release-gate-{task_id}",
+            "detail": "runtime activation started (detached); watch the release-gate task",
         }
 
     from hermes_cli import kanban_worktrees
 
-    monkeypatch.setattr(kanban_worktrees, "execute_release_gate", fake_execute)
+    monkeypatch.setattr(kanban_worktrees, "spawn_release_gate_activation", fake_spawn)
 
     confirm_missing = client.post(
         f"/api/plugins/kanban/tasks/{gate_id}/release-gate", json={"confirm": False}
@@ -8409,10 +8408,9 @@ def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "status": "green",
-        "fixer_attempts": 0,
-        "root_id": "t_root",
-        "detail": "dashboard green",
+        "status": "activating",
+        "unit": f"hermes-release-gate-{gate_id}",
+        "detail": "runtime activation started (detached); watch the release-gate task",
     }
     assert calls == [gate_id]
 

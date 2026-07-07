@@ -1714,7 +1714,7 @@ def _cmd_release_gate(args: argparse.Namespace) -> int:
     except Exception as exc:  # pragma: no cover
         print(f"Warning: pre-deploy backup failed ({exc}); continuing.", file=sys.stderr)
 
-    with kb.connect_closing() as conn:
+    with kb.connect_closing(board=getattr(args, "board", None)) as conn:
         try:
             result = kwt.execute_release_gate(
                 conn,
