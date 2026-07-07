@@ -84,6 +84,8 @@ const FIXTURE_WORKER: Worker = {
   effective_model: null,
   input_tokens: null,
   output_tokens: null,
+  token_status: "no_live_sample",
+  token_status_reason: "task_runs has no live token counters for this active worker yet",
   run_progress: null,
   heartbeat_ticks: [],
 };
@@ -98,6 +100,8 @@ const UPDATED_WORKER: Worker = {
   effective_model: "claude-sonnet-4",
   input_tokens: 1200,
   output_tokens: 80,
+  token_status: "live",
+  token_status_reason: null,
 };
 
 const BOARD_TASK: BoardTask = {
@@ -197,6 +201,12 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
     expect(screen.queryByRole("button", { name: "Schließen" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Schließen" })).toBeTruthy());
+  });
+
+  it("zeigt im Drawer einen klaren Platzhalter, wenn keine Live-Tokens vorliegen", () => {
+    renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    expect(document.body.textContent).toContain("Tokens");
+    expect(document.body.textContent).toContain("noch keine Live-Tokens");
   });
 });
 

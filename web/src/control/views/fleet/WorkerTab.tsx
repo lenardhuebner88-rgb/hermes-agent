@@ -330,6 +330,10 @@ function WorkerDrawer({
   const chainMembers = chainRootId
     ? allBoardTasks.filter((t) => t.root_id === chainRootId || t.id === chainRootId)
     : [];
+  const hasTokenSample = w.token_status === "live" || w.token_status === "partial" || w.input_tokens != null || w.output_tokens != null;
+  const tokenDisplay = hasTokenSample
+    ? `${fmtTokens(w.input_tokens)} → ${fmtTokens(w.output_tokens)}`
+    : de.worker.tokenNoLiveSample;
 
   // Drawer via shared Overlay: garantiert zentriert ab sm, Escape-Handling,
   // Scroll-Lock und Portal via document.body — kein eigener portal nötig.
@@ -376,7 +380,7 @@ function WorkerDrawer({
           </div>
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.drawerTokens}</div>
-            <div className="fleet-kv-v">{fmtTokens(w.input_tokens)} → {fmtTokens(w.output_tokens)}</div>
+            <div className="fleet-kv-v">{tokenDisplay}</div>
           </div>
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.drawerLaufzeit}</div>

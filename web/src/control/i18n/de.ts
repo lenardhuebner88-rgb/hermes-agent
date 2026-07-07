@@ -903,6 +903,7 @@ export const de = {
     chipStep: "Schritt",
     chipTokensIn: "In-Tokens",
     chipTokensOut: "Out-Tokens",
+    tokenNoLiveSample: "noch keine Live-Tokens",
     chipTokensNoLive: "Tokens & Kosten: nach Abschluss",
     chipTokensNoLiveTitle: "Live-Token-Zähler stehen für laufende Worker nicht zuverlässig bereit — echte Zahlen erscheinen nach Abschluss (Karte/Receipt).",
     chipNoValue: "—",
