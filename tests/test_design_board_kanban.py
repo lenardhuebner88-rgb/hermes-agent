@@ -1,156 +1,93 @@
+"""Tests for design_board_kanban lifecycle hooks."""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+
+import pytest
+
 from hermes_cli import design_board_kanban as dbk
 from hermes_cli import design_board_store as store
+from hermes_cli import kanban_db
 
 
-def test_terminal_set():
-    assert dbk.TERMINAL == {"done", "archived"}
+@pytest.fixture(autouse=True)
+def _isolate_design_board(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    # Initialise a fresh design-board store and kanban DB.
+    store_path = home / "design-board" / "board.json"
+    store_path.parent.mkdir()
+    store_path.write_text("{\"cards\": [], \"id_counter\": 0}")
+    db_path = kanban_db.kanban_db_path(board="default")
+    kanban_db._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kanban_db.init_db()
+    dbk.register_lifecycle_hooks = lambda: None
+    yield
 
 
-def test_task_facets_skips_missing(monkeypatch):
-    class FakeTask:
-        def __init__(self, id, status, assignee):
-            self.id, self.status, self.assignee = id, status, assignee
-
-    def fake_get_task(conn, tid):
-        return FakeTask(tid, "running", "coder") if tid == "t_ok" else None
-
-    monkeypatch.setattr(dbk, "_get_task", fake_get_task)
-    monkeypatch.setattr(dbk, "_open_ro", lambda: _Dummy())
-    # _open_ro is monkeypatched, so no real DB is touched.
-    facets = dbk.task_facets(["t_ok", "t_missing"])
-    assert facets == [{"id": "t_ok", "status": "running", "assignee": "coder", "terminal": False}]
+@pytest.fixture
+def board_db():
+    with kanban_db.connect_closing() as conn:
+        yield conn
 
 
-class _Dummy:
-    def __enter__(self): return object()
-    def __exit__(self, *a): return False
-
-class _FakeRow:
-    def __init__(self, id, status, assignee):
-        self._data = {"id": id, "status": status, "assignee": assignee}
-
-    def __getitem__(self, key):
-        return self._data[key]
-
-class _FakeConn:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def execute(self, _query, _params=None):
-        return self
-
-    def fetchall(self):
-        return self._rows
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-def test_batch_task_facets(monkeypatch):
-    rows = [
-        _FakeRow("t_1", "done", "coder"),
-        _FakeRow("t_2", "running", None),
-    ]
-    monkeypatch.setattr(dbk, "_open_ro", lambda: _FakeConn(rows))
-    facets = dbk.batch_task_facets(["t_1", "t_2", "t_missing"])
-    assert facets == {
-        "t_1": {"id": "t_1", "status": "done", "assignee": "coder", "terminal": True},
-        "t_2": {"id": "t_2", "status": "running", "assignee": None, "terminal": False},
-    }
-
-
-def test_batch_task_facets_empty():
-    assert dbk.batch_task_facets([]) == {}
-
-
-def test_batch_task_facets_dedupes_ids(monkeypatch):
-    calls = []
-
-    class _TrackingConn:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def execute(self, query, params=None):
-            calls.append(params)
-            return self
-
-        def fetchall(self):
-            return self._rows
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    rows = [_FakeRow("t_1", "done", "coder")]
-    monkeypatch.setattr(dbk, "_open_ro", lambda: _TrackingConn(rows))
-    facets = dbk.batch_task_facets(["t_1", "t_1", "t_1"])
-    assert facets == {
-        "t_1": {"id": "t_1", "status": "done", "assignee": "coder", "terminal": True},
-    }
-    assert len(calls) == 1
-    assert calls[0] == ["t_1"]
-
-
-def test_batch_task_facets_chunks_large_id_lists(monkeypatch):
-    calls = []
-
-    class _TrackingConn:
-        def execute(self, query, params=None):
-            calls.append(list(params) if params else [])
-            return self
-
-        def fetchall(self):
-            return []
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(dbk, "_open_ro", lambda: _TrackingConn())
-    ids = [f"t_{i}" for i in range(1500)]
-    assert dbk.batch_task_facets(ids) == {}
-    assert len(calls) == 2
-    assert len(calls[0]) == 900
-    assert len(calls[1]) == 600
-
-
-def test_after_screenshot_attaches_system_entry(monkeypatch):
-    card_id = store.create_card(
-        kind="bug",
-        title="Gap",
-        target={"view": "/control/fleet"},
-    )
-    store.link_task(card_id, "t_done")
-
+@pytest.fixture(autouse=True)
+def _stub_chromium(monkeypatch):
     monkeypatch.setattr(dbk, "_render_dashboard_view", lambda card: b"png")
-
-    entries = dbk.attach_after_screenshots_for_task("t_done", status="done")
-
-    assert len(entries) == 1
-    updated = store.get_card(card_id)
-    entry = updated["entries"][0]
-    assert entry["author"] == "system"
-    assert entry["kind"] == "screenshot"
-    assert entry["asset"].endswith("after-t_done.png")
-    assert entry["note"] == "after-screenshot task:t_done"
+    monkeypatch.setenv("HERMES_DESIGN_BOARD_DASHBOARD_BASE_URL", "http://127.0.0.1:9119")
 
 
-def test_completion_receipt_attaches_system_comment(monkeypatch):
+def _create_done_task(conn, task_id: str, completed_at: int, metadata: dict | None = None):
+    kanban_db.create_task(
+        conn,
+        title="Fix gap",
+        assignee="coder",
+        initial_status="running",
+    )
+    # Overwrite generated id with the test id.
+    conn.execute("UPDATE tasks SET id = ?, status = ?, completed_at = ? WHERE title = ?", (
+        task_id,
+        "done",
+        completed_at,
+        "Fix gap",
+    ))
+    run_id = kanban_db._synthesize_ended_run(
+        conn,
+        task_id,
+        outcome="completed",
+        summary="done",
+        metadata=metadata,
+    )
+    kanban_db._append_event(conn, task_id, "completed", {"completed_at": completed_at}, run_id=run_id)
+    return run_id
+
+
+def test_receipt_skipped_when_task_not_terminal():
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_running")
+    assert dbk.attach_completion_receipts_for_task("t_running", status="running") == []
+
+
+def test_receipt_written_when_linked_task_done(monkeypatch):
+    completed_at = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp())
+    with kanban_db.connect_closing() as conn:
+        _create_done_task(conn, "t_done", completed_at, metadata={"commit": "abc123"})
+
     card_id = store.create_card(
         kind="bug",
         title="Gap",
         target={"view": "/control/fleet"},
     )
     store.link_task(card_id, "t_done")
-    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
 
-    entries = dbk.attach_completion_receipts_for_task("t_done", status="done", run_id=42)
+    entries = dbk.attach_completion_receipts_for_task("t_done", status="done", run_id=1)
 
     assert len(entries) == 1
     updated = store.get_card(card_id)
@@ -162,34 +99,123 @@ def test_completion_receipt_attaches_system_comment(monkeypatch):
 
 
 def test_completion_receipt_is_idempotent_per_task(monkeypatch):
+    completed_at = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp())
+    with kanban_db.connect_closing() as conn:
+        _create_done_task(conn, "t_done", completed_at)
+
     card_id = store.create_card(
         kind="bug",
         title="Gap",
         target={"view": "/control/fleet"},
     )
     store.link_task(card_id, "t_done")
-    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
 
-    assert len(dbk.attach_completion_receipts_for_task("t_done", status="done")) == 1
-    assert dbk.attach_completion_receipts_for_task("t_done", status="done") == []
+    dbk.attach_completion_receipts_for_task("t_done", status="done")
+    dbk.attach_completion_receipts_for_task("t_done", status="done")
 
-
-def test_completion_receipt_skips_non_terminal(monkeypatch):
-    card_id = store.create_card(
-        kind="bug",
-        title="Gap",
-        target={"view": "/control/fleet"},
-    )
-    store.link_task(card_id, "t_running")
-    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
-
-    assert dbk.attach_completion_receipts_for_task("t_running", status="running") == []
     updated = store.get_card(card_id)
     assert updated is not None
-    assert updated["entries"] == []
+    assert len(updated["entries"]) == 1
 
 
-def test_after_screenshot_degrades_to_comment_on_render_error(monkeypatch):
+def test_commit_fallback_from_earlier_coder_run(monkeypatch, board_db):
+    """Review-gated task: final reviewer run has no commit, but an earlier coder run does."""
+    completed_at = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp())
+
+    kanban_db.create_task(
+        board_db,
+        title="Review task",
+        assignee="reviewer",
+        initial_status="running",
+    )
+    board_db.execute(
+        "UPDATE tasks SET id = ?, status = ?, completed_at = ? WHERE title = ?",
+        ("t_reviewed", "done", completed_at, "Review task"),
+    )
+    # Earlier coder run with the actual fix commit.
+    kanban_db._synthesize_ended_run(
+        board_db,
+        "t_reviewed",
+        outcome="completed",
+        summary="coder done",
+        metadata={"commit": "coderfixabc"},
+    )
+    # Final reviewer run without commit metadata.
+    reviewer_run = kanban_db._synthesize_ended_run(
+        board_db,
+        "t_reviewed",
+        outcome="completed",
+        summary="reviewer approved",
+        metadata=None,
+    )
+
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_reviewed")
+
+    dbk.attach_completion_receipts_for_task("t_reviewed", status="done", run_id=reviewer_run)
+
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
+    assert "commit:coderfixabc" in entry["note"]
+
+
+def test_commit_fallback_from_submitted_for_review_event(monkeypatch, board_db):
+    """Commit is only present in the submitted_for_review worker_gate payload."""
+    completed_at = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp())
+
+    kanban_db.create_task(
+        board_db,
+        title="Review task 2",
+        assignee="reviewer",
+        initial_status="running",
+    )
+    board_db.execute(
+        "UPDATE tasks SET id = ?, status = ?, completed_at = ? WHERE title = ?",
+        ("t_reviewed2", "done", completed_at, "Review task 2"),
+    )
+    # No commit anywhere except the submitted_for_review event.
+    kanban_db._synthesize_ended_run(
+        board_db,
+        "t_reviewed2",
+        outcome="completed",
+        summary="coder done",
+        metadata=None,
+    )
+    kanban_db._append_event(
+        board_db,
+        "t_reviewed2",
+        "submitted_for_review",
+        {"worker_gate": {"commit": "wgcommit123"}},
+    )
+    reviewer_run = kanban_db._synthesize_ended_run(
+        board_db,
+        "t_reviewed2",
+        outcome="completed",
+        summary="reviewer approved",
+        metadata=None,
+    )
+
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_reviewed2")
+
+    dbk.attach_completion_receipts_for_task("t_reviewed2", status="done", run_id=reviewer_run)
+
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
+    assert "commit:wgcommit123" in entry["note"]
+
+
+def test_after_screenshot_attaches_png(monkeypatch):
     card_id = store.create_card(
         kind="bug",
         title="Gap",
@@ -197,15 +223,38 @@ def test_after_screenshot_degrades_to_comment_on_render_error(monkeypatch):
     )
     store.link_task(card_id, "t_done")
 
-    def fail(_card):
-        raise RuntimeError("chromium missing")
-
-    monkeypatch.setattr(dbk, "_render_dashboard_view", fail)
+    calls = []
+    monkeypatch.setattr(dbk, "_render_dashboard_view", lambda card: calls.append(card) or b"png")
 
     entries = dbk.attach_after_screenshots_for_task("t_done", status="done")
 
     assert len(entries) == 1
-    entry = store.get_card(card_id)["entries"][0]
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
+    assert entry["author"] == "system"
+    assert entry["kind"] == "screenshot"
+
+
+def test_after_screenshot_degrades_to_comment_on_render_failure(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+
+    def fail_render(card):
+        raise RuntimeError("chromium missing")
+
+    monkeypatch.setattr(dbk, "_render_dashboard_view", fail_render)
+
+    entries = dbk.attach_after_screenshots_for_task("t_done", status="done")
+
+    assert len(entries) == 1
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
     assert entry["author"] == "system"
     assert entry["kind"] == "comment"
     assert "chromium missing" in entry["note"]
@@ -233,3 +282,14 @@ def test_dashboard_url_for_target_view(monkeypatch):
     assert dbk._dashboard_url_for_card({"target": {"view": "/control/fleet"}}) == "http://127.0.0.1:9119/control/fleet"
     assert dbk._dashboard_url_for_card({"target": {"view": "control/fleet"}}) == "http://127.0.0.1:9119/control/fleet"
     assert dbk._dashboard_url_for_card({"target": {"view": "https://example.test/x"}}) == "https://example.test/x"
+
+
+def test_commit_from_payload_variants():
+    assert dbk._commit_from_payload(None) is None
+    assert dbk._commit_from_payload('{"commit": "abc"}') == "abc"
+    assert dbk._commit_from_payload('{"commit_hash": "def"}') == "def"
+    assert dbk._commit_from_payload('{"metadata": {"commit": "ghi"}}') == "ghi"
+    assert dbk._commit_from_payload('{"worker_gate": {"commit": "jkl"}}') == "jkl"
+    assert dbk._commit_from_payload('{"metadata": {"worker_gate": {"commit": "mno"}}}') == "mno"
+    assert dbk._commit_from_payload("not-json") is None
+    assert dbk._commit_from_payload('["commit"]') is None

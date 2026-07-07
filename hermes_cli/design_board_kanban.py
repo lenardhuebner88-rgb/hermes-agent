@@ -207,12 +207,49 @@ def _completion_receipt_metadata(task_id: str, *, run_id: int | None = None) -> 
                 ).fetchone()
                 if row is not None:
                     commit = _commit_from_payload(row["payload"])
+            # Fallback for review-gated code tasks: the commit is usually stored
+            # on an earlier coder run or in the submitted_for_review worker_gate.
+            if commit is None:
+                commit = _find_historical_commit(conn, task_id)
     except Exception:
         return completed_at, commit
     return completed_at, commit
 
 
+def _find_historical_commit(conn, task_id: str) -> str | None:
+    """Search earlier task_runs and submitted_for_review events for a commit."""
+    # 1. Any earlier task_run metadata with a commit, newest first.
+    for row in conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id = ? AND metadata IS NOT NULL ORDER BY id DESC",
+        (task_id,),
+    ).fetchall():
+        commit = _commit_from_payload(row["metadata"])
+        if commit:
+            return commit
+    # 2. submitted_for_review payload (may carry worker_gate.commit).
+    row = conn.execute(
+        """
+        SELECT payload FROM task_events
+        WHERE task_id = ? AND kind = 'submitted_for_review'
+        ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is not None:
+        commit = _commit_from_payload(row["payload"])
+        if commit:
+            return commit
+    return None
+
+
 def _commit_from_payload(raw: object) -> str | None:
+    """Extract commit hash from a JSON object/string payload.
+
+
+    Handles top-level ``commit``/``commit_hash`` keys and nested ``metadata``
+    objects. Also understands review-gated ``submitted_for_review`` payloads
+    where the hash lives under ``worker_gate.commit``.
+    """
     if raw is None:
         return None
     try:
@@ -221,14 +258,28 @@ def _commit_from_payload(raw: object) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    value = data.get("commit") or data.get("commit_hash")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    nested = data.get("metadata")
-    if isinstance(nested, dict):
-        value = nested.get("commit") or nested.get("commit_hash")
+    for key in ("commit", "commit_hash"):
+        value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    nested = data.get("metadata")
+    if isinstance(nested, dict):
+        for key in ("commit", "commit_hash"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    worker_gate = data.get("worker_gate")
+    if isinstance(worker_gate, dict):
+        value = worker_gate.get("commit")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    # submitted_for_review event payload may wrap everything under metadata.
+    if isinstance(nested, dict):
+        worker_gate = nested.get("worker_gate")
+        if isinstance(worker_gate, dict):
+            value = worker_gate.get("commit")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return None
 
 
