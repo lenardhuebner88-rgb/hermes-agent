@@ -7320,11 +7320,12 @@ def test_workers_active_run_progress_from_runtime_cap(client):
 
 def test_workers_active_carries_input_output_tokens_and_heartbeat_ticks(client):
     """/workers/active selects input_tokens/output_tokens from task_runs and
-    returns heartbeat_ticks (newest 20 timestamps) grouped in one query."""
+    returns heartbeat_ticks capped to the newest 20 timestamps per run."""
     now = int(time.time())
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="tokened worker")
+        quiet_t = kb.create_task(conn, title="quiet worker")
         with kb.write_txn(conn):
             run_id = conn.execute(
                 "INSERT INTO task_runs (task_id, profile, status, started_at, "
@@ -7332,22 +7333,42 @@ def test_workers_active_carries_input_output_tokens_and_heartbeat_ticks(client):
                 "VALUES (?, 'coder', 'running', ?, 7171, 1234, 567)",
                 (t, now - 60),
             ).lastrowid
+            quiet_run_id = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid, input_tokens, output_tokens) "
+                "VALUES (?, 'coder', 'running', ?, 7172, 10, 20)",
+                (quiet_t, now - 60),
+            ).lastrowid
             conn.execute(
                 "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
                 (run_id, t),
             )
-        for i in range(5):
-            assert kb.heartbeat_worker(conn, t, note=f"step {i}", expected_run_id=run_id)
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (quiet_run_id, quiet_t),
+            )
+            # Quiet worker beats first; a global newest-N cap would drop these
+            # once the noisy worker appends enough newer beats.
+            for i in range(3):
+                kb._append_event(
+                    conn, quiet_t, "heartbeat", {"note": f"quiet {i}"}, run_id=quiet_run_id
+                )
+            for i in range(45):
+                kb._append_event(conn, t, "heartbeat", {"note": f"step {i}"}, run_id=run_id)
     finally:
         conn.close()
 
     data = client.get("/api/plugins/kanban/workers/active").json()
     worker = next(w for w in data["workers"] if w["run_id"] == run_id)
+    quiet = next(w for w in data["workers"] if w["run_id"] == quiet_run_id)
     assert worker["input_tokens"] == 1234
     assert worker["output_tokens"] == 567
-    assert len(worker["heartbeat_ticks"]) == 5
+    assert len(worker["heartbeat_ticks"]) == 20
     assert worker["heartbeat_ticks"] == sorted(worker["heartbeat_ticks"])
+    assert len(quiet["heartbeat_ticks"]) == 3
+    assert quiet["heartbeat_ticks"] == sorted(quiet["heartbeat_ticks"])
     assert all(now - 300 <= ts <= now for ts in worker["heartbeat_ticks"])
+    assert all(now - 300 <= ts <= now for ts in quiet["heartbeat_ticks"])
 
 
 def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client):

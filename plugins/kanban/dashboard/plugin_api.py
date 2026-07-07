@@ -3200,23 +3200,27 @@ def list_active_workers(
             ).fetchall():
                 notes[int(n["run_id"])] = {"note": n["note"], "at": n["at"]}
             # Heartbeat ticks per run for the Puls-Leitstand band chart.
-            # One grouped query; cap at 20 newest timestamps per run.
+            # One grouped query; cap at 20 newest timestamps PER RUN. A global
+            # LIMIT can starve quieter workers when one noisy run dominates the
+            # newest events, so rank inside each run before filtering.
             heartbeat_ticks = {rid: [] for rid in run_ids}
             for h in conn.execute(
                 f"""
                 SELECT run_id, created_at
-                  FROM task_events
-                 WHERE kind = 'heartbeat'
-                   AND run_id IN ({placeholders})
-                 ORDER BY id DESC
-                 LIMIT ?
+                  FROM (
+                    SELECT run_id, created_at,
+                           ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY id DESC) AS rn
+                      FROM task_events
+                     WHERE kind = 'heartbeat'
+                       AND run_id IN ({placeholders})
+                  )
+                 WHERE rn <= 20
+                 ORDER BY run_id, rn ASC
                 """,
-                (*run_ids, len(run_ids) * 20),
+                run_ids,
             ).fetchall():
                 rid = int(h["run_id"])
-                ts = int(h["created_at"])
-                if len(heartbeat_ticks[rid]) < 20:
-                    heartbeat_ticks[rid].append(ts)
+                heartbeat_ticks[rid].append(int(h["created_at"]))
             for rid in heartbeat_ticks:
                 heartbeat_ticks[rid].reverse()
         eta = kanban_db.run_duration_percentiles(
