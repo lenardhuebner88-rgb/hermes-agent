@@ -935,46 +935,136 @@ def _create_parked_release_gate_child(
             {"child_id": child_id, **payload},
         )
     if release_gate_mode() == "auto":
-        try:
-            with kb.write_txn(conn):
-                kb._append_event(
-                    conn,
-                    child_id,
-                    "release_gate_auto_execute_started",
-                    {"mode": "auto", **payload},
-                )
-            # AC-5: auto-mode uses EXACTLY the same activation path as the CLI —
-            # a detached transient unit runs ``execute_release_gate`` (gate +
-            # real backend restart via deploy_dashboard.sh) and writes the child
-            # result itself. Detaching (rather than the old inline call) keeps
-            # the integration process from blocking on the deploy AND makes the
-            # activation immune to the restart it triggers (self-termination
-            # trap). The detached ``systemd-run --user`` unit does NOT inherit
-            # ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` (spawn forwards only
-            # PATH/HERMES_HOME/bus vars), so we MUST reverse-map the integration
-            # connection's DB to its board slug and thread it — mirroring the
-            # endpoint's ``board=board``. Without it a non-default-board child
-            # would be resolved (and greened) against the wrong board. ``None``
-            # (custom/sandbox DB path) → board-agnostic resolution, as before.
-            board = kb.board_slug_for_conn(conn)
-            spawn = spawn_release_gate_activation(child_id, board=board)
-            if not spawn.get("ok"):
-                with kb.write_txn(conn):
-                    kb._append_event(
-                        conn,
-                        child_id,
-                        "release_gate_auto_execute_failed",
-                        {"error": spawn.get("detail"), **payload},
-                    )
-        except Exception as exc:
+        # Operator-forced auto mode (``kanban.release_gate.mode: auto``) —
+        # unchanged, byte-exact today's behaviour, guard-free by explicit
+        # operator opt-in.
+        _spawn_gate_activation_logged(conn, child_id, payload, mode="auto")
+    else:
+        # AD-S2: the global ``release.autonomous`` switch also auto-executes the
+        # gate — but only through the guarded hook (kill-switch on AND every
+        # auto_release guard green). Off / any guard held → the child stays
+        # parked (byte-exact today's behaviour when the switch is off).
+        maybe_auto_execute_gate(
+            conn, child_id, source_task_id=task_id, root_id=root_id, payload=payload,
+        )
+    return child_id
+
+
+def _spawn_gate_activation_logged(
+    conn: sqlite3.Connection,
+    child_id: str,
+    payload: dict,
+    *,
+    mode: str,
+) -> None:
+    """Launch the detached release-gate activation for *child_id* and record the
+    additive event trail (``release_gate_auto_execute_started``, then on a launch
+    failure ``release_gate_auto_execute_failed``).
+
+    Shared by the operator-forced ``release_gate.mode: auto`` path and the AD-S2
+    ``release.autonomous`` hook — both use EXACTLY the same detached activation
+    (AC: no new deploy path). ``mode`` only labels the started event (``"auto"``
+    vs ``"autonomous"``).
+
+    AC-5: the detached transient unit runs the SAME ``execute_release_gate`` core
+    the CLI runs (gate + real backend restart via deploy_dashboard.sh) and writes
+    the child result itself. Detaching keeps the integration process from
+    blocking on the deploy AND makes the activation immune to the restart it
+    triggers (self-termination trap). The ``systemd-run --user`` unit does NOT
+    inherit ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` (spawn forwards only
+    PATH/HERMES_HOME/bus vars), so reverse-map the integration connection's DB to
+    its board slug and thread it — a non-default-board child would otherwise be
+    resolved (and greened) against the wrong board. ``None`` (custom/sandbox DB
+    path) → board-agnostic resolution, as before."""
+    from hermes_cli import kanban_db as kb
+
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "release_gate_auto_execute_started",
+                {"mode": mode, **payload},
+            )
+        board = kb.board_slug_for_conn(conn)
+        spawn = spawn_release_gate_activation(child_id, board=board)
+        if not spawn.get("ok"):
             with kb.write_txn(conn):
                 kb._append_event(
                     conn,
                     child_id,
                     "release_gate_auto_execute_failed",
-                    {"error": str(exc), **payload},
+                    {"error": spawn.get("detail"), **payload},
                 )
-    return child_id
+    except Exception as exc:
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "release_gate_auto_execute_failed",
+                {"error": str(exc), **payload},
+            )
+
+
+def maybe_auto_execute_gate(
+    conn: sqlite3.Connection,
+    child_id: str,
+    *,
+    source_task_id: str,
+    root_id: str,
+    payload: dict,
+) -> bool:
+    """AD-S2 hook, run at the point a ``release_gate_parked`` child is created.
+
+    When the global ``release.autonomous`` kill-switch is ON **and** every
+    auto_release guard passes (chain tier ceiling, root ``freigabe: complete``,
+    ``effective_ui_impact`` != redesign, ``pause_on_red_streak``), the just-parked
+    gate is auto-executed via the SAME detached activation the operator
+    ``mode: auto`` path and the CLI/endpoint use — no new deploy path. Otherwise
+    the child stays parked; a held decision is recorded as an additive
+    ``release_gate_auto_execute_held`` event for the dashboard/audit trail,
+    EXCEPT the kill-switch-off default which stays silent so
+    ``release.autonomous: false`` is byte-exact today's behaviour (no new event).
+    Fail-soft: a guard-evaluation error parks (never breaks integration).
+
+    Returns True iff the detached activation was spawned."""
+    from hermes_cli import auto_release
+    from hermes_cli import kanban_db as kb
+
+    try:
+        # The source task is part of the chain but is linked as the release-gate
+        # child's parent; union it in so its ui_impact/tier is always considered
+        # even if the pure root→child BFS would not reach it.
+        chain_ids = set(_chain_member_ids(conn, root_id)) | {root_id, source_task_id}
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root_id, chain_ids=chain_ids,
+        )
+    except Exception:
+        _log.warning(
+            "release-gate auto-exec guard evaluation failed for %s; parking",
+            child_id, exc_info=True,
+        )
+        return False
+    if decision.get("outcome") != "auto_execute":
+        # held_kill_switch is the silent default: no event keeps
+        # release.autonomous:false byte-identical to pre-AD-S2 behaviour.
+        if decision.get("outcome") != "held_kill_switch":
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn,
+                        child_id,
+                        "release_gate_auto_execute_held",
+                        {**decision, **payload},
+                    )
+            except Exception:
+                _log.debug(
+                    "could not record release_gate_auto_execute_held",
+                    exc_info=True,
+                )
+        return False
+    _spawn_gate_activation_logged(conn, child_id, payload, mode="autonomous")
+    return True
 
 
 # ---------------------------------------------------------------------------
