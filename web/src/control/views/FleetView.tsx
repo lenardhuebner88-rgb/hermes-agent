@@ -12,7 +12,7 @@
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useMemo, useEffect } from "react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail } from "../hooks/useControlData";
+import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue } from "../hooks/useControlData";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -83,6 +83,7 @@ export function FleetView() {
   const accountUsage = useAccountUsage();
   const systemHealth = useSystemHealth();
   const pressureStatus = usePressureStatus();
+  const decisionQueue = useKanbanDecisionQueue();
 
   const now = nowSec();
 
@@ -99,6 +100,10 @@ export function FleetView() {
   const allPlanspecs = planspecs.data?.planspecs ?? [];
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps)).length;
   const activePlanspecs = allPlanspecs.filter((ps) => ps.kanban_state === "running" || ps.kanban_state === "queued");
+
+  // Geparkte Release-Gates (post-merge, wartet auf Operator-Ausführung) — einziges
+  // Zuhause ist Fleet → Risiko, aus dem /control-Postfach verschoben.
+  const releaseGateDecisions = (decisionQueue.data?.decisions ?? []).filter((d) => d.kind === "release_gate_parked");
 
   // "Wartet auf dich"-Items: wartende Freigaben + Operator-Halts
   const pendingItems = useMemo(
@@ -264,6 +269,7 @@ export function FleetView() {
                 pressureStatus={pressureStatus.data}
                 activeWorkers={activeWorkers}
                 lanesCatalog={lanesCatalog.data}
+                releaseGateDecisions={releaseGateDecisions}
                 onNavigateToPlan={() => setSubtab("plan")}
                 onTaskChanged={board.reload}
               />

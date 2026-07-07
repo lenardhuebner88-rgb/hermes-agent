@@ -334,6 +334,7 @@ export const de = {
     risikoLageBlockiert: (n: number) => `${n === 1 ? "Ein Halt" : `${n} Halts`} — Entscheidung nötig.`,
     risikoFreigabenTitle: "Operator-Entscheidungen",
     risikoFreigabeZumPlan: "Im Plan-Subtab konfigurieren →",
+    risikoReleaseGateTitle: "Release-Gate",
     risikoBlockiertTitle: "Blockierte Tasks",
     risikoOperatorHalt: "Operator-Halt",
     risikoZuverlässigkeitTitle: "Zuverlässigkeit je Lane",

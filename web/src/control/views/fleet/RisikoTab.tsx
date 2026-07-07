@@ -7,13 +7,15 @@ import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { Disclosure } from "../../components/primitives";
 import { buildReliabilityRiskModel, buildSystemPulseRiskModel } from "../../lib/fleetRisk";
-import type { ReliabilityResponse, LanesCatalogResponse } from "../../lib/schemas";
+import type { ReliabilityResponse, LanesCatalogResponse, KanbanDecision } from "../../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse, Worker } from "../../lib/types";
 import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TriageStrip } from "../../components/TriageStrip";
+import { ReleaseGateButton } from "../../components/ReleaseGateButton";
+import { useReleaseGateExecute } from "../../hooks/useControlData";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
@@ -33,6 +35,9 @@ interface RisikoTabProps {
   pressureStatus: PressureStatusResponse | null;
   activeWorkers: Worker[];
   lanesCatalog: LanesCatalogResponse | null;
+  /** Geparkte Release-Gates (kind === "release_gate_parked") — aus dem
+   *  /control-Postfach hierher verschoben, einziges Zuhause der Aktion. */
+  releaseGateDecisions: KanbanDecision[];
   onNavigateToPlan: () => void;
   /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
   onTaskChanged?: () => void | Promise<void>;
@@ -52,9 +57,12 @@ export function RisikoTab({
   pressureStatus,
   activeWorkers,
   lanesCatalog,
+  releaseGateDecisions,
   onNavigateToPlan,
   onTaskChanged,
 }: RisikoTabProps) {
+  const releaseGate = useReleaseGateExecute();
+
   // (a) Wartende Freigaben
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
 
@@ -146,6 +154,31 @@ export function RisikoTab({
               </button>
             </div>
           ))}
+        </>
+      ) : null}
+
+      {/* (a) Release-Gate: geparkte Post-Merge-Freigaben, direkt ausführbar.
+          Aus dem /control-Postfach hierher verschoben (einziges Zuhause). */}
+      {releaseGateDecisions.length > 0 ? (
+        <>
+          <div className="fleet-risiko-sec">{de.fleet.risikoReleaseGateTitle}</div>
+          {releaseGateDecisions.map((d) => {
+            const context = [
+              d.release_gate?.root_id ? `Root ${d.release_gate.root_id}` : null,
+              d.release_gate?.merge_commit ? `Merge ${d.release_gate.merge_commit}` : null,
+            ].filter(Boolean).join(" · ");
+            return (
+              <div key={d.task_id} className="fleet-risiko-blocked" aria-label={`Release-Gate: ${d.title}`}>
+                <div className="fleet-risiko-blocked-n">{d.title}</div>
+                {context ? (
+                  <div style={{ font: "400 11px/1.4 var(--hc-font-mono)", color: "var(--fleet-t3)" }}>
+                    {context}
+                  </div>
+                ) : null}
+                <ReleaseGateButton taskId={d.task_id} releaseGate={releaseGate} className="self-start" />
+              </div>
+            );
+          })}
         </>
       ) : null}
 

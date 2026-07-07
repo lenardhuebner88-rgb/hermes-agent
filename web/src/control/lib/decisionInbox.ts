@@ -221,6 +221,10 @@ export function buildDecisionInbox(input: {
   //    the task in the backlog tab. suggested_command rides along as a copy-hint.
   for (const d of input.kanbanDecisions ?? []) {
     if (!d.task_id) continue;
+    // Release-Gate zog aus dem Postfach ins Fleet-Risiko-Subtab um (einziges
+    // Zuhause der Aktion) — hier keine Karte mehr, sonst hängt ein Button-loses
+    // Duplikat in der Queue.
+    if (d.kind === "release_gate_parked") continue;
     const meta = KANBAN_KIND_META[d.kind] ?? { weight: 50, tone: "cyan" as ToneName };
     const label = d.kind === "operator_escalation" ? operatorEscalationLabel(d) : (KANBAN_KIND_LABELS[d.kind] ?? d.kind);
     const signal = d.kind === "operator_escalation" ? operatorEscalationSignal(d) : null;
@@ -228,14 +232,8 @@ export function buildDecisionInbox(input: {
       key: `kanban:${d.kind}:${d.task_id}`,
       surface: "kanban",
       title: d.title || d.task_id,
-      why: [
-        label,
-        signal,
-        d.reason,
-        d.kind === "release_gate_parked" && d.release_gate?.root_id ? `Root ${d.release_gate.root_id}` : null,
-        d.kind === "release_gate_parked" && d.release_gate?.merge_commit ? `Merge ${d.release_gate.merge_commit}` : null,
-      ].filter(Boolean).join(" · "),
-      nextAction: d.kind === "release_gate_parked" ? "Release-Gate ausführen" : (d.suggested_command || "Im Board entscheiden"),
+      why: [label, signal, d.reason].filter(Boolean).join(" · "),
+      nextAction: d.suggested_command || "Im Board entscheiden",
       tone: meta.tone,
       // Deep-link to the task in the Board/backlog tab (reads ?focus).
       target: `/control/backlog?focus=${encodeURIComponent(d.task_id)}`,
@@ -250,7 +248,6 @@ export function buildDecisionInbox(input: {
       // R1: a posted-but-uncompleted deliverable has ONE dominant resolution —
       // close the missing kanban_complete step — so it earns its inline repair.
       ...(d.kind === "deliverable_posted_not_completed" ? { repairTaskId: d.task_id } : {}),
-      ...(d.kind === "release_gate_parked" ? { releaseGateTaskId: d.task_id } : {}),
       // Naht 3: an Autoresearch escalation carrying a signal can be vetoed inline —
       // archive it AND teach reflect to suppress the signal. Strategist holds and
       // signal-less escalations get no veto here (they resolve via other paths).
