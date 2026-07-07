@@ -1,28 +1,41 @@
 /**
- * Ketten-Subtab (Jetzt-zentriert) + Ketten-Graph + Fortschritts-Ring.
+ * Ketten-Subtab — Redesign nach Mockup B v4.
  *
- * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
+ * 6 Sektionen: Ketten-Liste, Active-Chain-Header, Step-Pipeline,
+ * Active-Step-Detail (mit Model-Row + GGFM-Override-Badge), Upcoming-Steps,
+ * Done + Gate-Teaser.
+ *
+ * Join: useHermesWorkers() → worker.task_id === node.id für effective_model,
+ * model_override, heartbeat_age, run_progress, eta_p50_seconds.
+ *
+ * Reines Frontend-Redesign — keine Backend-Änderung, keine Logik-Änderung.
  */
 import { useState, useCallback, useMemo } from "react";
 import {
   fmtSeconds,
   fmtTokens,
   fmtUsd,
+  fmtDurationClock,
   profileInitial,
-  profileColorClass,
+
   buildChainChips,
-  buildSegments,
   pickFocusNode,
   chainProgress,
-  type ChainChipDef,
-  type SegmentKind,
+  heartbeatAge,
 } from "../../lib/fleetHub";
 import { formatEffectiveCost } from "../../lib/derive";
 import { de } from "../../i18n/de";
-import { useChainGraph, useHermesChainCosts, useHermesReviewVerdicts } from "../../hooks/useControlData";
-import type { BoardResponse, BoardTask } from "../../lib/types";
+import {
+  useChainGraph,
+  useHermesChainCosts,
+  useHermesReviewVerdicts,
+  useHermesWorkers,
+} from "../../hooks/useControlData";
+import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 import type { ChainCostsResponse } from "../../lib/schemas";
 import { type ChainNode } from "./shared";
+
+import "./ketten-v4.css";
 
 // ─── Ketten-Subtab ────────────────────────────────────────────────────────────
 
@@ -30,15 +43,12 @@ interface KettenTabProps {
   board: BoardResponse | null;
   initialRootId: string | null;
   now: number;
-  /** Callback: öffnet den Karten-Detail-Drawer. chainNodes erlaubt dem Drawer, Kettenkosten zu zeigen. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
 }
 
 export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: KettenTabProps) {
-  // Alle Board-Tasks (flat, alle Spalten)
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
 
-  // Ketten-Chips aus Board-Tasks ableiten
   const chips = buildChainChips(
     allBoardTasks.map((t) => ({
       id: t.id,
@@ -49,15 +59,8 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
     })),
   );
 
-  // Ausgewählte Kette:
-  // - initialRootId (von Worker-Drawer via "Kette öffnen") hat Priorität, aber nur einmalig.
-  // - Wenn Board-Daten erst nach Mount laden (cold start: chips zunächst leer), wird
-  //   auto-selektiert via useMemo (erste aktive Kette oder erste verfügbare).
-  // - userSelectedRootId: User-Auswahl überschreibt Auto-Select. Null = keine Auswahl noch.
   const [userSelectedRootId, setUserSelectedRootId] = useState<string | null>(initialRootId);
 
-  // Derived State: selectedRootId wird auto-berechnet, nicht setState!
-  // Falls userSelectedRootId oder initialRootId: use das. Sonst auto: erste aktive oder erste Kette.
   const selectedRootId = useMemo(() => {
     if (userSelectedRootId) return userSelectedRootId;
     return chips.find((c) => c.state === "active")?.rootId ?? chips[0]?.rootId ?? null;
@@ -67,62 +70,90 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
     setUserSelectedRootId(rootId);
   }, []);
 
-  // Chain-Graph für die ausgewählte Kette
   const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId);
   const nodes = chainGraph?.nodes ?? [];
 
-  // AC-3: Ketten-Kosten aus dem server-seitigen Rollup (GET /tasks/{id}/chain-
-  // costs — dieselbe Quelle wie die Flow-Receipt-Leiste und ChainVizView), nicht
-  // clientseitig aus den Node-Summen abgeleitet.
   const chainCosts = useHermesChainCosts(selectedRootId);
-
-  // Verdicts für Gate-Status
   const verdicts = useHermesReviewVerdicts();
+
+  // === Worker-Join (v4): join ChainNode → Worker via task_id ===
+  const { data: workersData } = useHermesWorkers();
+  const workerByNodeId = useMemo(() => {
+    const m = new Map<string, Worker>();
+    const ws = workersData?.workers ?? [];
+    for (const w of ws) {
+      if (w.task_id) m.set(w.task_id, w);
+    }
+    return m;
+  }, [workersData]);
 
   if (chips.length === 0) {
     return (
-      <div className="fleet-empty">
-        <p className="fleet-empty-title">{de.fleet.kettenLeer}</p>
-        <p className="fleet-empty-sub">{de.fleet.kettenLeerDesc}</p>
+      <div className="ketten-v4">
+        <div className="kt-empty">
+          <p className="kt-empty-title">{de.fleet.kettenLeer}</p>
+          <p className="kt-empty-sub">{de.fleet.kettenLeerDesc}</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <>
-      {/* Ketten-Chips */}
-      <div className="fleet-kchips">
-        {chips.map((chip) => (
-          <button
-            key={chip.rootId}
-            type="button"
-            className={`fleet-kchip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]${selectedRootId === chip.rootId ? " fleet-kchip-on" : ""}`}
-            onClick={() => handleChipSelect(chip.rootId)}
-            aria-pressed={selectedRootId === chip.rootId}
-          >
-            {chip.state === "active" ? (
-              <ChainProgressRing progress={chip.progress} total={chip.total} />
-            ) : chip.state === "pending" ? (
-              <span className="fleet-kchip-pending" aria-hidden="true">⏳</span>
-            ) : (
-              <span className="fleet-kchip-ok" aria-hidden="true">✓</span>
-            )}
-            {chip.label.length > 22 ? chip.label.slice(0, 22) + "…" : chip.label}
-          </button>
-        ))}
+    <div className="ketten-v4">
+      {/* ── SECTION 1: Ketten-Liste ───────────────────────────────────────── */}
+      <div className="chain-list-header">
+        <span className="section-title">Ketten</span>
+        <span className="section-count">{chips.length}</span>
+      </div>
+      <div className="chain-list">
+        {chips.map((chip) => {
+          const isActive = chip.state === "active";
+          const isDone = chip.state === "completed";
+          const pct = chip.total > 0 ? Math.round((chip.progress / chip.total) * 100) : 0;
+
+          return (
+            <button
+              key={chip.rootId}
+              type="button"
+              className={`chain-item${selectedRootId === chip.rootId ? " chain-item-active" : ""}${isDone ? " chain-item-done" : ""}`}
+              onClick={() => handleChipSelect(chip.rootId)}
+            >
+              <span className={`chain-glyph ${isActive ? "glyph-active" : isDone ? "glyph-done" : "glyph-waiting"}`}>
+                {isActive ? "▶" : isDone ? "✓" : "⋯"}
+              </span>
+              <div className="chain-content">
+                <div className="chain-title-row">
+                  <span className="chain-title">{chip.label}</span>
+                  <span className={`chain-badge ${isActive ? "badge-running" : isDone ? "badge-done" : "badge-waiting"}`}>
+                    {isActive ? "läuft" : isDone ? "fertig" : "wartet"}
+                  </span>
+                </div>
+                <div className="chain-meta-row">
+                  <span className="chain-mini-prog">
+                    <span
+                      className={`chain-mini-prog-fill ${isActive ? "fill-live" : isDone ? "fill-ok" : "fill-warn"}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </span>
+                  <span className="chain-meta-text">{chip.progress}/{chip.total}</span>
+                </div>
+              </div>
+            </button>
+          );
+        })}
       </div>
 
-      {/* Ketten-Inhalt */}
+      {/* ── Sections 2-6: Selected Chain ─────────────────────────────────── */}
       {selectedRootId && (chainLoading && !chainGraph) ? (
-        <div className="fleet-empty">
-          <p className="fleet-empty-sub" style={{ fontFamily: "var(--hc-font-mono)", fontSize: 11 }}>Lade Kette …</p>
+        <div className="kt-empty">
+          <p className="kt-empty-sub">Lade Kette …</p>
         </div>
       ) : selectedRootId && nodes.length > 0 ? (
-        <KettenGraph
+        <KettenGraphV4
           rootId={selectedRootId}
           nodes={nodes}
           now={now}
-          chips={chips}
+          workerByNodeId={workerByNodeId}
           verdicts={(verdicts.data?.reviews ?? []).map((v) => ({
             task_id: v.task_id,
             task_status: v.task_status,
@@ -134,263 +165,385 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
           onOpenNodeDetail={onOpenNodeDetail}
         />
       ) : selectedRootId ? (
-        <div className="fleet-empty">
-          <p className="fleet-empty-sub">Keine Ketten-Nodes geladen.</p>
+        <div className="kt-empty">
+          <p className="kt-empty-sub">Keine Ketten-Nodes geladen.</p>
         </div>
       ) : null}
-    </>
+    </div>
   );
 }
 
-// ─── SVG-Fortschritts-Ring ────────────────────────────────────────────────────
+// ─── Helper: Role color class ─────────────────────────────────────────────────
 
-function ChainProgressRing({ progress, total }: { progress: number; total: number }) {
-  const r = 6;
-  const circ = 2 * Math.PI * r; // ~37.7
-  const dash = progress * circ;
-  const gap = circ - dash;
-  return (
-    <svg className="fleet-ring" viewBox="0 0 16 16" aria-label={`${Math.round(progress * 100)}%`}>
-      <circle className="fleet-ring-bg" cx="8" cy="8" r={r} />
-      {total > 0 ? (
-        <circle
-          className="fleet-ring-fg"
-          cx="8"
-          cy="8"
-          r={r}
-          strokeDasharray={`${dash.toFixed(2)} ${gap.toFixed(2)}`}
-        />
-      ) : null}
-    </svg>
-  );
+function roleColorClass(assignee: string | null): string {
+  if (!assignee) return "ps-role-gate";
+  if (/premium|opus/i.test(assignee)) return "ps-role-coder";
+  if (/coder/i.test(assignee)) return "ps-role-coder";
+  if (/reviewer|review/i.test(assignee)) return "ps-role-reviewer";
+  if (/critic/i.test(assignee)) return "ps-role-critic";
+  if (/integrator/i.test(assignee)) return "ps-role-integrator";
+  return "ps-role-gate";
 }
 
-// ─── Ketten-Graph (Jetzt-zentriert) ───────────────────────────────────────────
+function avatarClass(assignee: string | null): string {
+  if (!assignee) return "avatar-default";
+  if (/premium|opus/i.test(assignee)) return "avatar-premium";
+  if (/coder/i.test(assignee)) return "avatar-coder";
+  if (/reviewer|review/i.test(assignee)) return "avatar-reviewer";
+  if (/critic/i.test(assignee)) return "avatar-critic";
+  return "avatar-default";
+}
 
-interface KettenGraphProps {
+// ─── KettenGraph v4 ────────────────────────────────────────────────────────────
+
+interface KettenGraphV4Props {
   rootId: string;
   nodes: ChainNode[];
   now: number;
-  chips: ChainChipDef[];
+  workerByNodeId: Map<string, Worker>;
   verdicts: Array<{ task_id: string; task_status: string; review_run_state: string; reviewer_profile: string | null }>;
-  /** Server-seitiger Ketten-Kosten-Rollup (AC-3). null ⇒ noch nicht geladen. */
   chainCosts?: ChainCostsResponse | null;
   chainCostsLoading?: boolean;
-  /** Callback: öffnet den Karten-Detail-Drawer + übergibt die Ketten-Nodes für Kostendarstellung. */
   onOpenNodeDetail: (taskId: string, chainNodes: ChainNode[]) => void;
 }
 
-function KettenGraph({ rootId, nodes, now, verdicts, chainCosts, chainCostsLoading, onOpenNodeDetail }: KettenGraphProps) {
+function KettenGraphV4({
+  rootId,
+  nodes,
+  now,
+  workerByNodeId,
+  verdicts,
+  chainCosts,
+  chainCostsLoading,
+  onOpenNodeDetail,
+}: KettenGraphV4Props) {
   const { pct, done, total } = chainProgress(nodes);
   const focusNode = pickFocusNode(nodes);
-  const segments: SegmentKind[] = buildSegments(nodes);
-  // AC-3: Ketten-Kosten aus dem server-seitigen Rollup, gerettet aus ChainVizViews
-  // ChainSummary (formatEffectiveCost auf den totals) — realer Ist-$ statt Node-Summe.
+
+  // === Chain costs (server-side rollup) ===
   const costTotals = chainCosts?.totals;
   const costTokens = costTotals ? costTotals.input_tokens + costTotals.output_tokens : 0;
   const costText = costTotals
     ? formatEffectiveCost({ cost_usd: costTotals.cost_usd, cost_effective_usd: costTotals.cost_effective_usd, tokens: costTokens }).text
     : chainCostsLoading ? "…" : "—";
 
-  // ETA aus dem Fokus-Node
-  const focusLaufzeit = focusNode?.latest_run?.runtime_seconds ?? null;
-  const focusHbAge = focusNode?.latest_run?.heartbeat_age_seconds ?? null;
+  const chainInputTokens = costTotals?.input_tokens ?? 0;
+  const chainOutputTokens = costTotals?.output_tokens ?? 0;
 
-  // Root-Task: ältester erstellter Node (level 0 oder kleinster level)
-  const rootNode = [...nodes].sort((a, b) => a.level - b.level)[0] ?? null;
-  const rootCreatedAt = rootNode?.created_at ?? 0;
-  const rootStartLabel = rootCreatedAt > 0 ? fmtSeconds(Math.max(0, now - rootCreatedAt)) + " her" : "—";
+  // === Focus node worker join ===
+  const focusWorker = focusNode ? workerByNodeId.get(focusNode.id) ?? null : null;
+  const focusEffectiveModel = focusWorker?.effective_model ?? focusNode?.latest_run?.profile ?? null;
+  const focusModelOverride = focusWorker?.model_override ?? null;
+  const focusHbAge = focusWorker
+    ? heartbeatAge(focusWorker.last_heartbeat_at, now)
+    : focusNode?.latest_run?.heartbeat_age_seconds ?? null;
+  const focusRunProgress = focusWorker?.run_progress ?? focusNode?.latest_run?.run_progress ?? null;
+  const focusEtaP50 = focusWorker?.eta_p50_seconds ?? null;
+  const focusRuntime = focusNode?.latest_run?.runtime_seconds ?? null;
 
-  // Offene Nodes (pending: scheduled/ready/todo/blocked) — NICHT der Fokus-Node
-  const openNodes = [...nodes]
-    .sort((a, b) => a.level - b.level)
-    .filter((n) => n.id !== focusNode?.id && (n.status === "scheduled" || n.status === "ready" || n.status === "todo" || n.status === "blocked"));
+  // Active chain chip for ETA
+  const chainEta = focusEtaP50 ?? focusRuntime;
 
-  // Fertige Nodes
-  const doneNodes = [...nodes]
-    .filter((n) => n.status === "done" || n.status === "archived")
-    .sort((a, b) => (a.level - b.level));
+  // === Node classification ===
+  const orderedNodes = [...nodes].sort((a, b) => a.level - b.level);
+  const upcomingNodes = orderedNodes.filter(
+    (n) => n.id !== focusNode?.id && (n.status === "scheduled" || n.status === "ready" || n.status === "todo" || n.status === "blocked"),
+  );
+  const doneNodes = orderedNodes.filter((n) => n.status === "done" || n.status === "archived");
 
-  // Gate-Node (Review-Status)
+  // === Gate verdicts ===
   const gateVerdicts = verdicts.filter((v) => v.task_id === rootId || nodes.some((n) => n.id === v.task_id));
-  const gateLabel = gateVerdicts.length > 0
-    ? `${gateVerdicts[0].reviewer_profile ?? "reviewer"}`
-    : "reviewer";
-  const gateMeta = gateVerdicts.length > 0
-    ? gateVerdicts[0].review_run_state
-    : `wartet auf Karte ${total}`;
+  const hasReviewer = gateVerdicts.some((v) => v.reviewer_profile != null);
+  const hasCritic = nodes.some((n) => n.assignee != null && /critic/i.test(n.assignee));
+  const hasBlockage = nodes.some((n) => n.status === "blocked");
+  const reviewRunState = gateVerdicts[0]?.review_run_state ?? "pending";
 
-  const [fertigOpen, setFertigOpen] = useState(false);
+  const [doneExpanded, setDoneExpanded] = useState(false);
 
   return (
     <>
-      {/* Fortschritts-Kopf */}
-      <div className="fleet-prog">
-        <div className="fleet-prog-top">
-          <span className="fleet-prog-pz">{pct} %</span>
-          <span className="fleet-prog-pl">
-            {focusNode?.status === "running"
-              ? de.fleet.kettenKarteLaeuft(done + 1, total)
-              : de.fleet.kettenKarteWartet(done + 1, total)}
-          </span>
-          <span className="fleet-prog-eta">
-            {focusLaufzeit != null ? `ETA ~${fmtSeconds(focusLaufzeit)}` : "—"}
-            {costText !== "—" ? ` · ${costText}` : ""}
+      {/* ── SECTION 2: Active Chain Header ────────────────────────────────── */}
+      <div className="ach">
+        <div className="ach-top">
+          <div className="ach-pct-wrap">
+            <span className="ach-pct">{pct}</span>
+            <span className="ach-pct-sub">% · {done} / {total} Steps</span>
+          </div>
+          <span className="ach-state-badge">
+            {focusNode?.status === "running" ? "läuft" : focusNode?.status === "blocked" ? "blockiert" : done >= total ? "fertig" : "wartet"}
           </span>
         </div>
 
-        {/* Segment-Leiste */}
-        <div className="fleet-segs">
-          {segments.map((kind, i) => (
-            <div
-              key={i}
-              className={`fleet-seg${kind === "done" ? " fleet-seg-done" : kind === "active" ? " fleet-seg-active" : ""}`}
-            />
-          ))}
+        {/* Health: 3 separate chips — values only */}
+        <div className="health-chips">
+          <span className={`hchip ${hasBlockage ? "hchip-muted" : "hchip-ok"}`}>
+            <span className={`hchip-icon ${hasBlockage ? "hi-muted" : "hi-ok"}`} />
+            {hasBlockage ? "Blockaden" : "keine Blockaden"}
+          </span>
+          <span className={`hchip ${hasReviewer ? "hchip-info" : "hchip-muted"}`}>
+            <span className={`hchip-icon ${hasReviewer ? "hi-info" : "hi-muted"}`} />
+            {hasReviewer ? "Reviewer zugewiesen" : "kein Reviewer"}
+          </span>
+          <span className={`hchip ${hasCritic ? "hchip-ok" : "hchip-muted"}`}>
+            <span className={`hchip-icon ${hasCritic ? "hi-ok" : "hi-muted"}`} />
+            {hasCritic ? "Critic aktiv" : "kein Critic"}
+          </span>
         </div>
-        <div className="fleet-seg-l">
-          <span>Root {rootStartLabel}</span>
-          <span>{gateLabel} · Gate</span>
+
+        {/* Meta: values only, no labels */}
+        <div className="ach-meta">
+          {chainEta != null ? (
+            <span className="ach-meta-item ach-meta-live">ETA ~{fmtSeconds(chainEta)}</span>
+          ) : null}
+          {chainEta != null && costText !== "—" ? <span className="ach-meta-sep">·</span> : null}
+          {costText !== "—" ? <span className="ach-meta-item">{costText}</span> : null}
+          {chainInputTokens > 0 || chainOutputTokens > 0 ? (
+            <>
+              <span className="ach-meta-sep">·</span>
+              <span className="ach-meta-item">{fmtTokens(chainInputTokens)} → {fmtTokens(chainOutputTokens)} tok</span>
+            </>
+          ) : null}
         </div>
       </div>
 
-      {/* Fokus-Karte */}
+      {/* ── SECTION 3: Step Pipeline ──────────────────────────────────────── */}
+      {orderedNodes.length > 0 ? (
+        <div className="pipe-wrap">
+          <div className="pipe-header">
+            <span>Pipeline</span>
+            <span className="pipe-step-count">{done} / {total} Steps</span>
+          </div>
+          <div className="pipe-scroll">
+            <div className="pipe">
+              {orderedNodes.map((node, i) => {
+
+                const isDone = node.status === "done" || node.status === "archived";
+                const isBlocked = node.status === "blocked";
+                const isRunning = node.status === "running";
+                const worker = workerByNodeId.get(node.id);
+                const nodeModel = worker?.effective_model ?? node.latest_run?.profile ?? null;
+
+                // Connector class (between this node and the next)
+                let connectorClass = "pc-open";
+                if (isDone) connectorClass = "pc-done";
+                else if (isRunning) connectorClass = "pc-active";
+                else if (isBlocked) connectorClass = "pc-warn";
+
+                let iconClass = "";
+                if (isDone) iconClass = "ps-done";
+                else if (isRunning) iconClass = "ps-active";
+                else if (isBlocked) iconClass = "ps-blocked";
+                else iconClass = roleColorClass(node.assignee);
+
+                return (
+                  <div key={node.id} className="pstep">
+                    {i < orderedNodes.length - 1 ? (
+                      <div className={`pstep-connector ${connectorClass}`} />
+                    ) : null}
+                    <div className={`pstep-icon ${iconClass}`}>
+                      {isDone ? "✓" : isRunning ? "▶" : (i + 1)}
+                    </div>
+                    <div className={`pstep-label ${isRunning ? "pstep-label-active" : isDone ? "pstep-label-done" : ""}`}>
+                      {node.assignee ? node.assignee.replace(/^(coder|premium|reviewer|critic|integrator)-?/, "").slice(0, 6) : "—"}
+                    </div>
+                    {nodeModel ? (
+                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`}>{nodeModel.slice(0, 8)}</div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── SECTION 4: Active Step Detail ────────────────────────────────── */}
       {focusNode ? (
         <button
           type="button"
-          className="fleet-fokus text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
+          className="detail"
           onClick={() => onOpenNodeDetail(focusNode.id, nodes)}
           aria-label={`Node ${focusNode.title} öffnen`}
         >
-          <div className="fleet-wk-top">
-            <div className={`fleet-avatar fleet-avatar-gross ${profileColorClass(focusNode.assignee ?? "")}`}>
+          <div className="detail-header">
+            <div className={`detail-avatar ${avatarClass(focusNode.assignee)}`}>
               {profileInitial(focusNode.assignee ?? "?")}
             </div>
-            <div className="fleet-wk-name">
-              {focusNode.assignee ? `${de.fleet.detailLabelAssignee}: ${focusNode.assignee}` : "—"}
-              <span>{focusNode.id.slice(0, 10)}</span>
+            <div className="detail-meta">
+              <div className="detail-role">
+                {focusNode.assignee ?? "—"}
+                {focusEffectiveModel ? <span className="detail-role-tier">· {focusEffectiveModel}</span> : null}
+              </div>
+              <div className="detail-task-id">{focusNode.id.slice(0, 12)}</div>
             </div>
+            {/* Heartbeat LED — nur einmal, oben-rechts */}
             {focusNode.status === "running" && focusHbAge != null ? (
-              <div className="fleet-led">
-                <span className="fleet-led-dot" />
+              <div className="detail-led">
+                <span className="led-dot" />
                 ♥ {fmtSeconds(focusHbAge)}
               </div>
-            ) : (
-              <div className="fleet-led" style={{ color: "var(--fleet-t3)", boxShadow: "none" }}>
-                {focusNode.status}
-              </div>
-            )}
+            ) : null}
           </div>
 
-          <div className="fleet-wk-task" style={{ WebkitLineClamp: 3, fontSize: 13 }}>
-            {focusNode.title}
-          </div>
+          <div className="detail-title">{focusNode.title}</div>
 
-          {focusNode.latest_run?.profile ? (
-            <div className="fleet-wk-note">
-              {de.fleet.detailLabelModell}: {focusNode.latest_run.profile}
-              {focusNode.latest_run.heartbeat_age_seconds != null
-                ? ` · ♥ ${fmtSeconds(focusNode.latest_run.heartbeat_age_seconds)}`
-                : ""}
+          {/* === Model-Row with GGFM Override Badge (v4) === */}
+          {focusEffectiveModel ? (
+            <div className="model-row">
+              <span className="model-icon">⚙</span>
+              <span className="model-label">{focusEffectiveModel}</span>
+              {focusModelOverride ? (
+                <span className="model-override-badge" title={`Override: ${focusModelOverride}`}>
+                  GGFM Override
+                </span>
+              ) : null}
             </div>
           ) : null}
 
-          {(() => {
-            const rp = focusNode.status === "running" ? focusNode.latest_run?.run_progress : null;
-            const effective =
-              rp != null ? rp
-              : focusNode.progress && focusNode.progress.total > 0
-                ? focusNode.progress.done / focusNode.progress.total
-              : focusNode.status === "running" ? 0.58 : 0;
-            const estimated = rp == null;
-            return (
-              <div className="fleet-rail" title={estimated ? "Fortschritt geschätzt (DAG/Heuristik)" : "Fortschritt (Runtime-Cap)"}>
-                <div className="fleet-rail-fill" style={{ width: `${Math.round(effective * 100)}%` }} />
-              </div>
-            );
-          })()}
-
-          <div className="fleet-wk-meta">
-            {focusNode.latest_run?.profile ? <b>{de.fleet.detailLabelModell}: {focusNode.latest_run.profile.replace(/^claude-/, "").split("-")[0] ?? focusNode.latest_run.profile}</b> : null}
-            {(focusNode.input_tokens > 0 || focusNode.output_tokens > 0) ? (
-              <span>{fmtTokens(focusNode.input_tokens)} → {fmtTokens(focusNode.output_tokens)} tok</span>
-            ) : null}
-            <span className="fleet-meta-right">
-              {focusNode.status === "running" ? "Karte läuft" : `Karte: ${focusNode.status}`}
-              {focusNode.latest_run?.runtime_seconds != null
-                ? ` seit ${fmtSeconds(focusNode.latest_run.runtime_seconds)}`
-                : ""}
-            </span>
+          {/* Progress ring + values */}
+          <div className="detail-bottom">
+            <ProgressRing
+              progress={
+                focusRunProgress != null ? focusRunProgress
+                : focusNode.progress && focusNode.progress.total > 0
+                  ? focusNode.progress.done / focusNode.progress.total
+                : focusNode.status === "running" ? 0.58 : 0
+              }
+            />
+            {/* Values only, no labels */}
+            <div className="values-row">
+              {focusRuntime != null ? (
+                <span className="val val-strong">{fmtDurationClock(focusRuntime)}</span>
+              ) : null}
+              {focusRuntime != null && (focusNode.input_tokens > 0 || focusNode.output_tokens > 0) ? (
+                <span className="val-sep">·</span>
+              ) : null}
+              {focusNode.input_tokens > 0 || focusNode.output_tokens > 0 ? (
+                <span className="val">
+                  {fmtTokens(focusNode.input_tokens)} ↓ {fmtTokens(focusNode.output_tokens)} tok
+                </span>
+              ) : null}
+              {focusEtaP50 != null ? (
+                <>
+                  <span className="val-sep">·</span>
+                  <span className="val val-live">p50~{fmtSeconds(focusEtaP50)}</span>
+                </>
+              ) : null}
+            </div>
           </div>
         </button>
       ) : null}
 
-      {/* Danach-Queue */}
-      {openNodes.length > 0 ? (
-        <div className="fleet-danach">
-          {openNodes.slice(0, 3).map((n, i) => (
-            <button
-              key={n.id}
-              type="button"
-              className="fleet-q text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
-              onClick={() => onOpenNodeDetail(n.id, nodes)}
-              aria-label={`Node ${n.title} öffnen`}
-            >
-              <span className="fleet-q-idx">{done + 1 + i + 1}</span>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {n.title}
-              </span>
-              <span className="fleet-q-assignee">{n.assignee ? `${de.fleet.detailLabelAssignee}: ${n.assignee}` : "—"}</span>
-            </button>
-          ))}
+      {/* ── SECTION 5: Upcoming Steps ────────────────────────────────────── */}
+      {upcomingNodes.length > 0 ? (
+        <div className="upcoming">
+          <div className="upcoming-header">
+            <span>Upcoming</span>
+            <span className="upcoming-count">{upcomingNodes.length}</span>
+          </div>
+          {upcomingNodes.map((n) => {
+            const worker = workerByNodeId.get(n.id);
+            const model = worker?.effective_model ?? n.latest_run?.profile ?? null;
+            const hasOverride = worker?.model_override != null;
+            return (
+              <button
+                key={n.id}
+                type="button"
+                className={`uitem${n.status === "blocked" ? " uitem-blocked" : ""}`}
+                onClick={() => onOpenNodeDetail(n.id, nodes)}
+                aria-label={`Node ${n.title} öffnen`}
+              >
+                <div className={`uavatar ${avatarClass(n.assignee)}`}>
+                  {profileInitial(n.assignee ?? "?")}
+                </div>
+                <div className="ucontent">
+                  <div className={`urole ${n.assignee && /reviewer/i.test(n.assignee) ? "urole-reviewer" : n.assignee && /critic/i.test(n.assignee) ? "urole-critic" : n.assignee && /coder/i.test(n.assignee) ? "urole-coder" : ""}`}>
+                    {n.assignee ?? "—"}
+                  </div>
+                  {model ? (
+                    <div className={`umodel ${hasOverride ? "umodel-override" : ""}`}>
+                      {model}
+                      {hasOverride ? " · ⚠ override" : " · lane default"}
+                    </div>
+                  ) : null}
+                  <div className="utitle">{n.title}</div>
+                </div>
+                <div className={`uwait${n.status === "blocked" ? " uwait-blocked" : ""}`}>
+                  {n.status === "blocked" ? "blockiert" : "wartet"}
+                </div>
+              </button>
+            );
+          })}
         </div>
       ) : null}
 
-      {/* Fertig-Gruppe (kollabiert) */}
+      {/* ── SECTION 6: Done + Gate Teaser ────────────────────────────────── */}
       {doneNodes.length > 0 ? (
-        <div className="fleet-fertig-grp">
+        <div className="done-section">
           <button
             type="button"
-            className="fleet-f-row focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
-            style={{ fontWeight: 600, color: "var(--fleet-t3)", opacity: 1, fontSize: 10.5 }}
-            onClick={() => setFertigOpen((v) => !v)}
-            aria-expanded={fertigOpen}
+            className="done-header"
+            onClick={() => setDoneExpanded((v) => !v)}
+            aria-expanded={doneExpanded}
           >
-            <span className="fleet-f-ok" aria-hidden="true">✓</span>
-            <span style={{ flex: 1 }}>{de.fleet.kettenFertigGruppe} ({doneNodes.length})</span>
-            <span style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10 }}>
-              {fertigOpen ? "▲" : "▼"}
-            </span>
+            <span>Fertig</span>
+            <span className="done-count">{doneNodes.length}</span>
+            <span className="done-chev">{doneExpanded ? "▲" : "▼"}</span>
           </button>
-          {fertigOpen ? doneNodes.map((n) => (
+          {doneExpanded ? doneNodes.map((n) => (
             <button
               key={n.id}
               type="button"
-              className="fleet-f-row focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hc-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--hc-bg)]"
+              className="done-item"
               onClick={() => onOpenNodeDetail(n.id, nodes)}
               aria-label={`Node ${n.title} öffnen`}
             >
-              <span className="fleet-f-ok" aria-hidden="true">✓</span>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {n.title}
-              </span>
-              <span className="fleet-f-meta">
-                {n.cost_usd > 0 ? fmtUsd(n.cost_usd) : null}
-                {n.latest_run?.runtime_seconds != null
-                  ? ` · ${fmtSeconds(n.latest_run.runtime_seconds)}`
-                  : ""}
-              </span>
+              <span className="davatar">✓</span>
+              <div className="dcontent">
+                <div className="dtitle">{n.title}</div>
+                <div className="dtime">
+                  {n.cost_usd > 0 ? fmtUsd(n.cost_usd) : null}
+                  {n.cost_usd > 0 && n.latest_run?.runtime_seconds != null ? " · " : ""}
+                  {n.latest_run?.runtime_seconds != null ? fmtSeconds(n.latest_run.runtime_seconds) : ""}
+                </div>
+              </div>
             </button>
           )) : null}
         </div>
       ) : null}
 
-      {/* Gate-Ziellinie */}
-      <div className="fleet-ziel">
-        <span className="fleet-ziel-raute" aria-hidden="true" />
-        Release-Gate · {gateLabel}
-        <span className="fleet-ziel-meta">{gateMeta}</span>
+      {/* Gate-Teaser */}
+      <div className="gate-teaser">
+        <div className="gate-icon" />
+        <div className="gate-content">
+          <div className="gate-label">Release-Gate</div>
+          <div className={`gate-status ${reviewRunState === "request_changes" ? "gate-status-warn" : ""}`}>
+            {reviewRunState === "approved" ? "approved" : reviewRunState === "request_changes" ? "Änderungen angefordert" : reviewRunState === "active" ? "Review läuft…" : "wartet"}
+          </div>
+        </div>
       </div>
     </>
+  );
+}
+
+// ─── Progress Ring (SVG) ──────────────────────────────────────────────────────
+
+function ProgressRing({ progress }: { progress: number }) {
+  const pct = Math.max(0, Math.min(1, progress));
+  const r = 16;
+  const circ = 2 * Math.PI * r;
+  const dash = pct * circ;
+  return (
+    <div className="progress-ring">
+      <svg viewBox="0 0 40 40" width="42" height="42">
+        <circle className="kt-ring-bg" cx="20" cy="20" r={r} />
+        <circle
+          className="kt-ring-fg"
+          cx="20" cy="20" r={r}
+          strokeDasharray={`${dash.toFixed(2)} ${circ.toFixed(2)}`}
+        />
+      </svg>
+      <span className="progress-ring-text">{Math.round(pct * 100)}%</span>
+    </div>
   );
 }
