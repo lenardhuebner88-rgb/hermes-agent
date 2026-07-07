@@ -134,7 +134,7 @@
   flex: 1; height: 3px; background: var(--kt-line);
   border-radius: 2px; overflow: hidden; max-width: 80px;
 }
-.ketten-v4 .chain-mini-prog-fill { height: 100%; border-radius: 2px; }
+.ketten-v4 .chain-mini-prog-fill { display: block; height: 100%; border-radius: 2px; }
 .ketten-v4 .fill-live { background: linear-gradient(90deg, var(--kt-live-deep), var(--kt-live)); }
 .ketten-v4 .fill-warn { background: var(--kt-warn); }
 .ketten-v4 .fill-alert { background: var(--kt-alert); }
