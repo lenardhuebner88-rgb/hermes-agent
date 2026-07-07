@@ -2977,9 +2977,10 @@ def test_spawn_release_gate_activation_launches_detached_transient_unit():
     assert "--unit=hermes-release-gate-t_gate_9" in argv
     # the detached command IS the shared CLI activation core, board-scoped. The
     # global --board MUST sit before the subcommand or argparse rejects it.
+    # --inline: the detached unit runs the gate core directly (no nested spawn).
     tail = argv[argv.index("/opt/hermes"):]
     assert tail == ["/opt/hermes", "kanban", "--board", "ops",
-                    "release-gate", "t_gate/9", "--json"]
+                    "release-gate", "t_gate/9", "--inline", "--json"]
     # Regression guard: the emitted CLI portion must actually parse (a --board
     # after the subcommand would raise "unrecognized arguments").
     import argparse
@@ -2988,6 +2989,7 @@ def test_spawn_release_gate_activation_launches_detached_transient_unit():
     kc.build_parser(parser.add_subparsers(dest="cmd"))
     ns = parser.parse_args(tail[1:])  # drop the hermes binary path
     assert ns.task_id == "t_gate/9" and ns.board == "ops"
+    assert ns.inline is True  # the detached unit must run inline (no recursion)
     # PATH is passed through so npm/node/git/systemctl resolve in the clean unit env
     assert any(a.startswith("--setenv=PATH=") for a in argv)
 
@@ -3047,10 +3049,11 @@ def test_auto_mode_release_gate_child_launches_board_scoped_activation(
     assert argv[0].endswith("systemd-run")
     assert "--user" in argv
     # board-scoped, same shape the CLI/endpoint path is asserted to build:
-    # `hermes kanban --board ops release-gate <child> --json`
+    # `hermes kanban --board ops release-gate <child> --inline --json`
+    # (--inline: the detached unit must NOT spawn another unit — see spawn.)
     i = argv.index("release-gate")
-    assert argv[i - 3:i + 3] == [
-        "kanban", "--board", "ops", "release-gate", child_id, "--json",
+    assert argv[i - 3:i + 4] == [
+        "kanban", "--board", "ops", "release-gate", child_id, "--inline", "--json",
     ]
     # never launches against the default board when the child is on "ops"
     assert argv[i - 1] != "default"

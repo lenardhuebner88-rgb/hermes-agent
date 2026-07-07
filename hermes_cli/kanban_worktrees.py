@@ -2155,7 +2155,10 @@ def spawn_release_gate_activation(
     cli_args = [bin_path, "kanban"]
     if board:
         cli_args += ["--board", str(board)]
-    cli_args += ["release-gate", str(task_id), "--json"]
+    # --inline: the detached unit must run the gate core directly, NOT spawn a
+    # second transient unit (which would deadlock: systemd-run waiting on a
+    # nested systemd-run waiting on the restart it triggers).
+    cli_args += ["release-gate", str(task_id), "--inline", "--json"]
     argv = [
         systemd_run, "--user", "--collect",
         f"--unit={unit}",
