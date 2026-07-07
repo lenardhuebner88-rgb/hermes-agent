@@ -305,6 +305,7 @@ from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
 from hermes_cli.subcommands.plan import build_plan_parser
 from hermes_cli.subcommands.vision import build_vision_parser
+from hermes_cli.subcommands.lessons import build_lessons_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -11966,6 +11967,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update", "vision",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
+        "lessons",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -12726,6 +12728,11 @@ def main():
     # vision command — Vision-Flywheel harness: strategist + metrics + gate ledger
     # =========================================================================
     build_vision_parser(subparsers)
+
+    # =========================================================================
+    # lessons command — deterministic trap-class harvester (no LLM, read-only)
+    # =========================================================================
+    build_lessons_parser(subparsers)
 
     # =========================================================================
     # project command — named, multi-folder workspaces
