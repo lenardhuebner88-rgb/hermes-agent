@@ -1161,6 +1161,7 @@ describe("fmtDurationClock", () => {
     expect(fmtDurationClock(45)).toBe("45s");
     expect(fmtDurationClock(402)).toBe("6m42s");
     expect(fmtDurationClock(3860)).toBe("1h04m");
+    expect(fmtDurationClock(7199)).toBe("2h00m");
     expect(fmtDurationClock(null)).toBe("—");
     expect(fmtDurationClock(-5)).toBe("—");
   });

@@ -776,8 +776,9 @@ export function fmtDurationClock(secs: number | null | undefined): string {
     const m = Math.floor(s / 60);
     return `${m}m${String(s % 60).padStart(2, "0")}s`;
   }
-  const h = Math.floor(s / 3600);
-  const m = Math.round((s % 3600) / 60);
+  const totalMinutes = Math.round(s / 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
   return `${h}h${String(m).padStart(2, "0")}m`;
 }
 
