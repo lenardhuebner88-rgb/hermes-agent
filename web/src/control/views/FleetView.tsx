@@ -212,6 +212,8 @@ export function FleetView() {
                 board={board.data}
                 reliability={reliability.data}
                 now={now}
+                cap={workers.data?.cap ?? null}
+                doneToday={costs.data?.today.runs ?? null}
                 initialOpen={drawerWorker}
                 onOpenChain={(rootId: string) => {
                   setKettenRootId(rootId);

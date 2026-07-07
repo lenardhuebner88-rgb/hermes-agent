@@ -47,6 +47,7 @@ import {
   WorkersResponseSchema,
   WorkerActivityResponseSchema,
   WorkerActionResponseSchema,
+  LiveEventsResponseSchema,
   TerminateRunResponseSchema,
   VaultProvenanceResponseSchema,
   StrategistCountSchema,
@@ -76,6 +77,8 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
+import { mergeLiveEvents } from "../lib/fleetHub";
+import type { LiveEvent } from "../lib/types";
 import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
 
@@ -639,6 +642,83 @@ export function useHermesWorkers() {
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
     5000,
   );
+}
+
+export interface RunLiveEventsState {
+  events: LiveEvent[];
+  loading: boolean;
+  error: string | null;
+}
+
+/**
+ * useRunLiveEvents — Puls-Leitstand-Ticker (S2). Pollt GET
+ * /runs/live-events alle 4000ms und akkumuliert die Events inkrementell:
+ * nach dem ersten Voll-Fetch trägt jeder Poll `since_id=<latest>` und liefert
+ * nur neue Events, die client-seitig in einen nach id absteigend sortierten,
+ * auf `cap` gedeckelten Puffer gemischt werden (mergeLiveEvents).
+ *
+ * Bewusst KEIN usePolling: der Store ersetzt seinen Snapshot pro Poll, hier
+ * brauchen wir das Merge über since_id. Pausiert bei document.hidden (wie
+ * usePolling) und stoppt sauber beim Unmount — nur montiert (Worker-Subtab
+ * sichtbar) läuft der Poll, sonst schläft der Ticker.
+ */
+export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
+  const [events, setEvents] = useState<LiveEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const sinceIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let stopped = false;
+    let timer: number | null = null;
+
+    const schedule = () => {
+      if (stopped) return;
+      timer = window.setTimeout(() => void tick(), 4000);
+    };
+
+    const tick = async () => {
+      // document.hidden: nicht fetchen, aber weiter takten (billiger No-op),
+      // damit der Ticker sofort weiterläuft, sobald der Tab wieder sichtbar ist.
+      if (typeof document !== "undefined" && document.hidden) {
+        schedule();
+        return;
+      }
+      try {
+        const since = sinceIdRef.current;
+        const url =
+          since != null
+            ? `/api/plugins/kanban/runs/live-events?since_id=${since}`
+            : "/api/plugins/kanban/runs/live-events";
+        const parsed = parseOrThrow(LiveEventsResponseSchema, await fetchJSON<unknown>(url), "runs/live-events");
+        if (stopped) return;
+        setError(null);
+        setLoading(false);
+        if (parsed.events.length > 0) {
+          setEvents((prev) => mergeLiveEvents(prev, parsed.events, cap));
+        }
+        if (parsed.latest_id != null) {
+          sinceIdRef.current = Math.max(sinceIdRef.current ?? 0, parsed.latest_id);
+        }
+      } catch (e) {
+        if (!stopped) {
+          setLoading(false);
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        schedule();
+      }
+    };
+
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [enabled, cap]);
+
+  return { events, loading, error };
 }
 
 // F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).

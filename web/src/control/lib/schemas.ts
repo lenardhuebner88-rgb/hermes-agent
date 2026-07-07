@@ -83,6 +83,9 @@ export const WorkerSchema = z.object({
   // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime_seconds).
   // null bei fehlendem Cap → UI nutzt etaFraction-Heuristik weiter.
   run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
+  // S1 (Puls-Leitstand): Heartbeat-Zeitstempel (Unix-Sek, chronologisch, Cap 20)
+  // für die Swimlane-Band-Ticks. Tolerant: fehlt bei alten Payloads → [].
+  heartbeat_ticks: z.array(z.coerce.number()).catch([]),
 });
 
 export const WorkersResponseSchema = z.object({
@@ -92,6 +95,31 @@ export const WorkersResponseSchema = z.object({
   cap: z.coerce.number().nullable().catch(null),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
+
+// ─── Live-Ereignis-Ticker (Puls-Leitstand S2) ────────────────────────────────
+// GET /runs/live-events — newest-first Cross-Worker-Events aus einer kuratierten
+// Kind-Allowlist (heartbeat, claimed, completed, blocked …). Tolerant gegenüber
+// neuen/fehlenden Feldern: ein einzelnes kaputtes Event darf nie die Liste leeren.
+export const LiveEventSchema = z.object({
+  id: z.coerce.number().catch(0),
+  run_id: z.coerce.number().nullable().catch(null),
+  task_id: z.string().nullable().catch(null),
+  task_title: z.string().nullable().catch(null),
+  profile: z.string().nullable().catch(null),
+  kind: z.string().catch("unknown"),
+  note: z.string().nullable().catch(null),
+  at: z.coerce.number().catch(0),
+});
+
+export const LiveEventsResponseSchema = z.object({
+  events: z.array(LiveEventSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  latest_id: z.coerce.number().nullable().catch(null),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+});
+
+export type LiveEvent = z.infer<typeof LiveEventSchema>;
+export type LiveEventsResponse = z.infer<typeof LiveEventsResponseSchema>;
 
 // Worker-Drawer-Steuerung (Gap 1) — POST /workers/{run_id}/action's response.
 // A guard refusal (e.g. "confirm required", "no active claim") comes back as

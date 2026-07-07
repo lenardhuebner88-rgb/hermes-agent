@@ -689,3 +689,231 @@ export function deriveSparklinePoints(
     value: p.done_tasks,
   }));
 }
+
+// ─── Puls-Leitstand (S2): Swimlane-Band-Geometrie ─────────────────────────────
+
+/** Klemmt einen Wert in [0, 1] (NaN/Infinity → 0). */
+export function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
+
+export interface BandWorker {
+  started_at: number;
+  eta_p50_seconds?: number | null;
+  eta_p90_seconds?: number | null;
+  max_runtime_seconds?: number | null;
+  run_progress?: number | null;
+  heartbeat_ticks?: number[] | null;
+}
+
+export interface BandGeometry {
+  /** Elapsed-Anteil am Fenster (0..1) — die gefüllte Bandbreite. */
+  fillFraction: number;
+  /** Position der p50-Marke im Fenster (0..1) oder null ohne p50-ETA. */
+  p50Fraction: number | null;
+  /** Positionen der Heartbeat-Ticks im Fenster (0..1). */
+  tickFractions: number[];
+  /** true wenn das Fenster aus echten Perzentilen/Cap stammt (nicht geschätzt). */
+  grounded: boolean;
+}
+
+/**
+ * bandWindowSeconds: die Zeitachse eines Swimlane-Bands in Sekunden.
+ * Bevorzugt das ehrliche p90-Perzentil (Mockup-Achsenlabel „p90-Fenster"),
+ * fällt auf den Runtime-Cap, dann p50×1.6, zuletzt elapsed×1.3 zurück — damit
+ * auch eine frische Lane ohne Historie ein wachsendes Band zeigt.
+ */
+export function bandWindowSeconds(w: BandWorker, now: number): { seconds: number; grounded: boolean } {
+  if (w.eta_p90_seconds && w.eta_p90_seconds > 0) return { seconds: w.eta_p90_seconds, grounded: true };
+  if (w.max_runtime_seconds && w.max_runtime_seconds > 0) return { seconds: w.max_runtime_seconds, grounded: true };
+  if (w.eta_p50_seconds && w.eta_p50_seconds > 0) return { seconds: w.eta_p50_seconds * 1.6, grounded: true };
+  const elapsed = Math.max(1, now - w.started_at);
+  return { seconds: elapsed * 1.3, grounded: false };
+}
+
+/**
+ * computeBandGeometry: reine Ableitung der Band-Darstellung eines laufenden
+ * Workers gegen sein p90-Fenster — Füllung (elapsed/Fenster), p50-Marke und die
+ * Heartbeat-Ticks als Positionen im Fenster. `now` injizierbar für Tests.
+ */
+export function computeBandGeometry(w: BandWorker, now: number): BandGeometry {
+  const elapsed = Math.max(0, now - w.started_at);
+  const win = bandWindowSeconds(w, now);
+  const windowSec = win.seconds > 0 ? win.seconds : 1;
+
+  let fill: number;
+  if (win.grounded) {
+    fill = clamp01(elapsed / windowSec);
+  } else if (typeof w.run_progress === "number") {
+    fill = clamp01(w.run_progress);
+  } else {
+    fill = Math.min(0.95, clamp01(elapsed / windowSec));
+  }
+
+  const p50Fraction =
+    w.eta_p50_seconds && w.eta_p50_seconds > 0 ? clamp01(w.eta_p50_seconds / windowSec) : null;
+
+  const tickFractions = (w.heartbeat_ticks ?? [])
+    .map((t) => (t - w.started_at) / windowSec)
+    .filter((f) => f >= 0 && f <= 1)
+    .map((f) => clamp01(f));
+
+  return { fillFraction: fill, p50Fraction, tickFractions, grounded: win.grounded };
+}
+
+/**
+ * fmtDurationClock: „6m42s" / „45s" / „1h04m" — die Uhrzeit-Notation des Mockups
+ * (im Gegensatz zum groben fmtSeconds „7 min"). Für Band-Meta + ETA-Chips.
+ */
+export function fmtDurationClock(secs: number | null | undefined): string {
+  if (secs == null || !Number.isFinite(secs) || secs < 0) return "—";
+  const s = Math.round(secs);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  return `${h}h${String(m).padStart(2, "0")}m`;
+}
+
+/** „23:59:02" — Uhrzeit eines Unix-Sekunden-Zeitstempels (Europe/Berlin). */
+export function fmtClockTime(epochSec: number | null | undefined): string {
+  if (!epochSec || !Number.isFinite(epochSec)) return "";
+  try {
+    return new Date(epochSec * 1000).toLocaleTimeString("de-DE", {
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZone: "Europe/Berlin",
+    });
+  } catch {
+    return "";
+  }
+}
+
+// ─── Puls-Leitstand: Lane-Rolle → Farbton ─────────────────────────────────────
+
+/** Rollen-Tint einer Swimlane, gemappt auf die Fleet-Statustrio-/Live-Tokens. */
+export type LaneTint = "coder" | "reviewer" | "verifier" | "neutral";
+
+/**
+ * laneTint: Rolle → Farb-Familie (Mockup Variante B): coder=cyan (live/primär),
+ * reviewer=amber, verifier=grün, sonst neutral (steel-brand). Der Fleet-Skin
+ * nutzt cyan bereits als Default-Avatar-Ton — konsistent mit DESIGN.md.
+ */
+export function laneTint(profile: string | null | undefined): LaneTint {
+  const p = (profile ?? "").toLowerCase();
+  if (/verif/.test(p)) return "verifier";
+  if (/review|critic/.test(p)) return "reviewer";
+  if (/coder|premium|opus|claude|build|scout/.test(p)) return "coder";
+  return "neutral";
+}
+
+// ─── Puls-Leitstand: Pulse-Strip-Ableitung ────────────────────────────────────
+
+export interface PulseSummary {
+  slotsUsed: number;
+  slotsCap: number | null;
+  queue: number;
+  doneToday: number | null;
+  blocked: number;
+  /** Live-Token-Summe (ein+aus) über alle aktiven Worker. */
+  tokenSum: number;
+}
+
+/**
+ * derivePulse: reine Ableitung der drei Pulse-Kacheln. `queue` = Tasks in ready/
+ * scheduled (warten auf einen Slot); `tokenSum` = Σ(input+output) der aktiven
+ * Worker; `doneToday`/`blocked`/`cap` kommen aus den bereits geladenen Quellen.
+ */
+export function derivePulse(input: {
+  activeWorkers: Array<{ input_tokens?: number | null; output_tokens?: number | null }>;
+  cap: number | null;
+  queue: number;
+  doneToday: number | null;
+  blocked: number;
+}): PulseSummary {
+  const tokenSum = input.activeWorkers.reduce(
+    (sum, w) => sum + (w.input_tokens ?? 0) + (w.output_tokens ?? 0),
+    0,
+  );
+  return {
+    slotsUsed: input.activeWorkers.length,
+    slotsCap: input.cap,
+    queue: input.queue,
+    doneToday: input.doneToday,
+    blocked: input.blocked,
+    tokenSum,
+  };
+}
+
+// ─── Puls-Leitstand: Live-Ticker-Formatierung + Merge ─────────────────────────
+
+export type LiveEventTone = "ok" | "warn" | "alert" | "none";
+
+export interface FormattedLiveEvent {
+  /** Statuszeichen-Präfix (✓ / ◼ …) oder null. */
+  mark: string | null;
+  text: string;
+  tone: LiveEventTone;
+}
+
+/**
+ * formatLiveEvent: reine Ableitung der Ticker-Zeile aus einem LiveEvent.
+ * Heartbeats zeigen ihre Note; Status-Kinds bekommen Präfix + Statuston.
+ */
+export function formatLiveEvent(e: {
+  kind: string;
+  note?: string | null;
+  task_title?: string | null;
+  task_id?: string | null;
+}): FormattedLiveEvent {
+  const title = (e.task_title || e.task_id || "").trim();
+  const note = (e.note || "").trim();
+  switch (e.kind) {
+    case "heartbeat":
+      return { mark: null, text: note || "Heartbeat", tone: "none" };
+    case "claimed":
+      return { mark: null, text: `Slot geclaimt → ${e.task_id || title}`, tone: "none" };
+    case "submitted_for_review":
+      return { mark: null, text: `${title} → Review`, tone: "none" };
+    case "review_released":
+      return { mark: "✓", text: `Review frei · ${title}`, tone: "ok" };
+    case "completed":
+      return { mark: "✓", text: `done · ${note || title}`, tone: "ok" };
+    case "integration_merged":
+      return { mark: "✓", text: `gemergt · ${title}`, tone: "ok" };
+    case "unblocked":
+      return { mark: null, text: `entsperrt · ${title}`, tone: "ok" };
+    case "blocked":
+      return { mark: "◼", text: `blocked · ${title}${note ? ` — ${note}` : ""}`, tone: "warn" };
+    case "auto_retried":
+      return { mark: "↻", text: `Auto-Retry · ${title}`, tone: "warn" };
+    case "timed_out":
+      return { mark: "⏱", text: `Timeout · ${title}`, tone: "alert" };
+    case "crashed":
+      return { mark: "✗", text: `Crash · ${title}`, tone: "alert" };
+    case "gave_up":
+      return { mark: "✗", text: `aufgegeben · ${title}`, tone: "alert" };
+    default:
+      return { mark: null, text: note || `${e.kind} · ${title}`.trim(), tone: "none" };
+  }
+}
+
+/**
+ * mergeLiveEvents: fügt neu gepollte (newest-first) Events in den bestehenden
+ * (newest-first) Puffer ein — dedupliziert nach id, sortiert absteigend nach id
+ * und deckelt auf `cap`. Reine Funktion für den since_id-Inkrement-Poll.
+ */
+export function mergeLiveEvents<T extends { id: number }>(prev: T[], incoming: T[], cap: number): T[] {
+  const byId = new Map<number, T>();
+  for (const e of prev) byId.set(e.id, e);
+  for (const e of incoming) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, Math.max(0, cap));
+}

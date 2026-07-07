@@ -1,14 +1,22 @@
 /**
- * Worker-Subtab + Worker-Drawer (Overlay Bottom-Sheet).
+ * Worker-Subtab — Puls-Leitstand (Variante B).
  *
- * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
+ * Der Tab ist ein Kontrollraum: eine Puls-Strip-Kopfzeile (Slots/Queue, heute
+ * fertig, Live-Token-Summe), pro aktivem Slot eine Zeitachsen-Swimlane (Laufband
+ * gegen das p90-Fenster, p50-Marke, Heartbeat-Ticks, step_key) und darunter ein
+ * Live-Ereignis-Ticker. Ohne Worker: freie Slot-Lanes + der Ticker als
+ * Verlaufsspur — nie ein schwarzes Loch. Tap auf eine Lane öffnet den Fokus-
+ * Drawer (erweitert um das vergrößerte Band + Notiz-Historie + „Andere Lanes").
+ *
+ * Referenz: Design-Board-Karte c_97c25aca (operator-approved Variante B).
  */
 import { useState } from "react";
 import {
-  runProgressFraction,
   heartbeatAge,
   fmtSeconds,
   fmtTokens,
+  fmtClockTime,
+  derivePulse,
   profileInitial,
   profileColorClass,
 } from "../../lib/fleetHub";
@@ -17,7 +25,11 @@ import type { Worker, BoardResponse, BoardTask } from "../../lib/types";
 import type { ReliabilityResponse } from "../../lib/schemas";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
-import { useWorkerLifecycle } from "../../hooks/useControlData";
+import { useWorkerLifecycle, useWorkerActivity, useRunLiveEvents } from "../../hooks/useControlData";
+import { WorkerBand } from "./WorkerBand";
+import { SlotLane, FreeSlotLane, MiniLane } from "./SlotLane";
+import { LiveTicker } from "./LiveTicker";
+import { PulseStrip } from "./PulseStrip";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -28,6 +40,10 @@ interface WorkerTabProps {
   now: number;
   initialOpen: Worker | null;
   onOpenChain: (rootId: string) => void;
+  /** F4: Live-Concurrency-Cap (kanban.max_in_progress) für den Pulse-Strip. */
+  cap?: number | null;
+  /** Heute abgeschlossene Läufe (costs.today.runs) für den Pulse-Strip. */
+  doneToday?: number | null;
 }
 
 interface WorkerSelection {
@@ -35,89 +51,106 @@ interface WorkerSelection {
   snapshot: Worker;
 }
 
-export function WorkerTab({ activeWorkers, board, reliability, now, initialOpen, onOpenChain }: WorkerTabProps) {
+// Wie viele freie Slot-Lanes der Leerzustand zeigt (Cap, sonst 3; gedeckelt bei
+// 5, damit ein hoher Cap den Tab nicht mit Leer-Lanes flutet).
+function freeSlotCount(cap: number | null | undefined): number {
+  const base = cap && cap >= 1 ? cap : 3;
+  return Math.max(1, Math.min(base, 5));
+}
+
+export function WorkerTab({
+  activeWorkers,
+  board,
+  reliability,
+  now,
+  initialOpen,
+  onOpenChain,
+  cap = null,
+  doneToday = null,
+}: WorkerTabProps) {
   const [selection, setSelection] = useState<WorkerSelection | null>(
-    () => initialOpen ? { taskId: initialOpen.task_id, snapshot: initialOpen } : null,
+    () => (initialOpen ? { taskId: initialOpen.task_id, snapshot: initialOpen } : null),
   );
+  const liveEvents = useRunLiveEvents(true);
 
   const selectedWorker = selection ? activeWorkers.find((w) => w.task_id === selection.taskId) ?? null : null;
   const drawerWorker = selectedWorker ?? selection?.snapshot ?? null;
 
-  const emptyState = (
-    <div className="fleet-empty">
-      <p className="fleet-empty-title">{de.fleet.workerEmptyTitle}</p>
-      <p className="fleet-empty-sub">{de.fleet.workerEmptyDesc}</p>
-    </div>
-  );
+  // Pulse-Ableitung: queue = ready+scheduled, blocked = blocked-Spalte.
+  const columns = board?.columns ?? [];
+  const queue = columns
+    .filter((c) => c.name === "ready" || c.name === "scheduled")
+    .reduce((n, c) => n + c.tasks.length, 0);
+  const blocked = (columns.find((c) => c.name === "blocked")?.tasks ?? []).length;
+  const pulse = derivePulse({ activeWorkers, cap, queue, doneToday, blocked });
 
-  if (activeWorkers.length === 0 && !drawerWorker) {
-    return emptyState;
-  }
+  const otherWorkers = drawerWorker
+    ? activeWorkers.filter((w) => w.task_id !== drawerWorker.task_id)
+    : [];
 
-  if (activeWorkers.length === 0) {
-    return (
-      <>
-        {emptyState}
-        {drawerWorker ? (
-          <WorkerDrawer
-            worker={drawerWorker}
-            active={false}
-            board={board}
-            reliability={reliability}
-            now={now}
-            onClose={() => setSelection(null)}
-            onOpenChain={onOpenChain}
-          />
-        ) : null}
-      </>
-    );
-  }
+  const select = (w: Worker) => setSelection({ taskId: w.task_id, snapshot: w });
+
+  const drawer = drawerWorker ? (
+    <WorkerDrawer
+      worker={drawerWorker}
+      active={selectedWorker != null}
+      board={board}
+      reliability={reliability}
+      now={now}
+      otherWorkers={otherWorkers}
+      onOpenWorker={select}
+      onClose={() => setSelection(null)}
+      onOpenChain={onOpenChain}
+    />
+  ) : null;
 
   return (
-    <>
-      {activeWorkers.map((w) => (
-        <button
-          key={w.run_id}
-          type="button"
-          className="fleet-wk fleet-wk-lebt text-left"
-          onClick={() => {
-            setSelection({ taskId: w.task_id, snapshot: w });
-          }}
-          aria-label={`Worker ${w.profile} Details`}
-        >
-          <div className="fleet-wk-top">
-            <div className={`fleet-avatar ${profileColorClass(w.profile)}`}>{profileInitial(w.profile)}</div>
-            <div className="fleet-wk-name">{w.profile}</div>
-            {w.last_heartbeat_at ? (
-              <div className="fleet-led">
-                <span className="fleet-led-dot" />
-                ♥ {fmtSeconds(heartbeatAge(w.last_heartbeat_at, now) ?? 0)}
-              </div>
-            ) : null}
-          </div>
-          {runProgressFraction(w, now) != null ? (
-            <div className="fleet-rail" title={w.run_progress == null ? "Fortschritt geschätzt (ETA-Heuristik)" : "Fortschritt (Runtime-Cap)"}>
-              <div
-                className="fleet-rail-fill"
-                style={{ width: `${Math.round((runProgressFraction(w, now) ?? 0) * 100)}%` }}
-              />
-            </div>
-          ) : null}
-        </button>
-      ))}
+    <div className="fleet-worker-tab">
+      <PulseStrip pulse={pulse} />
 
-      {drawerWorker ? (
-        <WorkerDrawer
-          worker={drawerWorker}
-          active={selectedWorker != null}
-          board={board}
-          reliability={reliability}
-          now={now}
-          onClose={() => setSelection(null)}
-          onOpenChain={onOpenChain}
-        />
-      ) : null}
-    </>
+      {activeWorkers.length > 0 ? (
+        <>
+          <div className="fleet-laneswrap">
+            <div className="fleet-axis" aria-hidden="true">
+              <span>0</span>
+              <span>25%</span>
+              <span>50%</span>
+              <span>75%</span>
+              <span>{de.fleet.pulseP90Window}</span>
+            </div>
+            {activeWorkers.map((w) => (
+              <SlotLane key={w.run_id} worker={w} now={now} onOpen={() => select(w)} />
+            ))}
+          </div>
+          <LiveTicker
+            events={liveEvents.events}
+            title={de.fleet.tickerLive}
+            loading={liveEvents.loading}
+            emptyLabel={de.fleet.tickerEmpty}
+          />
+        </>
+      ) : (
+        <>
+          <div className="fleet-laneswrap">
+            {Array.from({ length: freeSlotCount(cap) }, (_, i) => (
+              <FreeSlotLane
+                key={`free-${i}`}
+                index={i + 1}
+                label={i === 0 && queue > 0 ? de.fleet.slotFreeWaiting : de.fleet.slotFree}
+              />
+            ))}
+          </div>
+          <LiveTicker
+            events={liveEvents.events}
+            title={de.fleet.tickerHistory}
+            loading={liveEvents.loading}
+            emptyLabel={de.fleet.tickerEmpty}
+          />
+        </>
+      )}
+
+      {drawer}
+    </div>
   );
 }
 
@@ -221,7 +254,39 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
   );
 }
 
-// ─── Worker-Drawer ────────────────────────────────────────────────────────────
+// ─── Notiz-Historie (AC-3) ────────────────────────────────────────────────────
+// Per-Lane Heartbeat-Notiz-Verlauf aus GET /tasks/{task_id}/activity — nur wenn
+// der Drawer offen und der Worker aktiv ist (der Hook pausiert bei null-taskId).
+
+function WorkerNotesHistory({ taskId }: { taskId: string }) {
+  const activity = useWorkerActivity(taskId);
+  const notes = (activity.data?.events ?? []).filter((e) => e.note && e.note.trim());
+
+  return (
+    <div className="fleet-fx-notes-wrap">
+      <div className="fleet-fx-notes-head">{de.fleet.drawerNotes}</div>
+      {notes.length === 0 ? (
+        <div className="fleet-fx-note fleet-fx-note-empty">
+          {activity.loading ? "Lädt Notizen …" : de.fleet.drawerNotesEmpty}
+        </div>
+      ) : (
+        <div className="fleet-fx-notes">
+          {notes.map((e, i) => (
+            <div key={e.id} className="fleet-fx-note">
+              <span className="fleet-fx-note-ts">{fmtClockTime(e.at)}</span>{" "}
+              <span className={i === 0 ? "fleet-fx-note-cur" : undefined}>
+                {i === 0 ? "▸ " : ""}
+                {e.note}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Worker-Drawer (Fokus) ────────────────────────────────────────────────────
 
 interface WorkerDrawerProps {
   worker: Worker;
@@ -229,11 +294,23 @@ interface WorkerDrawerProps {
   board: BoardResponse | null;
   reliability: ReliabilityResponse | null;
   now: number;
+  otherWorkers: Worker[];
+  onOpenWorker: (w: Worker) => void;
   onClose: () => void;
   onOpenChain: (rootId: string) => void;
 }
 
-function WorkerDrawer({ worker: w, active, board, reliability, now, onClose, onOpenChain }: WorkerDrawerProps) {
+function WorkerDrawer({
+  worker: w,
+  active,
+  board,
+  reliability,
+  now,
+  otherWorkers,
+  onOpenWorker,
+  onClose,
+  onOpenChain,
+}: WorkerDrawerProps) {
   const elapsedSec = Math.max(0, now - w.started_at);
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const initial = profileInitial(w.profile);
@@ -283,6 +360,9 @@ function WorkerDrawer({ worker: w, active, board, reliability, now, onClose, onO
           {w.task_title}
           <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{active ? ` · Run ${w.run_id}` : ""}</code>
         </div>
+
+        {/* Vergrößertes Zeitachsen-Band (AC-3) — nur solange der Worker läuft. */}
+        {active ? <WorkerBand worker={w} now={now} size="big" /> : null}
 
         {/* KV-Grid */}
         <div className="fleet-grid2">
@@ -338,6 +418,9 @@ function WorkerDrawer({ worker: w, active, board, reliability, now, onClose, onO
           </div>
         ) : null}
 
+        {/* Notiz-Historie (AC-3) — nur bei laufendem Worker. */}
+        {active ? <WorkerNotesHistory taskId={w.task_id} /> : null}
+
         {active ? null : (
           <div className="fleet-kv" role="status">
             <div className="fleet-kv-k">{de.fleet.workerEndedTitle}</div>
@@ -375,6 +458,16 @@ function WorkerDrawer({ worker: w, active, board, reliability, now, onClose, onO
 
         {/* Log-Tail (nur bei offenem Drawer pollend, wie WorkerCard/NodeDetailDrawer) */}
         {active && logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
+
+        {/* Andere Lanes: schneller Sprung zu den übrigen aktiven Workern. */}
+        {otherWorkers.length > 0 ? (
+          <div className="fleet-fx-other">
+            <div className="fleet-sec">{de.fleet.drawerOtherLanes}</div>
+            {otherWorkers.map((ow) => (
+              <MiniLane key={ow.run_id} worker={ow} now={now} onOpen={() => onOpenWorker(ow)} />
+            ))}
+          </div>
+        ) : null}
       </div>
     </Overlay>
   );
