@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import sqlite3
+import subprocess
+import tempfile
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
 
 from hermes_cli import design_board_cli
@@ -16,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 _CHUNK = 1024 * 1024
 _MAX_BYTES = 100 * 1024 * 1024
+# HTML mockups are text; keep them well below the image ceiling.
+_MAX_HTML_BYTES = 5 * 1024 * 1024
 
 
 def _safe_batch_facets(task_ids: list[str]) -> tuple[dict, bool]:
@@ -140,6 +145,61 @@ def register_design_board_routes(app: FastAPI) -> None:
                 raise HTTPException(413, "file too large")
         name = store.write_asset(card_id, file.filename or "upload.bin", bytes(buf))
         return {"name": name}
+
+    @app.post("/api/design-board/cards/{card_id}/mockups")
+    async def _upload_mockup(
+        card_id: str,
+        file: UploadFile = File(...),
+        note: str = Form(""),
+    ):
+        """Upload an HTML mockup: render it to PNG and store a mockup_html entry.
+
+        Reuses ``design_board_cli.add_mockup`` (the same code the CLI uses), so
+        the tab drives the Claude-Design integration pipeline directly. Render
+        failures degrade to structured JSON errors instead of a bare 500.
+        """
+        if store.get_card(card_id) is None:
+            raise HTTPException(404, "card not found")
+        buf = bytearray()
+        while True:
+            chunk = await file.read(_CHUNK)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > _MAX_HTML_BYTES:
+                raise HTTPException(413, {
+                    "error": "file_too_large",
+                    "message": f"HTML mockup exceeds {_MAX_HTML_BYTES} bytes",
+                })
+        # Name the temp file after the (sanitised) upload and force an .html
+        # extension so the served asset renders as HTML in the iframe.
+        filename = store.sanitize_asset_name(file.filename or "mockup.html")
+        if not filename.lower().endswith((".html", ".htm")):
+            filename += ".html"
+        with tempfile.TemporaryDirectory() as td:
+            html_path = os.path.join(td, filename)
+            with open(html_path, "wb") as fh:
+                fh.write(bytes(buf))
+            try:
+                eid = design_board_cli.add_mockup(card_id, html_path, note=note)
+            except FileNotFoundError as exc:
+                logger.warning("design-board mockup renderer missing: %s", exc)
+                raise HTTPException(502, {
+                    "error": "render_unavailable",
+                    "message": "HTML→PNG renderer (chromium-shot) not available",
+                })
+            except subprocess.TimeoutExpired as exc:
+                logger.warning("design-board mockup render timed out: %s", exc)
+                raise HTTPException(504, {
+                    "error": "render_timeout",
+                    "message": "HTML→PNG render timed out",
+                })
+            except RuntimeError as exc:
+                logger.warning("design-board mockup render failed: %s", exc)
+                raise HTTPException(502, {
+                    "error": "render_failed", "message": str(exc),
+                })
+        return {"id": eid}
 
     @app.get("/api/design-board/cards/{card_id}/assets/{name}")
     async def _serve(card_id: str, name: str):

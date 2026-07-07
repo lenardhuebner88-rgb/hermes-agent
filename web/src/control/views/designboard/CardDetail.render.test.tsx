@@ -149,6 +149,79 @@ describe("CardDetail (jsdom)", () => {
     );
   });
 
+  it("uploads an HTML mockup via the mockup file input", async () => {
+    fetchJSONMock.mockReset();
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (url.includes("/mockups")) return Promise.resolve({ id: "e_mock" });
+      return Promise.resolve({
+        id: "c_1", kind: "mockup", title: "Hero", status: "open",
+        target: null, linked_tasks: [],
+        entries: [], task_facets: [], derived_status: null, kanban_ok: true,
+      });
+    });
+    render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>
+    );
+    const input = await waitFor(() => screen.getByTestId("mockup-upload"));
+    const file = new File(["<h1>hi</h1>"], "hero.html", { type: "text/html" });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => {
+      const post = fetchJSONMock.mock.calls.find(
+        (c) => c[0] === "/api/design-board/cards/c_1/mockups" && c[1]?.method === "POST",
+      );
+      expect(post).toBeTruthy();
+      expect(post![1].body instanceof FormData).toBe(true);
+    });
+  });
+
+  it("shows a mapped error when a mockup upload is rejected", async () => {
+    fetchJSONMock.mockReset();
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (url.includes("/mockups"))
+        return Promise.reject(new Error('413: {"detail":{"error":"file_too_large"}}'));
+      return Promise.resolve({
+        id: "c_1", kind: "mockup", title: "Hero", status: "open",
+        target: null, linked_tasks: [],
+        entries: [], task_facets: [], derived_status: null, kanban_ok: true,
+      });
+    });
+    render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>
+    );
+    const input = await waitFor(() => screen.getByTestId("mockup-upload"));
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "big.html", { type: "text/html" })] },
+    });
+    await waitFor(() => expect(screen.getByText(/zu groß/)).toBeTruthy());
+  });
+
+  it("renders a mockup_html entry with a scripts-disabled live iframe", async () => {
+    fetchJSONMock.mockReset();
+    fetchJSONMock.mockResolvedValue({
+      id: "c_1", kind: "mockup", title: "Hero", status: "open",
+      target: null, linked_tasks: [],
+      entries: [{
+        id: "e_m", author: "claude", kind: "mockup_html", note: "hero",
+        asset: "assets/hero.png", html: "assets/hero.html", pins: [], created_at: 1,
+      }],
+      task_facets: [], derived_status: null, kanban_ok: true,
+    });
+    render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByText("Live-HTML anzeigen")).toBeTruthy());
+    fireEvent.click(screen.getByText("Live-HTML anzeigen"));
+    const iframe = await waitFor(() => screen.getByTitle("mockup"));
+    expect(iframe.getAttribute("sandbox")).toBe("allow-same-origin");
+    expect(iframe.getAttribute("sandbox")).not.toContain("allow-scripts");
+  });
+
   it("shows before and after screenshots side by side", async () => {
     fetchJSONMock.mockResolvedValue({
       id: "c_1", kind: "bug", title: "Header overlaps", status: "addressed",
