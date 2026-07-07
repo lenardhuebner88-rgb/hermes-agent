@@ -3240,6 +3240,17 @@ def list_active_workers(
             model_override = row["model_override"] or None
             lane_model = lane_models.get((row["profile"] or "").strip())
             effective_model = model_override or lane_model
+            has_input_tokens = row["input_tokens"] is not None
+            has_output_tokens = row["output_tokens"] is not None
+            if has_input_tokens and has_output_tokens:
+                token_status = "live"
+                token_status_reason = None
+            elif has_input_tokens or has_output_tokens:
+                token_status = "partial"
+                token_status_reason = "only one live token counter is available"
+            else:
+                token_status = "no_live_sample"
+                token_status_reason = "task_runs has no live token counters for this active worker yet"
             workers.append({
                 "run_id": row["run_id"],
                 "task_id": row["task_id"],
@@ -3264,6 +3275,8 @@ def list_active_workers(
                 "heartbeat_ticks": heartbeat_ticks.get(int(row["run_id"]), []),
                 "input_tokens": row["input_tokens"],
                 "output_tokens": row["output_tokens"],
+                "token_status": token_status,
+                "token_status_reason": token_status_reason,
                 "eta_p50_seconds": prof_eta.get("p50"),
                 "eta_p90_seconds": prof_eta.get("p90"),
                 # B1: step progress + model resolution

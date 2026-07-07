@@ -61,6 +61,9 @@ export interface Worker {
   input_tokens?: number | null;
   /** Phase B: Live-Output-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
   output_tokens?: number | null;
+  /** Live-Token-Status: live counters, partial sample, or explicit no-data reason. */
+  token_status?: "live" | "partial" | "no_live_sample" | null;
+  token_status_reason?: string | null;
   /** S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime). null → etaFraction-Fallback. */
   run_progress?: number | null;
   /** S1 (Puls-Leitstand): Heartbeat-Zeitstempel (Unix-Sek, chronologisch, Cap 20)

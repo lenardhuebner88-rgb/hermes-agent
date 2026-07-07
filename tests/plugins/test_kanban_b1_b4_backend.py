@@ -195,6 +195,42 @@ def test_workers_active_b1_no_model_override(client):
     assert "effective_model" in w
 
 
+def test_workers_active_token_status_no_live_sample(client):
+    """workers/active is explicit when a running worker has no live token sample yet."""
+    task_id, run_id = _make_running_task(title="b1-token-null")
+    r = client.get("/api/plugins/kanban/workers/active")
+    assert r.status_code == 200
+    w = r.json()["workers"][0]
+    assert w["run_id"] == run_id
+    assert w["input_tokens"] is None
+    assert w["output_tokens"] is None
+    assert w["token_status"] == "no_live_sample"
+    assert "live token" in w["token_status_reason"]
+
+
+def test_workers_active_token_status_live_values(client):
+    """workers/active passes through live token counters when the run has them."""
+    task_id, run_id = _make_running_task(title="b1-token-live")
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE task_runs SET input_tokens=?, output_tokens=? WHERE id=?",
+            (1234, 56, run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/workers/active")
+    assert r.status_code == 200
+    w = r.json()["workers"][0]
+    assert w["run_id"] == run_id
+    assert w["input_tokens"] == 1234
+    assert w["output_tokens"] == 56
+    assert w["token_status"] == "live"
+    assert w["token_status_reason"] is None
+
+
 # ---------------------------------------------------------------------------
 # B2 — Task activity endpoint
 # ---------------------------------------------------------------------------
