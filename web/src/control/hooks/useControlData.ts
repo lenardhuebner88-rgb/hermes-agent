@@ -1210,6 +1210,38 @@ export function useRepairDeliverable() {
   return { busyId, doneIds, errorById, run };
 }
 
+export function useReleaseGateExecute() {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [doneIds, setDoneIds] = useState<Record<string, boolean>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (taskId: string) => {
+    setBusyId(taskId);
+    setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    try {
+      const res = await fetchJSON<{ ok?: boolean; detail?: string; status?: string }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/release-gate`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) },
+      );
+      if (res?.ok === false) {
+        const detail = res.detail || res.status || "Release-Gate fehlgeschlagen.";
+        if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+        return { ok: false as const, detail };
+      }
+      if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
+      return { ok: true as const, detail: res.detail || res.status };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+  return { busyId, doneIds, errorById, run };
+}
+
 // Naht 3: Inline-Veto für eine Autoresearch-Eskalation direkt am CommandHome —
 // POST /tasks/<id>/veto-escalation archiviert die Eskalation UND schreibt
 // freigabe_vetoed, sodass der Stratege (reflect) lernt, das Signal künftig nicht

@@ -25958,6 +25958,19 @@ def decision_queue(
                 reason,
                 _age(row["event_at"]),
                 suggested,
+                extra={
+                    "release_gate": {
+                        "root_id": payload.get("root_id"),
+                        "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
+                        "merge_commit": payload.get("merge_commit"),
+                        "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
+                        "suggested_command": suggested,
+                    },
+                    "root_id": payload.get("root_id"),
+                    "source_task_id": payload.get("source_task") or payload.get("source_task_id"),
+                    "merge_commit": payload.get("merge_commit"),
+                    "commands": [str(c) for c in cmds] if isinstance(cmds, list) else [],
+                },
             )
     except Exception:
         pass

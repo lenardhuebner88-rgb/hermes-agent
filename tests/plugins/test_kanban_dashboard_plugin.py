@@ -8362,3 +8362,77 @@ def test_board_block_reason_null_for_non_hold(client):
     assert "operator hold" not in reason.lower(), (
         f"non-hold blocked task must not have operator-hold block_reason, got {reason!r}"
     )
+
+
+def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client, monkeypatch):
+    conn = kb.connect()
+    try:
+        gate_id = kb.create_task(conn, title="release-gate: root", assignee="verifier")
+        kb.block_task(conn, gate_id, reason="awaiting release-gate GO")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                gate_id,
+                "release_gate_parked",
+                {"root_id": "t_root", "reason": "awaiting release-gate GO"},
+            )
+    finally:
+        conn.close()
+
+    calls = []
+
+    def fake_execute(exec_conn, task_id):
+        calls.append(task_id)
+        assert exec_conn is not None
+        return {
+            "ok": True,
+            "status": "green",
+            "fixer_attempts": 0,
+            "root_id": "t_root",
+            "result": "dashboard green",
+        }
+
+    from hermes_cli import kanban_worktrees
+
+    monkeypatch.setattr(kanban_worktrees, "execute_release_gate", fake_execute)
+
+    confirm_missing = client.post(
+        f"/api/plugins/kanban/tasks/{gate_id}/release-gate", json={"confirm": False}
+    )
+    assert confirm_missing.status_code == 200
+    assert confirm_missing.json()["ok"] is False
+    assert calls == []
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{gate_id}/release-gate", json={"confirm": True}
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "status": "green",
+        "fixer_attempts": 0,
+        "root_id": "t_root",
+        "detail": "dashboard green",
+    }
+    assert calls == [gate_id]
+
+
+def test_release_gate_endpoint_rejects_non_blocked_gate(client):
+    conn = kb.connect()
+    try:
+        gate_id = kb.create_task(conn, title="release-gate: root", assignee="verifier")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                gate_id,
+                "release_gate_parked",
+                {"root_id": "t_root", "reason": "awaiting release-gate GO"},
+            )
+    finally:
+        conn.close()
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{gate_id}/release-gate", json={"confirm": True}
+    )
+    assert response.status_code == 409
+    assert "not blocked" in response.json()["detail"]

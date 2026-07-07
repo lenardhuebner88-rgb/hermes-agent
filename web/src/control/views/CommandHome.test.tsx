@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { InboxItem } from "../lib/decisionInbox";
 import type {
   useFixRedispatch,
+  useReleaseGateExecute,
   useRepairDeliverable,
   useVetoEscalation,
 } from "../hooks/useControlData";
@@ -29,6 +30,7 @@ const hooks = vi.hoisted(() => {
     useHermesRunsDaily: vi.fn(),
     useStrategistCount: vi.fn(),
     useFixRedispatch: vi.fn(),
+    useReleaseGateExecute: vi.fn(),
     useRepairDeliverable: vi.fn(),
     useVetoEscalation: vi.fn(),
     useCaptureTask: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock("../hooks/useControlData", () => ({
   useHermesRunsDaily: hooks.useHermesRunsDaily,
   useStrategistCount: hooks.useStrategistCount,
   useFixRedispatch: hooks.useFixRedispatch,
+  useReleaseGateExecute: hooks.useReleaseGateExecute,
   useRepairDeliverable: hooks.useRepairDeliverable,
   useVetoEscalation: hooks.useVetoEscalation,
   useCaptureTask: hooks.useCaptureTask,
@@ -109,6 +112,7 @@ function installCommandHomeFixtures() {
   hooks.useHermesRunsDaily.mockReturnValue(hooks.poll({ days: 14, series: [] }));
   hooks.useStrategistCount.mockReturnValue(hooks.poll({ count: 0 }));
   hooks.useFixRedispatch.mockReturnValue(noopMutation);
+  hooks.useReleaseGateExecute.mockReturnValue(noopMutation);
   hooks.useRepairDeliverable.mockReturnValue(noopMutation);
   hooks.useVetoEscalation.mockReturnValue(noopMutation);
   hooks.useCaptureTask.mockReturnValue({ create: async () => "t_new", loading: false, error: null });
@@ -131,6 +135,7 @@ describe("TopDecision", () => {
         item={item}
         onOpen={() => undefined}
         fix={noopMutation as unknown as ReturnType<typeof useFixRedispatch>}
+        releaseGate={noopMutation as unknown as ReturnType<typeof useReleaseGateExecute>}
         repair={noopMutation as unknown as ReturnType<typeof useRepairDeliverable>}
         veto={noopMutation as unknown as ReturnType<typeof useVetoEscalation>}
       />,
