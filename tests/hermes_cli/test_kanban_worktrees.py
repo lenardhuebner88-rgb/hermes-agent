@@ -3004,6 +3004,58 @@ def test_spawn_release_gate_activation_reports_launch_failure():
     assert "already exists" in result["detail"].lower()
 
 
+def test_auto_mode_release_gate_child_launches_board_scoped_activation(
+    kanban_home, monkeypatch,
+):
+    """AC-5 regression: ``release_gate.mode:auto`` on a NON-default board must
+    launch the SAME detached activation the CLI/endpoint use, scoped to the child's
+    board. A detached ``systemd-run --user`` unit does NOT inherit the caller's
+    ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` (spawn only forwards PATH/HERMES_HOME/
+    bus vars), so a board=None launch would resolve ``<root>/kanban/current`` and
+    green the WRONG board's child. The auto path must therefore derive the board
+    from the integration connection and emit
+    ``hermes kanban --board <slug> release-gate <child> --json`` (global --board
+    BEFORE the subcommand)."""
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "auto")
+    monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
+    captured = {}
+
+    def fake_run(argv, **kwargs):  # the injected systemd-run launcher
+        captured["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    # The child lives on the non-default board "ops"; the conn's DB path is what
+    # the auto path must reverse-map to a --board slug.
+    with kb.connect(board="ops") as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
+        )
+        started = _events(conn, child_id, "release_gate_auto_execute_started")
+        failed = _events(conn, child_id, "release_gate_auto_execute_failed")
+
+    assert child_id is not None
+    # auto-execute fired and the detached launcher reported success (no fail event)
+    assert len(started) == 1
+    assert failed == []
+    argv = captured["argv"]
+    assert argv[0].endswith("systemd-run")
+    assert "--user" in argv
+    # board-scoped, same shape the CLI/endpoint path is asserted to build:
+    # `hermes kanban --board ops release-gate <child> --json`
+    i = argv.index("release-gate")
+    assert argv[i - 3:i + 3] == [
+        "kanban", "--board", "ops", "release-gate", child_id, "--json",
+    ]
+    # never launches against the default board when the child is on "ops"
+    assert argv[i - 1] != "default"
+
+
 def test_release_gate_executor_rejects_non_gate_task(kanban_home):
     """A task without a release_gate_parked event is not a gate child."""
     with kb.connect() as conn:

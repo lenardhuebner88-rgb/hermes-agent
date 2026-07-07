@@ -140,6 +140,50 @@ class TestPathResolution:
 
 
 # ---------------------------------------------------------------------------
+# Reverse mapping: DB path / connection -> board slug
+# (used to thread --board into a detached activation that does not inherit the
+#  caller's board env vars — see spawn_release_gate_activation)
+# ---------------------------------------------------------------------------
+
+class TestBoardSlugForDbPath:
+    def test_default_db_maps_to_default(self, fresh_home):
+        assert kb.board_slug_for_db_path(kb.kanban_db_path(board="default")) == "default"
+
+    def test_named_board_db_round_trips(self, fresh_home):
+        for slug in ("atm10-server", "proj_1", "ops"):
+            p = kb.kanban_db_path(board=slug)
+            assert kb.board_slug_for_db_path(p) == slug
+
+    def test_default_and_named_are_distinguished(self, fresh_home):
+        # The default DB is a sibling of the ``kanban/`` dir, a named board DB is
+        # two levels under ``kanban/boards/`` — the reverse map must not confuse them.
+        assert kb.board_slug_for_db_path(kb.kanban_db_path()) == "default"
+        assert kb.board_slug_for_db_path(kb.kanban_db_path(board="ops")) == "ops"
+
+    def test_unknown_path_returns_none(self, fresh_home, tmp_path):
+        # A HERMES_KANBAN_DB-pinned custom path / sandbox DB is not a recognizable
+        # board layout → None, so the caller falls back to board-agnostic resolution
+        # rather than mislabel it.
+        assert kb.board_slug_for_db_path(tmp_path / "custom.db") is None
+        assert kb.board_slug_for_db_path(tmp_path / "kanban.db") is None
+        assert kb.board_slug_for_db_path(None) is None
+
+    def test_conn_default_and_named(self, fresh_home):
+        with kb.connect(board="default") as conn:
+            assert kb.board_slug_for_conn(conn) == "default"
+        with kb.connect(board="ops") as conn:
+            assert kb.board_slug_for_conn(conn) == "ops"
+
+    def test_conn_in_memory_returns_none(self):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        try:
+            assert kb.board_slug_for_conn(conn) is None
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Current-board resolution
 # ---------------------------------------------------------------------------
 

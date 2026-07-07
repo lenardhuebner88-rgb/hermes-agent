@@ -688,6 +688,54 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     return board_dir(slug) / "kanban.db"
 
 
+def board_slug_for_db_path(db_path) -> Optional[str]:
+    """Reverse of :func:`kanban_db_path`: map a resolved ``kanban.db`` path back
+    to its board slug, or ``None`` when the path is not a recognizable board DB.
+
+    ``<root>/kanban.db`` → ``default``; ``<root>/kanban/boards/<slug>/kanban.db``
+    → ``<slug>``. A ``HERMES_KANBAN_DB``-pinned custom path, a sandbox DB, or an
+    in-memory DB returns ``None`` (the caller should then fall back to
+    board-agnostic resolution rather than guess a slug).
+
+    Used to thread the correct ``--board`` into a DETACHED activation process that
+    does not inherit the caller's ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` env
+    (see ``spawn_release_gate_activation``): without it, a non-default-board child
+    would be resolved against the wrong board.
+    """
+    try:
+        p = Path(db_path).resolve()
+    except (OSError, ValueError, TypeError):
+        return None
+    if p.name != "kanban.db":
+        return None
+    try:
+        if p == (kanban_home() / "kanban.db").resolve():
+            return DEFAULT_BOARD
+        # A named board DB lives at ``<boards_root>/<slug>/kanban.db``, i.e. the
+        # grandparent of the DB file is exactly ``boards_root()``.
+        if p.parent.parent == boards_root().resolve():
+            return _normalize_board_slug(p.parent.name)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def board_slug_for_conn(conn) -> Optional[str]:
+    """Board slug for an open connection, derived from its main DB file path via
+    ``PRAGMA database_list``. Returns ``None`` for in-memory DBs or a path that
+    does not match a known board layout — see :func:`board_slug_for_db_path`."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    path_str = row[2]  # column 2 is the file path; empty for in-memory DBs
+    if not path_str:
+        return None
+    return board_slug_for_db_path(path_str)
+
+
 def workspaces_root(board: Optional[str] = None) -> Path:
     """Return the directory under which ``scratch`` workspaces are created.
 

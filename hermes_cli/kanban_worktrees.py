@@ -949,9 +949,15 @@ def _create_parked_release_gate_child(
             # result itself. Detaching (rather than the old inline call) keeps
             # the integration process from blocking on the deploy AND makes the
             # activation immune to the restart it triggers (self-termination
-            # trap). board=None → the unit resolves the current board (the
-            # default board release gates live on).
-            spawn = spawn_release_gate_activation(child_id)
+            # trap). The detached ``systemd-run --user`` unit does NOT inherit
+            # ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` (spawn forwards only
+            # PATH/HERMES_HOME/bus vars), so we MUST reverse-map the integration
+            # connection's DB to its board slug and thread it — mirroring the
+            # endpoint's ``board=board``. Without it a non-default-board child
+            # would be resolved (and greened) against the wrong board. ``None``
+            # (custom/sandbox DB path) → board-agnostic resolution, as before.
+            board = kb.board_slug_for_conn(conn)
+            spawn = spawn_release_gate_activation(child_id, board=board)
             if not spawn.get("ok"):
                 with kb.write_txn(conn):
                     kb._append_event(
