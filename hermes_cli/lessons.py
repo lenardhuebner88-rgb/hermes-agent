@@ -684,6 +684,9 @@ def run_promote(
     """
     from hermes_cli import kanban_db
 
+    if cap < 0:
+        raise ValueError(f"cap must be >= 0, got {cap}")
+
     if harvest_path is None:
         hp: Path = get_hermes_home() / DEFAULT_OUTPUT_PATH
     else:

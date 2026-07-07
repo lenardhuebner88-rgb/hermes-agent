@@ -272,6 +272,34 @@ def test_promote_default_cap_is_5(kanban_home, repo_dir):
     assert result["capped"] == 2
 
 
+def test_promote_rejects_negative_cap(kanban_home, repo_dir):
+    """cap < 0 must raise ValueError — it must not silently slice eligible[:-1]."""
+    _make_harvest_file(
+        kanban_home,
+        [
+            _candidate("trap-a/x", evidence_count=2, source_ids=["t_1"]),
+            _candidate("trap-b/x", evidence_count=2, source_ids=["t_2"]),
+            _candidate("trap-c/x", evidence_count=2, source_ids=["t_3"]),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="cap must be >= 0"):
+        lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=-1)
+
+
+def test_promote_cap_zero_creates_no_tasks(kanban_home, repo_dir):
+    """cap=0 must produce zero promoted tasks (existing behaviour unchanged)."""
+    _make_harvest_file(
+        kanban_home,
+        [_candidate("trap-zero/x", evidence_count=3, source_ids=["t_1"])],
+    )
+
+    result = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=0)
+    assert result["promoted"] == 0
+    assert result["capped"] == 1
+    assert result["created"] == []
+
+
 # ---------------------------------------------------------------------------
 # AC-1d: Idempotency — re-run creates no duplicates
 # ---------------------------------------------------------------------------
