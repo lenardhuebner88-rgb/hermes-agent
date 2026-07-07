@@ -713,6 +713,14 @@ export const OperatorEscalationPayloadSchema = z.object({
   blocked_action_boundary: z.array(z.string()).catch([]),
 }).nullable().catch(null);
 
+export const ReleaseGatePayloadSchema = z.object({
+  root_id: z.string().nullable().catch(null).optional(),
+  source_task_id: z.string().nullable().catch(null).optional(),
+  merge_commit: z.string().nullable().catch(null).optional(),
+  commands: z.array(z.string()).catch([]),
+  suggested_command: z.string().nullable().catch(null).optional(),
+}).nullable().catch(null);
+
 export const KanbanDecisionSchema = z.object({
   kind: KanbanDecisionKindSchema,
   task_id: z.string().catch(""),
@@ -721,6 +729,7 @@ export const KanbanDecisionSchema = z.object({
   age_seconds: z.coerce.number().nullable().catch(null),
   suggested_command: z.string().nullable().catch(null),
   operator_escalation: OperatorEscalationPayloadSchema.optional(),
+  release_gate: ReleaseGatePayloadSchema.optional(),
 });
 
 export const DecisionQueueResponseSchema = z.object({

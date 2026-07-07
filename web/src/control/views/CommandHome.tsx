@@ -23,6 +23,7 @@ import {
   useBoard,
   useDecisionInbox,
   useFixRedispatch,
+  useReleaseGateExecute,
   useRepairDeliverable,
   useVetoEscalation,
   useHermesRunsDaily,
@@ -84,6 +85,7 @@ export function CommandHome({ density }: { density: Density }) {
   // set-state-in-effect und konnte mit Taps um den Zustand konkurrieren).
   const surfaceFilter = surfaceFromParam(searchParams.get("surface"));
   const fix = useFixRedispatch();
+  const releaseGate = useReleaseGateExecute();
   const repair = useRepairDeliverable();
   const veto = useVetoEscalation();
   const now = board.data?.now ?? nowSec();
@@ -165,7 +167,7 @@ export function CommandHome({ density }: { density: Density }) {
           </div>
 
           {top && !settling ? (
-            <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} repair={repair} veto={veto} />
+            <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} releaseGate={releaseGate} repair={repair} veto={veto} />
           ) : calm ? (
             <p className="mt-4 max-w-md text-sm text-ink-2">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
           ) : null}
@@ -226,7 +228,7 @@ export function CommandHome({ density }: { density: Density }) {
           ) : (
             <div className="space-y-2">
               {rest.map((item) => (
-                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} fix={fix} repair={repair} veto={veto} />
+                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} fix={fix} releaseGate={releaseGate} repair={repair} veto={veto} />
               ))}
             </div>
           )}
@@ -312,7 +314,7 @@ function QuickJumps({ fleetCount, blocked, shippedToday, accountProviders, onNav
 /** The #1 decision, promoted: surface + title + why + the one next action.
  *  (Wrapper ist ein div, nicht ein button — der K3-Inline-Resolve braucht
  *  einen ECHTEN zweiten Button, und button-in-button ist invalides HTML.) */
-export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
+export function TopDecision({ item, onOpen, fix, releaseGate, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; releaseGate: ReturnType<typeof useReleaseGateExecute>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
   const surface = SURFACE[item.surface];
   return (
     <div
@@ -334,6 +336,7 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
       </button>
       <span className="flex shrink-0 flex-col items-stretch gap-2 sm:mt-0.5 sm:items-end">
         {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+        {item.releaseGateTaskId ? <ReleaseGateButton taskId={item.releaseGateTaskId} releaseGate={releaseGate} /> : null}
         {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
         {item.vetoEscalationTaskId ? <VetoSignalButton taskId={item.vetoEscalationTaskId} veto={veto} /> : null}
         <button
@@ -345,6 +348,38 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
         </button>
       </span>
     </div>
+  );
+}
+
+/** Release-Gate: confirm-gated execution for a parked post-merge child. */
+function ReleaseGateButton({ taskId, releaseGate }: { taskId: string; releaseGate: ReturnType<typeof useReleaseGateExecute> }) {
+  const [arming, setArming] = useState(false);
+  const busy = releaseGate.busyId === taskId;
+  const done = !!releaseGate.doneIds[taskId];
+  const err = releaseGate.errorById[taskId];
+  if (done) {
+    return (
+      <span className="ch-btn ch-btn-done px-3 py-2 text-xs font-medium">Release-Gate grün</span>
+    );
+  }
+  return (
+    <span className="flex flex-col items-stretch gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!arming) { setArming(true); return; }
+          setArming(false);
+          void releaseGate.run(taskId);
+        }}
+        onBlur={() => setArming(false)}
+        className={cn("ch-btn px-3 py-2 text-xs font-medium", arming && "ch-btn-arming")}
+      >
+        {busy ? "läuft…" : arming ? "Sicher? Erneut klicken" : "Release-Gate ausführen"}
+      </button>
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
+    </span>
   );
 }
 
@@ -541,7 +576,7 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
 }
 
 /** A compact decision row — severity spine, surface, why, next action. */
-function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
+function DecisionRow({ item, onOpen, fix, releaseGate, repair, veto }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; releaseGate: ReturnType<typeof useReleaseGateExecute>; repair: ReturnType<typeof useRepairDeliverable>; veto: ReturnType<typeof useVetoEscalation> }) {
   const surface = SURFACE[item.surface];
   return (
     <div className={cn("ch-decision flex w-full items-center gap-3 px-3.5 py-3 text-left", severitySpine[item.tone])}>
@@ -553,6 +588,7 @@ function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onO
         <p className="mt-1 line-clamp-1 text-xs text-ink-2">{item.ageSeconds != null ? <span className="hc-mono tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-ink">{item.nextAction}</span></p>
       </button>
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+      {item.releaseGateTaskId ? <ReleaseGateButton taskId={item.releaseGateTaskId} releaseGate={releaseGate} /> : null}
       {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
       {item.vetoEscalationTaskId ? <VetoSignalButton taskId={item.vetoEscalationTaskId} veto={veto} /> : null}
       <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="shrink-0">

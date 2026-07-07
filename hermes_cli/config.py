@@ -2644,6 +2644,13 @@ DEFAULT_CONFIG = {
         # same task/profile (spawn_failed, timed_out, or crashed). Reassignment
         # resets the streak for the new profile.
         "failure_limit": 2,
+        # Release-gate executor mode. Default is conservative/manual: park the
+        # release-gate child and let an operator run it from CLI or /control.
+        # Set kanban.release_gate.mode: auto to execute newly-created gates
+        # immediately after merge.
+        "release_gate": {
+            "mode": "manual",
+        },
         # Release-gate executor: how many bounded coder-claude fixer attempts
         # (worktree-only) to make when the dashboard release gate is red before
         # escalating to the operator. 0 = escalate immediately on red.

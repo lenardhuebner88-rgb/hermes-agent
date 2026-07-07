@@ -8389,6 +8389,51 @@ class ChainCancelBody(BaseModel):
     confirm: bool = False
 
 
+class ReleaseGateBody(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/tasks/{task_id}/release-gate")
+def release_gate_endpoint(
+    task_id: str,
+    payload: ReleaseGateBody,
+    board: Optional[str] = Query(None),
+):
+    if not payload.confirm:
+        return {"ok": False, "detail": "confirm required"}
+
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        row = kanban_db.get_task(conn, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        parked = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'release_gate_parked' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if parked is None:
+            raise HTTPException(status_code=409, detail="not a parked release-gate task")
+        if row.status in {"done", "archived"}:
+            raise HTTPException(status_code=409, detail=f"release-gate already {row.status}")
+        if row.status != "blocked":
+            raise HTTPException(status_code=409, detail=f"release-gate not blocked: {row.status}")
+
+        from hermes_cli import kanban_worktrees  # noqa: WPS433 (intentional lazy import)
+
+        result = kanban_worktrees.execute_release_gate(conn, task_id)
+        detail = result.get("detail") or result.get("result") or result.get("status")
+        return {
+            "ok": bool(result.get("ok")),
+            "status": result.get("status"),
+            "fixer_attempts": result.get("fixer_attempts"),
+            "root_id": result.get("root_id"),
+            "detail": detail,
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/tasks/{root_id}/cancel-chain")
 def cancel_chain_endpoint(
     root_id: str,

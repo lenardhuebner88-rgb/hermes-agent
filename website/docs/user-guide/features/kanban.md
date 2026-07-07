@@ -509,6 +509,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = fall back to active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to active default. |
 | `auto_subscribe_on_create` | `true` | When a worker calls `kanban_create` from inside a session with a persistent delivery channel (messaging gateway or TUI), the originating session is auto-subscribed to the new task's completion/block events. The dispatcher still drives the delivery — this only changes whether the caller's chat/key shows up in the notify-sub table. Set to `false` to require explicit `kanban_notify-subscribe` calls per task. |
+| `release_gate.mode` | `manual` | Controls post-merge release-gate children. `manual` parks the child in the Decision Queue/CLI until an operator clicks **Release-Gate ausführen** or runs `hermes kanban release-gate <task-id>`; `auto` executes newly-created release gates immediately after merge. |
 
 And the two auxiliary LLM slots:
 
@@ -557,6 +558,7 @@ All routes are mounted under `/api/plugins/kanban/` and protected by the dashboa
 | `POST` | `/tasks/:id/comments` | Append a comment |
 | `POST` | `/tasks/:id/specify` | Run the triage specifier — auxiliary LLM fleshes out the task body and promotes it from `triage` to `todo`. Returns `{ok, task_id, reason, new_title}`; `ok=false` with a human-readable reason on "not in triage" / no aux client / LLM error is a 200, not a 4xx |
 | `POST` | `/tasks/:id/decompose` | Run the kanban decomposer — auxiliary LLM produces a task graph and the helper atomically creates the children + links the root + flips `triage → todo`. Returns `{ok, task_id, reason, fanout, child_ids, new_title}`. Same 200-on-LLM-error convention as `/specify`. |
+| `POST` | `/tasks/:id/release-gate` | Execute a parked release-gate child after explicit confirmation. Returns `{ok, status, fixer_attempts, root_id, detail}` and rejects non-release-gate/non-blocked tasks. |
 | `GET` | `/profiles` | List installed profiles with their descriptions (consumed by the dashboard's profile-description editor and the orchestrator picker). |
 | `PATCH` | `/profiles/:name` | Set or clear a profile's description (user-authored — `description_auto: false`). Returns `{ok, profile, description}`. |
 | `POST` | `/profiles/:name/describe-auto` | Generate a description for a profile via `auxiliary.profile_describer`. Persists with `description_auto: true` so the dashboard can surface a "review" badge. |

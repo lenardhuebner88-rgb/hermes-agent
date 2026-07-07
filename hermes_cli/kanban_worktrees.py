@@ -934,6 +934,24 @@ def _create_parked_release_gate_child(
             "release_gate_created",
             {"child_id": child_id, **payload},
         )
+    if release_gate_mode() == "auto":
+        try:
+            with kb.write_txn(conn):
+                kb._append_event(
+                    conn,
+                    child_id,
+                    "release_gate_auto_execute_started",
+                    {"mode": "auto", **payload},
+                )
+            execute_release_gate(conn, child_id)
+        except Exception as exc:
+            with kb.write_txn(conn):
+                kb._append_event(
+                    conn,
+                    child_id,
+                    "release_gate_auto_execute_failed",
+                    {"error": str(exc), **payload},
+                )
     return child_id
 
 
@@ -1000,6 +1018,30 @@ def release_gate_fixer_max_retries() -> int:
     except Exception:
         pass
     return 2
+
+
+def release_gate_mode() -> str:
+    """Configured release-gate execution mode: ``manual`` (default) or ``auto``.
+
+    Reads the root Hermes config directly for the same profile-isolation reason
+    as :func:`release_gate_fixer_max_retries`: release gates operate on the live
+    checkout and should not vary by worker profile.
+    """
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            mode = (((root_cfg.get("kanban") or {}).get("release_gate") or {}).get("mode") or "manual")
+            mode = str(mode).strip().lower()
+            if mode in {"manual", "auto"}:
+                return mode
+    except Exception:
+        pass
+    return "manual"
 
 
 _VISUAL_GATE_IME_NOTE = "mobile-IME physically unverified"
@@ -1760,7 +1802,7 @@ def execute_release_gate(
     )
     if ok:
         _finish_release_gate_green(conn, task_id, root_id, 0)
-        return {"status": "green", "fixer_attempts": 0, "root_id": root_id}
+        return {"ok": True, "status": "green", "fixer_attempts": 0, "root_id": root_id}
 
     fixer_attempts = 0
     while fixer_attempts < _retry_budget_for(output):
@@ -1789,6 +1831,7 @@ def execute_release_gate(
         if ok:
             _finish_release_gate_green(conn, task_id, root_id, fixer_attempts)
             return {
+                "ok": True,
                 "status": "green",
                 "fixer_attempts": fixer_attempts,
                 "root_id": root_id,
@@ -1798,6 +1841,7 @@ def execute_release_gate(
         conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
     )
     return {
+        "ok": False,
         "status": "escalated",
         "fixer_attempts": fixer_attempts,
         "root_id": root_id,
