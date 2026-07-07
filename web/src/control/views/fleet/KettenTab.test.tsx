@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 
 const src = readFileSync(path.resolve(import.meta.dirname, "KettenTab.tsx"), "utf8");
 
@@ -53,5 +55,171 @@ describe("KettenTab v4 — redesign checks", () => {
   it("shows inline model for upcoming steps", () => {
     expect(src).toMatch(/umodel/);
     expect(src).toMatch(/umodel-override/);
+  });
+
+  it("FIX-1: chain-list fraction uses done/total (not the 0..1 progress ratio)", () => {
+    expect(src).toContain("chip.done / chip.total");
+    expect(src).toContain("{chip.done}/{chip.total}");
+    expect(src).not.toMatch(/chip\.progress \/ chip\.total/);
+  });
+
+  it("FIX-2: completed chips are capped at 3 with an expander", () => {
+    expect(src).toContain("completedChips.slice(0, 3)");
+    expect(src).toContain("chain-expander");
+  });
+
+  it("FIX-3: pipeline label is the role (not stripped/sliced), model only as sub when different", () => {
+    expect(src).not.toMatch(/\.replace\(\/\^\(coder/);
+    expect(src).toContain('node.assignee ?? node.latest_run?.profile ?? "—"');
+    expect(src).toContain("nodeModel !== roleLabel");
+  });
+});
+
+// ─── FIX-4/FIX-5: real render against the echte chain-graph payload shape ────
+//
+// Fixture mirrors the LIVE kanban.db chain-graph node shape (plugin_api.py
+// `_chain_graph`), including the new `review_roles` rollup (ALL task_runs per
+// node, not just latest_run). Slice t_2fad4004's role runs are copied verbatim
+// from the live-verified example (coder/review/None, verifier/review/APPROVED,
+// reviewer/review/APPROVED, critic/done/APPROVED); the running slice adds the
+// mixed state (reviewer+critic done, verifier open, integrator absent) needed
+// to exercise the Rollen-Track.
+const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
+
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return { ...actual, fetchJSON: fetchJSONMock };
+});
+
+import { KettenTab } from "./KettenTab";
+import type { BoardResponse, BoardTask } from "../../lib/types";
+
+const ROOT_ID = "t_231b62fc";
+const DONE_ID = "t_2fad4004";
+const ACTIVE_ID = "t_c222ff4f";
+
+const ROOT_TASK: BoardTask = {
+  id: ROOT_ID, title: "Ketten v4 Fixes", status: "scheduled", assignee: null,
+  priority: 0, created_at: 1000, started_at: 1000, completed_at: null,
+  branch_name: null, latest_summary: null, link_counts: { parents: 0, children: 2 },
+  comment_count: 0, progress: { done: 1, total: 2 }, age: null, tenant: "orchestrator",
+  root_id: null, epic_id: null,
+};
+const DONE_TASK: BoardTask = {
+  ...ROOT_TASK, id: DONE_ID, title: "Slice A — done", status: "done", assignee: "coder",
+  completed_at: 1900, link_counts: { parents: 1, children: 0 }, root_id: ROOT_ID,
+};
+const ACTIVE_TASK: BoardTask = {
+  ...ROOT_TASK, id: ACTIVE_ID, title: "Slice B — running", status: "running", assignee: "coder",
+  completed_at: null, link_counts: { parents: 1, children: 0 }, root_id: ROOT_ID,
+};
+
+const BOARD: BoardResponse = {
+  columns: [
+    { name: "running", tasks: [ROOT_TASK, ACTIVE_TASK] },
+    { name: "done", tasks: [DONE_TASK] },
+  ],
+  tenants: ["orchestrator"],
+  assignees: ["coder"],
+  latest_event_id: 0,
+  source_errors: [],
+  now: 2000,
+};
+
+const CHAIN_GRAPH_PAYLOAD = {
+  schema: "kanban-chain-graph-v1",
+  root_id: ROOT_ID,
+  checked_at: 2000,
+  nodes: [
+    {
+      id: ROOT_ID, title: "Ketten v4 Fixes", status: "scheduled", assignee: null,
+      level: 0, parents: [], children: [DONE_ID, ACTIVE_ID],
+      created_at: 1000, started_at: 1000, completed_at: null, last_heartbeat_at: null,
+      runtime_seconds: null, progress: { done: 1, total: 2 }, latest_run: null,
+      review_roles: [],
+      cost_usd: 0, input_tokens: 0, output_tokens: 0, cost_usd_equivalent: 0, cost_effective_usd: 0,
+    },
+    {
+      id: DONE_ID, title: "Slice A — done", status: "done", assignee: "coder",
+      level: 1, parents: [ROOT_ID], children: [],
+      created_at: 1000, started_at: 1800, completed_at: 1900, last_heartbeat_at: 1900,
+      runtime_seconds: 100, progress: null,
+      latest_run: {
+        id: 1, profile: "critic", status: "done", outcome: "completed",
+        started_at: 1800, ended_at: 1900, last_heartbeat_at: 1900,
+        runtime_seconds: 100, heartbeat_age_seconds: 100, run_progress: 1,
+      },
+      // Live-verifiziertes Beispiel (Auftragsdatei): t_2fad4004.
+      review_roles: [
+        { profile: "coder", status: "review", verdict: null },
+        { profile: "verifier", status: "review", verdict: "APPROVED" },
+        { profile: "reviewer", status: "review", verdict: "APPROVED" },
+        { profile: "critic", status: "done", verdict: "APPROVED" },
+      ],
+      cost_usd: 0.1, input_tokens: 500, output_tokens: 300, cost_usd_equivalent: 0, cost_effective_usd: 0.1,
+    },
+    {
+      id: ACTIVE_ID, title: "Slice B — running", status: "running", assignee: "coder",
+      level: 1, parents: [ROOT_ID], children: [],
+      created_at: 1000, started_at: 1950, completed_at: null, last_heartbeat_at: 1990,
+      runtime_seconds: 50, progress: null,
+      latest_run: {
+        id: 2, profile: "coder", status: "running", outcome: null,
+        started_at: 1950, ended_at: null, last_heartbeat_at: 1990,
+        runtime_seconds: 50, heartbeat_age_seconds: 10, run_progress: 0.4,
+      },
+      // Rollen-Track-Fixture: reviewer+critic APPROVED, verifier offen, integrator fehlt.
+      review_roles: [
+        { profile: "coder", status: "running", verdict: null },
+        { profile: "reviewer", status: "done", verdict: "APPROVED" },
+        { profile: "critic", status: "done", verdict: "APPROVED" },
+        { profile: "verifier", status: "running", verdict: null },
+      ],
+      cost_usd: 0.02, input_tokens: 100, output_tokens: 20, cost_usd_equivalent: 0, cost_effective_usd: 0.02,
+    },
+  ],
+  edges: [
+    { from: ROOT_ID, to: DONE_ID },
+    { from: ROOT_ID, to: ACTIVE_ID },
+  ],
+};
+
+function routeFetch() {
+  fetchJSONMock.mockImplementation((url: string) => {
+    const u = String(url);
+    if (u.includes("/chain-graph")) return Promise.resolve(CHAIN_GRAPH_PAYLOAD);
+    return Promise.resolve({});
+  });
+}
+
+describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes Payload-Format", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeFetch();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders reviewer/critic done, verifier pending, integrator missing for the focused (running) slice", async () => {
+    render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("REVIEW (aktiver Slice)")).toBeTruthy();
+    });
+
+    const wrap = screen.getByText("REVIEW (aktiver Slice)").closest(".rtrack-wrap");
+    expect(wrap).not.toBeNull();
+    expect(wrap!.textContent).toContain("reviewer ✓");
+    expect(wrap!.textContent).toContain("critic ✓");
+    expect(wrap!.textContent).toContain("verifier ⏳");
+    expect(wrap!.textContent).toContain("integrator –");
+
+    // FIX-4: Header-Chips widersprechen dem Rollen-Track/der Pipeline nicht mehr.
+    expect(screen.getByText("Reviewer zugewiesen")).toBeTruthy();
+    expect(screen.getByText("Critic aktiv")).toBeTruthy();
   });
 });

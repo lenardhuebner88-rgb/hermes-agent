@@ -313,6 +313,9 @@ export interface ChainGraphNode {
    *  or the backend does not (yet) emit it — the card degrades gracefully. */
   progress: { done: number; total: number } | null;
   latest_run: ChainGraphRun | null;
+  /** FIX-5: Review-Rollen-Track — ALLE task_runs des Node-Tasks (nicht nur
+   *  latest_run). Additiv; ältere Payloads liefern [] via zod-catch. */
+  review_roles: Array<{ profile: string; status: string; verdict: string | null }>;
   /** Kosten-Felder — additiv (K7); ältere Payloads liefern 0 via zod-catch. */
   cost_usd: number;
   input_tokens: number;

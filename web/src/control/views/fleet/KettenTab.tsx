@@ -70,6 +70,15 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
     setUserSelectedRootId(rootId);
   }, []);
 
+  // FIX-2: aktive + wartende Ketten immer zeigen, fertige auf die jüngsten 3
+  // cappen (chips sind bereits active→pending→completed sortiert).
+  const [completedExpanded, setCompletedExpanded] = useState(false);
+  const activeOrPendingChips = chips.filter((c) => c.state !== "completed");
+  const completedChips = chips.filter((c) => c.state === "completed");
+  const visibleCompletedChips = completedExpanded ? completedChips : completedChips.slice(0, 3);
+  const hiddenCompletedCount = completedChips.length - 3;
+  const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
+
   const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId);
   const nodes = chainGraph?.nodes ?? [];
 
@@ -106,10 +115,10 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
         <span className="section-count">{chips.length}</span>
       </div>
       <div className="chain-list">
-        {chips.map((chip) => {
+        {visibleChips.map((chip) => {
           const isActive = chip.state === "active";
           const isDone = chip.state === "completed";
-          const pct = chip.total > 0 ? Math.round((chip.progress / chip.total) * 100) : 0;
+          const pct = chip.total > 0 ? Math.round((chip.done / chip.total) * 100) : 0;
 
           return (
             <button
@@ -135,13 +144,22 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
                       style={{ width: `${pct}%` }}
                     />
                   </span>
-                  <span className="chain-meta-text">{chip.progress}/{chip.total}</span>
+                  <span className="chain-meta-text">{chip.done}/{chip.total}</span>
                 </div>
               </div>
             </button>
           );
         })}
       </div>
+      {completedChips.length > 3 ? (
+        <button
+          type="button"
+          className="chain-expander"
+          onClick={() => setCompletedExpanded((v) => !v)}
+        >
+          {completedExpanded ? "weniger anzeigen" : `+${hiddenCompletedCount} weitere fertige`}
+        </button>
+      ) : null}
 
       {/* ── Sections 2-6: Selected Chain ─────────────────────────────────── */}
       {selectedRootId && (chainLoading && !chainGraph) ? (
@@ -184,6 +202,24 @@ function roleColorClass(assignee: string | null): string {
   if (/integrator/i.test(assignee)) return "ps-role-integrator";
   return "ps-role-gate";
 }
+
+// FIX-4/FIX-5: Rollen-Präsenz + Rollen-Status aus den echten task_runs
+// (`node.review_roles`), mit assignee als Fallback für ältere Payloads.
+function hasRole(node: ChainNode, role: string): boolean {
+  if ((node.review_roles ?? []).some((r) => r.profile === role)) return true;
+  return node.assignee != null && new RegExp(role, "i").test(node.assignee);
+}
+
+type RoleTrackStatus = "done" | "pending" | "none";
+
+function roleTrackStatus(node: ChainNode | null, role: string): RoleTrackStatus {
+  const runs = (node?.review_roles ?? []).filter((r) => r.profile === role);
+  if (runs.length === 0) return "none";
+  if (runs.some((r) => r.verdict === "APPROVED" || r.status === "done")) return "done";
+  return "pending";
+}
+
+const ROLE_TRACK_ORDER = ["reviewer", "critic", "verifier", "integrator"] as const;
 
 function avatarClass(assignee: string | null): string {
   if (!assignee) return "avatar-default";
@@ -253,10 +289,13 @@ function KettenGraphV4({
 
   // === Gate verdicts ===
   const gateVerdicts = verdicts.filter((v) => v.task_id === rootId || nodes.some((n) => n.id === v.task_id));
-  const hasReviewer = gateVerdicts.some((v) => v.reviewer_profile != null);
-  const hasCritic = nodes.some((n) => n.assignee != null && /critic/i.test(n.assignee));
-  const hasBlockage = nodes.some((n) => n.status === "blocked");
   const reviewRunState = gateVerdicts[0]?.review_run_state ?? "pending";
+
+  // FIX-4: Rollen-Präsenz einheitlich aus den Review-Runs der Chain-Nodes
+  // ableiten (statt Header-Chips vs. Pipeline aus unterschiedlichen Quellen).
+  const hasReviewer = nodes.some((n) => hasRole(n, "reviewer"));
+  const hasCritic = nodes.some((n) => hasRole(n, "critic"));
+  const hasBlockage = nodes.some((n) => n.status === "blocked");
 
   const [doneExpanded, setDoneExpanded] = useState(false);
 
@@ -321,7 +360,11 @@ function KettenGraphV4({
                 const isBlocked = node.status === "blocked";
                 const isRunning = node.status === "running";
                 const worker = workerByNodeId.get(node.id);
-                const nodeModel = worker?.effective_model ?? node.latest_run?.profile ?? null;
+                // FIX-3: Label = Rolle (nicht strippen); Sub = Modell, nur wenn
+                // bekannt UND verschieden von der Rolle.
+                const roleLabel = node.assignee ?? node.latest_run?.profile ?? "—";
+                const nodeModel = worker?.effective_model ?? null;
+                const showModelSub = nodeModel != null && nodeModel !== roleLabel;
 
                 // Connector class (between this node and the next)
                 let connectorClass = "pc-open";
@@ -343,16 +386,35 @@ function KettenGraphV4({
                     <div className={`pstep-icon ${iconClass}`}>
                       {isDone ? "✓" : isRunning ? "▶" : (i + 1)}
                     </div>
-                    <div className={`pstep-label ${isRunning ? "pstep-label-active" : isDone ? "pstep-label-done" : ""}`}>
-                      {node.assignee ? node.assignee.replace(/^(coder|premium|reviewer|critic|integrator)-?/, "").slice(0, 6) : "—"}
+                    <div className={`pstep-label ${isRunning ? "pstep-label-active" : isDone ? "pstep-label-done" : ""}`} title={roleLabel}>
+                      {roleLabel}
                     </div>
-                    {nodeModel ? (
-                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`}>{nodeModel.slice(0, 8)}</div>
+                    {showModelSub ? (
+                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`}>{nodeModel}</div>
                     ) : null}
                   </div>
                 );
               })}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── SECTION 3.5: Rollen-Track (fokussierter Slice) ───────────────── */}
+      {focusNode ? (
+        <div className="rtrack-wrap">
+          <div className="rtrack-header">REVIEW (aktiver Slice)</div>
+          <div className="rtrack-row">
+            {ROLE_TRACK_ORDER.map((role, i) => {
+              const state = roleTrackStatus(focusNode, role);
+              const glyph = state === "done" ? "✓" : state === "pending" ? "⏳" : "–";
+              return (
+                <span key={role} className={`rtrack-item rtrack-${state}`}>
+                  {role} {glyph}
+                  {i < ROLE_TRACK_ORDER.length - 1 ? <span className="rtrack-sep">·</span> : null}
+                </span>
+              );
+            })}
           </div>
         </div>
       ) : null}

@@ -394,6 +394,7 @@ function makeChainNode(overrides: Partial<ChainNode> & { id: string }): ChainNod
     runtime_seconds: null,
     progress: null,
     latest_run: null,
+    review_roles: [],
     cost_usd: 0,
     input_tokens: 0,
     output_tokens: 0,

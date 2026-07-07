@@ -346,6 +346,13 @@ const ChainGraphNodeSchema = z.object({
   runtime_seconds: z.coerce.number().nullable().catch(null),
   progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
   latest_run: ChainGraphRunSchema.nullable().catch(null),
+  // FIX-5: Review-Rollen-Track — ALLE task_runs des Node-Tasks (nicht nur
+  // latest_run). Additiv; ältere Payloads ohne dieses Feld liefern [].
+  review_roles: z.array(z.object({
+    profile: z.string(),
+    status: z.string(),
+    verdict: z.string().nullable().catch(null),
+  })).catch([]),
   // K7 cost fields — additiv; ältere Payloads ohne diese Felder liefern 0.
   cost_usd: z.coerce.number().catch(0),
   input_tokens: z.coerce.number().catch(0),

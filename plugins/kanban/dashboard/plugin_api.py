@@ -7712,6 +7712,39 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
         "cost_effective_usd": 0.0,
     }
 
+    # Per-node review-role runs — ALL task_runs (not just latest_run), single
+    # query over all chain nodes mirroring the cost/progress rollups above.
+    # Frontend Rollen-Track (FIX-5) renders {profile,status,verdict} per role
+    # for the focused node. The stored ``task_runs.verdict`` column is the
+    # authoritative, pre-normalised gate outcome (APPROVED/REQUEST_CHANGES) —
+    # it already reconciles each role's own vocabulary (e.g. the critic's
+    # ``uphold``/``overturn``), which ``_normalize_verifier_verdict`` does NOT
+    # (measured: ~29% of live review runs disagree). Read the column directly.
+    # Fail-soft on pre-review-gate DBs where the column is absent.
+    review_roles_by_task: dict[str, list[dict[str, Any]]] = {}
+    if nodes:
+        placeholders = ",".join("?" for _ in nodes)
+        try:
+            for row in conn.execute(
+                f"""
+                SELECT task_id, profile, status, verdict
+                  FROM task_runs
+                 WHERE task_id IN ({placeholders})
+                 ORDER BY task_id, started_at, id
+                """,
+                tuple(nodes),
+            ).fetchall():
+                profile = row["profile"]
+                if not profile:
+                    continue
+                review_roles_by_task.setdefault(row["task_id"], []).append({
+                    "profile": profile,
+                    "status": row["status"],
+                    "verdict": row["verdict"],
+                })
+        except sqlite3.OperationalError:
+            pass  # pre-review-gate DBs: task_runs.verdict column absent
+
     out_nodes: list[dict[str, Any]] = []
     for node_id in sorted(nodes, key=lambda item: (depth(item), item)):
         task = kanban_db.get_task(conn, node_id)
@@ -7762,6 +7795,7 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
             ),
             "progress": progress.get(task.id),
             "latest_run": run_payload,
+            "review_roles": review_roles_by_task.get(node_id, []),
             "cost_usd": costs["cost_usd"],
             "cost_usd_equivalent": costs["cost_usd_equivalent"],
             "cost_effective_usd": costs["cost_effective_usd"],

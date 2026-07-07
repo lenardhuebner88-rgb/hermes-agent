@@ -141,6 +141,14 @@
 .ketten-v4 .fill-ok { background: var(--kt-ok); }
 .ketten-v4 .chain-meta-text { font-size: 9px; color: var(--kt-ink-4); white-space: nowrap; }
 
+.ketten-v4 .chain-expander {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; margin-bottom: 16px; padding: 6px 2px;
+  font-size: 10px; font-weight: 600; color: var(--kt-ink-3);
+  background: none; border: none; cursor: pointer; font-family: inherit;
+}
+.ketten-v4 .chain-expander:hover { color: var(--kt-ink-2); }
+
 /* ========================================================= */
 /* SECTION 2: Active Chain Header                             */
 /* ========================================================= */
@@ -299,11 +307,38 @@
 .ketten-v4 .pstep-label {
   font-size: 8px; font-weight: 600; color: var(--kt-ink-3);
   margin-top: 5px; text-align: center; letter-spacing: 0.2px;
+  max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ketten-v4 .pstep-label-active { color: var(--kt-live); }
 .ketten-v4 .pstep-label-done { color: var(--kt-ok); }
-.ketten-v4 .pstep-sub { font-size: 7px; color: var(--kt-ink-4); margin-top: 1px; }
+.ketten-v4 .pstep-sub {
+  font-size: 7px; color: var(--kt-ink-4); margin-top: 1px;
+  max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ketten-v4 .pstep-sub-active { color: var(--kt-live); }
+
+/* ========================================================= */
+/* SECTION 3.5: Rollen-Track (fokussierter Slice)             */
+/* ========================================================= */
+.ketten-v4 .rtrack-wrap {
+  margin: 0 0 14px; padding: 10px 12px;
+  background: var(--kt-surface-1);
+  border: 1px solid var(--kt-line-soft);
+  border-radius: var(--kt-radius-card);
+}
+.ketten-v4 .rtrack-header {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.8px; color: var(--kt-ink-3); margin-bottom: 8px;
+}
+.ketten-v4 .rtrack-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  font-size: 11px; font-weight: 600;
+}
+.ketten-v4 .rtrack-item { display: inline-flex; align-items: center; gap: 4px; }
+.ketten-v4 .rtrack-done { color: var(--kt-ok); }
+.ketten-v4 .rtrack-pending { color: var(--kt-warn); }
+.ketten-v4 .rtrack-none { color: var(--kt-ink-4); }
+.ketten-v4 .rtrack-sep { color: var(--kt-ink-4); margin: 0 5px; }
 
 /* ========================================================= */
 /* SECTION 4: Active Step Detail Card                         */
