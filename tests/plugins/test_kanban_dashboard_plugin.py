@@ -341,6 +341,7 @@ def test_push_hook_filters_only_operator_blocks_and_chain_roots(
 
 def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
     from hermes_cli import planspecs
+    from hermes_constants import get_hermes_home  # noqa: WPS433 (intentional)
 
     calls = []
 
@@ -362,6 +363,7 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
             "search": None,
             "include_kanban_status": True,
             "board": None,
+            "prose_plans_root": get_hermes_home() / "dashboard" / "prose-plans",
         }
     ]
 
@@ -7314,6 +7316,96 @@ def test_workers_active_run_progress_from_runtime_cap(client):
 
     # Kein Cap → null, KEIN geratener Wert
     assert uncapped["run_progress"] is None
+
+
+def test_workers_active_carries_input_output_tokens_and_heartbeat_ticks(client):
+    """/workers/active selects input_tokens/output_tokens from task_runs and
+    returns heartbeat_ticks (newest 20 timestamps) grouped in one query."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="tokened worker")
+        with kb.write_txn(conn):
+            run_id = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid, input_tokens, output_tokens) "
+                "VALUES (?, 'coder', 'running', ?, 7171, 1234, 567)",
+                (t, now - 60),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (run_id, t),
+            )
+        for i in range(5):
+            assert kb.heartbeat_worker(conn, t, note=f"step {i}", expected_run_id=run_id)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/workers/active").json()
+    worker = next(w for w in data["workers"] if w["run_id"] == run_id)
+    assert worker["input_tokens"] == 1234
+    assert worker["output_tokens"] == 567
+    assert len(worker["heartbeat_ticks"]) == 5
+    assert worker["heartbeat_ticks"] == sorted(worker["heartbeat_ticks"])
+    assert all(now - 300 <= ts <= now for ts in worker["heartbeat_ticks"])
+
+
+def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client):
+    """GET /runs/live-events filters kinds to the display allowlist, returns
+    events newest-first, and supports incremental since_id polling."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        ta = kb.create_task(conn, title="alpha")
+        tb = kb.create_task(conn, title="beta")
+        with kb.write_txn(conn):
+            ra = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, worker_pid) "
+                "VALUES (?, 'coder', 'running', ?, 8001)",
+                (ta, now - 300),
+            ).lastrowid
+            rb = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, worker_pid) "
+                "VALUES (?, 'scout', 'running', ?, 8002)",
+                (tb, now - 300),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (ra, ta),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (rb, tb),
+            )
+            # allowed kind
+            kb._append_event(conn, ta, "heartbeat", {"note": "alpha beat"}, run_id=ra)
+            # allowed kind with null note
+            kb._append_event(conn, tb, "claimed", None, run_id=rb)
+            # noise kind (excluded by allowlist)
+            kb._append_event(conn, tb, "created", {"note": "created noise"}, run_id=rb)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/live-events").json()
+    assert data["count"] == 2
+    assert [e["kind"] for e in data["events"]] == ["claimed", "heartbeat"]
+    assert data["events"][1]["task_title"] == "alpha"
+    assert data["events"][1]["profile"] == "coder"
+    assert data["events"][1]["note"] == "alpha beat"
+    assert data["events"][0]["task_id"] == tb
+    assert "latest_id" in data and data["latest_id"] is not None
+    assert "checked_at" in data
+
+    # since_id should return only newer events
+    latest_id = data["latest_id"]
+    since = client.get(f"/api/plugins/kanban/runs/live-events?since_id={latest_id}").json()
+    assert since["count"] == 0
+    assert since["events"] == []
+
+    # limit should cap results
+    limited = client.get("/api/plugins/kanban/runs/live-events?limit=1").json()
+    assert limited["count"] == 1
+    assert limited["events"][0]["kind"] == "claimed"
 
 
 def test_chain_graph_latest_run_carries_run_progress(client):

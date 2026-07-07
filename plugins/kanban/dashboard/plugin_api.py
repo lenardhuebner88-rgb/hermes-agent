@@ -1336,6 +1336,27 @@ _WARNING_EVENT_KINDS = (
     "suspected_hallucinated_references",
 )
 
+# Kinds surfaced by GET /runs/live-events.  Intentionally excludes noise such as
+# archived/created/promoted/task_ping_sent/spawned/mother_receipt_sent so the
+# cross-worker ticker stays actionable.
+_LIVE_EVENT_KINDS = (
+    "heartbeat",
+    "claimed",
+    "submitted_for_review",
+    "review_released",
+    "completed",
+    "blocked",
+    "unblocked",
+    "integration_merged",
+    "timed_out",
+    "crashed",
+    "gave_up",
+    "auto_retried",
+)
+
+_LIVE_EVENTS_DEFAULT_LIMIT = 40
+_LIVE_EVENTS_MAX_LIMIT = 200
+
 _VERIFIER_REJECTION_KIND = "verifier_request_changes"
 _FIX_SUMMARY_KEYS = (
     "fix_summary",
@@ -2989,8 +3010,105 @@ def list_diagnostics(
 
 
 # ---------------------------------------------------------------------------
-# Worker visibility — cross-task active-worker list and per-run inspection
+# Worker visibility — cross-task active-worker list, per-run inspection,
+# and live cross-worker event feed
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Cross-worker live event feed (worker tab ticker)
+# ---------------------------------------------------------------------------
+@router.get("/runs/live-events")
+def get_live_events(
+    board: Optional[str] = Query(None),
+    limit: int = Query(_LIVE_EVENTS_DEFAULT_LIMIT, ge=1),
+    since_id: Optional[int] = Query(None, ge=1),
+):
+    """Latest cross-worker events suitable for the worker-tab ticker.
+
+    Returns a newest-first list of task events from a curated allowlist of
+    kinds (heartbeat, claimed, completed, blocked, …).  The caller can poll
+    incrementally with ``since_id``; only events with ids greater than the
+    supplied value are returned, preserving ``limit``.
+    """
+    limit = min(limit, _LIVE_EVENTS_MAX_LIMIT)
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    kinds = _LIVE_EVENT_KINDS
+    kind_placeholders = ",".join("?" for _ in kinds)
+
+    board_filter = ""
+    params: list[Any] = []
+    if board:
+        board_filter = "AND t.board = ? "
+        params.append(board)
+
+    if since_id is not None:
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT e.id, e.run_id, e.task_id, t.title AS task_title,
+                       COALESCE(r.profile, t.assignee) AS profile,
+                       e.kind, e.payload, e.created_at
+                FROM task_events e
+                JOIN tasks t ON t.id = e.task_id
+                LEFT JOIN task_runs r ON r.id = e.run_id
+                WHERE e.kind IN ({kind_placeholders})
+                  AND e.id > ?
+                  {board_filter}
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (*kinds, since_id, *params, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    else:
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT e.id, e.run_id, e.task_id, t.title AS task_title,
+                       COALESCE(r.profile, t.assignee) AS profile,
+                       e.kind, e.payload, e.created_at
+                FROM task_events e
+                JOIN tasks t ON t.id = e.task_id
+                LEFT JOIN task_runs r ON r.id = e.run_id
+                WHERE e.kind IN ({kind_placeholders})
+                  {board_filter}
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (*kinds, *params, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+
+    events = []
+    latest_id: Optional[int] = None
+    for row in rows:
+        row_id = int(row["id"])
+        if latest_id is None or row_id > latest_id:
+            latest_id = row_id
+        payload = json.loads(row["payload"]) if row["payload"] else None
+        events.append(
+            {
+                "id": row_id,
+                "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
+                "task_id": row["task_id"],
+                "task_title": row["task_title"],
+                "profile": row["profile"],
+                "kind": row["kind"],
+                "note": payload.get("note") if isinstance(payload, dict) else None,
+                "at": int(row["created_at"] or 0),
+            }
+        )
+
+    return {
+        "events": events,
+        "count": len(events),
+        "latest_id": latest_id,
+        "checked_at": int(time.time()),
+    }
+
 
 try:
     import psutil as _psutil
@@ -3048,7 +3166,9 @@ def list_active_workers(
                 r.outcome      AS run_outcome,
                 t.result       AS block_reason,
                 r.step_key,
-                t.model_override AS model_override
+                t.model_override AS model_override,
+                r.input_tokens,
+                r.output_tokens
             FROM task_runs r
             JOIN tasks t ON t.id = r.task_id
             WHERE r.ended_at IS NULL
@@ -3059,8 +3179,9 @@ def list_active_workers(
         ).fetchall()
         # Phase A (progress): latest heartbeat note per run (one grouped
         # query, no N+1) + duration percentiles per profile for the honest
-        # ETA ("üblich ~8 min · läuft 5 min" instead of a fake percent).
+        # ETA ("ueblich ~8 min - laeuft 5 min" instead of a fake percent).
         notes: dict[int, dict] = {}
+        heartbeat_ticks: dict[int, list[int]] = {}
         run_ids = [int(row["run_id"]) for row in rows]
         if run_ids:
             placeholders = ",".join("?" for _ in run_ids)
@@ -3078,6 +3199,26 @@ def list_active_workers(
                 run_ids,
             ).fetchall():
                 notes[int(n["run_id"])] = {"note": n["note"], "at": n["at"]}
+            # Heartbeat ticks per run for the Puls-Leitstand band chart.
+            # One grouped query; cap at 20 newest timestamps per run.
+            heartbeat_ticks = {rid: [] for rid in run_ids}
+            for h in conn.execute(
+                f"""
+                SELECT run_id, created_at
+                  FROM task_events
+                 WHERE kind = 'heartbeat'
+                   AND run_id IN ({placeholders})
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (*run_ids, len(run_ids) * 20),
+            ).fetchall():
+                rid = int(h["run_id"])
+                ts = int(h["created_at"])
+                if len(heartbeat_ticks[rid]) < 20:
+                    heartbeat_ticks[rid].append(ts)
+            for rid in heartbeat_ticks:
+                heartbeat_ticks[rid].reverse()
         eta = kanban_db.run_duration_percentiles(
             conn, [row["profile"] for row in rows],
         )
@@ -3122,6 +3263,9 @@ def list_active_workers(
                 "block_reason": row["block_reason"],
                 "last_heartbeat_note": note.get("note"),
                 "last_heartbeat_note_at": note.get("at"),
+                "heartbeat_ticks": heartbeat_ticks.get(int(row["run_id"]), []),
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
                 "eta_p50_seconds": prof_eta.get("p50"),
                 "eta_p90_seconds": prof_eta.get("p90"),
                 # B1: step progress + model resolution
