@@ -740,6 +740,13 @@ def run_promote(
             created.append({"title": title, "idempotency_key": idem, "dry_run": True})
             continue
 
+        # Anchor each held docs-edit task in a dispatchable worktree workspace
+        # tied to the target repo.  Without an explicit ``workspace_path``, the
+        # code-role board-default guard (kanban_db.py:4483-4508) raises on
+        # boards with a ``default_workdir`` and a later ``resolve_workspace``
+        # call would fail for ``dir`` kernels lacking a path.  ``worktree`` with
+        # an absolute repo anchor materialises a linked worktree under
+        # ``<repo>/.worktrees/<task-id>`` at dispatch time.
         with kanban_db.connect_closing(board=board) as conn:
             created_id = kanban_db.create_task(
                 conn,
@@ -747,7 +754,8 @@ def run_promote(
                 body=body,
                 assignee="coder",
                 created_by="lessons-promote",
-                workspace_kind="dir",
+                workspace_kind="worktree",
+                workspace_path=str(repo_dir.resolve()),
                 idempotency_key=idem,
                 initial_status="blocked",
                 kind="code",

@@ -378,6 +378,103 @@ def test_promote_no_candidates(kanban_home, repo_dir):
 
 
 # ---------------------------------------------------------------------------
+# AC-1e: Workspace dispatchability — promoted tasks must be dispatchable
+# ---------------------------------------------------------------------------
+
+
+def test_promote_task_has_dispatchable_workspace(kanban_home, repo_dir):
+    """Promoted tasks carry workspace_kind=worktree + absolute workspace_path.
+
+    Without an explicit workspace_path, the code-role board-default guard
+    (kanban_db.py:4483-4508) raises ValueError on boards with a
+    default_workdir, and resolve_workspace would fail for dir kernels
+    lacking a path.
+    """
+    _make_harvest_file(
+        kanban_home,
+        [
+            _candidate(
+                "release-gate/born-blocked-holds",
+                evidence_count=2,
+                source_ids=["t_01"],
+            ),
+        ],
+    )
+
+    result = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=5)
+    assert result["promoted"] == 1
+
+    with kb.connect_closing(board=None) as conn:
+        row = conn.execute(
+            "SELECT workspace_kind, workspace_path FROM tasks "
+            "WHERE assignee='coder' LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    ws_kind, ws_path = row
+    assert ws_kind == "worktree", f"Expected worktree, got {ws_kind!r}"
+    assert ws_path is not None and ws_path != "", (
+        f"Expected non-empty workspace_path, got {ws_path!r}"
+    )
+    assert Path(ws_path).is_absolute(), (
+        f"Expected absolute workspace_path, got {ws_path!r}"
+    )
+
+
+def test_promote_works_on_board_with_default_workdir(tmp_path, monkeypatch):
+    """Promote must not raise when the board has a default_workdir configured.
+
+    On boards with default_workdir set, the code-role board-default guard
+    (kanban_db.py:4483-4508) raises ValueError if a code task is created
+    with workspace_kind=dir/worktree but no explicit workspace_path. This
+    test reproduces that board configuration to guard against regressions
+    that would reintroduce the guard failure.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = kb.kanban_db_path()
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kb.init_db()
+
+    # Configure a board default_workdir — exactly the condition that triggers
+    # the code-role board-default guard when workspace_path is absent.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("# AGENTS\n", encoding="utf-8")
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "agent-dev-guide.md").write_text("# Dev Guide\n", encoding="utf-8")
+    kb.write_board_metadata(
+        kb.get_current_board(),
+        default_workdir=str(tmp_path / "board-repo"),
+    )
+
+    _make_harvest_file(
+        home,
+        [
+            _candidate(
+                "dirty-worktree/parallel-session-overlap",
+                evidence_count=2,
+                source_ids=["t_01"],
+            ),
+        ],
+    )
+
+    result = lessons.run_promote(harvest_path=None, repo_dir=repo, cap=5)
+    assert result["promoted"] == 1
+    with kb.connect_closing(board=None) as conn:
+        row = conn.execute(
+            "SELECT workspace_kind, workspace_path FROM tasks "
+            "WHERE assignee='coder' LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    ws_kind, ws_path = row
+    assert ws_kind == "worktree"
+    assert ws_path and Path(ws_path).is_absolute()
+
+
+# ---------------------------------------------------------------------------
 # CLI integration
 # ---------------------------------------------------------------------------
 
