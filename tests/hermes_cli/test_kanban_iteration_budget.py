@@ -18,6 +18,7 @@ import pytest
 
 from agent.iteration_budget import IterationBudget
 from agent.turn_finalizer import finalize_turn
+from cli import _configured_agent_max_turns
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 
@@ -34,7 +35,14 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+def test_profile_agent_max_iterations_alias_sets_max_turns():
+    assert _configured_agent_max_turns({"max_iterations": 50}) == 50
+    assert _configured_agent_max_turns({"max_turns": 40, "max_iterations": 50}) == 40
+    assert _configured_agent_max_turns({"max_turns": 0, "max_iterations": 50}) == 0
+
+
 # ---------------------------------------------------------------------------
+
 # (c) per-task --max-iterations
 # ---------------------------------------------------------------------------
 
@@ -379,6 +387,51 @@ def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
     assert ns.model == "gpt-5.5-codex", (
         f"model_override lost: args.model={ns.model!r}; worker argv={argv}"
     )
+
+
+def test_scout_budget_exhaustion_with_complete_handoff_completes_task(kanban_home):
+    handoff = """CODER_HANDOFF:
+- PATCH_TARGET: hermes_cli/kanban_db.py::record_iteration_budget_exhausted
+- TEST_TARGET: tests/hermes_cli/test_kanban_iteration_budget.py
+- AVOID: broad repo exploration after the handoff is complete
+"""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Scout handoff recovery",
+            assignee="scout",
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+        assert run_id is not None
+
+        assert kb.record_iteration_budget_exhausted(
+            conn,
+            tid,
+            summary=handoff,
+            metadata={"source": "test"},
+            expected_run_id=run_id,
+        )
+
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        assert task is not None
+        assert run is not None
+        events = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert task.status == "done"
+    assert task.result == handoff
+    assert run.outcome == "completed"
+    assert run.summary == handoff
+    assert run.metadata["recovered_from"] == "iteration_budget_exhausted"
+    assert "scout_handoff_recovered" in events
+    assert "completed" in events
+    assert "blocked" not in events
+    assert "iteration_budget_exhausted" not in events
 
 
 def test_budget_finalizer_honors_terminal_kanban_complete(kanban_home, monkeypatch):

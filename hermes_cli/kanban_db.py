@@ -7939,6 +7939,18 @@ def _schedule_continuation_after_closed_run(
     return True
 
 
+_CODER_HANDOFF_REQUIRED_MARKERS = ("CODER_HANDOFF", "PATCH_TARGET", "TEST_TARGET", "AVOID")
+
+
+def _has_complete_coder_handoff(text: Optional[str]) -> bool:
+    """Return True when ``text`` contains the minimal Scout→Coder handoff."""
+
+    if not text:
+        return False
+    upper = text.upper()
+    return all(marker in upper for marker in _CODER_HANDOFF_REQUIRED_MARKERS)
+
+
 def record_iteration_budget_exhausted(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7955,7 +7967,7 @@ def record_iteration_budget_exhausted(
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, current_run_id FROM tasks WHERE id = ?",
+            "SELECT status, current_run_id, assignee FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if not row or row["status"] != "running" or not row["current_run_id"]:
@@ -7963,6 +7975,54 @@ def record_iteration_budget_exhausted(
         current_run_id = int(row["current_run_id"])
         if expected_run_id is not None and int(expected_run_id) != current_run_id:
             return False
+        if row["assignee"] == "scout" and _has_complete_coder_handoff(summary):
+            recovery_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            recovery_metadata.update(
+                {
+                    "recovered_from": reason,
+                    "recovery_reason": "complete_coder_handoff_present",
+                }
+            )
+            run_id = _end_run(
+                conn,
+                task_id,
+                outcome="completed",
+                summary=summary,
+                metadata=recovery_metadata,
+            )
+            now = int(time.time())
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET status = 'done',
+                       result = ?,
+                       completed_at = ?,
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       worker_pid = NULL,
+                       current_run_id = NULL
+                 WHERE id = ?
+                """,
+                (summary, now, task_id),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "scout_handoff_recovered",
+                {
+                    "from": reason,
+                    "required_markers": list(_CODER_HANDOFF_REQUIRED_MARKERS),
+                },
+                run_id=run_id,
+            )
+            _append_event(
+                conn,
+                task_id,
+                "completed",
+                {"result": summary, "metadata": recovery_metadata},
+                run_id=run_id,
+            )
+            return True
         run_id = _end_run(
             conn,
             task_id,
@@ -26604,6 +26664,8 @@ _SCOUT_CODER_HANDOFF_CONTRACT = (
     "  - PATCH_TARGET: erste Datei/Symbole, die der Coder ändern soll.\n"
     "  - TEST_TARGET: engste Tests/Gates, die den Patch beweisen.\n"
     "  - AVOID: Pfade/Ansätze, die Tokens verbrennen oder Arbeit doppeln.\n"
+    "- Sobald CODER_HANDOFF mit PATCH_TARGET, TEST_TARGET und AVOID vollständig "
+    "ist: sofort kanban_complete aufrufen; keine weitere Repo-Erkundung.\n"
     "- Wenn der Scope dafür zu breit ist: BLOCK mit der fehlenden Eingrenzung, "
     "statt das Repo breit zu lesen."
 )

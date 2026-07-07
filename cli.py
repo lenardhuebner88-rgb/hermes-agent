@@ -3694,6 +3694,20 @@ def save_config_value(key_path: str, value: any) -> bool:
 # HermesCLI Class
 # ============================================================================
 
+
+def _configured_agent_max_turns(agent_config: dict) -> int | None:
+    """Return the configured max-turn budget from agent config.
+
+    ``max_turns`` is the canonical CLI field. ``max_iterations`` remains a
+    supported alias for Kanban worker profiles that predate the rename.
+    """
+
+    max_turns = agent_config.get("max_turns")
+    if max_turns is not None:
+        return max_turns
+    return agent_config.get("max_iterations")
+
+
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
     """
     Interactive CLI for the Hermes Agent.
@@ -3885,8 +3899,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Max turns priority: CLI arg > config file > env var > default
         if max_turns is not None:  # CLI arg was explicitly set
             self.max_turns = max_turns
-        elif CLI_CONFIG["agent"].get("max_turns"):
-            self.max_turns = CLI_CONFIG["agent"]["max_turns"]
+        elif (configured_max_turns := _configured_agent_max_turns(CLI_CONFIG["agent"])) is not None:
+            self.max_turns = configured_max_turns
         elif CLI_CONFIG.get("max_turns"):  # Backwards compat: root-level max_turns
             self.max_turns = CLI_CONFIG["max_turns"]
         elif os.getenv("HERMES_MAX_ITERATIONS"):
