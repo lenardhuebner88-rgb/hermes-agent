@@ -22189,6 +22189,23 @@ def _build_worker_env(parent_env) -> dict:
     )
 
 
+def _worker_project_context_cwd(task: Task) -> Optional[str]:
+    """Return the project root to scan for scratch-worker context files."""
+    if task.workspace_kind != "scratch" or not task.project_id:
+        return None
+    try:
+        from hermes_cli import projects_db as _projects_db
+
+        with _projects_db.connect_closing() as project_conn:
+            project = _projects_db.get_project(project_conn, task.project_id)
+    except Exception:
+        return None
+    primary_path = str(getattr(project, "primary_path", "") or "").strip()
+    if primary_path and os.path.isabs(primary_path) and os.path.isdir(primary_path):
+        return primary_path
+    return None
+
+
 def _is_claude_verdict_read_only_lane(
     profile_arg: str,
     lane_entry: Optional[dict],
@@ -22658,6 +22675,9 @@ def _default_spawn(
     # here (leave the inherited value rather than write a meaningless one).
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
+    project_context_cwd = _worker_project_context_cwd(task)
+    if project_context_cwd:
+        env["HERMES_CONTEXT_CWD"] = project_context_cwd
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:

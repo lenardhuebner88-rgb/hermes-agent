@@ -58,5 +58,11 @@ def resolve_context_cwd() -> Path | None:
     override = _session_cwd_override()
     if override:
         return Path(override).expanduser()
+    # Kanban workers may run inside an ephemeral scratch workspace while still
+    # belonging to a known project/repo. Keep TERMINAL_CWD pinned to the scratch
+    # workspace for tools, but let the prompt context scan the project root.
+    context_raw = os.environ.get("HERMES_CONTEXT_CWD", "").strip()
+    if context_raw:
+        return Path(context_raw).expanduser()
     raw = os.environ.get("TERMINAL_CWD", "").strip()
     return Path(raw).expanduser() if raw else None
