@@ -480,6 +480,107 @@ def test_scout_handoff_recovery_rejects_marker_mentions_without_values(
     assert "scout_handoff_recovered" not in events
 
 
+def test_scout_handoff_recovery_rejects_template_placeholder_values(kanban_home):
+    summary = """CODER_HANDOFF:
+- PATCH_TARGET: erste Datei/Symbole, die der Coder ändern soll.
+- TEST_TARGET: engste Tests/Gates, die den Patch beweisen.
+- AVOID: Pfade/Ansätze, die Tokens verbrennen oder Arbeit doppeln.
+"""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Scout template-only handoff",
+            assignee="scout",
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        claimed_task = kb.get_task(conn, tid)
+        assert claimed_task is not None
+        run_id = claimed_task.current_run_id
+        assert run_id is not None
+
+        assert kb.record_iteration_budget_exhausted(
+            conn,
+            tid,
+            summary=summary,
+            expected_run_id=run_id,
+        )
+
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert task is not None
+    assert run is not None
+    assert task.status != "done"
+    assert run.outcome != "completed"
+    assert "scout_handoff_recovered" not in events
+
+
+def test_record_task_failure_does_not_complete_reclaimed_scout_run(kanban_home):
+    handoff = """CODER_HANDOFF:
+- PATCH_TARGET: hermes_cli/kanban_db.py::_record_task_failure expected_run_id guard
+- TEST_TARGET: tests/hermes_cli/test_kanban_iteration_budget.py
+- AVOID: completing a newer reclaimed run from a stale finalizer
+"""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Scout stale finalizer",
+            assignee="scout",
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        first_task = kb.get_task(conn, tid)
+        assert first_task is not None
+        stale_run_id = first_task.current_run_id
+        assert stale_run_id is not None
+
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, claim_lock, claim_expires, started_at, "
+            "last_heartbeat_at, max_runtime_seconds) "
+            "VALUES (?, ?, 'running', 'reclaimed', 9999999999, 123, 123, 3600)",
+            (tid, "scout"),
+        )
+        new_run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "UPDATE tasks SET current_run_id = ?, claim_lock = 'reclaimed' "
+            "WHERE id = ?",
+            (new_run_id, tid),
+        )
+
+        assert not kb._record_task_failure(
+            conn,
+            tid,
+            "Iteration budget exhausted (20/20)",
+            outcome="timed_out",
+            release_claim=True,
+            end_run=True,
+            summary=handoff,
+            expected_run_id=stale_run_id,
+        )
+
+        task = kb.get_task(conn, tid)
+        run = conn.execute(
+            "SELECT id, status, outcome FROM task_runs WHERE id = ?",
+            (new_run_id,),
+        ).fetchone()
+        events = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert task is not None
+    assert run is not None
+    assert task.status == "running"
+    assert task.current_run_id == new_run_id
+    assert run["id"] == new_run_id
+    assert run["status"] == "running"
+    assert run["outcome"] is None
+    assert "scout_handoff_recovered" not in events
+    assert "timed_out" not in events
+
+
 def test_turn_finalizer_recovers_scout_handoff_from_budget_exhaustion(
     kanban_home, monkeypatch
 ):

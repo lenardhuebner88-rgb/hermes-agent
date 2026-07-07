@@ -148,6 +148,11 @@ def finalize_turn(
                                 "budget_max": agent.max_iterations,
                             },
                             summary=final_response,
+                            expected_run_id=(
+                                int(os.environ["HERMES_KANBAN_RUN_ID"])
+                                if os.environ.get("HERMES_KANBAN_RUN_ID")
+                                else None
+                            ),
                         )
                         logger.info(
                             "recorded budget-exhausted failure for task %s (%d/%d)",

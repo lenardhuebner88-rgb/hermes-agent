@@ -7950,6 +7950,26 @@ _CODER_HANDOFF_FIELD_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?P<key>PATCH_TARGET|TEST_TARGET|AVOID)\s*:\s*(?P<value>\S.*)?$",
     re.IGNORECASE,
 )
+_CODER_HANDOFF_PLACEHOLDER_VALUES = {
+    "erste datei/symbole, die der coder ändern soll.",
+    "engste tests/gates, die den patch beweisen.",
+    "pfade/ansätze, die tokens verbrennen oder arbeit doppeln.",
+}
+_CODER_HANDOFF_UNUSABLE_VALUE_RE = re.compile(
+    r"^(?:tbd|todo|n/?a|none|unknown|unklar|offen|missing|fehlt|leer|empty|-)\b",
+    re.IGNORECASE,
+)
+
+
+def _coder_handoff_value_usable(value: str) -> bool:
+    normalized = " ".join(value.strip().split()).casefold()
+    if not normalized:
+        return False
+    if normalized in _CODER_HANDOFF_PLACEHOLDER_VALUES:
+        return False
+    if _CODER_HANDOFF_UNUSABLE_VALUE_RE.search(normalized):
+        return False
+    return True
 
 
 def _has_complete_coder_handoff(text: Optional[str]) -> bool:
@@ -7975,7 +7995,7 @@ def _has_complete_coder_handoff(text: Optional[str]) -> bool:
         if not match:
             continue
         value = (match.group("value") or "").strip()
-        if value:
+        if _coder_handoff_value_usable(value):
             fields[match.group("key").upper()] = value
     return all(fields.get(field) for field in _CODER_HANDOFF_REQUIRED_FIELDS)
 
@@ -16378,6 +16398,7 @@ def _record_task_failure(
     event_payload_extra: Optional[dict] = None,
     count_failure: bool = True,
     summary: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -16425,12 +16446,17 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries, title, assignee "
-            "FROM tasks WHERE id = ?",
+            "SELECT consecutive_failures, status, max_retries, title, assignee, "
+            "current_run_id FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
             return False
+
+        if expected_run_id is not None:
+            current_run_id = row["current_run_id"] if "current_run_id" in row.keys() else None
+            if current_run_id is None or int(current_run_id) != int(expected_run_id):
+                return False
 
         if outcome == "timed_out" and release_claim and end_run:
             recovery_metadata = {
@@ -16444,6 +16470,7 @@ def _record_task_failure(
                 task_id,
                 summary=summary,
                 metadata=recovery_metadata,
+                expected_run_id=expected_run_id,
                 reason=outcome,
             ):
                 return False
