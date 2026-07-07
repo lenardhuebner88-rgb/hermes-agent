@@ -22,6 +22,10 @@ function assetUrl(cardId: string, asset: string): string {
   return `/api/design-board/cards/${cardId}/assets/${asset.split("/").pop()}`;
 }
 
+function entryTime(entry: Entry): string {
+  return new Date(entry.created_at * 1000).toISOString().replace("T", " ").replace(".000Z", "Z");
+}
+
 export function CardDetail(_props: { density?: string } = {}) {
   const { cardId = "" } = useParams<{ cardId: string }>();
   const [card, setCard] = useState<CardDetailData | null>(null);
@@ -281,8 +285,8 @@ export function CardDetail(_props: { density?: string } = {}) {
 
       <div className="mt-4 space-y-4">
         {card.entries.map((entry) => (
-          <div key={entry.id} className="hc-surface-card p-3">
-            <div className="hc-type-label hc-dim">{entry.author} · {entry.kind}</div>
+          <div key={entry.id} data-testid={`entry-${entry.id}`} className="hc-surface-card p-3" aria-label="Verlaufszeile">
+            <div className="hc-type-label hc-dim">{entryTime(entry)} · {entry.author} · {entry.kind}</div>
             {entry.note && <div className="mt-1 text-sm text-white">{entry.note}</div>}
             {entry.asset && (
               <div className="mt-2">

@@ -141,6 +141,54 @@ def test_after_screenshot_attaches_system_entry(monkeypatch):
     assert entry["note"] == "after-screenshot task:t_done"
 
 
+def test_completion_receipt_attaches_system_comment(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    entries = dbk.attach_completion_receipts_for_task("t_done", status="done", run_id=42)
+
+    assert len(entries) == 1
+    updated = store.get_card(card_id)
+    assert updated is not None
+    entry = updated["entries"][0]
+    assert entry["author"] == "system"
+    assert entry["kind"] == "comment"
+    assert entry["note"] == "task-receipt task:t_done completed_at:2025-01-01T00:00:00Z commit:abc123"
+
+
+def test_completion_receipt_is_idempotent_per_task(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_done")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    assert len(dbk.attach_completion_receipts_for_task("t_done", status="done")) == 1
+    assert dbk.attach_completion_receipts_for_task("t_done", status="done") == []
+
+
+def test_completion_receipt_skips_non_terminal(monkeypatch):
+    card_id = store.create_card(
+        kind="bug",
+        title="Gap",
+        target={"view": "/control/fleet"},
+    )
+    store.link_task(card_id, "t_running")
+    monkeypatch.setattr(dbk, "_completion_receipt_metadata", lambda task_id, run_id=None: (1735689600, "abc123"))
+
+    assert dbk.attach_completion_receipts_for_task("t_running", status="running") == []
+    updated = store.get_card(card_id)
+    assert updated is not None
+    assert updated["entries"] == []
+
+
 def test_after_screenshot_degrades_to_comment_on_render_error(monkeypatch):
     card_id = store.create_card(
         kind="bug",

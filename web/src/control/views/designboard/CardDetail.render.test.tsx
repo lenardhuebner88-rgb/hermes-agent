@@ -38,6 +38,30 @@ describe("CardDetail (jsdom)", () => {
     expect(screen.getByText("in arbeit")).toBeTruthy();
   });
 
+  it("renders a system task completion receipt as a timeline row", async () => {
+    fetchJSONMock.mockResolvedValue({
+      id: "c_1", kind: "bug", title: "Header overlaps", status: "addressed",
+      target: null, linked_tasks: ["t_done"],
+      entries: [{
+        id: "e_receipt", author: "system", kind: "comment",
+        note: "task-receipt task:t_done completed_at:2025-01-01T00:00:00Z commit:abc123",
+        asset: null, html: null, pins: [], created_at: 1735689600,
+      }],
+      task_facets: [], derived_status: "done", kanban_ok: true,
+    });
+    render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>
+    );
+
+    const row = await waitFor(() => screen.getByTestId("entry-e_receipt"));
+    expect(row.getAttribute("aria-label")).toBe("Verlaufszeile");
+    expect(screen.getByText("2025-01-01 00:00:00Z · system · comment")).toBeTruthy();
+    expect(screen.getByText(/task-receipt task:t_done/)).toBeTruthy();
+    expect(screen.getByText(/commit:abc123/)).toBeTruthy();
+  });
+
   it("submits a text-only comment entry", async () => {
     fetchJSONMock.mockResolvedValue({
       id: "c_1", kind: "bug", title: "Header overlaps", status: "open",

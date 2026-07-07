@@ -1,9 +1,11 @@
 """Kanban adapter for Design Board cards."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,6 +15,7 @@ from hermes_cli import kanban_db
 TERMINAL = {"done", "archived"}
 _CHROMIUM_SHOT = os.path.expanduser("~/bin/chromium-shot")
 _AFTER_MARKER_PREFIX = "after-screenshot task:"
+_RECEIPT_MARKER_PREFIX = "task-receipt task:"
 
 _get_task = kanban_db.get_task
 
@@ -76,9 +79,40 @@ def register_lifecycle_hooks() -> None:
         callbacks.append(handle_task_completed)
 
 
-def handle_task_completed(task_id: str, **_: object) -> None:
-    """Attach an automatic after-screenshot when a linked task is done."""
+def handle_task_completed(task_id: str, **kwargs: object) -> None:
+    """Attach automatic Design Board updates when a linked task is done."""
+    run_id = kwargs.get("run_id")
+    attach_completion_receipts_for_task(
+        task_id,
+        status="done",
+        run_id=run_id if isinstance(run_id, int) else None,
+    )
     attach_after_screenshots_for_task(task_id, status="done")
+
+
+def attach_completion_receipts_for_task(
+    task_id: str,
+    *,
+    status: str,
+    run_id: int | None = None,
+) -> list[str]:
+    """Write one idempotent completion receipt comment per linked card."""
+    if status not in TERMINAL:
+        return []
+
+    created: list[str] = []
+    note = _completion_receipt_note(task_id, run_id=run_id)
+    for card in _cards_linked_to_task(task_id):
+        card_id = card.get("id")
+        if not isinstance(card_id, str) or _has_receipt_entry(card, task_id):
+            continue
+        created.append(store.add_entry(
+            card_id,
+            author="system",
+            kind="comment",
+            note=note,
+        ))
+    return created
 
 
 def attach_after_screenshots_for_task(task_id: str, *, status: str) -> list[str]:
@@ -128,6 +162,78 @@ def _has_after_entry(card: dict, task_id: str) -> bool:
         if isinstance(entry, dict) and str(entry.get("note") or "").startswith(marker):
             return True
     return False
+
+
+def _has_receipt_entry(card: dict, task_id: str) -> bool:
+    marker = f"{_RECEIPT_MARKER_PREFIX}{task_id}"
+    for entry in card.get("entries") or []:
+        if isinstance(entry, dict) and str(entry.get("note") or "").startswith(marker):
+            return True
+    return False
+
+
+def _completion_receipt_note(task_id: str, *, run_id: int | None = None) -> str:
+    completed_at, commit = _completion_receipt_metadata(task_id, run_id=run_id)
+    completed = _format_completed_at(completed_at) if completed_at else "unknown"
+    note = f"{_RECEIPT_MARKER_PREFIX}{task_id} completed_at:{completed}"
+    if commit:
+        note += f" commit:{commit}"
+    return note
+
+
+def _completion_receipt_metadata(task_id: str, *, run_id: int | None = None) -> tuple[int | None, str | None]:
+    completed_at: int | None = None
+    commit: str | None = None
+    try:
+        with _open_ro() as conn:
+            task = _get_task(conn, task_id)
+            completed_at = task.completed_at if task is not None else None
+            if run_id is not None:
+                row = conn.execute(
+                    "SELECT metadata, ended_at FROM task_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is not None:
+                    completed_at = completed_at or row["ended_at"]
+                    commit = _commit_from_payload(row["metadata"])
+            if commit is None:
+                row = conn.execute(
+                    """
+                    SELECT payload FROM task_events
+                    WHERE task_id = ? AND kind IN ('completed', 'done')
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if row is not None:
+                    commit = _commit_from_payload(row["payload"])
+    except Exception:
+        return completed_at, commit
+    return completed_at, commit
+
+
+def _commit_from_payload(raw: object) -> str | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("commit") or data.get("commit_hash")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    nested = data.get("metadata")
+    if isinstance(nested, dict):
+        value = nested.get("commit") or nested.get("commit_hash")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _format_completed_at(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _render_dashboard_view(card: dict) -> bytes:
