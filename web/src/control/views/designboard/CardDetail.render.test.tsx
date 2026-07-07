@@ -148,4 +148,37 @@ describe("CardDetail (jsdom)", () => {
       expect(screen.getByText(/Kanban-Status nicht verfügbar/)).toBeTruthy(),
     );
   });
+
+  it("shows before and after screenshots side by side", async () => {
+    fetchJSONMock.mockResolvedValue({
+      id: "c_1", kind: "bug", title: "Header overlaps", status: "addressed",
+      target: null, linked_tasks: ["t_done"],
+      entries: [
+        {
+          id: "e_before", author: "piet", kind: "screenshot", note: "before",
+          asset: "assets/before.png", html: null, pins: [], created_at: 1,
+        },
+        {
+          id: "e_old_after", author: "system", kind: "screenshot", note: "old after",
+          asset: "assets/old-after.png", html: null, pins: [], created_at: 2,
+        },
+        {
+          id: "e_after", author: "system", kind: "screenshot", note: "after",
+          asset: "assets/after.png", html: null, pins: [], created_at: 3,
+        },
+      ],
+      task_facets: [], derived_status: "done", kanban_ok: true,
+    });
+    render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Vorher-Nachher Screenshots")).toBeTruthy());
+    expect(screen.getByText("Vorher · Operator-Screenshot")).toBeTruthy();
+    expect(screen.getByText("Nachher · System-Screenshot")).toBeTruthy();
+    expect(document.querySelector('img[src="/api/design-board/cards/c_1/assets/before.png"]')).toBeTruthy();
+    expect(document.querySelector('img[src="/api/design-board/cards/c_1/assets/after.png"]')).toBeTruthy();
+  });
 });

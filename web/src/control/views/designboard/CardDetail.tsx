@@ -141,6 +141,13 @@ export function CardDetail(_props: { density?: string } = {}) {
   if (error) return <div className="p-4"><FleetEmptyState title="Laden fehlgeschlagen" desc={error} /></div>;
   if (!card) return <div className="p-4 hc-type-label hc-dim">Laden…</div>;
 
+  const beforeScreenshot = card.entries.find((entry) =>
+    entry.kind === "screenshot" && entry.asset && entry.author !== "system",
+  );
+  const afterScreenshot = [...card.entries].reverse().find((entry) =>
+    entry.kind === "screenshot" && entry.asset && entry.author === "system",
+  );
+
   return (
     <div className="min-h-full bg-surface-0 p-4">
       <SectionHeader label={card.title} meta={statusBadge(card.derived_status ?? card.status)} />
@@ -231,6 +238,19 @@ export function CardDetail(_props: { density?: string } = {}) {
               {f.id} · {f.status}{f.assignee ? ` · ${f.assignee}` : ""}
             </span>
           ))}
+        </div>
+      )}
+
+      {beforeScreenshot && afterScreenshot && (
+        <div className="mt-4 grid gap-3 md:grid-cols-2" aria-label="Vorher-Nachher Screenshots">
+          <div className="hc-surface-card p-3">
+            <div className="hc-type-label hc-dim">Vorher · Operator-Screenshot</div>
+            <PinOverlay src={assetUrl(card.id, beforeScreenshot.asset!)} pins={beforeScreenshot.pins} editable={false} />
+          </div>
+          <div className="hc-surface-card p-3">
+            <div className="hc-type-label hc-dim">Nachher · System-Screenshot</div>
+            <PinOverlay src={assetUrl(card.id, afterScreenshot.asset!)} pins={afterScreenshot.pins} editable={false} />
+          </div>
         </div>
       )}
 
