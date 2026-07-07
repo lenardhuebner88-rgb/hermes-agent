@@ -22189,6 +22189,23 @@ def _build_worker_env(parent_env) -> dict:
     )
 
 
+def _worker_project_context_cwd(task: Task) -> Optional[str]:
+    """Return the project root to scan for scratch-worker context files."""
+    if task.workspace_kind != "scratch" or not task.project_id:
+        return None
+    try:
+        from hermes_cli import projects_db as _projects_db
+
+        with _projects_db.connect_closing() as project_conn:
+            project = _projects_db.get_project(project_conn, task.project_id)
+    except Exception:
+        return None
+    primary_path = str(getattr(project, "primary_path", "") or "").strip()
+    if primary_path and os.path.isabs(primary_path) and os.path.isdir(primary_path):
+        return primary_path
+    return None
+
+
 def _is_claude_verdict_read_only_lane(
     profile_arg: str,
     lane_entry: Optional[dict],
@@ -22310,12 +22327,14 @@ def _spawn_claude_worker(
         if profile_instructions
         else ""
     )
+    knowledge_pointers_block = "\n".join(_render_knowledge_pointers()).rstrip() + "\n\n"
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
         f"{profile_block}"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
+        f"{knowledge_pointers_block}"
         f"{prior_attempts_block}"
         f"{parent_history_block}"
         f"{comment_block}"
@@ -22658,6 +22677,9 @@ def _default_spawn(
     # here (leave the inherited value rather than write a meaningless one).
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
+    project_context_cwd = _worker_project_context_cwd(task)
+    if project_context_cwd:
+        env["HERMES_CONTEXT_CWD"] = project_context_cwd
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
@@ -23153,6 +23175,22 @@ def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     identically.
     """
     return _kanban_context.cap_text(s, limit)
+
+
+def _render_knowledge_pointers() -> list[str]:
+    """Render static external knowledge pointers for worker context.
+
+    Single source of truth shared by the Hermes-worker context
+    (:func:`build_worker_context`) and the claude-CLI worker prompt
+    (:func:`_spawn_claude_worker`). The pointers name on-disk resources only;
+    their content is never inlined.
+    """
+    return [
+        "## Knowledge pointers",
+        "- Current model landscape (cron-maintained, ~30min fresh): /home/piet/llm-wiki/wiki/models/model-landscape.md — read it only when a model/routing/pricing question arises.",
+        "- Canonical cross-agent facts: /home/piet/vault/00-Canon/ (start at _index.md)",
+        "",
+    ]
 
 
 def _render_prior_attempts(
@@ -23694,14 +23732,7 @@ def build_worker_context(
     # Knowledge pointers — static pointers to external resources workers may
     # consult on demand. No content is inlined here; workers read on-disk files
     # only when the pointer is relevant to their specific task.
-    lines.append("## Knowledge pointers")
-    lines.append(
-        "- Current model landscape (cron-maintained, ~30min fresh): /home/piet/llm-wiki/wiki/models/model-landscape.md — read it only when a model/routing/pricing question arises."
-    )
-    lines.append(
-        "- Canonical cross-agent facts: /home/piet/vault/00-Canon/ (start at _index.md)"
-    )
-    lines.append("")
+    lines.extend(_render_knowledge_pointers())
 
     if task.body and task.body.strip():
         # PlanSpec B: when the body references a known contract_profile (and

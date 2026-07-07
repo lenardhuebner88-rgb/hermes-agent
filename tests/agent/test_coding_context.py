@@ -489,10 +489,9 @@ class TestProfiles:
         assert cc.GENERAL_PROFILE.guidance == ""
 
     def test_skill_demotion_gated_on_focus(self, tmp_path):
-        # Names-only demotion is opt-in via focus mode — the default (auto)
-        # and forced (on) postures leave the skill index untouched. Under
-        # focus, clearly-non-coding categories are demoted (never hidden) and
-        # coding-adjacent ones keep full entries (deny-list semantics).
+        # Broad names-only demotion remains opt-in via focus mode. The default
+        # (auto) and forced (on) postures do not apply the profile-wide deny-list
+        # unless a separate task/path rule matches.
         _git_init(tmp_path)
         for raw in ("auto", "on"):
             mode = cc.resolve_runtime_mode(
@@ -512,6 +511,54 @@ class TestProfiles:
         # General posture demotes nothing.
         general = cc.resolve_runtime_mode(platform="telegram", cwd=tmp_path, config={})
         assert general.compact_skill_categories() == frozenset()
+
+    def test_task_keyword_rule_demotes_categories_under_auto(self, tmp_path, monkeypatch):
+        _git_init(tmp_path)
+        monkeypatch.setenv("HERMES_KANBAN_TASK_TITLE", "Frontend Worker Tab polish")
+        cfg = {
+            "agent": {
+                "coding_context": "auto",
+                "skill_category_demotions": {
+                    "rules": [
+                        {
+                            "task_keywords": ["frontend"],
+                            "categories": ["media", "creative", "productivity"],
+                        }
+                    ]
+                },
+            }
+        }
+
+        mode = cc.resolve_runtime_mode(platform="cli", cwd=tmp_path, config=cfg)
+
+        assert mode.is_coding is True
+        assert mode.compact_skill_categories() == frozenset(
+            {"media", "creative", "productivity"}
+        )
+
+    def test_path_rule_demotes_once_on_resolved_runtime_mode(self, tmp_path, monkeypatch):
+        app = tmp_path / "apps" / "desktop"
+        app.mkdir(parents=True)
+        (tmp_path / "package.json").write_text("{}")
+        cfg = {
+            "agent": {
+                "coding_context": "auto",
+                "skill_category_demotions": {
+                    "rules": [
+                        {
+                            "path_globs": ["apps/desktop/**"],
+                            "categories": ["media"],
+                        },
+                        {"task_keywords": ["later"], "categories": ["creative"]},
+                    ]
+                },
+            }
+        }
+
+        mode = cc.resolve_runtime_mode(platform="cli", cwd=app, config=cfg)
+        monkeypatch.setenv("HERMES_KANBAN_TASK_TITLE", "later mutation")
+
+        assert mode.compact_skill_categories() == frozenset({"media"})
 
 
 # ── detection signals ───────────────────────────────────────────────────────

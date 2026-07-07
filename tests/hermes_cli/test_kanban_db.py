@@ -2793,6 +2793,23 @@ def test_build_worker_context_includes_knowledge_pointers(kanban_home):
     assert "/home/piet/vault/00-Canon/" in ctx
 
 
+def test_build_worker_context_uses_shared_knowledge_pointer_renderer(
+    kanban_home, monkeypatch
+):
+    """The native context consumes the shared renderer instead of duplicated
+    literal pointer strings, keeping worker-runtime prompts in parity."""
+    monkeypatch.setattr(
+        kb,
+        "_render_knowledge_pointers",
+        lambda: ["## Knowledge pointers", "- shared-renderer-sentinel", ""],
+    )
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="test shared knowledge renderer")
+        ctx = kb.build_worker_context(conn, tid)
+
+    assert "shared-renderer-sentinel" in ctx
+
+
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------
@@ -7671,8 +7688,8 @@ class TestClaudeCliWorkerSpawn:
         assert "PROVIDER RULE: Never call anthropic/*" in prompt
 
     def test_claude_worker_no_comment_block_when_no_comments(self, kanban_home, monkeypatch):
-        """Zero comments → no block at all; the prompt is byte-identical to the
-        pre-change status quo (body flows straight into the work instruction)."""
+        """Zero comments → no comment block at all; the prompt still flows from
+        body through knowledge pointers into the work instruction."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
         with kb.connect_closing() as conn:
             tid = kb.create_task(
@@ -7686,9 +7703,10 @@ class TestClaudeCliWorkerSpawn:
 
         assert "## Comment thread" not in prompt
         assert "comment from worker" not in prompt
-        # Status quo: the (stored) body flows straight into the work
-        # instruction with no comment block wedged in between.
-        assert f"{task.body}\n\nWork in the current directory." in prompt
+        assert f"{task.body}\n\n## Knowledge pointers" in prompt
+        assert prompt.index("## Knowledge pointers") < prompt.index(
+            "Work in the current directory."
+        )
 
     def test_claude_worker_comment_thread_caps_at_ctx_max(self, kanban_home, monkeypatch):
         """More than _CTX_MAX_COMMENTS comments → only the most-recent N are
@@ -7798,6 +7816,57 @@ class TestClaudeCliWorkerSpawn:
 
         assert "## Prior attempts on this task" not in prompt
         assert "Attempt 1 —" not in prompt
+
+    def test_claude_worker_appends_knowledge_pointers(self, kanban_home, monkeypatch):
+        """claude-CLI workers get the same static Knowledge pointers section as
+        build_worker_context."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect_closing() as conn:
+            tid = kb.create_task(
+                conn,
+                title="model routing task",
+                body="pick the right model",
+                assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "## Knowledge pointers" in prompt
+        assert "/home/piet/llm-wiki/wiki/models/model-landscape.md" in prompt
+        assert "/home/piet/vault/00-Canon/" in prompt
+        assert prompt.index("pick the right model") < prompt.index(
+            "## Knowledge pointers"
+        )
+        assert prompt.index("## Knowledge pointers") < prompt.index(
+            "Work in the current directory."
+        )
+
+    def test_claude_worker_uses_shared_knowledge_pointer_renderer(
+        self, kanban_home, monkeypatch
+    ):
+        """A sentinel from the shared renderer must reach claude -p; otherwise
+        the claude worker prompt has drifted back to duplicated strings."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        monkeypatch.setattr(
+            kb,
+            "_render_knowledge_pointers",
+            lambda: ["## Knowledge pointers", "- shared-renderer-sentinel", ""],
+        )
+        with kb.connect_closing() as conn:
+            tid = kb.create_task(
+                conn,
+                title="shared renderer task",
+                body="do the thing",
+                assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "shared-renderer-sentinel" in prompt
 
     # --- default (hermes) path stays byte-identical -----------------------
 

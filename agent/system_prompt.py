@@ -24,6 +24,7 @@ Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
@@ -108,6 +109,19 @@ def _resolve_platform_hint(agent: Any, platform_key: str, default_hint: str) -> 
     if isinstance(append_text, str) and append_text.strip():
         return f"{base}\n\n{append_text.strip()}".strip()
     return base
+
+
+def _kanban_no_project_context_hint() -> str:
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return ""
+    if os.environ.get("HERMES_CONTEXT_CWD"):
+        return ""
+    return (
+        "# Project Context\n\n"
+        "No project context was loaded for this Kanban task: the task has no "
+        "known project/repo context. Verify the intended workspace/repo from "
+        "the task body before editing."
+    )
 
 
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
@@ -419,6 +433,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             context_length=_ctx_len)
         if context_files_prompt:
             context_parts.append(context_files_prompt)
+        else:
+            hint = _kanban_no_project_context_hint()
+            if hint:
+                context_parts.append(hint)
 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []

@@ -56,6 +56,27 @@ class TestContextFileCwd:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
 
+    def test_configured_context_dir_when_terminal_cwd_is_scratch(
+        self, monkeypatch, tmp_path
+    ):
+        workspace = tmp_path / "scratch"
+        project = tmp_path / "project"
+        workspace.mkdir()
+        project.mkdir()
+        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+        monkeypatch.setenv("HERMES_CONTEXT_CWD", str(project))
+
+        assert _captured_context_cwd(_make_agent()) == project
+
+    def test_kanban_task_without_project_gets_explicit_context_hint(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_no_repo")
+        monkeypatch.delenv("HERMES_CONTEXT_CWD", raising=False)
+        context = _context_prompt(_make_agent())
+
+        assert "No project context was loaded for this Kanban task" in context
+
 
 def _stable_prompt(agent):
     with (
@@ -65,6 +86,16 @@ def _stable_prompt(agent):
         patch("run_agent.build_context_files_prompt", return_value=""),
     ):
         return build_system_prompt_parts(agent)["stable"]
+
+
+def _context_prompt(agent):
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("run_agent.build_environment_hints", return_value=""),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        return build_system_prompt_parts(agent)["context"]
 
 
 def _init_code_repo(path):

@@ -16,7 +16,13 @@ from __future__ import annotations
 import subprocess
 
 
-def _make_task(kb, *, assignee: str = "w"):
+def _make_task(
+    kb,
+    *,
+    assignee: str = "w",
+    workspace_kind: str = "dir",
+    project_id: str | None = None,
+):
     return kb.Task(
         id="t_cwd",
         title="cwd pin",
@@ -28,16 +34,17 @@ def _make_task(kb, *, assignee: str = "w"):
         created_at=1,
         started_at=None,
         completed_at=None,
-        workspace_kind="dir",
+        workspace_kind=workspace_kind,
         workspace_path=None,
         claim_lock="lock",
         claim_expires=None,
         tenant=None,
         current_run_id=1,
+        project_id=project_id,
     )
 
 
-def _capture_spawn_env(kb, monkeypatch, workspace: str) -> dict:
+def _capture_spawn_env(kb, monkeypatch, workspace: str, task=None) -> dict:
     monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
 
     captured: dict = {}
@@ -52,7 +59,7 @@ def _capture_spawn_env(kb, monkeypatch, workspace: str) -> dict:
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    kb._default_spawn(_make_task(kb), workspace)
+    kb._default_spawn(task or _make_task(kb), workspace)
     return captured
 
 
@@ -99,3 +106,25 @@ def test_terminal_cwd_not_pinned_for_nonexistent_workspace(monkeypatch, tmp_path
 
     # Inherited value is preserved (not overwritten with a bogus path).
     assert captured["env"]["TERMINAL_CWD"] == "/pre/existing/anchor"
+
+
+def test_scratch_project_context_cwd_pinned_to_project_root(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    (root / "profiles" / "w").mkdir(parents=True)
+    (root / "profiles" / "w" / "config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    root.joinpath("config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    workspace = tmp_path / "scratch"
+    project_root = tmp_path / "repo"
+    workspace.mkdir()
+    project_root.mkdir()
+    task = _make_task(kb, workspace_kind="scratch", project_id="proj_1")
+    monkeypatch.setattr(kb, "_worker_project_context_cwd", lambda task: str(project_root))
+
+    captured = _capture_spawn_env(kb, monkeypatch, str(workspace), task=task)
+
+    assert captured["env"]["TERMINAL_CWD"] == str(workspace)
+    assert captured["env"]["HERMES_CONTEXT_CWD"] == str(project_root)

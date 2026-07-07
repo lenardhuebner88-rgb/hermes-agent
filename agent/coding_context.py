@@ -51,12 +51,14 @@ Activation (config ``agent.coding_context``):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import fnmatch
 import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -496,6 +498,9 @@ class RuntimeMode:
     # Standing operator instructions (``agent.coding_instructions``), appended
     # as an extra stable system block. Empty unless the user configures it.
     instructions: str = ""
+    # Task/path-triggered category demotions selected once when this immutable
+    # mode is resolved. These are names-only demotions, never hides.
+    task_compact_skill_categories: frozenset[str] = frozenset()
 
     @property
     def kind(self) -> str:
@@ -551,12 +556,10 @@ class RuntimeMode:
     def compact_skill_categories(self) -> frozenset[str]:
         """Skill categories to demote to names-only in the prompt's skill index.
 
-        Gated on the opt-in ``focus`` mode, like the toolset collapse: the
-        default posture leaves the skill index untouched. Users who didn't ask
-        for a lean prompt keep full entries for every category — index changes
-        under ``auto`` proved too surprising in practice, even names-only ones
-        (a demoted description is information the model no longer weighs when
-        deciding what to load).
+        ``focus`` still demotes the profile's broad non-coding categories, like
+        the toolset collapse. Separately, config-defined task/path rules can add
+        narrow names-only demotions under any coding mode; they are selected
+        while the immutable runtime mode is assembled, never mid-conversation.
 
         Demoted — never hidden — even under ``focus``. An earlier revision
         fully pruned these categories from the index, which caused silent
@@ -566,9 +569,137 @@ class RuntimeMode:
         rediscover what the index stopped showing them. Names-only keeps every
         skill loadable on recall while still cutting the description noise.
         """
-        if not self.is_coding or self.config_mode != "focus":
+        if not self.is_coding:
             return frozenset()
-        return frozenset(self.profile.compact_skill_categories)
+        categories = set(self.task_compact_skill_categories)
+        if self.config_mode == "focus":
+            categories.update(self.profile.compact_skill_categories)
+        return frozenset(categories)
+
+
+def _task_demotion_text_from_env() -> str:
+    parts = [
+        os.environ.get("HERMES_TASK_TITLE", ""),
+        os.environ.get("HERMES_TASK_BODY", ""),
+        os.environ.get("HERMES_KANBAN_TASK_TITLE", ""),
+        os.environ.get("HERMES_KANBAN_TASK_BODY", ""),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _task_demotion_text_from_kanban_db() -> str:
+    task_id = os.environ.get("HERMES_KANBAN_TASK")
+    if not task_id:
+        return ""
+    db_path = os.environ.get("HERMES_KANBAN_DB")
+    if not db_path:
+        return ""
+    try:
+        path = Path(db_path).expanduser().resolve()
+        uri = f"file:{path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute(
+                "SELECT title, body FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+    except Exception as exc:  # pragma: no cover - best-effort context only
+        logger.debug("failed to read kanban task text for skill demotion rules: %s", exc)
+        return ""
+    if row is None:
+        return ""
+    return "\n".join(part for part in (row[0], row[1] or "") if part)
+
+
+def _task_demotion_text() -> str:
+    return _task_demotion_text_from_env() or _task_demotion_text_from_kanban_db()
+
+
+def _candidate_rule_paths(cwd: Path) -> tuple[str, ...]:
+    paths: list[str] = []
+    for raw in (
+        str(cwd),
+        os.environ.get("HERMES_CONTEXT_CWD", ""),
+        os.environ.get("HERMES_TERMINAL_CWD", ""),
+        os.environ.get("TERMINAL_CWD", ""),
+        os.environ.get("HERMES_KANBAN_WORKSPACE", ""),
+    ):
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError):
+            path = Path(raw).expanduser()
+        text = path.as_posix()
+        paths.append(text)
+        root = _git_root(path) or _marker_root(path)
+        if root is not None:
+            try:
+                paths.append(path.relative_to(root).as_posix())
+            except ValueError:
+                pass
+    return tuple(dict.fromkeys(path for path in paths if path))
+
+
+def _rule_path_matches(pattern: str, paths: tuple[str, ...]) -> bool:
+    needle = pattern.strip().replace("\\", "/").lstrip("/")
+    if not needle:
+        return False
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        if fnmatch.fnmatch(normalized, needle):
+            return True
+        if fnmatch.fnmatch(normalized, f"**/{needle}"):
+            return True
+        if needle.endswith("/**"):
+            base = needle[:-3].rstrip("/")
+            if normalized.endswith(f"/{base}") or f"/{base}/" in normalized:
+                return True
+        if normalized.endswith(f"/{needle.rstrip('/')}"):
+            return True
+    return False
+
+
+def _configured_task_compact_skill_categories(
+    config: dict[str, Any], *, cwd: Path
+) -> frozenset[str]:
+    """Evaluate config-driven names-only category demotion rules once.
+
+    The rule result is stored on :class:`RuntimeMode`, which is assembled during
+    stable system-prompt creation. Prompt-builder rendering only consumes the
+    frozen category set; it does not inspect live task state mid-conversation.
+    """
+    agent_cfg = config.get("agent") if isinstance(config, dict) else {}
+    demotions = agent_cfg.get("skill_category_demotions", {}) if isinstance(agent_cfg, dict) else {}
+    rules = demotions.get("rules", []) if isinstance(demotions, dict) else []
+    if not isinstance(rules, list):
+        return frozenset()
+
+    task_text = _task_demotion_text().casefold()
+    paths = _candidate_rule_paths(cwd)
+    categories: set[str] = set()
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        rule_categories = rule.get("categories", [])
+        if not isinstance(rule_categories, list):
+            continue
+        task_keywords = rule.get("task_keywords", [])
+        path_globs = rule.get("path_globs", [])
+        keyword_match = isinstance(task_keywords, list) and any(
+            isinstance(keyword, str)
+            and keyword.strip()
+            and keyword.strip().casefold() in task_text
+            for keyword in task_keywords
+        )
+        path_match = isinstance(path_globs, list) and any(
+            isinstance(pattern, str) and _rule_path_matches(pattern, paths)
+            for pattern in path_globs
+        )
+        if not keyword_match and not path_match:
+            continue
+        for category in rule_categories:
+            if isinstance(category, str) and category.strip():
+                categories.add(category.strip())
+    return frozenset(categories)
 
 
 def resolve_runtime_mode(
@@ -588,7 +719,15 @@ def resolve_runtime_mode(
     it never affects detection.
     """
     resolved_cwd = _resolve_cwd(cwd)
-    mode = _coding_mode(config)
+    effective_config = config
+    if effective_config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            effective_config = load_config()
+        except Exception:
+            effective_config = {}
+    mode = _coding_mode(effective_config)
     name = _detect_profile_name(
         mode, (platform or "").strip().lower(), str(resolved_cwd)
     )
@@ -598,7 +737,10 @@ def resolve_runtime_mode(
         cwd=resolved_cwd,
         config_mode=mode,
         model=model,
-        instructions=_coding_instructions(config),
+        instructions=_coding_instructions(effective_config),
+        task_compact_skill_categories=_configured_task_compact_skill_categories(
+            effective_config or {}, cwd=resolved_cwd
+        ),
     )
 
 
@@ -655,11 +797,10 @@ def coding_compact_skill_categories(
 ) -> frozenset[str]:
     """Skill categories the active posture demotes to names-only in the index.
 
-    Empty outside the coding posture and outside the opt-in ``focus`` mode —
-    the default posture never touches the skill index. Under ``focus``,
-    demoted — never hidden: every skill name stays in the index and remains
-    loadable via ``skill_view`` / ``skills_list``; only descriptions are
-    dropped.
+    Empty outside the coding posture. Under ``focus`` and task/path demotion
+    rules, categories are demoted — never hidden: every skill name stays in the
+    index and remains loadable via ``skill_view`` / ``skills_list``; only
+    descriptions are dropped.
     """
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config

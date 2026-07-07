@@ -60,6 +60,16 @@ class TestResolveContextCwd:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert resolve_context_cwd() == tmp_path
 
+    def test_prefers_context_cwd_over_terminal_cwd(self, monkeypatch, tmp_path):
+        workspace = tmp_path / "scratch"
+        project = tmp_path / "project"
+        workspace.mkdir()
+        project.mkdir()
+        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+        monkeypatch.setenv("HERMES_CONTEXT_CWD", str(project))
+
+        assert resolve_context_cwd() == project
+
     def test_returns_none_when_unset(self, monkeypatch):
         # Unset → None; the caller (build_context_files_prompt) then getcwds —
         # the local-CLI #19242 contract. Discovery still runs; it is NOT skipped.

@@ -1012,6 +1012,40 @@ DEFAULT_CONFIG = {
         # approve. Clean the diff before you commit and push." Cache-safe:
         # takes effect next session. Empty by default.
         "coding_instructions": "",
+        # Rules evaluated once while assembling a new session's stable system
+        # prompt. Matched categories are demoted to names-only in the skill
+        # index (never hidden) so task-specific noise can be trimmed without
+        # removing recall anchors. Deep-merge lets users add/replace rules
+        # without a config version migration.
+        "skill_category_demotions": {
+            "rules": [
+                {
+                    "name": "frontend_task_noise",
+                    "task_keywords": [
+                        "frontend",
+                        "front-end",
+                        "react",
+                        "tsx",
+                        "jsx",
+                        "ui",
+                        "tui",
+                        "desktop",
+                    ],
+                    "path_globs": [
+                        "apps/desktop/**",
+                        "ui-tui/**",
+                        "web/**",
+                        "website/**",
+                        "frontend/**",
+                        "**/*.tsx",
+                        "**/*.jsx",
+                        "**/*.vue",
+                        "**/*.svelte",
+                    ],
+                    "categories": ["media", "creative", "productivity"],
+                }
+            ]
+        },
         # When verify-on-stop finds edited code without fresh verification
         # evidence, append guidance for creative UI work (avoid broad
         # tsc/lint/test before visual approval) and clean-diff expectations.
