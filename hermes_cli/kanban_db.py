@@ -8276,6 +8276,11 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       automatically once the underlying conditions change (e.g. parents
       finish, transient infra error clears).
 
+    * **Dependency wait** — ``block_task(..., kind='dependency')`` parks the
+      task on ``todo`` while waiting for a parent to finish.  This is NOT a
+      worker handoff; it must auto-recover when the parent completes, so
+      it is treated as non-sticky.
+
     The cheapest signal that distinguishes the two is the most recent
     ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
     recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
@@ -8288,12 +8293,15 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     for that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
+        "SELECT kind, payload FROM task_events "
         "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row or row["kind"] != "blocked":
+        return False
+    payload = json.loads(row["payload"] or "{}")
+    return payload.get("kind") != "dependency"
 
 
 def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -12666,17 +12674,22 @@ def block_task(
                 _latest_unblocked_block_recurrence(conn, task_id, block_kind) or 0
             )
             previous_kind = block_kind if previous_recurrences > 0 else previous_kind
-        recurrences = (
-            previous_recurrences + 1
-            if previous_recurrences > 0 and previous_kind == block_kind
-            else 1
-        )
         if block_kind == "dependency":
+            # Dependency waits are a normal scheduling state, not an error
+            # recurrence.  Do not count them toward the recurrence limit that
+            # triggers triage escalation.
+            recurrences = 1
             next_status = "todo"
-        elif recurrences >= BLOCK_RECURRENCE_LIMIT:
-            next_status = "triage"
         else:
-            next_status = "blocked"
+            recurrences = (
+                previous_recurrences + 1
+                if previous_recurrences > 0 and previous_kind == block_kind
+                else 1
+            )
+            if recurrences >= BLOCK_RECURRENCE_LIMIT:
+                next_status = "triage"
+            else:
+                next_status = "blocked"
         if expected_run_id is None:
             cur = conn.execute(
                 """

@@ -4330,6 +4330,120 @@ def test_recompute_ready_leaves_blocked_child_gated_while_parent_open(kanban_hom
         assert kb.get_task(conn, child).status == "ready"
 
 
+def test_dependency_wait_block_kind_is_todo_not_reclaimable(kanban_home):
+    """AC-1: A child with an open parent is naturally gated to 'todo' by
+    create_task/claim_task. Additionally, a running child whose parent is
+    reopened can be blocked with kind='dependency' and lands in 'todo'; it is
+    not claimable or runnable while the parent is still open."""
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(conn, title="child", assignee="a", parents=[parent])
+        # Natural gate: child is created as todo, cannot be claimed.
+        assert kb.get_task(conn, child).status == "todo"
+        assert kb.claim_task(conn, child) is None
+        ok, msg = kb.promote_task(conn, child, actor="test")
+        assert ok is False
+        assert msg is not None and "unsatisfied parent" in msg
+
+        # Simulate the rare dispatcher path: parent is done, child runs,
+        # parent somehow becomes un-done again (e.g. rollback/reopen), and the
+        # run realises it needs to dependency-wait. Block with kind='dependency'
+        # must park the child back on todo, not blocked/triage.
+        kb.claim_task(conn, parent)
+        kb.complete_task(conn, parent, result="ok")
+        kb.recompute_ready(conn)
+        assert kb.claim_task(conn, child) is not None
+        # Reopen parent manually to simulate the dependency-wait trigger.
+        conn.execute(
+            "UPDATE tasks SET status='todo' WHERE id=?", (parent,)
+        )
+        conn.commit()
+        assert kb.block_task(conn, child, reason="waiting for parent", kind="dependency")
+        task = kb.get_task(conn, child)
+        assert task.status == "todo"
+        assert task.block_kind == "dependency"
+        # claim_task and promote_task must refuse while parent is open.
+        assert kb.claim_task(conn, child) is None
+        ok, msg = kb.promote_task(conn, child, actor="test")
+        assert ok is False
+        assert msg is not None and (
+            "dependency wait" in msg or "unsatisfied parent dependencies" in msg
+        )
+
+
+def test_dependency_wait_promotes_when_parent_done_and_resets_block_kind(kanban_home):
+    """AC-2: Once the parent completes, the dependency-wait child is promoted to
+    'ready' and its block_kind/recurrences are cleared."""
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(conn, title="child", assignee="a", parents=[parent])
+        # Parent must be done before the child can run and then be parked.
+        kb.claim_task(conn, parent)
+        kb.complete_task(conn, parent, result="ok")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "ready"
+        assert kb.claim_task(conn, child) is not None
+        # Reopen parent to create the dependency-wait condition.
+        conn.execute(
+            "UPDATE tasks SET status='todo' WHERE id=?", (parent,)
+        )
+        conn.commit()
+        assert kb.block_task(conn, child, reason="waiting for parent", kind="dependency")
+        task = kb.get_task(conn, child)
+        assert task.status == "todo"
+        assert task.block_kind == "dependency"
+        # Re-complete the parent; child should be promoted and block_kind reset.
+        kb.recompute_ready(conn)  # parent was reopened; get it back to ready first
+        kb.claim_task(conn, parent)
+        kb.complete_task(conn, parent, result="ok")
+        kb.recompute_ready(conn)
+        task = kb.get_task(conn, child)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.block_kind is None
+        assert task.block_recurrences == 0
+        # claim should now succeed.
+        assert kb.claim_task(conn, child) is not None
+
+
+def test_dependency_wait_does_not_escalate_loop_or_recurrence(kanban_home):
+    """AC-3: Pure dependency waits must never be counted as loop/recurrence
+    escalation and never produce triage, even when the dependency-wait
+    pattern repeats on the same task."""
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(conn, title="child", assignee="a", parents=[parent])
+
+        def block_dependency_wait():
+            # Make the parent ready/claimed/done, then promote child to ready,
+            # claim it, reopen the parent and dependency-wait the child.
+            kb.recompute_ready(conn)  # parent may be todo after prior reopen
+            kb.claim_task(conn, parent)
+            kb.complete_task(conn, parent, result="ok")
+            kb.recompute_ready(conn)
+            assert kb.claim_task(conn, child) is not None
+            # Reopen parent to trigger the dependency wait.
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (parent,))
+            conn.commit()
+            assert kb.block_task(conn, child, reason="waiting", kind="dependency")
+            assert kb.get_task(conn, child).status == "todo"
+            assert kb.get_task(conn, child).block_recurrences == 1
+            event_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM task_events "
+                "WHERE task_id = ? AND kind = 'block_loop_detected'",
+                (child,),
+            ).fetchone()["c"]
+            assert event_count == 0
+
+        # Repeat the dependency-wait cycle several times.  Recurrences must
+        # stay pinned to 1 and triage/loop-detected events must never fire.
+        for _ in range(3):
+            block_dependency_wait()
+        # While parent is still open, unblock_task must not promote it either.
+        kb.unblock_task(conn, child)
+        assert kb.get_task(conn, child).status == "todo"
+
+
 def test_assign_refuses_while_running(kanban_home):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
