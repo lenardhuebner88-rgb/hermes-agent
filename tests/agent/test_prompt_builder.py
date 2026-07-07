@@ -471,6 +471,43 @@ class TestBuildSkillsSystemPrompt:
         # Disclosure note explains the demotion and how to load.
         assert "skill_view" in result
 
+    def test_config_rule_compacts_real_skill_index_fixture(
+        self, monkeypatch, tmp_path
+    ):
+        """Task/path rules feed the existing skill-index demotion path."""
+        from agent import coding_context as cc
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_KANBAN_TASK_TITLE", "Frontend Task")
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+        for cat, name in (("media", "image-edit"), ("github", "pr-review")):
+            d = tmp_path / "skills" / cat / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Does {name} things\n---\n"
+            )
+        cfg = {
+            "agent": {
+                "coding_context": "auto",
+                "skill_category_demotions": {
+                    "rules": [
+                        {"task_keywords": ["frontend"], "categories": ["media"]}
+                    ]
+                },
+            }
+        }
+
+        compact_categories = cc.coding_compact_skill_categories(
+            platform="cli", cwd=tmp_path, config=cfg
+        )
+        result = build_skills_system_prompt(compact_categories=compact_categories)
+
+        assert compact_categories == frozenset({"media"})
+        assert "media [names only]" in result
+        assert "image-edit" in result
+        assert "Does image-edit things" not in result
+        assert "pr-review" in result and "Does pr-review things" in result
+
     def test_compact_categories_demote_nested_and_miss_cache_separately(
         self, monkeypatch, tmp_path
     ):
