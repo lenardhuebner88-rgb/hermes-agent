@@ -1,0 +1,214 @@
+/**
+ * Risiko-Tab Redesign (★ FINAL, Design-Board c_2103a234 "risiko-final-hybrid") — CSS
+ *
+ * Alle 4 Zonen: Hero Auto-Mode Cockpit, Braucht-dich-Needcards, Autonome-
+ * Aktivität-Rail, System-Puls-Meter + Breakdown + Footer-Line.
+ *
+ * Additiv/scoped unter `.risiko-v4` — bewusst NICHT in fleet.css eingemischt
+ * (65 KB geteilte Fläche, Kollisionsrisiko mit dem parallelen Ketten-Tab-Redesign).
+ * Design-Tokens aus theme.css (--color-*), Token-Map-Pattern wie ketten-v4.css.
+ * Keine raw hex — nur Variablen + color-mix.
+ */
+
+.risiko-v4 {
+  --rk-surface-0: var(--color-surface-0);
+  --rk-surface-1: var(--color-surface-1);
+  --rk-surface-2: var(--color-surface-2);
+  --rk-surface-3: var(--color-surface-3);
+  --rk-surface-4: color-mix(in oklab, var(--color-surface-3) 50%, var(--color-brand) 8%);
+
+  --rk-line: color-mix(in oklab, var(--color-brand) 18%, transparent);
+  --rk-line-soft: color-mix(in oklab, var(--color-brand) 10%, transparent);
+
+  --rk-live: var(--color-live);
+  --rk-live-deep: color-mix(in oklab, var(--color-live) 80%, #000);
+  --rk-live-soft: color-mix(in oklab, var(--color-live) 12%, transparent);
+  --rk-live-glow: color-mix(in oklab, var(--color-live) 30%, transparent);
+
+  --rk-ok: var(--color-status-ok);
+  --rk-ok-soft: color-mix(in oklab, var(--color-status-ok) 10%, transparent);
+
+  --rk-warn: var(--color-status-warn);
+  --rk-warn-soft: color-mix(in oklab, var(--color-status-warn) 10%, transparent);
+
+  --rk-alert: var(--color-status-alert);
+  --rk-alert-soft: color-mix(in oklab, var(--color-status-alert) 10%, transparent);
+
+  --rk-ink: var(--color-ink);
+  --rk-ink-2: var(--color-ink-2);
+  --rk-ink-3: var(--color-ink-3);
+  --rk-ink-4: color-mix(in oklab, var(--color-ink-3) 50%, transparent);
+
+  --rk-radius-card: var(--radius-card, 10px);
+  --rk-radius-pill: 999px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.risiko-v4 .rk-eyebrow {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.9px; color: var(--rk-ink-3);
+}
+.risiko-v4 .rk-eyebrow-row { display: flex; align-items: center; justify-content: space-between; margin: 20px 2px 9px; }
+
+/* ── Zone 1: Hero Auto-Mode Cockpit ─────────────────────────────────────── */
+.risiko-v4 .rk-console {
+  position: relative; border-radius: 16px; padding: 16px 15px 14px; margin-bottom: 6px;
+  background: linear-gradient(180deg, var(--rk-surface-1), var(--rk-surface-0));
+  border: 1px solid var(--rk-line);
+}
+.risiko-v4 .rk-console-on {
+  border-color: var(--rk-live);
+  box-shadow: 0 0 0 1px var(--rk-live-glow), 0 8px 34px color-mix(in oklab, var(--rk-live) 10%, transparent), 0 2px 8px rgba(0,0,0,.5);
+}
+.risiko-v4 .rk-console-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+.risiko-v4 .rk-console-state { display: flex; align-items: center; gap: 10px; }
+.risiko-v4 .rk-console-state-dot {
+  width: 12px; height: 12px; border-radius: 50%; background: var(--rk-ink-4); flex-shrink: 0;
+}
+.risiko-v4 .rk-console-on .rk-console-state-dot {
+  background: var(--rk-ok); box-shadow: 0 0 12px color-mix(in oklab, var(--rk-ok) 75%, transparent);
+}
+.risiko-v4 .rk-console-state-txt { font-size: 17px; font-weight: 800; letter-spacing: .4px; color: var(--rk-ink-3); }
+.risiko-v4 .rk-console-on .rk-console-state-txt { color: var(--rk-ok); }
+.risiko-v4 .rk-console-sub { font-size: 11px; color: var(--rk-ink-2); margin-top: 1px; }
+
+.risiko-v4 .rk-switch {
+  width: 58px; height: 32px; border-radius: var(--rk-radius-pill); position: relative; flex-shrink: 0;
+  background: var(--rk-surface-2); border: 1px solid var(--rk-line);
+}
+.risiko-v4 .rk-console-on .rk-switch {
+  background: linear-gradient(180deg, var(--rk-ok-soft), color-mix(in oklab, var(--rk-ok) 20%, transparent));
+  border-color: color-mix(in oklab, var(--rk-ok) 55%, transparent);
+}
+.risiko-v4 .rk-switch-knob {
+  position: absolute; top: 2px; left: 2px; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--rk-ink-4); transition: left .15s, background .15s;
+}
+.risiko-v4 .rk-console-on .rk-switch-knob {
+  left: 28px;
+  background: radial-gradient(circle at 35% 30%, color-mix(in oklab, var(--rk-ok) 20%, white), var(--rk-ok));
+}
+.risiko-v4 .rk-switch:disabled { cursor: not-allowed; opacity: .9; }
+
+.risiko-v4 .rk-console-controls { display: flex; flex-direction: column; gap: 13px; }
+.risiko-v4 .rk-ctl-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.risiko-v4 .rk-ctl-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.risiko-v4 .rk-ctl-cap { font-size: 12.5px; font-weight: 600; color: var(--rk-ink); }
+.risiko-v4 .rk-ctl-hint { font-size: 9.5px; color: var(--rk-ink-4); }
+
+.risiko-v4 .rk-seg { display: flex; background: var(--rk-surface-0); border: 1px solid var(--rk-line); border-radius: 9px; padding: 2px; gap: 2px; }
+.risiko-v4 .rk-seg-opt {
+  font-size: 11px; font-weight: 600; padding: 6px 11px; border-radius: 7px; color: var(--rk-ink-3);
+  white-space: nowrap; background: transparent; border: none;
+}
+.risiko-v4 .rk-seg-opt-on { background: var(--rk-live-soft); color: var(--rk-live); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--rk-live) 40%, transparent); }
+.risiko-v4 .rk-seg-opt:disabled { cursor: not-allowed; }
+
+.risiko-v4 .rk-stepper { display: flex; align-items: center; background: var(--rk-surface-0); border: 1px solid var(--rk-line); border-radius: 9px; overflow: hidden; }
+.risiko-v4 .rk-step-btn {
+  width: 32px; height: 31px; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 600; color: var(--rk-live); background: var(--rk-surface-2); border: none;
+}
+.risiko-v4 .rk-step-btn:disabled { cursor: not-allowed; color: var(--rk-ink-4); }
+.risiko-v4 .rk-step-val { min-width: 34px; text-align: center; font-size: 15px; font-weight: 800; font-family: var(--hc-font-mono, monospace); color: var(--rk-ink); }
+
+.risiko-v4 .rk-safety { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rk-line-soft); }
+.risiko-v4 .rk-safety-ico {
+  width: 20px; height: 20px; border-radius: 6px; background: var(--rk-ok-soft); border: 1px solid color-mix(in oklab, var(--rk-ok) 30%, transparent);
+  display: flex; align-items: center; justify-content: center; font-size: 10px; flex-shrink: 0;
+}
+.risiko-v4 .rk-safety-txt { font-size: 11px; color: var(--rk-ink-2); }
+.risiko-v4 .rk-safety-txt b { color: var(--rk-ink); font-weight: 700; }
+
+.risiko-v4 .rk-console-foot { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 9px 2px 0; font-size: 9px; color: var(--rk-ink-4); }
+
+/* ── Zone 2: Braucht dich ────────────────────────────────────────────────── */
+.risiko-v4 .rk-sect-head { display: flex; align-items: center; justify-content: space-between; margin: 20px 2px 9px; }
+.risiko-v4 .rk-sect-count {
+  font-size: 10px; font-weight: 800; color: var(--rk-warn); background: var(--rk-warn-soft);
+  border: 1px solid color-mix(in oklab, var(--rk-warn) 35%, transparent); border-radius: var(--rk-radius-pill); padding: 1px 8px;
+}
+.risiko-v4 .rk-leer { font-size: 12px; color: var(--rk-ok); padding: 8px 2px 4px; }
+
+.risiko-v4 .rk-needcard {
+  position: relative; border-radius: var(--rk-radius-card); padding: 12px 13px 12px 15px; margin-bottom: 8px;
+  background: var(--rk-surface-2); border: 1px solid var(--rk-line); overflow: hidden;
+}
+.risiko-v4 .rk-needcard::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--rk-live); }
+.risiko-v4 .rk-needcard-alert::before { background: var(--rk-warn); }
+.risiko-v4 .rk-nc-top { display: flex; align-items: flex-start; gap: 9px; }
+.risiko-v4 .rk-nc-glyph {
+  width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 700;
+}
+.risiko-v4 .rk-glyph-gate { background: var(--rk-live-soft); color: var(--rk-live); border: 1px solid var(--rk-live); }
+.risiko-v4 .rk-glyph-op { background: var(--rk-warn-soft); color: var(--rk-warn); border: 1px solid color-mix(in oklab, var(--rk-warn) 55%, transparent); }
+.risiko-v4 .rk-nc-body { flex: 1; min-width: 0; }
+.risiko-v4 .rk-nc-titlerow { display: flex; align-items: center; gap: 6px; }
+.risiko-v4 .rk-nc-title { font-size: 12.5px; font-weight: 600; color: var(--rk-ink); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.risiko-v4 .rk-nc-badge { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: var(--rk-radius-pill); flex-shrink: 0; }
+.risiko-v4 .rk-badge-gate { background: var(--rk-live-soft); color: var(--rk-live); }
+.risiko-v4 .rk-badge-op { background: var(--rk-warn-soft); color: var(--rk-warn); }
+.risiko-v4 .rk-nc-meta { font-size: 9.5px; color: var(--rk-ink-4); font-family: var(--hc-font-mono, monospace); margin-top: 3px; }
+.risiko-v4 .rk-nc-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
+
+/* ── Zone 3: Autonome Aktivität ──────────────────────────────────────────── */
+.risiko-v4 .rk-rail-empty { font-size: 11px; color: var(--rk-ink-3); padding: 2px; }
+.risiko-v4 .rk-rail { margin: 0 2px; }
+.risiko-v4 .rk-rail-item { position: relative; display: flex; gap: 12px; padding: 0 0 13px 16px; border-left: 2px solid var(--rk-line-soft); }
+.risiko-v4 .rk-rail-item-last { border-left-color: transparent; padding-bottom: 0; }
+.risiko-v4 .rk-rail-node { position: absolute; left: -7px; top: 1px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--rk-surface-0); }
+.risiko-v4 .rk-node-ok { background: var(--rk-ok); box-shadow: 0 0 8px color-mix(in oklab, var(--rk-ok) 50%, transparent); }
+.risiko-v4 .rk-node-alert { background: var(--rk-alert); box-shadow: 0 0 8px color-mix(in oklab, var(--rk-alert) 50%, transparent); }
+.risiko-v4 .rk-node-warn { background: var(--rk-warn); box-shadow: 0 0 8px color-mix(in oklab, var(--rk-warn) 50%, transparent); }
+.risiko-v4 .rk-node-neutral { background: var(--rk-ink-4); }
+.risiko-v4 .rk-rail-body { min-width: 0; flex: 1; }
+.risiko-v4 .rk-rail-top { display: flex; align-items: center; gap: 7px; }
+.risiko-v4 .rk-rail-badge { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: var(--rk-radius-pill); }
+.risiko-v4 .rk-rb-ok { background: var(--rk-ok-soft); color: var(--rk-ok); }
+.risiko-v4 .rk-rb-alert { background: var(--rk-alert-soft); color: var(--rk-alert); }
+.risiko-v4 .rk-rb-warn { background: var(--rk-warn-soft); color: var(--rk-warn); }
+.risiko-v4 .rk-rb-neutral { background: var(--rk-surface-3); color: var(--rk-ink-3); }
+.risiko-v4 .rk-rail-age { font-size: 9.5px; color: var(--rk-ink-4); font-family: var(--hc-font-mono, monospace); margin-left: auto; }
+.risiko-v4 .rk-rail-desc { font-size: 11px; color: var(--rk-ink-2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.risiko-v4 .rk-rail-anchor { font-size: 9.5px; color: var(--rk-ink-4); font-family: var(--hc-font-mono, monospace); margin: 4px 2px 0; }
+
+/* ── Zone 4: System-Puls ─────────────────────────────────────────────────── */
+.risiko-v4 .rk-puls { display: flex; gap: 8px; margin-bottom: 8px; }
+.risiko-v4 .rk-meter {
+  flex: 1; border-radius: var(--rk-radius-card); padding: 11px 12px; background: var(--rk-surface-1);
+  border: 1px solid var(--rk-line-soft); position: relative; text-align: left; cursor: pointer;
+}
+.risiko-v4 .rk-meter-open { border-color: var(--rk-live); }
+.risiko-v4 .rk-meter-tap { position: absolute; top: 9px; right: 10px; font-size: 8px; color: var(--rk-ink-4); }
+.risiko-v4 .rk-meter-cap { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--rk-ink-3); }
+.risiko-v4 .rk-meter-val { font-size: 20px; font-weight: 800; font-family: var(--hc-font-mono, monospace); margin-top: 2px; color: var(--rk-ink); }
+.risiko-v4 .rk-meter-track { height: 5px; border-radius: 3px; background: var(--rk-surface-4); overflow: hidden; margin-top: 7px; }
+.risiko-v4 .rk-meter-fill { display: block; height: 100%; border-radius: 3px; }
+.risiko-v4 .rk-fill-cpu { background: linear-gradient(90deg, var(--rk-ok), var(--rk-live)); }
+.risiko-v4 .rk-fill-ram { background: linear-gradient(90deg, var(--rk-live-deep), var(--rk-live)); }
+.risiko-v4 .rk-meter-spark { display: flex; align-items: flex-end; gap: 2px; height: 15px; margin-top: 8px; }
+.risiko-v4 .rk-meter-spark i { flex: 1; background: var(--rk-live-soft); border-radius: 1px; }
+
+.risiko-v4 .rk-breakdown { margin: 0 2px 12px; padding: 9px 11px; background: var(--rk-surface-2); border: 1px solid var(--rk-line-soft); border-radius: var(--rk-radius-card); display: flex; flex-direction: column; gap: 6px; }
+.risiko-v4 .rk-breakdown-empty { font-size: 10.5px; color: var(--rk-ink-3); }
+.risiko-v4 .rk-breakdown-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10.5px; }
+.risiko-v4 .rk-breakdown-label { color: var(--rk-ink-2); text-transform: capitalize; }
+.risiko-v4 .rk-breakdown-val { color: var(--rk-ink-3); font-family: var(--hc-font-mono, monospace); }
+
+.risiko-v4 .rk-footer-line { display: flex; align-items: center; gap: 12px; margin: 0 2px 4px; flex-wrap: wrap; }
+.risiko-v4 .rk-sdot { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--rk-ink-2); }
+.risiko-v4 .rk-sdot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
+.risiko-v4 .rk-sdot-ok::before { background: var(--rk-ok); box-shadow: 0 0 6px color-mix(in oklab, var(--rk-ok) 50%, transparent); }
+.risiko-v4 .rk-sdot-warn::before { background: var(--rk-warn); box-shadow: 0 0 6px color-mix(in oklab, var(--rk-warn) 50%, transparent); }
+.risiko-v4 .rk-sdot-alert::before { background: var(--rk-alert); box-shadow: 0 0 6px color-mix(in oklab, var(--rk-alert) 50%, transparent); }
+.risiko-v4 .rk-lanes-inline { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--rk-ink-3); text-decoration: none; }
+.risiko-v4 .rk-lanes-inline:hover { color: var(--rk-live); }
+.risiko-v4 .rk-lanes-dots { display: inline-flex; gap: 3px; }
+.risiko-v4 .rk-ld { width: 7px; height: 7px; border-radius: 2px; }
+.risiko-v4 .rk-ld-ok { background: var(--rk-ok); }
+.risiko-v4 .rk-ld-warn { background: var(--rk-warn); }
+.risiko-v4 .rk-ld-alert { background: var(--rk-alert); }

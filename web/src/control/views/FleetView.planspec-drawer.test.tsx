@@ -20,6 +20,7 @@ const hooks = vi.hoisted(() => ({
   useAccountUsage: vi.fn(),
   usePlanSpecDetail: vi.fn(),
   useKanbanDecisionQueue: vi.fn(),
+  useReleaseStatus: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => hooks);
@@ -84,6 +85,7 @@ function setHookDefaults() {
   hooks.useLanesCatalog.mockReturnValue({ data: { lanes: [] }, loading: false, error: null, reload });
   hooks.useAccountUsage.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useKanbanDecisionQueue.mockReturnValue({ data: { decisions: [], count: 0, checked_at: 0 }, loading: false, error: null, reload });
+  hooks.useReleaseStatus.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.usePlanSpecDetail.mockImplementation((path: string | null) => {
     return {
       data: path

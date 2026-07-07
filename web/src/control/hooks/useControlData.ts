@@ -66,9 +66,10 @@ import {
   TaskBodySchema,
   TaskDeliverablesResponseSchema,
   LanesCatalogResponseSchema,
+  ReleaseStatusResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { TaskBodyResponse, TaskDeliverablesResponse } from "../lib/schemas";
+import type { TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
@@ -1210,12 +1211,64 @@ export function useRepairDeliverable() {
   return { busyId, doneIds, errorById, run };
 }
 
+// S2-Fix: the POST above returns immediately with `status: "activating"` — the
+// gate/fixer/restart runs afterwards in a detached systemd unit (self-termination
+// trap, see kanban_worktrees.spawn_release_gate_activation). Marking the button
+// "done" on that immediate response is the bug this polls around. Settle signal
+// is the SAME GET /tasks/{id} the drawer already uses (TaskDetailResponseSchema):
+// task.status -> done/archived = green; a NEW operator_escalation event (id above
+// the pre-activation baseline, so a pre-existing escalation never false-positives)
+// = failed. Dropped fetches during the restart window are swallowed and retried —
+// never counted as failure (reset-tolerance requirement).
+const RELEASE_GATE_POLL_INTERVAL_MS = 4000;
+const RELEASE_GATE_POLL_TIMEOUT_MS = 6 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function fetchTaskDetailSoft(taskId: string): Promise<TaskDetailResponse | null> {
+  try {
+    const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
+    return parseOrThrow(TaskDetailResponseSchema, raw, "tasks/detail");
+  } catch {
+    return null; // transient drop during the detached restart — caller retries
+  }
+}
+
 export function useReleaseGateExecute() {
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [activatingIds, setActivatingIds] = useState<Record<string, boolean>>({});
   const [doneIds, setDoneIds] = useState<Record<string, boolean>>({});
   const [errorById, setErrorById] = useState<Record<string, string>>({});
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const pollUntilSettled = useCallback(async (taskId: string): Promise<{ ok: boolean; detail?: string }> => {
+    const baseline = await fetchTaskDetailSoft(taskId);
+    const baselineEscalationId = Math.max(
+      -1,
+      ...(baseline?.events ?? []).filter((e) => e.kind === "operator_escalation").map((e) => e.id),
+    );
+    const deadline = Date.now() + RELEASE_GATE_POLL_TIMEOUT_MS;
+    while (aliveRef.current && Date.now() < deadline) {
+      await sleep(RELEASE_GATE_POLL_INTERVAL_MS);
+      if (!aliveRef.current) break;
+      const data = await fetchTaskDetailSoft(taskId);
+      if (data == null) continue; // dropped fetch — transient, retry
+      const status = data.task?.status;
+      if (status === "done" || status === "archived") {
+        return { ok: true };
+      }
+      const escalation = data.events.find((e) => e.kind === "operator_escalation" && e.id > baselineEscalationId);
+      if (escalation) {
+        const lastNote = [...data.comments].reverse().find((c) => (c.body ?? "").includes("Release-gate"));
+        return { ok: false, detail: lastNote?.body || "Release-Gate an Operator eskaliert." };
+      }
+    }
+    return { ok: false, detail: "Aktivierung dauert länger als erwartet — Status prüfen." };
+  }, []);
+
   const run = useCallback(async (taskId: string) => {
     setBusyId(taskId);
     setErrorById((prev) => ({ ...prev, [taskId]: "" }));
@@ -1229,6 +1282,18 @@ export function useReleaseGateExecute() {
         if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
         return { ok: false as const, detail };
       }
+      if (res.status === "activating") {
+        setBusyId(null);
+        if (aliveRef.current) setActivatingIds((prev) => ({ ...prev, [taskId]: true }));
+        const settled = await pollUntilSettled(taskId);
+        if (aliveRef.current) setActivatingIds((prev) => ({ ...prev, [taskId]: false }));
+        if (settled.ok) {
+          if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
+          return { ok: true as const };
+        }
+        if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: settled.detail || "Aktivierung fehlgeschlagen." }));
+        return { ok: false as const, detail: settled.detail };
+      }
       if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
       return { ok: true as const, detail: res.detail || res.status };
     } catch (e) {
@@ -1238,8 +1303,8 @@ export function useReleaseGateExecute() {
     } finally {
       if (aliveRef.current) setBusyId(null);
     }
-  }, []);
-  return { busyId, doneIds, errorById, run };
+  }, [pollUntilSettled]);
+  return { busyId, activatingIds, doneIds, errorById, run };
 }
 
 // Naht 3: Inline-Veto für eine Autoresearch-Eskalation direkt am CommandHome —
@@ -2060,6 +2125,23 @@ export function usePressureStatus() {
     "pressure-status",
     async () => parseOrThrow(PressureStatusResponseSchema, await fetchJSON<unknown>("/api/pressure-status"), "pressure-status"),
     5000,
+  );
+}
+
+// Auto-release kill-switch state + timeline — feeds the Risiko-Tab Hero cockpit
+// (autonomous/max_tier_autonomous) and Aktivität rail (recent/anchors). Same
+// GET /api/plugins/kanban/release-status AutoReleaseTile polls inline; kept as
+// its own hook (not a shared subscription with AutoReleaseTile) since the two
+// live in mutually-exclusive Fleet subtabs (Plan vs. Risiko) — no double-poll.
+export function useReleaseStatus() {
+  return usePolling<ReleaseStatusResponse>(
+    "release-status",
+    async () => parseOrThrow(
+      ReleaseStatusResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/release-status"),
+      "release-status",
+    ),
+    15000,
   );
 }
 

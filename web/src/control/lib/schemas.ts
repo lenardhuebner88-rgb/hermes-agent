@@ -745,6 +745,28 @@ export const DecisionQueueResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+// GET /release-status (plugin_api.py get_release_status) — the auto-release
+// kill-switch state + the last 10 auto_release timeline events + the last 5
+// pre-deploy git anchors. Feeds the Risiko-Tab Hero cockpit + Aktivität rail.
+// ⚠️ `pause_on_red_streak` is resolved backend-side (auto_release._release_config)
+// but NOT yet added to this endpoint's response — optional/nullable here so the
+// UI degrades gracefully until a backend change adds it (tracked as a read seam,
+// not invented on the frontend).
+const ReleaseStatusEventSchema = z.object({
+  task_id: z.string().catch(""),
+  created_at: z.coerce.number().catch(0),
+  payload: z.record(z.string(), z.unknown()).catch({}),
+});
+export const ReleaseStatusResponseSchema = z.object({
+  autonomous: z.boolean().catch(false),
+  max_tier_autonomous: z.string().catch("review"),
+  pause_on_red_streak: z.coerce.number().nullable().catch(null).optional(),
+  recent: z.array(ReleaseStatusEventSchema).catch([]),
+  anchors: z.array(z.string()).catch([]),
+});
+export type ReleaseStatusEvent = z.infer<typeof ReleaseStatusEventSchema>;
+export type ReleaseStatusResponse = z.infer<typeof ReleaseStatusResponseSchema>;
+
 export const ReviewVerdictsResponseSchema = z.object({
   reviews: z.array(KanbanReviewSchema).catch([]),
   count: z.coerce.number().catch(0),

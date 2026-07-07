@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 //
-// Release-Gate block (moved here from the /control Postfach, S-fleet-risiko-btn):
-// a parked post-merge release gate renders with its root/merge context and the
-// shared two-step ReleaseGateButton. Fixture mirrors the REAL backend payload
-// shape (hermes_cli/kanban_db.py `release_gate_parked` decision-queue entry +
-// hermes_cli/kanban_worktrees.py `_RELEASE_GATE_COMMANDS`), not a hand-stubbed
-// shape missing fields.
+// RisikoTab — Autonomie-Kontrollzentrum (★ FINAL, c_2103a234). Fixtures mirror
+// the REAL backend payload shapes (hermes_cli/kanban_db.py `release_gate_parked`
+// decision-queue entry, plugins/kanban/dashboard/plugin_api.py `get_release_status`
+// and `get_task` / TaskDetailResponseSchema), not hand-stubbed shapes missing
+// fields — belegter Fehlmodus 2026-07-02 (grüne Fake-Dict-Tests ließen echte
+// Bugs durch).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
 
@@ -19,12 +20,12 @@ vi.mock("@/lib/api", async () => {
 import { RisikoTab } from "./RisikoTab";
 import { de } from "../../i18n/de";
 import type { KanbanDecision } from "../../lib/schemas";
+import type { ReleaseStatusResponse } from "../../lib/schemas";
 
 const TASK_ID = "t_9f21ac04";
 
-// Realistisches Fixture — geerntet aus dem echten Event-Payload
-// (hermes_cli/kanban_worktrees.py: root_id/source_task/merge_commit/commands)
-// und dem decision_queue-Mapping (hermes_cli/kanban_db.py `release_gate_parked`).
+// ── Fixtures — real payload shapes ──────────────────────────────────────────
+
 const RELEASE_GATE_COMMANDS = [
   "cd /home/piet/.hermes/hermes-agent/web",
   "npm run build",
@@ -48,9 +49,24 @@ const RELEASE_GATE_DECISION: KanbanDecision = {
   },
 };
 
+// GET /api/plugins/kanban/release-status — real shape (get_release_status).
+const RELEASE_STATUS_FIXTURE: ReleaseStatusResponse = {
+  autonomous: true,
+  max_tier_autonomous: "review",
+  recent: [
+    {
+      task_id: "t_8aeb1773",
+      created_at: Math.floor(Date.now() / 1000) - 7200,
+      payload: { outcome: "deployed", detail: "operator-cockpit-s7" },
+    },
+  ],
+  anchors: ["release/pre-deploy/8aeb1773f"],
+};
+
 function defaultFetchImpl(url: string) {
   const u = String(url);
   if (u.includes("/release-gate")) return Promise.resolve({ ok: true });
+  if (u.includes("/release-status")) return Promise.resolve(RELEASE_STATUS_FIXTURE);
   if (u.includes("/runs/failures")) return Promise.resolve({ hours: 48, count: 0, truncated: false, failures: [] });
   if (u.includes("/lanes")) return Promise.resolve({ lanes: [], profiles: [] });
   return Promise.resolve({});
@@ -63,35 +79,47 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // Cancel any leftover fake timer (e.g. an in-flight release-gate poll deadline,
+  // or TriageStrip's own 30s refresh interval) before the next test installs a
+  // fresh fake-timer environment — an uncancelled one bled a failure into the
+  // NEXT test in the file (deterministic ordering bug, not flake).
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
-function renderRisikoTab(releaseGateDecisions: KanbanDecision[]) {
+function renderRisikoTab(overrides: {
+  releaseGateDecisions?: KanbanDecision[];
+  blockedTasks?: Array<{ id: string; title: string; status: string; block_reason?: string | null; root_id?: string | null }>;
+  releaseStatus?: ReleaseStatusResponse | null;
+  cap?: number | null;
+} = {}) {
   return render(
-    <RisikoTab
-      allPlanspecs={[]}
-      blockedTasks={[]}
-      reliability={null}
-      systemHealth={null}
-      pressureStatus={null}
-      activeWorkers={[]}
-      lanesCatalog={null}
-      releaseGateDecisions={releaseGateDecisions}
-      onNavigateToPlan={() => undefined}
-    />,
+    <MemoryRouter>
+      <RisikoTab
+        blockedTasks={overrides.blockedTasks ?? []}
+        reliability={null}
+        systemHealth={null}
+        pressureStatus={null}
+        activeWorkers={[]}
+        lanesCatalog={null}
+        releaseGateDecisions={overrides.releaseGateDecisions ?? []}
+        cap={overrides.cap ?? 3}
+        releaseStatus={overrides.releaseStatus ?? RELEASE_STATUS_FIXTURE}
+      />
+    </MemoryRouter>,
   );
 }
 
-describe("RisikoTab — Release-Gate block", () => {
-  it("renders nothing when there are no parked release gates", () => {
-    renderRisikoTab([]);
-    expect(screen.queryByText(de.fleet.risikoReleaseGateTitle)).toBeNull();
+describe("RisikoTab — Release-Gate needcard", () => {
+  it("renders the empty state when nothing needs the operator", () => {
+    renderRisikoTab();
+    expect(screen.getByText(de.fleet.risikoLeerState)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Release-Gate ausführen" })).toBeNull();
   });
 
   it("renders the parked task, its root/merge context and the Release-Gate button", () => {
-    renderRisikoTab([RELEASE_GATE_DECISION]);
+    renderRisikoTab({ releaseGateDecisions: [RELEASE_GATE_DECISION] });
 
-    expect(screen.getByText(de.fleet.risikoReleaseGateTitle)).toBeTruthy();
     expect(screen.getByText(RELEASE_GATE_DECISION.title)).toBeTruthy();
     expect(screen.getByText(/Root t_1a2b3c4d/)).toBeTruthy();
     expect(screen.getByText(/Merge a1b2c3d4e5f6/)).toBeTruthy();
@@ -99,7 +127,7 @@ describe("RisikoTab — Release-Gate block", () => {
   });
 
   it("two-step confirm calls the release-gate endpoint with the task id, not on the first (arming) click", async () => {
-    renderRisikoTab([RELEASE_GATE_DECISION]);
+    renderRisikoTab({ releaseGateDecisions: [RELEASE_GATE_DECISION] });
 
     fireEvent.click(screen.getByRole("button", { name: "Release-Gate ausführen" }));
     expect(fetchJSONMock).not.toHaveBeenCalledWith(
@@ -116,5 +144,146 @@ describe("RisikoTab — Release-Gate block", () => {
       );
     });
     expect(await screen.findByText("Release-Gate grün")).toBeTruthy();
+  });
+});
+
+describe("RisikoTab — S2-Fix: activation polling", () => {
+  // GET /api/plugins/kanban/tasks/{id} — real shape (get_task / TaskDetailResponseSchema).
+  function taskDetail(status: string, events: Array<{ id: number; kind: string; created_at: number }> = []) {
+    return {
+      task: { id: TASK_ID, title: RELEASE_GATE_DECISION.title, status, block_reason: null },
+      comments: [],
+      runs: [],
+      events,
+      deliverables: [],
+      links: { parents: [], children: [] },
+    };
+  }
+
+  it("shows the intermediate polling state, then settles green once the detached restart finishes", async () => {
+    vi.useFakeTimers();
+    let getTaskCalls = 0;
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-gate") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: "activating", unit: "hermes-release-gate-t_9f21ac04" });
+      }
+      if (u === `/api/plugins/kanban/tasks/${TASK_ID}`) {
+        getTaskCalls += 1;
+        // 1st call = poll baseline (still blocked/activating), 2nd = settled done.
+        return Promise.resolve(taskDetail(getTaskCalls === 1 ? "blocked" : "done"));
+      }
+      return defaultFetchImpl(u);
+    });
+
+    renderRisikoTab({ releaseGateDecisions: [RELEASE_GATE_DECISION] });
+    fireEvent.click(screen.getByRole("button", { name: "Release-Gate ausführen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sicher? Erneut klicken" }));
+
+    // Flush the immediate "activating" POST response + the poll baseline GET
+    // (both plain awaited promises, no timer involved yet).
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/Aktivierung läuft \(Neustart\)/)).toBeTruthy();
+    // Button must NOT optimistically report done on the immediate "activating" response.
+    expect(screen.queryByText("Release-Gate grün")).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); }); // one poll tick -> settles done
+    expect(screen.getByText("Release-Gate grün")).toBeTruthy();
+  });
+
+  it("surfaces a new operator_escalation event as a failed activation, not a false green", async () => {
+    vi.useFakeTimers();
+    let getTaskCalls = 0;
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-gate") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: "activating", unit: "hermes-release-gate-t_9f21ac04" });
+      }
+      if (u === `/api/plugins/kanban/tasks/${TASK_ID}`) {
+        getTaskCalls += 1;
+        if (getTaskCalls === 1) return Promise.resolve(taskDetail("blocked")); // baseline, no escalation yet
+        return Promise.resolve(taskDetail("blocked", [
+          { id: 501, kind: "operator_escalation", created_at: Math.floor(Date.now() / 1000) },
+        ]));
+      }
+      return defaultFetchImpl(u);
+    });
+
+    renderRisikoTab({ releaseGateDecisions: [RELEASE_GATE_DECISION] });
+    fireEvent.click(screen.getByRole("button", { name: "Release-Gate ausführen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sicher? Erneut klicken" }));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/Aktivierung läuft \(Neustart\)/)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+
+    expect(screen.queryByText("Release-Gate grün")).toBeNull();
+    expect(screen.getByRole("button", { name: "Release-Gate ausführen" })).toBeTruthy();
+  });
+
+  it("treats a dropped fetch during the restart window as transient and keeps polling instead of failing", async () => {
+    vi.useFakeTimers();
+    let getTaskCalls = 0;
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-gate") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: "activating", unit: "hermes-release-gate-t_9f21ac04" });
+      }
+      if (u === `/api/plugins/kanban/tasks/${TASK_ID}`) {
+        getTaskCalls += 1;
+        if (getTaskCalls === 1) return Promise.resolve(taskDetail("blocked")); // baseline
+        if (getTaskCalls === 2) return Promise.reject(new Error("Failed to fetch")); // dashboard mid-restart
+        return Promise.resolve(taskDetail("done"));
+      }
+      return defaultFetchImpl(u);
+    });
+
+    renderRisikoTab({ releaseGateDecisions: [RELEASE_GATE_DECISION] });
+    fireEvent.click(screen.getByRole("button", { name: "Release-Gate ausführen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sicher? Erneut klicken" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/Aktivierung läuft \(Neustart\)/)).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); }); // dropped fetch — must not surface as an error
+    expect(screen.queryByText(/fehlgeschlagen/i)).toBeNull();
+    expect(screen.getByText(/Aktivierung läuft \(Neustart\)/)).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); }); // next tick settles green
+    expect(screen.getByText("Release-Gate grün")).toBeTruthy();
+  });
+});
+
+describe("RisikoTab — Operator-Halts", () => {
+  it("renders an operator-question block reason with the inline AnswerQuestion form", () => {
+    renderRisikoTab({
+      blockedTasks: [{ id: "t_op1", title: "state.db-Retention: Prune+VACUUM", status: "blocked", block_reason: "operator hold: needs credentials" }],
+    });
+    expect(screen.getByText("state.db-Retention: Prune+VACUUM")).toBeTruthy();
+    expect(screen.getByText(de.fleet.answerTitle)).toBeTruthy();
+  });
+
+  it("does not classify a plain retry-eligible block as an operator halt (mirrors backend auto-retry classification)", () => {
+    renderRisikoTab({
+      blockedTasks: [{ id: "t_retry1", title: "transient network blip", status: "blocked", block_reason: "connection reset, retrying" }],
+    });
+    expect(screen.queryByText("transient network blip")).toBeNull();
+    expect(screen.getByText(de.fleet.risikoLeerState)).toBeTruthy();
+  });
+});
+
+describe("RisikoTab — Hero cockpit", () => {
+  it("shows the green AUTONOM headline when release.autonomous is true", () => {
+    renderRisikoTab({ releaseStatus: { ...RELEASE_STATUS_FIXTURE, autonomous: true } });
+    expect(screen.getByText("AUTONOM")).toBeTruthy();
+  });
+
+  it("shows the grey Kill-Switch-AUS headline when release.autonomous is false", () => {
+    renderRisikoTab({ releaseStatus: { ...RELEASE_STATUS_FIXTURE, autonomous: false } });
+    expect(screen.getByText("Kill-Switch AUS")).toBeTruthy();
+  });
+
+  it("reads the concurrency stepper value from the real workers cap, not a fabricated default", () => {
+    renderRisikoTab({ cap: 5 });
+    expect(screen.getByText("5")).toBeTruthy();
   });
 });

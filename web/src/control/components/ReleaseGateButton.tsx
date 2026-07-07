@@ -16,6 +16,7 @@ export function ReleaseGateButton({ taskId, releaseGate, className }: {
 }) {
   const [arming, setArming] = useState(false);
   const busy = releaseGate.busyId === taskId;
+  const activating = !!releaseGate.activatingIds[taskId];
   const done = !!releaseGate.doneIds[taskId];
   const err = releaseGate.errorById[taskId];
   if (done) {
@@ -25,6 +26,22 @@ export function ReleaseGateButton({ taskId, releaseGate, className }: {
         style={{ color: "var(--fleet-gruen)", borderColor: "rgba(67,214,154,.35)" }}
       >
         Release-Gate grün
+      </span>
+    );
+  }
+  // S2-Fix: the detached backend restart runs AFTER the immediate "activating"
+  // response — show this intermediate state and poll instead of optimistically
+  // reporting done (useReleaseGateExecute.run does the polling).
+  if (activating) {
+    return (
+      <span
+        role="status"
+        aria-live="polite"
+        className={cn("fleet-ta-btn inline-flex items-center gap-2", className)}
+        style={{ color: "var(--color-status-warn)", borderColor: "color-mix(in oklab, var(--color-status-warn) 55%, transparent)" }}
+      >
+        <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-status-warn/30 border-t-status-warn" aria-hidden="true" />
+        Aktivierung läuft (Neustart)…
       </span>
     );
   }

@@ -1,21 +1,37 @@
 /**
- * Risiko-Subtab (Operator-Entscheidungen, blockierte Tasks, Zuverlässigkeit, System-Puls).
+ * Risiko-Subtab — "Autonomie-Kontrollzentrum" (★ FINAL, Design-Board c_2103a234).
  *
- * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
+ * Greenfield-Redesign (2026-07-08) gegen den bindenden Mockup
+ * `risiko-final-hybrid.html`: 4 Zonen — Hero Auto-Mode Cockpit,
+ * "Braucht dich" (Ausnahmen, die die Autonomie eskaliert hat), Autonome
+ * Aktivität (Deploy/Rollback-Quittung) und System-Puls (kompakt, tap-to-detail).
+ *
+ * Gecuttet ggü. dem Vorgänger: Plan-Freigaben (gehören ins Plan-Subtab),
+ * die Zuverlässigkeits-Disclosure-Tabelle (ersetzt durch eine schlanke
+ * Lane-Health-Zeile in RisikoPulse) und die (nie gebaute) Per-Profil-Matrix.
+ * "Sonstige blockierte Tasks" (weder Release-Gate noch Operator-Frage) sind
+ * ebenfalls raus: die Retry-Sweep-Klassifikation (isOperatorQuestion mirrort
+ * _AUTO_RETRY_QUESTION_RE) sagt, dass genau diese Tasks vom System selbst
+ * behandelt werden — keine echte Eskalation, gehört nicht auf diesen Tab
+ * (Designprinzip aus dem Handoff: "was ein gesunder autonomer Lauf selbst
+ * erledigt, gehört NICHT auf den Tab"). Fehler-Triage (TriageStrip) bleibt:
+ * gescheiterte Runs mit Ein-Klick-Eskalation SIND eine echte Ausnahme.
  */
-import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
-import { Disclosure } from "../../components/primitives";
-import { buildReliabilityRiskModel, buildSystemPulseRiskModel } from "../../lib/fleetRisk";
+import { buildReliabilityRiskModel } from "../../lib/fleetRisk";
 import type { ReliabilityResponse, LanesCatalogResponse, KanbanDecision } from "../../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse, Worker } from "../../lib/types";
-import type { PlanSpecRecord } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TriageStrip } from "../../components/TriageStrip";
 import { ReleaseGateButton } from "../../components/ReleaseGateButton";
 import { useReleaseGateExecute } from "../../hooks/useControlData";
+import type { ReleaseStatusResponse } from "../../lib/schemas";
+import { RisikoHero } from "./RisikoHero";
+import { RisikoActivity } from "./RisikoActivity";
+import { RisikoPulse } from "./RisikoPulse";
+import "./risiko-v4.css";
 
 // ─── Risiko-Subtab ────────────────────────────────────────────────────────────
 
@@ -28,7 +44,6 @@ interface RisikoBlockedTask {
 }
 
 interface RisikoTabProps {
-  allPlanspecs: PlanSpecRecord[];
   blockedTasks: RisikoBlockedTask[];
   reliability: ReliabilityResponse | null;
   systemHealth: SystemHealthResponse | null;
@@ -38,7 +53,10 @@ interface RisikoTabProps {
   /** Geparkte Release-Gates (kind === "release_gate_parked") — aus dem
    *  /control-Postfach hierher verschoben, einziges Zuhause der Aktion. */
   releaseGateDecisions: KanbanDecision[];
-  onNavigateToPlan: () => void;
+  /** kanban.max_in_progress — GET /workers `cap` (F4), null = unconfiguriert. */
+  cap: number | null;
+  /** GET /release-status — Autonomie-Kill-Switch-State + Aktivitäts-Timeline. */
+  releaseStatus: ReleaseStatusResponse | null;
   /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
   onTaskChanged?: () => void | Promise<void>;
 }
@@ -50,7 +68,6 @@ function rowChainRootId(t: RisikoBlockedTask): string | null {
 }
 
 export function RisikoTab({
-  allPlanspecs,
   blockedTasks,
   reliability,
   systemHealth,
@@ -58,230 +75,99 @@ export function RisikoTab({
   activeWorkers,
   lanesCatalog,
   releaseGateDecisions,
-  onNavigateToPlan,
+  cap,
+  releaseStatus,
   onTaskChanged,
 }: RisikoTabProps) {
   const releaseGate = useReleaseGateExecute();
 
-  // (a) Wartende Freigaben
-  const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
+  // Operator-Halts — echte Klassifikation (mirrort backend _AUTO_RETRY_QUESTION_RE);
+  // alles andere blockierte behandelt die Retry-Sweep selbst, gehört nicht hierher.
+  const operatorHalts = blockedTasks.filter((t) => isOperatorQuestion(t.block_reason));
 
-  // (a) Blockierte Tasks — Operator-Halts vs. sonstige blockierte
-  const operatorHalts = blockedTasks.filter((t) => {
-    const r = (t.block_reason ?? "").toLowerCase();
-    return r.includes("operator");
-  });
-  const otherBlocked = blockedTasks.filter((t) => {
-    const r = (t.block_reason ?? "").toLowerCase();
-    return !r.includes("operator");
-  });
-
-  // Gesamte blockierte Tasks für den Leer-Zustand
-  const totalBlockedCount = blockedTasks.length;
-  const totalBoardTasks = 0; // Wir haben keinen Gesamtcount leicht verfügbar, daher weglassen
-
-  // (b) Zuverlässigkeit je Lane / (c) System-Puls
   const reliabilityModel = buildReliabilityRiskModel({
     reliability,
     laneCatalogProfiles: lanesCatalog?.profiles ?? [],
     activeWorkerProfiles: activeWorkers.map((w) => w.profile),
   });
-  const pulseModel = buildSystemPulseRiskModel({ systemHealth, pressureStatus });
 
-  const hasAnything = pendingApprovals.length > 0 || operatorHalts.length > 0 || otherBlocked.length > 0;
+  const needsYouCount = releaseGateDecisions.length + operatorHalts.length;
+  const hasAnything = needsYouCount > 0;
 
   return (
-    <>
-      {/* Lagezeile */}
-      <p className="fleet-lage">
-        {!hasAnything
-          ? <>{de.fleet.risikoLageNichtsBlockiert}</>
-          : <span className="fleet-amber">{de.fleet.risikoLageBlockiert(pendingApprovals.length + operatorHalts.length)}</span>
-        }
-      </p>
+    <div className="risiko-v4">
+      {/* Zone 1: Hero Auto-Mode Cockpit */}
+      <RisikoHero releaseStatus={releaseStatus} cap={cap} />
+      <p className="rk-console-foot">Reine Deklaration · Rollback ist das Netz · kein Pre-Gate</p>
 
-      {/* (c) System-Puls */}
-      <section className={`fleet-risk-card fleet-risk-card-${pulseModel.overallTone}`} aria-label="System-Puls">
-        <div className="fleet-risk-card-head">
-          <div>
-            <div className="fleet-risiko-sec">{de.fleet.risikoSystemPulsTitle}</div>
-            <p className="fleet-risk-headline">{pulseModel.headline}</p>
+      {/* Zone 2: Braucht dich — Ausnahmen, die die Autonomie eskaliert hat */}
+      <div className="rk-sect-head">
+        <span className="rk-eyebrow">{de.fleet.risikoBrauchtDichTitle}</span>
+        {hasAnything ? <span className="rk-sect-count">{de.fleet.risikoBrauchtDichCount(needsYouCount)}</span> : null}
+      </div>
+
+      {releaseGateDecisions.map((d) => {
+        const context = [
+          d.release_gate?.root_id ? `Root ${d.release_gate.root_id}` : null,
+          d.release_gate?.merge_commit ? `Merge ${d.release_gate.merge_commit}` : null,
+        ].filter(Boolean).join(" · ");
+        return (
+          <div key={d.task_id} className="rk-needcard" aria-label={`Release-Gate: ${d.title}`}>
+            <div className="rk-nc-top">
+              <div className="rk-nc-glyph rk-glyph-gate" aria-hidden="true">⇧</div>
+              <div className="rk-nc-body">
+                <div className="rk-nc-titlerow">
+                  <span className="rk-nc-title">{d.title}</span>
+                  <span className="rk-nc-badge rk-badge-gate">gate</span>
+                </div>
+                {context ? <div className="rk-nc-meta">{context}</div> : null}
+              </div>
+            </div>
+            <div className="rk-nc-actions">
+              <ReleaseGateButton taskId={d.task_id} releaseGate={releaseGate} />
+            </div>
+          </div>
+        );
+      })}
+
+      {operatorHalts.map((t) => (
+        <div key={t.id} className="rk-needcard rk-needcard-alert" aria-label={`Operator-Halt: ${t.title}`}>
+          <div className="rk-nc-top">
+            <div className="rk-nc-glyph rk-glyph-op" aria-hidden="true">!</div>
+            <div className="rk-nc-body">
+              <div className="rk-nc-titlerow">
+                <span className="rk-nc-title">{t.title}</span>
+                <span className="rk-nc-badge rk-badge-op">operator</span>
+              </div>
+              {t.block_reason ? <div className="rk-nc-meta">{t.block_reason}</div> : null}
+            </div>
+          </div>
+          {isOperatorQuestion(t.block_reason) ? <AnswerQuestion taskId={t.id} /> : null}
+          <div className="rk-nc-actions">
+            <FleetTaskActions
+              taskId={t.id}
+              status={t.status}
+              chainRootId={rowChainRootId(t)}
+              onChanged={onTaskChanged}
+            />
           </div>
         </div>
-        <div className="fleet-puls-grid">
-          {pulseModel.rows.map((row) => (
-            <div key={row.key} className={`fleet-puls-tile fleet-puls-tile-${row.tone}`}>
-              <span className="fleet-puls-label">{row.label}</span>
-              <span className="fleet-puls-val">{row.value}</span>
-              {row.detail ? <span className="fleet-puls-detail">{row.detail}</span> : null}
-            </div>
-          ))}
-        </div>
-      </section>
+      ))}
 
-      {/* Fehler-Triage: gescheiterte/blockierte Runs der letzten 48h mit Ein-Klick-
-          Eskalation. Aus der abgerissenen FlowView (S5) hierher gerettet — die
-          operative Risiko-Fläche ist ihr neues Zuhause (nicht die Inbox). */}
+      {!hasAnything ? (
+        <p className="rk-leer">{de.fleet.risikoLeerState}</p>
+      ) : null}
+
+      {/* Fehler-Triage: gescheiterte Runs der letzten 48h — eine echte
+          Ausnahme, mit Ein-Klick-Eskalation. Blendet sich selbst aus, wenn
+          nichts zu triagieren ist (kein Rauschen für den Nicht-Nutzer). */}
       <div id="fleet-section-triage"><TriageStrip /></div>
 
-      {/* (a) Operator-Entscheidungen: wartende Freigaben */}
-      {pendingApprovals.length > 0 ? (
-        <>
-          <div className="fleet-risiko-sec">{de.fleet.risikoFreigabenTitle}</div>
-          {pendingApprovals.map((ps) => (
-            <div key={ps.path} className="fleet-risiko-approval">
-              <div className="fleet-risiko-approval-n">
-                {ps.topic || ps.filename}
-                <span className="fleet-ps-badge fleet-ps-badge-amber" style={{ marginLeft: "auto" }}>
-                  freigabe: operator
-                </span>
-              </div>
-              {ps.freigabe ? (
-                <div className="fleet-plan-kopf-meta" style={{ marginTop: 2 }}>
-                  {ps.kanban_child_total > 0 ? <span>{de.fleet.kartenGeplant(ps.kanban_child_total)}</span> : null}
-                  {ps.binding ? <span>binding</span> : null}
-                </div>
-              ) : null}
-              {/* Konfiguration gehört ins Plan-Subtab-Cockpit — kein Blind-Approve hier */}
-              <button
-                type="button"
-                className="fleet-btn fleet-btn-primar"
-                style={{ marginTop: 2, alignSelf: "flex-start", padding: "8px 14px", minHeight: 36 }}
-                onClick={onNavigateToPlan}
-                aria-label={`${ps.topic || ps.filename} im Plan-Subtab konfigurieren`}
-              >
-                {de.fleet.risikoFreigabeZumPlan}
-              </button>
-            </div>
-          ))}
-        </>
-      ) : null}
+      {/* Zone 3: Autonome Aktivität */}
+      <RisikoActivity releaseStatus={releaseStatus} />
 
-      {/* (a) Release-Gate: geparkte Post-Merge-Freigaben, direkt ausführbar.
-          Aus dem /control-Postfach hierher verschoben (einziges Zuhause). */}
-      {releaseGateDecisions.length > 0 ? (
-        <>
-          <div className="fleet-risiko-sec">{de.fleet.risikoReleaseGateTitle}</div>
-          {releaseGateDecisions.map((d) => {
-            const context = [
-              d.release_gate?.root_id ? `Root ${d.release_gate.root_id}` : null,
-              d.release_gate?.merge_commit ? `Merge ${d.release_gate.merge_commit}` : null,
-            ].filter(Boolean).join(" · ");
-            return (
-              <div key={d.task_id} className="fleet-risiko-blocked" aria-label={`Release-Gate: ${d.title}`}>
-                <div className="fleet-risiko-blocked-n">{d.title}</div>
-                {context ? (
-                  <div style={{ font: "400 11px/1.4 var(--hc-font-mono)", color: "var(--fleet-t3)" }}>
-                    {context}
-                  </div>
-                ) : null}
-                <ReleaseGateButton taskId={d.task_id} releaseGate={releaseGate} className="self-start" />
-              </div>
-            );
-          })}
-        </>
-      ) : null}
-
-      {/* (a) Blockierte Tasks: Operator-Halts */}
-      {operatorHalts.length > 0 ? (
-        <>
-          <div className="fleet-risiko-sec">{de.fleet.risikoBlockiertTitle}</div>
-          {operatorHalts.map((t) => (
-            <div key={t.id} className="fleet-risiko-blocked" aria-label={`Blockierter Task: ${t.title}`}>
-              <div className="fleet-risiko-blocked-n">
-                {t.title}
-                <span className="fleet-ps-badge fleet-ps-badge-amber" style={{ marginLeft: "auto" }}>
-                  {de.fleet.risikoOperatorHalt}
-                </span>
-              </div>
-              {t.block_reason ? (
-                <div style={{ font: "400 11px/1.4 var(--hc-font-mono)", color: "var(--fleet-t3)", paddingLeft: 0 }}>
-                  {t.block_reason}
-                </div>
-              ) : null}
-              {isOperatorQuestion(t.block_reason) ? (
-                <AnswerQuestion taskId={t.id} />
-              ) : null}
-              <FleetTaskActions
-                taskId={t.id}
-                status={t.status}
-                chainRootId={rowChainRootId(t)}
-                onChanged={onTaskChanged}
-              />
-            </div>
-          ))}
-        </>
-      ) : null}
-
-      {/* Sonstige blockierte Tasks (keine Operator-Halts) — kompakt, mit Aktionen */}
-      {otherBlocked.length > 0 ? (
-        <div className="fleet-risiko-rel" style={{ gap: 10 }}>
-          {otherBlocked.slice(0, 5).map((t) => (
-            <div key={t.id}>
-              <div className="fleet-risiko-rel-row">
-                <span className="fleet-risiko-rel-lane" style={{ width: "auto", flex: 1 }}>{t.title}</span>
-                {t.block_reason ? (
-                  <span className="fleet-risiko-rel-val" style={{ flex: "none", fontSize: 10, color: "var(--fleet-t3)" }}>
-                    {t.block_reason.slice(0, 40)}
-                  </span>
-                ) : null}
-              </div>
-              <FleetTaskActions
-                taskId={t.id}
-                status={t.status}
-                chainRootId={rowChainRootId(t)}
-                onChanged={onTaskChanged}
-              />
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {/* (b) Zuverlässigkeit je Lane */}
-      {reliabilityModel.rows.length > 0 ? (
-        <Disclosure
-          className="fleet-risk-disclosure"
-          defaultOpen={reliabilityModel.defaultOpen}
-          summary={
-            <span className="fleet-risk-disclosure-summary">
-              <span>{de.fleet.risikoZuverlaessigkeitTitle}</span>
-              <span className="fleet-risk-disclosure-meta">{reliabilityModel.summary}</span>
-            </span>
-          }
-        >
-          <div className="fleet-risiko-rel" aria-label={`Zuverlässigkeit je Profil, ${reliabilityModel.windowLabel}`}>
-            {reliabilityModel.rows.map((row) => (
-              <div key={row.profile} className={`fleet-risiko-rel-row fleet-risiko-rel-row-${row.tone}`}>
-                <span className="fleet-risiko-rel-lane">{row.profile}</span>
-                <span className="fleet-risiko-rel-val">
-                  {row.sampleLabel ? row.sampleLabel : [
-                    row.completedPct != null ? `${de.fleet.risikoAbschlussRate} ${row.completedPct} %` : null,
-                    row.failedPct != null && row.failedPct > 0 ? `${de.fleet.risikoFailed} ${row.failedPct} %` : null,
-                    row.retries > 0 ? `${de.fleet.risikoRetries} ${row.retries}` : null,
-                  ].filter(Boolean).join(" · ") || "—"}
-                </span>
-              </div>
-            ))}
-          </div>
-          {reliabilityModel.hiddenCount > 0 ? (
-            <p className="fleet-risk-hidden-note">
-              {de.fleet.risikoProfileAusgeblendet(reliabilityModel.hiddenCount, reliabilityModel.windowLabel)}
-            </p>
-          ) : null}
-        </Disclosure>
-      ) : null}
-
-      {/* (d) Gepflegter Leerzustand */}
-      {!hasAnything ? (
-        <div className="fleet-risiko-leer">
-          <div className="fleet-risiko-leer-title">{de.fleet.risikoLeerState}</div>
-          <div className="fleet-risiko-leer-sub">
-            {totalBlockedCount === 0
-              ? "Alle Karten sauber durch."
-              : de.fleet.risikoLeerStateSub(totalBoardTasks)}
-          </div>
-        </div>
-      ) : null}
-    </>
+      {/* Zone 4: System-Puls */}
+      <RisikoPulse pressureStatus={pressureStatus} systemHealth={systemHealth} reliabilityModel={reliabilityModel} />
+    </div>
   );
 }

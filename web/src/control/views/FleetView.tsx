@@ -12,7 +12,7 @@
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useMemo, useEffect } from "react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue } from "../hooks/useControlData";
+import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus } from "../hooks/useControlData";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -84,6 +84,7 @@ export function FleetView() {
   const systemHealth = useSystemHealth();
   const pressureStatus = usePressureStatus();
   const decisionQueue = useKanbanDecisionQueue();
+  const releaseStatus = useReleaseStatus();
 
   const now = nowSec();
 
@@ -262,7 +263,6 @@ export function FleetView() {
             )}
             {subtab === "risiko" && (
               <RisikoTab
-                allPlanspecs={allPlanspecs}
                 blockedTasks={blockedTasks}
                 reliability={reliability.data}
                 systemHealth={systemHealth.data}
@@ -270,7 +270,8 @@ export function FleetView() {
                 activeWorkers={activeWorkers}
                 lanesCatalog={lanesCatalog.data}
                 releaseGateDecisions={releaseGateDecisions}
-                onNavigateToPlan={() => setSubtab("plan")}
+                cap={workers.data?.cap ?? null}
+                releaseStatus={releaseStatus.data}
                 onTaskChanged={board.reload}
               />
             )}
