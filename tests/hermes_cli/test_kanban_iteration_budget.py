@@ -434,6 +434,172 @@ def test_scout_budget_exhaustion_with_complete_handoff_completes_task(kanban_hom
     assert "iteration_budget_exhausted" not in events
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "CODER_HANDOFF: incomplete; missing PATCH_TARGET, TEST_TARGET and AVOID",
+        """CODER_HANDOFF:
+- PATCH_TARGET:
+- TEST_TARGET: tests/hermes_cli/test_kanban_iteration_budget.py
+- AVOID: broad repo exploration after the handoff is complete
+""",
+    ],
+)
+def test_scout_handoff_recovery_rejects_marker_mentions_without_values(
+    kanban_home, summary
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Scout incomplete handoff",
+            assignee="scout",
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        claimed_task = kb.get_task(conn, tid)
+        assert claimed_task is not None
+        run_id = claimed_task.current_run_id
+        assert run_id is not None
+
+        assert kb.record_iteration_budget_exhausted(
+            conn,
+            tid,
+            summary=summary,
+            expected_run_id=run_id,
+        )
+
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert task is not None
+    assert run is not None
+    assert task.status != "done"
+    assert run.outcome != "completed"
+    assert "scout_handoff_recovered" not in events
+
+
+def test_turn_finalizer_recovers_scout_handoff_from_budget_exhaustion(
+    kanban_home, monkeypatch
+):
+    handoff = """CODER_HANDOFF:
+- PATCH_TARGET: agent/turn_finalizer.py::_record_task_failure budget path
+- TEST_TARGET: tests/hermes_cli/test_kanban_iteration_budget.py
+- AVOID: blocking scout tasks after a complete handoff summary exists
+"""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="finalizer scout handoff recovery",
+            assignee="scout",
+            max_iterations=1,
+            max_continuations=0,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    class _BudgetExhaustedScoutAgent:
+        max_iterations = 1
+        model = "fake-model"
+        provider = "fake-provider"
+        base_url = "http://fake-provider.invalid"
+        session_id = "scout-budget-session"
+        quiet_mode = True
+        session_input_tokens = 0
+        session_output_tokens = 0
+        session_cache_read_tokens = 0
+        session_cache_write_tokens = 0
+        session_reasoning_tokens = 0
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+        session_estimated_cost_usd = 0.0
+        session_cost_status = "ok"
+        session_cost_source = "test"
+        _tool_guardrail_halt_decision = None
+        _response_was_previewed = False
+        _skill_nudge_interval = 0
+        _iters_since_skill = 0
+        valid_tool_names = set()
+        context_compressor = SimpleNamespace(last_prompt_tokens=0)
+
+        def __init__(self):
+            self.iteration_budget = IterationBudget(1)
+            assert self.iteration_budget.consume()
+
+        def _emit_status(self, _msg):
+            pass
+
+        def _safe_print(self, *_args, **_kwargs):
+            pass
+
+        def _handle_max_iterations(self, _messages, _api_call_count):
+            return handoff
+
+        def _save_trajectory(self, *_args, **_kwargs):
+            pass
+
+        def _cleanup_task_resources(self, *_args, **_kwargs):
+            pass
+
+        def _drop_trailing_empty_response_scaffolding(self, _messages):
+            pass
+
+        def _persist_session(self, *_args, **_kwargs):
+            pass
+
+        def _file_mutation_verifier_enabled(self):
+            return False
+
+        def _turn_completion_explainer_enabled(self):
+            return False
+
+        def _drain_pending_steer(self):
+            return None
+
+        def clear_interrupt(self):
+            pass
+
+        def _sync_external_memory_for_turn(self, **_kwargs):
+            pass
+
+    result = finalize_turn(
+        _BudgetExhaustedScoutAgent(),
+        final_response=None,
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[{"role": "user", "content": "scout the task"}],
+        conversation_history=[],
+        effective_task_id=tid,
+        turn_id="turn-scout-budget",
+        user_message="scout the task",
+        original_user_message="scout the task",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert result["final_response"] == handoff
+    assert task is not None
+    assert run is not None
+    assert task.status == "done"
+    assert task.result == handoff
+    assert run.outcome == "completed"
+    assert run.summary == handoff
+    assert run.metadata["recovered_from"] == "timed_out"
+    assert "scout_handoff_recovered" in events
+    assert "timed_out" not in events
+    assert "blocked" not in events
+
+
 def test_budget_finalizer_honors_terminal_kanban_complete(kanban_home, monkeypatch):
     """A kanban worker can spend its final allowed model turn on
     ``kanban_complete``. The post-loop budget finalizer must not overwrite that
