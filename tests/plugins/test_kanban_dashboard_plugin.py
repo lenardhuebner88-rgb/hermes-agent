@@ -7417,11 +7417,25 @@ def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client
     assert "latest_id" in data and data["latest_id"] is not None
     assert "checked_at" in data
 
+    # The board query param selects the board database; tasks are already
+    # scoped by connection and do not carry a separate t.board column.
+    board_data = client.get(
+        f"/api/plugins/kanban/runs/live-events?board={kb.DEFAULT_BOARD}"
+    ).json()
+    assert board_data["count"] == 2
+    assert [e["kind"] for e in board_data["events"]] == ["claimed", "heartbeat"]
+
     # since_id should return only newer events
     latest_id = data["latest_id"]
     since = client.get(f"/api/plugins/kanban/runs/live-events?since_id={latest_id}").json()
     assert since["count"] == 0
     assert since["events"] == []
+
+    board_since = client.get(
+        f"/api/plugins/kanban/runs/live-events?board={kb.DEFAULT_BOARD}&since_id={latest_id}"
+    ).json()
+    assert board_since["count"] == 0
+    assert board_since["events"] == []
 
     # limit should cap results
     limited = client.get("/api/plugins/kanban/runs/live-events?limit=1").json()

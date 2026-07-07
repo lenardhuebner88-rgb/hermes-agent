@@ -3036,12 +3036,8 @@ def get_live_events(
     kinds = _LIVE_EVENT_KINDS
     kind_placeholders = ",".join("?" for _ in kinds)
 
-    board_filter = ""
-    params: list[Any] = []
-    if board:
-        board_filter = "AND t.board = ? "
-        params.append(board)
-
+    # ``board`` is applied by opening the selected board database above.
+    # The tasks table is per-board and intentionally has no ``board`` column.
     if since_id is not None:
         try:
             rows = conn.execute(
@@ -3054,11 +3050,10 @@ def get_live_events(
                 LEFT JOIN task_runs r ON r.id = e.run_id
                 WHERE e.kind IN ({kind_placeholders})
                   AND e.id > ?
-                  {board_filter}
                 ORDER BY e.id DESC
                 LIMIT ?
                 """,
-                (*kinds, since_id, *params, limit),
+                (*kinds, since_id, limit),
             ).fetchall()
         finally:
             conn.close()
@@ -3073,11 +3068,10 @@ def get_live_events(
                 JOIN tasks t ON t.id = e.task_id
                 LEFT JOIN task_runs r ON r.id = e.run_id
                 WHERE e.kind IN ({kind_placeholders})
-                  {board_filter}
                 ORDER BY e.id DESC
                 LIMIT ?
                 """,
-                (*kinds, *params, limit),
+                (*kinds, limit),
             ).fetchall()
         finally:
             conn.close()
