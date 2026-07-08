@@ -523,7 +523,14 @@ def _cli(args: list[str], env_extra: dict | None = None) -> subprocess.Completed
         capture_output=True,
         text=True,
         cwd=str(_WORKTREE),
-        timeout=30,
+        # A cold `hermes` CLI start imports a heavy stack (incl. lark_oapi). In
+        # isolation each call is ~0.5s, but affected-test runs map any
+        # hermes_cli/*.py change to the whole tests/hermes_cli/ package (~480
+        # files), so this subprocess competes for CPU with hundreds of parallel
+        # pytest workers and a 30s guard flakes with SIGKILL mid-import. Keep a
+        # generous ceiling that still stays under the 300s per-file cap so a
+        # genuinely hung CLI is still caught.
+        timeout=120,
     )
 
 
