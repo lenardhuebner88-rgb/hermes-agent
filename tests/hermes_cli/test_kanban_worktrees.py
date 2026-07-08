@@ -3202,6 +3202,45 @@ def test_held_gate_leaves_mutual_exclusion_flag_unset(kanban_home, monkeypatch):
     assert "release_gate_auto_executed" not in outcome
 
 
+def test_failed_gate_spawn_leaves_mutual_exclusion_flag_unset(
+    kanban_home, monkeypatch,
+):
+    """Codex-caught deploy-gap regression: if the detached activation FAILS to
+    launch (systemd-run rejects the unit), the ``outcome`` must NOT be flagged —
+    so ``complete_task`` still runs ``maybe_auto_release`` as the fallback deploy.
+    The mutual-exclusion suppresses only a SUCCESSFULLY-spawned second deploy,
+    never a launch that didn't happen."""
+    from hermes_cli import auto_release
+
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": True, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    # The guards pass (autonomous + freigabe:complete) so the hook TRIES to
+    # spawn, but the launch itself fails.
+    monkeypatch.setattr(
+        kwt, "spawn_release_gate_activation",
+        lambda *a, **k: {"ok": False, "detail": "systemd-run failed"},
+    )
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="complete",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        outcome = {"merge_commit": "deadbeefcafe"}
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, outcome,
+        )
+        failed = _events(conn, child_id, "release_gate_auto_execute_failed")
+
+    assert child_id is not None
+    assert "release_gate_auto_executed" not in outcome
+    assert len(failed) == 1
+
+
 def test_autonomous_switch_off_parks_release_gate_byte_exact(
     kanban_home, monkeypatch,
 ):

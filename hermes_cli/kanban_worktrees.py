@@ -938,12 +938,13 @@ def _create_parked_release_gate_child(
         # Operator-forced auto mode (``kanban.release_gate.mode: auto``) —
         # unchanged, byte-exact today's behaviour, guard-free by explicit
         # operator opt-in.
-        _spawn_gate_activation_logged(conn, child_id, payload, mode="auto")
-        # Mutual-exclusion signal: a deploy was just spawned for this web/
-        # chain-tip, so complete_task() must NOT also run maybe_auto_release's
-        # release_chain (that would be a second, unsynchronized deploy_dashboard
-        # run / dashboard restart for the same completion).
-        outcome["release_gate_auto_executed"] = True
+        # Mutual-exclusion signal: only when the deploy was actually spawned
+        # (systemd-run accepted the unit) do we suppress maybe_auto_release's
+        # release_chain — otherwise a failed launch here would drop BOTH deploys
+        # (Codex-caught deploy-gap). A failed spawn leaves the flag unset so the
+        # maybe_auto_release fallback still runs.
+        if _spawn_gate_activation_logged(conn, child_id, payload, mode="auto"):
+            outcome["release_gate_auto_executed"] = True
     else:
         # AD-S2: the global ``release.autonomous`` switch also auto-executes the
         # gate — but only through the guarded hook (kill-switch on AND every
@@ -966,10 +967,16 @@ def _spawn_gate_activation_logged(
     payload: dict,
     *,
     mode: str,
-) -> None:
+) -> bool:
     """Launch the detached release-gate activation for *child_id* and record the
     additive event trail (``release_gate_auto_execute_started``, then on a launch
     failure ``release_gate_auto_execute_failed``).
+
+    Returns ``True`` iff the detached unit actually launched (``systemd-run``
+    accepted it); ``False`` on a launch failure. The caller keys the
+    double-deploy mutual-exclusion flag on this, so a FAILED launch must return
+    ``False`` — otherwise it would suppress the ``maybe_auto_release`` fallback
+    and drop BOTH deploys.
 
     Shared by the operator-forced ``release_gate.mode: auto`` path and the AD-S2
     ``release.autonomous`` hook — both use EXACTLY the same detached activation
@@ -1006,6 +1013,8 @@ def _spawn_gate_activation_logged(
                     "release_gate_auto_execute_failed",
                     {"error": spawn.get("detail"), **payload},
                 )
+            return False
+        return True
     except Exception as exc:
         with kb.write_txn(conn):
             kb._append_event(
@@ -1014,6 +1023,7 @@ def _spawn_gate_activation_logged(
                 "release_gate_auto_execute_failed",
                 {"error": str(exc), **payload},
             )
+        return False
 
 
 def maybe_auto_execute_gate(
@@ -1037,7 +1047,7 @@ def maybe_auto_execute_gate(
     ``release.autonomous: false`` is byte-exact today's behaviour (no new event).
     Fail-soft: a guard-evaluation error parks (never breaks integration).
 
-    Returns True iff the detached activation was spawned."""
+    Returns True iff the detached activation was successfully launched."""
     from hermes_cli import auto_release
     from hermes_cli import kanban_db as kb
 
@@ -1073,8 +1083,7 @@ def maybe_auto_execute_gate(
                     exc_info=True,
                 )
         return False
-    _spawn_gate_activation_logged(conn, child_id, payload, mode="autonomous")
-    return True
+    return _spawn_gate_activation_logged(conn, child_id, payload, mode="autonomous")
 
 
 # ---------------------------------------------------------------------------
