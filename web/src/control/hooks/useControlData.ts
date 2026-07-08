@@ -2196,19 +2196,29 @@ export function useReleaseModeWrite() {
   return { busy, error, run };
 }
 
-// POST /release-concurrency — writes kanban.max_in_progress.
+// POST /release-concurrency — writes any of kanban.max_in_progress,
+// kanban.max_in_progress_per_profile, kanban.max_concurrent_per_repo. Fields
+// are optional; only the ones present in the call are sent — the Risiko-Tab's
+// coupled "Parallele Worker pro Profil" stepper calls
+// run({ max_in_progress_per_profile: N, max_concurrent_per_repo: N }) in one
+// request, while the "Max. Worker gesamt" stepper calls
+// run({ max_in_progress: N }) alone.
 export function useReleaseConcurrencyWrite() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
-  const run = useCallback(async (maxInProgress: number) => {
+  const run = useCallback(async (next: {
+    max_in_progress?: number;
+    max_in_progress_per_profile?: number;
+    max_concurrent_per_repo?: number;
+  }) => {
     setBusy(true);
     if (aliveRef.current) setError(null);
     try {
       const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
         "/api/plugins/kanban/release-concurrency",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_in_progress: maxInProgress }) },
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) },
       );
       if (res?.ok === false) {
         const detail = res.detail || "Änderung fehlgeschlagen.";

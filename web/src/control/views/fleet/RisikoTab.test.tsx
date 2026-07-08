@@ -64,13 +64,18 @@ const RELEASE_STATUS_FIXTURE: ReleaseStatusResponse = {
 };
 
 // GET /api/plugins/kanban/release-mode — real shape (get_release_mode_endpoint,
-// AD-S4 + 2026-07-08 follow-up: red_streak, max_in_progress).
+// AD-S4 + 2026-07-08 follow-ups: red_streak, max_in_progress, and the
+// "Parallele Worker pro Profil" lever's max_in_progress_per_profile /
+// max_concurrent_per_repo / serialize_by_repo).
 const RELEASE_MODE_FIXTURE: ReleaseModeResponse = {
   autonomous: true,
   max_tier_autonomous: "review",
   pause_on_red_streak: 3,
   red_streak: 1,
   max_in_progress: 3,
+  max_in_progress_per_profile: 1,
+  max_concurrent_per_repo: 1,
+  serialize_by_repo: true,
 };
 
 function defaultFetchImpl(url: string) {
@@ -356,7 +361,7 @@ describe("RisikoTab — Hero cockpit (write)", () => {
     expect(screen.queryByRole("button", { name: "high" })).toBeNull();
   });
 
-  it("POSTs {max_in_progress} to /release-concurrency on a stepper click", async () => {
+  it("POSTs {max_in_progress} to /release-concurrency on the 'Max. Worker gesamt' stepper click", async () => {
     const onReleaseModeChanged = vi.fn();
     fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
       const u = String(url);
@@ -368,14 +373,14 @@ describe("RisikoTab — Hero cockpit (write)", () => {
     });
     renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 3 }, onReleaseModeChanged });
 
-    fireEvent.click(screen.getByRole("button", { name: "mehr parallele Profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "mehr Worker gesamt" }));
 
     await waitFor(() => expect(onReleaseModeChanged).toHaveBeenCalledTimes(1));
   });
 
-  it("clamps the stepper decrement at 1 and never posts below it", () => {
+  it("clamps the 'Max. Worker gesamt' stepper decrement at 1 and never posts below it", () => {
     renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 1 } });
-    const decrement = screen.getByRole("button", { name: "weniger parallele Profile" }) as HTMLButtonElement;
+    const decrement = screen.getByRole("button", { name: "weniger Worker gesamt" }) as HTMLButtonElement;
     expect(decrement.disabled).toBe(true);
   });
 
@@ -390,6 +395,89 @@ describe("RisikoTab — Hero cockpit (write)", () => {
     renderRisikoTab();
 
     fireEvent.click(screen.getByRole("switch", { name: "Autonomie-Kill-Switch" }));
+
+    expect(await screen.findByText("config.yaml gesperrt")).toBeTruthy();
+  });
+});
+
+describe("RisikoTab — Hero cockpit: 'Parallele Worker pro Profil' (coupled lever, 2026-07-08)", () => {
+  it("POSTs BOTH max_in_progress_per_profile and max_concurrent_per_repo with the same N on increment", async () => {
+    const onReleaseModeChanged = vi.fn();
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-concurrency") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          max_in_progress_per_profile: 2,
+          max_concurrent_per_repo: 2,
+        });
+        return Promise.resolve({ ok: true, max_in_progress_per_profile: 2, max_concurrent_per_repo: 2 });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 3, max_in_progress_per_profile: 1, max_concurrent_per_repo: 1 },
+      onReleaseModeChanged,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "mehr parallele Worker pro Profil" }));
+
+    await waitFor(() => expect(onReleaseModeChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("clamps the increment at the global max_in_progress ceiling", () => {
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 2, max_in_progress_per_profile: 2, max_concurrent_per_repo: 2 },
+    });
+    const increment = screen.getByRole("button", { name: "mehr parallele Worker pro Profil" }) as HTMLButtonElement;
+    expect(increment.disabled).toBe(true);
+  });
+
+  it("clamps the decrement at 1 and never posts below it", () => {
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress_per_profile: 1, max_concurrent_per_repo: 1 },
+    });
+    const decrement = screen.getByRole("button", { name: "weniger parallele Worker pro Profil" }) as HTMLButtonElement;
+    expect(decrement.disabled).toBe(true);
+  });
+
+  it("shows the stale-main hint when N > 1", () => {
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 3, max_in_progress_per_profile: 2, max_concurrent_per_repo: 2 },
+    });
+    expect(screen.getByText(de.fleet.risikoParallelWorkerStaleMainHint)).toBeTruthy();
+    expect(screen.queryByText(de.fleet.risikoParallelWorkerStrictHint)).toBeNull();
+  });
+
+  it("shows the neutral strict-serial hint when N == 1", () => {
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress_per_profile: 1, max_concurrent_per_repo: 1 },
+    });
+    expect(screen.getByText(de.fleet.risikoParallelWorkerStrictHint)).toBeTruthy();
+    expect(screen.queryByText(de.fleet.risikoParallelWorkerStaleMainHint)).toBeNull();
+  });
+
+  it("falls back to max_concurrent_per_repo as the displayed floor when max_in_progress_per_profile is null (unlimited)", () => {
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress_per_profile: null, max_concurrent_per_repo: 2 },
+    });
+    expect(screen.getByRole("group", { name: "Reichweite" })).toBeTruthy(); // sanity: hero rendered
+    const stepperButtons = screen.getAllByRole("button", { name: /parallele Worker pro Profil/ });
+    expect(stepperButtons.length).toBe(2);
+  });
+
+  it("surfaces a write error inline instead of swallowing it", async () => {
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-concurrency") && init?.method === "POST") {
+        return Promise.resolve({ ok: false, detail: "config.yaml gesperrt" });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab({
+      releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 3, max_in_progress_per_profile: 1, max_concurrent_per_repo: 1 },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "mehr parallele Worker pro Profil" }));
 
     expect(await screen.findByText("config.yaml gesperrt")).toBeTruthy();
   });

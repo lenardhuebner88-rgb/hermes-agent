@@ -3532,15 +3532,20 @@ class ReleaseModeBody(BaseModel):
 
 
 class ReleaseConcurrencyBody(BaseModel):
-    max_in_progress: int
+    # All optional so the coupled Risiko-Tab "Parallele Worker pro Profil"
+    # lever can POST just {max_in_progress_per_profile, max_concurrent_per_repo}
+    # without clobbering the independent global max_in_progress knob.
+    max_in_progress: Optional[int] = None
+    max_in_progress_per_profile: Optional[int] = None
+    max_concurrent_per_repo: Optional[int] = None
 
 
-def _read_max_in_progress() -> int:
-    """kanban.max_in_progress from the ROOT config.yaml, same direct-read
-    style as ``_release_config()`` (not the cached ``load_config()`` —
-    avoids any staleness right after an atomic write). Default 3, the F4
-    default already used by the /workers `cap` field; graceful on any
-    parse trouble (advisory value only)."""
+def _read_root_kanban_cfg() -> dict:
+    """Direct (uncached) read of the ``kanban`` block from the ROOT
+    config.yaml — same direct-read style as ``_release_config()`` (not the
+    cached ``load_config()`` — avoids any staleness right after an atomic
+    write). Returns ``{}`` on any parse trouble or absent config, never
+    raises (every ``_read_*`` caller below is advisory-only)."""
     try:
         import yaml
 
@@ -3548,18 +3553,60 @@ def _read_max_in_progress() -> int:
 
         cfg_path = get_default_hermes_root() / "config.yaml"
         if not cfg_path.is_file():
-            return 3
+            return {}
         with open(cfg_path, "r", encoding="utf-8") as fh:
             root_cfg = yaml.safe_load(fh) or {}
         kanban_cfg = root_cfg.get("kanban") or {}
-        if not isinstance(kanban_cfg, dict):
-            return 3
-        raw = kanban_cfg.get("max_in_progress")
-        if isinstance(raw, (int, float)) and int(raw) >= 1:
-            return int(raw)
-        return 3
+        return kanban_cfg if isinstance(kanban_cfg, dict) else {}
     except Exception:
-        return 3
+        return {}
+
+
+def _read_max_in_progress() -> int:
+    """kanban.max_in_progress from the ROOT config.yaml. Default 3, the F4
+    default already used by the /workers `cap` field."""
+    raw = _read_root_kanban_cfg().get("max_in_progress")
+    if isinstance(raw, (int, float)) and int(raw) >= 1:
+        return int(raw)
+    return 3
+
+
+def _read_max_in_progress_per_profile() -> Optional[int]:
+    """kanban.max_in_progress_per_profile from the ROOT config.yaml — the
+    REAL value, or ``None`` when absent/invalid. Unlike ``max_in_progress``
+    (default 3), this cap's config default is unlimited (config.py), so a
+    fake ``1`` here would misrepresent an "unlimited" install as
+    single-worker-per-profile."""
+    raw = _read_root_kanban_cfg().get("max_in_progress_per_profile")
+    if isinstance(raw, (int, float)) and int(raw) >= 1:
+        return int(raw)
+    return None
+
+
+def _read_max_concurrent_per_repo() -> int:
+    """kanban.max_concurrent_per_repo from the ROOT config.yaml, default 1
+    (matches the dispatcher's own default —
+    ``gateway.kanban_watchers._read_dispatch_caps``)."""
+    raw = _read_root_kanban_cfg().get("max_concurrent_per_repo")
+    if isinstance(raw, (int, float)) and int(raw) >= 1:
+        return int(raw)
+    return 1
+
+
+def _read_serialize_by_repo() -> bool:
+    """kanban.serialize_by_repo from the ROOT config.yaml, default True.
+    Exposed read-only for the Risiko-Tab display — the coupled lever never
+    changes it."""
+    raw = _read_root_kanban_cfg().get("serialize_by_repo", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return True
 
 
 def _read_red_streak() -> int:
@@ -3588,13 +3635,17 @@ def _release_mode_view() -> dict:
         "pause_on_red_streak": cfg["pause_on_red_streak"],
         "red_streak": _read_red_streak(),
         "max_in_progress": _read_max_in_progress(),
+        "max_in_progress_per_profile": _read_max_in_progress_per_profile(),
+        "max_concurrent_per_repo": _read_max_concurrent_per_repo(),
+        "serialize_by_repo": _read_serialize_by_repo(),
     }
 
 
 @router.get("/release-mode")
 def get_release_mode_endpoint():
     """GET /release-mode — autonomous, max_tier_autonomous, pause_on_red_streak,
-    red_streak, max_in_progress.
+    red_streak, max_in_progress, max_in_progress_per_profile,
+    max_concurrent_per_repo, serialize_by_repo.
 
     The read-side of the Risiko-Tab Hero cockpit; the POST twins
     (``/release-mode``, ``/release-concurrency``) flip these atomically.
@@ -3650,13 +3701,41 @@ def set_release_mode_endpoint(payload: ReleaseModeBody):
 
 @router.post("/release-concurrency")
 def set_release_concurrency_endpoint(payload: ReleaseConcurrencyBody):
-    """POST /release-concurrency — set ``kanban.max_in_progress`` atomically.
+    """POST /release-concurrency — set any of ``kanban.max_in_progress``,
+    ``kanban.max_in_progress_per_profile``, ``kanban.max_concurrent_per_repo``
+    atomically. All three fields are optional; only fields present in the
+    body are written (mirrors ``set_release_mode_endpoint``'s partial-update
+    contract) — the Risiko-Tab's coupled "Parallele Worker pro Profil" lever
+    POSTs ``{max_in_progress_per_profile: N, max_concurrent_per_repo: N}``
+    in one request without touching the independent global
+    ``max_in_progress``.
 
-    Backup → write → reload → return ``{ok, max_in_progress}``. Same
-    auth/loopback protection as every other mutating kanban endpoint.
+    Validation is permissive (each present field just needs to be >= 1) —
+    no cross-field ``<= max_in_progress`` guard here, that clamp lives in
+    the UI. Backup → write → reload → return current concurrency values.
+    Same auth/loopback protection as every other mutating kanban endpoint.
     """
-    if payload.max_in_progress < 1:
+    if (
+        payload.max_in_progress is None
+        and payload.max_in_progress_per_profile is None
+        and payload.max_concurrent_per_repo is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="at least one of max_in_progress, max_in_progress_per_profile, "
+            "max_concurrent_per_repo required",
+        )
+    if payload.max_in_progress is not None and payload.max_in_progress < 1:
         raise HTTPException(status_code=400, detail="max_in_progress must be >= 1")
+    if (
+        payload.max_in_progress_per_profile is not None
+        and payload.max_in_progress_per_profile < 1
+    ):
+        raise HTTPException(
+            status_code=400, detail="max_in_progress_per_profile must be >= 1"
+        )
+    if payload.max_concurrent_per_repo is not None and payload.max_concurrent_per_repo < 1:
+        raise HTTPException(status_code=400, detail="max_concurrent_per_repo must be >= 1")
 
     from hermes_constants import get_default_hermes_root
     from utils import atomic_roundtrip_yaml_update
@@ -3666,9 +3745,24 @@ def set_release_concurrency_endpoint(payload: ReleaseConcurrencyBody):
     if cfg_path.is_file():
         backup_path.write_bytes(cfg_path.read_bytes())
 
-    atomic_roundtrip_yaml_update(cfg_path, "kanban.max_in_progress", payload.max_in_progress)
+    if payload.max_in_progress is not None:
+        atomic_roundtrip_yaml_update(cfg_path, "kanban.max_in_progress", payload.max_in_progress)
+    if payload.max_in_progress_per_profile is not None:
+        atomic_roundtrip_yaml_update(
+            cfg_path, "kanban.max_in_progress_per_profile", payload.max_in_progress_per_profile
+        )
+    if payload.max_concurrent_per_repo is not None:
+        atomic_roundtrip_yaml_update(
+            cfg_path, "kanban.max_concurrent_per_repo", payload.max_concurrent_per_repo
+        )
 
-    return {"ok": True, "max_in_progress": _read_max_in_progress(), "backup": str(backup_path)}
+    return {
+        "ok": True,
+        "max_in_progress": _read_max_in_progress(),
+        "max_in_progress_per_profile": _read_max_in_progress_per_profile(),
+        "max_concurrent_per_repo": _read_max_concurrent_per_repo(),
+        "backup": str(backup_path),
+    }
 
 
 @router.get("/epics")

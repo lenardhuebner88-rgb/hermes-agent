@@ -15,6 +15,7 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -669,6 +670,146 @@ def _resolve_auto_decompose_settings(
     if per_tick < 1:
         per_tick = 1
     return enabled, per_tick
+
+
+@dataclass(frozen=True)
+class _DispatchCaps:
+    """Resolved dispatcher concurrency caps for one tick (see
+    :func:`_read_dispatch_caps`)."""
+
+    max_spawn: "Optional[int]"
+    max_in_progress: "Optional[int]"
+    max_in_progress_per_profile: "Optional[int]"
+    serialize_by_repo: bool
+    max_concurrent_per_repo: int
+
+
+def _read_dispatch_caps(
+    load_config: Callable[[], Any],
+) -> "tuple[_DispatchCaps, list[str]]":
+    """Resolve the live dispatcher concurrency caps from config.
+
+    Extracted so the caps can be re-read on every dispatcher tick, mirroring
+    ``_resolve_auto_decompose_settings`` (#49638): a dashboard write to
+    ``kanban.max_in_progress_per_profile`` / ``kanban.max_concurrent_per_repo``
+    (the Risiko-Tab "Parallele Worker pro Profil" lever) — or to
+    ``kanban.max_in_progress`` / ``kanban.max_spawn`` — used to be read ONLY
+    at gateway boot and closed over for the process lifetime, so a config
+    write was a silent no-op until a restart. Calling this every tick makes
+    the effect land on the NEXT tick instead.
+
+    Returns ``(caps, warnings)``. ``warnings`` holds the same messages the
+    boot-time reader used to log inline for invalid values — callers decide
+    when to actually log them (always at boot; only on change per tick, so a
+    persistently-misconfigured value doesn't spam the log every tick).
+
+    Fails **safe** on a config-read error: returns the tightest known-safe
+    defaults (no spawn/in-progress/per-profile override, per-repo
+    serialization ON at concurrency 1) rather than an unbounded cap.
+    """
+    warnings: "list[str]" = []
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        warnings.append(
+            f"kanban dispatcher: cannot read dispatch caps ({exc}); "
+            "using safe defaults (no override, serialize_by_repo=True)"
+        )
+        return (
+            _DispatchCaps(
+                max_spawn=None,
+                max_in_progress=None,
+                max_in_progress_per_profile=None,
+                serialize_by_repo=True,
+                max_concurrent_per_repo=1,
+            ),
+            warnings,
+        )
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+
+    raw_max_spawn = kanban_cfg.get("max_spawn", None)
+    max_spawn = None
+    if raw_max_spawn is not None:
+        try:
+            max_spawn = int(raw_max_spawn)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"kanban dispatcher: invalid kanban.max_spawn={raw_max_spawn!r}; ignoring"
+            )
+            max_spawn = None
+        else:
+            if max_spawn < 1:
+                warnings.append(
+                    f"kanban dispatcher: kanban.max_spawn={raw_max_spawn!r} is below 1; ignoring"
+                )
+                max_spawn = None
+
+    raw_max_in_progress = kanban_cfg.get("max_in_progress", None)
+    max_in_progress = None
+    if raw_max_in_progress is not None:
+        try:
+            max_in_progress = int(raw_max_in_progress)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"kanban dispatcher: invalid kanban.max_in_progress={raw_max_in_progress!r}; ignoring"
+            )
+            max_in_progress = None
+        else:
+            if max_in_progress < 1:
+                warnings.append(
+                    f"kanban dispatcher: kanban.max_in_progress={raw_max_in_progress!r} is below 1; ignoring"
+                )
+                max_in_progress = None
+
+    raw_per_profile = kanban_cfg.get("max_in_progress_per_profile", None)
+    max_in_progress_per_profile = None
+    if raw_per_profile is not None:
+        try:
+            max_in_progress_per_profile = int(raw_per_profile)
+        except (TypeError, ValueError):
+            warnings.append(
+                "kanban dispatcher: invalid kanban.max_in_progress_per_profile="
+                f"{raw_per_profile!r}; ignoring"
+            )
+            max_in_progress_per_profile = None
+        else:
+            if max_in_progress_per_profile < 1:
+                warnings.append(
+                    "kanban dispatcher: kanban.max_in_progress_per_profile="
+                    f"{raw_per_profile!r} is below 1; ignoring"
+                )
+                max_in_progress_per_profile = None
+
+    serialize_by_repo = _coerce_config_bool(
+        kanban_cfg.get("serialize_by_repo", True), default=True
+    )
+
+    raw_max_concurrent_per_repo = kanban_cfg.get("max_concurrent_per_repo", 1)
+    try:
+        max_concurrent_per_repo = int(raw_max_concurrent_per_repo or 1)
+    except (TypeError, ValueError):
+        warnings.append(
+            "kanban dispatcher: invalid kanban.max_concurrent_per_repo="
+            f"{raw_max_concurrent_per_repo!r}; using default 1"
+        )
+        max_concurrent_per_repo = 1
+    if max_concurrent_per_repo < 1:
+        warnings.append(
+            "kanban dispatcher: kanban.max_concurrent_per_repo="
+            f"{raw_max_concurrent_per_repo!r} is below 1; using default 1"
+        )
+        max_concurrent_per_repo = 1
+
+    return (
+        _DispatchCaps(
+            max_spawn=max_spawn,
+            max_in_progress=max_in_progress,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+            serialize_by_repo=serialize_by_repo,
+            max_concurrent_per_repo=max_concurrent_per_repo,
+        ),
+        warnings,
+    )
 
 
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
@@ -1900,52 +2041,22 @@ class GatewayKanbanWatchersMixin:
             interval = 60.0
         interval = max(interval, 1.0)  # sanity floor — tighter than this is a footgun
 
-        # Read max_spawn config to limit concurrent kanban tasks
-        raw_max_spawn = kanban_cfg.get("max_spawn", None)
-        max_spawn = None
-        if raw_max_spawn is not None:
-            try:
-                max_spawn = int(raw_max_spawn)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_spawn=%r; ignoring",
-                    raw_max_spawn,
-                )
-                max_spawn = None
-            else:
-                if max_spawn < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_spawn=%r is below 1; ignoring",
-                        raw_max_spawn,
-                    )
-                    max_spawn = None
-                else:
-                    logger.info("kanban dispatcher: max_spawn=%d", max_spawn)
-
-        # Cap the number of simultaneously running tasks so slow workers
-        # (local LLMs, resource-constrained hosts) don't pile up and time
-        # out. When set, the dispatcher skips spawning when the board
-        # already has this many tasks in 'running' status.
-        raw_max_in_progress = kanban_cfg.get("max_in_progress", None)
-        max_in_progress = None
-        if raw_max_in_progress is not None:
-            try:
-                max_in_progress = int(raw_max_in_progress)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring",
-                    raw_max_in_progress,
-                )
-                max_in_progress = None
-            else:
-                if max_in_progress < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_in_progress=%r is below 1; ignoring",
-                        raw_max_in_progress,
-                    )
-                    max_in_progress = None
-                else:
-                    logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
+        # Dispatcher concurrency caps (max_spawn, max_in_progress,
+        # max_in_progress_per_profile, serialize_by_repo,
+        # max_concurrent_per_repo) are resolved via the shared
+        # `_read_dispatch_caps` helper — read once here at boot AND re-read
+        # every tick below (see `_last_dispatch_caps` in the tick loop) so a
+        # dashboard/config write takes effect on the next tick, not only
+        # after a gateway restart.
+        _dispatch_caps, _dispatch_cap_warnings = _read_dispatch_caps(_load_config)
+        for _msg in _dispatch_cap_warnings:
+            logger.warning(_msg)
+        max_spawn = _dispatch_caps.max_spawn
+        if max_spawn is not None:
+            logger.info("kanban dispatcher: max_spawn=%d", max_spawn)
+        max_in_progress = _dispatch_caps.max_in_progress
+        if max_in_progress is not None:
+            logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
 
         raw_failure_limit = kanban_cfg.get("failure_limit", _kb.DEFAULT_FAILURE_LIMIT)
         try:
@@ -2010,58 +2121,25 @@ class GatewayKanbanWatchersMixin:
                 default_assignee,
             )
 
-        # Read kanban.max_in_progress_per_profile — per-profile concurrency
-        # cap (#21582). When set, no single profile gets more than N
-        # workers running at once, even if the global max_in_progress
-        # would allow it. Prevents one profile's local model / API quota
-        # / browser pool from being overwhelmed by a fan-out.
-        raw_per_profile = kanban_cfg.get("max_in_progress_per_profile", None)
-        max_in_progress_per_profile = None
-        if raw_per_profile is not None:
-            try:
-                max_in_progress_per_profile = int(raw_per_profile)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_in_progress_per_profile=%r; ignoring",
-                    raw_per_profile,
-                )
-                max_in_progress_per_profile = None
-            else:
-                if max_in_progress_per_profile < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_in_progress_per_profile=%r is below 1; ignoring",
-                        raw_per_profile,
-                    )
-                    max_in_progress_per_profile = None
-                else:
-                    logger.info(
-                        "kanban dispatcher: max_in_progress_per_profile=%d",
-                        max_in_progress_per_profile,
-                    )
+        # kanban.max_in_progress_per_profile — per-profile concurrency cap
+        # (#21582). When set, no single profile gets more than N workers
+        # running at once, even if the global max_in_progress would allow
+        # it. Prevents one profile's local model / API quota / browser pool
+        # from being overwhelmed by a fan-out. kanban.serialize_by_repo /
+        # max_concurrent_per_repo cap how many same-repo tasks may run at
+        # once. All resolved above via `_read_dispatch_caps`.
+        max_in_progress_per_profile = _dispatch_caps.max_in_progress_per_profile
+        if max_in_progress_per_profile is not None:
+            logger.info(
+                "kanban dispatcher: max_in_progress_per_profile=%d",
+                max_in_progress_per_profile,
+            )
 
-        serialize_by_repo = _coerce_config_bool(
-            kanban_cfg.get("serialize_by_repo", True), default=True
-        )
+        serialize_by_repo = _dispatch_caps.serialize_by_repo
         if not serialize_by_repo:
             logger.info("kanban dispatcher: serialize_by_repo=False (per-repo lock OFF)")
 
-        raw_max_concurrent_per_repo = kanban_cfg.get("max_concurrent_per_repo", 1)
-        try:
-            max_concurrent_per_repo = int(raw_max_concurrent_per_repo or 1)
-        except (TypeError, ValueError):
-            logger.warning(
-                "kanban dispatcher: invalid kanban.max_concurrent_per_repo=%r; "
-                "using default 1",
-                raw_max_concurrent_per_repo,
-            )
-            max_concurrent_per_repo = 1
-        if max_concurrent_per_repo < 1:
-            logger.warning(
-                "kanban dispatcher: kanban.max_concurrent_per_repo=%r is below 1; "
-                "using default 1",
-                raw_max_concurrent_per_repo,
-            )
-            max_concurrent_per_repo = 1
+        max_concurrent_per_repo = _dispatch_caps.max_concurrent_per_repo
 
         # Read C1 budget caps (N-C1). Both default OFF (None) — the dispatcher
         # never holds on budget unless the operator sets a positive value, so
@@ -2557,6 +2635,10 @@ class GatewayKanbanWatchersMixin:
         logger.info(
             "kanban dispatcher: embedded in gateway (interval=%.1fs)", interval
         )
+        # Tracks the last-logged dispatch caps so the per-tick re-read below
+        # only logs when a value actually changes (avoids log spam on every
+        # tick for an unchanged, or persistently-invalid, config value).
+        _last_dispatch_caps = _dispatch_caps
         while self._running:
             try:
                 # Reap zombie children before per-board work so a board DB
@@ -2591,6 +2673,60 @@ class GatewayKanbanWatchersMixin:
                     await asyncio.to_thread(
                         _auto_decompose_tick, tick_boards, _ad_per_tick
                     )
+
+                # Re-read dispatch concurrency caps live each tick — same
+                # rationale as auto-decompose above: a dashboard/config write
+                # to max_in_progress(_per_profile) / serialize_by_repo /
+                # max_concurrent_per_repo / max_spawn must take effect on the
+                # NEXT tick, not require a gateway restart. Only log when a
+                # resolved value actually changes, so an unchanged (or
+                # persistently invalid) config doesn't spam the log.
+                _dispatch_caps, _dispatch_cap_warnings = await asyncio.to_thread(
+                    _read_dispatch_caps, _load_config
+                )
+                if _dispatch_caps != _last_dispatch_caps:
+                    for _msg in _dispatch_cap_warnings:
+                        logger.warning(_msg)
+                    if _dispatch_caps.max_spawn != _last_dispatch_caps.max_spawn:
+                        logger.info(
+                            "kanban dispatcher: max_spawn now %r (was %r)",
+                            _dispatch_caps.max_spawn, _last_dispatch_caps.max_spawn,
+                        )
+                    if _dispatch_caps.max_in_progress != _last_dispatch_caps.max_in_progress:
+                        logger.info(
+                            "kanban dispatcher: max_in_progress now %r (was %r)",
+                            _dispatch_caps.max_in_progress, _last_dispatch_caps.max_in_progress,
+                        )
+                    if (
+                        _dispatch_caps.max_in_progress_per_profile
+                        != _last_dispatch_caps.max_in_progress_per_profile
+                    ):
+                        logger.info(
+                            "kanban dispatcher: max_in_progress_per_profile now %r (was %r)",
+                            _dispatch_caps.max_in_progress_per_profile,
+                            _last_dispatch_caps.max_in_progress_per_profile,
+                        )
+                    if _dispatch_caps.serialize_by_repo != _last_dispatch_caps.serialize_by_repo:
+                        logger.info(
+                            "kanban dispatcher: serialize_by_repo now %r (was %r)",
+                            _dispatch_caps.serialize_by_repo, _last_dispatch_caps.serialize_by_repo,
+                        )
+                    if (
+                        _dispatch_caps.max_concurrent_per_repo
+                        != _last_dispatch_caps.max_concurrent_per_repo
+                    ):
+                        logger.info(
+                            "kanban dispatcher: max_concurrent_per_repo now %r (was %r)",
+                            _dispatch_caps.max_concurrent_per_repo,
+                            _last_dispatch_caps.max_concurrent_per_repo,
+                        )
+                    _last_dispatch_caps = _dispatch_caps
+                max_spawn = _dispatch_caps.max_spawn
+                max_in_progress = _dispatch_caps.max_in_progress
+                max_in_progress_per_profile = _dispatch_caps.max_in_progress_per_profile
+                serialize_by_repo = _dispatch_caps.serialize_by_repo
+                max_concurrent_per_repo = _dispatch_caps.max_concurrent_per_repo
+
                 results = await asyncio.to_thread(_tick_once, tick_boards)
                 any_spawned = False
                 for slug, res in (results or []):

@@ -115,6 +115,8 @@
 .risiko-v4 .rk-step-btn:disabled { cursor: not-allowed; color: var(--rk-ink-4); }
 .risiko-v4 .rk-step-val { min-width: 34px; text-align: center; font-size: 15px; font-weight: 800; font-family: var(--hc-font-mono, monospace); color: var(--rk-ink); }
 
+.risiko-v4 .rk-ctl-subhint { font-size: 9.5px; color: var(--rk-ink-4); margin: -3px 2px 0; }
+
 .risiko-v4 .rk-write-error { font-size: 10.5px; color: var(--rk-alert); margin: 8px 2px 0; }
 
 .risiko-v4 .rk-safety { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rk-line-soft); }

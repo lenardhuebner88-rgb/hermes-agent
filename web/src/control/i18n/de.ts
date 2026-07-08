@@ -333,6 +333,13 @@ export const de = {
     risikoBrauchtDichTitle: "Braucht dich",
     risikoBrauchtDichCount: (n: number) => `${n} gehalten`,
     risikoLeerState: "Nichts hängt — alles läuft autonom durch",
+    // Risiko-Hero — "Parallele Worker pro Profil"-Regler (2026-07-08), koppelt
+    // kanban.max_in_progress_per_profile + kanban.max_concurrent_per_repo.
+    risikoParallelWorkerLabel: "Parallele Worker pro Profil",
+    risikoParallelWorkerHint: "wie viele Worker desselben Profils gleichzeitig laufen dürfen — auch am selben Repo",
+    risikoParallelWorkerStaleMainHint: "≥2 lässt gleiche Profile am selben Repo parallel branchen (stale-main-Risiko).",
+    risikoParallelWorkerStrictHint: "strikt seriell pro Profil",
+    risikoMaxWorkerGesamtLabel: "Max. Worker gesamt",
     // Plan-Cockpit (t4)
     planLeer: "Keine Freigaben offen.",
     planLeerDesc: "Sobald eine PlanSpec mit freigabe: operator wartet, erscheint sie hier.",

@@ -772,6 +772,9 @@ export type ReleaseStatusResponse = z.infer<typeof ReleaseStatusResponseSchema>;
 // release-status: same autonomous/max_tier_autonomous/pause_on_red_streak,
 // plus red_streak (current consecutive-red-nights count, the "x" in the
 // Risiko-Tab safety line) and max_in_progress (kanban.max_in_progress).
+// max_in_progress_per_profile/max_concurrent_per_repo/serialize_by_repo feed
+// the "Parallele Worker pro Profil" coupled lever (2026-07-08); per_profile
+// is nullable — its real config default is unlimited, never fake it as 1.
 // Feeds the Hero cockpit; POST /release-mode + POST /release-concurrency
 // write it back.
 export const ReleaseModeResponseSchema = z.object({
@@ -780,6 +783,9 @@ export const ReleaseModeResponseSchema = z.object({
   pause_on_red_streak: z.coerce.number().nullable().catch(null),
   red_streak: z.coerce.number().catch(0),
   max_in_progress: z.coerce.number().catch(3),
+  max_in_progress_per_profile: nullableNumber,
+  max_concurrent_per_repo: z.coerce.number().catch(1),
+  serialize_by_repo: z.boolean().catch(true),
 });
 export type ReleaseModeResponse = z.infer<typeof ReleaseModeResponseSchema>;
 export type ReleaseTier = ReleaseModeResponse["max_tier_autonomous"];

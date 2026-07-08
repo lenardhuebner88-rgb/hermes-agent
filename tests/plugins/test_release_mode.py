@@ -213,3 +213,95 @@ def test_release_concurrency_rejects_below_one(client, kanban_home):
     # Rejected write must not touch the persisted config.
     resp = client.get(f"{PREFIX}/release-mode")
     assert resp.json()["max_in_progress"] == 3
+
+
+def test_release_mode_exposes_parallelism_lever_fields_with_defaults(client, kanban_home):
+    """GET /release-mode carries the Risiko-Tab "Parallele Worker pro Profil"
+    lever's read-side fields. max_in_progress_per_profile's real default is
+    unlimited (None) — must NOT be faked as 1 when absent from config."""
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 0})
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["max_in_progress_per_profile"] is None
+    assert body["max_concurrent_per_repo"] == 1
+    assert body["serialize_by_repo"] is True
+
+
+def test_release_mode_exposes_parallelism_lever_fields_when_set(client, kanban_home):
+    cfg = kanban_home / "config.yaml"
+    cfg.write_text(
+        "release:\n  autonomous: true\n"
+        "kanban:\n  max_in_progress: 5\n  max_in_progress_per_profile: 2\n"
+        "  max_concurrent_per_repo: 2\n  serialize_by_repo: true\n"
+    )
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["max_in_progress"] == 5
+    assert body["max_in_progress_per_profile"] == 2
+    assert body["max_concurrent_per_repo"] == 2
+    assert body["serialize_by_repo"] is True
+
+
+def test_release_concurrency_coupled_lever_sets_per_profile_and_per_repo(client, kanban_home):
+    """The coupled Risiko-Tab stepper POSTs both fields with the same N in
+    one request; max_in_progress must stay untouched."""
+    cfg = kanban_home / "config.yaml"
+    cfg.write_text(
+        "release:\n  autonomous: true\n"
+        "kanban:\n  max_in_progress: 3\n  max_in_progress_per_profile: 1\n"
+        "  max_concurrent_per_repo: 1\n"
+    )
+
+    resp = client.post(
+        f"{PREFIX}/release-concurrency",
+        json={"max_in_progress_per_profile": 2, "max_concurrent_per_repo": 2},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["max_in_progress_per_profile"] == 2
+    assert body["max_concurrent_per_repo"] == 2
+    # The global cap was never in this POST's body — must be unchanged.
+    assert body["max_in_progress"] == 3
+
+    live_text = cfg.read_text().lower()
+    assert "max_in_progress_per_profile: 2" in live_text
+    assert "max_concurrent_per_repo: 2" in live_text
+    assert "max_in_progress: 3" in live_text
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    body = resp.json()
+    assert body["max_in_progress_per_profile"] == 2
+    assert body["max_concurrent_per_repo"] == 2
+    assert body["max_in_progress"] == 3
+
+
+def test_release_concurrency_rejects_per_profile_below_one(client, kanban_home):
+    cfg = kanban_home / "config.yaml"
+    cfg.write_text(
+        "release:\n  autonomous: true\n"
+        "kanban:\n  max_in_progress_per_profile: 1\n  max_concurrent_per_repo: 1\n"
+    )
+
+    resp = client.post(f"{PREFIX}/release-concurrency", json={"max_in_progress_per_profile": 0})
+    assert resp.status_code == 400
+
+    resp = client.post(f"{PREFIX}/release-concurrency", json={"max_concurrent_per_repo": 0})
+    assert resp.status_code == 400
+
+    # Neither rejected write may touch the persisted config.
+    resp = client.get(f"{PREFIX}/release-mode")
+    body = resp.json()
+    assert body["max_in_progress_per_profile"] == 1
+    assert body["max_concurrent_per_repo"] == 1
+
+
+def test_release_concurrency_empty_body_rejected(client, kanban_home):
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 0})
+
+    resp = client.post(f"{PREFIX}/release-concurrency", json={})
+    assert resp.status_code == 400
