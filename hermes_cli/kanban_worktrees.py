@@ -939,14 +939,24 @@ def _create_parked_release_gate_child(
         # unchanged, byte-exact today's behaviour, guard-free by explicit
         # operator opt-in.
         _spawn_gate_activation_logged(conn, child_id, payload, mode="auto")
+        # Mutual-exclusion signal: a deploy was just spawned for this web/
+        # chain-tip, so complete_task() must NOT also run maybe_auto_release's
+        # release_chain (that would be a second, unsynchronized deploy_dashboard
+        # run / dashboard restart for the same completion).
+        outcome["release_gate_auto_executed"] = True
     else:
         # AD-S2: the global ``release.autonomous`` switch also auto-executes the
         # gate — but only through the guarded hook (kill-switch on AND every
         # auto_release guard green). Off / any guard held → the child stays
         # parked (byte-exact today's behaviour when the switch is off).
-        maybe_auto_execute_gate(
+        if maybe_auto_execute_gate(
             conn, child_id, source_task_id=task_id, root_id=root_id, payload=payload,
-        )
+        ):
+            # Same mutual-exclusion signal as the mode:auto branch above — only
+            # set when the guarded hook actually spawned the detached activation
+            # (a held/parked gate leaves it False so a non-web or guard-held chain
+            # still reaches maybe_auto_release unchanged).
+            outcome["release_gate_auto_executed"] = True
     return child_id
 
 

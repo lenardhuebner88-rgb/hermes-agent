@@ -11767,7 +11767,22 @@ def complete_task(
     try:
         from hermes_cli import auto_release as _auto_release
 
-        _ar_outcome = _auto_release.maybe_auto_release(conn, task_id)
+        if _wt_outcome and _wt_outcome.get("release_gate_auto_executed"):
+            # Mutual-exclusion (double-deploy guard): the worker-isolation
+            # integrator already spawned a release-gate activation
+            # (deploy_dashboard.sh) for this web/ chain-tip via the parked-gate
+            # path earlier in THIS complete_task(). Skip maybe_auto_release's own
+            # release_chain deploy so a single completion triggers at most ONE
+            # dashboard restart. A held/non-web chain leaves the flag unset and
+            # reaches maybe_auto_release unchanged.
+            _log.info(
+                "auto-release: skipping chain-release for %s "
+                "(release-gate already auto-executed this completion)",
+                task_id,
+            )
+            _ar_outcome = None
+        else:
+            _ar_outcome = _auto_release.maybe_auto_release(conn, task_id)
         if _ar_outcome is not None:
             with write_txn(conn):
                 _append_event(conn, task_id, "auto_release", _ar_outcome)

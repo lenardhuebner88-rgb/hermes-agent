@@ -3110,6 +3110,98 @@ def test_autonomous_switch_auto_executes_parked_release_gate(
     assert "--json" in argv[i:]
 
 
+def test_autonomous_auto_execute_sets_mutual_exclusion_flag(
+    kanban_home, monkeypatch,
+):
+    """Double-deploy guard: when the AD-S2 hook auto-executes the parked gate,
+    ``_create_parked_release_gate_child`` marks the integration ``outcome`` with
+    ``release_gate_auto_executed`` so ``complete_task`` skips
+    ``maybe_auto_release``'s own ``release_chain`` deploy — a single completion
+    triggers at most ONE ``deploy_dashboard.sh`` run / dashboard restart."""
+    from hermes_cli import auto_release
+
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": True, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
+    monkeypatch.setattr(
+        kwt.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="complete",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        outcome = {"merge_commit": "deadbeefcafe"}
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, outcome,
+        )
+
+    assert child_id is not None
+    assert outcome.get("release_gate_auto_executed") is True
+
+
+def test_mode_auto_sets_mutual_exclusion_flag(kanban_home, monkeypatch):
+    """The operator-forced ``release_gate.mode:auto`` path also spawns a deploy,
+    so it too flags the outcome — closing the same double-deploy window for the
+    mode:auto + release.autonomous combination."""
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "auto")
+    monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
+    monkeypatch.setattr(
+        kwt.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        outcome = {"merge_commit": "deadbeefcafe"}
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, outcome,
+        )
+
+    assert child_id is not None
+    assert outcome.get("release_gate_auto_executed") is True
+
+
+def test_held_gate_leaves_mutual_exclusion_flag_unset(kanban_home, monkeypatch):
+    """Kill-switch OFF: the gate stays parked and the ``outcome`` is NOT flagged,
+    so ``complete_task`` still reaches ``maybe_auto_release`` unchanged — the fix
+    only suppresses the SECOND deploy, it never creates a deploy gap."""
+    from hermes_cli import auto_release
+
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": False, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    monkeypatch.setattr(
+        kwt.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="complete",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        outcome = {"merge_commit": "deadbeefcafe"}
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, outcome,
+        )
+
+    assert child_id is not None
+    assert "release_gate_auto_executed" not in outcome
+
+
 def test_autonomous_switch_off_parks_release_gate_byte_exact(
     kanban_home, monkeypatch,
 ):
