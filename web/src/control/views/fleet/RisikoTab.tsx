@@ -27,7 +27,7 @@ import { isOperatorQuestion } from "../../lib/fleet";
 import { TriageStrip } from "../../components/TriageStrip";
 import { ReleaseGateButton } from "../../components/ReleaseGateButton";
 import { useReleaseGateExecute } from "../../hooks/useControlData";
-import type { ReleaseStatusResponse } from "../../lib/schemas";
+import type { ReleaseStatusResponse, ReleaseModeResponse } from "../../lib/schemas";
 import { RisikoHero } from "./RisikoHero";
 import { RisikoActivity } from "./RisikoActivity";
 import { RisikoPulse } from "./RisikoPulse";
@@ -53,9 +53,12 @@ interface RisikoTabProps {
   /** Geparkte Release-Gates (kind === "release_gate_parked") — aus dem
    *  /control-Postfach hierher verschoben, einziges Zuhause der Aktion. */
   releaseGateDecisions: KanbanDecision[];
-  /** kanban.max_in_progress — GET /workers `cap` (F4), null = unconfiguriert. */
-  cap: number | null;
-  /** GET /release-status — Autonomie-Kill-Switch-State + Aktivitäts-Timeline. */
+  /** GET /release-mode — Hero-Cockpit-Read-State (autonomous, max_tier_autonomous,
+   *  pause_on_red_streak, red_streak, max_in_progress); POST-Twins schreiben zurück. */
+  releaseMode: ReleaseModeResponse | null;
+  /** Nach einem erfolgreichen Hero-Write neu laden. */
+  onReleaseModeChanged?: () => void | Promise<void>;
+  /** GET /release-status — Aktivitäts-Timeline (recent/anchors). */
   releaseStatus: ReleaseStatusResponse | null;
   /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
   onTaskChanged?: () => void | Promise<void>;
@@ -75,7 +78,8 @@ export function RisikoTab({
   activeWorkers,
   lanesCatalog,
   releaseGateDecisions,
-  cap,
+  releaseMode,
+  onReleaseModeChanged,
   releaseStatus,
   onTaskChanged,
 }: RisikoTabProps) {
@@ -97,7 +101,7 @@ export function RisikoTab({
   return (
     <div className="risiko-v4">
       {/* Zone 1: Hero Auto-Mode Cockpit */}
-      <RisikoHero releaseStatus={releaseStatus} cap={cap} />
+      <RisikoHero releaseMode={releaseMode} onReleaseModeChanged={onReleaseModeChanged} />
       <p className="rk-console-foot">Reine Deklaration · Rollback ist das Netz · kein Pre-Gate</p>
 
       {/* Zone 2: Braucht dich — Ausnahmen, die die Autonomie eskaliert hat */}

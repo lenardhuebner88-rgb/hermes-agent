@@ -767,6 +767,23 @@ export const ReleaseStatusResponseSchema = z.object({
 export type ReleaseStatusEvent = z.infer<typeof ReleaseStatusEventSchema>;
 export type ReleaseStatusResponse = z.infer<typeof ReleaseStatusResponseSchema>;
 
+// GET/POST /release-mode (plugin_api.py get_release_mode_endpoint /
+// set_release_mode_endpoint, AD-S4 + follow-up) — the WRITE-backed twin of
+// release-status: same autonomous/max_tier_autonomous/pause_on_red_streak,
+// plus red_streak (current consecutive-red-nights count, the "x" in the
+// Risiko-Tab safety line) and max_in_progress (kanban.max_in_progress).
+// Feeds the Hero cockpit; POST /release-mode + POST /release-concurrency
+// write it back.
+export const ReleaseModeResponseSchema = z.object({
+  autonomous: z.boolean().catch(false),
+  max_tier_autonomous: z.enum(["standard", "review", "critical"]).catch("review"),
+  pause_on_red_streak: z.coerce.number().nullable().catch(null),
+  red_streak: z.coerce.number().catch(0),
+  max_in_progress: z.coerce.number().catch(3),
+});
+export type ReleaseModeResponse = z.infer<typeof ReleaseModeResponseSchema>;
+export type ReleaseTier = ReleaseModeResponse["max_tier_autonomous"];
+
 export const ReviewVerdictsResponseSchema = z.object({
   reviews: z.array(KanbanReviewSchema).catch([]),
   count: z.coerce.number().catch(0),

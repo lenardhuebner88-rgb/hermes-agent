@@ -126,3 +126,90 @@ def test_release_mode_preserves_sibling_keys(client, kanban_home):
     # Sibling policy knobs must survive the atomic YAML round-trip.
     assert body["max_tier_autonomous"] == "critical"
     assert body["pause_on_red_streak"] == 3
+
+
+def test_release_mode_max_tier_autonomous_round_trip(client, kanban_home):
+    """POST max_tier_autonomous review->critical, autonomous untouched."""
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 0})
+
+    resp = client.post(f"{PREFIX}/release-mode", json={"max_tier_autonomous": "critical"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["max_tier_autonomous"] == "critical"
+    # A Reichweite-only POST must not clobber the sibling autonomous flag.
+    assert body["autonomous"] is True
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["max_tier_autonomous"] == "critical"
+    assert body["autonomous"] is True
+
+
+def test_release_mode_max_tier_autonomous_rejects_invalid_tier(client, kanban_home):
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 0})
+
+    resp = client.post(f"{PREFIX}/release-mode", json={"max_tier_autonomous": "high"})
+    assert resp.status_code == 400
+
+    # Rejected write must not touch the persisted config.
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.json()["max_tier_autonomous"] == "review"
+
+
+def test_release_mode_requires_at_least_one_field(client, kanban_home):
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 0})
+
+    resp = client.post(f"{PREFIX}/release-mode", json={})
+    assert resp.status_code == 400
+
+
+def test_release_mode_exposes_red_streak_and_max_in_progress(client, kanban_home):
+    """GET /release-mode also carries the safety-line inputs the old
+    /release-status endpoint never exposed: red_streak (advisory, defaults
+    to 0 with no gate-records file) and max_in_progress (kanban.max_in_progress,
+    default 3 when unset)."""
+    _write_config(kanban_home, {"autonomous": True, "max_tier_autonomous": "review", "pause_on_red_streak": 3})
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["red_streak"] == 0
+    assert body["max_in_progress"] == 3
+
+
+def test_release_concurrency_round_trip(client, kanban_home):
+    """POST /release-concurrency 3->5, GET /release-mode + response reflect it."""
+    cfg = kanban_home / "config.yaml"
+    cfg.write_text("release:\n  autonomous: true\nkanban:\n  max_in_progress: 3\n")
+
+    resp = client.post(f"{PREFIX}/release-concurrency", json={"max_in_progress": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["max_in_progress"] == 5
+    assert "backup" in body and body["backup"].endswith("config.yaml.bak")
+
+    backup_path = Path(body["backup"])
+    assert backup_path.is_file()
+    assert "max_in_progress: 3" in backup_path.read_text().lower()
+
+    live_text = cfg.read_text().lower()
+    assert "max_in_progress: 5" in live_text
+
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.status_code == 200
+    assert resp.json()["max_in_progress"] == 5
+
+
+def test_release_concurrency_rejects_below_one(client, kanban_home):
+    cfg = kanban_home / "config.yaml"
+    cfg.write_text("release:\n  autonomous: true\nkanban:\n  max_in_progress: 3\n")
+
+    resp = client.post(f"{PREFIX}/release-concurrency", json={"max_in_progress": 0})
+    assert resp.status_code == 400
+
+    # Rejected write must not touch the persisted config.
+    resp = client.get(f"{PREFIX}/release-mode")
+    assert resp.json()["max_in_progress"] == 3

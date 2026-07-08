@@ -4,13 +4,15 @@
  * Master-Kill-Switch (release.autonomous) + Reichweite-Segment
  * (max_tier_autonomous) + EIN Stepper "Max. parallele Profile"
  * (kanban.max_in_progress) + read-only Sicherheitsnetz-Zeile
- * (pause_on_red_streak). Kein Per-Profil-Matrix (Piet 2026-07-07 verworfen).
+ * (pause_on_red_streak / red_streak). Kein Per-Profil-Matrix (Piet
+ * 2026-07-07 verworfen).
  *
- * Alle drei Kontrollen sind READ-wired gegen echte Endpoints (release-status,
- * workers.cap); die WRITE-Seite (AD-S4 Toggle/Tier-Endpoint, ein neuer
- * kanban.max_in_progress-Setter) ist noch nicht gemerged — Controls sind daher
- * disabled mit "Backend folgt"-Hinweis statt einen nicht existierenden Endpoint
- * zu erfinden. Zwei stub-Funktionen markieren die Verdrahtungs-Naht.
+ * Live-wired gegen GET/POST /api/plugins/kanban/release-mode (AD-S4 +
+ * 2026-07-08 Follow-up: max_tier_autonomous-Write, red_streak,
+ * max_in_progress) und POST /api/plugins/kanban/release-concurrency (neuer
+ * kanban.max_in_progress-Setter). Kein Stub mehr — beide POSTs schreiben
+ * wirklich; die Buttons sind nur WÄHREND eines laufenden Writes disabled
+ * (Doppelklick-Schutz), nicht mehr grundsätzlich.
  *
  * ⚠️ Divergenz ggü. dem Mockup: die HTML-Vorlage zeigt Reichweite-Segmente
  * "review · high · critical" — der reale Backend-Tier-Enum (auto_release.py
@@ -18,35 +20,45 @@
  * serverseitig nicht. Gebaut gegen den echten Enum statt die Fantasie-Stufe zu
  * übernehmen.
  */
-import type { ReleaseStatusResponse } from "../../lib/schemas";
+import { useReleaseConcurrencyWrite, useReleaseModeWrite } from "../../hooks/useControlData";
+import type { ReleaseModeResponse, ReleaseTier } from "../../lib/schemas";
 
-const TIERS = ["standard", "review", "critical"] as const;
-
-// TODO(AD-S4): wire once POST /api/plugins/kanban/release-mode lands
-// (t_3816e7fc, held). Body shape per handoff: {autonomous?, max_tier_autonomous?}.
-// No-op today — the control stays read-only + disabled until this seam is filled.
-async function writeReleaseMode(_next: { autonomous?: boolean; max_tier_autonomous?: string }): Promise<void> {
-  return Promise.resolve();
-}
-
-// TODO(max_in_progress setter): wire once an atomic config-write endpoint for
-// kanban.max_in_progress lands (not yet merged — anti-scope for this build, no
-// backend touches). No-op today — the stepper stays read-only + disabled.
-async function writeConcurrency(_next: number): Promise<void> {
-  return Promise.resolve();
-}
+const TIERS: readonly ReleaseTier[] = ["standard", "review", "critical"];
 
 export interface RisikoHeroProps {
-  releaseStatus: ReleaseStatusResponse | null;
-  /** kanban.max_in_progress — GET /workers `cap` (F4), null = unconfigured. */
-  cap: number | null;
+  releaseMode: ReleaseModeResponse | null;
+  /** Nach einem erfolgreichen Write aufgerufen — lädt release-mode neu, damit
+   *  die Anzeige den persistierten Config-Stand zeigt (optimistic-then-refetch). */
+  onReleaseModeChanged?: () => void | Promise<void>;
 }
 
-export function RisikoHero({ releaseStatus, cap }: RisikoHeroProps) {
-  const autonomous = releaseStatus?.autonomous ?? false;
-  const tier = releaseStatus?.max_tier_autonomous ?? "review";
-  const streak = releaseStatus?.pause_on_red_streak;
-  const backendTodo = "Backend folgt (AD-S4)";
+export function RisikoHero({ releaseMode, onReleaseModeChanged }: RisikoHeroProps) {
+  const modeWrite = useReleaseModeWrite();
+  const concurrencyWrite = useReleaseConcurrencyWrite();
+
+  const autonomous = releaseMode?.autonomous ?? false;
+  const tier: ReleaseTier = releaseMode?.max_tier_autonomous ?? "review";
+  const pauseOnRedStreak = releaseMode?.pause_on_red_streak;
+  const redStreak = releaseMode?.red_streak ?? 0;
+  const maxInProgress = releaseMode?.max_in_progress ?? null;
+
+  async function handleToggle() {
+    const res = await modeWrite.run({ autonomous: !autonomous });
+    if (res.ok) void onReleaseModeChanged?.();
+  }
+
+  async function handleTier(next: ReleaseTier) {
+    if (next === tier || modeWrite.busy) return;
+    const res = await modeWrite.run({ max_tier_autonomous: next });
+    if (res.ok) void onReleaseModeChanged?.();
+  }
+
+  async function handleStep(delta: number) {
+    const next = Math.max(1, (maxInProgress ?? 1) + delta);
+    if (next === maxInProgress || concurrencyWrite.busy) return;
+    const res = await concurrencyWrite.run(next);
+    if (res.ok) void onReleaseModeChanged?.();
+  }
 
   return (
     <section
@@ -68,10 +80,9 @@ export function RisikoHero({ releaseStatus, cap }: RisikoHeroProps) {
           role="switch"
           aria-checked={autonomous}
           aria-label="Autonomie-Kill-Switch"
-          disabled
-          title={backendTodo}
+          disabled={modeWrite.busy}
           className="rk-switch"
-          onClick={() => { void writeReleaseMode({ autonomous: !autonomous }); }}
+          onClick={() => { void handleToggle(); }}
         >
           <span className="rk-switch-knob" aria-hidden="true" />
         </button>
@@ -83,15 +94,15 @@ export function RisikoHero({ releaseStatus, cap }: RisikoHeroProps) {
             <span className="rk-ctl-cap">Reichweite</span>
             <span className="rk-ctl-hint">wie weit Autonomie reicht, bevor sie eskaliert</span>
           </div>
-          <div className="rk-seg" role="group" aria-label="Reichweite" title={backendTodo}>
+          <div className="rk-seg" role="group" aria-label="Reichweite">
             {TIERS.map((t) => (
               <button
                 key={t}
                 type="button"
-                disabled
+                disabled={modeWrite.busy}
                 aria-pressed={t === tier}
                 className={`rk-seg-opt ${t === tier ? "rk-seg-opt-on" : ""}`}
-                onClick={() => { void writeReleaseMode({ max_tier_autonomous: t }); }}
+                onClick={() => { void handleTier(t); }}
               >
                 {t}
               </button>
@@ -103,23 +114,23 @@ export function RisikoHero({ releaseStatus, cap }: RisikoHeroProps) {
             <span className="rk-ctl-cap">Max. parallele Profile</span>
             <span className="rk-ctl-hint">wie viele Profile gleichzeitig arbeiten dürfen</span>
           </div>
-          <div className="rk-stepper" title={backendTodo}>
+          <div className="rk-stepper">
             <button
               type="button"
-              disabled
+              disabled={concurrencyWrite.busy || (maxInProgress ?? 1) <= 1}
               aria-label="weniger parallele Profile"
               className="rk-step-btn"
-              onClick={() => { void writeConcurrency(Math.max(1, (cap ?? 1) - 1)); }}
+              onClick={() => { void handleStep(-1); }}
             >
               −
             </button>
-            <span className="rk-step-val">{cap ?? "—"}</span>
+            <span className="rk-step-val">{maxInProgress ?? "—"}</span>
             <button
               type="button"
-              disabled
+              disabled={concurrencyWrite.busy}
               aria-label="mehr parallele Profile"
               className="rk-step-btn"
-              onClick={() => { void writeConcurrency((cap ?? 0) + 1); }}
+              onClick={() => { void handleStep(1); }}
             >
               +
             </button>
@@ -127,15 +138,18 @@ export function RisikoHero({ releaseStatus, cap }: RisikoHeroProps) {
         </div>
       </div>
 
+      {modeWrite.error ? <p className="rk-write-error" role="alert">{modeWrite.error}</p> : null}
+      {concurrencyWrite.error ? <p className="rk-write-error" role="alert">{concurrencyWrite.error}</p> : null}
+
       <div className="rk-safety">
         <span className="rk-safety-ico" aria-hidden="true">🛡</span>
-        {streak != null ? (
+        {pauseOnRedStreak != null && pauseOnRedStreak > 0 ? (
           <span className="rk-safety-txt">
-            Auto-Stopp nach <b>{streak} roten</b> in Folge
+            Auto-Stopp nach <b>{pauseOnRedStreak} roten</b> in Folge · Streak <b>{redStreak}/{pauseOnRedStreak}</b>
           </span>
         ) : (
           <span className="rk-safety-txt">
-            Guards aktiv — Streak-Stand noch nicht vom Backend exponiert
+            Guards aktiv — kein Auto-Stopp-Schwellenwert konfiguriert
           </span>
         )}
       </div>

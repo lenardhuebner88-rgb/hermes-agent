@@ -3521,8 +3521,58 @@ def get_release_status(
     }
 
 
+_RELEASE_TIERS = {"standard", "review", "critical"}
+
+
 class ReleaseModeBody(BaseModel):
-    autonomous: bool
+    # Both optional so a caller can flip just one knob (e.g. only Reichweite)
+    # without having to resend the other — see set_release_mode_endpoint.
+    autonomous: Optional[bool] = None
+    max_tier_autonomous: Optional[str] = None
+
+
+class ReleaseConcurrencyBody(BaseModel):
+    max_in_progress: int
+
+
+def _read_max_in_progress() -> int:
+    """kanban.max_in_progress from the ROOT config.yaml, same direct-read
+    style as ``_release_config()`` (not the cached ``load_config()`` —
+    avoids any staleness right after an atomic write). Default 3, the F4
+    default already used by the /workers `cap` field; graceful on any
+    parse trouble (advisory value only)."""
+    try:
+        import yaml
+
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if not cfg_path.is_file():
+            return 3
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            root_cfg = yaml.safe_load(fh) or {}
+        kanban_cfg = root_cfg.get("kanban") or {}
+        if not isinstance(kanban_cfg, dict):
+            return 3
+        raw = kanban_cfg.get("max_in_progress")
+        if isinstance(raw, (int, float)) and int(raw) >= 1:
+            return int(raw)
+        return 3
+    except Exception:
+        return 3
+
+
+def _read_red_streak() -> int:
+    """Current consecutive-red-nights count (the "x" in the Risiko-Tab
+    safety line "Auto-Stopp nach N roten · Streak x/N") — same ledger read
+    ``auto_release.maybe_auto_release`` uses for ``pause_on_red_streak``.
+    Advisory only: any failure degrades to 0, never blocks the endpoint."""
+    try:
+        from hermes_cli import vision_metrics as _vm
+
+        return _vm.red_streak_from_head(_vm.read_gate_records())
+    except Exception:
+        return 0
 
 
 def _release_mode_view() -> dict:
@@ -3536,28 +3586,41 @@ def _release_mode_view() -> dict:
         "autonomous": cfg["autonomous"],
         "max_tier_autonomous": cfg["max_tier_autonomous"],
         "pause_on_red_streak": cfg["pause_on_red_streak"],
+        "red_streak": _read_red_streak(),
+        "max_in_progress": _read_max_in_progress(),
     }
 
 
 @router.get("/release-mode")
 def get_release_mode_endpoint():
-    """GET /release-mode — autonomous, max_tier_autonomous, pause_on_red_streak.
+    """GET /release-mode — autonomous, max_tier_autonomous, pause_on_red_streak,
+    red_streak, max_in_progress.
 
-    The read-side of the Risiko-Tab toggle; the POST twin flips
-    ``release.autonomous`` in the root config.yaml atomically.
+    The read-side of the Risiko-Tab Hero cockpit; the POST twins
+    (``/release-mode``, ``/release-concurrency``) flip these atomically.
     """
     return _release_mode_view()
 
 
 @router.post("/release-mode")
 def set_release_mode_endpoint(payload: ReleaseModeBody):
-    """POST /release-mode — flip ``release.autonomous`` atomically.
+    """POST /release-mode — flip ``release.autonomous`` and/or
+    ``release.max_tier_autonomous`` atomically.
 
-    Backup → write → reload → return new state.  Same auth/loopback
+    Both fields are optional; only the fields present in the body are
+    written (a Reichweite-only POST does not clobber autonomous, and vice
+    versa). Backup → write → reload → return new state. Same auth/loopback
     protection as every other mutating kanban endpoint (enforced centrally
     by the web-server middleware on ``/api/plugins/kanban/...``).
     """
-    from hermes_cli.auto_release import _release_config
+    if payload.autonomous is None and payload.max_tier_autonomous is None:
+        raise HTTPException(status_code=400, detail="at least one of autonomous, max_tier_autonomous required")
+    if payload.max_tier_autonomous is not None and payload.max_tier_autonomous not in _RELEASE_TIERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_tier_autonomous must be one of {sorted(_RELEASE_TIERS)}",
+        )
+
     from hermes_constants import get_default_hermes_root
     from utils import atomic_roundtrip_yaml_update
 
@@ -3566,18 +3629,46 @@ def set_release_mode_endpoint(payload: ReleaseModeBody):
     if cfg_path.is_file():
         backup_path.write_bytes(cfg_path.read_bytes())
 
-    atomic_roundtrip_yaml_update(cfg_path, "release.autonomous", payload.autonomous)
+    if payload.autonomous is not None:
+        atomic_roundtrip_yaml_update(cfg_path, "release.autonomous", payload.autonomous)
+    if payload.max_tier_autonomous is not None:
+        atomic_roundtrip_yaml_update(cfg_path, "release.max_tier_autonomous", payload.max_tier_autonomous)
 
     # Reload through the same path the auto-release loop uses so the
     # returned state reflects what the next activation will observe.
-    new_state = _release_config()
+    new_state = _release_mode_view()
     return {
         "ok": True,
         "autonomous": new_state["autonomous"],
         "max_tier_autonomous": new_state["max_tier_autonomous"],
         "pause_on_red_streak": new_state["pause_on_red_streak"],
+        "red_streak": new_state["red_streak"],
+        "max_in_progress": new_state["max_in_progress"],
         "backup": str(backup_path),
     }
+
+
+@router.post("/release-concurrency")
+def set_release_concurrency_endpoint(payload: ReleaseConcurrencyBody):
+    """POST /release-concurrency — set ``kanban.max_in_progress`` atomically.
+
+    Backup → write → reload → return ``{ok, max_in_progress}``. Same
+    auth/loopback protection as every other mutating kanban endpoint.
+    """
+    if payload.max_in_progress < 1:
+        raise HTTPException(status_code=400, detail="max_in_progress must be >= 1")
+
+    from hermes_constants import get_default_hermes_root
+    from utils import atomic_roundtrip_yaml_update
+
+    cfg_path = get_default_hermes_root() / "config.yaml"
+    backup_path = cfg_path.with_suffix(".yaml.bak")
+    if cfg_path.is_file():
+        backup_path.write_bytes(cfg_path.read_bytes())
+
+    atomic_roundtrip_yaml_update(cfg_path, "kanban.max_in_progress", payload.max_in_progress)
+
+    return {"ok": True, "max_in_progress": _read_max_in_progress(), "backup": str(backup_path)}
 
 
 @router.get("/epics")

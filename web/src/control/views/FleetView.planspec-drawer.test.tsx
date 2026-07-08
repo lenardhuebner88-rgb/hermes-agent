@@ -21,6 +21,7 @@ const hooks = vi.hoisted(() => ({
   usePlanSpecDetail: vi.fn(),
   useKanbanDecisionQueue: vi.fn(),
   useReleaseStatus: vi.fn(),
+  useReleaseMode: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => hooks);
@@ -86,6 +87,7 @@ function setHookDefaults() {
   hooks.useAccountUsage.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useKanbanDecisionQueue.mockReturnValue({ data: { decisions: [], count: 0, checked_at: 0 }, loading: false, error: null, reload });
   hooks.useReleaseStatus.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useReleaseMode.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.usePlanSpecDetail.mockImplementation((path: string | null) => {
     return {
       data: path

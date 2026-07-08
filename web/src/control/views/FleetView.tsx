@@ -12,7 +12,7 @@
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useMemo, useEffect } from "react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus } from "../hooks/useControlData";
+import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -85,6 +85,7 @@ export function FleetView() {
   const pressureStatus = usePressureStatus();
   const decisionQueue = useKanbanDecisionQueue();
   const releaseStatus = useReleaseStatus();
+  const releaseMode = useReleaseMode();
 
   const now = nowSec();
 
@@ -270,7 +271,8 @@ export function FleetView() {
                 activeWorkers={activeWorkers}
                 lanesCatalog={lanesCatalog.data}
                 releaseGateDecisions={releaseGateDecisions}
-                cap={workers.data?.cap ?? null}
+                releaseMode={releaseMode.data}
+                onReleaseModeChanged={releaseMode.reload}
                 releaseStatus={releaseStatus.data}
                 onTaskChanged={board.reload}
               />

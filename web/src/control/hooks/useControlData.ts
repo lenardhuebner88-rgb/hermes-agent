@@ -67,9 +67,10 @@ import {
   TaskDeliverablesResponseSchema,
   LanesCatalogResponseSchema,
   ReleaseStatusResponseSchema,
+  ReleaseModeResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse } from "../lib/schemas";
+import type { TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
@@ -2128,8 +2129,9 @@ export function usePressureStatus() {
   );
 }
 
-// Auto-release kill-switch state + timeline — feeds the Risiko-Tab Hero cockpit
-// (autonomous/max_tier_autonomous) and Aktivität rail (recent/anchors). Same
+// Auto-release timeline (recent/anchors) — feeds the Risiko-Tab Aktivität rail.
+// (The Hero cockpit itself reads autonomous/max_tier_autonomous/red_streak/
+// max_in_progress from the WRITE-backed useReleaseMode() below instead.) Same
 // GET /api/plugins/kanban/release-status AutoReleaseTile polls inline; kept as
 // its own hook (not a shared subscription with AutoReleaseTile) since the two
 // live in mutually-exclusive Fleet subtabs (Plan vs. Risiko) — no double-poll.
@@ -2143,6 +2145,86 @@ export function useReleaseStatus() {
     ),
     15000,
   );
+}
+
+// Read-side of the Risiko-Tab Hero cockpit: autonomous, max_tier_autonomous,
+// pause_on_red_streak, red_streak (current streak, the "x" in "Streak x/N")
+// and max_in_progress (kanban.max_in_progress). The two POST twins below
+// write it back; callers reload() this after a successful write so the UI
+// reflects the persisted config rather than staying purely optimistic.
+export function useReleaseMode() {
+  return usePolling<ReleaseModeResponse>(
+    "release-mode",
+    async () => parseOrThrow(
+      ReleaseModeResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/release-mode"),
+      "release-mode",
+    ),
+    15000,
+  );
+}
+
+// POST /release-mode — flips release.autonomous and/or max_tier_autonomous.
+// Both fields optional so a caller can send just the one knob it changed.
+export function useReleaseModeWrite() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (next: { autonomous?: boolean; max_tier_autonomous?: string }) => {
+    setBusy(true);
+    if (aliveRef.current) setError(null);
+    try {
+      const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        "/api/plugins/kanban/release-mode",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) },
+      );
+      if (res?.ok === false) {
+        const detail = res.detail || "Änderung fehlgeschlagen.";
+        if (aliveRef.current) setError(detail);
+        return { ok: false as const, detail };
+      }
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, []);
+  return { busy, error, run };
+}
+
+// POST /release-concurrency — writes kanban.max_in_progress.
+export function useReleaseConcurrencyWrite() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (maxInProgress: number) => {
+    setBusy(true);
+    if (aliveRef.current) setError(null);
+    try {
+      const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        "/api/plugins/kanban/release-concurrency",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_in_progress: maxInProgress }) },
+      );
+      if (res?.ok === false) {
+        const detail = res.detail || "Änderung fehlgeschlagen.";
+        if (aliveRef.current) setError(detail);
+        return { ok: false as const, detail };
+      }
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, []);
+  return { busy, error, run };
 }
 
 export function useOperatorInventory() {

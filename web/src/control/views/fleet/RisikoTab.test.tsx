@@ -20,7 +20,7 @@ vi.mock("@/lib/api", async () => {
 import { RisikoTab } from "./RisikoTab";
 import { de } from "../../i18n/de";
 import type { KanbanDecision } from "../../lib/schemas";
-import type { ReleaseStatusResponse } from "../../lib/schemas";
+import type { ReleaseStatusResponse, ReleaseModeResponse } from "../../lib/schemas";
 
 const TASK_ID = "t_9f21ac04";
 
@@ -63,8 +63,20 @@ const RELEASE_STATUS_FIXTURE: ReleaseStatusResponse = {
   anchors: ["release/pre-deploy/8aeb1773f"],
 };
 
+// GET /api/plugins/kanban/release-mode — real shape (get_release_mode_endpoint,
+// AD-S4 + 2026-07-08 follow-up: red_streak, max_in_progress).
+const RELEASE_MODE_FIXTURE: ReleaseModeResponse = {
+  autonomous: true,
+  max_tier_autonomous: "review",
+  pause_on_red_streak: 3,
+  red_streak: 1,
+  max_in_progress: 3,
+};
+
 function defaultFetchImpl(url: string) {
   const u = String(url);
+  if (u.includes("/release-concurrency")) return Promise.resolve({ ok: true, max_in_progress: 3 });
+  if (u.includes("/release-mode")) return Promise.resolve(RELEASE_MODE_FIXTURE);
   if (u.includes("/release-gate")) return Promise.resolve({ ok: true });
   if (u.includes("/release-status")) return Promise.resolve(RELEASE_STATUS_FIXTURE);
   if (u.includes("/runs/failures")) return Promise.resolve({ hours: 48, count: 0, truncated: false, failures: [] });
@@ -91,7 +103,8 @@ function renderRisikoTab(overrides: {
   releaseGateDecisions?: KanbanDecision[];
   blockedTasks?: Array<{ id: string; title: string; status: string; block_reason?: string | null; root_id?: string | null }>;
   releaseStatus?: ReleaseStatusResponse | null;
-  cap?: number | null;
+  releaseMode?: ReleaseModeResponse | null;
+  onReleaseModeChanged?: () => void | Promise<void>;
 } = {}) {
   return render(
     <MemoryRouter>
@@ -103,7 +116,8 @@ function renderRisikoTab(overrides: {
         activeWorkers={[]}
         lanesCatalog={null}
         releaseGateDecisions={overrides.releaseGateDecisions ?? []}
-        cap={overrides.cap ?? 3}
+        releaseMode={overrides.releaseMode ?? RELEASE_MODE_FIXTURE}
+        onReleaseModeChanged={overrides.onReleaseModeChanged}
         releaseStatus={overrides.releaseStatus ?? RELEASE_STATUS_FIXTURE}
       />
     </MemoryRouter>,
@@ -271,19 +285,112 @@ describe("RisikoTab — Operator-Halts", () => {
   });
 });
 
-describe("RisikoTab — Hero cockpit", () => {
+describe("RisikoTab — Hero cockpit (read)", () => {
   it("shows the green AUTONOM headline when release.autonomous is true", () => {
-    renderRisikoTab({ releaseStatus: { ...RELEASE_STATUS_FIXTURE, autonomous: true } });
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, autonomous: true } });
     expect(screen.getByText("AUTONOM")).toBeTruthy();
   });
 
   it("shows the grey Kill-Switch-AUS headline when release.autonomous is false", () => {
-    renderRisikoTab({ releaseStatus: { ...RELEASE_STATUS_FIXTURE, autonomous: false } });
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, autonomous: false } });
     expect(screen.getByText("Kill-Switch AUS")).toBeTruthy();
   });
 
-  it("reads the concurrency stepper value from the real workers cap, not a fabricated default", () => {
-    renderRisikoTab({ cap: 5 });
+  it("reads the concurrency stepper value from the real release-mode max_in_progress, not a fabricated default", () => {
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 5 } });
     expect(screen.getByText("5")).toBeTruthy();
+  });
+
+  it("shows the real red_streak/pause_on_red_streak safety line", () => {
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, pause_on_red_streak: 3, red_streak: 2 } });
+    expect(screen.getByText(/Auto-Stopp nach/)).toBeTruthy();
+    expect(screen.getByText("2/3")).toBeTruthy();
+  });
+
+  it("falls back to the Guards-aktiv line when pause_on_red_streak is 0 (disabled)", () => {
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, pause_on_red_streak: 0, red_streak: 0 } });
+    expect(screen.getByText(/kein Auto-Stopp-Schwellenwert konfiguriert/)).toBeTruthy();
+  });
+});
+
+describe("RisikoTab — Hero cockpit (write)", () => {
+  it("POSTs {autonomous} to /release-mode on toggle click and reloads on success", async () => {
+    const onReleaseModeChanged = vi.fn();
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-mode") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ autonomous: false });
+        return Promise.resolve({ ok: true, autonomous: false, max_tier_autonomous: "review", pause_on_red_streak: 3, red_streak: 1, max_in_progress: 3 });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, autonomous: true }, onReleaseModeChanged });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Autonomie-Kill-Switch" }));
+
+    await waitFor(() => expect(onReleaseModeChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("POSTs {max_tier_autonomous} to /release-mode on a Reichweite-segment click", async () => {
+    const onReleaseModeChanged = vi.fn();
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-mode") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ max_tier_autonomous: "critical" });
+        return Promise.resolve({ ok: true, autonomous: true, max_tier_autonomous: "critical", pause_on_red_streak: 3, red_streak: 1, max_in_progress: 3 });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_tier_autonomous: "review" }, onReleaseModeChanged });
+
+    fireEvent.click(screen.getByRole("button", { name: "critical" }));
+
+    await waitFor(() => expect(onReleaseModeChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("uses the real standard/review/critical tier enum, not the mockup's review/high/critical", () => {
+    renderRisikoTab();
+    expect(screen.getByRole("button", { name: "standard" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "critical" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "high" })).toBeNull();
+  });
+
+  it("POSTs {max_in_progress} to /release-concurrency on a stepper click", async () => {
+    const onReleaseModeChanged = vi.fn();
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-concurrency") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ max_in_progress: 4 });
+        return Promise.resolve({ ok: true, max_in_progress: 4 });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 3 }, onReleaseModeChanged });
+
+    fireEvent.click(screen.getByRole("button", { name: "mehr parallele Profile" }));
+
+    await waitFor(() => expect(onReleaseModeChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("clamps the stepper decrement at 1 and never posts below it", () => {
+    renderRisikoTab({ releaseMode: { ...RELEASE_MODE_FIXTURE, max_in_progress: 1 } });
+    const decrement = screen.getByRole("button", { name: "weniger parallele Profile" }) as HTMLButtonElement;
+    expect(decrement.disabled).toBe(true);
+  });
+
+  it("surfaces a write error inline instead of swallowing it", async () => {
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/release-mode") && init?.method === "POST") {
+        return Promise.resolve({ ok: false, detail: "config.yaml gesperrt" });
+      }
+      return defaultFetchImpl(u);
+    });
+    renderRisikoTab();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Autonomie-Kill-Switch" }));
+
+    expect(await screen.findByText("config.yaml gesperrt")).toBeTruthy();
   });
 });
