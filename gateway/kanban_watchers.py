@@ -686,7 +686,7 @@ class _DispatchCaps:
 
 def _read_dispatch_caps(
     load_config: Callable[[], Any],
-) -> "tuple[_DispatchCaps, list[str]]":
+) -> "tuple[Optional[_DispatchCaps], list[str]]":
     """Resolve the live dispatcher concurrency caps from config.
 
     Extracted so the caps can be re-read on every dispatcher tick, mirroring
@@ -698,14 +698,19 @@ def _read_dispatch_caps(
     write was a silent no-op until a restart. Calling this every tick makes
     the effect land on the NEXT tick instead.
 
-    Returns ``(caps, warnings)``. ``warnings`` holds the same messages the
+    Returns ``(caps, warnings)`` where ``caps`` is a resolved
+    :class:`_DispatchCaps`, OR ``(None, warnings)`` when the config could not
+    be READ at all (``load_config()`` raised). ``None`` is the signal for the
+    caller to RETAIN its last-known caps rather than reset — dropping to
+    unbounded (``max_in_progress=None`` etc.) on a transient read failure
+    would be the opposite of safe. ``warnings`` holds the same messages the
     boot-time reader used to log inline for invalid values — callers decide
     when to actually log them (always at boot; only on change per tick, so a
     persistently-misconfigured value doesn't spam the log every tick).
 
-    Fails **safe** on a config-read error: returns the tightest known-safe
-    defaults (no spawn/in-progress/per-profile override, per-repo
-    serialization ON at concurrency 1) rather than an unbounded cap.
+    Note: an invalid VALUE (e.g. ``max_spawn: "abc"``) is still resolved to a
+    valid ``_DispatchCaps`` (that field ignored, warning appended) — only a
+    read/parse EXCEPTION yields ``None``.
     """
     warnings: "list[str]" = []
     try:
@@ -713,18 +718,9 @@ def _read_dispatch_caps(
     except Exception as exc:
         warnings.append(
             f"kanban dispatcher: cannot read dispatch caps ({exc}); "
-            "using safe defaults (no override, serialize_by_repo=True)"
+            "retaining last-known caps"
         )
-        return (
-            _DispatchCaps(
-                max_spawn=None,
-                max_in_progress=None,
-                max_in_progress_per_profile=None,
-                serialize_by_repo=True,
-                max_concurrent_per_repo=1,
-            ),
-            warnings,
-        )
+        return (None, warnings)
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
 
     raw_max_spawn = kanban_cfg.get("max_spawn", None)
@@ -2049,6 +2045,18 @@ class GatewayKanbanWatchersMixin:
         # dashboard/config write takes effect on the next tick, not only
         # after a gateway restart.
         _dispatch_caps, _dispatch_cap_warnings = _read_dispatch_caps(_load_config)
+        if _dispatch_caps is None:
+            # Config unreadable at boot (near-impossible — it was just read
+            # upstream). No last-known caps yet, so fall back to conservative
+            # defaults: no spawn/in-progress/per-profile override, per-repo
+            # serialization ON at concurrency 1.
+            _dispatch_caps = _DispatchCaps(
+                max_spawn=None,
+                max_in_progress=None,
+                max_in_progress_per_profile=None,
+                serialize_by_repo=True,
+                max_concurrent_per_repo=1,
+            )
         for _msg in _dispatch_cap_warnings:
             logger.warning(_msg)
         max_spawn = _dispatch_caps.max_spawn
@@ -2681,9 +2689,19 @@ class GatewayKanbanWatchersMixin:
                 # NEXT tick, not require a gateway restart. Only log when a
                 # resolved value actually changes, so an unchanged (or
                 # persistently invalid) config doesn't spam the log.
-                _dispatch_caps, _dispatch_cap_warnings = await asyncio.to_thread(
+                _new_caps, _dispatch_cap_warnings = await asyncio.to_thread(
                     _read_dispatch_caps, _load_config
                 )
+                if _new_caps is None:
+                    # Transient config-read failure this tick — RETAIN the
+                    # last-known caps rather than dropping to unbounded
+                    # (max_in_progress/per_profile=None). Log the read-failure
+                    # warning(s); atomic config writes make this near-impossible.
+                    for _msg in _dispatch_cap_warnings:
+                        logger.warning(_msg)
+                    _dispatch_caps = _last_dispatch_caps
+                else:
+                    _dispatch_caps = _new_caps
                 if _dispatch_caps != _last_dispatch_caps:
                     for _msg in _dispatch_cap_warnings:
                         logger.warning(_msg)

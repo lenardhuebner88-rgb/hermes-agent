@@ -91,22 +91,19 @@ def test_malformed_values_fall_back_with_warning():
     assert len(warnings) == 2
 
 
-def test_config_read_error_fails_safe():
-    """A transient config read failure must never widen concurrency —
-    returns the tightest safe caps (no override, serialize_by_repo=True)."""
+def test_config_read_error_returns_none_to_retain_last_known():
+    """A transient config READ failure must never widen concurrency. It returns
+    ``(None, warnings)`` — the signal for the tick loop to RETAIN its last-known
+    caps rather than reset to unbounded (max_in_progress/per_profile=None would
+    drop the global/per-profile cap for that tick). Codex-caught fail-safe."""
 
     def _boom():
         raise RuntimeError("config read failed")
 
     caps, warnings = _read_dispatch_caps(_boom)
-    assert caps == _DispatchCaps(
-        max_spawn=None,
-        max_in_progress=None,
-        max_in_progress_per_profile=None,
-        serialize_by_repo=True,
-        max_concurrent_per_repo=1,
-    )
+    assert caps is None
     assert len(warnings) == 1
+    assert "retaining last-known" in warnings[0]
 
 
 def test_non_dict_config_fails_safe():
