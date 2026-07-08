@@ -431,6 +431,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "subscribed so its terminal state (and its "
                                "decompose children's, via inheritance) reaches "
                                "the home channel without a manual notify-subscribe.")
+    p_create.add_argument("--ui-impact", default=None, dest="ui_impact",
+                          metavar="IMPACT", choices=sorted(kb._UI_IMPACT_VALUES),
+                          help="UI-impact classifier (PlanSpec): none | minor | "
+                               "redesign. NULL/none/minor → autonom-faehig; "
+                               "redesign marks the task operator-gated (UI "
+                               "rework needs human eyes). Read back via "
+                               "'hermes kanban show' or effective_ui_impact().")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1198,6 +1205,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_release_gate.add_argument(
         "--json", action="store_true", help="Emit JSON result"
     )
+    p_release_gate.add_argument(
+        "--inline",
+        action="store_true",
+        default=False,
+        help="Run the gate synchronously in THIS process (legacy path). "
+             "By default the gate is launched as a detached systemd transient "
+             "unit via spawn_release_gate_activation — so it survives the "
+             "dashboard restart the gate itself triggers. --inline keeps the "
+             "old synchronous behaviour for tests and never spawns a unit.",
+    )
 
     p_release_uireal = sub.add_parser(
         "release-uireal",
@@ -1698,15 +1715,50 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
 
 
 def _cmd_release_gate(args: argparse.Namespace) -> int:
-    """Run the release gate on a parked release-gate child: execute the gate
-    commands in the live checkout, and on red spawn a bounded coder-claude
-    fixer in the chain worktree (never live-main) before re-running. Persistent
-    red escalates to the operator.
+    """Run the release gate on a parked release-gate child.
 
-    Exit codes: 0 green, 2 escalated (operator action needed), 1 precondition
-    error / failure."""
+    By default the gate is launched as a DETACHED systemd transient unit via
+    :func:`spawn_release_gate_activation` (the same path the dashboard execute
+    endpoint takes). Running the gate inline in this process used to be the only
+    option, but the gate restarts the dashboard backend — a ``systemctl restart``
+    that kills the very process that must write the child's terminal result
+    BEFORE it returns (the self-termination trap). The detached unit sits in its
+    own cgroup and survives the restart.
+
+    ``--inline`` keeps the old synchronous behaviour for tests: it runs
+    :func:`execute_release_gate` directly in this process and never spawns a
+    unit. The detached path needs no pre-deploy backup (the gate core takes care
+    of that); the inline path still does it best-effort.
+
+    Exit codes (default / detached):
+        0  activation unit started (watch the task for green/escalation)
+        1  the activation unit could not be started (precondition/spawn error)
+    Exit codes (--inline):
+        0  green
+        2  escalated (operator action needed)
+        1  precondition error / failure
+    """
     from hermes_cli import kanban_worktrees as kwt
 
+    inline = bool(getattr(args, "inline", False))
+
+    # --- Detached (default): hand off to a transient systemd unit ------------
+    if not inline:
+        board = getattr(args, "board", None)
+        launched = kwt.spawn_release_gate_activation(
+            args.task_id, board=board,
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(launched))
+        else:
+            tag = "started" if launched.get("ok") else "FAILED"
+            print(
+                f"release-gate {args.task_id}: detached activation {tag} "
+                f"(unit={launched.get('unit')}); {launched.get('detail', '')}"
+            )
+        return 0 if launched.get("ok") else 1
+
+    # --- Inline (legacy / tests): run the gate core in this process ----------
     # Best-effort pre-deploy snapshot — never blocks the gate on failure.
     try:
         from hermes_cli.backup import create_pre_deploy_backup
@@ -1918,6 +1970,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
             epic_id=getattr(args, "epic_id", None),
             kind=getattr(args, "kind", None),
+            ui_impact=getattr(args, "ui_impact", None),
             # P1-S3: a standalone `kanban create` couples a scout to a resolved-critical
             # task (flag/tier-gated, idempotent; held/triage statuses defer inside).
             # Live smoke tasks and other no-file/non-code cards can opt out so they
@@ -2141,6 +2194,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         payload = {
             "task": _task_to_dict(task),
+            "ui_impact": task.ui_impact,
+            "effective_ui_impact": kb.effective_ui_impact(task),
             "latest_summary": latest_summary,
             "parents": parents,
             "children": children,
@@ -2193,6 +2248,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  skills:    {', '.join(task.skills)}")
     if task.model_override:
         print(f"  model:     {task.model_override}")
+    if task.ui_impact:
+        print(f"  ui-impact: {task.ui_impact} → {kb.effective_ui_impact(task)}")
     # Effective retry threshold. Show the per-task override if set,
     # otherwise the dispatcher's resolved value from config (or the
     # default if config doesn't set it either). Helps operators see

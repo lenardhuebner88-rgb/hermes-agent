@@ -432,6 +432,39 @@ def test_create_kind_argparse_choices_include_analysis():
     assert ns.kind == "analysis"
 
 
+def test_create_ui_impact_flag_argparse_and_roundtrip(kanban_home):
+    """AC-2: ``--ui-impact`` is exposed on ``kanban create``, choices validated,
+    and the value reaches the stored row + kanban show read-back."""
+    # argparse surface: flag accepts the allowed choices.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.exit_on_error = False  # type: ignore[attr-defined]
+    top = parser.add_subparsers(dest="_top")
+    kc.build_parser(top)
+    ns = parser.parse_args(
+        ["kanban", "create", "probe", "--ui-impact", "redesign"]
+    )
+    assert ns.ui_impact == "redesign"
+
+    # invalid choice is rejected by argparse
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        parser.parse_args(["kanban", "create", "probe", "--ui-impact", "bogus"])
+
+    # end-to-end: create + read-back via show --json
+    out = kc.run_slash("create 'ui task' --assignee alice --ui-impact redesign --json")
+    payload = json.loads(out)
+    tid = payload["id"]
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.ui_impact == "redesign"
+    assert kb.effective_ui_impact(task) == "operator-gated"
+
+    show_out = kc.run_slash(f"show {tid} --json")
+    show = json.loads(show_out)
+    assert show["ui_impact"] == "redesign"
+    assert show["effective_ui_impact"] == "operator-gated"
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")
@@ -884,11 +917,16 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
 # release-gate subcommand wiring (R2)
 # ---------------------------------------------------------------------------
 
-def _release_gate_args(task_id, **extra):
+def _release_gate_args(task_id, *, inline=False, **extra):
+    """Build a parsed release-gate Namespace. ``inline`` and any store_true
+    flags become bare ``--inline`` etc.; keyword extras with a value are
+    emitted as ``--key value``."""
     parser = argparse.ArgumentParser(prog="hermes", add_help=False)
     sub = parser.add_subparsers(dest="command")
     kc.build_parser(sub)
     argv = ["kanban", "release-gate", task_id]
+    if inline:
+        argv.append("--inline")
     for k, v in extra.items():
         argv += [f"--{k.replace('_','-')}", str(v)]
     return parser.parse_args(argv)
@@ -905,7 +943,7 @@ def test_cli_release_gate_green_exit_zero(kanban_home, monkeypatch, capsys):
         return {"status": "green", "fixer_attempts": 0, "root_id": task_id}
 
     monkeypatch.setattr(kwt, "execute_release_gate", fake_exec)
-    args = _release_gate_args("t_gate", max_retries=3)
+    args = _release_gate_args("t_gate", inline=True, max_retries=3)
     rc = kc.kanban_command(args)
     assert rc == 0
     assert captured == {"task_id": "t_gate", "max_retries": 3}
@@ -921,7 +959,7 @@ def test_cli_release_gate_escalated_exit_two(kanban_home, monkeypatch):
             "status": "escalated", "fixer_attempts": 2, "root_id": task_id,
         },
     )
-    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    rc = kc.kanban_command(_release_gate_args("t_gate", inline=True))
     assert rc == 2
 
 
@@ -932,13 +970,13 @@ def test_cli_release_gate_precondition_error_exit_one(kanban_home, monkeypatch, 
         raise kwt.ReleaseGateError("not a release-gate child")
 
     monkeypatch.setattr(kwt, "execute_release_gate", boom)
-    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    rc = kc.kanban_command(_release_gate_args("t_gate", inline=True))
     assert rc == 1
     assert "not a release-gate child" in capsys.readouterr().err
 
 
 def test_cli_release_gate_calls_pre_deploy_backup(kanban_home, monkeypatch):
-    """_cmd_release_gate calls create_pre_deploy_backup before executing the gate."""
+    """_cmd_release_gate --inline calls create_pre_deploy_backup before the gate."""
     from hermes_cli import kanban_worktrees as kwt
     import hermes_cli.backup as backup_mod
 
@@ -956,7 +994,7 @@ def test_cli_release_gate_calls_pre_deploy_backup(kanban_home, monkeypatch):
         },
     )
 
-    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    rc = kc.kanban_command(_release_gate_args("t_gate", inline=True))
     assert rc == 0
     assert backup_calls, "create_pre_deploy_backup was not called"
 
@@ -977,9 +1015,76 @@ def test_cli_release_gate_continues_when_backup_raises(kanban_home, monkeypatch,
         },
     )
 
-    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    rc = kc.kanban_command(_release_gate_args("t_gate", inline=True))
     # Gate still returns green exit code despite backup failure
     assert rc == 0
+
+
+def test_cli_release_gate_default_launches_detached_unit(kanban_home, monkeypatch, capsys):
+    """AC-1: WITHOUT --inline, _cmd_release_gate hands off to
+    spawn_release_gate_activation — the detached transient unit that survives
+    the dashboard restart the gate itself triggers — and never touches
+    execute_release_gate directly."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    captured = {}
+    exec_called = []
+
+    def fake_spawn(task_id, *, board=None, **_kw):
+        captured["task_id"] = task_id
+        captured["board"] = board
+        return {"ok": True, "unit": "hermes-release-gate-t_deadbeef", "detail": "started"}
+
+    monkeypatch.setattr(kwt, "spawn_release_gate_activation", fake_spawn)
+    # If the inline path fires by mistake, this must blow up the test.
+    monkeypatch.setattr(
+        kwt, "execute_release_gate",
+        lambda *a, **k: exec_called.append(1),
+    )
+
+    args = _release_gate_args("t_deadbeef", inline=False)  # default: detached
+    rc = kc.kanban_command(args)
+    assert rc == 0
+    assert captured == {"task_id": "t_deadbeef", "board": None}
+    assert exec_called == [], "detached path must NOT call execute_release_gate"
+    out = capsys.readouterr().out
+    assert "detached activation" in out and "hermes-release-gate-t_deadbeef" in out
+
+
+def test_cli_release_gate_default_reports_spawn_failure(kanban_home, monkeypatch, capsys):
+    """AC-1: a failed launch (precondition/spawn error) returns rc=1 and ok=False."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    monkeypatch.setattr(
+        kwt, "spawn_release_gate_activation",
+        lambda task_id, **_kw: {"ok": False, "unit": None, "detail": "Unit already exists."},
+    )
+    args = _release_gate_args("t_x", inline=False)
+    rc = kc.kanban_command(args)
+    assert rc == 1
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_cli_release_gate_default_json(kanban_home, monkeypatch, capsys):
+    """AC-1: --json on the detached path emits the spawn result dict as JSON."""
+    from hermes_cli import kanban_worktrees as kwt
+    import json
+
+    monkeypatch.setattr(
+        kwt, "spawn_release_gate_activation",
+        lambda task_id, **_kw: {"ok": True, "unit": "u", "detail": "started"},
+    )
+    args = _release_gate_args("t_j", inline=False)
+    # _release_gate_args appends --json as "--json True" (str); that would be
+    # mis-parsed by argparse store_true. Build it via the parser directly.
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "release-gate", "t_j", "--json"])
+    rc = kc.kanban_command(args)
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert json.loads(out)["ok"] is True
 
 
 # ---------------------------------------------------------------------------

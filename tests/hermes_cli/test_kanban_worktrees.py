@@ -2977,9 +2977,10 @@ def test_spawn_release_gate_activation_launches_detached_transient_unit():
     assert "--unit=hermes-release-gate-t_gate_9" in argv
     # the detached command IS the shared CLI activation core, board-scoped. The
     # global --board MUST sit before the subcommand or argparse rejects it.
+    # --inline: the detached unit runs the gate core directly (no nested spawn).
     tail = argv[argv.index("/opt/hermes"):]
     assert tail == ["/opt/hermes", "kanban", "--board", "ops",
-                    "release-gate", "t_gate/9", "--json"]
+                    "release-gate", "t_gate/9", "--inline", "--json"]
     # Regression guard: the emitted CLI portion must actually parse (a --board
     # after the subcommand would raise "unrecognized arguments").
     import argparse
@@ -2988,6 +2989,7 @@ def test_spawn_release_gate_activation_launches_detached_transient_unit():
     kc.build_parser(parser.add_subparsers(dest="cmd"))
     ns = parser.parse_args(tail[1:])  # drop the hermes binary path
     assert ns.task_id == "t_gate/9" and ns.board == "ops"
+    assert ns.inline is True  # the detached unit must run inline (no recursion)
     # PATH is passed through so npm/node/git/systemctl resolve in the clean unit env
     assert any(a.startswith("--setenv=PATH=") for a in argv)
 
@@ -3047,13 +3049,152 @@ def test_auto_mode_release_gate_child_launches_board_scoped_activation(
     assert argv[0].endswith("systemd-run")
     assert "--user" in argv
     # board-scoped, same shape the CLI/endpoint path is asserted to build:
-    # `hermes kanban --board ops release-gate <child> --json`
+    # `hermes kanban --board ops release-gate <child> --inline --json`
+    # (--inline: the detached unit must NOT spawn another unit — see spawn.)
     i = argv.index("release-gate")
-    assert argv[i - 3:i + 3] == [
-        "kanban", "--board", "ops", "release-gate", child_id, "--json",
+    assert argv[i - 3:i + 4] == [
+        "kanban", "--board", "ops", "release-gate", child_id, "--inline", "--json",
     ]
     # never launches against the default board when the child is on "ops"
     assert argv[i - 1] != "default"
+
+
+def test_autonomous_switch_auto_executes_parked_release_gate(
+    kanban_home, monkeypatch,
+):
+    """AD-S2: with the global ``release.autonomous`` switch ON and every guard
+    green (freigabe:complete root, standard tier, no redesign), the just-parked
+    gate is auto-executed via the SAME detached activation — no new deploy path.
+    The started event is labelled ``mode: autonomous`` and the launcher argv is
+    the same ``systemd-run … release-gate <child> --inline --json`` shape."""
+    from hermes_cli import auto_release
+
+    # global switch ON; release_gate.mode stays manual so ONLY the AD-S2 hook
+    # (not the legacy mode:auto path) can fire.
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": True, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
+    captured = {}
+
+    def fake_run(argv, **kwargs):  # the injected systemd-run launcher
+        captured["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="complete",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
+        )
+        started = _events(conn, child_id, "release_gate_auto_execute_started")
+        failed = _events(conn, child_id, "release_gate_auto_execute_failed")
+        held = _events(conn, child_id, "release_gate_auto_execute_held")
+
+    assert child_id is not None
+    assert len(started) == 1
+    assert started[0]["mode"] == "autonomous"
+    assert failed == []
+    assert held == []
+    argv = captured["argv"]
+    assert argv[0].endswith("systemd-run")
+    i = argv.index("release-gate")
+    assert argv[i:i + 3] == ["release-gate", child_id, "--inline"]
+    assert "--json" in argv[i:]
+
+
+def test_autonomous_switch_off_parks_release_gate_byte_exact(
+    kanban_home, monkeypatch,
+):
+    """AD-S2 AC-3: ``release.autonomous`` false parks EXACTLY as today — the
+    child is blocked with a ``release_gate_parked`` event, no activation is
+    spawned, and NO new auto-execute/held event is written (silent kill-switch)."""
+    from hermes_cli import auto_release
+
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": False, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    ran = {"called": False}
+
+    def fake_run(argv, **kwargs):  # must never fire when the switch is off
+        ran["called"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="complete",
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
+        )
+        child = kb.get_task(conn, child_id)
+        parked = _events(conn, child_id, "release_gate_parked")
+        started = _events(conn, child_id, "release_gate_auto_execute_started")
+        held = _events(conn, child_id, "release_gate_auto_execute_held")
+        run_count = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (child_id,),
+        ).fetchone()[0]
+
+    assert child is not None
+    assert child.status == "blocked"
+    assert len(parked) == 1
+    assert parked[0]["state"] == kwt.GREEN_CODE_NOT_RUNTIME_ACTIVATED
+    assert started == []          # no auto-execution
+    assert held == []             # kill-switch-off is silent (byte-exact)
+    assert run_count == 0
+    assert ran["called"] is False  # no detached activation spawned
+
+
+def test_autonomous_switch_holds_and_logs_when_guard_red(
+    kanban_home, monkeypatch,
+):
+    """AD-S2 AC-2: switch ON but a guard held (freigabe:operator) parks the child
+    AND records an additive ``release_gate_auto_execute_held`` audit event — the
+    activation is never spawned."""
+    from hermes_cli import auto_release
+
+    monkeypatch.setattr(
+        auto_release, "_release_config",
+        lambda: {"autonomous": True, "max_tier_autonomous": "review"},
+    )
+    monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
+    ran = {"called": False}
+
+    def fake_run(argv, **kwargs):
+        ran["called"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    with kb.connect() as conn:
+        source_id = kb.create_task(
+            conn, title="web slice", assignee="coder", created_by="integrator",
+            freigabe="operator",  # operator-gated chain never auto-releases
+        )
+        assert kb.complete_task(conn, source_id, result="merged")
+        child_id = kwt._create_parked_release_gate_child(
+            conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
+        )
+        started = _events(conn, child_id, "release_gate_auto_execute_started")
+        held = _events(conn, child_id, "release_gate_auto_execute_held")
+
+    assert started == []
+    assert len(held) == 1
+    assert held[0]["outcome"] == "held_no_freigabe"
+    assert ran["called"] is False
 
 
 def test_release_gate_executor_rejects_non_gate_task(kanban_home):

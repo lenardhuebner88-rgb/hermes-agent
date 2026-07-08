@@ -365,3 +365,79 @@ def maybe_auto_release(conn, task_id: str) -> Optional[dict]:
         notify=_default_notify,
         fetch=_default_fetch,
     )
+
+
+def evaluate_ad_hoc_release_guards(conn, *, root_id: str, chain_ids) -> dict:
+    """Guard ceiling for the AD-S2 ad-hoc release-gate auto-execution path.
+
+    Reuses the SAME guards as :func:`maybe_auto_release`, applied *sinngemäß* to
+    an already-created ``release_gate_parked`` child instead of a chain-tip
+    completion: the global ``release.autonomous`` kill-switch, the chain tier
+    ceiling (``critical`` never autonomous, and never above
+    ``max_tier_autonomous``), the root ``freigabe: complete`` requirement, and
+    ``pause_on_red_streak`` — PLUS the AD-S1 ``effective_ui_impact`` gate (a
+    ``redesign`` slice needs human eyes). Pure and read-only; the caller
+    (``kanban_worktrees.maybe_auto_execute_gate``) spawns the detached
+    activation only on the ``auto_execute`` outcome.
+
+    ``chain_ids`` is the set of task ids that make up the chain being released
+    (typically ``kanban_worktrees._chain_member_ids(conn, root_id)``); the tier
+    and UI-impact ceilings are computed over ALL of them, so one critical or one
+    redesign slice pins the whole chain.
+
+    Outcome dict (mirrors maybe_auto_release's outcome vocabulary):
+      ``{"outcome": "auto_execute"}``                    all guards green
+      ``{"outcome": "held_kill_switch"}``                release.autonomous false
+      ``{"outcome": "held_no_freigabe", "detail": …}``   root not freigabe:complete
+      ``{"outcome": "held_critical", "detail": …}``      chain tier ceiling
+      ``{"outcome": "held_ui_redesign", "detail": …}``   effective_ui_impact redesign
+      ``{"outcome": "held_red_gate", "detail": …}``      pause_on_red_streak
+    """
+    cfg = _release_config()
+    if not cfg.get("autonomous"):
+        return {"outcome": "held_kill_switch"}
+    from hermes_cli import kanban_db as _kb
+
+    ids = list(dict.fromkeys(chain_ids))  # dedupe, stable order
+    # freigabe: only an operator-pre-authorised (``complete``) chain releases
+    # autonomously; ``operator`` OR NULL holds — mirrors maybe_auto_release,
+    # which requires the freigabe-bearing root to read exactly ``complete``.
+    frow = conn.execute(
+        "SELECT freigabe FROM tasks WHERE id = ?", (root_id,)
+    ).fetchone()
+    freigabe = str((frow["freigabe"] if frow else "") or "").strip().lower()
+    if freigabe != "complete":
+        return {
+            "outcome": "held_no_freigabe",
+            "detail": f"root {root_id} freigabe={freigabe or 'none'} (need complete)",
+        }
+    # Tier ceiling over the WHOLE chain: one critical slice pins the chain.
+    max_tier = "standard"
+    for cid in ids:
+        tier = _kb._effective_review_tier(conn, cid)
+        if _TIER_ORDER.get(tier, 0) > _TIER_ORDER.get(max_tier, 0):
+            max_tier = tier
+    if max_tier == "critical" or (
+        _TIER_ORDER[max_tier] > _TIER_ORDER[cfg["max_tier_autonomous"]]
+    ):
+        return {"outcome": "held_critical", "detail": f"chain max tier {max_tier}"}
+    # AD-S1 UI-impact gate: any redesign slice in the chain needs human eyes.
+    for cid in ids:
+        task = _kb.get_task(conn, cid)
+        if _kb.effective_ui_impact(task) == "operator-gated":
+            return {
+                "outcome": "held_ui_redesign",
+                "detail": f"chain member {cid} effective_ui_impact operator-gated",
+            }
+    # S3: pause_on_red_streak — a chronically-red nightly gate is not a safe
+    # base to release from (same check maybe_auto_release runs). Default 0 = off.
+    pause_n = int(cfg.get("pause_on_red_streak") or 0)
+    if pause_n > 0:
+        from hermes_cli import vision_metrics as _vm
+
+        if _vm.red_streak_from_head(_vm.read_gate_records()) >= pause_n:
+            return {
+                "outcome": "held_red_gate",
+                "detail": f"last {pause_n} recorded green-gate nights all red",
+            }
+    return {"outcome": "auto_execute"}

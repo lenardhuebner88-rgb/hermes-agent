@@ -416,4 +416,83 @@ def test_pause_on_red_streak_releases_when_fewer_than_n_red(kanban_home, monkeyp
         assert events == ["deploy"]
 
 
+# ---------------------------------------------------------------------------
+# AD-S2: evaluate_ad_hoc_release_guards — the guard ceiling reused by the
+# release-gate auto-execution hook. Same guards as maybe_auto_release, exercised
+# against real task rows / task_events, PLUS the AD-S1 effective_ui_impact gate.
+# ---------------------------------------------------------------------------
+
+def _chain_ids(root, kids):
+    return set(kids) | {root}
+
+
+def test_ad_hoc_guards_green_chain_auto_executes(kanban_home, monkeypatch):
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="review")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision == {"outcome": "auto_execute"}
+
+
+def test_ad_hoc_guards_kill_switch_off_holds(kanban_home, monkeypatch):
+    """release.autonomous false (the default) → held_kill_switch, never spawns."""
+    # no _release_config monkeypatch: the tmp home has no config.yaml, so the
+    # real resolver returns autonomous=False (byte-exact today's off state).
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="review")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision == {"outcome": "held_kill_switch"}
+
+
+def test_ad_hoc_guards_critical_tier_holds(kanban_home, monkeypatch):
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="critical")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision["outcome"] == "held_critical"
+    assert "critical" in decision["detail"]
+
+
+def test_ad_hoc_guards_operator_freigabe_holds(kanban_home, monkeypatch):
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="review", freigabe="operator")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision["outcome"] == "held_no_freigabe"
+    assert "operator" in decision["detail"]
+
+
+def test_ad_hoc_guards_ui_redesign_member_holds(kanban_home, monkeypatch):
+    """A single redesign slice in the chain pins the whole chain (AD-S1 gate)."""
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="review")
+        assert kb.set_task_ui_impact(conn, kids[0], "redesign")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision["outcome"] == "held_ui_redesign"
+    assert kids[0] in decision["detail"]
+
+
+def test_ad_hoc_guards_minor_ui_impact_still_auto_executes(kanban_home, monkeypatch):
+    """none/minor stay autonom-capable — only redesign gates."""
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="review")
+        assert kb.set_task_ui_impact(conn, kids[0], "minor")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision == {"outcome": "auto_execute"}
+
+
 import json  # noqa: E402
