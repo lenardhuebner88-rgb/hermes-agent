@@ -1,9 +1,56 @@
-"""Configuration for the standalone voice web surface."""
+"""Standalone voice web routes and the Live-to-cascade bridge."""
 
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+import json
+import logging
+import os
+from pathlib import Path
+import shutil
+import subprocess
+from typing import Any
+import uuid
+import wave
+
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
+
+from hermes_cli.config import load_env
+from hermes_cli.voice_live_session import GeminiLiveSession, LiveFallbackRequired
+from hermes_constants import get_hermes_home
+from tools.transcription_tools import transcribe_audio
+from tools.tts_tool import text_to_speech_tool
+from tools.voice_live_tools import FUNCTION_DECLARATIONS, VoiceToolExecutor
 
 
 DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+VOICE_CLIENT_DIR = Path(__file__).with_name("voice_client")
+
+_ALLOWED_VOICE_ASSETS = {
+    "app.js": "application/javascript",
+    "manifest.json": "application/manifest+json",
+    "worklet.js": "application/javascript",
+}
+_NO_STORE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+_MAX_FALLBACK_PCM_BYTES = 16 * 1024 * 1024
+_AUDIO_QUEUE_FRAMES = 128
+_EVENT_QUEUE_ITEMS = 128
+_FALLBACK_END_TIMEOUT_SECONDS = 60.0
+_LIVE_END_GRACE_SECONDS = 1.0
+_EVENT_DRAIN_TIMEOUT_SECONDS = 10.0
+_DELEGATE_TIMEOUT_SECONDS = 120.0
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
+_FFMPEG_TIMEOUT_SECONDS = 60.0
+_OUTPUT_PCM_CHUNK_BYTES = 24_000
+
+_log = logging.getLogger(__name__)
+
+WsAuthReason = Callable[[WebSocket], tuple[str | None, str]]
+WsReason = Callable[[WebSocket], str | None]
+WsCloseReason = Callable[[str], str]
 
 
 @dataclass
@@ -11,6 +58,15 @@ class VoiceWebConfig:
     enabled: bool = False
     model: str = DEFAULT_LIVE_MODEL
     language: str = "de-DE"
+
+
+class VoiceRuntimeError(RuntimeError):
+    """A safe, structured error suitable for a websocket response."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def voice_web_config(raw: dict) -> VoiceWebConfig:
@@ -32,3 +88,691 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
         model=model,
         language=language,
     )
+
+
+def resolve_gemini_api_key() -> str:
+    """Resolve Gemini credentials server-side without exposing their value."""
+    environment = load_env()
+    return (
+        os.environ.get("GEMINI_API_KEY")
+        or environment.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or environment.get("GOOGLE_API_KEY")
+        or ""
+    ).strip()
+
+
+def _voice_cache_dir() -> Path:
+    path = get_hermes_home() / "cache" / "voice-web"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_pcm16_wav(path: Path, pcm: bytes) -> None:
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16_000)
+        wav_file.writeframes(pcm)
+
+
+async def fallback_transcribe_pcm(pcm: bytes, language: str) -> str:
+    """Run Hermes' configured STT adapter against a temporary PCM16 WAV."""
+    del language  # The public adapter gets language/provider settings from config.
+    wav_path = _voice_cache_dir() / f"input-{uuid.uuid4().hex}.wav"
+    try:
+        await asyncio.to_thread(_write_pcm16_wav, wav_path, pcm)
+        result = await asyncio.to_thread(transcribe_audio, str(wav_path))
+    finally:
+        await asyncio.to_thread(wav_path.unlink, missing_ok=True)
+
+    if not isinstance(result, dict) or not result.get("success"):
+        detail = result.get("error") if isinstance(result, dict) else None
+        raise VoiceRuntimeError(
+            "transcription_failed",
+            str(detail or "Die Spracheingabe konnte nicht transkribiert werden."),
+        )
+    transcript = str(result.get("transcript") or "").strip()
+    if not transcript:
+        raise VoiceRuntimeError(
+            "empty_transcript",
+            "Die Spracheingabe enthielt keinen erkennbaren Text.",
+        )
+    return transcript
+
+
+def _decode_tts_result(raw_result: str) -> Path:
+    try:
+        result = json.loads(raw_result)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise VoiceRuntimeError(
+            "tts_failed",
+            "Die Sprachausgabe lieferte keine gültige Antwort.",
+        ) from exc
+    if not isinstance(result, dict) or not result.get("success"):
+        detail = result.get("error") if isinstance(result, dict) else None
+        raise VoiceRuntimeError(
+            "tts_failed",
+            str(detail or "Die Sprachausgabe ist fehlgeschlagen."),
+        )
+    file_path = str(result.get("file_path") or "").strip()
+    if not file_path:
+        raise VoiceRuntimeError(
+            "tts_failed",
+            "Die Sprachausgabe hat keine Audiodatei erzeugt.",
+        )
+    return Path(file_path)
+
+
+def _transcode_to_pcm24k(source_path: Path) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise VoiceRuntimeError(
+            "ffmpeg_unavailable",
+            "ffmpeg wird für die Sprachausgabe benötigt.",
+        )
+    try:
+        process = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-nostdin",
+                "-i",
+                str(source_path),
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "pipe:1",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=_FFMPEG_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise VoiceRuntimeError(
+            "tts_transcode_failed",
+            "Die Sprachausgabe konnte nicht in PCM umgewandelt werden.",
+        ) from exc
+    if process.returncode != 0 or not process.stdout:
+        detail = process.stderr.decode("utf-8", "replace").strip()[-500:]
+        raise VoiceRuntimeError(
+            "tts_transcode_failed",
+            detail or "Die Sprachausgabe konnte nicht in PCM umgewandelt werden.",
+        )
+    return process.stdout
+
+
+def _unlink_owned_voice_file(path: Path) -> None:
+    try:
+        path.resolve().relative_to(_voice_cache_dir().resolve())
+    except (OSError, ValueError):
+        return
+    path.unlink(missing_ok=True)
+
+
+async def fallback_synthesize_pcm(text: str, language: str) -> bytes:
+    """Run Hermes' public TTS adapter, then convert its output to PCM16/24k."""
+    del language  # Voice/language selection belongs to the existing TTS config.
+    requested_path = _voice_cache_dir() / f"output-{uuid.uuid4().hex}.mp3"
+    generated_path = requested_path
+    try:
+        raw_result = await asyncio.to_thread(
+            text_to_speech_tool,
+            text,
+            str(requested_path),
+        )
+        generated_path = _decode_tts_result(raw_result)
+        return await asyncio.to_thread(_transcode_to_pcm24k, generated_path)
+    finally:
+        await asyncio.to_thread(_unlink_owned_voice_file, generated_path)
+        if generated_path != requested_path:
+            await asyncio.to_thread(_unlink_owned_voice_file, requested_path)
+
+
+async def delegate_to_hermes(prompt: str) -> str:
+    """Delegate one fallback turn through the supported Hermes CLI surface."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "hermes",
+            "-q",
+            prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise VoiceRuntimeError(
+            "delegation_unavailable",
+            "Hermes konnte nicht gestartet werden.",
+        ) from exc
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=_DELEGATE_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+            try:
+                await asyncio.wait_for(
+                    process.wait(),
+                    timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                pass
+        raise
+    except TimeoutError as exc:
+        if process.returncode is None:
+            process.kill()
+        try:
+            await asyncio.wait_for(
+                process.communicate(),
+                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            pass
+        raise VoiceRuntimeError(
+            "delegation_timeout",
+            "Hermes hat nicht rechtzeitig geantwortet.",
+        ) from exc
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", "replace").strip()[-500:]
+        raise VoiceRuntimeError(
+            "delegation_failed",
+            detail or "Hermes konnte die Anfrage nicht bearbeiten.",
+        )
+    response = stdout.decode("utf-8", "replace").strip()
+    if not response:
+        raise VoiceRuntimeError(
+            "delegation_empty",
+            "Hermes hat keine Antwort geliefert.",
+        )
+    return response
+
+
+def _html_safe_json(value: str) -> str:
+    return (
+        json
+        .dumps(value, ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+
+def _voice_index_response(request: Request, session_token: str) -> HTMLResponse:
+    index_path = VOICE_CLIENT_DIR / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="Voice client is not built")
+    html = index_path.read_text(encoding="utf-8")
+    gated = bool(getattr(request.app.state, "auth_required", False))
+    bootstrap = f"window.__HERMES_AUTH_REQUIRED__={'true' if gated else 'false'};"
+    if not gated:
+        bootstrap += (
+            f"window.__HERMES_SESSION_TOKEN__={_html_safe_json(session_token)};"
+        )
+    script = f"<script>{bootstrap}</script>"
+    if "</head>" in html:
+        html = html.replace("</head>", f"{script}</head>", 1)
+    else:
+        html = script + html
+    return HTMLResponse(html, headers=_NO_STORE_HEADERS)
+
+
+async def _put_live_audio(
+    audio_in: asyncio.Queue[bytes],
+    data: bytes,
+    fallback_mode: asyncio.Event,
+) -> None:
+    if fallback_mode.is_set():
+        return
+    put_task = asyncio.create_task(audio_in.put(data))
+    fallback_task = asyncio.create_task(fallback_mode.wait())
+    try:
+        await asyncio.wait(
+            {put_task, fallback_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if fallback_task.done() and not put_task.done():
+            put_task.cancel()
+    finally:
+        for task in (put_task, fallback_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(put_task, fallback_task, return_exceptions=True)
+
+
+async def _put_event(
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    event: dict[str, Any],
+    disconnected: asyncio.Event,
+) -> bool:
+    if disconnected.is_set():
+        return False
+    put_task = asyncio.create_task(events_out.put(event))
+    disconnect_task = asyncio.create_task(disconnected.wait())
+    try:
+        await asyncio.wait(
+            {put_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnect_task.done() and not put_task.done():
+            put_task.cancel()
+        return put_task.done() and not put_task.cancelled()
+    finally:
+        for task in (put_task, disconnect_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(put_task, disconnect_task, return_exceptions=True)
+
+
+async def _read_voice_frames(
+    websocket: WebSocket,
+    audio_in: asyncio.Queue[bytes],
+    fallback_pcm: bytearray,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    fallback_mode: asyncio.Event,
+    disconnected: asyncio.Event,
+) -> str:
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                disconnected.set()
+                return "disconnect"
+
+            frame = message.get("bytes")
+            if frame is not None:
+                if len(frame) % 2:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_pcm_frame",
+                                "message": "PCM16-Frames müssen eine gerade Bytezahl haben.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    return "error"
+                if len(fallback_pcm) + len(frame) > _MAX_FALLBACK_PCM_BYTES:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "audio_too_large",
+                                "message": "Die Spracheingabe überschreitet das Größenlimit.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    return "error"
+                fallback_pcm.extend(frame)
+                await _put_live_audio(audio_in, frame, fallback_mode)
+                continue
+
+            text = message.get("text")
+            if not isinstance(text, str):
+                continue
+            try:
+                control = json.loads(text)
+            except json.JSONDecodeError:
+                await _put_event(
+                    events_out,
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "invalid_control_frame",
+                            "message": "Die Steuerungsnachricht ist kein gültiges JSON.",
+                        },
+                    },
+                    disconnected,
+                )
+                continue
+            control_type = control.get("type") if isinstance(control, dict) else None
+            if control_type == "end":
+                return "end"
+            if control_type == "interrupt":
+                await _put_event(events_out, {"type": "interrupted"}, disconnected)
+                continue
+            await _put_event(
+                events_out,
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "unknown_control_frame",
+                        "message": "Unbekannte Voice-Steuerungsnachricht.",
+                    },
+                },
+                disconnected,
+            )
+    except WebSocketDisconnect:
+        disconnected.set()
+        return "disconnect"
+
+
+async def _send_voice_events(
+    websocket: WebSocket,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+) -> None:
+    while not disconnected.is_set():
+        event = await events_out.get()
+        try:
+            if event is None:
+                return
+            if event.get("type") == "audio":
+                data = event.get("data")
+                if isinstance(data, bytes) and data:
+                    await websocket.send_bytes(data)
+            else:
+                await websocket.send_json(event)
+        except (WebSocketDisconnect, RuntimeError):
+            disconnected.set()
+            return
+        finally:
+            events_out.task_done()
+
+
+async def _run_cascade_fallback(
+    fallback_pcm: bytes,
+    config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+) -> None:
+    if not fallback_pcm:
+        raise VoiceRuntimeError("no_audio", "Es wurde kein Audio empfangen.")
+    if not await _put_event(
+        events_out,
+        {"type": "state", "value": "thinking"},
+        disconnected,
+    ):
+        return
+    transcript = await fallback_transcribe_pcm(fallback_pcm, config.language)
+    if not await _put_event(
+        events_out,
+        {"type": "transcript", "text": transcript},
+        disconnected,
+    ):
+        return
+    response = await delegate_to_hermes(transcript)
+    audio = await fallback_synthesize_pcm(response, config.language)
+    if not audio or len(audio) % 2:
+        raise VoiceRuntimeError(
+            "invalid_tts_audio",
+            "Die Sprachausgabe hat kein gültiges PCM16-Audio erzeugt.",
+        )
+    if not await _put_event(
+        events_out,
+        {"type": "state", "value": "speaking"},
+        disconnected,
+    ):
+        return
+    for offset in range(0, len(audio), _OUTPUT_PCM_CHUNK_BYTES):
+        if not await _put_event(
+            events_out,
+            {"type": "audio", "data": audio[offset : offset + _OUTPUT_PCM_CHUNK_BYTES]},
+            disconnected,
+        ):
+            return
+    await _put_event(
+        events_out,
+        {"type": "state", "value": "listening"},
+        disconnected,
+    )
+
+
+async def _run_live_bridge(
+    config: VoiceWebConfig,
+    api_key: str,
+    audio_in: asyncio.Queue[bytes],
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    fallback_mode: asyncio.Event,
+) -> bool:
+    session = GeminiLiveSession(
+        config.model,
+        config.language,
+        FUNCTION_DECLARATIONS,
+        api_key,
+    )
+    executor = VoiceToolExecutor(delegate=delegate_to_hermes)
+    try:
+        await session.run(audio_in, events_out, executor)
+    except LiveFallbackRequired:
+        fallback_mode.set()
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception("Gemini Live bridge failed; switching to cascade fallback")
+        fallback_mode.set()
+        return True
+    fallback_mode.set()
+    return True
+
+
+async def _finish_event_sender(
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    sender_task: asyncio.Task[None],
+    disconnected: asyncio.Event,
+) -> None:
+    if not disconnected.is_set():
+        try:
+            await asyncio.wait_for(
+                events_out.join(),
+                timeout=_EVENT_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            disconnected.set()
+    if not sender_task.done():
+        if disconnected.is_set():
+            sender_task.cancel()
+        else:
+            await events_out.put(None)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(sender_task),
+            timeout=_EVENT_DRAIN_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        sender_task.cancel()
+    await asyncio.gather(sender_task, return_exceptions=True)
+
+
+def create_voice_router(
+    raw_config: dict,
+    *,
+    ws_auth_reason: WsAuthReason,
+    ws_host_origin_reason: WsReason,
+    ws_client_reason: WsReason,
+    ws_close_reason: WsCloseReason,
+    session_token: str,
+) -> APIRouter:
+    """Build an optionally empty router with dashboard auth injected."""
+    router = APIRouter()
+    config = voice_web_config(raw_config)
+    if not config.enabled:
+        return router
+
+    @router.get("/voice")
+    async def voice_index(request: Request) -> HTMLResponse:
+        return _voice_index_response(request, session_token)
+
+    @router.get("/voice/{asset_name}")
+    async def voice_asset(asset_name: str) -> FileResponse:
+        media_type = _ALLOWED_VOICE_ASSETS.get(asset_name)
+        if media_type is None:
+            raise HTTPException(status_code=404, detail="Voice asset not found")
+        asset_path = VOICE_CLIENT_DIR / asset_name
+        if not asset_path.is_file():
+            raise HTTPException(status_code=404, detail="Voice asset not found")
+        return FileResponse(
+            asset_path,
+            media_type=media_type,
+            headers=_NO_STORE_HEADERS,
+        )
+
+    @router.websocket("/api/voice/live")
+    async def voice_live(websocket: WebSocket) -> None:
+        auth_reason, _credential = ws_auth_reason(websocket)
+        if auth_reason is not None:
+            await websocket.close(
+                code=4401,
+                reason=ws_close_reason(f"auth: {auth_reason}"),
+            )
+            return
+        host_origin_reason = ws_host_origin_reason(websocket)
+        if host_origin_reason is not None:
+            await websocket.close(
+                code=4403,
+                reason=ws_close_reason(host_origin_reason),
+            )
+            return
+        client_reason = ws_client_reason(websocket)
+        if client_reason is not None:
+            await websocket.close(
+                code=4408,
+                reason=ws_close_reason(client_reason),
+            )
+            return
+
+        await websocket.accept()
+        audio_in: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_AUDIO_QUEUE_FRAMES)
+        events_out: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=_EVENT_QUEUE_ITEMS
+        )
+        fallback_pcm = bytearray()
+        fallback_mode = asyncio.Event()
+        disconnected = asyncio.Event()
+        sender_task = asyncio.create_task(
+            _send_voice_events(websocket, events_out, disconnected)
+        )
+        reader_task = asyncio.create_task(
+            _read_voice_frames(
+                websocket,
+                audio_in,
+                fallback_pcm,
+                events_out,
+                fallback_mode,
+                disconnected,
+            )
+        )
+        api_key = resolve_gemini_api_key()
+        live_task: asyncio.Task[bool] | None = None
+        if api_key:
+            live_task = asyncio.create_task(
+                _run_live_bridge(
+                    config,
+                    api_key,
+                    audio_in,
+                    events_out,
+                    fallback_mode,
+                )
+            )
+        else:
+            fallback_mode.set()
+
+        run_fallback = not api_key
+        reader_result = "disconnect"
+        try:
+            if live_task is None:
+                reader_result = await reader_task
+            else:
+                done, _ = await asyncio.wait(
+                    {reader_task, live_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if live_task in done:
+                    run_fallback = live_task.result()
+                    if not reader_task.done():
+                        try:
+                            reader_result = await asyncio.wait_for(
+                                asyncio.shield(reader_task),
+                                timeout=_FALLBACK_END_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            reader_result = "error"
+                            await _put_event(
+                                events_out,
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "code": "fallback_audio_timeout",
+                                        "message": (
+                                            "Die Fallback-Aufnahme wurde nicht "
+                                            "rechtzeitig beendet."
+                                        ),
+                                    },
+                                },
+                                disconnected,
+                            )
+                    else:
+                        reader_result = reader_task.result()
+                else:
+                    reader_result = reader_task.result()
+                    if reader_result == "end" and not live_task.done():
+                        try:
+                            run_fallback = await asyncio.wait_for(
+                                asyncio.shield(live_task),
+                                timeout=_LIVE_END_GRACE_SECONDS,
+                            )
+                        except TimeoutError:
+                            run_fallback = False
+                    elif live_task.done():
+                        run_fallback = live_task.result()
+
+            if run_fallback and reader_result == "end" and not disconnected.is_set():
+                try:
+                    await _run_cascade_fallback(
+                        bytes(fallback_pcm),
+                        config,
+                        events_out,
+                        disconnected,
+                    )
+                except VoiceRuntimeError as exc:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {"code": exc.code, "message": exc.message},
+                        },
+                        disconnected,
+                    )
+                except Exception:
+                    _log.exception("Voice cascade fallback failed")
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "fallback_failed",
+                                "message": "Der Voice-Fallback ist fehlgeschlagen.",
+                            },
+                        },
+                        disconnected,
+                    )
+        finally:
+            for task in (reader_task, live_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (reader_task, live_task) if task is not None),
+                return_exceptions=True,
+            )
+            await _finish_event_sender(events_out, sender_task, disconnected)
+            if not disconnected.is_set():
+                try:
+                    await websocket.close(code=1000)
+                except RuntimeError:
+                    pass
+
+    return router

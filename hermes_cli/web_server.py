@@ -15202,6 +15202,18 @@ register_vault_provenance_routes(app)
 from hermes_cli.promptforge_view import register_promptforge_routes  # noqa: E402
 register_promptforge_routes(app)
 
+from hermes_cli.voice_ws import create_voice_router  # noqa: E402
+app.include_router(
+    create_voice_router(
+        load_config(),
+        ws_auth_reason=_ws_auth_reason,
+        ws_host_origin_reason=_ws_host_origin_reason,
+        ws_client_reason=_ws_client_reason,
+        ws_close_reason=_ws_close_reason,
+        session_token=_SESSION_TOKEN,
+    )
+)
+
 mount_spa(app)
 
 
