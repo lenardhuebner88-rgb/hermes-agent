@@ -606,12 +606,19 @@ async def test_delegate_cancellation_terminates_and_reaps_child(monkeypatch):
         return process
 
     tree_signals = []
+    group_alive = True
 
     def fake_killpg(pid, sig):
+        nonlocal group_alive
+        if sig == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
         tree_signals.append((pid, sig))
         if sig == voice_ws.signal.SIGTERM:
             process.terminated = True
             process.returncode = -sig
+            group_alive = False
 
     monkeypatch.setattr(
         voice_ws.asyncio,
@@ -665,14 +672,21 @@ async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
         return process
 
     tree_signals = []
+    group_alive = True
 
     def fake_killpg(pid, sig):
+        nonlocal group_alive
+        if sig == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
         tree_signals.append((pid, sig))
         if sig == voice_ws.signal.SIGTERM:
             process.terminated = True
         if sig == voice_ws.signal.SIGKILL:
             process.killed = True
             process.returncode = -sig
+            group_alive = False
 
     monkeypatch.setattr(
         voice_ws.asyncio,
@@ -696,6 +710,68 @@ async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+@pytest.mark.asyncio
+async def test_stop_subprocess_kills_term_ignoring_descendant_process_group():
+    from hermes_cli import voice_ws
+
+    child_code = (
+        "import signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print('ready', flush=True); time.sleep(300)"
+    )
+    parent_code = (
+        "import subprocess,sys,time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}], "
+        "stdout=subprocess.PIPE, text=True); "
+        "assert child.stdout.readline().strip() == 'ready'; "
+        "print(child.pid, flush=True); time.sleep(300)"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        parent_code,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    child_pid = None
+    try:
+        assert process.stdout is not None
+        child_pid = int(
+            (
+                await asyncio.wait_for(
+                    process.stdout.readline(),
+                    timeout=3,
+                )
+            ).decode()
+        )
+        await voice_ws._stop_subprocess(process)
+
+        assert process.returncode is not None
+        for _ in range(100):
+            if not voice_ws._posix_process_group_exists(
+                process.pid
+            ) and not voice_ws.psutil.pid_exists(child_pid):
+                break
+            await asyncio.sleep(0.05)
+        assert not voice_ws._posix_process_group_exists(process.pid)
+        assert not voice_ws.psutil.pid_exists(child_pid)
+    finally:
+        try:
+            os.killpg(process.pid, voice_ws.signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.returncode is None:
+            process.kill()
+            await asyncio.wait_for(process.wait(), timeout=2)
+        if child_pid is not None and voice_ws.psutil.pid_exists(child_pid):
+            try:
+                voice_ws.psutil.Process(child_pid).kill()
+            except voice_ws.psutil.Error:
+                pass
+
+
 @pytest.mark.asyncio
 async def test_interrupt_audio_discard_preserves_queue_accounting():
     from hermes_cli import voice_ws
@@ -712,7 +788,7 @@ async def test_interrupt_audio_discard_preserves_queue_accounting():
         retained.append(events.get_nowait())
         events.task_done()
     await asyncio.wait_for(events.join(), timeout=1)
-    assert retained == [{"type": "state", "value": "listening"}]
+    assert retained == []
 
 
 def test_post_end_interrupt_cancels_and_reaps_blocked_delegate(monkeypatch):
@@ -736,13 +812,20 @@ def test_post_end_interrupt_cancels_and_reaps_blocked_delegate(monkeypatch):
 
     process = BlockingProcess()
     synthesis_calls = []
+    group_alive = True
 
     async def fake_create_subprocess_exec(*args, **kwargs):
         return process
 
     def fake_killpg(pid, sig):
+        nonlocal group_alive
         assert pid == process.pid
+        if sig == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
         process.returncode = -sig
+        group_alive = False
 
     async def fake_transcribe(_pcm, _language):
         return "hallo"
@@ -773,6 +856,71 @@ def test_post_end_interrupt_cancels_and_reaps_blocked_delegate(monkeypatch):
 
     assert process.reaped.wait(timeout=1)
     assert synthesis_calls == []
+
+
+def test_post_end_interrupt_drops_queued_short_tts_response(monkeypatch):
+    from hermes_cli import voice_ws
+
+    interrupt_processed = threading.Event()
+    original_discard = voice_ws._discard_queued_response_events
+
+    def tracking_discard(events_out):
+        original_discard(events_out)
+        interrupt_processed.set()
+
+    async def controlled_sender(websocket, events_out, disconnected):
+        while not disconnected.is_set():
+            event = await events_out.get()
+            try:
+                if event is None:
+                    return
+                if event == {"type": "state", "value": "speaking"}:
+                    await websocket.send_json(event)
+                    while not interrupt_processed.is_set():
+                        await asyncio.sleep(0.001)
+                elif event.get("type") == "audio":
+                    await websocket.send_bytes(event["data"])
+                else:
+                    await websocket.send_json(event)
+            finally:
+                events_out.task_done()
+
+    async def fake_transcribe(_pcm, _language):
+        return "hallo"
+
+    async def fake_delegate(_prompt):
+        return "antwort"
+
+    async def fake_synthesize(_text, _language):
+        return b"\x01\x00" * 20
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "fallback_transcribe_pcm", fake_transcribe)
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
+    monkeypatch.setattr(voice_ws, "_send_voice_events", controlled_sender)
+    monkeypatch.setattr(
+        voice_ws,
+        "_discard_queued_response_events",
+        tracking_discard,
+    )
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        ws.send_bytes(b"\x01\x00")
+        ws.send_json({"type": "end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "antwort",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        ws.send_json({"type": "interrupt"})
+        assert ws.receive_json() == {"type": "interrupted"}
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert interrupt_processed.is_set()
 
 
 def test_delegate_stderr_never_reaches_websocket(monkeypatch, caplog):

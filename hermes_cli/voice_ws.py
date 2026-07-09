@@ -302,8 +302,79 @@ def _signal_process_tree(
     (process.kill if force else process.terminate)()
 
 
+def _posix_process_group_exists(pgid: int) -> bool:
+    """Probe only the fresh, isolated delegation group created from ``pgid``."""
+    if pgid <= 0 or pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_posix_group_exit(pgid: int, timeout: float) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while _posix_process_group_exists(pgid):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+async def _stop_posix_process_group(process: asyncio.subprocess.Process) -> None:
+    """Stop every member of the delegation's new session and reap its parent."""
+    pgid = process.pid
+    if pgid <= 0 or pgid == os.getpgrp():
+        raise RuntimeError("refusing to signal a non-isolated process group")
+
+    if _posix_process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    parent_reaped = False
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=_PROCESS_TERMINATE_GRACE_SECONDS,
+        )
+        parent_reaped = True
+    except TimeoutError:
+        pass
+
+    # The direct parent may already be reaped while a TERM-ignoring descendant
+    # still owns the isolated group. Probe the group independently before return.
+    if _posix_process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    if not parent_reaped:
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _log.warning("Hermes delegation parent did not exit after group kill")
+
+    if not await _wait_for_posix_group_exit(
+        pgid,
+        _PROCESS_CLEANUP_TIMEOUT_SECONDS,
+    ):
+        _log.warning("Hermes delegation process group still exists after kill")
+
+
 async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
     """Stop the whole isolated tree, then reap the direct child within bounds."""
+    if os.name == "posix":
+        await _stop_posix_process_group(process)
+        return
     if process.returncode is not None:
         return
     try:
@@ -480,7 +551,7 @@ async def _put_event_checkpoint(
 def _discard_queued_response_events(
     events_out: asyncio.Queue[dict[str, Any] | None],
 ) -> None:
-    """Drop not-yet-sent playback output while preserving safe state events."""
+    """Drop queued playback output; the sender's one popped frame may be in flight."""
     retained: list[dict[str, Any] | None] = []
     while True:
         try:
@@ -491,7 +562,10 @@ def _discard_queued_response_events(
         should_drop = event is not None and (
             event.get("type") == "audio"
             or (event.get("type") == "transcript" and event.get("role") == "assistant")
-            or (event.get("type") == "state" and event.get("value") == "speaking")
+            or (
+                event.get("type") == "state"
+                and event.get("value") in {"speaking", "listening"}
+            )
         )
         if not should_drop:
             retained.append(event)
@@ -727,13 +801,17 @@ async def _run_cascade_fallback(
     ):
         return
     for offset in range(0, len(audio), _OUTPUT_PCM_CHUNK_BYTES):
+        if stop_requested.is_set():
+            return
         if not await _put_event(
             events_out,
             {"type": "audio", "data": audio[offset : offset + _OUTPUT_PCM_CHUNK_BYTES]},
             disconnected,
         ):
             return
-    await _put_event(
+    if stop_requested.is_set():
+        return
+    await _put_event_checkpoint(
         events_out,
         {"type": "state", "value": "listening"},
         disconnected,
