@@ -232,7 +232,10 @@ def test_complete_task_without_disposition_is_backward_compat(kanban_home):
             conn, tid,
             result="done",
             summary="finished",
-            metadata=_NO_DISPOSITION_METADATA,
+            metadata={
+                **_NO_DISPOSITION_METADATA,
+                "review_verdict": "APPROVED",
+            },
         )
     assert ok is True
 
@@ -271,7 +274,10 @@ def test_review_gate_verified_done_records_coder_disposition(
             tid,
             result="APPROVED",
             summary="verifier approved",
-            metadata=_NO_DISPOSITION_METADATA,
+            metadata={
+                **_NO_DISPOSITION_METADATA,
+                "review_verdict": "APPROVED",
+            },
             review_gate=True,
         )
         assert ok is True
@@ -310,7 +316,10 @@ def test_intermediate_review_stage_records_disposition(
             tid,
             result="APPROVED",
             summary="verifier approved with follow-up",
-            metadata=_TWO_ITEMS_METADATA,
+            metadata={
+                **_TWO_ITEMS_METADATA,
+                "review_verdict": "APPROVED",
+            },
             review_gate=True,
         ) is True
 

@@ -1402,10 +1402,12 @@ KANBAN_COMPLETE_SCHEMA = {
                 "description": (
                     "Free-form dict of structured facts about this "
                     "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
-                    "\"findings\": [...]}. Reviewer runs may include "
-                    "``review_verdict``/``verdict`` values such as APPROVED "
-                    "or NEEDS_REVISION; the kanban DB normalizes those only "
-                    "for review-originated runs. Surfaced to downstream "
+                    "\"findings\": [...]}. Review-originated runs MUST include "
+                    "``metadata.review_verdict`` with APPROVED or "
+                    "REQUEST_CHANGES; free-form summary text never authorizes "
+                    "a terminal review transition. The kanban DB normalizes "
+                    "structured synonyms only for review-originated runs. "
+                    "Surfaced to downstream "
                     "workers alongside ``summary``."
                 ),
             },

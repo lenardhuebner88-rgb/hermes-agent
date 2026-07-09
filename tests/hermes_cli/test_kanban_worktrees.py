@@ -1237,10 +1237,17 @@ def test_integration_park_class_strips_stored_prefix(reason, expected):
 
 def test_integrate_merges_no_ff_and_cleans_up(repo):
     info = _provisioned_chain(repo, "t_m1")
+    validated_heads = []
+
+    def gate(validation_root, _files):
+        validated_heads.append(_git(validation_root, "rev-parse", "HEAD"))
+        return True, "stub gate"
+
     out = kwt.integrate_chain(
-        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate,
+        repo, info["path"], info["branch"], "main", gate_runner=gate,
     )
     assert out["action"] == "merged"
+    assert validated_heads == [out["merge_commit"]]
     # --no-ff: HEAD is a real merge commit with two parents.
     parents = _git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
     assert len(parents) == 3
@@ -1379,8 +1386,14 @@ def test_operation_in_progress_parks(repo):
 
 def test_red_gate_reverts_merge_and_parks(repo):
     info = _provisioned_chain(repo, "t_red", relpath="breaks.py")
+    validation_roots = []
+
+    def red_gate(validation_root, _files):
+        validation_roots.append(Path(validation_root))
+        return False, "stub gate red"
+
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
-                              gate_runner=_red_gate)
+                              gate_runner=red_gate)
     assert out["action"] == "parked"
     assert "post-merge gate failed" in out["reason"]
     assert out["reverted"] is True
@@ -1391,6 +1404,7 @@ def test_red_gate_reverts_merge_and_parks(repo):
     # Live branch stays provably green: HEAD is the revert commit.
     head_subject = _git(repo, "log", "-1", "--format=%s")
     assert head_subject.startswith("Revert")
+    assert validation_roots and all(not root.exists() for root in validation_roots)
 
 
 def _red_gate_web(_repo, _files):
@@ -1404,50 +1418,50 @@ def _red_gate_python(_repo, _files):
     return False, "pytest[1]: exit 1\nFAILED tests/hermes_cli/test_wip_broken.py"
 
 
-def test_foreign_dirty_web_file_in_failing_stage_parks_as_foreign_dirty_checkout(repo):
-    """P1 2026-07-05 (t_2fa852c6): a foreign session's untracked WIP file
-    OUTSIDE this chain's own diff (AutoReleaseTile.test.tsx analogue) fails
-    the FIRST failing gate stage (tsc, web scope). The park must attribute
-    this honestly instead of the generic chain-blame 'post-merge gate
-    failed' reason."""
+def test_foreign_dirty_web_file_is_absent_from_clean_validation_worktree(repo):
+    """A foreign live-checkout web file cannot create a false-red gate."""
     info = _provisioned_chain(repo, "t_fdc_web", relpath="feature.py")
     foreign = repo / "web" / "src" / "control" / "AutoReleaseTile.test.tsx"
     foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_text("// half-finished foreign test\n")
+    validation_roots = []
+
+    def gate(validation_root, _files):
+        validation_roots.append(Path(validation_root))
+        contaminated = (
+            Path(validation_root)
+            / "web/src/control/AutoReleaseTile.test.tsx"
+        ).exists()
+        return (not contaminated, "clean" if not contaminated else "contaminated")
+
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
-                              gate_runner=_red_gate_web)
-    assert out["action"] == "parked"
-    assert out["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
-    assert not out["reason"].startswith("post-merge gate failed")
-    assert "AutoReleaseTile.test.tsx" in out["reason"]
-    assert out["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
-    # Revert-as-chain-fault mechanics unchanged: the live branch stays green
-    # regardless of WHY the gate failed.
-    assert out["reverted"] is True
-    head_subject = _git(repo, "log", "-1", "--format=%s")
-    assert head_subject.startswith("Revert")
-    # No chain-blame: the park must classify "transient" (bounded
-    # integration-retry self-heal), NEVER "needs_orchestrator" (the
-    # conflict-fixer lane that dispatches a fixer to "repair" code that was
-    # never broken — kanban_db.py's no_silent_stall_sweep §5).
-    assert kwt._integration_park_class(out["reason"]) == "transient"
-    # Foreign file untouched.
+                              gate_runner=gate)
+    assert out["action"] == "merged"
+    assert validation_roots and all(root != repo for root in validation_roots)
+    assert all(not root.exists() for root in validation_roots)
     assert foreign.read_text() == "// half-finished foreign test\n"
 
 
-def test_foreign_dirty_python_file_in_failing_stage_parks_as_foreign_dirty_checkout(repo):
-    """Same incident shape for the python gate: a foreign broken tests/
-    file fails the pytest stage."""
+def test_foreign_dirty_python_file_is_absent_from_clean_validation_worktree(repo):
+    """A foreign live-checkout Python test cannot create a false-red gate."""
     info = _provisioned_chain(repo, "t_fdc_py", relpath="feature.py")
     foreign = repo / "tests" / "hermes_cli" / "test_wip_broken.py"
     foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_text("def test_x():\n    assert False\n")
+    validation_roots = []
+
+    def gate(validation_root, _files):
+        validation_roots.append(Path(validation_root))
+        contaminated = (
+            Path(validation_root) / "tests/hermes_cli/test_wip_broken.py"
+        ).exists()
+        return (not contaminated, "clean" if not contaminated else "contaminated")
+
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
-                              gate_runner=_red_gate_python)
-    assert out["action"] == "parked"
-    assert out["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
-    assert "tests/hermes_cli/test_wip_broken.py" in out["reason"]
-    assert kwt._integration_park_class(out["reason"]) == "transient"
+                              gate_runner=gate)
+    assert out["action"] == "merged"
+    assert validation_roots and all(not root.exists() for root in validation_roots)
+    assert foreign.exists()
 
 
 def test_red_gate_without_foreign_dirty_keeps_generic_classification(repo):
@@ -1463,12 +1477,8 @@ def test_red_gate_without_foreign_dirty_keeps_generic_classification(repo):
     assert out["reverted"] is True
 
 
-def test_foreign_dirty_web_file_with_green_gate_flags_gate_environment(repo):
-    """DONE-WHEN (c), FALSE-GREEN: gate passes, but a foreign dirty file sat
-    in a scope the gate actually exercised (web/, since this chain's own
-    diff also touches web/) — the merge still lands, but the result carries
-    gate_environment=foreign_dirty so this green is never mistaken for a
-    clean-checkout green."""
+def test_foreign_dirty_web_file_cannot_contaminate_green_gate(repo):
+    """A green result now proves a clean commit checkout, not annotated dirt."""
     info = _provisioned_chain(
         repo, "t_fdc_green", relpath="web/src/control/Foo.tsx",
         content="export const x = 1;\n",
@@ -1479,8 +1489,9 @@ def test_foreign_dirty_web_file_with_green_gate_flags_gate_environment(repo):
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
                               gate_runner=_ok_gate)
     assert out["action"] == "merged"
-    assert out["gate_environment"] == "foreign_dirty"
-    assert out["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
+    assert "gate_environment" not in out
+    assert "foreign_dirty_files" not in out
+    assert foreign.exists()
 
 
 def test_clean_checkout_green_has_no_gate_environment_flag(repo):
@@ -1543,21 +1554,27 @@ def test_reverted_merge_is_reintegrated_not_clean(repo):
     assert not info["path"].exists()
 
 
-def test_reintegration_red_gate_with_foreign_dirty_parks_as_foreign_dirty_checkout(repo):
-    """Coordinator follow-up 2026-07-06: integrate_chain's OTHER gate call
-    site — the ancestry reintegration-after-revert branch (same shape as
-    test_reverted_merge_is_reintegrated_not_clean) — gets the same
-    foreign-dirty-checkout attribution as the standard merge path, via the
-    shared ``_gate_with_foreign_dirty_evidence`` helper."""
+def test_reintegration_gate_uses_clean_validation_worktree(repo):
+    """The revert-of-revert gate is isolated from later foreign live WIP."""
     info = _provisioned_chain(repo, "t_reint_fdc", relpath="restored.py")
-    gate_results = iter([
-        (False, "first gate failed"),
-        (False, "tsc -b: exit 2\nerror TS2345 in AutoReleaseTile.test.tsx"),
-    ])
+    validation_roots = []
+    calls = 0
+
+    def gate(validation_root, _files):
+        nonlocal calls
+        calls += 1
+        validation_roots.append(Path(validation_root))
+        if calls == 1:
+            return False, "first gate failed"
+        contaminated = (
+            Path(validation_root)
+            / "web/src/control/AutoReleaseTile.test.tsx"
+        ).exists()
+        return (not contaminated, "clean" if not contaminated else "contaminated")
 
     out1 = kwt.integrate_chain(
         repo, info["path"], info["branch"], "main",
-        gate_runner=lambda _repo, _files: next(gate_results),
+        gate_runner=gate,
     )
     assert out1["action"] == "parked"
     assert kwt._branch_is_ancestor(repo, info["branch"], "main") is True
@@ -1570,19 +1587,13 @@ def test_reintegration_red_gate_with_foreign_dirty_parks_as_foreign_dirty_checko
 
     out2 = kwt.integrate_chain(
         repo, info["path"], info["branch"], "main",
-        gate_runner=lambda _repo, _files: next(gate_results),
+        gate_runner=gate,
     )
 
-    assert out2["action"] == "parked"
-    assert out2["park_class"] == kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
+    assert out2["action"] == "merged"
     assert out2["reintegrated_after_revert"] is True
-    assert "restored_commit" in out2
-    assert not out2["reason"].startswith("post-reintegration gate failed")
-    assert "AutoReleaseTile.test.tsx" in out2["reason"]
-    assert out2["foreign_dirty_files"] == ["web/src/control/AutoReleaseTile.test.tsx"]
-    # No chain-blame: transient, not needs_orchestrator.
-    assert kwt._integration_park_class(out2["reason"]) == "transient"
-    # Foreign file untouched.
+    assert out2["merge_commit"] == _git(repo, "rev-parse", "HEAD")
+    assert all(not root.exists() for root in validation_roots)
     assert foreign.read_text() == "// half-finished foreign test\n"
 
 
@@ -1924,9 +1935,119 @@ def test_web_integration_creates_parked_release_gate_child(
         "cd /home/piet/.hermes/hermes-agent/web",
         "npm run build",
         "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
-        "curl -fsS http://127.0.0.1:9119/control >/dev/null",
     ):
         assert command in (child.body or "")
+    assert "127.0.0.1:9119" not in (child.body or "")
+
+
+def test_completion_retry_reconciles_merge_after_closeout_enqueue_rollback(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    real_enqueue = kb._enqueue_closeout_in_txn
+
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(
+            ws,
+            "web/src/control/retry.ts",
+            "export const retry = true\n",
+            msg=f"kanban({tid}): retryable web work",
+        )
+
+        monkeypatch.setattr(
+            kb,
+            "_enqueue_closeout_in_txn",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced closeout enqueue failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="forced closeout enqueue failure"):
+            kb.complete_task(conn, tid, result="done")
+
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == "running"
+        assert not kwt._branch_exists(repo, f"kanban/{tid}")
+        assert len(_events(conn, tid, "integration_merged")) == 1
+        assert len(_events(conn, tid, "INTEGRATOR_VERIFIED")) == 1
+
+        monkeypatch.setattr(kb, "_enqueue_closeout_in_txn", real_enqueue)
+        assert kb.complete_task(conn, tid, result="done")
+        assert kb.get_task(conn, tid).status == "done"
+        assert len(_events(conn, tid, "integration_merged")) == 1
+        assert _events(conn, tid, "integration_parked") == []
+        pending = _events(conn, tid, "closeout_pending")
+        assert len(pending) == 1
+        assert pending[0]["release_context"]["release_gate_child_id"]
+
+
+def test_completion_retry_parks_when_green_merge_was_reverted_after_rollback(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    real_enqueue = kb._enqueue_closeout_in_txn
+
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(
+            ws,
+            "web/src/control/reverted.ts",
+            "export const active = true\n",
+            msg=f"kanban({tid}): web work later reverted",
+        )
+        monkeypatch.setattr(
+            kb,
+            "_enqueue_closeout_in_txn",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced closeout enqueue failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="forced closeout enqueue failure"):
+            kb.complete_task(conn, tid, result="done")
+
+        merge_commit = _events(conn, tid, "integration_merged")[0]["merge_commit"]
+        _git(repo, "revert", "-m", "1", "--no-edit", merge_commit)
+        monkeypatch.setattr(kb, "_enqueue_closeout_in_txn", real_enqueue)
+
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == "blocked"
+        assert _events(conn, tid, "closeout_pending") == []
+        run = kb.latest_run(conn, tid)
+        assert run is not None
+        assert run.metadata["content_drift_after_merge"] is True
+        assert run.metadata["revert_commits"]
+
+
+def test_required_web_release_gate_creation_failure_parks_completion(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    monkeypatch.setattr(
+        kwt,
+        "_create_parked_release_gate_child",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("release gate DB unavailable")
+        ),
+    )
+
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(
+            ws,
+            "web/src/control/gated.ts",
+            "export const gated = true\n",
+            msg=f"kanban({tid}): gated web work",
+        )
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == "blocked"
+        assert _events(conn, tid, "closeout_pending") == []
+        merged = _events(conn, tid, "integration_merged")
+        assert merged[0]["release_gate_required"] is True
+        run = kb.latest_run(conn, tid)
+        assert run is not None
+        assert run.metadata["release_gate_creation_failed"] is True
 
 
 def test_complete_task_closes_already_integrated_branch_visibly(
@@ -2616,6 +2737,290 @@ def test_release_gate_executor_green_path(kanban_home):
     assert child.status == "done"
 
 
+def test_release_gate_validates_exact_commit_in_clean_ephemeral_worktree(
+    kanban_home, repo,
+):
+    """Foreign live WIP is absent and the detached validation ref is exact."""
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    foreign = repo / "foreign-wip.txt"
+    foreign.write_text("not part of the release commit\n")
+    validation_roots = []
+    validation_heads = []
+
+    def gate(validation_root):
+        root = Path(validation_root)
+        validation_roots.append(root)
+        validation_heads.append(_git(root, "rev-parse", "HEAD"))
+        return (not (root / "foreign-wip.txt").exists(), "clean validation")
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=merge_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=gate,
+            activation_runner=_fake_activation(),
+            max_retries=0,
+            repo_root=repo,
+        )
+
+    assert result["status"] == "green"
+    assert validation_heads == [merge_commit]
+    assert validation_roots and all(root != repo for root in validation_roots)
+    assert all(not root.exists() for root in validation_roots)
+    assert foreign.read_text() == "not part of the release commit\n"
+
+
+def test_default_release_runner_rebinds_absolute_commands_to_validation_root(
+    repo, monkeypatch,
+):
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["cwd"] = kwargs["cwd"]
+        return SimpleNamespace(returncode=0, stdout="build ok", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    monkeypatch.setattr(kwt, "visual_gate_enabled", lambda: False)
+
+    ok, _ = kwt._default_release_gate_runner(repo_root=repo)
+
+    assert ok is True
+    assert captured["cwd"] == str(repo)
+    assert str(repo) in captured["argv"][2]
+    assert str(kwt.LIVE_CHECKOUT_ROOT) not in captured["argv"][2]
+
+
+def test_release_gate_refuses_activation_when_live_head_advanced(
+    kanban_home, repo,
+):
+    validated_commit = _git(repo, "rev-parse", "HEAD")
+    _commit_in(repo, "later.txt", "later\n", msg="concurrent integration")
+    activation = _fake_activation()
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=validated_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=lambda _validation_root: (True, "old commit green"),
+            activation_runner=activation,
+            max_retries=0,
+            repo_root=repo,
+        )
+        child = kb.get_task(conn, child_id)
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+
+    assert result["status"] == "escalated"
+    assert child.status == "blocked"
+    assert activation.calls == []
+    assert "live HEAD advanced" in escalations[0]["evidence"]["last_error"]
+
+
+def test_release_activation_holds_integrator_process_and_file_locks(
+    kanban_home, repo, monkeypatch,
+):
+    """HEAD comparison and activation share the integrator's lock boundary."""
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    events = []
+    state = {"process": False, "file": False}
+    handle = object()
+    expected_lock_path = (
+        Path(_git(repo, "rev-parse", "--absolute-git-dir"))
+        / "hermes-kanban-integrator.lock"
+    )
+
+    class RecordingProcessLock:
+        def __enter__(self):
+            assert not state["process"]
+            state["process"] = True
+            events.append("process_enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            assert state["process"] and not state["file"]
+            events.append("process_exit")
+            state["process"] = False
+
+    def acquire_file_lock(path, timeout=kwt.LOCK_TIMEOUT_SECONDS):
+        assert state["process"] and not state["file"]
+        assert Path(path) == expected_lock_path
+        state["file"] = True
+        events.append("file_acquire")
+        return handle
+
+    def release_file_lock(actual_handle):
+        assert actual_handle is handle
+        assert state["process"] and state["file"]
+        events.append("file_release")
+        state["file"] = False
+
+    def activation():
+        assert state == {"process": True, "file": True}
+        events.append("activation")
+        return True, "activated", {"pre_pid": 31, "post_pid": 32}
+
+    monkeypatch.setattr(kwt, "_PROCESS_LOCK", RecordingProcessLock())
+    monkeypatch.setattr(kwt, "_acquire_file_lock", acquire_file_lock)
+    monkeypatch.setattr(kwt, "_release_file_lock", release_file_lock)
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=merge_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=lambda _validation_root: (True, "green"),
+            activation_runner=activation,
+            max_retries=0,
+            repo_root=repo,
+        )
+
+    assert result["status"] == "green"
+    assert events == [
+        "process_enter",
+        "file_acquire",
+        "activation",
+        "file_release",
+        "process_exit",
+    ]
+
+
+def test_release_gate_validation_worktree_cleans_up_when_runner_crashes(
+    kanban_home, repo,
+):
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    validation_roots = []
+
+    def crashing_gate(validation_root):
+        validation_roots.append(Path(validation_root))
+        raise RuntimeError("gate exploded")
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=merge_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=crashing_gate,
+            max_retries=0,
+            repo_root=repo,
+        )
+
+    assert result["status"] == "escalated"
+    assert validation_roots and all(not root.exists() for root in validation_roots)
+    assert "kanban-validation" not in _git(repo, "worktree", "list", "--porcelain")
+
+
+def test_release_fixer_commit_is_integrated_and_revalidated_before_activation(
+    kanban_home, repo,
+):
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    validation_roots = []
+    activation_heads = []
+
+    def gate(validation_root):
+        root = Path(validation_root)
+        validation_roots.append(root)
+        ok = (root / "release-fix.txt").is_file()
+        return ok, "fixed" if ok else "missing release fix"
+
+    def fixer(**kwargs):
+        info = kwt.ensure_worktree(repo, kwargs["root_id"])
+        assert info["path"] == kwargs["worktree"]
+        _commit_in(
+            info["path"],
+            "release-fix.txt",
+            "fixed\n",
+            msg="release fixer commit",
+        )
+
+    def activation():
+        assert (repo / "release-fix.txt").read_text() == "fixed\n"
+        activation_heads.append(_git(repo, "rev-parse", "HEAD"))
+        return True, "activated", {"pre_pid": 11, "post_pid": 22}
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=merge_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=gate,
+            fixer_runner=fixer,
+            activation_runner=activation,
+            max_retries=1,
+            repo_root=repo,
+        )
+        executed = _events(conn, child_id, "release_gate_executed")
+
+    assert result["status"] == "green"
+    assert result["fixer_attempts"] == 1
+    assert activation_heads == [_git(repo, "rev-parse", "HEAD")]
+    assert [event.get("phase") for event in executed] == [
+        "merged_commit",
+        "fixer_branch",
+        "integrated_fixer_commit",
+    ]
+    assert executed[-1]["validation_commit"] == activation_heads[0]
+    assert all(not root.exists() for root in validation_roots)
+    assert "kanban/" not in _git(repo, "branch", "--list", "kanban/*")
+
+
+def test_release_fixer_failed_integration_stays_blocked_without_activation(
+    kanban_home, repo,
+):
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    activation = _fake_activation()
+    validation_roots = []
+
+    def gate(validation_root):
+        root = Path(validation_root)
+        validation_roots.append(root)
+        ok = (root / "a.txt").read_text() == "fixed on branch\n"
+        return ok, "fixed" if ok else "still broken"
+
+    def fixer(**kwargs):
+        info = kwt.ensure_worktree(repo, kwargs["root_id"])
+        _commit_in(
+            info["path"], "a.txt", "fixed on branch\n", msg="release fix",
+        )
+        # Simulate concurrent operator WIP on the same live path. The existing
+        # overlap guard must park before merge; activation must remain impossible.
+        (repo / "a.txt").write_text("operator WIP\n")
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=merge_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=gate,
+            fixer_runner=fixer,
+            activation_runner=activation,
+            max_retries=1,
+            repo_root=repo,
+        )
+        child = kb.get_task(conn, child_id)
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+
+    assert result["status"] == "escalated"
+    assert child.status == "blocked"
+    assert activation.calls == []
+    assert _git(repo, "rev-parse", "HEAD") == merge_commit
+    assert (repo / "a.txt").read_text() == "operator WIP\n"
+    assert "integration failed" in escalations[0]["evidence"]["last_error"]
+    assert all(not root.exists() for root in validation_roots)
+
+
 def test_release_gate_executor_red_then_fixer_then_green(kanban_home):
     """Gate red -> one bounded fixer in the chain worktree -> re-run green."""
     gate_results = iter([(False, "TS2322 build error"), (True, "build ok")])
@@ -3038,6 +3443,8 @@ def test_auto_mode_release_gate_child_launches_board_scoped_activation(
         child_id = kwt._create_parked_release_gate_child(
             conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
         )
+        assert _events(conn, child_id, "release_gate_auto_execute_started") == []
+        assert kwt.start_parked_release_gate(conn, child_id) == "started"
         started = _events(conn, child_id, "release_gate_auto_execute_started")
         failed = _events(conn, child_id, "release_gate_auto_execute_failed")
 
@@ -3094,6 +3501,9 @@ def test_autonomous_switch_auto_executes_parked_release_gate(
         child_id = kwt._create_parked_release_gate_child(
             conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
         )
+        assert captured == {}
+        assert _events(conn, child_id, "release_gate_auto_execute_started") == []
+        assert kwt.start_parked_release_gate(conn, child_id) == "started"
         started = _events(conn, child_id, "release_gate_auto_execute_started")
         failed = _events(conn, child_id, "release_gate_auto_execute_failed")
         held = _events(conn, child_id, "release_gate_auto_execute_held")
@@ -3110,14 +3520,10 @@ def test_autonomous_switch_auto_executes_parked_release_gate(
     assert "--json" in argv[i:]
 
 
-def test_autonomous_auto_execute_sets_mutual_exclusion_flag(
+def test_parked_gate_creation_never_starts_release_before_closeout(
     kanban_home, monkeypatch,
 ):
-    """Double-deploy guard: when the AD-S2 hook auto-executes the parked gate,
-    ``_create_parked_release_gate_child`` marks the integration ``outcome`` with
-    ``release_gate_auto_executed`` so ``complete_task`` skips
-    ``maybe_auto_release``'s own ``release_chain`` deploy — a single completion
-    triggers at most ONE ``deploy_dashboard.sh`` run / dashboard restart."""
+    """Gate creation is DB-only; closeout owns every external release start."""
     from hermes_cli import auto_release
 
     monkeypatch.setattr(
@@ -3126,10 +3532,8 @@ def test_autonomous_auto_execute_sets_mutual_exclusion_flag(
     )
     monkeypatch.setattr(kwt, "release_gate_mode", lambda: "manual")
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
-    monkeypatch.setattr(
-        kwt.subprocess, "run",
-        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
+    calls = []
+    monkeypatch.setattr(kwt.subprocess, "run", lambda *a, **kw: calls.append(a))
 
     with kb.connect() as conn:
         source_id = kb.create_task(
@@ -3143,13 +3547,16 @@ def test_autonomous_auto_execute_sets_mutual_exclusion_flag(
         )
 
     assert child_id is not None
-    assert outcome.get("release_gate_auto_executed") is True
+    assert outcome.get("release_gate_child_id") == child_id
+    assert "release_gate_auto_executed" not in outcome
+    assert calls == []
+    with kb.connect() as conn:
+        assert _events(conn, child_id, "release_gate_auto_execute_started") == []
 
 
-def test_mode_auto_sets_mutual_exclusion_flag(kanban_home, monkeypatch):
-    """The operator-forced ``release_gate.mode:auto`` path also spawns a deploy,
-    so it too flags the outcome — closing the same double-deploy window for the
-    mode:auto + release.autonomous combination."""
+def test_mode_auto_starts_only_when_closeout_invokes_parked_gate(
+    kanban_home, monkeypatch,
+):
     monkeypatch.setattr(kwt, "release_gate_mode", lambda: "auto")
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes")
     monkeypatch.setattr(
@@ -3166,9 +3573,12 @@ def test_mode_auto_sets_mutual_exclusion_flag(kanban_home, monkeypatch):
         child_id = kwt._create_parked_release_gate_child(
             conn, source_id, source_id, outcome,
         )
+        assert _events(conn, child_id, "release_gate_auto_execute_started") == []
+        assert kwt.start_parked_release_gate(conn, child_id) == "started"
 
     assert child_id is not None
-    assert outcome.get("release_gate_auto_executed") is True
+    assert outcome.get("release_gate_child_id") == child_id
+    assert "release_gate_auto_executed" not in outcome
 
 
 def test_held_gate_leaves_mutual_exclusion_flag_unset(kanban_home, monkeypatch):
@@ -3205,11 +3615,7 @@ def test_held_gate_leaves_mutual_exclusion_flag_unset(kanban_home, monkeypatch):
 def test_failed_gate_spawn_leaves_mutual_exclusion_flag_unset(
     kanban_home, monkeypatch,
 ):
-    """Codex-caught deploy-gap regression: if the detached activation FAILS to
-    launch (systemd-run rejects the unit), the ``outcome`` must NOT be flagged —
-    so ``complete_task`` still runs ``maybe_auto_release`` as the fallback deploy.
-    The mutual-exclusion suppresses only a SUCCESSFULLY-spawned second deploy,
-    never a launch that didn't happen."""
+    """A failed acknowledgement is ambiguous and never authorizes fallback."""
     from hermes_cli import auto_release
 
     monkeypatch.setattr(
@@ -3234,9 +3640,12 @@ def test_failed_gate_spawn_leaves_mutual_exclusion_flag_unset(
         child_id = kwt._create_parked_release_gate_child(
             conn, source_id, source_id, outcome,
         )
+        assert _events(conn, child_id, "release_gate_auto_execute_failed") == []
+        state = kwt.start_parked_release_gate(conn, child_id)
         failed = _events(conn, child_id, "release_gate_auto_execute_failed")
 
     assert child_id is not None
+    assert state == "ambiguous"
     assert "release_gate_auto_executed" not in outcome
     assert len(failed) == 1
 
@@ -3319,6 +3728,7 @@ def test_autonomous_switch_holds_and_logs_when_guard_red(
         child_id = kwt._create_parked_release_gate_child(
             conn, source_id, source_id, {"merge_commit": "deadbeefcafe"},
         )
+        assert kwt.start_parked_release_gate(conn, child_id) == "held"
         started = _events(conn, child_id, "release_gate_auto_execute_started")
         held = _events(conn, child_id, "release_gate_auto_execute_held")
 

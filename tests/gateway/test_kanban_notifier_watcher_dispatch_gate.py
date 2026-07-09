@@ -6,6 +6,8 @@
 """
 
 import asyncio
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from gateway.config import Platform
@@ -72,3 +74,71 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
                     asyncio.run(runner._kanban_notifier_watcher())
 
     assert past_gate, "list_boards should be called when dispatch_in_gateway=true"
+
+
+def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatch):
+    """The per-board dispatch tick launches closeout units, never inline work."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import config as config_mod
+    from hermes_cli import kanban_closeout as closeout
+    from hermes_cli import kanban_db as _kb
+
+    runner = _make_runner()
+    boards = [{"slug": "alpha"}, {"slug": "beta"}]
+    closeout_calls = []
+    sleep_calls = []
+
+    async def fake_sleep(_delay):
+        sleep_calls.append(True)
+        # Initial 5s delay, then one interval sleep after the first full tick.
+        if len(sleep_calls) >= 2:
+            runner._running = False
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    dispatch_result = SimpleNamespace(
+        spawned=[], reclaimed=0, crashed=[], timed_out=[], promoted=0, auto_blocked=[]
+    )
+    monkeypatch.delenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", raising=False)
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+            }
+        },
+    )
+    monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
+    monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    monkeypatch.setattr(_kb, "kanban_db_path", lambda board=None: tmp_path / f"{board}.db")
+    monkeypatch.setattr(_kb, "list_boards", lambda include_archived=False: boards)
+    monkeypatch.setattr(_kb, "connect", lambda board=None: MagicMock(name=f"conn-{board}"))
+    monkeypatch.setattr(_kb, "connect_closing", lambda *a, **k: nullcontext(MagicMock()))
+    monkeypatch.setattr(_kb, "dispatch_once", lambda *a, **k: dispatch_result)
+    monkeypatch.setattr(_kb, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(_kb, "poll_openclaw_results", lambda *a, **k: None)
+    monkeypatch.setattr(_kb, "no_silent_stall_sweep", lambda *a, **k: None)
+    monkeypatch.setattr(_kb, "escalate_silent_blocks_sweep", lambda *a, **k: None)
+    monkeypatch.setattr(_kb, "escalate_blocking_scouts_sweep", lambda *a, **k: None)
+    monkeypatch.setattr(_kb, "classify_escalations_sweep", lambda *a, **k: None)
+    monkeypatch.setattr(_kb, "has_spawnable_ready", lambda *a, **k: False)
+    monkeypatch.setattr(_kb, "has_spawnable_review", lambda *a, **k: False)
+    monkeypatch.setattr(_kb, "backfill_run_costs", lambda *a, **k: 0)
+    monkeypatch.setattr(_kb, "backfill_run_costs_from_sessions", lambda *a, **k: 0)
+    monkeypatch.setattr(_kb, "write_kanban_dispatcher_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(
+        closeout,
+        "spawn_pending_closeouts",
+        lambda conn, board, limit=10: closeout_calls.append((board, limit)) or [],
+    )
+
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    assert closeout_calls == [("alpha", 10), ("beta", 10)]

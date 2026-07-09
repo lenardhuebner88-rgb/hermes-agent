@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -31,6 +32,9 @@ from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name
 from hermes_cli.scoped_auto_commit import create_scoped_local_commit
+
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1191,19 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     e_close = epic_sub.add_parser("close", help="Mark an epic closed")
     e_close.add_argument("epic_id", help="Epic id")
 
+    p_closeout = sub.add_parser(
+        "closeout",
+        help="Process a durable task closeout in a detached transient unit",
+    )
+    p_closeout.add_argument("task_id", help="Done task with closeout_pending")
+    p_closeout.add_argument(
+        "--inline",
+        action="store_true",
+        default=False,
+        help="Claim and process in this process (used by the detached unit)",
+    )
+    p_closeout.add_argument("--json", action="store_true", help="Emit JSON result")
+
     p_release_gate = sub.add_parser(
         "release-gate",
         help="Execute a parked release-gate child: run the dashboard gate in "
@@ -1401,6 +1418,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "decompose":  _cmd_decompose,
             "gc":       _cmd_gc,
             "epic":     _dispatch_epic,
+            "closeout": _cmd_closeout,
             "release-gate": _cmd_release_gate,
             "release-uireal": _cmd_release_uireal,
             "release-freigabe": _cmd_release_freigabe,
@@ -1712,6 +1730,62 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
         return 1
     print(f"Heartbeat recorded for {args.task_id}")
     return 0
+
+
+def _cmd_closeout(args: argparse.Namespace) -> int:
+    """Launch closeout detached, or run the single-task unit core inline.
+
+    Exit 0 means delivered or detached unit accepted, 2 is a durable safety
+    hold/ambiguous release, and 1 is a launch, claim, or processing failure.
+    """
+
+    from hermes_cli import kanban_closeout as closeout
+
+    inline = bool(getattr(args, "inline", False))
+    board = getattr(args, "board", None)
+    if not inline:
+        payload = closeout.spawn_closeout_unit(args.task_id, board=board)
+        if getattr(args, "json", False):
+            print(json.dumps(payload))
+        else:
+            state = "started" if payload.get("ok") else "FAILED"
+            print(
+                f"closeout {args.task_id}: detached unit {state} "
+                f"(unit={payload.get('unit')}); {payload.get('detail', '')}"
+            )
+        return 0 if payload.get("ok") else 1
+
+    try:
+        with kb.connect_closing(board=board) as conn:
+            result = closeout.process_closeout(conn, args.task_id)
+        payload = {
+            "task_id": result.task_id,
+            "state": result.state,
+            "release_state": result.release_state,
+            "receipt_path": result.receipt_path,
+            "delivered": result.delivered,
+            "error": result.error,
+        }
+    except Exception as exc:
+        payload = {
+            "task_id": args.task_id,
+            "state": "failed",
+            "delivered": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if getattr(args, "json", False):
+        print(json.dumps(payload))
+    elif payload["state"] == "failed":
+        print(f"closeout {args.task_id}: {payload['error']}", file=sys.stderr)
+    else:
+        print(f"closeout {args.task_id}: {payload['state']}")
+    if payload.get("delivered"):
+        return 0
+    if payload.get("state") in {"pending", "not_claimed"}:
+        return 0
+    if payload.get("state") in {"held", "ambiguous"}:
+        return 2
+    return 1
 
 
 def _cmd_release_gate(args: argparse.Namespace) -> int:
@@ -2798,14 +2872,20 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             # Operator CLI completions (no HERMES_KANBAN_TASK/RUN_ID env)
             # keep the direct 'done' path by design.
             worker_run_id = _worker_run_id_for(tid)
-            if not kb.complete_task(
-                conn, tid,
-                result=args.result,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=worker_run_id,
-                review_gate=worker_run_id is not None,
-            ):
+            try:
+                completed = kb.complete_task(
+                    conn, tid,
+                    result=args.result,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=worker_run_id,
+                    review_gate=worker_run_id is not None,
+                )
+            except kb.ReviewVerdictRequiredError as exc:
+                failed.append(tid)
+                print(f"kanban: {exc}", file=sys.stderr)
+                continue
+            if not completed:
                 failed.append(tid)
                 print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
             else:
@@ -3298,6 +3378,17 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             auto_retry_blocked=auto_retry_blocked,
             auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
         )
+        if not args.dry_run:
+            try:
+                from hermes_cli import kanban_closeout as _closeout
+
+                _closeout.spawn_pending_closeouts(
+                    conn,
+                    board=kb.board_slug_for_conn(conn),
+                    limit=10,
+                )
+            except Exception:
+                _log.debug("kanban dispatch: closeout spawn sweep failed", exc_info=True)
     if getattr(args, "json", False):
         print(json.dumps({
             "reclaimed": res.reclaimed,

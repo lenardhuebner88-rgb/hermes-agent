@@ -424,7 +424,7 @@ def gate_on(monkeypatch: pytest.MonkeyPatch):
 
 # ---------------------------------------------------------------------------
 # Reviewer-verdict path: complete_task with REQUEST_CHANGES verdict
-# (outcome='completed', task blocked via direct UPDATE)
+# (run and task are both blocked through the normal block transition)
 # ---------------------------------------------------------------------------
 
 
@@ -432,15 +432,9 @@ def test_reviewer_verdict_request_changes_triggers_auto_retry(
     kanban_home: Path,
     gate_on: bool,
 ) -> None:
-    """Regression: when the reviewer calls complete_task with verdict=
-    REQUEST_CHANGES, the run ends with outcome='completed' (not 'blocked'),
-    but the task is flipped to status='blocked' via a direct UPDATE
-    (kanban_db.py:10395-10414).  Before the fallback fix,
-    _latest_blocked_run_for_auto_retry returned None for this case, so
-    auto_retry_blocked_tasks silently skipped the task and
-    _block_is_settled reported 'settled'.  After the fix, the lane
-    picks up the completed run carrying verdict='REQUEST_CHANGES' and
-    auto-retries the task."""
+    """Regression: a review REQUEST_CHANGES verdict is a real blocked run,
+    and the normal retry lane must pick it up without special-case outcome
+    inference."""
     with kb.connect() as conn:
         # Coder claims and submits work → goes to review.
         tid = kb.create_task(conn, title="impl", assignee="coder")
@@ -455,27 +449,22 @@ def test_reviewer_verdict_request_changes_triggers_auto_retry(
             conn,
             tid,
             summary="needs fixes",
-            metadata={"verdict": "REQUEST_CHANGES"},
+            metadata={"review_verdict": "REQUEST_CHANGES"},
             review_gate=True,
         )
         task = kb.get_task(conn, tid)
         assert task.status == "blocked", "task must be blocked after REQUEST_CHANGES"
 
-        # Verify the run has outcome='completed' (not 'blocked') — this is
-        # the exact gap the fix targets.
+        # Review rejection is represented consistently in both task and run.
         run_row = conn.execute(
             "SELECT outcome, verdict FROM task_runs WHERE id = ?",
             (claimed.current_run_id,),
         ).fetchone()
         assert run_row is not None
-        assert run_row["outcome"] == "completed", (
-            "review run must keep outcome='completed' (not 'blocked')"
-        )
+        assert run_row["outcome"] == "blocked"
         assert run_row["verdict"] == "REQUEST_CHANGES"
 
-        # Without the fallback, _latest_blocked_run_for_auto_retry returns
-        # None here → auto_retry_blocked_tasks skips → task stays blocked.
-        # With the fix the fallback picks up the completed/REQUEST_CHANGES run.
+        # The standard blocked-run path must retry the review rejection.
         retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
         assert [t for t, _ in retried] == [tid], (
             "auto_retry_blocked_tasks must retry a REQUEST_CHANGES-blocked task"

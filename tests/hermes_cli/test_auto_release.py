@@ -96,6 +96,7 @@ from pathlib import Path  # noqa: E402
 
 import hermes_cli.profiles as profiles_mod  # noqa: E402
 from hermes_cli import kanban_db as kb  # noqa: E402
+from hermes_cli import kanban_closeout as closeout  # noqa: E402
 from hermes_cli import vision_metrics as vm  # noqa: E402
 
 
@@ -110,6 +111,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     for name in ["coder", "verifier"]:
         _write_profile(home, name)
@@ -145,6 +147,51 @@ def _green_config():
     return {"autonomous": True, "max_tier_autonomous": "review"}
 
 
+def _drain_closeouts(conn):
+    return closeout.closeout_sweep(conn, limit=100)
+
+
+def test_completion_atomically_enqueues_closeout_without_inline_release(
+    kanban_home, monkeypatch
+):
+    release_calls = []
+    monkeypatch.setattr(
+        auto_release,
+        "maybe_auto_release",
+        lambda *_args, **_kwargs: release_calls.append("release"),
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="atomic closeout", assignee="coder")
+        kb.claim_task(conn, task_id)
+        assert kb.complete_task(conn, task_id, summary="done")
+        events = kb.list_events(conn, task_id)
+        kinds = [event.kind for event in events]
+        assert kinds.index(closeout.CLOSEOUT_PENDING) < kinds.index("completed")
+        assert release_calls == []
+
+
+def test_closeout_enqueue_failure_rolls_back_terminal_transition(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="rollback closeout", assignee="coder")
+        kb.claim_task(conn, task_id)
+
+        def fail_enqueue(*_args, **_kwargs):
+            raise OSError("outbox unavailable")
+
+        monkeypatch.setattr(
+            closeout, "enqueue_closeout_pending_in_txn", fail_enqueue
+        )
+        with pytest.raises(OSError, match="outbox unavailable"):
+            kb.complete_task(conn, task_id, summary="must roll back")
+
+        assert kb.get_task(conn, task_id).status == "running"
+        kinds = [event.kind for event in kb.list_events(conn, task_id)]
+        assert "completed" not in kinds
+        assert closeout.CLOSEOUT_PENDING not in kinds
+
+
 def test_autonomous_off_by_default(kanban_home, monkeypatch):
     """Kill-switch default false → chain-tip completion does NOT deploy."""
     deploys = []
@@ -157,6 +204,7 @@ def test_autonomous_off_by_default(kanban_home, monkeypatch):
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert deploys == []
 
 
@@ -185,6 +233,7 @@ def test_green_chain_deploys_and_verifies(kanban_home, monkeypatch):
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert events == ["deploy"]
         # pre-deploy live test + post-deploy re-check both hit the payload
         assert fetches.count("/api/status") >= 2
@@ -240,6 +289,7 @@ def test_critical_tier_never_autonomous(kanban_home, monkeypatch):
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert deploys == []
         ev = conn.execute(
             "SELECT payload FROM task_events WHERE kind = 'auto_release' "
@@ -260,6 +310,7 @@ def test_ui_real_chain_held(kanban_home, monkeypatch):
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert deploys == []
 
 
@@ -277,15 +328,16 @@ def test_incomplete_chain_does_not_deploy(kanban_home, monkeypatch):
         _root, kids = _mk_chain(conn, tier="review", n=3)
         kb.claim_task(conn, kids[0])
         assert kb.complete_task(conn, kids[0], summary="s")
+        _drain_closeouts(conn)
         assert deploys == []
 
 
 # ---------------------------------------------------------------------------
-# A2 (S3 chronic-red-refinement): fail-open hook must never break completion,
-# and must leave a forensic task_event behind.
+# A2: a release-runner crash must never undo completion and must become a
+# durable, non-redeployable ambiguous closeout state.
 # ---------------------------------------------------------------------------
 
-def test_hook_crash_completion_still_succeeds_and_records_forensic_event(
+def test_release_crash_completion_stays_done_and_records_ambiguous_closeout(
     kanban_home, monkeypatch
 ):
     monkeypatch.setattr(auto_release, "_release_config", _green_config)
@@ -298,18 +350,16 @@ def test_hook_crash_completion_still_succeeds_and_records_forensic_event(
         _root, kids = _mk_chain(conn, tier="review")
         for kid in kids:
             kb.claim_task(conn, kid)
-            # completion must succeed despite the hook crashing
             assert kb.complete_task(conn, kid, summary="s")
+        results = _drain_closeouts(conn)
+        assert any(result.state == "ambiguous" for result in results)
         ev = conn.execute(
-            "SELECT payload FROM task_events WHERE kind = 'auto_release_hook_crashed' "
+            "SELECT payload FROM task_events WHERE kind = 'closeout_release_ambiguous' "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert ev is not None
         payload = json.loads(ev["payload"])
         assert "simulated hook crash" in payload["error"]
-        assert "chain_root" in payload
-        # no auto_release event at all this run — the outcome dict was never
-        # produced (the hook crashed before returning one)
         no_ar = conn.execute(
             "SELECT COUNT(*) AS n FROM task_events WHERE kind = 'auto_release'"
         ).fetchone()
@@ -351,6 +401,7 @@ def test_pause_on_red_streak_default_off_is_unchanged(kanban_home, monkeypatch):
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert events == ["deploy"]
 
 
@@ -374,6 +425,7 @@ def test_pause_on_red_streak_holds_when_last_n_nights_all_red(kanban_home, monke
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert deploys == []
         ev = conn.execute(
             "SELECT payload FROM task_events WHERE kind = 'auto_release' "
@@ -413,6 +465,7 @@ def test_pause_on_red_streak_releases_when_fewer_than_n_red(kanban_home, monkeyp
         for kid in kids:
             kb.claim_task(conn, kid)
             assert kb.complete_task(conn, kid, summary="s")
+        _drain_closeouts(conn)
         assert events == ["deploy"]
 
 
