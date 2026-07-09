@@ -38,16 +38,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Activate venv ───────────────────────────────────────────────────────────
+# A candidate must actually be able to run the suite (pytest importable), not
+# merely exist: a bare `uv venv` drops an empty .venv/ that would otherwise
+# shadow the real venv and break every test run in the checkout.
 VENV=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
-    VENV="$candidate"
-    break
+    if "$candidate/bin/python" -c "import pytest" >/dev/null 2>&1; then
+      VENV="$candidate"
+      break
+    fi
+    echo "note: skipping $candidate (no pytest importable — empty/partial venv)" >&2
   fi
 done
 
 if [ -z "$VENV" ]; then
-  echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
+  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
   exit 1
 fi
 
