@@ -645,48 +645,140 @@ def _format_run_count(count: int) -> str:
 
 
 def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
-    from hermes_cli import config as hermes_config
-    from hermes_cli import kanban_db
+    """Fetch Kimi account usage from the Moonshot/Kimi Coding usage API.
 
-    cfg = hermes_config.load_config() or {}
-    kanban_cfg = cfg.get("kanban") if isinstance(cfg, dict) else None
-    if not isinstance(kanban_cfg, dict):
-        kanban_cfg = {}
+    Docs (2026-07): ``GET https://api.kimi.com/coding/v1/usages`` with
+    ``Authorization: Bearer <KIMI_API_KEY>``. The response shape exposes a
+    weekly bucket and a list of rate limits (the first limit is the 5-hour
+    sliding window). When the API key is missing or the call fails, we return a
+    fail-open unavailable snapshot so the dashboard can show a cache/unknown
+    state instead of invented numbers.
+    """
+    import os
 
-    now = _utc_now()
+    api_key = os.environ.get("KIMI_API_KEY", "").strip()
+    if not api_key:
+        return AccountUsageSnapshot(
+            provider="kimi",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Kimi API key not configured (KIMI_API_KEY).",
+        )
+
+    url = "https://api.kimi.com/coding/v1/usages"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.get(url, headers=headers)
+            status_code = getattr(response, "status_code", None)
+            if status_code is not None and status_code >= 400:
+                if status_code in (401, 403):
+                    return AccountUsageSnapshot(
+                        provider="kimi",
+                        source="usage_api",
+                        fetched_at=_utc_now(),
+                        unavailable_reason="Kimi API key rejected.",
+                    )
+                return AccountUsageSnapshot(
+                    provider="kimi",
+                    source="usage_api",
+                    fetched_at=_utc_now(),
+                    unavailable_reason=f"Kimi usage API error ({status_code}).",
+                )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.debug("Kimi usage API request failed", exc_info=True)
+        return AccountUsageSnapshot(
+            provider="kimi",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Kimi usage API unreachable ({type(exc).__name__}).",
+        )
+
+    try:
+        payload = response.json() or {}
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="kimi",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Invalid Kimi usage response ({type(exc).__name__}).",
+        )
+
+    data = payload.get("data") or {}
     windows: list[AccountUsageWindow] = []
     details: list[str] = []
-    periods = (
-        ("5h", int((now - timedelta(hours=5)).timestamp()), _positive_int(kanban_cfg.get("cap_tokens_5h"))),
-        ("7d", int((now - timedelta(days=7)).timestamp()), _positive_int(kanban_cfg.get("cap_tokens_7d"))),
-    )
 
-    with kanban_db.connect_closing() as conn:
-        for label, since_epoch, cap in periods:
-            totals = kanban_db.subscription_token_totals(
-                conn,
-                subscription="kimi",
-                since_epoch=since_epoch,
+    # Weekly bucket: { total_tokens, used_percent, resets_at, ... }
+    weekly = data.get("weekly") or {}
+    weekly_used = weekly.get("used_percent")
+    if weekly_used is None:
+        weekly_total = _positive_int(weekly.get("total_tokens"))
+        weekly_cap = _positive_int(weekly.get("limit")) or _positive_int(weekly.get("cap"))
+        if weekly_total is not None and weekly_cap:
+            weekly_used = min(100.0, (weekly_total / weekly_cap) * 100.0)
+    if weekly_used is not None:
+        windows.append(
+            AccountUsageWindow(
+                label="Diese Woche",
+                used_percent=float(weekly_used),
+                reset_at=_parse_dt(weekly.get("resets_at") or weekly.get("reset_at")),
+                window_key="weekly",
             )
-            total_tokens = int(totals.get("total_tokens") or 0)
-            runs = int(totals.get("runs") or 0)
-            pretty_total = _format_token_total(total_tokens)
-            details.append(f"Kimi {label} tokens: {pretty_total} across {_format_run_count(runs)}")
-            if cap:
-                windows.append(
-                    AccountUsageWindow(
-                        label=f"Kimi {label}",
-                        used_percent=(total_tokens / cap) * 100.0,
-                        detail=f"{pretty_total} / {_format_token_total(cap)} tokens",
-                        window_key="session" if label == "5h" else "weekly",
-                    )
-                )
+        )
+
+    # 5-hour sliding window: list of limits, first entry is the session window.
+    limits = data.get("limits") or []
+    session = limits[0] if isinstance(limits, list) and limits else {}
+    session_used = session.get("used_percent")
+    if session_used is None:
+        session_total = _positive_int(session.get("total_tokens"))
+        session_cap = _positive_int(session.get("limit")) or _positive_int(session.get("cap"))
+        if session_total is not None and session_cap:
+            session_used = min(100.0, (session_total / session_cap) * 100.0)
+    if session_used is not None:
+        windows.append(
+            AccountUsageWindow(
+                label="5-Std-Fenster",
+                used_percent=float(session_used),
+                reset_at=_parse_dt(session.get("resets_at") or session.get("reset_at")),
+                window_key="session",
+            )
+        )
+
+    # Plan / subscription tier for the subtitle (Basic / Pro / Max).
+    plan = None
+    for candidate_key in ("plan", "plan_type", "tier", "subscription_plan"):
+        candidate = data.get(candidate_key) or payload.get(candidate_key)
+        if candidate:
+            plan = _title_case_slug(str(candidate))
+            break
+
+    # Optional magnitude details for non-dashboard consumers.
+    weekly_total = _positive_int(weekly.get("total_tokens"))
+    if weekly_total is not None:
+        details.append(f"Weekly tokens: {_format_token_total(weekly_total)}")
+    if session and isinstance(session.get("total_tokens"), int) and not isinstance(session.get("total_tokens"), bool):
+        session_total = int(session["total_tokens"])
+        details.append(f"Session tokens: {_format_token_total(session_total)}")
+
+    if not windows and not details:
+        return AccountUsageSnapshot(
+            provider="kimi",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Kimi usage data empty or unrecognized shape.",
+        )
 
     return AccountUsageSnapshot(
         provider="kimi",
-        source="kanban_subscription_tokens",
-        fetched_at=now,
-        title="Kimi subscription tokens",
+        source="usage_api",
+        fetched_at=_utc_now(),
+        title="Kimi",
+        plan=plan,
         windows=tuple(windows),
         details=tuple(details),
     )

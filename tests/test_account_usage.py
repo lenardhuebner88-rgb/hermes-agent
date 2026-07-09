@@ -1,8 +1,5 @@
-from contextlib import contextmanager
 from datetime import datetime, timezone
 
-import hermes_cli.config as hermes_config
-import hermes_cli.kanban_db as kanban_db
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
@@ -50,11 +47,6 @@ class _RoutingClient:
 
     def get(self, url, headers=None):
         return _Response(self._payloads[url])
-
-
-@contextmanager
-def _dummy_connection():
-    yield object()
 
 
 def test_fetch_account_usage_codex(monkeypatch):
@@ -211,58 +203,123 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
 
 
-def test_fetch_account_usage_kimi_returns_details_without_configured_caps(monkeypatch):
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {"kanban": {}})
-    monkeypatch.setattr(kanban_db, "connect_closing", lambda: _dummy_connection())
+def test_fetch_account_usage_kimi_unavailable_without_api_key(monkeypatch):
+    monkeypatch.setenv("KIMI_API_KEY", "")
+
+    snapshot = fetch_account_usage("kimi")
+
+    assert snapshot is not None
+    assert snapshot.provider == "kimi"
+    assert snapshot.source == "usage_api"
+    assert snapshot.unavailable_reason is not None
+    assert "Kimi API key not configured" in snapshot.unavailable_reason
+    assert snapshot.windows == ()
+
+
+def test_fetch_account_usage_kimi_maps_api_response_to_weekly_and_session_windows(monkeypatch):
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
     monkeypatch.setattr(
-        kanban_db,
-        "subscription_token_totals",
-        lambda conn, *, subscription, since_epoch: {
-            "subscription": subscription,
-            "since_epoch": since_epoch,
-            "runs": 2 if since_epoch else 0,
-            "input_tokens": 700,
-            "output_tokens": 300,
-            "total_tokens": 1000,
-        },
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "data": {
+                    "plan": "basic",
+                    "weekly": {
+                        "total_tokens": 9_000_000,
+                        "used_percent": 9,
+                        "resets_at": "2026-07-15T08:00:00Z",
+                    },
+                    "limits": [
+                        {
+                            "total_tokens": 0,
+                            "used_percent": 0,
+                            "resets_at": "2026-07-09T14:00:00Z",
+                        },
+                    ],
+                }
+            }
+        ),
     )
 
     snapshot = fetch_account_usage("kimi")
 
     assert snapshot is not None
     assert snapshot.provider == "kimi"
-    assert snapshot.source == "kanban_subscription_tokens"
-    assert snapshot.windows == ()
-    assert "Kimi 5h tokens: 1,000 across 2 runs" in snapshot.details
-    assert "Kimi 7d tokens: 1,000 across 2 runs" in snapshot.details
-
-
-def test_fetch_account_usage_kimi_uses_configured_token_caps_for_percent_windows(monkeypatch):
-    monkeypatch.setattr(
-        hermes_config,
-        "load_config",
-        lambda: {"kanban": {"cap_tokens_5h": 2000, "cap_tokens_7d": 8000}},
+    assert snapshot.source == "usage_api"
+    assert snapshot.title == "Kimi"
+    assert snapshot.plan == "Basic"
+    assert len(snapshot.windows) == 2
+    assert snapshot.windows[0] == AccountUsageWindow(
+        label="Diese Woche",
+        used_percent=9.0,
+        window_key="weekly",
+        reset_at=datetime(2026, 7, 15, 8, 0, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(kanban_db, "connect_closing", lambda: _dummy_connection())
-
-    totals_by_call = iter(
-        [
-            {"runs": 1, "input_tokens": 800, "output_tokens": 200, "total_tokens": 1000},
-            {"runs": 3, "input_tokens": 1500, "output_tokens": 500, "total_tokens": 2000},
-        ]
+    assert snapshot.windows[1] == AccountUsageWindow(
+        label="5-Std-Fenster",
+        used_percent=0.0,
+        window_key="session",
+        reset_at=datetime(2026, 7, 9, 14, 0, 0, tzinfo=timezone.utc),
     )
+    assert "Weekly tokens: 9,000,000" in snapshot.details
+    assert "Session tokens: 0" in snapshot.details
+
+
+def test_fetch_account_usage_kimi_computes_percent_from_tokens_when_not_provided(monkeypatch):
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
     monkeypatch.setattr(
-        kanban_db,
-        "subscription_token_totals",
-        lambda conn, *, subscription, since_epoch: next(totals_by_call),
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "data": {
+                    "plan": "pro",
+                    "weekly": {"total_tokens": 93_000, "limit": 100_000},
+                    "limits": [{"total_tokens": 18_000, "limit": 100_000}],
+                }
+            }
+        ),
     )
 
     snapshot = fetch_account_usage("kimi")
 
     assert snapshot is not None
+    assert snapshot.plan == "Pro"
     assert snapshot.windows == (
-        AccountUsageWindow(label="Kimi 5h", used_percent=50.0, detail="1,000 / 2,000 tokens", window_key="session"),
-        AccountUsageWindow(label="Kimi 7d", used_percent=25.0, detail="2,000 / 8,000 tokens", window_key="weekly"),
+        AccountUsageWindow(
+            label="Diese Woche",
+            used_percent=93.0,
+            window_key="weekly",
+        ),
+        AccountUsageWindow(
+            label="5-Std-Fenster",
+            used_percent=18.0,
+            window_key="session",
+        ),
     )
-    assert "Kimi 5h tokens: 1,000 across 1 run" in snapshot.details
-    assert "Kimi 7d tokens: 2,000 across 3 runs" in snapshot.details
+
+
+def test_fetch_account_usage_kimi_rejected_api_key_returns_unavailable(monkeypatch):
+    monkeypatch.setenv("KIMI_API_KEY", "sk-invalid")
+
+    class _UnauthorizedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            class _Response:
+                status_code = 401
+
+                def raise_for_status(self):
+                    raise Exception("Unauthorized")
+
+            return _Response()
+
+    monkeypatch.setattr("agent.account_usage.httpx.Client", lambda timeout=15.0: _UnauthorizedClient())
+
+    snapshot = fetch_account_usage("kimi")
+
+    assert snapshot is not None
+    assert snapshot.unavailable_reason == "Kimi API key rejected."
