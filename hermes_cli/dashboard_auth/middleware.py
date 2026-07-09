@@ -60,6 +60,20 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/ds-assets/",
     "/fonts/",
     "/fonts-terminal/",
+    # Standalone voice PWA install metadata: browsers fetch the manifest and
+    # the service-worker script WITHOUT credentials, so a 302 -> /login here
+    # (instead of the real file) breaks installability and, for the SW
+    # script specifically, invalidates the registration outright (same
+    # reasoning as the dashboard's own "/sw.js" entry above). These are
+    # static, secret-free files — no bootstrap token, no session content.
+    # The /voice HTML page itself and the /api/voice/live websocket stay
+    # gated; only the static asset surface is public.
+    "/voice/manifest.json",
+    "/voice/sw.js",
+    "/voice/app.js",
+    "/voice/worklet.js",
+    "/voice/offline.html",
+    "/voice/icon",  # covers icon.svg + icon-192.png/icon-512.png/icon-maskable-512.png
 )
 
 

@@ -35,10 +35,16 @@ VOICE_CLIENT_DIR = Path(__file__).with_name("voice_client")
 _ALLOWED_VOICE_ASSETS = {
     "app.js": "application/javascript",
     "icon.svg": "image/svg+xml",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "icon-maskable-512.png": "image/png",
     "manifest.json": "application/manifest+json",
+    "offline.html": "text/html",
+    "sw.js": "application/javascript",
     "worklet.js": "application/javascript",
 }
 _NO_STORE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+_SERVICE_WORKER_SCOPE_HEADERS = {"Service-Worker-Allowed": "/voice"}
 _MAX_FALLBACK_PCM_BYTES = 16 * 1024 * 1024
 _FALLBACK_PREROLL_PCM_BYTES = 60 * 16_000 * 2
 _AUDIO_QUEUE_FRAMES = 128
@@ -978,10 +984,18 @@ def create_voice_router(
         asset_path = VOICE_CLIENT_DIR / asset_name
         if not asset_path.is_file():
             raise HTTPException(status_code=404, detail="Voice asset not found")
+        headers = _NO_STORE_HEADERS
+        if asset_name == "sw.js":
+            # Legalizes scope "/voice" for a worker script living at
+            # /voice/sw.js: a service worker may only control its own
+            # directory and below ("/voice/"), which does NOT cover the
+            # page URL "/voice" itself. This header widens the allowed
+            # scope so the registration with {scope: "/voice"} succeeds.
+            headers = {**_NO_STORE_HEADERS, **_SERVICE_WORKER_SCOPE_HEADERS}
         return FileResponse(
             asset_path,
             media_type=media_type,
-            headers=_NO_STORE_HEADERS,
+            headers=headers,
         )
 
     @router.websocket("/api/voice/live")

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#071310" />
+    <meta name="color-scheme" content="dark" />
+    <title>Hermes Voice – Offline</title>
+    <style>
+      :root {
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        color: #f2fbf7;
+        background: #071310;
+        font-synthesis: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        display: grid;
+        min-height: 100svh;
+        margin: 0;
+        padding:
+          max(1.5rem, env(safe-area-inset-top))
+          max(1.25rem, env(safe-area-inset-right))
+          max(1.5rem, env(safe-area-inset-bottom))
+          max(1.25rem, env(safe-area-inset-left));
+        place-items: center;
+        text-align: center;
+        background:
+          radial-gradient(circle at 50% -10%, rgba(52, 211, 153, 0.22), transparent 42%),
+          linear-gradient(165deg, #0b1d18 0%, #071310 55%, #040a09 100%);
+      }
+
+      main {
+        display: grid;
+        max-width: 26rem;
+        gap: 1.1rem;
+        justify-items: center;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.4rem, 12vw, 3.2rem);
+        font-weight: 720;
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 0;
+        color: #a7c7ba;
+        font-size: 1rem;
+        line-height: 1.5;
+      }
+
+      button {
+        min-height: 3.5rem;
+        margin-top: 0.5rem;
+        padding: 0 1.75rem;
+        border: 0;
+        border-radius: 999px;
+        color: #032018;
+        background: #6ee7b7;
+        box-shadow: 0 0.9rem 2.4rem rgba(16, 185, 129, 0.22);
+        font: inherit;
+        font-size: 1.02rem;
+        font-weight: 800;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      button:hover {
+        background: #a7f3d0;
+      }
+
+      button:focus-visible {
+        outline: 3px solid #f8fafc;
+        outline-offset: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Offline</h1>
+      <p>Hermes Voice braucht eine Verbindung zum Homeserver.</p>
+      <button type="button" onclick="location.reload()">Erneut versuchen</button>
+    </main>
+  </body>
+</html>

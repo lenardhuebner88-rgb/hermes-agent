@@ -654,3 +654,7 @@ window.addEventListener("pagehide", () => {
     void cleanupSession(activeSession);
   }
 });
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice" }).catch(() => {});
+}

@@ -181,6 +181,11 @@ def test_voice_assets_are_explicitly_allowlisted(tmp_path, monkeypatch):
         "worklet.js": ("voice-worklet", "javascript"),
         "manifest.json": ('{"name":"Hermes Voice"}', "manifest+json"),
         "icon.svg": ("<svg></svg>", "image/svg+xml"),
+        "icon-192.png": ("fake-192-png-bytes", "image/png"),
+        "icon-512.png": ("fake-512-png-bytes", "image/png"),
+        "icon-maskable-512.png": ("fake-maskable-png-bytes", "image/png"),
+        "offline.html": ("<html>offline</html>", "text/html"),
+        "sw.js": ("self.skipWaiting();", "javascript"),
     }
     for asset_name, (content, _media_type) in expected_assets.items():
         (tmp_path / asset_name).write_text(content, encoding="utf-8")
@@ -196,27 +201,95 @@ def test_voice_assets_are_explicitly_allowlisted(tmp_path, monkeypatch):
         assert allowed.headers["cache-control"].startswith("no-store")
     assert client.get("/voice/private.txt").status_code == 404
     assert client.get("/voice/../private.txt").status_code == 404
+    assert client.get("/voice/unknown.xyz").status_code == 404
+
+
+def test_voice_sw_js_asset_sets_service_worker_allowed_header(tmp_path, monkeypatch):
+    """sw.js must legalize scope="/voice" via ``Service-Worker-Allowed``.
+
+    Without this header a browser rejects a registration that passes an
+    explicit ``scope`` wider than the script's own directory (here that's
+    moot since both are "/voice", but the header is the documented opt-in
+    browsers require whenever `scope` is passed explicitly at all — see
+    app.js' ``register("/voice/sw.js", { scope: "/voice" })``). Sibling
+    assets must NOT carry the header — it is sw.js-specific, not folded
+    into the shared ``_NO_STORE_HEADERS``.
+    """
+    from hermes_cli import voice_ws
+
+    (tmp_path / "sw.js").write_text("self.skipWaiting();", encoding="utf-8")
+    (tmp_path / "icon.svg").write_text("<svg></svg>", encoding="utf-8")
+    monkeypatch.setattr(voice_ws, "VOICE_CLIENT_DIR", tmp_path)
+    client = TestClient(_voice_app())
+
+    response = client.get("/voice/sw.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+    assert response.headers["service-worker-allowed"] == "/voice"
+    assert response.headers["cache-control"].startswith("no-store")
+
+    sibling = client.get("/voice/icon.svg")
+    assert sibling.status_code == 200
+    assert "service-worker-allowed" not in sibling.headers
 
 
 def test_voice_pwa_manifest_contract():
-    manifest_path = (
-        Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "manifest.json"
-    )
+    """REAL-ARTIFACT: exercises the actual on-disk manifest.json and icon
+    files (no monkeypatched VOICE_CLIENT_DIR), so a manifest/icon drift that
+    only shows up against the real repo files can't hide behind a fixture.
+    """
+    from hermes_cli import voice_ws
+
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    manifest_path = client_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["name"] == "Hermes Voice"
+    assert manifest["name"]
     assert manifest["display"] == "standalone"
     assert manifest["start_url"] == "/voice"
     assert manifest["scope"] == "/voice"
     assert manifest["theme_color"] == "#071310"
-    assert manifest["icons"] == [
-        {
-            "src": "/voice/icon.svg",
-            "sizes": "any",
-            "type": "image/svg+xml",
-            "purpose": "any maskable",
-        }
-    ]
+
+    icons = manifest["icons"]
+    assert any(
+        icon["sizes"] == "192x192" and icon["type"] == "image/png" for icon in icons
+    )
+    assert any(
+        icon["sizes"] == "512x512"
+        and icon["type"] == "image/png"
+        and icon["purpose"] == "any"
+        for icon in icons
+    )
+    assert any(icon["purpose"] == "maskable" for icon in icons)
+
+    for icon in icons:
+        icon_path = client_dir / icon["src"].removeprefix("/voice/")
+        assert icon_path.is_file(), (
+            f"manifest icon src {icon['src']!r} has no file on disk"
+        )
+        if icon_path.suffix == ".png":
+            assert icon_path.read_bytes().startswith(b"\x89PNG"), (
+                f"{icon_path} does not start with the PNG magic bytes"
+            )
+
+    for asset_name in voice_ws._ALLOWED_VOICE_ASSETS:
+        assert (client_dir / asset_name).is_file(), (
+            f"_ALLOWED_VOICE_ASSETS entry {asset_name!r} has no file on disk"
+        )
+
+
+def test_voice_sw_js_guards_api_paths_and_references_offline_fallback():
+    """REAL-ARTIFACT sanity check on sw.js's actual text: a cheap tripwire
+    that the "/api/*" fetch guard and the offline fallback wiring survive
+    future edits without standing up a full ServiceWorker test harness
+    (neither jsdom nor plain Node implement the SW/Cache APIs).
+    """
+    sw_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "sw.js"
+    script = sw_path.read_text(encoding="utf-8")
+
+    assert "hermes-voice-v" in script
+    assert "/voice/offline.html" in script
+    assert 'startsWith("/api/")' in script
 
 
 def test_voice_client_uses_single_use_ticket_without_long_lived_ws_token():
@@ -233,7 +306,15 @@ def test_voice_client_uses_single_use_ticket_without_long_lived_ws_token():
     assert '<script src="/voice/app.js" defer></script>' in document
     assert '<link rel="manifest" href="/voice/manifest.json"' in document
     assert 'href="/voice/icon.svg"' in document
-    assert "serviceWorker.register" not in script
+    # C1 (PWA installability): app.js registers the service worker with an
+    # explicit "/voice" scope, guarded so a registration failure never
+    # breaks the app itself.
+    assert 'if ("serviceWorker" in navigator)' in script
+    assert (
+        'navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice" })'
+        in script
+    )
+    assert ".catch(() => {})" in script
 
 
 def test_voice_client_barge_in_tracks_audible_playback_not_server_state():

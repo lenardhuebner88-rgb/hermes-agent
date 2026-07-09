@@ -168,6 +168,40 @@ def test_gated_workbox_chunk_passes_the_gate(gated_app):
     )
 
 
+@pytest.mark.parametrize("path", [
+    "/voice/manifest.json",
+    "/voice/sw.js",
+    "/voice/icon-192.png",
+    "/voice/offline.html",
+])
+def test_voice_pwa_static_paths_are_public(path):
+    """Standalone voice PWA install metadata (manifest, service worker,
+    icons, offline fallback) must bypass the OAuth gate the same way the
+    dashboard's own PWA assets do above — browsers fetch the manifest and
+    the SW script without credentials. Unit-tested directly against
+    ``_path_is_public`` since these paths live under the /voice router,
+    which isn't mounted on this module's ``gated_app`` fixture.
+    """
+    from hermes_cli.dashboard_auth.middleware import _path_is_public
+
+    assert _path_is_public(path) is True
+
+
+@pytest.mark.parametrize("path", [
+    "/voice",
+    "/api/voice/live",
+    "/voicemanifest.json",
+])
+def test_voice_html_page_and_live_websocket_stay_gated(path):
+    """The /voice HTML page and the live websocket must NOT be swept up by
+    the new "/voice/*" public prefixes — only the static asset surface is
+    public. ``/voicemanifest.json`` guards against a missing-slash prefix
+    leak (a bare "/voice" prefix would wrongly admit it via startswith)."""
+    from hermes_cli.dashboard_auth.middleware import _path_is_public
+
+    assert _path_is_public(path) is False
+
+
 # ---------------------------------------------------------------------------
 # OAuth round trip
 # ---------------------------------------------------------------------------
