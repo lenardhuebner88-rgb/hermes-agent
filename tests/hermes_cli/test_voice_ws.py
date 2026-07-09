@@ -449,6 +449,143 @@ def test_odd_sized_pcm_frame_returns_structured_error(monkeypatch):
     assert payload["error"]["code"] == "invalid_pcm_frame"
 
 
+class _FakeVoiceInput:
+    def __init__(self, messages, before_receive=None):
+        self._messages = iter(messages)
+        self._before_receive = before_receive
+        self._index = 0
+
+    async def receive(self):
+        if self._before_receive is not None:
+            self._before_receive(self._index)
+        self._index += 1
+        return next(self._messages)
+
+
+async def _read_test_voice_frames(websocket, fallback_mode):
+    from hermes_cli import voice_ws
+
+    audio_in = asyncio.Queue(maxsize=32)
+    fallback_pcm = bytearray()
+    events_out = asyncio.Queue()
+    disconnected = asyncio.Event()
+    result = await voice_ws._read_voice_frames(
+        websocket,
+        audio_in,
+        fallback_pcm,
+        events_out,
+        fallback_mode,
+        disconnected,
+    )
+    return result, fallback_pcm, events_out
+
+
+@pytest.mark.asyncio
+async def test_healthy_live_audio_keeps_recent_bounded_fallback_preroll(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
+    monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
+    frames = [bytes([value, 0]) * 2 for value in range(1, 6)]
+    messages = [{"bytes": frame} for frame in frames]
+    messages.append({"text": json.dumps({"type": "end"})})
+
+    result, fallback_pcm, events_out = await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        asyncio.Event(),
+    )
+
+    assert result == "end"
+    assert bytes(fallback_pcm) == frames[-1]
+    assert len(fallback_pcm) <= 2 * voice_ws._FALLBACK_PREROLL_PCM_BYTES
+    assert events_out.empty()
+
+
+@pytest.mark.asyncio
+async def test_live_failure_keeps_preroll_then_counts_new_fallback_audio(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
+    monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
+    fallback_mode = asyncio.Event()
+    frames = [bytes([value, 0]) * 2 for value in range(1, 6)]
+    messages = [{"bytes": frame} for frame in frames]
+    messages.append({"text": json.dumps({"type": "end"})})
+
+    def enter_fallback(index):
+        if index == 3:
+            fallback_mode.set()
+
+    result, fallback_pcm, events_out = await _read_test_voice_frames(
+        _FakeVoiceInput(messages, enter_fallback),
+        fallback_mode,
+    )
+
+    assert result == "end"
+    assert bytes(fallback_pcm) == b"".join(frames[2:])
+    assert events_out.empty()
+
+
+@pytest.mark.asyncio
+async def test_missing_key_fallback_keeps_full_audio_up_to_hard_cap(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
+    monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
+    fallback_mode = asyncio.Event()
+    fallback_mode.set()
+    frames = [bytes([value, 0]) * 2 for value in range(1, 4)]
+    messages = [{"bytes": frame} for frame in frames]
+    messages.append({"text": json.dumps({"type": "end"})})
+
+    result, fallback_pcm, events_out = await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        fallback_mode,
+    )
+
+    assert result == "end"
+    assert bytes(fallback_pcm) == b"".join(frames)
+    assert events_out.empty()
+
+
+@pytest.mark.asyncio
+async def test_fallback_audio_exceeding_hard_cap_returns_structured_error(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
+    monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
+    fallback_mode = asyncio.Event()
+    fallback_mode.set()
+    frame = b"\x01\x00" * 2
+    messages = [{"bytes": frame} for _ in range(4)]
+
+    result, fallback_pcm, events_out = await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        fallback_mode,
+    )
+
+    assert result == "error"
+    assert bytes(fallback_pcm) == frame * 3
+    assert events_out.get_nowait()["error"]["code"] == "audio_too_large"
+
+
+@pytest.mark.asyncio
+async def test_single_oversize_live_frame_still_hits_hard_cap(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
+    monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
+
+    result, fallback_pcm, events_out = await _read_test_voice_frames(
+        _FakeVoiceInput([{"bytes": b"\x01\x00" * 7}]),
+        asyncio.Event(),
+    )
+
+    assert result == "error"
+    assert fallback_pcm == b""
+    assert events_out.get_nowait()["error"]["code"] == "audio_too_large"
+
+
 @pytest.mark.asyncio
 async def test_fallback_transcription_writes_pcm_wav_under_hermes_home(
     tmp_path, monkeypatch

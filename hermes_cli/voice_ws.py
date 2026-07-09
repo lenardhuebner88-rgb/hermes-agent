@@ -40,6 +40,7 @@ _ALLOWED_VOICE_ASSETS = {
 }
 _NO_STORE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
 _MAX_FALLBACK_PCM_BYTES = 16 * 1024 * 1024
+_FALLBACK_PREROLL_PCM_BYTES = 60 * 16_000 * 2
 _AUDIO_QUEUE_FRAMES = 128
 _EVENT_QUEUE_ITEMS = 128
 _FALLBACK_END_TIMEOUT_SECONDS = 60.0
@@ -574,6 +575,26 @@ def _discard_queued_response_events(
         events_out.put_nowait(event)
 
 
+def _append_fallback_pcm(
+    fallback_pcm: bytearray,
+    frame: bytes,
+    fallback_mode: asyncio.Event,
+) -> bool:
+    """Retain a rolling Live tail, then enforce the cumulative fallback cap."""
+    if len(frame) > _MAX_FALLBACK_PCM_BYTES:
+        return False
+    if fallback_mode.is_set():
+        if len(fallback_pcm) + len(frame) > _MAX_FALLBACK_PCM_BYTES:
+            return False
+        fallback_pcm.extend(frame)
+        return True
+
+    fallback_pcm.extend(frame)
+    if len(fallback_pcm) > 2 * _FALLBACK_PREROLL_PCM_BYTES:
+        del fallback_pcm[:-_FALLBACK_PREROLL_PCM_BYTES]
+    return True
+
+
 async def _read_voice_frames(
     websocket: WebSocket,
     audio_in: asyncio.Queue[bytes],
@@ -604,7 +625,7 @@ async def _read_voice_frames(
                         disconnected,
                     )
                     return "error"
-                if len(fallback_pcm) + len(frame) > _MAX_FALLBACK_PCM_BYTES:
+                if not _append_fallback_pcm(fallback_pcm, frame, fallback_mode):
                     await _put_event(
                         events_out,
                         {
@@ -617,7 +638,6 @@ async def _read_voice_frames(
                         disconnected,
                     )
                     return "error"
-                fallback_pcm.extend(frame)
                 await _put_live_audio(audio_in, frame, fallback_mode)
                 continue
 
