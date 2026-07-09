@@ -272,6 +272,9 @@ describe("AgentTerminalsView desktop rendering", () => {
   it("switches between stable 1x, 2x, and 4x terminal grids with unique targets", async () => {
     await renderView();
     expect(await screen.findByTestId("terminal-pane-host-0")).toBeTruthy();
+    const primaryCard = screen.getByTestId("terminal-pane-card-0");
+    expect(primaryCard.className).toContain("w-full");
+    expect(primaryCard.className).toContain("shrink-0");
 
     fireEvent.click(screen.getByTestId("terminal-layout-button-2"));
     expect(await screen.findByTestId("terminal-layout-2")).toBeTruthy();

@@ -2388,7 +2388,7 @@ export function AgentTerminalsView() {
           key={paneIndex}
           data-testid={`terminal-pane-card-${paneIndex}`}
           className={cn(
-            "flex h-full min-h-0 min-w-0 flex-col overflow-hidden",
+            "flex h-full min-h-0 min-w-0 w-full shrink-0 flex-col overflow-hidden",
             visiblePaneCount > 1 && "rounded-[14px] border bg-[#05080d] shadow-[0_12px_30px_rgba(0,0,0,.22)]",
             visiblePaneCount > 1 && (activePane === paneIndex ? "border-cyan-300/55 ring-1 ring-cyan-300/15" : "border-white/[0.08]"),
           )}
