@@ -4,6 +4,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
+import { LoopsResponseSchema } from "../lib/schemas";
 import { de } from "../i18n/de";
 import type { LoopDetailResponse, LoopFilesResponse, LoopHeartbeatCurrent, LoopModelsResponse, LoopPack, LoopPackSummary } from "../lib/types";
 
@@ -574,6 +575,56 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
       />,
     );
     expect(screen.queryByLabelText(t.skipPlanLabel)).toBeNull();
+  });
+
+  it("zeigt für Autoland nur den UI-Laufvertrag und keine gefährlichen Overrides", () => {
+    const parsed = LoopsResponseSchema.parse({
+      packs: [{ ...idlePipeline, name: "dashboard-experience", autoland: true }],
+    }).packs[0] as LoopPack;
+    const html = renderGrid([parsed], { startOpenPack: parsed.name });
+
+    expect(html).toContain("Einmaliger Laufvertrag");
+    expect(html).not.toContain(t.skipPlanLabel);
+    expect(html).not.toContain(t.paramLabel);
+  });
+
+  it("sendet den Autoland-Laufvertrag mit frei gewählten UI-Budgets", () => {
+    const onSubmitStart = vi.fn();
+    const pack = { ...idlePipeline, name: "dashboard-experience", autoland: true };
+    render(
+      <LoopsGrid
+        packs={[pack]}
+        models={models}
+        selectedPack={null}
+        detail={null}
+        detailLoading={false}
+        detailError={null}
+        busyPack={null}
+        actionErrorByPack={{}}
+        landNoteByPack={{}}
+        startOpenPack={pack.name}
+        pendingStopPack={null}
+        pendingLandPack={null}
+        workshopOpenPack={null}
+        files={null}
+        filesLoading={false}
+        filesError={null}
+        fileSaveBusy={false}
+        fileSaveError={null}
+        duplicateBusy={false}
+        duplicateError={null}
+        {...noopHandlers}
+        onSubmitStart={onSubmitStart}
+      />,
+    );
+    const roundInputs = screen.getAllByLabelText(t.maxRoundsLabel);
+    const hourInputs = screen.getAllByLabelText(t.maxHoursLabel);
+    fireEvent.change(roundInputs[roundInputs.length - 1], { target: { value: "15" } });
+    fireEvent.change(hourInputs[hourInputs.length - 1], { target: { value: "4" } });
+    const submitButtons = screen.getAllByRole("button", { name: t.submitStart });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+
+    expect(onSubmitStart).toHaveBeenCalledWith(pack.name, { MAX_ROUNDS: "15", MAX_HOURS: "4" });
   });
 
   it("setzt SKIP_PLAN=1 in overrides, wenn die Checkbox angehakt ist", () => {

@@ -996,6 +996,8 @@ export interface LoopPackSummary {
   type: "pipeline" | "sweep";
   /** "repo" = kuratiertes Manifest aus loops/packs/, "custom" = per Werkstatt dupliziert. */
   source?: "repo" | "custom";
+  /** true = genau ein verifizierter PASS-Commit darf nach den Gates automatisch landen. */
+  autoland?: boolean;
   description: string;
   stability: string;
   phases: Record<string, LoopPhase>;

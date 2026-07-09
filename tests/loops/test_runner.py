@@ -1217,6 +1217,11 @@ def test_allowlisted_night_autolands_exactly_one_verified_commit(
         tmp_path, monkeypatch,
         stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
     )
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "MAX_ROUNDS=15\nMAX_HOURS=4\n", encoding="utf-8"
+    )
     runner = LoopRunner(pack, state_root=tmp_path / "state")
 
     def plan_phase(kv, cwd):
@@ -1245,6 +1250,7 @@ def test_allowlisted_night_autolands_exactly_one_verified_commit(
     assert calls == ["plan", "build", "verify"]
     assert pushes == [str(repo)]
     assert "loop(test): ux-1" in g(repo, "log", "--oneline", "-3", "main").stdout
+    assert runner.qcount("00-planned") == 0
     assert runner.qcount("20-verified") == 0
     assert runner.qcount("30-landed") == 1
     assert "AUTOLAND bereit" not in runner.ledger_path.read_text(encoding="utf-8")
@@ -1555,17 +1561,90 @@ def test_stop_set_during_verify_blocks_same_night_push(
     )
 
 
-def test_autoland_rejects_runtime_overrides(tmp_path, fake_engine, monkeypatch):
+def test_autoland_accepts_ui_run_contract_overrides(tmp_path, fake_engine, monkeypatch):
     _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     state = tmp_path / "state" / "dashboard-experience"
     state.mkdir(parents=True)
     (state / "overrides.env").write_text(
-        "PHASE_VERIFY_MODEL=anderes-modell\n", encoding="utf-8"
+        "PHASE_PLAN_ENGINE=claude\n"
+        "PHASE_PLAN_MODEL=claude-fable-5\n"
+        "PHASE_BUILD_ENGINE=codex\n"
+        "PHASE_BUILD_MODEL=gpt-5.6-sol\n"
+        "PHASE_VERIFY_ENGINE=claude\n"
+        "PHASE_VERIFY_MODEL=claude-fable-5\n"
+        "MAX_ROUNDS=15\n"
+        "MAX_HOURS=4\n",
+        encoding="utf-8",
     )
     runner = LoopRunner(pack, state_root=tmp_path / "state")
 
-    with pytest.raises(RuntimeError, match="keine overrides.env"):
-        runner.cmd_night()
+    runner._validate_autoland_runtime()
+    assert runner.phase_cfg("verify").model == "claude-fable-5"
+    assert runner.stop_cfg("max_rounds") == 15
+    assert runner.stop_cfg("max_hours") == 4
+    assert runner._runtime_autoland_authorized() is True
+
+
+def test_autoland_rejects_model_outside_ui_catalog(tmp_path, fake_engine, monkeypatch):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "PHASE_VERIFY_ENGINE=claude\n"
+        "PHASE_VERIFY_MODEL=not-in-dashboard-catalog\n",
+        encoding="utf-8",
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    with pytest.raises(RuntimeError, match="nicht im UI-Katalog"):
+        runner._validate_autoland_runtime()
+
+
+def test_autoland_custom_phase_contract_disables_automatic_landing(
+    tmp_path, fake_engine, monkeypatch
+):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "PHASE_BUILD_ENGINE=codex\nPHASE_BUILD_MODEL=gpt-5.5\n",
+        encoding="utf-8",
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner._validate_autoland_runtime()
+    assert runner._runtime_autoland_authorized() is False
+    runner._prepare_runtime_land_mode()
+    runner.consume_overrides()
+
+    resumed = LoopRunner(pack, state_root=tmp_path / "state")
+    assert resumed.overrides == {}
+    assert resumed._manual_land_required("resume") is True
+
+
+def test_autoland_rejects_fractional_budget_override(tmp_path, fake_engine, monkeypatch):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("MAX_HOURS=1.5\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    with pytest.raises(RuntimeError, match="ganze positive Zahl"):
+        runner._validate_autoland_runtime()
+
+
+@pytest.mark.parametrize("override", ["SKIP_PLAN=1", "PHASE_VERIFY_TIMEOUT=1", "UNKNOWN=1"])
+def test_autoland_rejects_non_ui_runtime_overrides(
+    tmp_path, fake_engine, monkeypatch, override
+):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(f"{override}\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    with pytest.raises(RuntimeError, match="nicht erlaubte Runtime-Overrides"):
+        runner._validate_autoland_runtime()
 
 
 def test_autoland_resume_lands_first_and_preserves_next_run_overrides(

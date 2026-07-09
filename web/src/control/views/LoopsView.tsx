@@ -614,10 +614,12 @@ function LoopStartForm({
     const overrides = buildPhaseOverrides(pack, phaseValues);
     if (maxRounds.trim() && maxRounds !== defaultMaxRounds) overrides.MAX_ROUNDS = maxRounds.trim();
     if (maxHours.trim() && maxHours !== defaultMaxHours) overrides.MAX_HOURS = maxHours.trim();
-    if (skipPlan) overrides.SKIP_PLAN = "1";
-    for (const name of paramNames) {
-      const value = (paramValues[name] ?? "").trim();
-      if (value && value !== pack.params[name]) overrides[name.toUpperCase()] = value;
+    if (!pack.autoland && skipPlan) overrides.SKIP_PLAN = "1";
+    if (!pack.autoland) {
+      for (const name of paramNames) {
+        const value = (paramValues[name] ?? "").trim();
+        if (value && value !== pack.params[name]) overrides[name.toUpperCase()] = value;
+      }
     }
     onSubmit(overrides);
   };
@@ -628,6 +630,11 @@ function LoopStartForm({
   return (
     <div className="space-y-3">
       <p className="text-[11px] uppercase tracking-[0.14em]" style={{ ...monoFont, ...captionStyle }}>{t.startPanelTitle}</p>
+      {pack.autoland ? (
+        <p className="rounded-md border px-3 py-2 text-xs leading-relaxed" style={{ borderColor: "var(--ln-sodium)", background: "var(--ln-raised)", color: "var(--ln-ink-soft)" }}>
+          {t.autolandContractHint}
+        </p>
+      ) : null}
       {phaseNames.map((phase) => {
         const value = phaseValues[phase];
         const engineModels = engines[value.engine]?.models ?? [];
@@ -691,6 +698,7 @@ function LoopStartForm({
           <input
             type="number"
             min={1}
+            max={50}
             value={maxRounds}
             disabled={busy}
             onChange={(e) => setMaxRounds(e.target.value)}
@@ -703,6 +711,7 @@ function LoopStartForm({
           <input
             type="number"
             min={1}
+            max={24}
             value={maxHours}
             disabled={busy}
             onChange={(e) => setMaxHours(e.target.value)}
@@ -711,7 +720,7 @@ function LoopStartForm({
           />
         </label>
       </div>
-      {pack.type === "pipeline" ? (
+      {!pack.autoland && pack.type === "pipeline" ? (
         <label className="inline-flex min-h-9 items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
           <input
             type="checkbox"
@@ -729,7 +738,7 @@ function LoopStartForm({
           {t.stopCriteria(failStreak, dryRounds)}
         </p>
       ) : null}
-      {paramNames.map((name) => (
+      {!pack.autoland ? paramNames.map((name) => (
         <label key={name} className="block min-w-0">
           <span className="text-[11px] uppercase tracking-[0.08em]" style={captionStyle}>{t.paramLabel} · {name}</span>
           <textarea
@@ -742,7 +751,7 @@ function LoopStartForm({
             style={nightFieldStyle}
           />
         </label>
-      ))}
+      )) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"

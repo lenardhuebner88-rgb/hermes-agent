@@ -74,8 +74,11 @@ Auto-Land (Stufe 2) ist für alle übrigen Packs bewusst NICHT freigeschaltet.
 **Eng begrenzte Ausnahme (Operator 2026-07-09):** Nur das kuratierte Repo-Pack
 `dashboard-experience` steht zusätzlich in der Code-Allowlist des Runners. Die
 Freigabe ist an den Repo-Pack-Pfad, das Live-Repo, den Fable→Sol→Fable-Vertrag
-sowie SHA-256 der Manifest- und Prompt-Inhalte gebunden; Custom-Kopien, Drift und
-Runtime-Overrides brechen hart ab. Dort
+sowie SHA-256 der Manifest- und Prompt-Inhalte gebunden; Custom-Kopien und Drift
+brechen hart ab. Der Control-Startdialog darf Engine, Modell und Laufbudgets
+one-shot überschreiben; nur Budget-Overrides behalten die Auto-Land-Autorität.
+Ein abweichender Phasenvertrag läuft vollständig, bleibt aber zur manuellen Prüfung
+und Landung liegen. Dort
 plant und verifiziert Fable 5 in frischen Sessions, GPT-5.6 Sol baut genau einen
 Commit, und der Driver landet ausschließlich bei `1 verified / 1 commit / 0
 planned / 0 building`, ausschließlich geänderten Pfaden unter

@@ -752,6 +752,7 @@ export const de = {
     confirmYes: "Bestätigen",
     confirmNo: "Abbrechen",
     startPanelTitle: "Loop starten",
+    autolandContractHint: "Einmaliger Laufvertrag: Du bestimmst Engine, Modell und Budgets. Abweichende Phasenmodelle laufen mit manueller Landung; Auto-Land bleibt dem gebundenen Fable → Sol → Fable-Vertrag vorbehalten.",
     phaseEngine: "Engine",
     phaseModel: "Modell",
     paramLabel: "Pack-Parameter",

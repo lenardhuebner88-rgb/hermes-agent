@@ -1807,6 +1807,7 @@ export const LoopPackSummarySchema = z.object({
   type: z.enum(["pipeline", "sweep"]),
   // "repo" = kuratiertes Manifest, "custom" = per Werkstatt dupliziert (control_loops.py:220).
   source: z.enum(["repo", "custom"]).optional(),
+  autoland: z.boolean().catch(false),
   description: z.string().catch(""),
   stability: z.string().catch("experimental"),
   phases: z.record(z.string(), LoopPhaseSchema).catch({}),

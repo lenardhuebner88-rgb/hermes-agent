@@ -692,18 +692,97 @@ class LoopRunner:
         return self.stop_path.exists()
 
     def _validate_autoland_runtime(self, *, skip_plan: bool = False) -> None:
-        """Runtime-Overrides duerfen den gebundenen Auto-Land-Vertrag nicht aendern."""
+        """Autoland erlaubt nur den im Control-Startdialog sichtbaren Laufvertrag."""
         if not self.pack.autoland:
             return
         if skip_plan:
             raise RuntimeError(
                 f"Pack {self.pack.name}: --skip-plan ist bei autoland nicht erlaubt"
             )
-        if self.overrides:
+
+        allowed = {"MAX_ROUNDS", "MAX_HOURS"}
+        for phase in self.pack.phases:
+            prefix = f"PHASE_{phase.upper()}_"
+            allowed.update({f"{prefix}ENGINE", f"{prefix}MODEL"})
+        rejected = sorted(set(self.overrides) - allowed)
+        if rejected:
             raise RuntimeError(
-                f"Pack {self.pack.name}: autoland akzeptiert keine overrides.env; "
-                "Datei entfernen und mit dem kuratierten Vertrag starten"
+                f"Pack {self.pack.name}: nicht erlaubte Runtime-Overrides: {rejected}; "
+                "Autoland akzeptiert nur Engine, Modell, MAX_ROUNDS und MAX_HOURS"
             )
+
+        catalog_path = REPO_ROOT / "loops" / "models.yaml"
+        catalog_data = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
+        catalog = catalog_data.get("engines", {})
+        for phase in self.pack.phases:
+            prefix = f"PHASE_{phase.upper()}_"
+            if not ({f"{prefix}ENGINE", f"{prefix}MODEL"} & self.overrides.keys()):
+                continue
+            cfg = self.phase_cfg(phase)
+            engine_entry = catalog.get(cfg.engine)
+            if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: Phase {phase}: Engine {cfg.engine!r} unbekannt"
+                )
+            if cfg.model not in engine_entry.get("models", []):
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: Phase {phase}: Modell {cfg.model!r} "
+                    "ist nicht im UI-Katalog erlaubt"
+                )
+        limits = {"max_rounds": 50, "max_hours": 24}
+        for key, maximum in limits.items():
+            env_key = key.upper()
+            raw = self.overrides.get(env_key)
+            if raw is not None and not re.fullmatch(r"[1-9][0-9]*", raw):
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: {env_key} muss eine ganze positive Zahl sein"
+                )
+            value = self.stop_cfg(key)
+            if value <= 0 or value > maximum:
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: {key} muss zwischen 1 und {maximum} liegen"
+                )
+
+    def _runtime_autoland_authorized(self) -> bool:
+        """Nur der gebundene Phasenvertrag darf automatisch pushen; Budgets sind frei."""
+        if not self.pack.autoland:
+            return False
+        phase_keys = {
+            key for key in self.overrides
+            if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
+        }
+        if not phase_keys:
+            return True  # Das Pack-Manifest selbst wurde bereits fail-closed validiert.
+        return all(
+            (self.phase_cfg(phase).engine, self.phase_cfg(phase).model)
+            == AUTOLAND_PHASE_CONTRACT[phase][:2]
+            for phase in AUTOLAND_PHASE_CONTRACT
+        )
+
+    @property
+    def manual_land_marker(self) -> Path:
+        return self.state / "AUTOLAND_MANUAL"
+
+    def _prepare_runtime_land_mode(self) -> None:
+        if not self.pack.autoland:
+            return
+        if self._runtime_autoland_authorized():
+            self.manual_land_marker.unlink(missing_ok=True)
+            return
+        self.manual_land_marker.parent.mkdir(parents=True, exist_ok=True)
+        self.manual_land_marker.write_text(
+            "UI-Phasenvertrag weicht vom gebundenen Auto-Land-Vertrag ab.\n",
+            encoding="utf-8",
+        )
+
+    def _manual_land_required(self, context: str) -> bool:
+        if not self.manual_land_marker.exists():
+            return False
+        note = f"AUTOLAND übersprungen ({context}): abweichender UI-Phasenvertrag"
+        self.say(note)
+        self.ledger(note)
+        self.notify(f"ℹ️ {self.pack.name}: {note}; manuell prüfen und landen")
+        return True
 
     # ── Queue-Disposition (pipeline) ──
     def qcount(self, stage: str) -> int:
@@ -1179,8 +1258,11 @@ class LoopRunner:
         # Checkout gescheitert sein. Erst diesen einen verifizierten Commit landen;
         # niemals weitere Arbeit darauf stapeln.
         if self.pack.autoland and self._autoland_pending():
+            if self._manual_land_required("resume"):
+                return True
             return self._try_autoland("resume")
         self._validate_autoland_runtime(skip_plan=skip_plan)
+        self._prepare_runtime_land_mode()
         self.consume_overrides()
         if not skip_plan and self.overrides.get("SKIP_PLAN", "").strip().lower() in ("1", "true", "yes"):
             skip_plan = True
@@ -1195,6 +1277,8 @@ class LoopRunner:
                 return True
         self.cmd_run(fresh=fresh)
         if self.pack.autoland and self._autoland_pending():
+            if self._manual_land_required("night"):
+                return True
             if self.stop_requested():
                 self.say("STOP-Datei — verifizierte Arbeit bleibt ungelandet.")
                 self.ledger("AUTOLAND angehalten (night): STOP-Datei gesetzt")
@@ -1206,11 +1290,12 @@ class LoopRunner:
         commits = self.git("log", "--oneline", f"main..{self.pack.branch}").stdout.strip()
         counts = " · ".join(f"{self.qcount(s)} {s[3:]}" for s in QUEUE_STAGES) \
             if self.pack.type == "pipeline" else "(sweep)"
-        landing = (
-            "Landung: automatisch nach unabhaengigem PASS (allowlist + Schienen)."
-            if self.pack.autoland
-            else "Landung: Morgen-Review (Design-Doc → Landung)."
-        )
+        if self.pack.autoland and self.manual_land_marker.exists():
+            landing = "Landung: manuell — UI-Phasenvertrag weicht vom Auto-Land-Vertrag ab."
+        elif self.pack.autoland:
+            landing = "Landung: automatisch nach unabhaengigem PASS (allowlist + Schienen)."
+        else:
+            landing = "Landung: Morgen-Review (Design-Doc → Landung)."
         msg = (
             f"🌙 {self.pack.name} Bilanz: {counts}\n"
             f"Commits (main..{self.pack.branch}):\n{commits or '—'}\n"
