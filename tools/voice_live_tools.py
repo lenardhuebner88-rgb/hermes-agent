@@ -157,9 +157,11 @@ class VoiceToolExecutor:
                 if "|" not in line:
                     continue
                 session, attached = line.rsplit("|", 1)
-                terminals.append(
-                    {"name": session, "attached": attached.strip() == "1"}
-                )
+                try:
+                    attached_count = int(attached.strip())
+                except ValueError:
+                    attached_count = 0
+                terminals.append({"name": session, "attached": attached_count > 0})
             return {"terminals": terminals}
 
         if name == "read_terminal":
@@ -204,7 +206,7 @@ class VoiceToolExecutor:
                 )
 
             _, error = await self._run_tmux(
-                ["tmux", "send-keys", "-t", session, "-l", command],
+                ["tmux", "send-keys", "-t", session, "-l", "--", command],
                 action="send_to_terminal",
             )
             if error is not None:
