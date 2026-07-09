@@ -259,7 +259,7 @@ def test_respawn_and_kill_refuse_unparsable_pid_when_pane_not_marked_dead(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t1751500000\t{home}\n"
+    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t1751500000\t\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     with pytest.raises(CapabilityError, match="not marked dead"):
@@ -378,7 +378,7 @@ def test_list_windows_parses_real_tab_separated_format_matches_create_new_base_n
     fo_dir.mkdir(parents=True)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
 
-    fixture = f"work\tclaude-fo\t1\t%9\t9999\t0\tclaude\t1751500000\t{fo_dir}\n"
+    fixture = f"work\tclaude-fo\t1\t%9\t9999\t0\tclaude\t1751500000\t\t{fo_dir}\n"
     calls = _patch_list_windows_output(monkeypatch, fixture)
     windows = service.list_windows("work")
 
@@ -413,7 +413,7 @@ def test_kill_dead_kills_when_pane_dead_flag_set_even_with_pid_present(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t{home}\n"
+    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     service.kill_dead("work", "claude")

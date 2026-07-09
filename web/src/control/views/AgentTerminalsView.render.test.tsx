@@ -25,6 +25,7 @@ const apiMock = {
   getControlOverviewVault: vi.fn(),
   getControlOverviewKanbanBoard: vi.fn(),
   getControlOverviewDecisionQueue: vi.fn(),
+  getAccountUsage: vi.fn(),
 };
 const fitFitMock = vi.fn();
 const terminalScrollLinesMock = vi.fn();
@@ -240,6 +241,14 @@ beforeEach(() => {
     ],
   });
   apiMock.getControlOverviewDecisionQueue.mockResolvedValue({ count: 1, decisions: [{ task_id: "t_block", task_title: "Needs operator" }] });
+  apiMock.getAccountUsage.mockResolvedValue({
+    as_of: "2026-07-09T20:00:00Z",
+    providers: [
+      { provider: "openai-codex", available: true, source: "oauth", fetched_at: null, title: "OpenAI Codex", plan: "Plus", windows: [{ label: "5h", window_key: "five_hour", used_percent: 35, reset_at: null, detail: null }, { label: "Weekly", window_key: "weekly", used_percent: 61, reset_at: null, detail: null }], details: [], unavailable_reason: null, cached: false },
+      { provider: "anthropic", available: true, source: "oauth", fetched_at: null, title: "Anthropic", plan: "Max", windows: [], details: [], unavailable_reason: null, cached: false },
+      { provider: "kimi", available: true, source: "local", fetched_at: null, title: "Kimi", plan: "Coding", windows: [], details: [], unavailable_reason: null, cached: false },
+    ],
+  });
 });
 
 afterEach(() => {
@@ -251,11 +260,55 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
 
     expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    expect(screen.getByText("Abo-Limits")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Werkzeuge umschalten" }));
     expect(screen.getByText("Terminal-Kontext")).not.toBeNull();
     fireEvent.click((await screen.findAllByText("codex"))[0]);
     expect(screen.getAllByText("hermes-agents:codex").length).toBeGreaterThan(0);
     expect(await screen.findByText("/home/piet/.hermes/hermes-agent")).toBeTruthy();
     expect(screen.getByText("node/codex")).toBeTruthy();
+  });
+
+  it("switches between stable 1x, 2x, and 4x terminal grids with unique targets", async () => {
+    await renderView();
+    expect(await screen.findByTestId("terminal-pane-host-0")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("terminal-layout-button-2"));
+    expect(await screen.findByTestId("terminal-layout-2")).toBeTruthy();
+    expect(screen.getByTestId("terminal-pane-host-0")).toBeTruthy();
+    expect(screen.getByTestId("terminal-pane-host-1")).toBeTruthy();
+    expect((screen.getByLabelText("Terminal 1") as HTMLSelectElement).value).not.toBe((screen.getByLabelText("Terminal 2") as HTMLSelectElement).value);
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const attachCalls = vi.mocked(buildWsUrl).mock.calls.filter(([path]) => path === "/api/agent-terminals/attach");
+      expect(attachCalls.some(([, params]) => params?.client_id === "agent-terminals-ui-pane-0" && params?.isolated === "1")).toBe(true);
+      expect(attachCalls.some(([, params]) => params?.client_id === "agent-terminals-ui-pane-1" && params?.isolated === "1")).toBe(true);
+    });
+
+    fireEvent.click(screen.getByTestId("terminal-layout-button-4"));
+    expect(await screen.findByTestId("terminal-layout-4")).toBeTruthy();
+    expect(screen.getAllByTestId(/terminal-pane-card-/)).toHaveLength(4);
+    expect(window.localStorage.getItem("hermes.control.agent-terminals.desktop-layout.v1")).toBe("4");
+
+    const primaryCallsBeforeShrink = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0").length;
+    fireEvent.click(screen.getByTestId("terminal-layout-button-1"));
+    expect(screen.queryByTestId("terminal-layout-4")).toBeNull();
+    expect(screen.getByTestId("terminal-pane-host-0")).toBeTruthy();
+    const primaryCallsAfterShrink = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+    expect(primaryCallsAfterShrink).toHaveLength(primaryCallsBeforeShrink);
+    expect(primaryCallsAfterShrink.at(-1)?.[1]?.isolated).toBe("1");
+  });
+
+  it("restores persisted desktop 4x with four isolated panes and a collapsed Usage rail", async () => {
+    window.localStorage.setItem("hermes.control.agent-terminals.desktop-layout.v1", "4");
+    await renderView();
+    expect(await screen.findByTestId("terminal-layout-4")).toBeTruthy();
+    expect(screen.getByTestId("terminal-usage-dock").getAttribute("aria-hidden")).toBe("true");
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBe("1");
+    });
   });
 
   it("renders a persistent fleet-strip card per fleet window and selects the terminal on click", async () => {
@@ -275,7 +328,9 @@ describe("AgentTerminalsView desktop rendering", () => {
   it("renders the stat tiles from the existing skills/toolsets/kanban counts", async () => {
     await renderView();
 
-    await screen.findByText("Terminal-Kontext");
+    await screen.findByText("Abo-Limits");
+    fireEvent.click(screen.getByRole("button", { name: "Werkzeuge umschalten" }));
+    expect(await screen.findByText("Terminal-Kontext")).toBeTruthy();
     expect(screen.getByText("Skills aktiv")).toBeTruthy();
     expect(screen.getByText("Toolsets aktiv")).toBeTruthy();
     expect(screen.getByText("Kanban aktiv")).toBeTruthy();
@@ -394,6 +449,22 @@ describe("AgentTerminalsView desktop rendering", () => {
 });
 
 describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
+  it("forces a persisted 4x layout back to one mounted terminal on compact screens", async () => {
+    installDom(true);
+    window.localStorage.setItem("hermes.control.agent-terminals.desktop-layout.v1", "4");
+    await renderView();
+
+    expect(await screen.findByTestId("terminal-pane-host-0")).toBeTruthy();
+    expect(screen.queryByTestId("terminal-layout-4")).toBeNull();
+    expect(screen.queryByTestId("terminal-pane-host-1")).toBeNull();
+    expect(screen.getByTestId("terminal-usage-dock").getAttribute("aria-hidden")).toBe("true");
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBeUndefined();
+    });
+  });
+
   it("renders an immersive chip strip with the fixture windows and a sticky + chip", async () => {
     installDom(true);
     await renderView();

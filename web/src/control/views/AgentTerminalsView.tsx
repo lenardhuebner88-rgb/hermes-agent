@@ -14,17 +14,20 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
+  Columns2,
   ChevronUp,
   ChevronsDown,
   ChevronsUp,
   ClipboardList,
   CornerDownLeft,
   Gauge,
+  Grid2X2,
   Inbox,
   Keyboard,
   LayoutGrid,
   Maximize2,
   Minimize2,
+  PanelRightOpen,
   Paperclip,
   Pencil,
   PlugZap,
@@ -67,6 +70,15 @@ import {
 import { de } from "../i18n/de";
 import { Sparkline } from "../components/fleet/Sparkline";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
+import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
+import { TerminalUsageDock } from "./agent-terminals/TerminalUsageDock";
+import {
+  normalizeDesktopLayout,
+  resolvePaneTargets,
+  targetKey as paneTargetKey,
+  type DesktopTerminalLayout,
+  type TerminalTarget as PaneTarget,
+} from "./agent-terminals/layout";
 
 const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: string }> = [
   { kind: "hermes", label: "Hermes", hint: "hermes --tui" },
@@ -87,6 +99,8 @@ const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
 const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
 const KEYS_STORAGE_KEY = "hermes-terminals-keysopen";
 const TARGET_STORAGE_KEY = "hermes-terminals-last-target";
+const LAYOUT_STORAGE_KEY = "hermes.control.agent-terminals.desktop-layout.v1";
+const PANE_TARGETS_STORAGE_KEY = "hermes.control.agent-terminals.pane-targets.v1";
 const LASTSEEN_STORAGE_KEY = "hermes-terminals-lastseen";
 const FONT_MIN = 8;
 const FONT_MAX = 20;
@@ -602,6 +616,13 @@ export function AgentTerminalsView() {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const extraPaneOneRef = useRef<TerminalPaneHandle | null>(null);
+  const extraPaneTwoRef = useRef<TerminalPaneHandle | null>(null);
+  const extraPaneThreeRef = useRef<TerminalPaneHandle | null>(null);
+  const extraPaneRefs = useMemo(
+    () => [extraPaneOneRef, extraPaneTwoRef, extraPaneThreeRef],
+    [],
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const tmuxCopyModeRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -624,6 +645,31 @@ export function AgentTerminalsView() {
       return null;
     }
   });
+  const [desktopLayout, setDesktopLayout] = useState<DesktopTerminalLayout>(() => {
+    try {
+      return normalizeDesktopLayout(window.localStorage.getItem(LAYOUT_STORAGE_KEY));
+    } catch {
+      return 1;
+    }
+  });
+  const [extraTargets, setExtraTargets] = useState<Array<PaneTarget | null>>(() => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(PANE_TARGETS_STORAGE_KEY) ?? "[]") as unknown;
+      if (!Array.isArray(parsed)) return [null, null, null];
+      return [0, 1, 2].map((index) => {
+        const item = parsed[index] as { session?: unknown; window?: unknown } | undefined;
+        return item && typeof item.session === "string" && typeof item.window === "string"
+          ? { session: item.session, window: item.window }
+          : null;
+      });
+    } catch {
+      return [null, null, null];
+    }
+  });
+  const [activePane, setActivePane] = useState(0);
+  const [primaryIsolated, setPrimaryIsolated] = useState(() => !compactLayout && desktopLayout > 1);
+  const [paneConnections, setPaneConnections] = useState<Record<number, TerminalPaneConnectionState>>({});
+  const [rightRail, setRightRail] = useState<"usage" | "tools" | null>(() => !compactLayout && desktopLayout === 4 ? null : "usage");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -687,15 +733,70 @@ export function AgentTerminalsView() {
   const [broadcastConfirming, setBroadcastConfirming] = useState(false);
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
+  const visiblePaneCount: DesktopTerminalLayout = compactLayout ? 1 : desktopLayout;
+  const paneTargets = useMemo<Array<PaneTarget | null>>(() => [target, ...extraTargets], [extraTargets, target]);
+  const activeTarget = paneTargets[Math.min(activePane, visiblePaneCount - 1)] ?? target;
   const selectedWindow = useMemo(() => {
-    if (!target) return null;
-    return windows.find((w) => w.session === target.session && w.window === target.window) ?? null;
-  }, [target, windows]);
+    if (!activeTarget) return null;
+    return windows.find((w) => w.session === activeTarget.session && w.window === activeTarget.window) ?? null;
+  }, [activeTarget, windows]);
+  const activeConnection = activePane === 0
+    ? { ready: socketReady, connecting: socketConnecting, error: null }
+    : paneConnections[activePane] ?? { ready: false, connecting: true, error: null };
+  const activeSocketReady = activeConnection.ready;
 
   const sessions = useMemo(() => Array.from(new Set(windows.map((w) => w.session))), [windows]);
   const orderedWindows = useMemo(() => orderWindowsForStrip(windows), [windows]);
   const orderedOverview = useMemo(() => orderOverviewForFleet(overview), [overview]);
-  const state = classifyTerminalState({ window: selectedWindow, socketReady, socketConnecting, mobile });
+  const state = classifyTerminalState({ window: selectedWindow, socketReady: activeConnection.ready, socketConnecting: activeConnection.connecting, mobile });
+
+  const selectPaneTarget = useCallback((paneIndex: number, next: PaneTarget) => {
+    const duplicateIndex = paneTargets.findIndex((candidate, index) => index !== paneIndex && candidate && paneTargetKey(candidate) === paneTargetKey(next));
+    if (duplicateIndex >= 0 && duplicateIndex < visiblePaneCount) {
+      setActivePane(duplicateIndex);
+      return;
+    }
+    if (paneIndex === 0) {
+      if (desktopLayout === 1) setPrimaryIsolated(false);
+      setTarget(next);
+    } else {
+      setExtraTargets((current) => current.map((candidate, index) => (index === paneIndex - 1 ? next : candidate)));
+    }
+    setActivePane(paneIndex);
+  }, [desktopLayout, paneTargets, visiblePaneCount]);
+
+  const chooseDesktopLayout = useCallback((layout: DesktopTerminalLayout) => {
+    setDesktopLayout(layout);
+    if (layout > 1) setPrimaryIsolated(true);
+    if (layout === 4) setRightRail(null);
+    setActivePane((current) => Math.min(current, layout - 1));
+  }, []);
+
+  useEffect(() => {
+    if (!compactLayout) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- compact mode must keep one direct mobile attach.
+    setActivePane(0);
+    setPrimaryIsolated(false);
+  }, [compactLayout]);
+
+  useEffect(() => {
+    if (!target || windows.length === 0) return;
+    const available = windows.map(targetFromWindow);
+    const resolved = resolvePaneTargets(available, [target, ...extraTargets], desktopLayout);
+    const next = resolved.slice(1);
+    if (JSON.stringify(next) === JSON.stringify(extraTargets)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reconcile persisted pane targets with live tmux inventory.
+    setExtraTargets(next);
+  }, [desktopLayout, extraTargets, target, windows]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LAYOUT_STORAGE_KEY, String(desktopLayout));
+      window.localStorage.setItem(PANE_TARGETS_STORAGE_KEY, JSON.stringify(extraTargets));
+    } catch {
+      // Persistence is best-effort (private browsing / storage policy).
+    }
+  }, [desktopLayout, extraTargets]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1006,7 +1107,14 @@ export function AgentTerminalsView() {
     }
     const attachCols = String(Math.max(2, Math.floor(term.cols)));
     const attachRows = String(Math.max(2, Math.floor(term.rows)));
-    void buildWsUrl("/api/agent-terminals/attach", { session: target.session, window: target.window, client_id: "agent-terminals-ui", cols: attachCols, rows: attachRows })
+    void buildWsUrl("/api/agent-terminals/attach", {
+      session: target.session,
+      window: target.window,
+      client_id: "agent-terminals-ui-pane-0",
+      cols: attachCols,
+      rows: attachRows,
+      ...(primaryIsolated ? { isolated: "1" } : {}),
+    })
       .then((url) => {
         if (disposed) return;
         const ws = new WebSocket(url);
@@ -1073,7 +1181,7 @@ export function AgentTerminalsView() {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [target, attachNonce]);
+  }, [attachNonce, primaryIsolated, target]);
 
   // Tab wird sichtbar, Socket ist (noch) nicht offen → statt auf den nächsten
   // Backoff-Tick zu warten, sofort neu verbinden (Reset des Backoffs).
@@ -1099,7 +1207,7 @@ export function AgentTerminalsView() {
     try {
       const response = await api.createAgentTerminalWindow(createKind, workdir);
       setSelectedKind(createKind);
-      setTarget(targetFromWindow(response.window));
+      selectPaneTarget(activePane, targetFromWindow(response.window));
       await refresh();
       setCreateSheetOpen(false);
     } catch (err) {
@@ -1107,20 +1215,20 @@ export function AgentTerminalsView() {
     } finally {
       setCreateBusy(false);
     }
-  }, [createKind, workdir, refresh]);
+  }, [activePane, createKind, refresh, selectPaneTarget, workdir]);
 
   const respawnWindow = useCallback(
     async (win: { session: string; window: string }) => {
       setError(null);
       try {
         const response = await api.respawnAgentTerminalWindow(win.session, win.window);
-        setTarget(targetFromWindow(response.window));
+        selectPaneTarget(activePane, targetFromWindow(response.window));
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [refresh],
+    [activePane, refresh, selectPaneTarget],
   );
 
   const killWindow = useCallback(
@@ -1178,19 +1286,23 @@ export function AgentTerminalsView() {
           return next;
         });
       }
-      setTarget(targetFromWindow(response.window));
+      selectPaneTarget(activePane, targetFromWindow(response.window));
       await refresh();
     } catch (err) {
       setRenameError(err instanceof Error ? err.message : String(err));
     } finally {
       setRenameBusy(false);
     }
-  }, [selectedWindow, renameValue, refresh]);
+  }, [activePane, refresh, renameValue, selectPaneTarget, selectedWindow]);
 
   const sendRaw = useCallback((sequence: string) => {
+    if (activePane > 0) {
+      extraPaneRefs[activePane - 1]?.current?.sendRaw(sequence);
+      return;
+    }
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(sequence);
-  }, []);
+  }, [activePane, extraPaneRefs]);
 
   const syncPtySize = useCallback(() => {
     const term = termRef.current;
@@ -1258,25 +1370,30 @@ export function AgentTerminalsView() {
 
   const scrollTerminal = useCallback(
     (action: "pageUp" | "lineUp" | "lineDown" | "bottom") => {
-      const term = termRef.current;
+      const term = activePane > 0 ? null : termRef.current;
+      const handle = activePane > 0 ? extraPaneRefs[activePane - 1]?.current : null;
       if (action === "pageUp") {
-        term?.scrollPages(-1);
+        if (handle) handle.scrollPages(-1);
+        else term?.scrollPages(-1);
         sendRaw(tmuxCopyModeRef.current ? "\x1b[5~" : TMUX_PAGE_UP);
         tmuxCopyModeRef.current = true;
       } else if (action === "lineUp") {
-        term?.scrollLines(-TMUX_LINE_STEP);
+        if (handle) handle.scrollLines(-TMUX_LINE_STEP);
+        else term?.scrollLines(-TMUX_LINE_STEP);
         sendRaw(`${tmuxCopyModeRef.current ? "" : TMUX_COPY_MODE}${"\x1b[A".repeat(TMUX_LINE_STEP)}`);
         tmuxCopyModeRef.current = true;
       } else if (action === "lineDown") {
-        term?.scrollLines(TMUX_LINE_STEP);
+        if (handle) handle.scrollLines(TMUX_LINE_STEP);
+        else term?.scrollLines(TMUX_LINE_STEP);
         if (tmuxCopyModeRef.current) sendRaw("\x1b[B".repeat(TMUX_LINE_STEP));
       } else {
-        term?.scrollToBottom();
+        if (handle) handle.scrollToBottom();
+        else term?.scrollToBottom();
         if (tmuxCopyModeRef.current) sendRaw("q");
         tmuxCopyModeRef.current = false;
       }
     },
-    [sendRaw],
+    [activePane, extraPaneRefs, sendRaw],
   );
 
   const sendKey = useCallback(
@@ -1440,9 +1557,9 @@ export function AgentTerminalsView() {
   }, []);
 
   const openFromFleet = useCallback((win: AgentTerminalOverviewWindow) => {
-    setTarget(targetFromWindow(win));
+    selectPaneTarget(activePane, targetFromWindow(win));
     setView("terminal");
-  }, []);
+  }, [activePane, selectPaneTarget]);
 
   const sendBroadcast = useCallback(async () => {
     const payload = buildComposerPayload(broadcastText, true);
@@ -1510,7 +1627,7 @@ export function AgentTerminalsView() {
     for (const win of overview) map.set(`${win.session}:${win.window}`, win);
     return map;
   }, [overview]);
-  const selectedOverview = target ? overviewByKey.get(`${target.session}:${target.window}`) ?? null : null;
+  const selectedOverview = activeTarget ? overviewByKey.get(`${activeTarget.session}:${activeTarget.window}`) ?? null : null;
 
   const sessionList = (
     <div className="flex h-full flex-col gap-3">
@@ -1528,13 +1645,13 @@ export function AgentTerminalsView() {
             <div className="mb-2 flex items-center gap-2 text-xs font-medium text-ink-2"><Server className="h-3.5 w-3.5" />{session}</div>
             <div className="grid gap-1">
               {windows.filter((w) => w.session === session).map((win) => {
-                const active = target?.session === win.session && target.window === win.window;
+                const active = activeTarget?.session === win.session && activeTarget.window === win.window;
                 const dead = isDeadWindow(win);
                 const laneOverview = overviewByKey.get(`${win.session}:${win.window}`);
                 const laneState: AgentTerminalOverviewState = laneOverview?.state ?? (dead ? "dead" : "idle");
                 return (
                   <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
-                    <button type="button" onClick={() => setTarget(targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-card border px-2 py-2 text-left text-xs transition", active ? "border-live/60 bg-live/10 text-live" : "border-transparent text-ink-2 hover:border-line hover:bg-surface-3")}>
+                    <button type="button" onClick={() => selectPaneTarget(activePane, targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-card border px-2 py-2 text-left text-xs transition", active ? "border-live/60 bg-live/10 text-live" : "border-transparent text-ink-2 hover:border-line hover:bg-surface-3")}>
                       <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
                       <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
                       <Sparkline state={laneState} className="mt-1" />
@@ -1718,7 +1835,7 @@ export function AgentTerminalsView() {
         {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>}
       </div>
       <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
-        <div className="flex justify-between"><span>Target</span><span className="text-ink">{target ? `${target.session}:${target.window}` : "—"}</span></div>
+        <div className="flex justify-between"><span>Target</span><span className="text-ink">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "—"}</span></div>
         <div className="flex justify-between"><span>Attach</span><StatusPill state={state} /></div>
         <div className="flex justify-between"><span>Input</span><span className="text-ink-2">nur User-Tasten, kein Auto-Send</span></div>
         <div className="flex justify-between"><span>Mobile</span><span className="text-ink-2">reattach an dasselbe tmux-Fenster</span></div>
@@ -1813,8 +1930,8 @@ export function AgentTerminalsView() {
               void uploadFiles(files);
             }
           }}
-          placeholder={socketReady ? "Prompt oder Befehl … (Enter sendet)" : "Terminal nicht verbunden"}
-          disabled={!socketReady}
+          placeholder={activeSocketReady ? "Prompt oder Befehl … (Enter sendet)" : "Terminal nicht verbunden"}
+          disabled={!activeSocketReady}
           rows={Math.min(4, Math.max(1, composerText.split("\n").length))}
           enterKeyHint="send"
           autoCapitalize="off"
@@ -1826,7 +1943,7 @@ export function AgentTerminalsView() {
           type="button"
           aria-label="Eingabe senden"
           title="Senden (mit Enter)"
-          disabled={!socketReady || !composerText}
+          disabled={!activeSocketReady || !composerText}
           onClick={() => sendComposer(true)}
           className="grid h-10 w-12 shrink-0 place-items-center rounded-card border border-live/50 bg-live/15 text-live transition hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-35"
         >
@@ -1855,23 +1972,23 @@ export function AgentTerminalsView() {
             </TerminalControlButton>
           </div>
           <div className="grid grid-cols-4 gap-1" role="group" aria-label="Terminal arrow key controls">
-            <TerminalControlButton label="Send arrow left" disabled={!socketReady} onClick={() => sendKey("\x1b[D")}>
+            <TerminalControlButton label="Send arrow left" disabled={!activeSocketReady} onClick={() => sendKey("\x1b[D")}>
               <ArrowLeft className="h-4 w-4" />
             </TerminalControlButton>
-            <TerminalControlButton label="Send arrow up" disabled={!socketReady} onClick={() => sendKey("\x1b[A")}>
+            <TerminalControlButton label="Send arrow up" disabled={!activeSocketReady} onClick={() => sendKey("\x1b[A")}>
               <ArrowUp className="h-4 w-4" />
             </TerminalControlButton>
-            <TerminalControlButton label="Send arrow down" disabled={!socketReady} onClick={() => sendKey("\x1b[B")}>
+            <TerminalControlButton label="Send arrow down" disabled={!activeSocketReady} onClick={() => sendKey("\x1b[B")}>
               <ArrowDown className="h-4 w-4" />
             </TerminalControlButton>
-            <TerminalControlButton label="Send arrow right" disabled={!socketReady} onClick={() => sendKey("\x1b[C")}>
+            <TerminalControlButton label="Send arrow right" disabled={!activeSocketReady} onClick={() => sendKey("\x1b[C")}>
               <ArrowRight className="h-4 w-4" />
             </TerminalControlButton>
           </div>
         </div>
         <div className="grid grid-cols-5 gap-1" role="group" aria-label="Terminal special keys">
           {QUICK_KEYS.map((key) => (
-            <TerminalControlButton key={key.label} label={`Send ${key.label}`} disabled={!socketReady} onClick={() => sendKey(key.sequence)}>
+            <TerminalControlButton key={key.label} label={`Send ${key.label}`} disabled={!activeSocketReady} onClick={() => sendKey(key.sequence)}>
               <span className="font-mono text-[11px]">{key.label}</span>
             </TerminalControlButton>
           ))}
@@ -1903,7 +2020,7 @@ export function AgentTerminalsView() {
       </button>
       <div className="flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto px-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {orderedWindows.map((win) => {
-          const active = target?.session === win.session && target.window === win.window;
+          const active = activeTarget?.session === win.session && activeTarget.window === win.window;
           const dead = isDeadWindow(win);
           const key = `${win.session}:${win.window}`;
           const unseen = !active && hasUnseenActivity(win, lastSeen);
@@ -1914,7 +2031,7 @@ export function AgentTerminalsView() {
                 chipRefs.current[key] = el;
               }}
               type="button"
-              onClick={() => (active ? setSessionSheetOpen(true) : setTarget(targetFromWindow(win)))}
+              onClick={() => (active ? setSessionSheetOpen(true) : selectPaneTarget(activePane, targetFromWindow(win)))}
               className={cn(
                 "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition",
                 active ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2",
@@ -1975,10 +2092,10 @@ export function AgentTerminalsView() {
         <div className="flex items-center justify-between gap-2"><span>Status</span><StatusPill state={state} /></div>
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <button type="button" onClick={() => setAttachNonce((n) => n + 1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+        <button type="button" onClick={() => { if (activePane > 0) extraPaneRefs[activePane - 1]?.current?.reconnect(); else setAttachNonce((n) => n + 1); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <PlugZap className="h-4 w-4" /><span>Neu verbinden</span>
         </button>
-        <button type="button" disabled={!socketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
+        <button type="button" disabled={!activeSocketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
           <span className="font-mono text-sm">^C</span><span>^C senden</span>
         </button>
         {sessionSheetDead && (
@@ -2188,6 +2305,117 @@ export function AgentTerminalsView() {
     </div>
   );
 
+  const handlePaneConnection = useCallback((paneIndex: number, connection: TerminalPaneConnectionState) => {
+    setPaneConnections((current) => {
+      const previous = current[paneIndex];
+      if (previous?.ready === connection.ready && previous.connecting === connection.connecting && previous.error === connection.error) return current;
+      return { ...current, [paneIndex]: connection };
+    });
+  }, []);
+
+  const paneHeader = (paneIndex: number, paneTarget: PaneTarget | null) => {
+    const connection = paneIndex === 0
+      ? { ready: socketReady, connecting: socketConnecting }
+      : paneConnections[paneIndex] ?? { ready: false, connecting: true };
+    const usedByOtherPane = new Set(
+      paneTargets
+        .slice(0, visiblePaneCount)
+        .filter((candidate, index): candidate is PaneTarget => index !== paneIndex && Boolean(candidate))
+        .map(paneTargetKey),
+    );
+    return (
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.07] bg-[#0a111a] px-2">
+        <button
+          type="button"
+          className={cn("size-2 rounded-full", connection.ready ? "bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,.55)]" : connection.connecting ? "animate-pulse bg-amber-300" : "bg-red-400")}
+          aria-label={`Pane ${paneIndex + 1} aktivieren`}
+          onClick={() => setActivePane(paneIndex)}
+        />
+        <select
+          aria-label={`Terminal ${paneIndex + 1}`}
+          value={paneTarget ? paneTargetKey(paneTarget) : ""}
+          onChange={(event) => {
+            const next = windows.find((item) => `${item.session}:${item.window}` === event.target.value);
+            if (next) selectPaneTarget(paneIndex, targetFromWindow(next));
+          }}
+          className="min-w-0 flex-1 truncate bg-transparent font-mono text-[11px] text-ink outline-none"
+        >
+          <option value="" disabled>Terminal wählen</option>
+          {windows.map((item) => {
+            const optionTarget = targetFromWindow(item);
+            return (
+              <option key={`${item.session}:${item.window}`} value={paneTargetKey(optionTarget)} disabled={usedByOtherPane.has(paneTargetKey(optionTarget))}>
+                {item.session}:{item.window}
+              </option>
+            );
+          })}
+        </select>
+        <span className="font-mono text-[10px] text-ink-3">{paneIndex + 1}/{visiblePaneCount}</span>
+      </div>
+    );
+  };
+
+  const primaryHost = (
+    <div
+      ref={hostRef}
+      data-testid="terminal-pane-host-0"
+      className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden bg-[#0b0e12]"
+      onMouseDown={() => setActivePane(0)}
+      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const files = event.dataTransfer?.files;
+        if (files && files.length) void uploadFiles(files);
+      }}
+      aria-label="Live terminal output"
+    />
+  );
+
+  const terminalPaneSurface = (
+    <div
+      data-testid={`terminal-layout-${visiblePaneCount}`}
+      className={cn(
+        "min-h-0 min-w-0 flex-1 bg-[#05080d]",
+        visiblePaneCount === 1
+          ? "flex"
+          : "grid gap-2 p-2",
+        visiblePaneCount === 2 && "grid-cols-2 grid-rows-1",
+        visiblePaneCount === 4 && "grid-cols-2 grid-rows-2",
+      )}
+    >
+      {paneTargets.slice(0, visiblePaneCount).map((paneTarget, paneIndex) => (
+        <section
+          key={paneIndex}
+          data-testid={`terminal-pane-card-${paneIndex}`}
+          className={cn(
+            "flex h-full min-h-0 min-w-0 flex-col overflow-hidden",
+            visiblePaneCount > 1 && "rounded-[14px] border bg-[#05080d] shadow-[0_12px_30px_rgba(0,0,0,.22)]",
+            visiblePaneCount > 1 && (activePane === paneIndex ? "border-cyan-300/55 ring-1 ring-cyan-300/15" : "border-white/[0.08]"),
+          )}
+          onMouseDown={() => setActivePane(paneIndex)}
+        >
+          {visiblePaneCount > 1 && paneHeader(paneIndex, paneTarget)}
+          {paneIndex === 0 ? primaryHost : paneTarget ? (
+            <TerminalPane
+              ref={extraPaneRefs[paneIndex - 1]}
+              target={paneTarget}
+              paneOrder={paneIndex}
+              fontSize={fontSize ?? 13}
+              isolated
+              active={activePane === paneIndex}
+              onActivate={() => setActivePane(paneIndex)}
+              onConnectionChange={(connection) => handlePaneConnection(paneIndex, connection)}
+            />
+          ) : (
+            <button type="button" className="grid h-full place-items-center text-xs text-ink-3" onClick={() => setActivePane(paneIndex)}>
+              Weiteres Terminal wählen
+            </button>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+
   return (
     <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-ink sm:gap-3">
       {!compactLayout && (
@@ -2228,14 +2456,17 @@ export function AgentTerminalsView() {
               key={`${win.session}:${win.window}`}
               win={win}
               now={overviewNow}
-              isCurrent={target?.session === win.session && target.window === win.window}
-              onSelect={() => setTarget(targetFromWindow(win))}
+              isCurrent={activeTarget?.session === win.session && activeTarget.window === win.window}
+              onSelect={() => selectPaneTarget(activePane, targetFromWindow(win))}
             />
           ))}
         </div>
       )}
 
-      <div className="grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_280px]">
+      <div className={cn(
+        "relative grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)]",
+        rightRail ? "xl:grid-cols-[260px_minmax(0,1fr)_300px]" : "xl:grid-cols-[260px_minmax(0,1fr)]",
+      )}>
         <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 lg:block">{sessionList}</aside>
         <section
           style={immersive && immersiveHeight ? { height: `${immersiveHeight}px` } : undefined}
@@ -2247,8 +2478,39 @@ export function AgentTerminalsView() {
           {compactLayout && chipStrip}
           {!compactLayout && view === "terminal" && (
             <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2 text-xs text-ink-2">
-              <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{target ? `${target.session}:${target.window}` : "missing window"}</span></div>
+              <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "missing window"}</span></div>
               <div className="flex shrink-0 items-center gap-1">
+                {([1, 2, 4] as DesktopTerminalLayout[]).map((layout) => (
+                  <button
+                    key={layout}
+                    type="button"
+                    data-testid={`terminal-layout-button-${layout}`}
+                    aria-label={`${layout} Terminal${layout > 1 ? "s" : ""} anzeigen`}
+                    title={`${layout}× Terminal`}
+                    onClick={() => chooseDesktopLayout(layout)}
+                    className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", desktopLayout === layout ? "border-cyan-300/50 bg-cyan-300/10 text-cyan-100" : "border-line")}
+                  >
+                    {layout === 1 ? <TerminalSquare className="h-3.5 w-3.5" /> : layout === 2 ? <Columns2 className="h-3.5 w-3.5" /> : <Grid2X2 className="h-3.5 w-3.5" />}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  aria-label="Usage Window umschalten"
+                  title="ChatGPT / Claude / Kimi Usage"
+                  onClick={() => setRightRail((current) => current === "usage" ? null : "usage")}
+                  className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", rightRail === "usage" ? "border-live/50 bg-live/10 text-live" : "border-line")}
+                >
+                  <Gauge className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Werkzeuge umschalten"
+                  title="Werkzeuge"
+                  onClick={() => setRightRail((current) => current === "tools" ? null : "tools")}
+                  className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", rightRail === "tools" ? "border-live/50 bg-live/10 text-live" : "border-line")}
+                >
+                  <PanelRightOpen className="h-3.5 w-3.5" />
+                </button>
                 <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A−</button>
                 <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A+</button>
                 <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-card border border-line text-ink-2 hover:bg-surface-3">
@@ -2263,7 +2525,7 @@ export function AgentTerminalsView() {
               <span className="min-w-0 truncate">{error}</span>
             </div>
           )}
-          {!target && !loading ? (
+          {!activeTarget && !loading ? (
             <div className="grid h-[480px] place-items-center p-6 text-center text-sm text-ink-3">Kein tmux-Fenster verfügbar. Neue Session über „+" anlegen.</div>
           ) : (
             <div className={cn("flex w-full flex-col", immersive ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
@@ -2287,16 +2549,7 @@ export function AgentTerminalsView() {
                   </button>
                 </div>
               )}
-              <div
-                ref={hostRef}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const files = event.dataTransfer?.files;
-                  if (files && files.length) void uploadFiles(files);
-                }}
-                className="min-h-0 min-w-0 flex-1 w-full overflow-hidden [&_.xterm]:box-border [&_.xterm]:px-2 [&_.xterm]:py-1 [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:touch-pan-y"
-              />
+              {terminalPaneSurface}
               {composer}
               {keysBar}
             </div>
@@ -2309,7 +2562,12 @@ export function AgentTerminalsView() {
             <div className={cn("absolute inset-x-0 bottom-0 z-10 overflow-y-auto bg-surface-0 p-3", compactLayout ? "top-11" : "top-0")}>{fleetPanel}</div>
           )}
         </section>
-        <aside className="hidden min-h-[540px] min-w-0 overflow-hidden rounded-panel border border-line bg-surface-2 p-3 xl:block">{toolsDrawer}</aside>
+        <TerminalUsageDock open={!compactLayout && rightRail === "usage"} onClose={() => setRightRail(null)} />
+        {!compactLayout && rightRail === "tools" ? (
+          <aside className="absolute inset-y-0 right-0 z-30 min-h-[540px] w-[min(300px,calc(100%-1rem))] min-w-0 overflow-hidden rounded-panel border border-line bg-surface-2 p-3 shadow-[-24px_0_55px_rgba(0,0,0,.38)] xl:relative xl:w-auto xl:shadow-none">
+            {toolsDrawer}
+          </aside>
+        ) : null}
       </div>
 
       {sessionSheet}
@@ -2319,7 +2577,7 @@ export function AgentTerminalsView() {
       {handoffOpen && (
         <TerminalHandoffPanel
           target={target}
-          getSelection={() => termRef.current?.getSelection() ?? ""}
+          getSelection={() => activePane > 0 ? extraPaneRefs[activePane - 1]?.current?.getSelection() ?? "" : termRef.current?.getSelection() ?? ""}
           onClose={() => setHandoffOpen(false)}
         />
       )}
