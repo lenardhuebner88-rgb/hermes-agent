@@ -1,0 +1,202 @@
+{
+  "collections": [
+    {
+      "id": "kanon",
+      "title": "Kanon — Die geteilte Wahrheit",
+      "description": "Dauerhafte, agent-übergreifende Fakten. Hermes · Claude · Codex lesen und pflegen hier — statt jeder in sein eigenes Notizbuch.",
+      "accent": "cyan",
+      "icon": "Landmark",
+      "doc_count": 6,
+      "updated_ts": 1783575727,
+      "docs": [
+        {
+          "id": "kb::doc::canon-index",
+          "collection": "kanon",
+          "title": "Canon-Index",
+          "summary": "Einstieg und Grundregel: was kanonisch hier lebt — und was bewusst nicht.",
+          "source_ref": "vault/00-Canon/_index.md",
+          "tags": ["kanon", "einstieg"],
+          "updated_ts": 1783575727,
+          "heading_count": 6
+        },
+        {
+          "id": "kb::doc::canon-infra-topology",
+          "collection": "kanon",
+          "title": "Infrastruktur & Topologie",
+          "summary": "Ports, Pfade, Services, Hosts — wie der Homeserver verdrahtet ist.",
+          "source_ref": "vault/00-Canon/infra-topology.md",
+          "tags": ["topologie", "ports", "pfade"],
+          "updated_ts": 1782975740,
+          "heading_count": 9
+        }
+      ]
+    },
+    {
+      "id": "orchestrierung",
+      "title": "Orchestrierung",
+      "description": "Wie Claude als Orchestrator Agenten steuert — die Verfassung und die gesammelten Lehren aus echten Läufen.",
+      "accent": "violet",
+      "icon": "Workflow",
+      "doc_count": 5,
+      "updated_ts": 1783053014,
+      "docs": [
+        {
+          "id": "kb::doc::orch-constitution",
+          "collection": "orchestrierung",
+          "title": "Verfassung (Orchestrator)",
+          "summary": "Die Grundregeln des Orchestrators: triage → delegieren → integrieren → Gate.",
+          "source_ref": "orchestration/CLAUDE.md",
+          "tags": ["orchestrierung", "regeln"],
+          "updated_ts": 1781043443,
+          "heading_count": 7
+        },
+        {
+          "id": "kb::doc::orch-playbook",
+          "collection": "orchestrierung",
+          "title": "Playbook — Lehren",
+          "summary": "Die gesammelten Orchestrierungs-Lessons aus echten Läufen, selbst gepflegt.",
+          "source_ref": "orchestration/PLAYBOOK.md",
+          "tags": ["lessons", "playbook"],
+          "updated_ts": 1783053014,
+          "heading_count": 37
+        }
+      ]
+    },
+    {
+      "id": "skills",
+      "title": "Claude-Skills",
+      "description": "Was die Agenten von Haus aus können: jede Skill mit Zweck und vollem Spielbuch.",
+      "accent": "amber",
+      "icon": "Sparkles",
+      "doc_count": 17,
+      "updated_ts": 1783372248,
+      "docs": [
+        {
+          "id": "kb::skill::decision",
+          "collection": "skills",
+          "title": "decision",
+          "summary": "Use to capture a durable cross-agent decision into the Canon decision ledger.",
+          "source_ref": "skills/decision",
+          "tags": ["skill"],
+          "updated_ts": 1782415763,
+          "heading_count": 1
+        },
+        {
+          "id": "kb::skill::design-board",
+          "collection": "skills",
+          "title": "design-board",
+          "summary": "Use when working with the Hermes Design Board — cards under ~/.hermes/design-board or the /control/design-board tab: attaching or rendering an HTML mockup, adding screenshots/comments/pins, promoting a design card to a…",
+          "source_ref": "skills/design-board",
+          "tags": ["skill"],
+          "updated_ts": 1783372248,
+          "heading_count": 1
+        }
+      ]
+    },
+    {
+      "id": "rollen",
+      "title": "Subagent-Rollen",
+      "description": "Die spezialisierten Lese-, Bau- und Urteils-Rollen, an die delegiert wird.",
+      "accent": "emerald",
+      "icon": "Users",
+      "doc_count": 13,
+      "updated_ts": 1783198954,
+      "docs": [
+        {
+          "id": "kb::role::auditor",
+          "collection": "rollen",
+          "title": "auditor",
+          "summary": "Read-only Code-Sichtung, Grounding, Audit und Schwachstellen-Fund.",
+          "source_ref": "agents/auditor.md",
+          "tags": ["rolle", "sonnet"],
+          "updated_ts": 1781246686,
+          "heading_count": 0
+        },
+        {
+          "id": "kb::role::builder",
+          "collection": "rollen",
+          "title": "builder",
+          "summary": "Feature-Slice-Bau in-session — ein klar umrissener Slice (Komponente, Endpoint, View, Bugfix) inkl.",
+          "source_ref": "agents/builder.md",
+          "tags": ["rolle", "sonnet"],
+          "updated_ts": 1782969808,
+          "heading_count": 0
+        }
+      ]
+    },
+    {
+      "id": "llm-wiki",
+      "title": "LLM-Wiki",
+      "description": "Agentisch gepflegtes Wissen aus Quellen, Konzepten, Entitäten, Abfragen und Synthesen — direkt aus ~/llm-wiki/wiki.",
+      "accent": "indigo",
+      "icon": "Brain",
+      "doc_count": 39,
+      "updated_ts": 1783623276,
+      "docs": [
+        {
+          "id": "kb::llm::overview.md",
+          "collection": "llm-wiki",
+          "title": "Overview",
+          "summary": "This wiki implements the [[wiki/concepts/llm-maintained-wiki|LLM-maintained wiki]]",
+          "source_ref": "llm-wiki/overview.md",
+          "tags": ["llm-wiki", "type:overview"],
+          "updated_ts": 1782491049,
+          "heading_count": 1
+        },
+        {
+          "id": "kb::llm::synthesis.md",
+          "collection": "llm-wiki",
+          "title": "Synthesis",
+          "summary": "The wiki is not just an index over raw documents. Its purpose is to maintain a",
+          "source_ref": "llm-wiki/synthesis.md",
+          "tags": ["llm-wiki", "type:synthesis"],
+          "updated_ts": 1782491062,
+          "heading_count": 2
+        }
+      ],
+      "pulse": [
+        { "date": "2026-07-09", "model": "openai/gpt-5.6-terra-pro", "detail": "context 1M, $2.50/$15.00 per 1M" },
+        { "date": "2026-07-09", "model": "openai/gpt-5.6-sol-pro", "detail": "context 1M, $5.00/$30.00 per 1M" },
+        { "date": "2026-07-09", "model": "openai/gpt-5.6-luna-pro", "detail": "context 1M, $1.00/$6.00 per 1M" }
+      ]
+    },
+    {
+      "id": "vault-plans",
+      "title": "Vault Plans",
+      "description": "Plan-Dokumente aus ~/vault/03-Agents/*/plans — mit Titel, Status, Tags und Summary direkt aus dem Frontmatter.",
+      "accent": "rose",
+      "icon": "Newspaper",
+      "doc_count": 201,
+      "updated_ts": 1783623638,
+      "docs": [
+        {
+          "id": "kb::plan::Claude-Code/plans/2026-06-16-abo-limits-tile-planspec.md",
+          "collection": "vault-plans",
+          "title": "PlanSpec — Dashboard-Tile „Abo-Limits\" (Variante A für Kimi)",
+          "summary": "Ein `/control`-Tile „Abo-Limits\" zeigt Anthropic Max und ChatGPT/Codex aus den vorhandenen OAuth-Usage-Endpunkten sowie Kimi aus lokaler `kanban.db`-Aggregation.",
+          "source_ref": "vault/03-Agents/Claude-Code/plans/2026-06-16-abo-limits-tile-planspec.md",
+          "tags": ["vault-plan", "type:plan", "status:obsolete"],
+          "updated_ts": 1781728435,
+          "heading_count": 18,
+          "status": "obsolete"
+        },
+        {
+          "id": "kb::plan::Claude-Code/plans/2026-06-17-abo-limits-cockpit-und-stats-optimierung.md",
+          "collection": "vault-plans",
+          "title": "PlanSpec — Abo-Limits-Cockpit (A + Engpass) & Stats-Tab-Optimierung",
+          "summary": "Der Operator will im Dashboard **real und abgeglichen** sehen, wie viel Usage im **5-Stunden-Fenster**",
+          "source_ref": "vault/03-Agents/Claude-Code/plans/2026-06-17-abo-limits-cockpit-und-stats-optimierung.md",
+          "tags": ["vault-plan", "type:planspec", "status:done"],
+          "updated_ts": 1781707631,
+          "heading_count": 21,
+          "created": "2026-06-17",
+          "type": "planspec",
+          "status": "done"
+        }
+      ]
+    }
+  ],
+  "count": 281,
+  "query": "",
+  "now": 1783624432
+}
