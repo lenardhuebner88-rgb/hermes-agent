@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from google import genai
@@ -15,6 +17,7 @@ _CONTEXT_TRIGGER_TOKENS = 100_000
 _CONTEXT_TARGET_TOKENS = 50_000
 _VOICE_NAME = "Puck"
 _MAX_TOOL_ERROR_CHARS = 500
+_SENDER_HANDOFF_SECONDS = 1.0
 
 _FALLBACK_ERRORS = (
     errors.APIError,
@@ -22,7 +25,6 @@ _FALLBACK_ERRORS = (
     ConnectionError,
     OSError,
     TimeoutError,
-    ValueError,
 )
 
 
@@ -44,6 +46,12 @@ class _LiveSession(Protocol):
     def receive(self) -> Any: ...
 
 
+@dataclass(slots=True)
+class _PendingAudio:
+    data: bytes
+    source_queue: asyncio.Queue[bytes]
+
+
 class GeminiLiveSession:
     """Relay PCM audio and function calls through one resumable Gemini session."""
 
@@ -59,6 +67,7 @@ class GeminiLiveSession:
         self._tool_declarations = list(tool_declarations)
         self._api_key = api_key
         self._resumption_handle: str | None = None
+        self._replay_audio: deque[_PendingAudio] = deque()
 
     def _connect_config(self) -> types.LiveConnectConfig:
         tools = []
@@ -79,11 +88,9 @@ class GeminiLiveSession:
                 ),
             ),
             tools=tools,
+            # Developer API supports handles, not transparent index replay.
             session_resumption=types.SessionResumptionConfig(
                 handle=self._resumption_handle,
-                # We reconnect with server handles, but do not buffer/replay
-                # client messages from last_consumed_client_message_index.
-                transparent=False,
             ),
             context_window_compression=types.ContextWindowCompressionConfig(
                 trigger_tokens=_CONTEXT_TRIGGER_TOKENS,
@@ -93,21 +100,78 @@ class GeminiLiveSession:
             ),
         )
 
+    async def _next_audio(
+        self,
+        audio_in: asyncio.Queue[bytes],
+        stop_event: asyncio.Event,
+    ) -> _PendingAudio | None:
+        if self._replay_audio:
+            return self._replay_audio.popleft()
+
+        get_task = asyncio.create_task(audio_in.get())
+        stop_task = asyncio.create_task(stop_event.wait())
+        try:
+            await asyncio.wait(
+                {get_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in (get_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(get_task, stop_task, return_exceptions=True)
+            if get_task.done() and not get_task.cancelled():
+                pending = _PendingAudio(get_task.result(), audio_in)
+                if stop_event.is_set():
+                    self._replay_audio.appendleft(pending)
+                    return None
+                return pending
+            return None
+        except asyncio.CancelledError:
+            for task in (get_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(get_task, stop_task, return_exceptions=True)
+            if get_task.done() and not get_task.cancelled():
+                self._replay_audio.appendleft(
+                    _PendingAudio(get_task.result(), audio_in)
+                )
+            raise
+        finally:
+            for task in (get_task, stop_task):
+                if not task.done():
+                    task.cancel()
+
     async def _send_audio(
         self,
         session: _LiveSession,
         audio_in: asyncio.Queue[bytes],
+        stop_event: asyncio.Event,
     ) -> None:
-        while True:
-            data = await audio_in.get()
+        while not stop_event.is_set():
+            pending = await self._next_audio(audio_in, stop_event)
+            if pending is None:
+                return
+            if stop_event.is_set():
+                self._replay_audio.appendleft(pending)
+                return
+            if not pending.data:
+                pending.source_queue.task_done()
+                continue
             try:
-                if not data:
-                    continue
                 await session.send_realtime_input(
-                    audio=types.Blob(data=data, mime_type=_INPUT_MIME_TYPE)
+                    audio=types.Blob(
+                        data=pending.data,
+                        mime_type=_INPUT_MIME_TYPE,
+                    )
                 )
-            finally:
-                audio_in.task_done()
+            except asyncio.CancelledError:
+                self._replay_audio.appendleft(pending)
+                raise
+            except Exception:
+                self._replay_audio.appendleft(pending)
+                raise
+            else:
+                pending.source_queue.task_done()
 
     async def _execute_tool_calls(
         self,
@@ -147,8 +211,11 @@ class GeminiLiveSession:
         """Handle one message and return whether a resumption reconnect is due."""
 
         update = message.session_resumption_update
-        if update and update.resumable and update.new_handle:
-            self._resumption_handle = update.new_handle
+        if update:
+            if update.resumable is False:
+                self._resumption_handle = None
+            elif update.resumable and update.new_handle:
+                self._resumption_handle = update.new_handle
 
         data = message.data
         if data:
@@ -215,7 +282,8 @@ class GeminiLiveSession:
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
     ) -> bool:
-        sender = asyncio.create_task(self._send_audio(session, audio_in))
+        stop_sender = asyncio.Event()
+        sender = asyncio.create_task(self._send_audio(session, audio_in, stop_sender))
         receiver = asyncio.create_task(
             self._receive_turns(session, events_out, tool_executor)
         )
@@ -231,7 +299,19 @@ class GeminiLiveSession:
                 if error is not None:
                     raise error
             if receiver in done:
-                return receiver.result()
+                reconnect = receiver.result()
+                stop_sender.set()
+                try:
+                    await asyncio.wait_for(
+                        sender,
+                        timeout=_SENDER_HANDOFF_SECONDS,
+                    )
+                except TimeoutError:
+                    if sender.done() and not sender.cancelled():
+                        error = sender.exception()
+                        if error is not None:
+                            raise error
+                return reconnect
             raise ConnectionError("Gemini Live audio sender stopped unexpectedly")
         finally:
             await self._cancel_tasks(sender, receiver)

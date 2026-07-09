@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from google import genai
 from google.genai import errors, types
 
 
@@ -54,6 +56,29 @@ class _FakeClient:
         self.aio = SimpleNamespace(live=live)
 
 
+class _FakeWebSocket:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    async def recv(self, *, decode: bool = False) -> bytes:
+        assert decode is False
+        return b'{"setupComplete": {}}'
+
+
+class _FakeWebSocketConnection:
+    def __init__(self, websocket: _FakeWebSocket):
+        self._websocket = websocket
+
+    async def __aenter__(self) -> _FakeWebSocket:
+        return self._websocket
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
 class _FakeSDKSession:
     def __init__(
         self,
@@ -61,22 +86,35 @@ class _FakeSDKSession:
         *,
         send_error: Exception | None = None,
         receive_error: Exception | None = None,
+        send_gate: asyncio.Event | None = None,
+        expected_sends: int = 1,
+        wait_for_send_before_receive: bool = False,
     ):
         self._turns = list(turns or [])
         self._send_error = send_error
         self._receive_error = receive_error
+        self._send_gate = send_gate
+        self._expected_sends = expected_sends
+        self._wait_for_send_before_receive = wait_for_send_before_receive
         self._never_finish = asyncio.Event()
         self.receive_calls = 0
         self.receive_reentered = asyncio.Event()
+        self.send_started = asyncio.Event()
         self.audio_sent = asyncio.Event()
+        self.expected_audio_sent = asyncio.Event()
         self.realtime_inputs: list[types.Blob] = []
         self.tool_responses: list[list[types.FunctionResponse]] = []
 
     async def send_realtime_input(self, *, audio: types.Blob) -> None:
+        self.send_started.set()
+        if self._send_gate is not None:
+            await self._send_gate.wait()
         if self._send_error is not None:
             raise self._send_error
         self.realtime_inputs.append(audio)
         self.audio_sent.set()
+        if len(self.realtime_inputs) >= self._expected_sends:
+            self.expected_audio_sent.set()
 
     async def send_tool_response(
         self, *, function_responses: list[types.FunctionResponse]
@@ -87,6 +125,8 @@ class _FakeSDKSession:
         self.receive_calls += 1
         if self.receive_calls >= 2:
             self.receive_reentered.set()
+        if self._wait_for_send_before_receive and self.receive_calls == 1:
+            await self.send_started.wait()
         if self._receive_error is not None:
             if False:  # pragma: no cover - makes this an async generator
                 yield None
@@ -217,9 +257,40 @@ async def test_run_streams_pcm_executes_tools_and_reenters_receive(
     assert config.speech_config.language_code == "de-DE"
     assert config.tools[0].function_declarations[0].name == "list_terminals"
     assert config.session_resumption.handle is None
-    assert config.session_resumption.transparent is False
+    assert config.session_resumption.transparent is None
     assert config.context_window_compression.trigger_tokens == 100_000
     assert config.context_window_compression.sliding_window.target_tokens == 50_000
+
+
+@pytest.mark.asyncio
+async def test_connect_config_serializes_through_real_developer_api_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import google.genai.live as sdk_live
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    websocket = _FakeWebSocket()
+    monkeypatch.setattr(
+        sdk_live,
+        "ws_connect",
+        lambda *_args, **_kwargs: _FakeWebSocketConnection(websocket),
+    )
+    wrapper = GeminiLiveSession("model", "de-DE", [], "unused-api-key")
+    wrapper._resumption_handle = "resume-123"
+    client = genai.Client(api_key="unused-api-key")
+    try:
+        async with client.aio.live.connect(
+            model="model",
+            config=wrapper._connect_config(),
+        ):
+            pass
+    finally:
+        client.close()
+
+    assert len(websocket.sent) == 1
+    setup = json.loads(websocket.sent[0])["setup"]
+    assert setup["sessionResumption"] == {"handle": "resume-123"}
 
 
 @pytest.mark.asyncio
@@ -246,6 +317,21 @@ async def test_connect_errors_request_fallback(
         await wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
 
     assert caught.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_connect_value_error_surfaces_as_programmer_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    error = ValueError("invalid live config")
+    live = _FakeLive(connect_error=error)
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+
+    with pytest.raises(ValueError, match="invalid live config"):
+        await wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
 
 
 @pytest.mark.asyncio
@@ -290,8 +376,8 @@ async def test_go_away_reconnects_with_latest_resumption_handle(
                         new_handle="resume-123",
                         resumable=True,
                     ),
-                    go_away=types.LiveServerGoAway(time_left="5s"),
-                )
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
             ]
         ]
     )
@@ -310,6 +396,126 @@ async def test_go_away_reconnects_with_latest_resumption_handle(
 
     assert live.calls[0][1].session_resumption.handle is None
     assert live.calls[1][1].session_resumption.handle == "resume-123"
+
+
+@pytest.mark.asyncio
+async def test_non_resumable_update_clears_stale_handle_before_go_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import (
+        GeminiLiveSession,
+        LiveFallbackRequired,
+    )
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="resume-stale",
+                        resumable=True,
+                    )
+                ),
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        resumable=False,
+                    )
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+
+    with pytest.raises(LiveFallbackRequired):
+        await wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
+
+    assert len(live.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_go_away_replays_blocked_frame_first_after_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    blocked_send = asyncio.Event()
+    first = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="resume-123",
+                        resumable=True,
+                    )
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ],
+        send_gate=blocked_send,
+        wait_for_send_before_receive=True,
+    )
+    second = _FakeSDKSession(expected_sends=2)
+    live = _FakeLive([first, second])
+    _install_fake_client(monkeypatch, live)
+    monkeypatch.setattr(
+        voice_live_session,
+        "_SENDER_HANDOFF_SECONDS",
+        0.01,
+        raising=False,
+    )
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    await audio_in.put(b"first-frame")
+    await audio_in.put(b"second-frame")
+
+    task = asyncio.create_task(
+        wrapper.run(audio_in, asyncio.Queue(), _FakeToolExecutor())
+    )
+    await asyncio.wait_for(first.send_started.wait(), timeout=1)
+    await asyncio.wait_for(second.expected_audio_sent.wait(), timeout=1)
+    await asyncio.wait_for(audio_in.join(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert first.realtime_inputs == []
+    assert [blob.data for blob in second.realtime_inputs] == [
+        b"first-frame",
+        b"second-frame",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stop_winner_preserves_get_completed_after_wait_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    async def stop_only_snapshot(tasks, *, return_when):
+        assert return_when is asyncio.FIRST_COMPLETED
+        await asyncio.gather(*tasks)
+        stop_task = next(task for task in tasks if task.result() is True)
+        return {stop_task}, set(tasks) - {stop_task}
+
+    monkeypatch.setattr(voice_live_session.asyncio, "wait", stop_only_snapshot)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    await audio_in.put(b"raced-frame")
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    assert await wrapper._next_audio(audio_in, stop_event) is None
+    pending = await wrapper._next_audio(audio_in, asyncio.Event())
+
+    assert pending is not None
+    assert pending.data == b"raced-frame"
+    pending.source_queue.task_done()
+    await asyncio.wait_for(audio_in.join(), timeout=1)
 
 
 @pytest.mark.asyncio
