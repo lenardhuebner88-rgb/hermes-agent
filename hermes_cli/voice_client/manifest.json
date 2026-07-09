@@ -1,0 +1,20 @@
+{
+  "id": "/voice",
+  "name": "Hermes Voice",
+  "short_name": "Hermes Voice",
+  "description": "Eigenständiger deutschsprachiger Sprachassistent für Hermes.",
+  "lang": "de-DE",
+  "start_url": "/voice",
+  "scope": "/voice",
+  "display": "standalone",
+  "background_color": "#071310",
+  "theme_color": "#071310",
+  "icons": [
+    {
+      "src": "/voice/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

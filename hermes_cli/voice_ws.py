@@ -34,6 +34,7 @@ VOICE_CLIENT_DIR = Path(__file__).with_name("voice_client")
 
 _ALLOWED_VOICE_ASSETS = {
     "app.js": "application/javascript",
+    "icon.svg": "image/svg+xml",
     "manifest.json": "application/manifest+json",
     "worklet.js": "application/javascript",
 }

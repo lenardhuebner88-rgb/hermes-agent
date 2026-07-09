@@ -175,17 +175,77 @@ def test_voice_routes_absent_when_disabled(tmp_path, monkeypatch):
 def test_voice_assets_are_explicitly_allowlisted(tmp_path, monkeypatch):
     from hermes_cli import voice_ws
 
-    (tmp_path / "app.js").write_text("voice-app", encoding="utf-8")
+    expected_assets = {
+        "app.js": ("voice-app", "javascript"),
+        "worklet.js": ("voice-worklet", "javascript"),
+        "manifest.json": ('{"name":"Hermes Voice"}', "manifest+json"),
+        "icon.svg": ("<svg></svg>", "image/svg+xml"),
+    }
+    for asset_name, (content, _media_type) in expected_assets.items():
+        (tmp_path / asset_name).write_text(content, encoding="utf-8")
     (tmp_path / "private.txt").write_text("secret", encoding="utf-8")
     monkeypatch.setattr(voice_ws, "VOICE_CLIENT_DIR", tmp_path)
     client = TestClient(_voice_app())
 
-    allowed = client.get("/voice/app.js")
-    assert allowed.status_code == 200
-    assert allowed.text == "voice-app"
-    assert allowed.headers["cache-control"].startswith("no-store")
+    for asset_name, (content, media_type) in expected_assets.items():
+        allowed = client.get(f"/voice/{asset_name}")
+        assert allowed.status_code == 200
+        assert allowed.text == content
+        assert media_type in allowed.headers["content-type"]
+        assert allowed.headers["cache-control"].startswith("no-store")
     assert client.get("/voice/private.txt").status_code == 404
     assert client.get("/voice/../private.txt").status_code == 404
+
+
+def test_voice_pwa_manifest_contract():
+    manifest_path = (
+        Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["name"] == "Hermes Voice"
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == "/voice"
+    assert manifest["scope"] == "/voice"
+    assert manifest["theme_color"] == "#071310"
+    assert manifest["icons"] == [
+        {
+            "src": "/voice/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable",
+        }
+    ]
+
+
+def test_voice_client_uses_single_use_ticket_without_long_lived_ws_token():
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+
+    assert 'fetch("/api/auth/ws-ticket"' in script
+    assert 'credentials: "same-origin"' in script
+    assert 'headers.set("X-Hermes-Session-Token", loopbackToken)' in script
+    assert 'websocketUrl.searchParams.set("ticket", ticket)' in script
+    assert 'searchParams.set("token"' not in script
+    assert "?token=" not in script
+    assert '<script src="/voice/app.js" defer></script>' in document
+    assert '<link rel="manifest" href="/voice/manifest.json"' in document
+    assert 'href="/voice/icon.svg"' in document
+    assert "serviceWorker.register" not in script
+
+
+def test_voice_client_barge_in_tracks_audible_playback_not_server_state():
+    script_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "app.js"
+    script = script_path.read_text(encoding="utf-8")
+
+    # The server may announce `listening` after enqueueing all PCM while the
+    # WebAudio queue remains audible. Barge-in must therefore key off tracked
+    # local sources, and a non-speaking state must not reset its three-frame
+    # detector until those sources have drained.
+    assert "session.playbackSources.size > 0 &&" in script
+    assert "session.playbackSources.size === 0\n  )" in script
+    assert 'session.voiceState === "speaking" &&' not in script
 
 
 def test_live_failure_falls_back_on_same_websocket(monkeypatch):

@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#071310" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Hermes Voice – der eigenständige, deutschsprachige Sprachassistent."
+    />
+    <link rel="manifest" href="/voice/manifest.json" />
+    <link rel="icon" href="/voice/icon.svg" type="image/svg+xml" />
+    <title>Hermes Voice</title>
+    <style>
+      :root {
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        color: #f2fbf7;
+        background: #071310;
+        font-synthesis: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 20rem;
+        min-height: 100svh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 50% -10%, rgba(52, 211, 153, 0.22), transparent 42%),
+          linear-gradient(165deg, #0b1d18 0%, #071310 55%, #040a09 100%);
+      }
+
+      body::before {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        content: "";
+        opacity: 0.16;
+        background-image: linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+        background-size: 100% 3rem;
+        mask-image: linear-gradient(to bottom, black, transparent 70%);
+      }
+
+      main {
+        display: grid;
+        width: min(100%, 48rem);
+        min-height: 100svh;
+        margin: 0 auto;
+        padding:
+          max(1.25rem, env(safe-area-inset-top))
+          max(1rem, env(safe-area-inset-right))
+          max(1.25rem, env(safe-area-inset-bottom))
+          max(1rem, env(safe-area-inset-left));
+        gap: 1rem;
+        grid-template-rows: auto auto 1fr auto;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        color: #b8d9cb;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .brand img {
+        width: 2rem;
+        height: 2rem;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+
+      .state-card,
+      .transcript-card {
+        border: 1px solid rgba(167, 243, 208, 0.15);
+        border-radius: 1.5rem;
+        background: rgba(9, 27, 22, 0.72);
+        box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.24);
+        backdrop-filter: blur(1rem);
+      }
+
+      .state-card {
+        position: relative;
+        display: grid;
+        min-height: 15rem;
+        padding: 2rem 1.5rem;
+        overflow: hidden;
+        place-items: center;
+        text-align: center;
+      }
+
+      .state-card::after {
+        position: absolute;
+        width: 11rem;
+        height: 11rem;
+        border: 1px solid rgba(110, 231, 183, 0.18);
+        border-radius: 50%;
+        content: "";
+        box-shadow:
+          0 0 0 2rem rgba(52, 211, 153, 0.025),
+          0 0 0 4rem rgba(52, 211, 153, 0.018);
+        pointer-events: none;
+        transition: border-color 180ms ease, transform 180ms ease;
+      }
+
+      body[data-voice-state="listening"] .state-card::after {
+        border-color: rgba(52, 211, 153, 0.58);
+        animation: breathe 2.4s ease-in-out infinite;
+      }
+
+      body[data-voice-state="thinking"] .state-card::after {
+        border-color: rgba(250, 204, 21, 0.58);
+        animation: rotate-pulse 1.5s linear infinite;
+      }
+
+      body[data-voice-state="speaking"] .state-card::after {
+        border-color: rgba(96, 165, 250, 0.62);
+        animation: speak 650ms ease-in-out infinite alternate;
+      }
+
+      body[data-voice-state="error"] .state-card::after {
+        border-color: rgba(251, 113, 133, 0.62);
+      }
+
+      .state-copy {
+        position: relative;
+        z-index: 1;
+      }
+
+      #voice-status {
+        margin: 0;
+        font-size: clamp(2.8rem, 15vw, 6.5rem);
+        font-weight: 720;
+        line-height: 0.94;
+        letter-spacing: -0.055em;
+      }
+
+      #status-detail {
+        max-width: 31rem;
+        min-height: 2.8em;
+        margin: 1.2rem auto 0;
+        color: #a7c7ba;
+        font-size: 0.98rem;
+        line-height: 1.45;
+      }
+
+      .transcript-card {
+        min-height: 10rem;
+        padding: 1.25rem;
+      }
+
+      .section-title {
+        margin: 0 0 1rem;
+        color: #89a99c;
+        font-size: 0.72rem;
+        font-weight: 750;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      #transcript {
+        display: grid;
+        gap: 0.85rem;
+      }
+
+      #transcript-empty {
+        margin: 2rem 0;
+        color: #6f8e82;
+        text-align: center;
+      }
+
+      .transcript-entry {
+        display: grid;
+        max-width: 92%;
+        padding: 0.9rem 1rem;
+        gap: 0.2rem;
+        border-radius: 1rem 1rem 1rem 0.25rem;
+        background: rgba(255, 255, 255, 0.055);
+      }
+
+      .transcript-entry--assistant {
+        justify-self: end;
+        border-radius: 1rem 1rem 0.25rem;
+        background: rgba(52, 211, 153, 0.11);
+      }
+
+      .transcript-role,
+      .transcript-text {
+        margin: 0;
+      }
+
+      .transcript-role {
+        color: #7dd3b0;
+        font-size: 0.72rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .transcript-text {
+        color: #e8f5ef;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+
+      .action-bar {
+        position: sticky;
+        bottom: max(0.75rem, env(safe-area-inset-bottom));
+        z-index: 2;
+        display: grid;
+        padding-top: 0.5rem;
+      }
+
+      #session-button {
+        min-height: 4.25rem;
+        border: 0;
+        border-radius: 999px;
+        color: #032018;
+        background: #6ee7b7;
+        box-shadow: 0 0.9rem 2.4rem rgba(16, 185, 129, 0.22);
+        font: inherit;
+        font-size: 1.08rem;
+        font-weight: 800;
+        cursor: pointer;
+        transition: transform 120ms ease, background 120ms ease;
+        touch-action: manipulation;
+      }
+
+      #session-button:hover:not(:disabled) {
+        background: #a7f3d0;
+        transform: translateY(-1px);
+      }
+
+      #session-button:focus-visible {
+        outline: 3px solid #f8fafc;
+        outline-offset: 3px;
+      }
+
+      #session-button:disabled {
+        color: #7d9189;
+        background: #263d35;
+        box-shadow: none;
+        cursor: wait;
+      }
+
+      body:not([data-voice-state="idle"]):not([data-voice-state="error"])
+        #session-button:not(:disabled) {
+        color: #fff1f2;
+        background: #be123c;
+        box-shadow: 0 0.9rem 2.4rem rgba(190, 18, 60, 0.2);
+      }
+
+      @keyframes breathe {
+        50% {
+          opacity: 0.65;
+          transform: scale(1.08);
+        }
+      }
+
+      @keyframes rotate-pulse {
+        50% {
+          border-radius: 38%;
+          transform: rotate(180deg) scale(0.92);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes speak {
+        to {
+          transform: scale(1.11);
+        }
+      }
+
+      @media (min-width: 42rem) {
+        main {
+          padding-inline: 1.5rem;
+          gap: 1.25rem;
+        }
+
+        .state-card {
+          min-height: 19rem;
+        }
+
+        .transcript-card {
+          padding: 1.5rem;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+    <script src="/voice/app.js" defer></script>
+  </head>
+  <body data-voice-state="idle">
+    <main>
+      <header class="brand">
+        <img src="/voice/icon.svg" alt="" width="32" height="32" />
+        <h1>Hermes Voice</h1>
+      </header>
+
+      <section class="state-card" aria-labelledby="voice-status">
+        <div class="state-copy" role="status" aria-live="polite" aria-atomic="true">
+          <p id="voice-status">bereit</p>
+          <p id="status-detail">Starte eine sichere Sprachsitzung, wenn du bereit bist.</p>
+        </div>
+      </section>
+
+      <section class="transcript-card" aria-labelledby="transcript-title">
+        <h2 class="section-title" id="transcript-title">Gespräch</h2>
+        <div id="transcript" aria-live="polite" aria-relevant="additions text"></div>
+        <p id="transcript-empty">Noch kein Gespräch.</p>
+      </section>
+
+      <div class="action-bar">
+        <button id="session-button" type="button" aria-label="Sprachsitzung starten">
+          Start
+        </button>
+      </div>
+    </main>
+  </body>
+</html>

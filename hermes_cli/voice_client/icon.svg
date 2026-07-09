@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hermes Voice">
+  <rect width="512" height="512" rx="120" fill="#071310"/>
+  <circle cx="256" cy="256" r="176" fill="#0d2b22" stroke="#34d399" stroke-width="16"/>
+  <path d="M148 266h42l24-82 42 154 42-154 24 82h42" fill="none" stroke="#a7f3d0" stroke-linecap="round" stroke-linejoin="round" stroke-width="28"/>
+  <circle cx="256" cy="256" r="22" fill="#34d399"/>
+</svg>
