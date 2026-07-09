@@ -182,3 +182,56 @@ def test_text_response_on_last_allowed_call_is_completed():
     )
     assert result["final_response"] == "final report"
     assert result["completed"] is True
+
+
+class _StubAgentNoSummary(_StubAgent):
+    """Variant whose max-iterations summary yields nothing, so the turn
+    ends with the tool result as the transcript tail (no assistant append)."""
+
+    def _handle_max_iterations(self, messages, n):
+        return None
+
+
+@pytest.mark.parametrize(
+    "malformed_tool_calls",
+    [
+        # Last element is not a dict — the walk-back used to type-check
+        # only tool_calls[0], then index tool_calls[-1].
+        [{"id": "c1", "function": {"name": "read_file", "arguments": "{}"}}, "truncated"],
+        # function key present but None — .get("function", {}) returns None.
+        [{"id": "c1", "function": None}],
+    ],
+)
+def test_malformed_tool_calls_tail_does_not_raise(malformed_tool_calls):
+    """Regression: the turn-exit diagnostic block sat unguarded between the
+    cleanup guards and the result-dict build.  A malformed ``tool_calls``
+    shape on the walk-back raised out of ``finalize_turn``, discarding the
+    turn — the exact failure mode the #8049 guards exist to prevent."""
+    agent = _StubAgentNoSummary(raise_in=())
+    messages = [
+        {"role": "user", "content": "do a thing"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": malformed_tool_calls,
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "file contents"},
+    ]
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=3,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=None,
+        effective_task_id="task-1",
+        turn_id="turn-1",
+        user_message="do a thing",
+        original_user_message="do a thing",
+        _should_review_memory=False,
+        _turn_exit_reason="unknown",
+    )
+    # The result dict must be returned despite the malformed diagnostic walk.
+    assert "final_response" in result
+    assert "cleanup_errors" not in result
