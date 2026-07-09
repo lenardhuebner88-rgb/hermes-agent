@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/visual-verify.sh [--skip-build] [--output-dir DIR] [--seed fixture.json] [--self-test] <route> [<route>...]
+Usage: scripts/visual-verify.sh [--skip-build] [--output-dir DIR] [--seed fixture.json] [--self-test] [--viewports SPEC] <route> [<route>...]
 
 Starts an auth-free disposable Hermes Web UI on 127.0.0.1:0 with an isolated
 HERMES_HOME, captures screenshots at 390px, 820px, and desktop widths, and
@@ -14,6 +14,7 @@ Options:
   --output-dir DIR   Evidence directory (default: visual-verify-output/<timestamp>).
   --seed FILE        Apply a JSON seed fixture to the isolated HERMES_HOME first.
   --self-test        Equivalent to route /control when no routes are supplied.
+  --viewports SPEC   Override the default viewport trio, e.g. "390x844,tablet-lg=840x1118".
 EOF
 }
 
@@ -22,6 +23,7 @@ skip_build=0
 output_dir=""
 seed_file=""
 self_test=0
+viewports_spec=""
 routes=()
 server_pid=""
 tmp_home=""
@@ -65,6 +67,14 @@ while [[ $# -gt 0 ]]; do
     --self-test)
       self_test=1
       shift
+      ;;
+    --viewports)
+      viewports_spec="${2:-}"
+      if [[ -z "${viewports_spec}" ]]; then
+        echo "--viewports requires a spec" >&2
+        exit 2
+      fi
+      shift 2
       ;;
     --help|-h)
       usage
@@ -178,8 +188,14 @@ if [[ -z "${port}" ]]; then
   exit 1
 fi
 
-node "${repo_root}/scripts/visual_verify_runner.mjs" \
-  --base-url "http://127.0.0.1:${port}" \
-  --output-dir "${output_dir}" \
-  --git-head "$(git -C "${repo_root}" rev-parse HEAD)" \
-  "${routes[@]}"
+runner_args=(
+  --base-url "http://127.0.0.1:${port}"
+  --output-dir "${output_dir}"
+  --git-head "$(git -C "${repo_root}" rev-parse HEAD)"
+)
+if [[ -n "${viewports_spec}" ]]; then
+  runner_args+=(--viewports "${viewports_spec}")
+fi
+runner_args+=("${routes[@]}")
+
+node "${repo_root}/scripts/visual_verify_runner.mjs" "${runner_args[@]}"

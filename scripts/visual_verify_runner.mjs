@@ -4,20 +4,64 @@ import path from "node:path";
 import { requirePlaywrightChromium, resolveChromiumExecutable } from "./lib/playwright_chromium.mjs";
 
 const CONNECT_TIMEOUT_MS = 15_000;
-const viewports = [
+const DEFAULT_VIEWPORTS = [
   { name: "mobile-390", width: 390, height: 844, isMobile: true, hasTouch: true },
   { name: "tablet-820", width: 820, height: 1180, isMobile: true, hasTouch: true },
   { name: "desktop-1366", width: 1366, height: 900, isMobile: false, hasTouch: false },
 ];
 
 function usage() {
-  process.stderr.write("usage: visual_verify_runner.mjs --base-url URL --output-dir DIR --git-head SHA <route> [<route>...]\n");
+  process.stderr.write(
+    "usage: visual_verify_runner.mjs --base-url URL --output-dir DIR --git-head SHA "
+    + "[--viewports WxH[,name=WxH...]] <route> [<route>...]\n",
+  );
+}
+
+function parseViewportsSpec(spec) {
+  const entries = spec.split(",").map((entry) => entry.trim());
+  if (entries.length === 0 || entries.some((entry) => entry.length === 0)) {
+    throw new Error(`invalid --viewports spec: "${spec}" (empty entry — expected e.g. "390x844,tablet-lg=840x1118")`);
+  }
+  const viewports = entries.map((entry) => {
+    const eq = entry.indexOf("=");
+    const name = eq === -1 ? "" : entry.slice(0, eq);
+    const dims = eq === -1 ? entry : entry.slice(eq + 1);
+    const match = /^(\d+)x(\d+)$/.exec(dims);
+    if (!match || (eq !== -1 && name.length === 0)) {
+      throw new Error(`invalid --viewports entry: "${entry}" (expected WxH or name=WxH)`);
+    }
+    if (eq !== -1 && !/^[A-Za-z0-9._-]+$/.test(name)) {
+      throw new Error(`invalid --viewports entry: "${entry}" (name must be [A-Za-z0-9._-])`);
+    }
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || width > 10000 || height < 1 || height > 10000) {
+      throw new Error(`invalid --viewports entry: "${entry}" (width/height must be 1..10000)`);
+    }
+    const isMobile = width < 1024;
+    return {
+      name: name || `w${width}`,
+      width,
+      height,
+      isMobile,
+      hasTouch: isMobile,
+    };
+  });
+  const seen = new Set();
+  for (const viewport of viewports) {
+    if (seen.has(viewport.name)) {
+      throw new Error(`invalid --viewports spec: duplicate viewport name "${viewport.name}"`);
+    }
+    seen.add(viewport.name);
+  }
+  return viewports;
 }
 
 function parseArgs(argv) {
   let baseUrl = "";
   let outputDir = "";
   let gitHead = "";
+  let viewportsSpec = null;
   const routes = [];
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -27,6 +71,8 @@ function parseArgs(argv) {
       outputDir = argv[++index] || "";
     } else if (arg === "--git-head") {
       gitHead = argv[++index] || "";
+    } else if (arg === "--viewports") {
+      viewportsSpec = argv[++index] || "";
     } else if (arg === "--help" || arg === "-h") {
       usage();
       process.exit(0);
@@ -40,7 +86,17 @@ function parseArgs(argv) {
     usage();
     process.exit(2);
   }
-  return { baseUrl, outputDir, gitHead, routes };
+  let viewports = DEFAULT_VIEWPORTS;
+  if (viewportsSpec !== null) {
+    try {
+      viewports = parseViewportsSpec(viewportsSpec);
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      usage();
+      process.exit(2);
+    }
+  }
+  return { baseUrl, outputDir, gitHead, routes, viewports };
 }
 
 function routeUrl(baseUrl, route) {
@@ -178,7 +234,7 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
 }
 
 async function main() {
-  const { baseUrl, outputDir, gitHead, routes } = parseArgs(process.argv);
+  const { baseUrl, outputDir, gitHead, routes, viewports } = parseArgs(process.argv);
   await fs.mkdir(outputDir, { recursive: true });
   const chromium = requirePlaywrightChromium();
   const browser = await chromium.launch({
