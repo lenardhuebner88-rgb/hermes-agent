@@ -114,6 +114,46 @@ def test_unsilence_cleans_up_after_exit():
     assert seen == ["post"]
 
 
+def test_second_silence_window_has_live_sink():
+    """Regression: the first context exit used to close the (shared) sink.
+
+    Every later ``thread_scoped_silence()`` window then wrote to a closed
+    file — writes were silently dropped by the proxy's except-guards (which
+    coincidentally looked like correct silencing), but ``fileno()`` raised
+    ``ValueError('I/O operation on closed file')`` straight into the
+    silenced code (subprocess redirection, TTY probing, ...).
+    """
+    fileno_results = []
+
+    def body():
+        with thread_scoped_silence():
+            print("first-dropped")
+        with thread_scoped_silence():
+            # Must not raise; must resolve to the devnull sink's real fd.
+            fileno_results.append(sys.stdout.fileno())
+            fileno_results.append(sys.stderr.fileno())
+            print("second-dropped")
+        print("second-kept")
+
+    captured = _run_with_real_stream(body)
+    assert "first-dropped" not in captured
+    assert "second-dropped" not in captured
+    assert "second-kept" in captured
+    assert len(fileno_results) == 2
+    assert all(isinstance(fd, int) for fd in fileno_results)
+
+
+def test_shared_sink_survives_context_exit():
+    """The module-lifetime sink must stay open after a context exits —
+    the installed proxies reference it forever."""
+    from agent import thread_scoped_output as tso
+
+    with thread_scoped_silence():
+        pass
+    assert tso._shared_sink is not None
+    assert not tso._shared_sink.closed
+
+
 def test_many_concurrent_silenced_and_loud_threads():
     """Stress: interleaved silenced/loud threads keep their respective fates."""
     start = threading.Event()

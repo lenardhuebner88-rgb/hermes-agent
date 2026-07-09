@@ -30,6 +30,26 @@ _install_lock = threading.Lock()
 # Maps the proxy we installed for a given attribute ("stdout"/"stderr") so we
 # never double-wrap and so we can recover the original stream.
 _installed: dict[str, "_ThreadRoutingStream"] = {}
+# Module-lifetime devnull sink shared by all silenced threads.  The installed
+# proxies keep a reference to it for the life of the process, so it must never
+# be closed by an individual ``thread_scoped_silence()`` exit: closing it left
+# every later silenced window writing to a closed file (writes were silently
+# dropped by the proxy's except-guards, and ``fileno()`` raised).
+_shared_sink: TextIO | None = None
+
+
+def _shared_sink_locked() -> TextIO:
+    """Return the process-lifetime devnull sink, (re)opening it if needed.
+
+    Caller must hold ``_install_lock`` — sink acquisition and proxy rebind
+    have to happen in ONE lock scope, otherwise a thread that fetched the
+    sink earlier could rebind the proxy back to a stale, closed object
+    after another thread already reopened it.
+    """
+    global _shared_sink
+    if _shared_sink is None or getattr(_shared_sink, "closed", False):
+        _shared_sink = open(os.devnull, "w", encoding="utf-8")
+    return _shared_sink
 
 
 class _ThreadRoutingStream:
@@ -104,12 +124,21 @@ class _ThreadRoutingStream:
         return getattr(self._target(), name)
 
 
-def _ensure_installed(attr: str, sink: TextIO) -> "_ThreadRoutingStream":
-    """Install (idempotently) a routing proxy as ``sys.<attr>`` and return it."""
+def _ensure_installed(attr: str) -> "_ThreadRoutingStream":
+    """Install (idempotently) a routing proxy as ``sys.<attr>`` and return it.
+
+    Sink acquisition and proxy (re)bind happen atomically under
+    ``_install_lock`` so the proxy can never be rebound to a stale sink.
+    """
     with _install_lock:
+        sink = _shared_sink_locked()
         proxy = _installed.get(attr)
         current = getattr(sys, attr, None)
         if proxy is not None and current is proxy:
+            if proxy._sink is not sink:
+                # Heal a proxy still holding a closed sink from an earlier
+                # era of this module that closed per-call sinks.
+                proxy._sink = sink
             return proxy
         # Capture whatever is currently bound as the passthrough.  If a prior
         # global redirect_stdout is active we deliberately route non-silenced
@@ -130,10 +159,14 @@ def thread_scoped_silence() -> Iterator[None]:
     thread's body instead of ``contextlib.redirect_stdout(devnull)`` when the
     process is multi-threaded and another thread must keep its console output.
     """
-    sink = open(os.devnull, "w", encoding="utf-8")
+    # The sink is shared and process-lifetime — never closed here.  The
+    # installed proxies keep referencing it across calls, so a per-call
+    # close() left every subsequent silenced window writing to a closed
+    # file: write()/flush() degraded to silent no-ops via their except
+    # guards, and fileno() raised ValueError into the silenced code.
     ident = threading.get_ident()
-    out_proxy = _ensure_installed("stdout", sink)
-    err_proxy = _ensure_installed("stderr", sink)
+    out_proxy = _ensure_installed("stdout")
+    err_proxy = _ensure_installed("stderr")
     out_proxy.silence(ident)
     err_proxy.silence(ident)
     try:
@@ -141,7 +174,3 @@ def thread_scoped_silence() -> Iterator[None]:
     finally:
         out_proxy.unsilence(ident)
         err_proxy.unsilence(ident)
-        try:
-            sink.close()
-        except Exception:
-            pass
