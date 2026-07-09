@@ -12,6 +12,12 @@ export const TERMINAL_THEME_STATIC: ITheme = {
   selectionBackground: "#f0e6d244",
 };
 
+// Xterm paints to canvas and therefore cannot consume Tailwind utilities.
+// Keep terminal-only background colors in this shared palette instead of
+// scattering raw literals through control-view components.
+export const TERMINAL_PANE_BACKGROUND = "#05080d";
+export const TERMINAL_MAIN_BACKGROUND = "#071b1d";
+
 export function terminalTierWidthPx(host: HTMLElement | null): number {
   if (typeof window === "undefined") return 1280;
   const fromHost = host?.clientWidth ?? 0;

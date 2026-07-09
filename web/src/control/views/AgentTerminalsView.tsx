@@ -64,6 +64,7 @@ import {
   createHermesXtermSurface,
   SGR_WHEEL_DOWN,
   SGR_WHEEL_UP,
+  TERMINAL_MAIN_BACKGROUND,
   TERMINAL_THEME_STATIC,
   touchScrollSteps,
 } from "@/lib/xtermSurface";
@@ -939,7 +940,7 @@ export function AgentTerminalsView() {
     }
     const { term, fit } = createHermesXtermSurface({
       host,
-      theme: { ...TERMINAL_THEME_STATIC, background: "#071b1d" },
+      theme: { ...TERMINAL_THEME_STATIC, background: TERMINAL_MAIN_BACKGROUND },
       scrollback: 4000,
       loggerName: "agent-terminals",
       onWheelScrollBuffer: true,
@@ -2159,7 +2160,7 @@ export function AgentTerminalsView() {
           value={workdir}
           onChange={(event) => selectWorkdir(event.target.value)}
           className="rounded-card border border-line bg-surface-2 px-2 py-2 text-xs text-ink-2 focus:border-live/50 focus:outline-none"
-        >{/* TOKEN-REVIEW: was bg-[#0a2427] */}
+        >
           {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
             <option key={option.key} value={option.key}>{option.label}</option>
           ))}
@@ -2324,7 +2325,7 @@ export function AgentTerminalsView() {
         .map(paneTargetKey),
     );
     return (
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.07] bg-[#0a111a] px-2">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.07] bg-surface-1 px-2">
         <button
           type="button"
           className={cn("size-2 rounded-full", connection.ready ? "bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,.55)]" : connection.connecting ? "animate-pulse bg-amber-300" : "bg-red-400")}
@@ -2359,7 +2360,7 @@ export function AgentTerminalsView() {
     <div
       ref={hostRef}
       data-testid="terminal-pane-host-0"
-      className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden bg-[#0b0e12]"
+      className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden bg-surface-0"
       onMouseDown={() => setActivePane(0)}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
       onDrop={(event) => {
@@ -2375,7 +2376,7 @@ export function AgentTerminalsView() {
     <div
       data-testid={`terminal-layout-${visiblePaneCount}`}
       className={cn(
-        "min-h-0 min-w-0 flex-1 bg-[#05080d]",
+        "min-h-0 min-w-0 flex-1 bg-surface-0",
         visiblePaneCount === 1
           ? "flex"
           : "grid gap-2 p-2",
@@ -2389,7 +2390,7 @@ export function AgentTerminalsView() {
           data-testid={`terminal-pane-card-${paneIndex}`}
           className={cn(
             "flex h-full min-h-0 min-w-0 w-full shrink-0 flex-col overflow-hidden",
-            visiblePaneCount > 1 && "rounded-[14px] border bg-[#05080d] shadow-[0_12px_30px_rgba(0,0,0,.22)]",
+            visiblePaneCount > 1 && "rounded-[14px] border bg-surface-0 shadow-[0_12px_30px_rgba(0,0,0,.22)]",
             visiblePaneCount > 1 && (activePane === paneIndex ? "border-cyan-300/55 ring-1 ring-cyan-300/15" : "border-white/[0.08]"),
           )}
           onMouseDown={() => setActivePane(paneIndex)}

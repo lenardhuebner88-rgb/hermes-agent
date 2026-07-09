@@ -67,7 +67,7 @@ export function TerminalUsageDock({ open, onClose }: { open: boolean; onClose: (
     <aside
       data-testid="terminal-usage-dock"
       aria-hidden={!open}
-      className={`absolute inset-y-0 right-0 z-30 flex w-[min(310px,calc(100%-1rem))] flex-col border-l border-white/[0.08] bg-[#071018]/[0.97] shadow-[-24px_0_55px_rgba(0,0,0,.38)] backdrop-blur-xl transition-transform duration-200 xl:relative xl:z-0 xl:w-[300px] xl:shrink-0 xl:shadow-none ${open ? "translate-x-0" : "translate-x-full xl:hidden"}`}
+      className={`absolute inset-y-0 right-0 z-30 flex w-[min(310px,calc(100%-1rem))] flex-col border-l border-white/[0.08] bg-surface-0/95 shadow-[-24px_0_55px_rgba(0,0,0,.38)] backdrop-blur-xl transition-transform duration-200 xl:relative xl:z-0 xl:w-[300px] xl:shrink-0 xl:shadow-none ${open ? "translate-x-0" : "translate-x-full xl:hidden"}`}
     >
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-3">
         <div>

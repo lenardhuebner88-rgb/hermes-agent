@@ -48,6 +48,8 @@ vi.mock("@/lib/api", async () => {
 vi.mock("@xterm/xterm", () => ({ Terminal: class Terminal {} }));
 vi.mock("@/lib/xtermSurface", () => ({
   TERMINAL_THEME_STATIC: {},
+  TERMINAL_MAIN_BACKGROUND: "terminal-background",
+  TERMINAL_PANE_BACKGROUND: "terminal-pane-background",
   createHermesXtermSurface: vi.fn(() => ({
     term: {
       clear: vi.fn(),

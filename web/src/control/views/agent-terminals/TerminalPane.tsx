@@ -9,7 +9,11 @@ import {
 import { Terminal } from "@xterm/xterm";
 
 import { buildWsUrl } from "../../../lib/api";
-import { createHermesXtermSurface, TERMINAL_THEME_STATIC } from "../../../lib/xtermSurface";
+import {
+  createHermesXtermSurface,
+  TERMINAL_PANE_BACKGROUND,
+  TERMINAL_THEME_STATIC,
+} from "../../../lib/xtermSurface";
 import type { TerminalTarget } from "./layout";
 import { buildAttachQuery, canFitTerminal, reconnectDelayMs } from "./terminalPaneModel";
 
@@ -106,7 +110,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     if (!host) return;
     const surface = createHermesXtermSurface({
       host,
-      theme: { ...TERMINAL_THEME_STATIC, background: "#05080d" },
+      theme: { ...TERMINAL_THEME_STATIC, background: TERMINAL_PANE_BACKGROUND },
       loggerName: "AgentTerminalPane",
       appAwareWheel: true,
       terminalOptions: { fontSize: 13 },
@@ -285,7 +289,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       ref={hostRef}
       data-testid={`terminal-pane-host-${paneOrder}`}
       data-ready={connection.ready ? "true" : "false"}
-      className={`h-full min-h-0 min-w-0 overflow-hidden bg-[#05080d] ${className}`}
+      className={`h-full min-h-0 min-w-0 overflow-hidden bg-surface-0 ${className}`}
       onMouseDown={onActivate}
       onFocus={onActivate}
       tabIndex={0}
