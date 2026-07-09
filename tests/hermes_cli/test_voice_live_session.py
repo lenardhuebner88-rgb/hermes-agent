@@ -360,6 +360,11 @@ async def test_stream_errors_request_fallback(
         await wrapper.run(audio_in, asyncio.Queue(), _FakeToolExecutor())
 
     assert caught.value.__cause__ is failure
+    if path == "send":
+        assert audio_in.empty()
+        assert [pending.data for pending in wrapper._replay_audio] == [b"\x01\x02"]
+        assert all(not pending.source_ack_owed for pending in wrapper._replay_audio)
+        await asyncio.wait_for(audio_in.join(), timeout=1)
 
 
 @pytest.mark.asyncio
@@ -514,7 +519,35 @@ async def test_stop_winner_preserves_get_completed_after_wait_snapshot(
 
     assert pending is not None
     assert pending.data == b"raced-frame"
-    pending.source_queue.task_done()
+    assert pending.source_ack_owed is False
+    await asyncio.wait_for(audio_in.join(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_transfers_blocked_frame_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    blocked_send = asyncio.Event()
+    session = _FakeSDKSession(send_gate=blocked_send)
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    await audio_in.put(b"cancelled-frame")
+
+    task = asyncio.create_task(
+        wrapper.run(audio_in, asyncio.Queue(), _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.send_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert audio_in.empty()
+    assert [pending.data for pending in wrapper._replay_audio] == [b"cancelled-frame"]
+    assert wrapper._replay_audio[0].source_ack_owed is False
     await asyncio.wait_for(audio_in.join(), timeout=1)
 
 
