@@ -2822,6 +2822,8 @@ export interface LoopStopResult {
 export interface LoopTimerResult {
   pack: string;
   timer_enabled: boolean;
+  timer_schedule: string;
+  timer_next_run: string | null;
 }
 
 export function startLoop(pack: string, overrides: Record<string, string | number>): Promise<LoopStartResult> {
@@ -2841,6 +2843,14 @@ export function toggleLoopTimer(pack: string, enabled: boolean): Promise<LoopTim
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
+  });
+}
+
+export function setLoopTimerSchedule(pack: string, time: string): Promise<LoopTimerResult> {
+  return fetchJSON<LoopTimerResult>(`/api/loops/${encodeURIComponent(pack)}/timer/schedule`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ time }),
   });
 }
 

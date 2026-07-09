@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
@@ -44,6 +44,8 @@ const runningPipeline: LoopPack = {
   queue: { "00-planned": 1, "10-building": 2, "20-verified": 7, "30-landed": 3, "90-bounced": 0 },
   commits_ahead: 0,
   timer_enabled: true,
+  timer_schedule: "23:37",
+  timer_next_run: "Thu 2026-07-09 23:37:00 CEST",
 };
 
 // Gleiches Manifest, aber zwischen zwei Phasen (heartbeat.current == null,
@@ -69,6 +71,8 @@ const idleSweepWithCommits: LoopPack = {
   queue: null,
   commits_ahead: 4,
   timer_enabled: false,
+  timer_schedule: "02:07",
+  timer_next_run: null,
 };
 
 // Läuft UND hat unverdaute Commits — Land darf trotzdem nicht auftauchen
@@ -119,12 +123,42 @@ const noopHandlers = {
   onStop: vi.fn(),
   onLand: vi.fn(),
   onToggleTimer: vi.fn(),
+  onSaveTimerSchedule: vi.fn(),
   onSaveFile: vi.fn(),
   onDuplicate: vi.fn(),
 };
 
 function renderGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) {
   return renderToStaticMarkup(
+    <LoopsGrid
+      packs={packs}
+      models={models}
+      selectedPack={null}
+      detail={null}
+      detailLoading={false}
+      detailError={null}
+      busyPack={null}
+      actionErrorByPack={{}}
+      landNoteByPack={{}}
+      startOpenPack={null}
+      pendingStopPack={null}
+      pendingLandPack={null}
+      workshopOpenPack={null}
+      files={null}
+      filesLoading={false}
+      filesError={null}
+      fileSaveBusy={false}
+      fileSaveError={null}
+      duplicateBusy={false}
+      duplicateError={null}
+      {...noopHandlers}
+      {...overrides}
+    />,
+  );
+}
+
+function renderInteractiveGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) {
+  return render(
     <LoopsGrid
       packs={packs}
       models={models}
@@ -209,6 +243,40 @@ describe("LoopsGrid", () => {
   it("shows the empty state when no packs are configured", () => {
     const html = renderGrid([]);
     expect(html).toContain(t.empty);
+  });
+});
+
+describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
+  it("zeigt gespeicherte lokale Uhrzeit und den echten nächsten Lauf", () => {
+    const { container } = renderInteractiveGrid([runningPipeline]);
+    const view = within(container);
+    const input = view.getByLabelText(`${t.timerTimeLabel} builder-reviewer`) as HTMLInputElement;
+    expect(input.value).toBe("23:37");
+    expect(view.getByText(t.timerNextRun("Thu 2026-07-09 23:37:00 CEST"))).toBeTruthy();
+  });
+
+  it("aktiviert Speichern erst nach einer gültigen Änderung und reicht die Uhrzeit weiter", () => {
+    const onSaveTimerSchedule = vi.fn();
+    const { container } = renderInteractiveGrid([idleSweepWithCommits], { onSaveTimerSchedule });
+    const input = within(container).getByLabelText(`${t.timerTimeLabel} doc-sweep`) as HTMLInputElement;
+    const timeControls = input.parentElement;
+    expect(timeControls).not.toBeNull();
+    const save = within(timeControls!).getByRole("button", { name: t.timerSave }) as HTMLButtonElement;
+    expect(input.value).toBe("02:07");
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: "03:45" } });
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    expect(onSaveTimerSchedule).toHaveBeenCalledWith("doc-sweep", "03:45");
+  });
+
+  it("erklärt bei deaktiviertem Timer, welche Uhrzeit beim Aktivieren gilt", () => {
+    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    const input = within(container).getByLabelText(`${t.timerTimeLabel} doc-sweep`);
+    const timerPanel = input.parentElement?.parentElement?.parentElement;
+    expect(timerPanel).not.toBeNull();
+    expect(within(timerPanel!).getByText(t.timerDisabledHint("02:07"))).toBeTruthy();
   });
 });
 
@@ -475,6 +543,7 @@ const idlePipeline: LoopPack = {
   running: false,
   heartbeat: null,
   timer_enabled: false,
+  timer_next_run: null,
 };
 
 describe("LoopStartForm — SKIP_PLAN-Override", () => {

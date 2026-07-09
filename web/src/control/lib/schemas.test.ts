@@ -1005,6 +1005,8 @@ describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/contr
       expect(pipeline.queue).toEqual({ "00-planned": 0, "10-building": 0, "20-verified": 0, "90-bounced": 0 });
       // Älterer Payload ohne "heartbeat"-Key (vor 646c06e5c) muss weiter parsen — .catch(null) fängt den fehlenden Key ab.
       expect(pipeline.heartbeat).toBeNull();
+      expect(pipeline.timer_schedule).toBe("23:37");
+      expect(pipeline.timer_next_run).toBeNull();
     }
     expect(isLoopPackError(sweep)).toBe(false);
     if (!isLoopPackError(sweep)) {
@@ -1041,7 +1043,9 @@ describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/contr
             ],
           },
           stop_requested: false, queue: null,
-          commits_ahead: 0, timer_enabled: false,
+          commits_ahead: 0, timer_enabled: true,
+          timer_schedule: "01:45",
+          timer_next_run: "Fri 2026-07-10 01:45:00 CEST",
         },
         {
           name: "nacht-kopie", type: "sweep",
@@ -1063,6 +1067,8 @@ describe("LoopsResponseSchema (loop-runner /api/loops contract, hermes_cli/contr
       expect(nacht.heartbeat?.last).toHaveLength(2);
       expect(nacht.heartbeat?.last[0].secs).toBe(512);
       expect(nacht.heartbeat?.last[1].rc).toBe(1);
+      expect(nacht.timer_schedule).toBe("01:45");
+      expect(nacht.timer_next_run).toBe("Fri 2026-07-10 01:45:00 CEST");
     }
     expect(isLoopPackError(nachtKopie)).toBe(false);
     if (!isLoopPackError(nachtKopie)) {
