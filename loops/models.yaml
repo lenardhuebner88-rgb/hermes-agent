@@ -1,9 +1,9 @@
 # Kuratierter Engine/Modell-Katalog fürs Dashboard-Dropdown (Loop-Runner v1).
 # Struktur: engines.<name>.{label, models}. "models: []" heißt "Katalog-Eintrag ohne
 # Adapter" (Dashboard zeigt die Engine, aber Start ist gesperrt).
-# Codex-Modell 2026-07-02 gegen `~/.codex/config.toml` (default_model = "gpt-5.5") und
-# codex-rs/models-manager/models.json (slugs: gpt-5.5, gpt-5.4, gpt-5.4-mini,
-# gpt-5.3-codex, gpt-5.2 — KEIN "gpt-5.5-codex") live geprüft und korrigiert.
+# Codex-Modell 2026-07-09 gegen `~/.codex/config.toml` geprüft:
+# default_model = "gpt-5.6-sol"; gpt-5.5/gpt-5.3-codex bleiben als bewiesene
+# Fallbacks im Katalog.
 # neuralwatt-Modelle: Liste kuratiert; live geprüft 2026-07-03 gegen
 # GET /v1/models (API liefert 16 IDs: glm-5.2 ±fast/flex/short-Varianten,
 # kimi-k2.6 ±fast/flex, kimi-k2.7-code ±flex, qwen3.5-397b ±fast, qwen3.6-35b ±fast).
@@ -16,7 +16,7 @@ engines:
     models: [kimi-code/kimi-for-coding]
   codex:
     label: "Codex (ChatGPT-Abo)"
-    models: [gpt-5.5, gpt-5.3-codex]
+    models: [gpt-5.6-sol, gpt-5.5, gpt-5.3-codex]
   hermes:
     # "Modell" = Hermes-PROFIL; das Profil trägt die Provider-/Modell-Bindung.
     # reviewer → glm-5.2 @ NeuralWatt · coder → Codex-Pool (live verifiziert 2026-07-02).

@@ -135,6 +135,10 @@ if [[ -n "${seed_file}" ]]; then
 fi
 
 if [[ "${skip_build}" -eq 0 ]]; then
+  # Keep autonomous/worktree verification builds out of the tracked production
+  # assets. vite.config.ts and hermes_cli.web_server share this override, so the
+  # disposable server serves exactly the branch build without dirtying git.
+  export HERMES_WEB_DIST="${tmp_home}/web_dist"
   (cd "${repo_root}/web" && npm run build)
 fi
 
@@ -177,4 +181,5 @@ fi
 node "${repo_root}/scripts/visual_verify_runner.mjs" \
   --base-url "http://127.0.0.1:${port}" \
   --output-dir "${output_dir}" \
+  --git-head "$(git -C "${repo_root}" rev-parse HEAD)" \
   "${routes[@]}"
