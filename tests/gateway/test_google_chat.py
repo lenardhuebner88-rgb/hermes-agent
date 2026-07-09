@@ -51,7 +51,8 @@ def _ensure_google_mocks():
         return  # Real libraries installed, use them.
 
     # --- google.cloud.pubsub_v1 ---
-    google = MagicMock()
+    import google
+
     google_cloud = MagicMock()
     pubsub_v1 = MagicMock()
     pubsub_v1.SubscriberClient = MagicMock
@@ -103,6 +104,13 @@ def _ensure_google_mocks():
 
 
 _ensure_google_mocks()
+
+
+def test_google_mocks_preserve_genai_namespace():
+    """Optional chat shims must not replace the core google namespace."""
+    from google import genai
+
+    assert genai.__name__ == "google.genai"
 
 
 # Patch the availability flag before importing, so the adapter doesn't bail
