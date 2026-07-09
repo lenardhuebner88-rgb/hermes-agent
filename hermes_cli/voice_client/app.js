@@ -282,6 +282,10 @@ function resetBargeIn(session) {
   session.bargeTriggered = false;
 }
 
+function hasOpenWebSocket(session) {
+  return session.websocket?.readyState === WebSocket.OPEN;
+}
+
 function handleMicFrame(session, message) {
   if (!isCurrent(session) || session.microphoneStopped) {
     return;
@@ -302,7 +306,7 @@ function handleMicFrame(session, message) {
         session.bargeTriggered = true;
         session.suppressIncomingAudio = true;
         stopPlayback(session);
-        if (session.websocket.readyState === WebSocket.OPEN) {
+        if (hasOpenWebSocket(session)) {
           session.websocket.send(JSON.stringify({ type: "interrupt" }));
         }
         const latency = performance.now() - session.bargeStartedAt;
@@ -319,7 +323,7 @@ function handleMicFrame(session, message) {
 
   if (
     message.pcm instanceof ArrayBuffer &&
-    session.websocket.readyState === WebSocket.OPEN &&
+    hasOpenWebSocket(session) &&
     !session.drainRequested
   ) {
     session.websocket.send(message.pcm);

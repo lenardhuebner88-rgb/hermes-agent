@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -246,6 +247,95 @@ def test_voice_client_barge_in_tracks_audible_playback_not_server_state():
     assert "session.playbackSources.size > 0 &&" in script
     assert "session.playbackSources.size === 0\n  )" in script
     assert 'session.voiceState === "speaking" &&' not in script
+
+
+def test_voice_client_mic_frames_are_safe_before_websocket_assignment():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the standalone voice client harness")
+
+    repo_root = Path(__file__).parents[2]
+    harness = r"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("hermes_cli/voice_client/app.js", "utf8");
+const element = {
+  textContent: "",
+  disabled: false,
+  hidden: false,
+  children: [],
+  addEventListener() {},
+  setAttribute() {},
+  append() {},
+};
+const context = {
+  AbortController,
+  ArrayBuffer,
+  DataView,
+  Headers,
+  URL,
+  WebSocket: { OPEN: 1, CONNECTING: 0 },
+  console: { info() {} },
+  document: {
+    body: { dataset: {} },
+    querySelector() { return element; },
+  },
+  navigator: {},
+  performance: { now() { return 60; } },
+  window: {
+    __HERMES_SESSION_TOKEN__: undefined,
+    addEventListener() {},
+    clearTimeout,
+    setTimeout,
+  },
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`
+  const startupSession = {
+    microphoneStopped: false,
+    websocket: null,
+    playbackSources: new Set(),
+    drainRequested: false,
+    voiceState: "connecting",
+    bargeTriggered: false,
+    loudChunks: 0,
+    bargeStartedAt: null,
+  };
+  activeSession = startupSession;
+  handleMicFrame(startupSession, { rms: 0.01, pcm: new ArrayBuffer(640) });
+
+  const sourceNode = { onended: null, stop() {}, disconnect() {} };
+  const bargeSession = {
+    microphoneStopped: false,
+    websocket: null,
+    playbackSources: new Set([sourceNode]),
+    playbackCursor: 0,
+    audioContext: { currentTime: 0 },
+    drainRequested: false,
+    voiceState: "speaking",
+    suppressIncomingAudio: false,
+    bargeTriggered: false,
+    loudChunks: 2,
+    bargeStartedAt: 0,
+  };
+  activeSession = bargeSession;
+  handleMicFrame(bargeSession, { rms: 1, pcm: new ArrayBuffer(640) });
+  if (!bargeSession.bargeTriggered) {
+    throw new Error("barge-in was not triggered by audible local playback");
+  }
+`, context);
+"""
+    result = subprocess.run(
+        [node, "-e", harness],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_live_failure_falls_back_on_same_websocket(monkeypatch):
