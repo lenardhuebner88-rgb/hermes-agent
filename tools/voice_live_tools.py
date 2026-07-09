@@ -173,9 +173,7 @@ class VoiceToolExecutor:
             try:
                 requested_lines = int(args.get("lines", _DEFAULT_CAPTURE_LINES))
             except (TypeError, ValueError):
-                return _error(
-                    "invalid_arguments", "lines muss eine ganze Zahl sein."
-                )
+                return _error("invalid_arguments", "lines muss eine ganze Zahl sein.")
             lines = max(1, min(requested_lines, _MAX_CAPTURE_LINES))
             process, error = await self._run_tmux(
                 [

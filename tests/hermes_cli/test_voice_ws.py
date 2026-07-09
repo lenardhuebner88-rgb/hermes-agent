@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 import wave
 
@@ -377,6 +378,9 @@ async def test_delegate_uses_bounded_shell_free_hermes_quiet_subprocess(monkeypa
         observed["kwargs"] = kwargs
         return FakeProcess()
 
+    expected_executable = str(Path(sys.executable).absolute().with_name("hermes"))
+    assert Path(expected_executable).is_file()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setattr(
         voice_ws.asyncio,
         "create_subprocess_exec",
@@ -386,9 +390,15 @@ async def test_delegate_uses_bounded_shell_free_hermes_quiet_subprocess(monkeypa
     response = await voice_ws.delegate_to_hermes("prüfe den Status")
 
     assert response == "erledigt"
-    assert observed["args"] == ("hermes", "-q", "prüfe den Status")
+    assert observed["args"] == (
+        expected_executable,
+        "-q",
+        "prüfe den Status",
+    )
     assert observed["kwargs"]["stdout"] is voice_ws.asyncio.subprocess.PIPE
     assert observed["kwargs"]["stderr"] is voice_ws.asyncio.subprocess.PIPE
+    if os.name == "posix":
+        assert observed["kwargs"]["start_new_session"] is True
 
 
 def test_disabled_web_server_does_not_import_voice_runtime(tmp_path):
@@ -569,6 +579,7 @@ async def test_delegate_cancellation_terminates_and_reaps_child(monkeypatch):
 
     class CancellableProcess:
         def __init__(self):
+            self.pid = 424_201
             self.returncode = None
             self.communicate_started = voice_ws.asyncio.Event()
             self.terminated = False
@@ -594,11 +605,20 @@ async def test_delegate_cancellation_terminates_and_reaps_child(monkeypatch):
     async def fake_create_subprocess_exec(*args, **kwargs):
         return process
 
+    tree_signals = []
+
+    def fake_killpg(pid, sig):
+        tree_signals.append((pid, sig))
+        if sig == voice_ws.signal.SIGTERM:
+            process.terminated = True
+            process.returncode = -sig
+
     monkeypatch.setattr(
         voice_ws.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
+    monkeypatch.setattr(voice_ws.os, "killpg", fake_killpg)
     task = voice_ws.asyncio.create_task(voice_ws.delegate_to_hermes("langlaufend"))
     await voice_ws.asyncio.wait_for(process.communicate_started.wait(), timeout=1)
 
@@ -608,6 +628,7 @@ async def test_delegate_cancellation_terminates_and_reaps_child(monkeypatch):
 
     assert process.terminated is True
     assert process.reaped is True
+    assert tree_signals == [(process.pid, voice_ws.signal.SIGTERM)]
 
 
 @pytest.mark.asyncio
@@ -616,6 +637,7 @@ async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
 
     class StubbornProcess:
         def __init__(self):
+            self.pid = 424_202
             self.returncode = None
             self.terminated = False
             self.killed = False
@@ -642,11 +664,22 @@ async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
     async def fake_create_subprocess_exec(*args, **kwargs):
         return process
 
+    tree_signals = []
+
+    def fake_killpg(pid, sig):
+        tree_signals.append((pid, sig))
+        if sig == voice_ws.signal.SIGTERM:
+            process.terminated = True
+        if sig == voice_ws.signal.SIGKILL:
+            process.killed = True
+            process.returncode = -sig
+
     monkeypatch.setattr(
         voice_ws.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
+    monkeypatch.setattr(voice_ws.os, "killpg", fake_killpg)
     monkeypatch.setattr(voice_ws, "_DELEGATE_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(voice_ws, "_PROCESS_TERMINATE_GRACE_SECONDS", 0.01)
 
@@ -657,6 +690,10 @@ async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
     assert process.terminated is True
     assert process.killed is True
     assert process.reaped is True
+    assert tree_signals == [
+        (process.pid, voice_ws.signal.SIGTERM),
+        (process.pid, voice_ws.signal.SIGKILL),
+    ]
 
 
 @pytest.mark.asyncio
@@ -668,14 +705,162 @@ async def test_interrupt_audio_discard_preserves_queue_accounting():
     events.put_nowait({"type": "audio", "data": b"old"})
     events.put_nowait({"type": "state", "value": "listening"})
 
-    voice_ws._discard_queued_audio_events(events)
+    voice_ws._discard_queued_response_events(events)
 
     retained = []
     while not events.empty():
         retained.append(events.get_nowait())
         events.task_done()
     await asyncio.wait_for(events.join(), timeout=1)
-    assert retained == [
-        {"type": "state", "value": "speaking"},
-        {"type": "state", "value": "listening"},
-    ]
+    assert retained == [{"type": "state", "value": "listening"}]
+
+
+def test_post_end_interrupt_cancels_and_reaps_blocked_delegate(monkeypatch):
+    from hermes_cli import voice_ws
+
+    class BlockingProcess:
+        pid = 424_203
+
+        def __init__(self):
+            self.returncode = None
+            self.started = threading.Event()
+            self.reaped = threading.Event()
+
+        async def communicate(self):
+            self.started.set()
+            await asyncio.Event().wait()
+
+        async def wait(self):
+            self.reaped.set()
+            return self.returncode
+
+    process = BlockingProcess()
+    synthesis_calls = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    def fake_killpg(pid, sig):
+        assert pid == process.pid
+        process.returncode = -sig
+
+    async def fake_transcribe(_pcm, _language):
+        return "hallo"
+
+    async def unexpected_synthesis(*args, **kwargs):
+        synthesis_calls.append((args, kwargs))
+        return b"\x00\x00"
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "fallback_transcribe_pcm", fake_transcribe)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", unexpected_synthesis)
+    monkeypatch.setattr(
+        voice_ws.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(voice_ws.os, "killpg", fake_killpg)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        ws.send_bytes(b"\x01\x00")
+        ws.send_json({"type": "end"})
+        assert process.started.wait(timeout=2)
+        ws.send_json({"type": "interrupt"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
+        assert ws.receive_json() == {"type": "interrupted"}
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert process.reaped.wait(timeout=1)
+    assert synthesis_calls == []
+
+
+def test_delegate_stderr_never_reaches_websocket(monkeypatch, caplog):
+    from hermes_cli import voice_ws
+
+    secret = "SECRET_FROM_HERMES_STDERR"
+    synthesis_calls = []
+
+    class FailingProcess:
+        pid = 424_204
+        returncode = 17
+
+        async def communicate(self):
+            return b"", secret.encode()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FailingProcess()
+
+    async def fake_transcribe(_pcm, _language):
+        return "hallo"
+
+    async def unexpected_synthesis(*args, **kwargs):
+        synthesis_calls.append((args, kwargs))
+        return b"\x00\x00"
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "fallback_transcribe_pcm", fake_transcribe)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", unexpected_synthesis)
+    monkeypatch.setattr(
+        voice_ws.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        ws.send_bytes(b"\x01\x00")
+        ws.send_json({"type": "end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
+        payload = ws.receive_json()
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert payload == {
+        "type": "error",
+        "error": {
+            "code": "delegation_failed",
+            "message": "Hermes konnte die Anfrage nicht bearbeiten.",
+        },
+    }
+    assert secret not in json.dumps(payload)
+    assert secret not in caplog.text
+    assert synthesis_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stt_thread_finishes_before_its_temp_file_is_removed(
+    tmp_path, monkeypatch
+):
+    from hermes_cli import voice_ws
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_done = threading.Event()
+    observed_path = []
+
+    def blocked_transcribe(path):
+        observed_path.append(Path(path))
+        started.set()
+        release.wait(timeout=2)
+        worker_done.set()
+        return {"success": True, "transcript": "ignored after cancellation"}
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(voice_ws, "transcribe_audio", blocked_transcribe)
+    task = asyncio.create_task(
+        voice_ws.fallback_transcribe_pcm(b"\x01\x00" * 4, "de-DE")
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert observed_path[0].exists()
+
+    release.set()
+    assert await asyncio.to_thread(worker_done.wait, 1)
+    for _ in range(50):
+        if not observed_path[0].exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not observed_path[0].exists()

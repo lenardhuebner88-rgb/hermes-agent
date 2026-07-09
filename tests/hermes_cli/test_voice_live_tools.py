@@ -34,9 +34,7 @@ async def test_list_terminals_parses_tmux_output():
 @pytest.mark.asyncio
 async def test_send_to_terminal_uses_literal_send_keys():
     executor = VoiceToolExecutor(delegate=None)
-    with patch(
-        "tools.voice_live_tools.subprocess.run", return_value=_proc("")
-    ) as run:
+    with patch("tools.voice_live_tools.subprocess.run", return_value=_proc("")) as run:
         result = await executor.execute(
             "send_to_terminal", {"session": "main", "command": "-literal command"}
         )
@@ -74,9 +72,7 @@ async def test_tmux_subprocess_is_dispatched_via_to_thread():
 @pytest.mark.asyncio
 async def test_read_terminal_clamps_line_count(requested, expected):
     executor = VoiceToolExecutor(delegate=None)
-    with patch(
-        "tools.voice_live_tools.subprocess.run", return_value=_proc("")
-    ) as run:
+    with patch("tools.voice_live_tools.subprocess.run", return_value=_proc("")) as run:
         await executor.execute(
             "read_terminal", {"session": "work:main", "lines": requested}
         )

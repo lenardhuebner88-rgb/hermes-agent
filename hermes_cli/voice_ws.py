@@ -10,13 +10,16 @@ import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 from typing import Any
 import uuid
 import wave
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
+import psutil
 
 from hermes_cli.config import load_env
 from hermes_cli.voice_live_session import GeminiLiveSession, LiveFallbackRequired
@@ -44,6 +47,7 @@ _EVENT_DRAIN_TIMEOUT_SECONDS = 10.0
 _DELEGATE_TIMEOUT_SECONDS = 120.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
+_FALLBACK_CANCEL_TIMEOUT_SECONDS = 7.0
 _FFMPEG_TIMEOUT_SECONDS = 60.0
 _OUTPUT_PCM_CHUNK_BYTES = 24_000
 
@@ -114,15 +118,37 @@ def _write_pcm16_wav(path: Path, pcm: bytes) -> None:
         wav_file.writeframes(pcm)
 
 
+def _consume_background_task(task: asyncio.Task[Any]) -> None:
+    """Retrieve detached task failures after cancellation-safe thread work."""
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _run_sync_cancel_safe(function: Callable[..., Any], *args: Any) -> Any:
+    """Cancel the await promptly while letting the bounded worker clean up."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_consume_background_task)
+        raise
+
+
+def _transcribe_pcm_sync(pcm: bytes, wav_path: Path) -> dict[str, Any]:
+    try:
+        _write_pcm16_wav(wav_path, pcm)
+        return transcribe_audio(str(wav_path))
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
 async def fallback_transcribe_pcm(pcm: bytes, language: str) -> str:
     """Run Hermes' configured STT adapter against a temporary PCM16 WAV."""
     del language  # The public adapter gets language/provider settings from config.
     wav_path = _voice_cache_dir() / f"input-{uuid.uuid4().hex}.wav"
-    try:
-        await asyncio.to_thread(_write_pcm16_wav, wav_path, pcm)
-        result = await asyncio.to_thread(transcribe_audio, str(wav_path))
-    finally:
-        await asyncio.to_thread(wav_path.unlink, missing_ok=True)
+    result = await _run_sync_cancel_safe(_transcribe_pcm_sync, pcm, wav_path)
 
     if not isinstance(result, dict) or not result.get("success"):
         detail = result.get("error") if isinstance(result, dict) else None
@@ -214,31 +240,74 @@ def _unlink_owned_voice_file(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def _synthesize_pcm_sync(text: str, requested_path: Path) -> bytes:
+    generated_path = requested_path
+    try:
+        raw_result = text_to_speech_tool(text, str(requested_path))
+        generated_path = _decode_tts_result(raw_result)
+        return _transcode_to_pcm24k(generated_path)
+    finally:
+        _unlink_owned_voice_file(generated_path)
+        if generated_path != requested_path:
+            _unlink_owned_voice_file(requested_path)
+
+
 async def fallback_synthesize_pcm(text: str, language: str) -> bytes:
     """Run Hermes' public TTS adapter, then convert its output to PCM16/24k."""
     del language  # Voice/language selection belongs to the existing TTS config.
     requested_path = _voice_cache_dir() / f"output-{uuid.uuid4().hex}.mp3"
-    generated_path = requested_path
+    return await _run_sync_cancel_safe(_synthesize_pcm_sync, text, requested_path)
+
+
+def resolve_hermes_executable() -> str:
+    """Resolve Hermes from the active Python environment before consulting PATH."""
+    executable_name = "hermes.exe" if os.name == "nt" else "hermes"
+    sibling = Path(sys.executable).expanduser().absolute().with_name(executable_name)
+    if sibling.is_file() and (os.name == "nt" or os.access(sibling, os.X_OK)):
+        return str(sibling)
+    discovered = shutil.which(executable_name)
+    if discovered:
+        return str(Path(discovered).expanduser().absolute())
+    raise VoiceRuntimeError(
+        "delegation_unavailable",
+        "Hermes ist in dieser Laufzeitumgebung nicht verfügbar.",
+    )
+
+
+def _delegation_isolation_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+    return {"start_new_session": True}
+
+
+def _signal_process_tree(
+    process: asyncio.subprocess.Process,
+    *,
+    force: bool,
+) -> None:
+    """Signal the isolated delegation process group/tree without a shell."""
+    if os.name == "posix":
+        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        return
+
     try:
-        raw_result = await asyncio.to_thread(
-            text_to_speech_tool,
-            text,
-            str(requested_path),
-        )
-        generated_path = _decode_tts_result(raw_result)
-        return await asyncio.to_thread(_transcode_to_pcm24k, generated_path)
-    finally:
-        await asyncio.to_thread(_unlink_owned_voice_file, generated_path)
-        if generated_path != requested_path:
-            await asyncio.to_thread(_unlink_owned_voice_file, requested_path)
+        root = psutil.Process(process.pid)
+        descendants = root.children(recursive=True)
+        for child in reversed(descendants):
+            (child.kill if force else child.terminate)()
+    except (OSError, psutil.Error):
+        pass
+    (process.kill if force else process.terminate)()
 
 
 async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
-    """Terminate, escalate to kill, and reap a child within a fixed bound."""
+    """Stop the whole isolated tree, then reap the direct child within bounds."""
     if process.returncode is not None:
         return
     try:
-        process.terminate()
+        _signal_process_tree(process, force=False)
     except (OSError, ProcessLookupError):
         pass
     try:
@@ -250,7 +319,7 @@ async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
     except TimeoutError:
         if process.returncode is None:
             try:
-                process.kill()
+                _signal_process_tree(process, force=True)
             except (OSError, ProcessLookupError):
                 pass
     try:
@@ -264,13 +333,15 @@ async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
 
 async def delegate_to_hermes(prompt: str) -> str:
     """Delegate one fallback turn through the supported Hermes CLI surface."""
+    executable = resolve_hermes_executable()
     try:
         process = await asyncio.create_subprocess_exec(
-            "hermes",
+            executable,
             "-q",
             prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_delegation_isolation_kwargs(),
         )
     except OSError as exc:
         raise VoiceRuntimeError(
@@ -279,7 +350,7 @@ async def delegate_to_hermes(prompt: str) -> str:
         ) from exc
 
     try:
-        stdout, stderr = await asyncio.wait_for(
+        stdout, _stderr = await asyncio.wait_for(
             process.communicate(),
             timeout=_DELEGATE_TIMEOUT_SECONDS,
         )
@@ -294,10 +365,13 @@ async def delegate_to_hermes(prompt: str) -> str:
         ) from exc
 
     if process.returncode != 0:
-        detail = stderr.decode("utf-8", "replace").strip()[-500:]
+        _log.warning(
+            "Hermes delegation failed returncode=%s",
+            process.returncode,
+        )
         raise VoiceRuntimeError(
             "delegation_failed",
-            detail or "Hermes konnte die Anfrage nicht bearbeiten.",
+            "Hermes konnte die Anfrage nicht bearbeiten.",
         )
     response = stdout.decode("utf-8", "replace").strip()
     if not response:
@@ -403,10 +477,10 @@ async def _put_event_checkpoint(
     return not disconnected.is_set()
 
 
-def _discard_queued_audio_events(
+def _discard_queued_response_events(
     events_out: asyncio.Queue[dict[str, Any] | None],
 ) -> None:
-    """Drop not-yet-sent audio while preserving queued control/state events."""
+    """Drop not-yet-sent playback output while preserving safe state events."""
     retained: list[dict[str, Any] | None] = []
     while True:
         try:
@@ -414,7 +488,12 @@ def _discard_queued_audio_events(
         except asyncio.QueueEmpty:
             break
         events_out.task_done()
-        if event is None or event.get("type") != "audio":
+        should_drop = event is not None and (
+            event.get("type") == "audio"
+            or (event.get("type") == "transcript" and event.get("role") == "assistant")
+            or (event.get("type") == "state" and event.get("value") == "speaking")
+        )
+        if not should_drop:
             retained.append(event)
     for event in retained:
         events_out.put_nowait(event)
@@ -493,7 +572,7 @@ async def _read_voice_frames(
                 # automatic VAD/barge-in.  The explicit browser control only
                 # flushes queued server audio and tells the client to stop local
                 # playback; the SDK exposes no supported activity_start hook here.
-                _discard_queued_audio_events(events_out)
+                _discard_queued_response_events(events_out)
                 await _put_event(events_out, {"type": "interrupted"}, disconnected)
                 continue
             await _put_event(
@@ -509,6 +588,69 @@ async def _read_voice_frames(
             )
     except WebSocketDisconnect:
         disconnected.set()
+        return "disconnect"
+
+
+async def _monitor_post_end_controls(
+    websocket: WebSocket,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    stop_requested: asyncio.Event,
+) -> str:
+    """Own websocket.receive after the initial reader returns on ``end``."""
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                disconnected.set()
+                stop_requested.set()
+                return "disconnect"
+
+            control_type = None
+            error_code = "unknown_control_frame"
+            error_message = "Unbekannte Voice-Steuerungsnachricht."
+            if message.get("bytes") is not None:
+                error_code = "audio_after_end"
+                error_message = "Nach end werden nur Steuerungsnachrichten akzeptiert."
+            else:
+                text = message.get("text")
+                if isinstance(text, str):
+                    try:
+                        control = json.loads(text)
+                    except json.JSONDecodeError:
+                        error_code = "invalid_control_frame"
+                        error_message = (
+                            "Die Steuerungsnachricht ist kein gültiges JSON."
+                        )
+                    else:
+                        control_type = (
+                            control.get("type") if isinstance(control, dict) else None
+                        )
+
+            if control_type == "interrupt":
+                stop_requested.set()
+                _discard_queued_response_events(events_out)
+                if await _put_event_checkpoint(
+                    events_out,
+                    {"type": "interrupted"},
+                    disconnected,
+                ):
+                    return "interrupt"
+                return "disconnect"
+
+            if not await _put_event(
+                events_out,
+                {
+                    "type": "error",
+                    "error": {"code": error_code, "message": error_message},
+                },
+                disconnected,
+            ):
+                stop_requested.set()
+                return "disconnect"
+    except (OSError, RuntimeError, WebSocketDisconnect):
+        disconnected.set()
+        stop_requested.set()
         return "disconnect"
 
 
@@ -540,7 +682,10 @@ async def _run_cascade_fallback(
     config: VoiceWebConfig,
     events_out: asyncio.Queue[dict[str, Any] | None],
     disconnected: asyncio.Event,
+    stop_requested: asyncio.Event,
 ) -> None:
+    if stop_requested.is_set():
+        return
     if not fallback_pcm:
         raise VoiceRuntimeError("no_audio", "Es wurde kein Audio empfangen.")
     if not await _put_event_checkpoint(
@@ -550,6 +695,8 @@ async def _run_cascade_fallback(
     ):
         return
     transcript = await fallback_transcribe_pcm(fallback_pcm, config.language)
+    if stop_requested.is_set():
+        return
     if not await _put_event_checkpoint(
         events_out,
         {"type": "transcript", "text": transcript},
@@ -557,6 +704,8 @@ async def _run_cascade_fallback(
     ):
         return
     response = await delegate_to_hermes(transcript)
+    if stop_requested.is_set():
+        return
     if not await _put_event_checkpoint(
         events_out,
         {"type": "transcript", "role": "assistant", "text": response},
@@ -564,6 +713,8 @@ async def _run_cascade_fallback(
     ):
         return
     audio = await fallback_synthesize_pcm(response, config.language)
+    if stop_requested.is_set():
+        return
     if not audio or len(audio) % 2:
         raise VoiceRuntimeError(
             "invalid_tts_audio",
@@ -587,6 +738,66 @@ async def _run_cascade_fallback(
         {"type": "state", "value": "listening"},
         disconnected,
     )
+
+
+async def _cancel_task_bounded(task: asyncio.Task[Any]) -> None:
+    if task.done():
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    task.cancel()
+    done, _ = await asyncio.wait(
+        {task},
+        timeout=_FALLBACK_CANCEL_TIMEOUT_SECONDS,
+    )
+    if done:
+        await asyncio.gather(task, return_exceptions=True)
+    else:
+        _log.warning("Voice fallback task did not stop within the cleanup bound")
+        task.add_done_callback(_consume_background_task)
+
+
+async def _run_controllable_cascade(
+    websocket: WebSocket,
+    fallback_pcm: bytes,
+    config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+) -> str:
+    """Run fallback while a sole post-end receiver remains cancellable."""
+    stop_requested = asyncio.Event()
+    fallback_task = asyncio.create_task(
+        _run_cascade_fallback(
+            fallback_pcm,
+            config,
+            events_out,
+            disconnected,
+            stop_requested,
+        )
+    )
+    monitor_task = asyncio.create_task(
+        _monitor_post_end_controls(
+            websocket,
+            events_out,
+            disconnected,
+            stop_requested,
+        )
+    )
+    try:
+        done, _ = await asyncio.wait(
+            {fallback_task, monitor_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if monitor_task in done:
+            outcome = monitor_task.result()
+            stop_requested.set()
+            await _cancel_task_bounded(fallback_task)
+            return outcome
+        await fallback_task
+        return "complete"
+    finally:
+        stop_requested.set()
+        await _cancel_task_bounded(monitor_task)
+        await _cancel_task_bounded(fallback_task)
 
 
 async def _run_live_bridge(
@@ -785,7 +996,8 @@ def create_voice_router(
 
             if run_fallback and reader_result == "end" and not disconnected.is_set():
                 try:
-                    await _run_cascade_fallback(
+                    await _run_controllable_cascade(
+                        websocket,
                         bytes(fallback_pcm),
                         config,
                         events_out,
