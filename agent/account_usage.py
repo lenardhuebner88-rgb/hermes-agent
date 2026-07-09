@@ -644,15 +644,65 @@ def _format_run_count(count: int) -> str:
     return f"{count:,} run" + ("" if count == 1 else "s")
 
 
-def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
-    """Fetch Kimi account usage from the Moonshot/Kimi Coding usage API.
+def _numeric(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or value in {None, ""}:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
-    Docs (2026-07): ``GET https://api.kimi.com/coding/v1/usages`` with
-    ``Authorization: Bearer <KIMI_API_KEY>``. The response shape exposes a
-    weekly bucket and a list of rate limits (the first limit is the 5-hour
-    sliding window). When the API key is missing or the call fails, we return a
-    fail-open unavailable snapshot so the dashboard can show a cache/unknown
-    state instead of invented numbers.
+
+def _used_percent_from_quota(bucket: Any) -> Optional[float]:
+    if not isinstance(bucket, dict):
+        return None
+    explicit = _numeric(bucket.get("used_percent"))
+    if explicit is not None:
+        return max(0.0, min(100.0, explicit))
+    used = _numeric(bucket.get("used") or bucket.get("total_tokens"))
+    limit = _numeric(bucket.get("limit") or bucket.get("cap"))
+    if used is None or limit is None or limit <= 0:
+        return None
+    return max(0.0, min(100.0, (used / limit) * 100.0))
+
+
+def _remaining_detail(bucket: Any) -> Optional[str]:
+    if not isinstance(bucket, dict):
+        return None
+    remaining = bucket.get("remaining")
+    limit = bucket.get("limit") or bucket.get("cap")
+    if remaining in {None, ""} or limit in {None, ""}:
+        return None
+    return f"{remaining}/{limit} verbleibend"
+
+
+def _normalize_kimi_tag(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for prefix in ("LEVEL_", "TYPE_", "PLAN_"):
+        if text.upper().startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    return _title_case_slug(text)
+
+
+def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
+    """Fetch Kimi Coding usage from the live Moonshot/Kimi usages API.
+
+    Live shape verified 2026-07-09::
+
+        GET https://api.kimi.com/coding/v1/usages
+        {
+          "usage": {"limit": "100", "used": "22", "remaining": "78", "resetTime": "..."},
+          "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                      "detail": {"limit": "100", "used": "17", "remaining": "83", "resetTime": "..."}}],
+          "user": {"membership": {"level": "LEVEL_BASIC"}},
+          "subType": "TYPE_PURCHASE"
+        }
+
+    Missing/unrecognized data is fail-open so the dashboard never invents limits.
     """
     import os
 
@@ -707,63 +757,74 @@ def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
             fetched_at=_utc_now(),
             unavailable_reason=f"Invalid Kimi usage response ({type(exc).__name__}).",
         )
+    if not isinstance(payload, dict):
+        return AccountUsageSnapshot(
+            provider="kimi",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Kimi usage response is not an object.",
+        )
 
-    data = payload.get("data") or {}
     windows: list[AccountUsageWindow] = []
     details: list[str] = []
 
-    # Weekly bucket: { total_tokens, used_percent, resets_at, ... }
-    weekly = data.get("weekly") or {}
-    weekly_used = weekly.get("used_percent")
-    if weekly_used is None:
-        weekly_total = _positive_int(weekly.get("total_tokens"))
-        weekly_cap = _positive_int(weekly.get("limit")) or _positive_int(weekly.get("cap"))
-        if weekly_total is not None and weekly_cap:
-            weekly_used = min(100.0, (weekly_total / weekly_cap) * 100.0)
+    # Weekly/current account bucket from the live API: payload["usage"].
+    weekly = payload.get("usage")
+    weekly = weekly if isinstance(weekly, dict) else {}
+    weekly_used = _used_percent_from_quota(weekly)
     if weekly_used is not None:
         windows.append(
             AccountUsageWindow(
                 label="Diese Woche",
                 used_percent=float(weekly_used),
-                reset_at=_parse_dt(weekly.get("resets_at") or weekly.get("reset_at")),
+                reset_at=_parse_dt(weekly.get("resetTime") or weekly.get("resets_at") or weekly.get("reset_at")),
+                detail=_remaining_detail(weekly),
                 window_key="weekly",
             )
         )
 
-    # 5-hour sliding window: list of limits, first entry is the session window.
-    limits = data.get("limits") or []
-    session = limits[0] if isinstance(limits, list) and limits else {}
-    session_used = session.get("used_percent")
-    if session_used is None:
-        session_total = _positive_int(session.get("total_tokens"))
-        session_cap = _positive_int(session.get("limit")) or _positive_int(session.get("cap"))
-        if session_total is not None and session_cap:
-            session_used = min(100.0, (session_total / session_cap) * 100.0)
+    # 5-hour sliding window from the live API: payload["limits"][0]["detail"].
+    session: dict[str, Any] = {}
+    limits = payload.get("limits")
+    if isinstance(limits, list) and limits:
+        first_limit = limits[0]
+        if isinstance(first_limit, dict):
+            detail = first_limit.get("detail")
+            if isinstance(detail, dict):
+                session = detail
+    session_used = _used_percent_from_quota(session)
     if session_used is not None:
         windows.append(
             AccountUsageWindow(
                 label="5-Std-Fenster",
                 used_percent=float(session_used),
-                reset_at=_parse_dt(session.get("resets_at") or session.get("reset_at")),
+                reset_at=_parse_dt(session.get("resetTime") or session.get("resets_at") or session.get("reset_at")),
+                detail=_remaining_detail(session),
                 window_key="session",
             )
         )
 
-    # Plan / subscription tier for the subtitle (Basic / Pro / Max).
-    plan = None
-    for candidate_key in ("plan", "plan_type", "tier", "subscription_plan"):
-        candidate = data.get(candidate_key) or payload.get(candidate_key)
-        if candidate:
-            plan = _title_case_slug(str(candidate))
-            break
+    plan_parts: list[str] = []
+    user = payload.get("user")
+    membership = user.get("membership", {}) if isinstance(user, dict) else {}
+    for raw in (
+        membership.get("level") if isinstance(membership, dict) else None,
+        payload.get("subType"),
+    ):
+        part = _normalize_kimi_tag(raw)
+        if part and part not in plan_parts:
+            plan_parts.append(part)
+    plan = " · ".join(plan_parts) if plan_parts else None
 
-    # Optional magnitude details for non-dashboard consumers.
-    weekly_total = _positive_int(weekly.get("total_tokens"))
-    if weekly_total is not None:
-        details.append(f"Weekly tokens: {_format_token_total(weekly_total)}")
-    if session and isinstance(session.get("total_tokens"), int) and not isinstance(session.get("total_tokens"), bool):
-        session_total = int(session["total_tokens"])
-        details.append(f"Session tokens: {_format_token_total(session_total)}")
+    # Optional magnitude details for non-dashboard consumers/details disclosure.
+    total_quota = payload.get("totalQuota")
+    if isinstance(total_quota, dict):
+        detail = _remaining_detail(total_quota)
+        if detail:
+            details.append(f"Gesamt-Quota: {detail}")
+    parallel = payload.get("parallel")
+    if isinstance(parallel, dict) and parallel.get("limit") not in {None, ""}:
+        details.append(f"Parallel: {parallel.get('limit')}")
 
     if not windows and not details:
         return AccountUsageSnapshot(

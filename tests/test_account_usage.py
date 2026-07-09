@@ -216,27 +216,34 @@ def test_fetch_account_usage_kimi_unavailable_without_api_key(monkeypatch):
     assert snapshot.windows == ()
 
 
-def test_fetch_account_usage_kimi_maps_api_response_to_weekly_and_session_windows(monkeypatch):
+def test_fetch_account_usage_kimi_maps_live_usages_shape(monkeypatch):
     monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
     monkeypatch.setattr(
         "agent.account_usage.httpx.Client",
         lambda timeout=15.0: _Client(
             {
-                "data": {
-                    "plan": "basic",
-                    "weekly": {
-                        "total_tokens": 9_000_000,
-                        "used_percent": 9,
-                        "resets_at": "2026-07-15T08:00:00Z",
-                    },
-                    "limits": [
-                        {
-                            "total_tokens": 0,
-                            "used_percent": 0,
-                            "resets_at": "2026-07-09T14:00:00Z",
+                "user": {"membership": {"level": "LEVEL_BASIC"}},
+                "usage": {
+                    "limit": "100",
+                    "used": "22",
+                    "remaining": "78",
+                    "resetTime": "2026-07-14T17:55:48.457288Z",
+                },
+                "limits": [
+                    {
+                        "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                        "detail": {
+                            "limit": "100",
+                            "used": "17",
+                            "remaining": "83",
+                            "resetTime": "2026-07-09T12:55:48.457288Z",
                         },
-                    ],
-                }
+                    }
+                ],
+                "parallel": {"limit": "10"},
+                "totalQuota": {"limit": "100", "remaining": "99"},
+                "authentication": {"method": "METHOD_API_KEY", "scope": "FEATURE_CODING"},
+                "subType": "TYPE_PURCHASE",
             }
         ),
     )
@@ -244,58 +251,29 @@ def test_fetch_account_usage_kimi_maps_api_response_to_weekly_and_session_window
     snapshot = fetch_account_usage("kimi")
 
     assert snapshot is not None
+    assert snapshot.unavailable_reason is None
     assert snapshot.provider == "kimi"
     assert snapshot.source == "usage_api"
     assert snapshot.title == "Kimi"
-    assert snapshot.plan == "Basic"
-    assert len(snapshot.windows) == 2
-    assert snapshot.windows[0] == AccountUsageWindow(
-        label="Diese Woche",
-        used_percent=9.0,
-        window_key="weekly",
-        reset_at=datetime(2026, 7, 15, 8, 0, 0, tzinfo=timezone.utc),
-    )
-    assert snapshot.windows[1] == AccountUsageWindow(
-        label="5-Std-Fenster",
-        used_percent=0.0,
-        window_key="session",
-        reset_at=datetime(2026, 7, 9, 14, 0, 0, tzinfo=timezone.utc),
-    )
-    assert "Weekly tokens: 9,000,000" in snapshot.details
-    assert "Session tokens: 0" in snapshot.details
-
-
-def test_fetch_account_usage_kimi_computes_percent_from_tokens_when_not_provided(monkeypatch):
-    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
-    monkeypatch.setattr(
-        "agent.account_usage.httpx.Client",
-        lambda timeout=15.0: _Client(
-            {
-                "data": {
-                    "plan": "pro",
-                    "weekly": {"total_tokens": 93_000, "limit": 100_000},
-                    "limits": [{"total_tokens": 18_000, "limit": 100_000}],
-                }
-            }
-        ),
-    )
-
-    snapshot = fetch_account_usage("kimi")
-
-    assert snapshot is not None
-    assert snapshot.plan == "Pro"
+    assert snapshot.plan == "Basic · Purchase"
     assert snapshot.windows == (
         AccountUsageWindow(
             label="Diese Woche",
-            used_percent=93.0,
+            used_percent=22.0,
             window_key="weekly",
+            reset_at=datetime(2026, 7, 14, 17, 55, 48, 457288, tzinfo=timezone.utc),
+            detail="78/100 verbleibend",
         ),
         AccountUsageWindow(
             label="5-Std-Fenster",
-            used_percent=18.0,
+            used_percent=17.0,
             window_key="session",
+            reset_at=datetime(2026, 7, 9, 12, 55, 48, 457288, tzinfo=timezone.utc),
+            detail="83/100 verbleibend",
         ),
     )
+    assert "Gesamt-Quota: 99/100 verbleibend" in snapshot.details
+    assert "Parallel: 10" in snapshot.details
 
 
 def test_fetch_account_usage_kimi_rejected_api_key_returns_unavailable(monkeypatch):
