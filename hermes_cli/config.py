@@ -915,6 +915,11 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    "voice_web": {
+        "enabled": False,
+        "model": "gemini-2.5-flash-native-audio-preview-12-2025",
+        "language": "de-DE",
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).
