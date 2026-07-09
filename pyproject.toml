@@ -105,6 +105,9 @@ dependencies = [
   # Browser CDP supervisor + browser_dialog import this directly. Keep core
   # so browser tool discovery doesn't fail on lean installs.
   "websockets==15.0.1",
+  # Standalone /voice bridge. The server, not the browser, owns the Gemini
+  # Live session so the API key never crosses the WebSocket boundary.
+  "google-genai==2.11.0",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
   "fastapi>=0.104.0,<1",
