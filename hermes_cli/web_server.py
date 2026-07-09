@@ -280,6 +280,16 @@ _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 # injection share a single, testable seam.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = True
 
+
+def _voice_web_enabled(raw_config: Any) -> bool:
+    """Fail closed unless voice_web.enabled is the literal boolean true."""
+    section = raw_config.get("voice_web") if isinstance(raw_config, dict) else None
+    return isinstance(section, dict) and section.get("enabled") is True
+
+
+_VOICE_WEB_RAW_CONFIG = load_config()
+_VOICE_WEB_ENABLED = _voice_web_enabled(_VOICE_WEB_RAW_CONFIG)
+
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
@@ -14046,6 +14056,13 @@ def mount_spa(application: FastAPI):
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        if not _VOICE_WEB_ENABLED and (
+            full_path == "voice" or full_path.startswith("voice/")
+        ):
+            return JSONResponse(
+                {"detail": "Voice web is disabled"},
+                status_code=404,
+            )
         # An unmatched /api/* path is a missing/renamed endpoint, NOT a
         # client-side route. Falling through to index.html here returns
         # `<!doctype html>` with status 200, which makes JSON clients (the
@@ -15202,17 +15219,19 @@ register_vault_provenance_routes(app)
 from hermes_cli.promptforge_view import register_promptforge_routes  # noqa: E402
 register_promptforge_routes(app)
 
-from hermes_cli.voice_ws import create_voice_router  # noqa: E402
-app.include_router(
-    create_voice_router(
-        load_config(),
-        ws_auth_reason=_ws_auth_reason,
-        ws_host_origin_reason=_ws_host_origin_reason,
-        ws_client_reason=_ws_client_reason,
-        ws_close_reason=_ws_close_reason,
-        session_token=_SESSION_TOKEN,
+if _VOICE_WEB_ENABLED:
+    from hermes_cli.voice_ws import create_voice_router  # noqa: E402
+
+    app.include_router(
+        create_voice_router(
+            _VOICE_WEB_RAW_CONFIG,
+            ws_auth_reason=_ws_auth_reason,
+            ws_host_origin_reason=_ws_host_origin_reason,
+            ws_client_reason=_ws_client_reason,
+            ws_close_reason=_ws_close_reason,
+            session_token=_SESSION_TOKEN,
+        )
     )
-)
 
 mount_spa(app)
 

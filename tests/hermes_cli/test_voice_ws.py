@@ -1,5 +1,9 @@
+import asyncio
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import wave
 
@@ -218,21 +222,20 @@ def test_live_failure_falls_back_on_same_websocket(monkeypatch):
     monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
     monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
 
-    transcript = None
-    audio = None
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(fixture)
         ws.send_json({"type": "end"})
-        for _ in range(10):
-            message = ws.receive()
-            if message.get("text"):
-                payload = json.loads(message["text"])
-                if payload.get("type") == "transcript":
-                    transcript = payload
-            if message.get("bytes"):
-                audio = message["bytes"]
-            if transcript is not None and audio is not None:
-                break
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        transcript = ws.receive_json()
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Hallo Piet",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        audio = ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        assert ws.receive()["type"] == "websocket.close"
 
     assert transcript == {"type": "transcript", "text": "hallo hermes"}
     assert audio
@@ -267,9 +270,17 @@ def test_missing_gemini_key_uses_fallback_without_constructing_live(
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x00\x00")
         ws.send_json({"type": "end"})
-        messages = [ws.receive() for _ in range(4)]
-
-    assert any(message.get("bytes") for message in messages)
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "antwort",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        assert ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        assert ws.receive()["type"] == "websocket.close"
 
 
 def test_odd_sized_pcm_frame_returns_structured_error(monkeypatch):
@@ -378,3 +389,293 @@ async def test_delegate_uses_bounded_shell_free_hermes_quiet_subprocess(monkeypa
     assert observed["args"] == ("hermes", "-q", "prüfe den Status")
     assert observed["kwargs"]["stdout"] is voice_ws.asyncio.subprocess.PIPE
     assert observed["kwargs"]["stderr"] is voice_ws.asyncio.subprocess.PIPE
+
+
+def test_disabled_web_server_does_not_import_voice_runtime(tmp_path):
+    environment = os.environ.copy()
+    environment["HERMES_HOME"] = str(tmp_path)
+    code = """
+import sys
+from fastapi.testclient import TestClient
+from hermes_cli import web_server
+
+for module_name in (
+    "hermes_cli.voice_ws",
+    "hermes_cli.voice_live_session",
+    "google.genai",
+    "tools.transcription_tools",
+    "tools.tts_tool",
+):
+    assert module_name not in sys.modules, module_name
+assert web_server._voice_web_enabled({}) is False
+assert web_server._voice_web_enabled({"voice_web": {"enabled": 1}}) is False
+assert web_server._voice_web_enabled({"voice_web": {"enabled": True}}) is True
+route_paths = {getattr(route, "path", "") for route in web_server.app.routes}
+assert "/voice" not in route_paths
+assert "/api/voice/live" not in route_paths
+assert TestClient(web_server.app).get("/voice").status_code == 404
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_enabled_web_server_imports_and_registers_voice_router(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "voice_web:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["HERMES_HOME"] = str(tmp_path)
+    code = """
+import sys
+from hermes_cli import web_server
+
+assert "hermes_cli.voice_ws" in sys.modules
+route_paths = {getattr(route, "path", "") for route in web_server.app.routes}
+assert "/voice" in route_paths
+assert "/api/voice/live" in route_paths
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_google_api_key_alias_does_not_enable_gemini_live(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-alias-only")
+    monkeypatch.setattr(
+        voice_ws,
+        "load_env",
+        lambda: {"GOOGLE_API_KEY": "google-dotenv-alias-only"},
+    )
+
+    assert voice_ws.resolve_gemini_api_key() == ""
+
+
+def test_blank_process_gemini_key_falls_back_to_dotenv(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("GEMINI_API_KEY", "   ")
+    monkeypatch.setattr(
+        voice_ws,
+        "load_env",
+        lambda: {"GEMINI_API_KEY": "dotenv-gemini-key"},
+    )
+
+    assert voice_ws.resolve_gemini_api_key() == "dotenv-gemini-key"
+
+
+def test_unexpected_live_error_is_safe_and_never_cascades(monkeypatch):
+    from hermes_cli import voice_ws
+
+    secret = "server-only-gemini-key"
+    fallback_calls = []
+
+    class BrokenGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, audio_in, events_out, tool_executor):
+            raise ValueError(f"programmer failure containing {secret}")
+
+    async def unexpected_fallback(*args, **kwargs):
+        fallback_calls.append((args, kwargs))
+        raise AssertionError("unexpected live errors must not cascade")
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: secret)
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", BrokenGeminiLiveSession)
+    monkeypatch.setattr(
+        voice_ws,
+        "fallback_transcribe_pcm",
+        unexpected_fallback,
+    )
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", unexpected_fallback)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        payload = ws.receive_json()
+
+    assert payload == {
+        "type": "error",
+        "error": {
+            "code": "live_internal_error",
+            "message": "Die Live-Sprachverbindung ist intern fehlgeschlagen.",
+        },
+    }
+    assert secret not in json.dumps(payload)
+    assert fallback_calls == []
+
+
+def test_interrupt_flushes_playback_semantics_and_live_keeps_receiving(
+    monkeypatch,
+):
+    from hermes_cli import voice_ws
+
+    received_frames = []
+
+    class ContinuingGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, audio_in, events_out, tool_executor):
+            for _ in range(2):
+                frame = await audio_in.get()
+                received_frames.append(frame)
+                audio_in.task_done()
+            await events_out.put({"type": "state", "value": "listening"})
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+    monkeypatch.setattr(
+        voice_ws,
+        "GeminiLiveSession",
+        ContinuingGeminiLiveSession,
+    )
+    monkeypatch.setattr(voice_ws, "_LIVE_END_GRACE_SECONDS", 0.01)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        ws.send_bytes(b"\x01\x00")
+        ws.send_json({"type": "interrupt"})
+        assert ws.receive_json() == {"type": "interrupted"}
+        ws.send_bytes(b"\x02\x00")
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert received_frames == [b"\x01\x00", b"\x02\x00"]
+
+
+@pytest.mark.asyncio
+async def test_delegate_cancellation_terminates_and_reaps_child(monkeypatch):
+    from hermes_cli import voice_ws
+
+    class CancellableProcess:
+        def __init__(self):
+            self.returncode = None
+            self.communicate_started = voice_ws.asyncio.Event()
+            self.terminated = False
+            self.reaped = False
+
+        async def communicate(self):
+            self.communicate_started.set()
+            await voice_ws.asyncio.Event().wait()
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            raise AssertionError("cooperative terminate should not need kill")
+
+        async def wait(self):
+            self.reaped = True
+            return self.returncode
+
+    process = CancellableProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(
+        voice_ws.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    task = voice_ws.asyncio.create_task(voice_ws.delegate_to_hermes("langlaufend"))
+    await voice_ws.asyncio.wait_for(process.communicate_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(voice_ws.asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.reaped is True
+
+
+@pytest.mark.asyncio
+async def test_delegate_timeout_escalates_to_kill_and_reaps_child(monkeypatch):
+    from hermes_cli import voice_ws
+
+    class StubbornProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+            self.reaped = False
+
+        async def communicate(self):
+            await voice_ws.asyncio.Event().wait()
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            if not self.killed:
+                await voice_ws.asyncio.Event().wait()
+            self.reaped = True
+            return self.returncode
+
+    process = StubbornProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(
+        voice_ws.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(voice_ws, "_DELEGATE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(voice_ws, "_PROCESS_TERMINATE_GRACE_SECONDS", 0.01)
+
+    with pytest.raises(voice_ws.VoiceRuntimeError) as exc:
+        await voice_ws.delegate_to_hermes("langlaufend")
+
+    assert exc.value.code == "delegation_timeout"
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.reaped is True
+
+
+@pytest.mark.asyncio
+async def test_interrupt_audio_discard_preserves_queue_accounting():
+    from hermes_cli import voice_ws
+
+    events = asyncio.Queue()
+    events.put_nowait({"type": "state", "value": "speaking"})
+    events.put_nowait({"type": "audio", "data": b"old"})
+    events.put_nowait({"type": "state", "value": "listening"})
+
+    voice_ws._discard_queued_audio_events(events)
+
+    retained = []
+    while not events.empty():
+        retained.append(events.get_nowait())
+        events.task_done()
+    await asyncio.wait_for(events.join(), timeout=1)
+    assert retained == [
+        {"type": "state", "value": "speaking"},
+        {"type": "state", "value": "listening"},
+    ]

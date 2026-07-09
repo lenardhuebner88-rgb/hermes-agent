@@ -43,6 +43,7 @@ _LIVE_END_GRACE_SECONDS = 1.0
 _EVENT_DRAIN_TIMEOUT_SECONDS = 10.0
 _DELEGATE_TIMEOUT_SECONDS = 120.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
+_PROCESS_TERMINATE_GRACE_SECONDS = 1.0
 _FFMPEG_TIMEOUT_SECONDS = 60.0
 _OUTPUT_PCM_CHUNK_BYTES = 24_000
 
@@ -92,14 +93,11 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
 
 def resolve_gemini_api_key() -> str:
     """Resolve Gemini credentials server-side without exposing their value."""
+    process_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if process_key:
+        return process_key
     environment = load_env()
-    return (
-        os.environ.get("GEMINI_API_KEY")
-        or environment.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or environment.get("GOOGLE_API_KEY")
-        or ""
-    ).strip()
+    return str(environment.get("GEMINI_API_KEY") or "").strip()
 
 
 def _voice_cache_dir() -> Path:
@@ -235,6 +233,35 @@ async def fallback_synthesize_pcm(text: str, language: str) -> bytes:
             await asyncio.to_thread(_unlink_owned_voice_file, requested_path)
 
 
+async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
+    """Terminate, escalate to kill, and reap a child within a fixed bound."""
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=_PROCESS_TERMINATE_GRACE_SECONDS,
+        )
+        return
+    except TimeoutError:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        _log.warning("Hermes delegation child did not exit after kill")
+
+
 async def delegate_to_hermes(prompt: str) -> str:
     """Delegate one fallback turn through the supported Hermes CLI surface."""
     try:
@@ -257,26 +284,10 @@ async def delegate_to_hermes(prompt: str) -> str:
             timeout=_DELEGATE_TIMEOUT_SECONDS,
         )
     except asyncio.CancelledError:
-        if process.returncode is None:
-            process.kill()
-            try:
-                await asyncio.wait_for(
-                    process.wait(),
-                    timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                pass
+        await _stop_subprocess(process)
         raise
     except TimeoutError as exc:
-        if process.returncode is None:
-            process.kill()
-        try:
-            await asyncio.wait_for(
-                process.communicate(),
-                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            pass
+        await _stop_subprocess(process)
         raise VoiceRuntimeError(
             "delegation_timeout",
             "Hermes hat nicht rechtzeitig geantwortet.",
@@ -373,6 +384,42 @@ async def _put_event(
         await asyncio.gather(put_task, disconnect_task, return_exceptions=True)
 
 
+async def _put_event_checkpoint(
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    event: dict[str, Any],
+    disconnected: asyncio.Event,
+) -> bool:
+    """Queue one event and wait until the sole sender delivered or rejected it."""
+    if not await _put_event(events_out, event, disconnected):
+        return False
+    try:
+        await asyncio.wait_for(
+            events_out.join(),
+            timeout=_EVENT_DRAIN_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        disconnected.set()
+        return False
+    return not disconnected.is_set()
+
+
+def _discard_queued_audio_events(
+    events_out: asyncio.Queue[dict[str, Any] | None],
+) -> None:
+    """Drop not-yet-sent audio while preserving queued control/state events."""
+    retained: list[dict[str, Any] | None] = []
+    while True:
+        try:
+            event = events_out.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        events_out.task_done()
+        if event is None or event.get("type") != "audio":
+            retained.append(event)
+    for event in retained:
+        events_out.put_nowait(event)
+
+
 async def _read_voice_frames(
     websocket: WebSocket,
     audio_in: asyncio.Queue[bytes],
@@ -442,6 +489,11 @@ async def _read_voice_frames(
             if control_type == "end":
                 return "end"
             if control_type == "interrupt":
+                # Gemini continues to receive microphone PCM and performs native
+                # automatic VAD/barge-in.  The explicit browser control only
+                # flushes queued server audio and tells the client to stop local
+                # playback; the SDK exposes no supported activity_start hook here.
+                _discard_queued_audio_events(events_out)
                 await _put_event(events_out, {"type": "interrupted"}, disconnected)
                 continue
             await _put_event(
@@ -476,7 +528,7 @@ async def _send_voice_events(
                     await websocket.send_bytes(data)
             else:
                 await websocket.send_json(event)
-        except (WebSocketDisconnect, RuntimeError):
+        except (WebSocketDisconnect, OSError, RuntimeError):
             disconnected.set()
             return
         finally:
@@ -491,20 +543,26 @@ async def _run_cascade_fallback(
 ) -> None:
     if not fallback_pcm:
         raise VoiceRuntimeError("no_audio", "Es wurde kein Audio empfangen.")
-    if not await _put_event(
+    if not await _put_event_checkpoint(
         events_out,
         {"type": "state", "value": "thinking"},
         disconnected,
     ):
         return
     transcript = await fallback_transcribe_pcm(fallback_pcm, config.language)
-    if not await _put_event(
+    if not await _put_event_checkpoint(
         events_out,
         {"type": "transcript", "text": transcript},
         disconnected,
     ):
         return
     response = await delegate_to_hermes(transcript)
+    if not await _put_event_checkpoint(
+        events_out,
+        {"type": "transcript", "role": "assistant", "text": response},
+        disconnected,
+    ):
+        return
     audio = await fallback_synthesize_pcm(response, config.language)
     if not audio or len(audio) % 2:
         raise VoiceRuntimeError(
@@ -552,12 +610,7 @@ async def _run_live_bridge(
         return True
     except asyncio.CancelledError:
         raise
-    except Exception:
-        _log.exception("Gemini Live bridge failed; switching to cascade fallback")
-        fallback_mode.set()
-        return True
-    fallback_mode.set()
-    return True
+    raise RuntimeError("Gemini Live bridge exited without a fallback signal")
 
 
 async def _finish_event_sender(
@@ -760,6 +813,24 @@ def create_voice_router(
                         },
                         disconnected,
                     )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.error(
+                "Voice Live websocket failed internally type=%s",
+                type(exc).__name__,
+            )
+            await _put_event(
+                events_out,
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "live_internal_error",
+                        "message": "Die Live-Sprachverbindung ist intern fehlgeschlagen.",
+                    },
+                },
+                disconnected,
+            )
         finally:
             for task in (reader_task, live_task):
                 if task is not None and not task.done():
