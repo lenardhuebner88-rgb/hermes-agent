@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { StatsFieldConfigSchema, type StatsFieldConfig } from "../lib/statsFields";
 import type { PromptForgeCatalog } from "../views/schmiede/catalog";
+import type { KnowledgeCatalog } from "../views/knowledge/knowledge.helpers";
 import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
 import {
   AccountUsageResponseSchema,
@@ -2539,6 +2540,21 @@ export function useLibraryUnread(): number {
   return countLibraryUnread(state.data?.items ?? [], since);
 }
 
+// S6 (2026-07-09): der komplette Regal-Katalog, ungefiltert (kein `q` — die
+// Volltextsuche im Nachschlagewerk bleibt ihr eigener, debouncter Fetch,
+// s. KnowledgeShelf). Speist sowohl die BriefingsShelf-Schnellauswahl-Kacheln
+// als auch KnowledgeShelfs Baseline-Ansicht; geteilter pollingStore-Key → EIN
+// Timer/Request für beide statt zwei. Bewusst ohne zod-Schema (wie die
+// übrigen Library-Endpoints, z. B. useLibraryUnread direkt darüber) — die
+// Bibliothek validiert ihre Payloads nirgends per parseOrThrow.
+export function useKnowledgeCatalog() {
+  return usePolling<KnowledgeCatalog>(
+    "knowledge-catalog",
+    () => fetchJSON<KnowledgeCatalog>("/api/library/knowledge"),
+    60000,
+  );
+}
+
 export interface PromptForgeCatalogState {
   data: PromptForgeCatalog | null;
   error: string | null;
@@ -2806,6 +2822,8 @@ export interface LoopStopResult {
 export interface LoopTimerResult {
   pack: string;
   timer_enabled: boolean;
+  timer_schedule: string;
+  timer_next_run: string | null;
 }
 
 export function startLoop(pack: string, overrides: Record<string, string | number>): Promise<LoopStartResult> {
@@ -2825,6 +2843,14 @@ export function toggleLoopTimer(pack: string, enabled: boolean): Promise<LoopTim
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
+  });
+}
+
+export function setLoopTimerSchedule(pack: string, time: string): Promise<LoopTimerResult> {
+  return fetchJSON<LoopTimerResult>(`/api/loops/${encodeURIComponent(pack)}/timer/schedule`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ time }),
   });
 }
 

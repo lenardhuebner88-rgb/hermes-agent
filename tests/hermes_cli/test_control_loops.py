@@ -63,6 +63,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(control_loops, "PACKS_DIR_OVERRIDE", packs)
     monkeypatch.setattr(control_loops, "STATE_ROOT_OVERRIDE", tmp_path / "state")
     monkeypatch.setattr(control_loops, "MODELS_PATH_OVERRIDE", models)
+    monkeypatch.setattr(control_loops, "SYSTEMD_USER_DIR_OVERRIDE", tmp_path / "systemd-user")
 
     calls: list[tuple[str, ...]] = []
 
@@ -93,6 +94,9 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["queue"] is None  # sweep hat keine Queue
     assert nacht["commits_ahead"] == 0
     assert nacht["timer_enabled"] is False
+    assert nacht["timer_schedule"] == "23:37"
+    assert nacht["timer_next_run"] is None
+    assert nacht["autoland"] is False
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
     assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
@@ -236,6 +240,170 @@ def test_timer_toggle_calls_systemctl(api):
     assert ("enable", "--now", "hermes-loop@nacht.timer") in calls
     resp = client.post("/api/loops/nacht/timer", json={"enabled": False})
     assert ("disable", "--now", "hermes-loop@nacht.timer") in calls
+
+
+def test_timer_schedule_persists_for_disabled_timer_without_starting_it(api):
+    client, calls, tmp = api
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "04:25"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "pack": "nacht",
+        "timer_enabled": False,
+        "timer_schedule": "04:25",
+        "timer_next_run": None,
+    }
+    dropin = tmp / "systemd-user" / "hermes-loop@nacht.timer.d" / "schedule.conf"
+    assert dropin.read_text(encoding="utf-8") == (
+        "# Verwaltet vom Hermes /control Loop-Tab.\n"
+        "[Timer]\n"
+        "OnCalendar=\n"
+        "OnCalendar=*-*-* 04:25:00\n"
+    )
+    assert ("daemon-reload",) in calls
+    assert ("restart", "hermes-loop@nacht.timer") not in calls
+    nacht = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "nacht")
+    assert nacht["timer_schedule"] == "04:25"
+
+
+def test_timer_schedule_rearms_enabled_timer_and_reports_next_run(api, monkeypatch):
+    client, calls, _tmp = api
+
+    def enabled_systemctl(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "is-enabled":
+            return subprocess.CompletedProcess(args, 0, stdout="enabled\n", stderr="")
+        if args[0] == "show":
+            return subprocess.CompletedProcess(
+                args, 0, stdout="Fri 2026-07-10 02:15:00 CEST\n", stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", enabled_systemctl)
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "02:15"})
+    assert resp.status_code == 200, resp.text
+    assert ("restart", "hermes-loop@nacht.timer") in calls
+    assert resp.json()["timer_next_run"] == "Fri 2026-07-10 02:15:00 CEST"
+
+
+def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disabled_timer(api, monkeypatch):
+    client, calls, _tmp = api
+
+    def effective_systemctl(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "is-enabled":
+            return subprocess.CompletedProcess(args, 1, stdout="disabled\n", stderr="")
+        if "--property=TimersCalendar" in args:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout="{ OnCalendar=*-*-* 04:50:00 ; next_elapse=Fri 2026-07-10 04:50:00 CEST }\n",
+                stderr="",
+            )
+        if "--property=NextElapseUSecRealtime" in args:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="Fri 2026-07-10 04:50:00 CEST\n", stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", effective_systemctl)
+    nacht = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "nacht")
+    assert nacht["timer_enabled"] is False
+    assert nacht["timer_schedule"] == "04:50"
+    assert nacht["timer_next_run"] == "Fri 2026-07-10 04:50:00 CEST"
+
+
+@pytest.mark.parametrize(
+    "bad_time", ["7:30", "24:00", "23:60", "23:37\n", "0٣:45", "٢٣:٤٥", "morgen"],
+)
+def test_timer_schedule_rejects_invalid_time_without_writing(api, bad_time):
+    client, calls, tmp = api
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": bad_time})
+    assert resp.status_code == 400
+    assert not (tmp / "systemd-user" / "hermes-loop@nacht.timer.d" / "schedule.conf").exists()
+    assert ("daemon-reload",) not in calls
+
+
+def test_timer_schedule_rolls_back_dropin_when_daemon_reload_fails(api, monkeypatch):
+    client, calls, tmp = api
+    first = client.put("/api/loops/nacht/timer/schedule", json={"time": "05:10"})
+    assert first.status_code == 200
+    dropin = tmp / "systemd-user" / "hermes-loop@nacht.timer.d" / "schedule.conf"
+    before = dropin.read_bytes()
+    reloads = 0
+
+    def failing_reload(*args: str) -> subprocess.CompletedProcess:
+        nonlocal reloads
+        calls.append(args)
+        if args[0] == "is-enabled":
+            return subprocess.CompletedProcess(args, 1, stdout="disabled\n", stderr="")
+        if args == ("daemon-reload",):
+            reloads += 1
+            if reloads == 1:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="invalid unit")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", failing_reload)
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "06:20"})
+    assert resp.status_code == 502
+    assert "daemon-reload" in resp.json()["detail"]
+    assert dropin.read_bytes() == before
+    assert reloads == 2, "Rollback muss systemd erneut auf den alten Drop-in laden"
+
+
+def test_timer_schedule_removes_new_dropin_when_first_daemon_reload_fails(api, monkeypatch):
+    client, calls, tmp = api
+    reloads = 0
+
+    def failing_reload(*args: str) -> subprocess.CompletedProcess:
+        nonlocal reloads
+        calls.append(args)
+        if args[0] == "is-enabled":
+            return subprocess.CompletedProcess(args, 1, stdout="disabled\n", stderr="")
+        if args == ("daemon-reload",):
+            reloads += 1
+            return subprocess.CompletedProcess(
+                args, 1 if reloads == 1 else 0, stdout="", stderr="invalid unit",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", failing_reload)
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "06:20"})
+    dropin = tmp / "systemd-user" / "hermes-loop@nacht.timer.d" / "schedule.conf"
+    assert resp.status_code == 502
+    assert not dropin.exists(), "Rollback muss einen erstmals angelegten Drop-in entfernen"
+    assert reloads == 2
+
+
+def test_timer_schedule_restores_and_rearms_previous_schedule_when_restart_fails(api, monkeypatch):
+    client, calls, tmp = api
+    seeded = client.put("/api/loops/nacht/timer/schedule", json={"time": "05:10"})
+    assert seeded.status_code == 200
+    dropin = tmp / "systemd-user" / "hermes-loop@nacht.timer.d" / "schedule.conf"
+    before = dropin.read_bytes()
+    restarts = 0
+    reloads = 0
+
+    def failing_restart(*args: str) -> subprocess.CompletedProcess:
+        nonlocal reloads, restarts
+        calls.append(args)
+        if args[0] == "is-enabled":
+            return subprocess.CompletedProcess(args, 0, stdout="enabled\n", stderr="")
+        if args == ("daemon-reload",):
+            reloads += 1
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ("restart", "hermes-loop@nacht.timer"):
+            restarts += 1
+            return subprocess.CompletedProcess(
+                args, 1 if restarts == 1 else 0, stdout="", stderr="restart failed",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", failing_restart)
+    resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "06:20"})
+    assert resp.status_code == 502
+    assert "neu eingeplant" in resp.json()["detail"]
+    assert dropin.read_bytes() == before
+    assert reloads == 2
+    assert restarts == 2, "Rollback muss den Timer mit dem alten Schedule erneut starten"
 
 
 def test_files_repo_pack_readonly_and_put_403(api):

@@ -58,7 +58,7 @@ Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
 Neue Engine = Modul mit `@register("name")` nach dem Contract
 `run(model, prompt, cwd, timeout_s) -> EngineResult`.
 
-## Landung (Stufe 1 — bewusster Schritt, nie im Loop)
+## Landung (Stufe 1 — standardmäßig bewusster Schritt)
 
 `--cmd land` automatisiert die Morgen-Mechanik mit Schienen: Abbruch bei UNVERIFIED
 (10-building) · Live-Checkout muss auf main + sauber sein · Rollback-Anker-Tag
@@ -69,7 +69,30 @@ berührt) · bei Rot `reset --keep` auf den Anker · Push NUR piet-fork · verif
 Pläne → `30-landed` · Pack FRESH von neuem main. Rebase-Konflikt oder dirty
 Pack-Worktree bleiben Abbruch mit manuellem Klärbedarf. Das **Urteil** über die
 Commits (Ledger + Diffs lesen) bleibt vor dem Aufruf beim Menschen/Hauptagenten.
-Auto-Land (Stufe 2) ist bewusst NICHT freigeschaltet.
+Auto-Land (Stufe 2) ist für alle übrigen Packs bewusst NICHT freigeschaltet.
+
+**Eng begrenzte Ausnahme (Operator 2026-07-09):** Nur das kuratierte Repo-Pack
+`dashboard-experience` steht zusätzlich in der Code-Allowlist des Runners. Die
+Freigabe ist an den Repo-Pack-Pfad, das Live-Repo, den Fable→Sol→Fable-Vertrag
+sowie SHA-256 der Manifest- und Prompt-Inhalte gebunden; Custom-Kopien, Drift und
+Runtime-Overrides brechen hart ab. Dort
+plant und verifiziert Fable 5 in frischen Sessions, GPT-5.6 Sol baut genau einen
+Commit, und der Driver landet ausschließlich bei `1 verified / 1 commit / 0
+planned / 0 building`, ausschließlich geänderten Pfaden unter
+`web/src/control/**`, exakt passender `PASS <plan-id>`-Quittung und einer
+runner-attestierten, commitgebundenen 390/820/1366-Evidenz (Summary + 3 PNG + 3
+ARIA) mit unveränderter SHA-256. Er fährt
+dieselbe ff-only-/Rebase-/Gate-/Rollback-Leiter,
+fordert einen erfolgreichen Push nach `piet-fork` und rollt bei Push-Fehler auch
+den lokalen Merge zurück – aber nur, solange `main` exakt auf dem eigenen
+Merge-Commit steht; fremde Parallel-Commits erzwingen manuelle Klärung statt
+Reset. Eine gesetzte `STOP`-Datei blockiert auch Resume/Push. `autoland: true` in
+irgendeinem anderen Manifest ist ein harter Manifest-Fehler; Custom-Packs können
+diese Autorität nicht erlangen. Modellphasen laufen mit Worker-Markern: Claudes
+globaler Guard sperrt Push/Deploy in den Fable-Phasen; für **alle** Engines setzt
+der Runner zusätzlich einen `git`-Push-Deny vor den PATH, neutralisiert bekannte
+Push-Remotes/Credentials und stellt die Umgebung nach der Phase wieder her. Die
+Ausnahme deployt nicht und erweitert keine Worker-Rechte auf push/merge.
 
 ## Eigene Packs (Werkstatt)
 

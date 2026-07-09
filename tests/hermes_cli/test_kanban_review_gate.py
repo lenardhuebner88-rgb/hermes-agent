@@ -4,8 +4,9 @@ Covers the producer side (``complete_task(review_gate=...)`` →
 ``_submit_for_review``) and the dependency-gating contract:
 
 * code-bearing worker completions park in ``review`` (not ``done``);
-* the gate is opt-in (``review_gate`` defaults False) and config-gated
-  (disabled / no verifier profile → direct ``done``, no stall);
+* the gate is opt-in (``review_gate`` defaults False) and config-gated;
+* an enabled gate with an unavailable review profile stays retryably parked
+  in ``review`` instead of silently completing or self-reviewing;
 * non-code assignees are never gated;
 * the verifier's OWN completion (run originated from review) is terminal
   ``done`` — never re-parked (anti-loop);
@@ -458,7 +459,7 @@ def test_set_tier_below_floor_with_ack_records_event(kanban_home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# B-T6: ordered stage list per tier (missing profiles degrade gracefully)
+# B-T6: ordered stage list per tier (configured topology is never shortened)
 # ---------------------------------------------------------------------------
 
 
@@ -476,9 +477,21 @@ def test_review_stages_for_tier(monkeypatch):
         "reviewer",
         "critic",
     ]
-    # missing critic profile → critical degrades, never strands the task
+    # A temporarily missing critic remains a required stage. Runtime
+    # availability is a retryable dispatch concern, not permission to weaken
+    # the configured review topology.
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name != "critic")
-    assert kb._review_stages_for_tier("critical", cfg) == ["verifier", "reviewer"]
+    assert kb._review_stages_for_tier("critical", cfg) == [
+        "verifier",
+        "reviewer",
+        "critic",
+    ]
+    monkeypatch.setattr(
+        profiles_mod,
+        "profile_exists",
+        lambda name: (_ for _ in ()).throw(RuntimeError("resolver unavailable")),
+    )
+    assert kb._review_stages_for_tier("review", cfg) == ["verifier", "reviewer"]
     # unknown tier → single verifier stage (today's behavior)
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     assert kb._review_stages_for_tier("bogus", cfg) == ["verifier"]
@@ -555,7 +568,13 @@ def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
 
         # stage 0: verifier APPROVED → re-park for stage 1 (reviewer)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
-        kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, tid).status == "review"
         assert (
             kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
@@ -563,13 +582,25 @@ def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
 
         # stage 1: reviewer APPROVED → re-park for stage 2 (critic)
         kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
-        kb.complete_task(conn, tid, summary="reviewer ok", review_gate=True)
+        kb.complete_task(
+            conn,
+            tid,
+            summary="reviewer ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, tid).status == "review"
         assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
 
         # stage 2: critic APPROVED → terminal done
         kb.claim_review_task(conn, tid, reviewer_profile="critic")
-        kb.complete_task(conn, tid, summary="critic ok", review_gate=True)
+        kb.complete_task(
+            conn,
+            tid,
+            summary="critic ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, tid).status == "done"
 
 
@@ -581,7 +612,13 @@ def test_standard_tier_still_single_stage(kanban_home, gate_on):
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
-        kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, tid).status == "done"  # standard → one stage only
 
 
@@ -989,7 +1026,13 @@ def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
         }
 
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
-        assert kb.complete_task(conn, tid, summary="APPROVED", review_gate=True)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="APPROVED",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, tid).status == "done"
         assert (
             len([
@@ -1017,9 +1060,21 @@ def test_final_review_completion_writes_review_released_event(kanban_home, gate_
         kb.claim_task(conn, tid)
         assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
-        assert kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
-        assert kb.complete_task(conn, tid, summary="reviewer ok", review_gate=True)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="reviewer ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
 
         releases = [e for e in kb.list_events(conn, tid) if e.kind == "review_released"]
         assert len(releases) == 1
@@ -1064,8 +1119,10 @@ def test_gate_disabled_by_default_goes_done(kanban_home):
         assert kb.get_task(conn, tid).status == "done"
 
 
-def test_gate_inert_when_verifier_profile_missing(kanban_home, monkeypatch):
-    """Enabled gate but missing verifier profile must NOT strand the task."""
+def test_gate_missing_verifier_parks_retryable_review_unavailable(
+    kanban_home, monkeypatch
+):
+    """An unavailable verifier cannot turn an enabled review gate into ``done``."""
     monkeypatch.setattr(
         kb,
         "_review_gate_config",
@@ -1080,7 +1137,87 @@ def test_gate_inert_when_verifier_profile_missing(kanban_home, monkeypatch):
         tid = kb.create_task(conn, title="impl", assignee="coder")
         kb.claim_task(conn, tid)
         assert kb.complete_task(conn, tid, summary="x", review_gate=True)
-        assert kb.get_task(conn, tid).status == "done"
+        assert kb.get_task(conn, tid).status == "review"
+
+        # Repeated dispatcher ticks keep retrying availability without
+        # duplicating or weakening the typed hold evidence.
+        kb.dispatch_once(conn, max_spawn=1)
+        kb.dispatch_once(conn, max_spawn=1)
+
+        run = kb.latest_run(conn, tid)
+        assert run is not None and run.outcome == "completed"
+        events = kb.list_events(conn, tid)
+        assert not any(event.kind == "completed" for event in events)
+        unavailable = [event for event in events if event.kind == "review_unavailable"]
+        assert len(unavailable) == 1
+        assert unavailable[0].payload["target_profile"] == "verifier"
+        assert unavailable[0].payload["retryable"] is True
+        assert unavailable[0].payload["reason"] == "profile_missing"
+        assert unavailable[0].payload["review_tier"] == "standard"
+        assert unavailable[0].payload["review_stage"] == 0
+
+
+def test_gate_profile_resolver_exception_parks_retryable_review_unavailable(
+    kanban_home, monkeypatch
+):
+    """Profile lookup failures are retryable review holds, never approval."""
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+        },
+    )
+
+    def resolver_unavailable(name):
+        raise RuntimeError(f"cannot resolve {name}")
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", resolver_unavailable)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="x", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+
+        events = kb.list_events(conn, tid)
+        assert not any(event.kind == "completed" for event in events)
+        unavailable = [event for event in events if event.kind == "review_unavailable"]
+        assert len(unavailable) == 1
+        assert unavailable[0].payload["target_profile"] == "verifier"
+        assert unavailable[0].payload["retryable"] is True
+        assert unavailable[0].payload["reason"] == "profile_resolution_failed"
+
+
+def test_misconfigured_reviewer_equal_to_coder_fails_closed_as_not_independent(
+    kanban_home, gate_on, monkeypatch
+):
+    cfg = kb._review_gate_config()
+    cfg["verifier_profile"] = "coder"
+    monkeypatch.setattr(kb, "_review_gate_config", lambda: cfg)
+
+    spawned = []
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="self-review trap", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="implementation", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+
+        result = kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            spawn_fn=lambda task, workspace: spawned.append(task.assignee) or 123,
+        )
+        assert tid in result.skipped_nonspawnable
+        assert spawned == []
+        unavailable = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "review_unavailable"
+        ]
+        assert unavailable[-1].payload["target_profile"] == "coder"
+        assert unavailable[-1].payload["reason"] == "reviewer_not_independent"
+        assert unavailable[-1].payload["retryable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1236,7 @@ def test_run_originated_from_review_discriminates(kanban_home, gate_on):
         assert kb._run_originated_from_review(conn, tid, claimed.current_run_id) is True
 
 
-def test_verifier_completion_goes_done(kanban_home, gate_on):
+def test_verifier_completion_with_structured_approval_goes_done(kanban_home, gate_on):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="coder")
         kb.claim_task(conn, tid)
@@ -1109,9 +1246,43 @@ def test_verifier_completion_goes_done(kanban_home, gate_on):
         claimed = kb.claim_review_task(conn, tid)
         assert claimed is not None and claimed.status == "running"
         assert kb.complete_task(
-            conn, tid, summary="APPROVED — tests pass", review_gate=True
+            conn,
+            tid,
+            summary="Tests pass",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
         )
         assert kb.get_task(conn, tid).status == "done"
+
+
+@pytest.mark.parametrize("summary", ["review finished", "APPROVED — tests pass"])
+def test_review_completion_without_structured_verdict_stays_in_flight(
+    kanban_home, gate_on, summary
+):
+    """Free text is evidence, not terminal review authority."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None and claimed.status == "running"
+        run_id = claimed.current_run_id
+
+        with pytest.raises(ValueError, match=r"metadata\.review_verdict|structured verdict"):
+            kb.complete_task(conn, tid, summary=summary, review_gate=True)
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.current_run_id == run_id
+        run = conn.execute(
+            "SELECT ended_at, outcome, verdict FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        assert run is not None
+        assert run["ended_at"] is None
+        assert run["outcome"] is None
+        assert run["verdict"] is None
+        events = kb.list_events(conn, tid)
+        assert not any(event.kind in {"completed", "review_released"} for event in events)
 
 
 def test_review_originated_request_changes_completion_does_not_go_done(
@@ -1128,7 +1299,7 @@ def test_review_originated_request_changes_completion_does_not_go_done(
             conn,
             tid,
             summary="needs fixes",
-            metadata={"verdict": "REQUEST_CHANGES"},
+            metadata={"review_verdict": "REQUEST_CHANGES"},
             review_gate=True,
         )
 
@@ -1139,6 +1310,90 @@ def test_review_originated_request_changes_completion_does_not_go_done(
         ).fetchone()
         assert row is not None
         assert row["verdict"] == "REQUEST_CHANGES"
+
+
+def test_review_block_is_always_request_changes_even_with_approved_metadata(
+    kanban_home, gate_on
+):
+    """The explicit negative action wins over contradictory metadata."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None
+
+        assert kb.block_task(
+            conn,
+            tid,
+            reason="review rejected",
+            reviewer_metadata={"review_verdict": "APPROVED"},
+        )
+
+        run = conn.execute(
+            "SELECT outcome, verdict FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert run is not None
+        assert run["outcome"] == "blocked"
+        assert run["verdict"] == "REQUEST_CHANGES"
+
+
+def test_intermediate_request_changes_never_advances_or_integrates(
+    kanban_home, gate_on, tmp_path, monkeypatch
+):
+    """A negative verifier verdict returns to the coder before later review or merge."""
+    from hermes_cli import kanban_worktrees
+
+    integrations = []
+    monkeypatch.setattr(
+        kanban_worktrees,
+        "maybe_integrate_on_complete",
+        lambda conn, task_id: integrations.append(task_id),
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical implementation",
+            assignee="coder",
+            review_tier="critical",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+        )
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        before = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "submitted_for_review"
+        ]
+        assert len(before) == 1
+        assert before[0].payload["review_stage"] == 0
+        assert before[0].payload["target_profile"] == "verifier"
+
+        claimed = kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert claimed is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="A regression remains",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["regression remains"],
+            },
+            review_gate=True,
+        )
+
+        assert kb.get_task(conn, tid).status == "blocked"
+        after = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "submitted_for_review"
+        ]
+        assert len(after) == 1
+        assert after[0].payload["target_profile"] == "verifier"
+        assert integrations == []
 
 
 def test_non_review_originated_approved_metadata_cannot_fake_review_completion(
@@ -1184,7 +1439,13 @@ def test_children_wait_for_verified_done(kanban_home, gate_on):
         assert kb.get_task(conn, child).status == "todo"
         # Verifier approves → parent done → child unblocks.
         kb.claim_review_task(conn, parent)
-        kb.complete_task(conn, parent, summary="APPROVED", review_gate=True)
+        kb.complete_task(
+            conn,
+            parent,
+            summary="Verifier approved",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert kb.get_task(conn, parent).status == "done"
         assert kb.get_task(conn, child).status == "ready"
 

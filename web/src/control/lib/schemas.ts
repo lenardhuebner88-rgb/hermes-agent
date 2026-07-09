@@ -1818,6 +1818,8 @@ export const LoopPackSummarySchema = z.object({
   queue: z.record(z.string(), z.coerce.number()).nullable().catch(null),
   commits_ahead: z.coerce.number().catch(0),
   timer_enabled: z.boolean().catch(false),
+  timer_schedule: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).catch("23:37"),
+  timer_next_run: z.string().nullable().catch(null),
 });
 
 // Reihenfolge irrelevant für die Auflösung (Summary verlangt "type", Error hat

@@ -15,8 +15,12 @@ Design (bindend): vault/03-Agents/Claude-Code/plans/2026-07-02-loop-runner-v1-v2
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import fcntl
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -41,6 +45,13 @@ except ModuleNotFoundError:  # editable install paketiert loops/ nicht → Repo-
 PACKS_DIR_OVERRIDE: Path | None = None
 STATE_ROOT_OVERRIDE: Path | None = None
 MODELS_PATH_OVERRIDE: Path | None = None
+SYSTEMD_USER_DIR_OVERRIDE: Path | None = None
+
+DEFAULT_TIMER_SCHEDULE = "23:37"
+_TIMER_SCHEDULE_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+_TIMER_ON_CALENDAR_RE = re.compile(
+    r"OnCalendar=\*-\*-\* ((?:[01][0-9]|2[0-3]):[0-5][0-9]):00(?:\s|;|$)",
+)
 
 # Mutationen nur für reguläre Packs — Unterstrich-Packs (_blank) sind Vorlagen.
 # Muss dieselben Namen zulassen wie runner._PACK_NAME_RE (minus führenden Unterstrich),
@@ -99,6 +110,141 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess:
         capture_output=True, encoding="utf-8", errors="replace",
         timeout=30, check=False,
     )
+
+
+def _systemd_user_dir() -> Path:
+    """User-systemd ist absichtlich HOME-verankert, nicht HERMES_HOME-verankert."""
+    return SYSTEMD_USER_DIR_OVERRIDE or (Path.home() / ".config" / "systemd" / "user")
+
+
+def _timer_unit(name: str) -> str:
+    return f"hermes-loop@{name}.timer"
+
+
+def _timer_dropin_path(name: str) -> Path:
+    return _systemd_user_dir() / f"{_timer_unit(name)}.d" / "schedule.conf"
+
+
+@contextmanager
+def _timer_mutation_lock(name: str) -> Iterator[None]:
+    """Toggle und Schedule-Write desselben Packs dürfen sich nicht überholen."""
+    lock_path = _state_root() / name / ".timer-schedule.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _timer_schedule(name: str) -> str:
+    """Effektiven systemd-Kalender lesen; Datei/Repo-Default sind Fallbacks."""
+    effective = _systemctl(
+        "show", "--property=TimersCalendar", "--value", _timer_unit(name),
+    )
+    if effective.returncode == 0:
+        match = _TIMER_ON_CALENDAR_RE.search(effective.stdout)
+        if match:
+            return match.group(1)
+
+    path = _timer_dropin_path(name)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return DEFAULT_TIMER_SCHEDULE
+    match = _TIMER_ON_CALENDAR_RE.search(content)
+    return match.group(1) if match else DEFAULT_TIMER_SCHEDULE
+
+
+def _timer_next_run(name: str) -> str | None:
+    res = _systemctl(
+        "show", "--property=NextElapseUSecRealtime", "--value", _timer_unit(name),
+    )
+    if res.returncode != 0:
+        return None
+    value = res.stdout.strip()
+    return value if value and value.lower() != "n/a" else None
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    """Datei im Zielverzeichnis schreiben und atomar ersetzen."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_path.replace(path)
+        # Rename-Metadaten best effort ebenfalls persistieren. Ein fsync-Fehler
+        # darf den bereits atomar ersetzten Inhalt nicht als fehlgeschlagen melden.
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _restore_timer_dropin(path: Path, previous: bytes | None, *, restart: bool, unit: str) -> None:
+    """Best-effort-Rollback nach einem systemd-Fehler; Originalfehler gewinnt."""
+    try:
+        if previous is None:
+            path.unlink(missing_ok=True)
+            try:
+                dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        else:
+            _atomic_write(path, previous)
+        _systemctl("daemon-reload")
+        if restart:
+            _systemctl("restart", unit)
+    except OSError:
+        pass
+
+
+def _set_timer_schedule(name: str, schedule: str, *, enabled: bool) -> None:
+    path = _timer_dropin_path(name)
+    try:
+        previous = path.read_bytes() if path.is_file() else None
+        content = (
+            "# Verwaltet vom Hermes /control Loop-Tab.\n"
+            "[Timer]\n"
+            "OnCalendar=\n"
+            f"OnCalendar=*-*-* {schedule}:00\n"
+        ).encode("utf-8")
+        _atomic_write(path, content)
+    except OSError as exc:
+        raise RuntimeError(f"Timer-Zeit konnte nicht gespeichert werden: {exc}") from exc
+
+    unit = _timer_unit(name)
+    reload_result = _systemctl("daemon-reload")
+    if reload_result.returncode != 0:
+        _restore_timer_dropin(path, previous, restart=False, unit=unit)
+        detail = reload_result.stderr.strip() or reload_result.stdout.strip()
+        raise RuntimeError(f"systemctl daemon-reload fehlgeschlagen: {detail}")
+
+    if enabled:
+        restart_result = _systemctl("restart", unit)
+        if restart_result.returncode != 0:
+            _restore_timer_dropin(path, previous, restart=True, unit=unit)
+            detail = restart_result.stderr.strip() or restart_result.stdout.strip()
+            raise RuntimeError(f"Timer konnte nicht neu eingeplant werden: {detail}")
 
 
 def _load_pack_or_404(name: str) -> loop_runner.Pack:
@@ -208,7 +354,7 @@ def _spawn_land(pack: loop_runner.Pack, log_path: Path) -> None:
 
 
 def _timer_enabled(name: str) -> bool:
-    res = _systemctl("is-enabled", f"hermes-loop@{name}.timer")
+    res = _systemctl("is-enabled", _timer_unit(name))
     return res.returncode == 0 and res.stdout.strip() == "enabled"
 
 
@@ -232,6 +378,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         if (state / "queue" / stage).is_dir() else 0
         for stage in loop_runner.QUEUE_STAGES
     }
+    timer_enabled = _timer_enabled(pack.name)
     return {
         "name": pack.name,
         "type": pack.type,
@@ -244,12 +391,15 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         },
         "stop": pack.stop,
         "params": pack.params,
+        "autoland": pack.autoland,
         "running": _is_running(state),
         "heartbeat": _heartbeat(state),
         "stop_requested": (state / "STOP").exists(),
         "queue": qcounts if pack.type == "pipeline" else None,
         "commits_ahead": len(_commits_ahead(pack)),
-        "timer_enabled": _timer_enabled(pack.name),
+        "timer_enabled": timer_enabled,
+        "timer_schedule": _timer_schedule(pack.name),
+        "timer_next_run": _timer_next_run(pack.name),
     }
 
 
@@ -259,6 +409,10 @@ class StartBody(BaseModel):
 
 class TimerBody(BaseModel):
     enabled: bool
+
+
+class TimerScheduleBody(BaseModel):
+    time: str
 
 
 class FileBody(BaseModel):
@@ -450,10 +604,40 @@ def register_loops_routes(app: FastAPI) -> None:
     def toggle_timer(pack: str, body: TimerBody) -> dict[str, Any]:
         loaded = _load_pack_or_404(pack)
         action = "enable" if body.enabled else "disable"
-        res = _systemctl(action, "--now", f"hermes-loop@{loaded.name}.timer")
-        if res.returncode != 0:
-            raise HTTPException(
-                status_code=502,
-                detail=f"systemctl {action} fehlgeschlagen: {res.stderr.strip() or res.stdout.strip()}",
-            )
-        return {"pack": loaded.name, "timer_enabled": _timer_enabled(loaded.name)}
+        with _timer_mutation_lock(loaded.name):
+            res = _systemctl(action, "--now", _timer_unit(loaded.name))
+            if res.returncode != 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"systemctl {action} fehlgeschlagen: {res.stderr.strip() or res.stdout.strip()}",
+                )
+            timer_enabled = _timer_enabled(loaded.name)
+            timer_schedule = _timer_schedule(loaded.name)
+            timer_next_run = _timer_next_run(loaded.name)
+        return {
+            "pack": loaded.name,
+            "timer_enabled": timer_enabled,
+            "timer_schedule": timer_schedule,
+            "timer_next_run": timer_next_run,
+        }
+
+    @app.put("/api/loops/{pack}/timer/schedule")
+    def save_timer_schedule(pack: str, body: TimerScheduleBody) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        schedule = body.time
+        if not _TIMER_SCHEDULE_RE.fullmatch(schedule):
+            raise HTTPException(status_code=400, detail="Uhrzeit muss im Format HH:MM (00:00–23:59) vorliegen")
+        with _timer_mutation_lock(loaded.name):
+            timer_enabled = _timer_enabled(loaded.name)
+            try:
+                _set_timer_schedule(loaded.name, schedule, enabled=timer_enabled)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            timer_schedule = _timer_schedule(loaded.name)
+            timer_next_run = _timer_next_run(loaded.name)
+        return {
+            "pack": loaded.name,
+            "timer_enabled": timer_enabled,
+            "timer_schedule": timer_schedule,
+            "timer_next_run": timer_next_run,
+        }

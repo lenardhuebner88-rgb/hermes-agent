@@ -1,0 +1,44 @@
+{
+  "id": "cron::profile:research::92adf20dd9bd::2026-07-09_20-03-53.md",
+  "category": "news",
+  "series_id": "profile:research/92adf20dd9bd",
+  "series": "KI Modell-Brief (Abend)",
+  "title": "KI Modell-Brief (Abend) — Ausgabe 09.07. 20:03",
+  "ts": 1783620233,
+  "preview": "OpenAI hat GPT-5.6 heute aus der Preview in den echten Rollout geschoben.",
+  "source_ref": "cron:research/92adf20dd9bd",
+  "series_meta": "0 20 * * *",
+  "structured": true,
+  "structured_brief": {
+    "run_kind": "abend",
+    "generated": "2026-07-09T20:03:53+02:00",
+    "top_story": "OpenAI hat GPT-5.6 heute aus der Preview in den echten Rollout geschoben: ChatGPT, Codex und API starten gleichzeitig.",
+    "model_news": [
+      {
+        "title": "OpenAI - GPT-5.6 (Sol/Terra/Luna)",
+        "summary": "OpenAI - GPT-5.6 (Sol/Terra/Luna) [A, 2026-07-09]: GA-Rollout über ChatGPT, Codex und API.",
+        "source_title": "2026-07-09 OpenAI - GPT-5.6: Frontier intelligence that scales with your ambition",
+        "source_url": "https://openai.com/index/gpt-5-6"
+      },
+      {
+        "title": "Meta - Muse Spark 1.1",
+        "summary": "Meta - Muse Spark 1.1 [A, 2026-07-09]: Multimodales Reasoning-Modell für agentische Aufgaben.",
+        "source_title": "2026-07-09 Meta AI - Introducing Muse Spark 1.1",
+        "source_url": "https://ai.meta.com/blog/introducing-muse-spark-meta-model-api/"
+      }
+    ],
+    "sources": [
+      {
+        "title": "2026-07-09 OpenAI - GPT-5.6: Frontier intelligence that scales with your ambition",
+        "url": "https://openai.com/index/gpt-5-6"
+      },
+      {
+        "title": "2026-07-09 Meta AI - Introducing Muse Spark 1.1",
+        "url": "https://ai.meta.com/blog/introducing-muse-spark-meta-model-api/"
+      }
+    ],
+    "watchlist_delta": [
+      "WATCHLIST-UPDATE: gpt-5.6-launch -> GPT-5.6 rollt ab heute über ChatGPT, Codex und API aus."
+    ]
+  }
+}

@@ -192,6 +192,30 @@ def worker_env(monkeypatch, tmp_path):
     return tid
 
 
+@pytest.fixture
+def review_worker_env(monkeypatch, worker_env):
+    """Promote the scoped worker task into a claimed independent review run."""
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        assert kb._submit_for_review(
+            conn,
+            worker_env,
+            result=None,
+            summary="implementation ready",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        claimed = kb.claim_review_task(
+            conn, worker_env, reviewer_profile="verifier"
+        )
+        assert claimed is not None and claimed.current_run_id is not None
+        run_id = claimed.current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    return worker_env
+
+
 def test_show_defaults_to_env_task_id(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_show({})
@@ -437,6 +461,60 @@ def test_complete_happy_path(worker_env):
         assert md == {"files": 2}
     finally:
         conn.close()
+
+
+def test_review_complete_requires_structured_verdict_and_is_retryable(
+    review_worker_env,
+):
+    """A prose approval cannot close review; the same in-flight run can retry."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    rejected = json.loads(
+        kt._handle_complete({"summary": "APPROVED - all tests pass"})
+    )
+    error = rejected.get("error", "")
+    assert "metadata.review_verdict" in error
+    assert "retry" in error.lower()
+    assert "in-flight" in error.lower()
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, review_worker_env)
+        assert task is not None and task.status == "running"
+        run = kb.latest_run(conn, review_worker_env)
+        assert run is not None and run.ended_at is None
+        verdict = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?", (run.id,)
+        ).fetchone()
+        assert verdict is not None and verdict["verdict"] is None
+
+    approved = json.loads(
+        kt._handle_complete(
+            {
+                "summary": "All tests pass",
+                "metadata": {"review_verdict": "APPROVED"},
+            }
+        )
+    )
+    assert approved["ok"] is True
+    with kb.connect() as conn:
+        assert kb.get_task(conn, review_worker_env).status == "done"
+        run = kb.latest_run(conn, review_worker_env)
+        assert run is not None
+        verdict = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?", (run.id,)
+        ).fetchone()
+        assert verdict is not None and verdict["verdict"] == "APPROVED"
+
+
+def test_complete_schema_requires_review_verdict_metadata():
+    from tools import kanban_tools as kt
+
+    metadata_help = kt.KANBAN_COMPLETE_SCHEMA["parameters"]["properties"][
+        "metadata"
+    ]["description"]
+    assert "MUST" in metadata_help
+    assert "metadata.review_verdict" in metadata_help
 
 
 def test_complete_metadata_round_trips_through_show(worker_env):

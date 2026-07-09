@@ -362,6 +362,55 @@ def test_run_slash_complete_goal_mode_worker_fail_open_when_judge_unavailable(
     assert task.status == "done"
 
 
+def test_run_slash_review_worker_requires_structured_verdict(
+    monkeypatch, kanban_home
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="review-cli-verdict",
+            assignee="coder",
+            initial_status="blocked",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'review', claim_lock = NULL, "
+                "claim_expires = NULL WHERE id = ?",
+                (tid,),
+            )
+        claimed = kb.claim_review_task(
+            conn,
+            tid,
+            claimer="cli-review-test",
+            reviewer_profile="verifier",
+        )
+        assert claimed is not None
+        run_id = kb.get_task(conn, tid).current_run_id
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+
+    rejected = kc.run_slash(
+        f"complete {tid} --summary 'APPROVED in prose only'"
+    )
+    assert "requires explicit metadata.review_verdict" in rejected
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "running"
+        assert kb.get_run(conn, run_id).status == "running"
+
+    approved = kc.run_slash(
+        f"complete {tid} --summary 'verified' "
+        "--metadata '{\"review_verdict\":\"APPROVED\"}'"
+    )
+    assert "Completed" in approved
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "done"
+        verdict = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()["verdict"]
+        assert verdict == "APPROVED"
+
+
 def test_run_slash_json_output(kanban_home):
     out = kc.run_slash("create 'jsontask' --assignee alice --json")
     payload = json.loads(out)
@@ -470,6 +519,21 @@ def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'b' --assignee bob")
     out = kc.run_slash("dispatch --dry-run")
     assert "Spawned:" in out
+
+
+def test_cli_dispatch_spawns_durable_closeouts_for_external_dispatcher(
+    kanban_home, monkeypatch
+):
+    from hermes_cli import kanban_closeout as closeout
+
+    calls = []
+    monkeypatch.setattr(
+        closeout,
+        "spawn_pending_closeouts",
+        lambda conn, board, limit=10: calls.append((board, limit)) or [],
+    )
+    kc.run_slash("dispatch")
+    assert calls == [("default", 10)]
 
 
 def test_run_slash_context_output_format(kanban_home):
@@ -911,6 +975,95 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# durable closeout subcommand wiring
+# ---------------------------------------------------------------------------
+
+def _closeout_args(task_id, *, inline=False, json_output=False, board=None):
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    argv = ["kanban"]
+    if board:
+        argv += ["--board", board]
+    argv += ["closeout", task_id]
+    if inline:
+        argv.append("--inline")
+    if json_output:
+        argv.append("--json")
+    return parser.parse_args(argv)
+
+
+def test_cli_closeout_default_launches_detached_unit(kanban_home, monkeypatch):
+    from hermes_cli import kanban_closeout as closeout
+
+    calls = []
+    monkeypatch.setattr(
+        closeout,
+        "spawn_closeout_unit",
+        lambda task_id, board=None: calls.append((task_id, board))
+        or {"ok": True, "unit": "hermes-kanban-closeout-default-t_x", "detail": "started"},
+    )
+    monkeypatch.setattr(
+        closeout,
+        "process_closeout",
+        lambda *_args, **_kwargs: pytest.fail("detached path processed inline"),
+    )
+
+    rc = kc.kanban_command(_closeout_args("t_x"))
+
+    assert rc == 0
+    assert calls == [("t_x", None)]
+
+
+def test_cli_closeout_inline_processes_exactly_one_task_as_json(
+    kanban_home, monkeypatch, capsys
+):
+    from hermes_cli import kanban_closeout as closeout
+
+    calls = []
+
+    def fake_process(conn, task_id):
+        calls.append((conn is not None, task_id))
+        return closeout.CloseoutResult(
+            task_id=task_id,
+            state="delivered",
+            release_state=closeout.CLOSEOUT_RELEASE_NOT_REQUIRED,
+            receipt_path="/tmp/receipt.md",
+            delivered=True,
+        )
+
+    monkeypatch.setattr(closeout, "process_closeout", fake_process)
+    rc = kc.kanban_command(
+        _closeout_args("t_one", inline=True, json_output=True)
+    )
+
+    assert rc == 0
+    assert calls == [(True, "t_one")]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "delivered"
+    assert payload["delivered"] is True
+
+
+@pytest.mark.parametrize("state", ["pending", "not_claimed"])
+def test_cli_closeout_inline_pending_check_exits_zero(
+    kanban_home, monkeypatch, state
+):
+    from hermes_cli import kanban_closeout as closeout
+
+    monkeypatch.setattr(
+        closeout,
+        "process_closeout",
+        lambda _conn, task_id: closeout.CloseoutResult(
+            task_id=task_id,
+            state=state,
+            release_state=closeout.CLOSEOUT_RELEASE_WAITING,
+        ),
+    )
+
+    assert kc.kanban_command(_closeout_args("t_wait", inline=True)) == 0
 
 
 # ---------------------------------------------------------------------------

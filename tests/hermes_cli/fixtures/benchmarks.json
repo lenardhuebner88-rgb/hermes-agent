@@ -1,0 +1,115 @@
+{
+  "updated": "2026-07-09T22:02:38+02:00",
+  "sources": {
+    "seed": {
+      "name": "Provider-Angabe (kuratiert)",
+      "url": "",
+      "fetched": ""
+    },
+    "openrouter": {
+      "name": "OpenRouter Model-Metadaten",
+      "url": "https://openrouter.ai/api/v1/models",
+      "fetched": "2026-07-09T22:02:38+02:00"
+    }
+  },
+  "models": [
+    {
+      "id": "anthropic/claude-haiku-4.5",
+      "family": "claude-sonnet-haiku",
+      "provider": "anthropic",
+      "scores": [
+        {
+          "suite": "swe-bench-verified",
+          "score": 73.3,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2025-10-15",
+          "claimed_by_provider": true
+        }
+      ]
+    },
+    {
+      "id": "anthropic/claude-opus-4.1",
+      "family": "claude-opus",
+      "provider": "anthropic",
+      "scores": [
+        {
+          "suite": "swe-bench-verified",
+          "score": 74.5,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2025-08-05",
+          "claimed_by_provider": true
+        }
+      ]
+    },
+    {
+      "id": "google/gemini-3.5-flash",
+      "family": "gemini",
+      "provider": "google",
+      "scores": [
+        {
+          "suite": "osworld-verified",
+          "score": 78.4,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2026-07-09",
+          "claimed_by_provider": true
+        },
+        {
+          "suite": "swe-bench-pro",
+          "score": 55.1,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2026-07-09",
+          "claimed_by_provider": true
+        }
+      ]
+    },
+    {
+      "id": "minimax/minimax-m2",
+      "family": "minimax",
+      "provider": "minimax",
+      "scores": [
+        {
+          "suite": "swe-bench-verified",
+          "score": 69.4,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2025-10-22",
+          "claimed_by_provider": true
+        }
+      ]
+    },
+    {
+      "id": "moonshotai/kimi-k2-thinking",
+      "family": "kimi",
+      "provider": "moonshotai",
+      "scores": [
+        {
+          "suite": "swe-bench-verified",
+          "score": 71.3,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2025-11-04",
+          "claimed_by_provider": true
+        }
+      ]
+    },
+    {
+      "id": "openai/gpt-5.1-codex-max",
+      "family": "gpt5-codex",
+      "provider": "openai",
+      "scores": [
+        {
+          "suite": "swe-bench-verified",
+          "score": 73.7,
+          "unit": "%",
+          "source": "seed",
+          "as_of": "2025-12-04",
+          "claimed_by_provider": true
+        }
+      ]
+    }
+  ]
+}

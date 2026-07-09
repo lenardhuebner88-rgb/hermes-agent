@@ -13355,13 +13355,17 @@ async def agent_terminal_capabilities() -> Dict[str, object]:
 
 @app.get("/api/agent-terminals/sessions")
 async def agent_terminal_sessions() -> Dict[str, object]:
-    return {"sessions": _agent_terminal_service().list_sessions()}
+    service = _agent_terminal_service()
+    service.cleanup_stale_isolated_attaches()
+    return {"sessions": service.list_sessions()}
 
 
 @app.get("/api/agent-terminals/windows")
 async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, object]:
     try:
-        windows = _agent_terminal_service().list_windows(session)
+        service = _agent_terminal_service()
+        service.cleanup_stale_isolated_attaches()
+        windows = service.list_windows(session)
     except AgentTerminalError as exc:
         raise _agent_terminal_error(exc) from exc
     return {"windows": [window.to_dict() for window in windows]}
@@ -13531,18 +13535,26 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
         return
     assert PtyBridge is not None
 
+    isolated_target = None
     try:
         session = TmuxAgentSessionService.validate_name(ws.query_params.get("session") or "", field="session")
         window = TmuxAgentSessionService.validate_name(ws.query_params.get("window") or "", field="window")
         service = _agent_terminal_service()
-        argv = service.attach_argv(session, window)
-    except AgentTerminalError as exc:
+        # Harden the source session before creating an isolated grouped client.
+        service.ensure_session_options(session)
+        attach_session = session
+        attach_window = window
+        if ws.query_params.get("isolated") == "1":
+            isolated_target = service.create_isolated_attach(session, window)
+            attach_session = isolated_target.session
+            attach_window = isolated_target.window
+        argv = service.attach_argv(attach_session, attach_window)
+    except (AgentTerminalError, KeyError) as exc:
+        if isolated_target is not None:
+            service.cleanup_isolated_attach(isolated_target.session)
         await ws.send_text(f"\r\n\x1b[31mInvalid tmux target: {scrub_detail(str(exc))}\x1b[0m\r\n")
         await ws.close(code=1008)
         return
-    # Covers sessions created before this option existed / a foreign tmux
-    # session the dashboard didn't spawn — best-effort, never fails attach.
-    service.ensure_session_options(session)
 
     attach_cols = _attach_dimension(ws.query_params.get("cols"), default=80)
     attach_rows = _attach_dimension(ws.query_params.get("rows"), default=24)
@@ -13550,10 +13562,13 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
     try:
         bridge = PtyBridge.spawn(argv, cwd=str(Path.home()), env=None, cols=attach_cols, rows=attach_rows)
     except (PtyUnavailableError, FileNotFoundError, OSError) as exc:
+        if isolated_target is not None:
+            service.cleanup_isolated_attach(isolated_target.session)
         detail = scrub_detail(f"Agent terminal attach failed: {exc}") or "Agent terminal attach failed"
         await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
+
 
     loop = asyncio.get_running_loop()
 
@@ -13618,6 +13633,8 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
         except (asyncio.CancelledError, Exception):
             pass
         bridge.close()
+        if isolated_target is not None:
+            service.cleanup_isolated_attach(isolated_target.session)
 
 
 @app.websocket("/api/pty")
@@ -15189,6 +15206,13 @@ register_library_routes(app)
 # hermes_cli/library_results.py.
 from hermes_cli.library_results import register_library_results_routes  # noqa: E402
 register_library_results_routes(app)
+
+# Bibliothek — Modelle: landscape (model-landscape.md) + sourced benchmarks
+# (benchmarks.json) + prompting guides (wiki/prompting/*.md). Under /api/ →
+# inherits the session-token gate; never in PUBLIC_API_PATHS. See
+# hermes_cli/library_models.py.
+from hermes_cli.library_models import register_library_models_routes  # noqa: E402
+register_library_models_routes(app)
 
 from hermes_cli.design_board_view import register_design_board_routes  # noqa: E402
 register_design_board_routes(app)

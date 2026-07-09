@@ -1449,31 +1449,6 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], _wk_err, exc_info=True,
                                 )
                         if task_terminal:
-                            # K12: on terminal ``done`` (NOT archived — avoid
-                            # receipt-spam when tasks get archived later) write a
-                            # fail-soft vault receipt. Own try/except so a write
-                            # hiccup can never affect the unsub below; the helper
-                            # is itself swallow-all and filesystem-only (never an
-                            # adapter send), so the delivery count is unchanged.
-                            if task.status == "done":
-                                try:
-                                    run = runs_by_event_id.get(
-                                        int(getattr(ev, "id", 0) or 0)
-                                    )
-                                    summary = getattr(run, "summary", None) or getattr(
-                                        task, "result", None
-                                    )
-                                    await asyncio.to_thread(
-                                        _write_auto_receipt,
-                                        task,
-                                        board_slug=board_slug,
-                                        summary=summary,
-                                    )
-                                except Exception:
-                                    logger.debug(
-                                        "kanban notifier: auto-receipt for %s failed",
-                                        sub["task_id"], exc_info=True,
-                                    )
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
                             )
@@ -2395,6 +2370,26 @@ class GatewayKanbanWatchersMixin:
                     logger.debug(
                         "kanban dispatcher: escalation classification sweep "
                         "failed on board %s", slug, exc_info=True,
+                    )
+                # A closeout may deploy/restart services, so the gateway only
+                # starts stable detached units. The unit claims its row after
+                # systemd accepted it; this watcher never processes inline.
+                try:
+                    from hermes_cli import kanban_closeout as _closeout
+
+                    closeout_spawns = _closeout.spawn_pending_closeouts(
+                        conn, board=slug, limit=10,
+                    )
+                    started = sum(1 for item in closeout_spawns if item.get("ok"))
+                    if started:
+                        logger.info(
+                            "kanban dispatcher [%s]: started %d closeout unit(s)",
+                            slug, started,
+                        )
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: closeout spawn sweep failed on board %s",
+                        slug, exc_info=True,
                     )
                 return _dispatch_result
             except sqlite3.DatabaseError as exc:

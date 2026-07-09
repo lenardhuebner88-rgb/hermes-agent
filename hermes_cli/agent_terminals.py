@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -24,6 +25,12 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
 _TRAILING_NUMBER_RE = re.compile(r"-\d+$")
 _MAX_NUMBERED_WINDOWS = 9
+_EPHEMERAL_ATTACH_PREFIX = "__hermes_attach_"
+_EPHEMERAL_ATTACH_MARKER = "@hermes_ephemeral_attach"
+_EPHEMERAL_ATTACH_SOURCE = "@hermes_attach_source"
+_EPHEMERAL_ATTACH_WINDOW = "@hermes_attach_window"
+_EPHEMERAL_ATTACH_CREATED_AT = "@hermes_attach_created_at"
+_EPHEMERAL_ATTACH_GRACE_SECONDS = 60
 
 _AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi")
 
@@ -168,6 +175,14 @@ class AgentWindowDefinition:
     cwd: Path
     env: Mapping[str, str]
     workdir_key: str
+
+
+@dataclass(frozen=True)
+class IsolatedAttachTarget:
+    source_session: str
+    source_window: str
+    session: str
+    window: str
 
 
 @dataclass(frozen=True)
@@ -459,11 +474,105 @@ class TmuxAgentSessionService:
         )
 
     # ----- inventory ------------------------------------------------------
-    def list_sessions(self) -> list[str]:
-        proc = self._run("list-sessions", "-F", "#{session_name}", check=False)
+    def _isolated_attach_rows(self) -> list[tuple[str, str, str, str, int | None, int]]:
+        proc = self._run(
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{@hermes_ephemeral_attach}\t#{@hermes_attach_source}\t#{@hermes_attach_window}\t#{@hermes_attach_created_at}\t#{session_attached}",
+            check=False,
+        )
         if proc.returncode != 0:
             return []
-        return [line for line in proc.stdout.splitlines() if line]
+        rows: list[tuple[str, str, str, str, int | None, int]] = []
+        for line in proc.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 6:
+                continue
+            name, marker, source, window, created_raw, attached_raw = parts
+            try:
+                created = int(created_raw) if created_raw else None
+            except ValueError:
+                created = None
+            try:
+                attached = int(attached_raw or "0")
+            except ValueError:
+                attached = 0
+            rows.append((name, marker, source, window, created, attached))
+        return rows
+
+    def list_sessions(self) -> list[str]:
+        return sorted(
+            name
+            for name, marker, _source, _window, _created, _attached in self._isolated_attach_rows()
+            if name and marker != "1"
+        )
+
+    def create_isolated_attach(
+        self,
+        session: str,
+        window: str,
+        *,
+        attach_id: str | None = None,
+        now: int | None = None,
+    ) -> IsolatedAttachTarget:
+        source_session = self.validate_name(session, field="session")
+        source_window = self.validate_name(window, field="window")
+        if source_session.startswith(_EPHEMERAL_ATTACH_PREFIX):
+            raise InvalidTarget("ephemeral attach sessions cannot be used as sources")
+        if not self.window_exists(source_session, source_window):
+            raise KeyError(f"tmux target not found: {source_session}:{source_window}")
+        token = self.validate_name(attach_id or secrets.token_hex(6), field="attach_id")
+        group = self.validate_name(f"{_EPHEMERAL_ATTACH_PREFIX}{token}", field="session")
+        if group in {name for name, *_rest in self._isolated_attach_rows()}:
+            raise InvalidTarget(f"isolated attach already exists: {group}")
+        created = int(self._now() if now is None else now)
+        try:
+            self._run("new-session", "-d", "-t", source_session, "-s", group)
+            self._run("select-window", "-t", self._cmd_target(group, source_window))
+            for option, value in (
+                (_EPHEMERAL_ATTACH_MARKER, "1"),
+                (_EPHEMERAL_ATTACH_SOURCE, source_session),
+                (_EPHEMERAL_ATTACH_WINDOW, source_window),
+                (_EPHEMERAL_ATTACH_CREATED_AT, str(created)),
+            ):
+                self._run("set-option", "-t", group, option, value)
+        except Exception:
+            self._run("kill-session", "-t", group, check=False)
+            raise
+        return IsolatedAttachTarget(source_session, source_window, group, source_window)
+
+    def cleanup_isolated_attach(self, session: str) -> bool:
+        target = self.validate_name(session, field="session")
+        row = next((row for row in self._isolated_attach_rows() if row[0] == target), None)
+        if row is None or row[1] != "1":
+            return False
+        return self._run("kill-session", "-t", target, check=False).returncode == 0
+
+    def cleanup_related_isolated_attaches(self, source_session: str, source_window: str | None = None) -> list[str]:
+        source = self.validate_name(source_session, field="session")
+        window = self.validate_name(source_window, field="window") if source_window is not None else None
+        cleaned: list[str] = []
+        for name, marker, row_source, row_window, _created, _attached in self._isolated_attach_rows():
+            if marker != "1" or row_source != source or (window is not None and row_window != window):
+                continue
+            if self.cleanup_isolated_attach(name):
+                cleaned.append(name)
+        return cleaned
+
+    def cleanup_stale_isolated_attaches(
+        self,
+        *,
+        now: int | None = None,
+        grace_seconds: int = _EPHEMERAL_ATTACH_GRACE_SECONDS,
+    ) -> list[str]:
+        current = int(self._now() if now is None else now)
+        cleaned: list[str] = []
+        for name, marker, _source, _window, created, attached in self._isolated_attach_rows():
+            if marker != "1" or attached or created is None or current - created <= grace_seconds:
+                continue
+            if self.cleanup_isolated_attach(name):
+                cleaned.append(name)
+        return cleaned
 
     def list_windows(self, session: str | None = None) -> list[TmuxWindow]:
         # pane_current_path stays LAST: it is the only field a pane process can
@@ -474,7 +583,7 @@ class TmuxAgentSessionService:
             "list-windows",
             "-a",
             "-F",
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{@hermes_ephemeral_attach}\t#{pane_current_path}",
         ]
         if session:
             args.insert(1, "-t")
@@ -484,13 +593,15 @@ class TmuxAgentSessionService:
             return []
         windows: list[TmuxWindow] = []
         for line in proc.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 7:
+            parts = line.split("\t", 9)
+            if len(parts) < 10:
+                continue
+            if parts[8] == "1":
                 continue
             pid = int(parts[4]) if parts[4].isdigit() else None
             dead = parts[5] == "1"
             activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
-            cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+            cwd = ("\t".join(parts[9:]) or None) if len(parts) > 9 else None
             windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead, activity))
         return windows
 
@@ -626,6 +737,7 @@ class TmuxAgentSessionService:
         # zurückgeben und das nummerierte Fenster verschwinden lassen.
         if definition.window != info.window:
             definition = replace(definition, window=info.window)
+        self.cleanup_related_isolated_attaches(info.session, info.window)
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
         return self._spawn_window(definition)
@@ -635,6 +747,7 @@ class TmuxAgentSessionService:
         info = self.show(session, window)
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
+        self.cleanup_related_isolated_attaches(info.session, info.window)
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("kill_dead", session=session, window=window)
 
@@ -646,6 +759,7 @@ class TmuxAgentSessionService:
         if info.session != "work":
             raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
         kind, _workdir = self.identity_for(info.session, info.window)
+        self.cleanup_related_isolated_attaches(info.session, info.window)
         self._run("kill-window", "-t", self._cmd_target(session, window))
         self._log_event("terminate", kind=kind, session=session, window=window)
 

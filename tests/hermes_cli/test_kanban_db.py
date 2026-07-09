@@ -10957,11 +10957,10 @@ def test_dispatch_review_spawns_as_verifier_profile(
     assert spawned_tasks[0].skills == []
 
 
-def test_dispatch_review_falls_back_when_verifier_missing(
+def test_dispatch_review_never_falls_back_to_coder_when_verifier_missing(
     kanban_home, monkeypatch,
 ):
-    """If the verifier profile doesn't exist, the review agent spawns as the
-    task's own assignee (degenerate self-review) rather than stalling."""
+    """A missing verifier is retryable review infrastructure, not self-review."""
     from hermes_cli import profiles
     # The task's assignee resolves, but 'verifier' does not.
     monkeypatch.setattr(
@@ -10976,10 +10975,50 @@ def test_dispatch_review_falls_back_when_verifier_missing(
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
-        kb.dispatch_once(conn, spawn_fn=capture_spawn)
+        res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
+        assert kb.get_task(conn, t).status == "review"
+        unavailable = [e for e in kb.list_events(conn, t) if e.kind == "review_unavailable"]
+    assert spawned_tasks == []
+    assert t in res.skipped_nonspawnable
+    assert len(unavailable) == 1
+    assert unavailable[0].payload["target_profile"] == "verifier"
+    assert unavailable[0].payload["retryable"] is True
+
+
+def test_review_unavailable_auto_spawns_when_verifier_returns(
+    kanban_home, monkeypatch,
+):
+    """Every dispatcher tick re-resolves the frozen stage without operator input."""
+    from hermes_cli import profiles
+
+    available = False
+    monkeypatch.setattr(
+        profiles,
+        "profile_exists",
+        lambda name: available and name == "verifier",
+    )
+    spawned_tasks = []
+
+    def capture_spawn(task, workspace, board=None):
+        spawned_tasks.append(task)
+        return 42
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+
+        first = kb.dispatch_once(conn, spawn_fn=capture_spawn)
+        assert t in first.skipped_nonspawnable
+        assert spawned_tasks == []
+        assert kb.get_task(conn, t).status == "review"
+
+        available = True
+        second = kb.dispatch_once(conn, spawn_fn=capture_spawn)
+        assert t not in second.skipped_nonspawnable
+        assert kb.get_task(conn, t).status == "running"
+
     assert len(spawned_tasks) == 1
-    assert spawned_tasks[0].assignee == "alice"
-    assert spawned_tasks[0].skills == []
+    assert spawned_tasks[0].assignee == "verifier"
 
 
 def test_dispatch_review_skips_unassigned(kanban_home):
@@ -11032,12 +11071,14 @@ def test_dispatch_review_spawns_when_ready_empty(
     assert spawns[0] == t
 
 
-def test_has_spawnable_review_true(kanban_home):
-    """has_spawnable_review returns True when review tasks exist with real profiles."""
+def test_has_spawnable_review_true(kanban_home, monkeypatch):
+    """Spawnability follows the independent stage target, not the assignee."""
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="default")
         _set_task_status(conn, t, "review")
-        # default profile should exist in the test env
         assert kb.has_spawnable_review(conn) is True
 
 
@@ -12456,7 +12497,14 @@ def test_b2_approved_verdict_on_review_complete(kanban_home):
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
         assert claimed is not None
-        ok = kb.complete_task(conn, t, result="lgtm", summary="lgtm")
+        ok = kb.complete_task(
+            conn,
+            t,
+            result="lgtm",
+            summary="lgtm",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
         assert ok is True
         assert _latest_run_verdict(conn, t) == "APPROVED"
 
@@ -12473,21 +12521,23 @@ def test_b2_request_changes_verdict_on_review_block(kanban_home):
         assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
 
 
-def test_b2_review_complete_extracts_needs_revision_verdict(kanban_home):
-    """Reviewer verdict strings override the completion default."""
+def test_b2_review_complete_rejects_free_text_verdict(kanban_home):
+    """A verdict in prose cannot authorize a review transition."""
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="review me", assignee="coder")
         _set_task_status(conn, t, "review")
         claimed = kb.claim_review_task(conn, t)
         assert claimed is not None
-        ok = kb.complete_task(
-            conn,
-            t,
-            result="reviewed",
-            summary="Verdict: NEEDS_REVISION",
-        )
-        assert ok is True
-        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+        with pytest.raises(kb.ReviewVerdictRequiredError):
+            kb.complete_task(
+                conn,
+                t,
+                result="reviewed",
+                summary="Verdict: NEEDS_REVISION",
+                review_gate=True,
+            )
+        assert kb.get_task(conn, t).status == "running"
+        assert _latest_run_verdict(conn, t) is None
 
 
 def test_b2_review_complete_extracts_metadata_verdict_synonym(kanban_home):
@@ -12503,9 +12553,11 @@ def test_b2_review_complete_extracts_metadata_verdict_synonym(kanban_home):
             result="reviewed",
             summary="done",
             metadata={"review_verdict": "changes-requested"},
+            review_gate=True,
         )
         assert ok is True
         assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+        assert kb.get_task(conn, t).status == "blocked"
 
 
 def test_b2_review_block_extracts_metadata_verdict_synonym(kanban_home):
@@ -12531,8 +12583,8 @@ def test_b2_set_run_verdict_requires_existing_run_row(kanban_home):
         assert kb._set_run_verdict(conn, 999_999_999, "APPROVED") is False
 
 
-def test_b2_auto_approved_not_overwritten_by_metadata_verdict(kanban_home, monkeypatch):
-    """A review-chain auto-APPROVED verdict cannot be clobbered later."""
+def test_b2_explicit_approved_not_overwritten_by_later_verdict(kanban_home, monkeypatch):
+    """The first structured run verdict remains immutable."""
     monkeypatch.setattr(
         kb,
         "_review_stages_for_tier",
@@ -12558,23 +12610,16 @@ def test_b2_auto_approved_not_overwritten_by_metadata_verdict(kanban_home, monke
             (t,),
         ).fetchone()["current_run_id"]
 
-        assert kb.complete_task(conn, t, summary="verifier approved") is True
-        assert _latest_run_verdict(conn, t) == "APPROVED"
-
-        # Regression guard: stale/retried completion must not let generic
-        # metadata-verdict extraction overwrite the review-chain auto-APPROVED
-        # verdict already recorded on this run.
-        conn.execute(
-            "UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?",
-            (run_id, t),
-        )
         assert kb.complete_task(
             conn,
             t,
-            summary="late metadata extraction",
-            metadata={"verdict": "NEEDS_REVISION"},
+            summary="verifier approved",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
         ) is True
+        assert _latest_run_verdict(conn, t) == "APPROVED"
 
+        assert kb._set_run_verdict(conn, run_id, "REQUEST_CHANGES") is False
         assert _latest_run_verdict(conn, t) == "APPROVED"
 
 
@@ -12681,7 +12726,14 @@ def test_fo_backlog_item_closes_only_on_terminal_flow_done(
         assert _frontmatter_dict(item)["status"] == "next"
 
         assert kb.claim_review_task(conn, task_id) is not None
-        assert kb.complete_task(conn, task_id, result="APPROVED", summary="APPROVED")
+        assert kb.complete_task(
+            conn,
+            task_id,
+            result="APPROVED",
+            summary="APPROVED",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
 
         fm = _frontmatter_dict(item)
         assert fm["status"] == "done"

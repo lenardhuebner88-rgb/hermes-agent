@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+//
+// Der Rest der Datei rendert Subkomponenten via renderToStaticMarkup (node,
+// Hauskonvention) — jsdom wird nur für die neuen Full-Component-Tests am
+// Dateiende gebraucht (echter Fetch-Mock + Router-Kontext).
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CollectionSection, DocCard } from "./KnowledgeShelf";
+import { cleanup, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+
+const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
+
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return { ...actual, fetchJSON: fetchJSONMock };
+});
+
+import { CollectionSection, DocCard, KnowledgeShelf } from "./KnowledgeShelf";
 import { TocNav } from "./KnowledgeReader";
 import {
   filterCatalog,
@@ -13,6 +28,11 @@ import {
   type KnowledgeCollection,
   type KnowledgeDoc,
 } from "./knowledge.helpers";
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 const doc = (over: Partial<KnowledgeDoc>): KnowledgeDoc => ({
   id: "kb::doc::canon-infra-topology",
@@ -252,5 +272,71 @@ describe("helpers", () => {
     expect(filtered.count).toBe(1);
     expect(filtered.collections).toHaveLength(1);
     expect(filtered.collections[0].docs.map((item) => item.id)).toEqual(["concept"]);
+  });
+});
+
+// S6: Baseline-Polling (useKnowledgeCatalog) + Deep-Link-Preselect aus dem
+// `collection`-Suchparameter (von der BriefingsShelf-Schnellauswahl gesetzt).
+// Fixture = dieselbe echte /api/library/knowledge-Ernte wie in
+// briefings/BriefingsShelf.test.tsx (geteiltes Fixture wäre ein zusätzlicher
+// Datei-Import über View-Grenzen — hier reicht ein kleiner, aber echter
+// Zwei-Sammlungs-Ausschnitt aus demselben Live-Payload).
+describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
+  const KNOWLEDGE_CATALOG = {
+    collections: [
+      {
+        id: "kanon",
+        title: "Kanon — Die geteilte Wahrheit",
+        description: "Dauerhafte, agent-übergreifende Fakten.",
+        accent: "cyan",
+        icon: "Landmark",
+        doc_count: 6,
+        updated_ts: 1783575727,
+        docs: [doc({ id: "kb::doc::canon-index", collection: "kanon", title: "Canon-Index" })],
+      },
+      {
+        id: "llm-wiki",
+        title: "LLM-Wiki",
+        description: "Agentisch gepflegtes Wissen aus ~/llm-wiki/wiki.",
+        accent: "indigo",
+        icon: "Brain",
+        doc_count: 39,
+        updated_ts: 1783623276,
+        docs: [doc({ id: "kb::llm::overview.md", collection: "llm-wiki", title: "Overview" })],
+      },
+    ],
+    count: 45,
+    query: "",
+    now: 1783624432,
+  };
+
+  function mockKnowledgeFetch() {
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/knowledge")) return KNOWLEDGE_CATALOG;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+  }
+
+  it("lädt und rendert den Katalog ohne `collection`-Param (Baseline-Poll)", async () => {
+    mockKnowledgeFetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=wissen"]}><KnowledgeShelf /></MemoryRouter>);
+
+    expect(await screen.findByText("Canon-Index")).toBeTruthy();
+    expect(screen.getByText("Overview")).toBeTruthy();
+  });
+
+  it("preselektiert die Sammlung aus `?collection=<id>` (Deep-Link von der Briefings-Kachel)", async () => {
+    mockKnowledgeFetch();
+    render(
+      <MemoryRouter initialEntries={["/control/bibliothek?mode=wissen&collection=llm-wiki"]}>
+        <KnowledgeShelf />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Overview")).toBeTruthy();
+    // Kanon ist gefiltert weg — nur die vorselektierte Sammlung zeigt Docs.
+    expect(screen.queryByText("Canon-Index")).toBeNull();
+    expect(screen.getByRole("button", { name: /Kanon/ }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: /LLM-Wiki/ }).getAttribute("aria-pressed")).toBe("true");
   });
 });

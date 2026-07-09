@@ -862,9 +862,13 @@ def test_active_root_with_pending_work_does_not_flush(tmp_path, monkeypatch):
     assert not any("steckt fest" in s["text"] for s in adapter.sent)
 
 
-def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
-    """K12: a task reaching terminal ``done`` drops a `<task_id>.md` receipt
-    into HERMES_AUTO_RECEIPT_DIR containing the task id and title.
+def test_notifier_done_does_not_write_receipt_without_closeout_worker(
+    tmp_path, monkeypatch
+):
+    """Done notification delivery is independent from durable closeout.
+
+    The subscription watcher must not write a receipt or falsely imply delivery;
+    only the detached closeout worker owns the done receipt acknowledgement.
     """
     db_path = tmp_path / "auto-receipt-done.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
@@ -889,17 +893,11 @@ def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
     runner = _make_runner(adapter)
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
-    # Normal delivery is unchanged by the receipt write.
+    # Normal notification delivery is unchanged.
     assert len(adapter.sent) == 1
 
     receipt = receipt_dir / f"{tid}.md"
-    assert receipt.exists(), f"expected auto-receipt at {receipt}"
-    content = receipt.read_text(encoding="utf-8")
-    assert tid in content
-    assert "ship the receipt feature" in content
-    assert "Step-Ledger" in content
-    assert detailed_result in content
-    assert "Kurz erledigt." in content
+    assert not receipt.exists()
 
 
 def test_auto_receipt_written_on_gave_up(tmp_path, monkeypatch):

@@ -5502,6 +5502,42 @@ def _append_event(
     return int(cur.lastrowid)
 
 
+def _enqueue_closeout_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    run_id: Optional[int] = None,
+    summary: Optional[str] = None,
+    release_context: Optional[dict[str, Any]] = None,
+) -> int:
+    """Persist terminal delivery intent inside the caller's write txn."""
+    from hermes_cli import kanban_closeout
+
+    context = dict(release_context or {})
+    if "auto_release_candidate" not in context:
+        row = conn.execute(
+            "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        source = (row["planspec_source"] or "").strip() if row else ""
+        candidate = False
+        if source:
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE planspec_source = ? "
+                "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')",
+                (source,),
+            ).fetchone()[0]
+            candidate = int(open_count) == 0
+        context["auto_release_candidate"] = candidate
+    return kanban_closeout.enqueue_closeout_pending_in_txn(
+        conn,
+        task_id,
+        run_id=run_id,
+        summary=summary,
+        board=board_slug_for_conn(conn),
+        release_context=context,
+    )
+
+
 def _coerce_int(val: Any) -> Optional[int]:
     if val is None or isinstance(val, bool):
         return None
@@ -8127,6 +8163,12 @@ def _recover_scout_coder_handoff(
         },
         run_id=run_id,
     )
+    _enqueue_closeout_in_txn(
+        conn,
+        task_id,
+        run_id=run_id,
+        summary=summary,
+    )
     _append_event(
         conn,
         task_id,
@@ -9435,6 +9477,17 @@ class WorkerGateError(Exception):
         super().__init__(f"worker gate failed on {command!r} (exit {returncode})")
 
 
+class ReviewVerdictRequiredError(ValueError):
+    """A review worker tried to complete without structured terminal authority."""
+
+    def __init__(self):
+        super().__init__(
+            "review completion requires explicit metadata.review_verdict "
+            "(APPROVED or REQUEST_CHANGES). The task is still in-flight; "
+            "retry kanban_complete with the structured verdict."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Review gate (Phase 2: independent verification before 'done')
 # ---------------------------------------------------------------------------
@@ -9689,30 +9742,113 @@ def effective_ui_impact(task: Optional["Task"]) -> str:
 
 
 def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
-    """Ordered reviewer profiles for a tier; missing profiles dropped (never
-    strand a task on a profile that does not exist → graceful degrade).
+    """Return the complete configured reviewer topology for *tier*.
 
     standard = [verifier]; review = [verifier, reviewer];
     critical = [verifier, reviewer, critic]. An unknown tier falls back to the
-    single verifier stage (today's behavior).
+    single verifier stage. Runtime availability never weakens this policy: a
+    missing stage is held retryably in ``review`` until its profile returns.
     """
-    # Tolerate a minimal config dict (verifier_profile only) — fall back to the
-    # module defaults so the reviewer/critic stages degrade gracefully and the
-    # standard tier never needs the extra keys (callers that monkeypatch
-    # _review_gate_config with a verifier-only dict keep working).
-    verifier = cfg.get("verifier_profile", _DEFAULT_VERIFIER_PROFILE)
-    review = cfg.get("review_profile", _DEFAULT_REVIEW_PROFILE)
-    critic = cfg.get("critic_profile", _DEFAULT_CRITIC_PROFILE)
+    verifier = cfg.get("verifier_profile") or _DEFAULT_VERIFIER_PROFILE
+    review = cfg.get("review_profile") or _DEFAULT_REVIEW_PROFILE
+    critic = cfg.get("critic_profile") or _DEFAULT_CRITIC_PROFILE
     seq = {
         "standard": [verifier],
         "review": [verifier, review],
         "critical": [verifier, review, critic],
     }.get(tier, [verifier])
+    return [str(profile).strip() for profile in seq if str(profile).strip()]
+
+
+def _review_profile_availability(profile: Optional[str]) -> tuple[bool, str]:
+    """Resolve review profile liveness without ever granting review authority.
+
+    The reason is stable machine-readable event data. Both a missing profile
+    and a broken resolver are retryable infrastructure states.
+    """
+    target = str(profile or "").strip()
+    if not target:
+        return False, "profile_missing"
     try:
         from hermes_cli.profiles import profile_exists
     except Exception:
-        return [seq[0]]
-    return [p for p in seq if p and profile_exists(p)] or [seq[0]]
+        return False, "profile_resolution_failed"
+    try:
+        return (
+            (True, "available")
+            if profile_exists(target)
+            else (False, "profile_missing")
+        )
+    except Exception:
+        return False, "profile_resolution_failed"
+
+
+def _append_review_unavailable_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    target_profile: Optional[str],
+    *,
+    review_tier: Optional[str] = None,
+    review_stage: Optional[int] = None,
+) -> bool:
+    """Append one typed retryable hold event when the current stage is absent.
+
+    Call inside an existing write transaction. Repeated dispatcher ticks are
+    deduplicated while still re-checking profile liveness on every tick.
+    """
+    target = str(target_profile or "").strip()
+    available, reason = _review_profile_availability(target)
+    assignee_row = conn.execute(
+        "SELECT assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    original_assignee = (
+        str(assignee_row["assignee"] or "").strip()
+        if assignee_row is not None
+        else ""
+    )
+    if target and original_assignee and target.casefold() == original_assignee.casefold():
+        available = False
+        reason = "reviewer_not_independent"
+    if available:
+        return False
+    if review_tier is None or review_stage is None:
+        submitted = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if submitted is not None and submitted["payload"]:
+            try:
+                submitted_payload = json.loads(submitted["payload"])
+            except Exception:
+                submitted_payload = None
+            if isinstance(submitted_payload, dict):
+                if review_tier is None:
+                    review_tier = submitted_payload.get("review_tier")
+                if review_stage is None:
+                    review_stage = submitted_payload.get("review_stage")
+    payload: dict[str, Any] = {
+        "target_profile": target or None,
+        "reason": reason,
+        "retryable": True,
+    }
+    if review_tier is not None:
+        payload["review_tier"] = review_tier
+    if review_stage is not None:
+        payload["review_stage"] = int(review_stage)
+    latest = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if latest is not None and latest["kind"] == "review_unavailable":
+        try:
+            if json.loads(latest["payload"] or "{}") == payload:
+                return False
+        except Exception:
+            pass
+    _append_event(conn, task_id, "review_unavailable", payload)
+    return True
 
 
 def _review_chain_target(conn: sqlite3.Connection, task_id: str, cfg: dict) -> str:
@@ -9740,15 +9876,13 @@ def _review_spawn_profile_for(
     assignee: Optional[str],
     cfg: dict,
 ) -> Optional[str]:
-    """The profile the dispatcher would actually spawn for a review task: the
-    current stage target (verifier→reviewer→critic, from the latest
-    submitted_for_review event) if it maps to a real profile, else the original
-    assignee if it does, else ``None`` (genuinely nonspawnable).
+    """Return the runnable current review-stage profile, else ``None``.
 
     Single source of truth for review spawnability — shared by dispatch_once,
     the no-silent-stall sweep, and has_spawnable_review so all three agree. A
-    staged review task whose original coder lane profile is gone is still
-    spawnable via its stage target and must not be stranded as nonspawnable.
+    The original task assignee is deliberately never a fallback: for code tasks
+    that is the implementing worker, and spawning it here would turn an
+    independent review gate into self-review.
 
     A blank/None assignee returns ``None``: dispatch buckets those as
     ``skipped_unassigned`` (a distinct operator signal — the task has no owner)
@@ -9758,17 +9892,10 @@ def _review_spawn_profile_for(
     if not (assignee and str(assignee).strip()):
         return None
     stage = _review_chain_target(conn, task_id, cfg)
-    try:
-        from hermes_cli.profiles import profile_exists
-    except Exception:
-        # Cannot check profiles → fail-open on the stage target (matches the
-        # dispatcher's behavior when the profiles module is unavailable).
-        return stage or (assignee or None)
-    if stage and profile_exists(stage):
-        return stage
-    if assignee and profile_exists(assignee):
-        return assignee
-    return None
+    if str(stage).strip().casefold() == str(assignee).strip().casefold():
+        return None
+    available, _reason = _review_profile_availability(stage)
+    return stage if available else None
 
 
 def _worker_gate_config() -> dict:
@@ -9934,16 +10061,14 @@ def _normalize_review_verdict(value: object) -> Optional[str]:
 
 def _extract_review_verdict(
     *,
-    result: Optional[str] = None,
-    summary: Optional[str] = None,
     metadata: object = None,
-    default: Optional[str] = None,
 ) -> Optional[str]:
-    """Extract the verifier verdict without treating free-form metadata as truth.
+    """Extract an explicit structured verdict from review metadata only.
 
     ``metadata['verdict']`` remains an ordinary payload field for non-review
     runs; callers gate this helper with :func:`_run_originated_from_review`
-    before writing the structured ``task_runs.verdict`` column.
+    before writing the structured ``task_runs.verdict`` column. Free-form
+    summary/result text is evidence, never terminal review authority.
     """
     if isinstance(metadata, dict):
         for key in (
@@ -9963,16 +10088,7 @@ def _extract_review_verdict(
                 if normalized is not None:
                     return normalized
 
-    for text in (summary, result):
-        if not isinstance(text, str):
-            continue
-        normalized_text = text.upper().replace("-", "_")
-        for raw in sorted(_VERDICT_NORMALIZE, key=len, reverse=True):
-            pattern = rf"(?<![A-Z0-9]){re.escape(raw)}(?![A-Z0-9])"
-            if re.search(pattern, normalized_text):
-                return _VERDICT_NORMALIZE[raw]
-
-    return _normalize_review_verdict(default)
+    return None
 
 
 def _set_run_verdict(
@@ -10072,20 +10188,13 @@ def _review_gate_should_apply(
 ) -> bool:
     """Decide whether this completion should be parked in ``review``.
 
-    All of: gate enabled, verifier profile exists (else routing would strand
-    the task — fail safe to the direct ``done`` path), this run did NOT
-    originate from review (anti-loop), and the task's assignee is a
-    code-bearing role.
+    All of: gate enabled, this run did NOT originate from review (anti-loop),
+    and the task's assignee is a code-bearing role. Profile availability is a
+    retryable runtime state handled after policy selection; it can never turn
+    an enabled review gate into direct ``done``.
     """
     cfg = _review_gate_config()
     if not cfg["enabled"]:
-        return False
-    try:
-        from hermes_cli.profiles import profile_exists
-
-        if not profile_exists(cfg["verifier_profile"]):
-            return False
-    except Exception:
         return False
     run_id = expected_run_id
     if run_id is None:
@@ -10546,6 +10655,13 @@ def _submit_for_review(
             "submitted_for_review",
             payload,
             run_id=run_id,
+        )
+        _append_review_unavailable_event(
+            conn,
+            task_id,
+            payload["target_profile"],
+            review_tier=_tier,
+            review_stage=_stage,
         )
     # Advisory phantom-ref scan, same as the done path (own txn, never blocks).
     scan_text = " ".join(filter(None, [summary, result]))
@@ -11040,6 +11156,7 @@ def _maybe_advance_review_chain(
     result: Optional[str],
     summary: Optional[str],
     metadata: Optional[dict],
+    verdict: Optional[str],
 ) -> Optional[bool]:
     """If this APPROVED completion closes an INTERMEDIATE review stage, re-park
     the task in ``review`` for the next stage (verifier→reviewer→critic) and
@@ -11051,6 +11168,8 @@ def _maybe_advance_review_chain(
     stage falls through to the done path. The chain state (frozen tier + stage)
     lives in the latest ``submitted_for_review`` event, not a second column.
     """
+    if verdict != "APPROVED":
+        return None
     run_id = (
         expected_run_id
         if expected_run_id is not None
@@ -11099,26 +11218,27 @@ def _maybe_advance_review_chain(
             metadata=metadata,
         )
         if rid is not None:
-            verdict = _extract_review_verdict(
-                result=result,
-                summary=summary,
-                metadata=metadata,
-                default="APPROVED",
-            )
-            if verdict is not None:
-                _set_run_verdict(conn, rid, verdict)
+            _set_run_verdict(conn, rid, verdict)
         advanced_run_id = rid
+        next_payload = {
+            "review_tier": tier,
+            "review_stage": next_stage,
+            "target_profile": next_profile,
+            "advanced_from_stage": stage,
+        }
         _append_event(
             conn,
             task_id,
             "submitted_for_review",
-            {
-                "review_tier": tier,
-                "review_stage": next_stage,
-                "target_profile": next_profile,
-                "advanced_from_stage": stage,
-            },
+            next_payload,
             run_id=rid,
+        )
+        _append_review_unavailable_event(
+            conn,
+            task_id,
+            next_profile,
+            review_tier=tier,
+            review_stage=next_stage,
         )
     _record_disposition_items(conn, task_id, metadata, run_id=advanced_run_id)
     return True
@@ -11345,8 +11465,10 @@ def complete_task(
 
     # Phase 2 review gate: park code-bearing worker completions in 'review'
     # for an independent verifier instead of moving straight to 'done'.
-    # Opt-in (review_gate) + enabled + verifier-exists + not-a-review-run
-    # (anti-loop) + code-bearing assignee — otherwise fall through.
+    # Opt-in (review_gate) + enabled + not-a-review-run (anti-loop) +
+    # code-bearing assignee — otherwise fall through. Profile availability is
+    # recorded as a retryable hold by _submit_for_review, never as permission
+    # to bypass this policy.
     if _review_gate_should_apply(conn, task_id, expected_run_id):
         if review_gate or expected_run_id is not None:
             # B1 verification economy: a green deterministic worker gate IS the
@@ -11397,6 +11519,33 @@ def complete_task(
                     _clear_failure_counter(conn, task_id)
                 return submitted
 
+    # A review worker's completion needs explicit, machine-readable terminal
+    # authority before any stage advance, worktree integration, or done write.
+    # Operator/manual completion remains an explicit override: it has neither
+    # review_gate=True nor an expected worker run id.
+    _review_run_id = (
+        expected_run_id
+        if expected_run_id is not None
+        else _current_run_id(conn, task_id)
+    )
+    _review_verdict: Optional[str] = None
+    _review_worker_completion = bool(review_gate or expected_run_id is not None) and (
+        _run_originated_from_review(conn, task_id, _review_run_id)
+    )
+    if _review_worker_completion:
+        _review_verdict = _extract_review_verdict(metadata=metadata)
+        if _review_verdict is None:
+            raise ReviewVerdictRequiredError()
+        if _review_verdict == "REQUEST_CHANGES":
+            block_reason = summary if summary is not None else result
+            return block_task(
+                conn,
+                task_id,
+                reason=block_reason or "review verdict: REQUEST_CHANGES",
+                expected_run_id=_review_run_id,
+                reviewer_metadata=metadata,
+            )
+
     # B (staged review gate): an APPROVED completion of an INTERMEDIATE review
     # stage re-parks the task for the next stage (verifier→reviewer→critic)
     # instead of going done. Placed BEFORE the worktree-integration hook so a
@@ -11409,6 +11558,7 @@ def complete_task(
         result=result,
         summary=summary,
         metadata=metadata,
+        verdict=_review_verdict,
     ):
         return True
 
@@ -11543,68 +11693,36 @@ def complete_task(
                 summary=summary if summary is not None else result,
                 metadata=metadata,
             )
-        # B2: only the review lane writes structured verdicts (anti-loop
-        # discriminator); ordinary coder completions leave task_runs.verdict
-        # NULL even when metadata carries a free-form verdict key.  A final
-        # review completion must also agree with the task status transition:
-        # non-APPROVED verdicts are a blocked review result, never terminal
-        # done, even if the worker called kanban_complete.
-        if _run_originated_from_review(conn, task_id, run_id):
-            verdict = _extract_review_verdict(
-                result=result,
-                summary=summary,
-                metadata=metadata,
-                default="APPROVED",
+        # Only the prevalidated review-worker path writes a verdict/release.
+        # Ordinary coder and explicit operator completions leave the column
+        # untouched even when their metadata contains verdict-like fields.
+        if _review_verdict == "APPROVED":
+            _set_run_verdict(conn, run_id, _review_verdict)
+            release_payload: dict[str, Any] = {
+                "verdict": _review_verdict,
+                "completed_run_id": run_id,
+            }
+            row = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? "
+                "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if row and row["payload"]:
+                try:
+                    submitted_payload = json.loads(row["payload"]) or {}
+                except Exception:
+                    submitted_payload = {}
+                if isinstance(submitted_payload, dict):
+                    for key in ("review_tier", "review_stage", "target_profile"):
+                        if key in submitted_payload:
+                            release_payload[key] = submitted_payload[key]
+            _append_event(
+                conn,
+                task_id,
+                "review_released",
+                release_payload,
+                run_id=run_id,
             )
-            if verdict is not None:
-                _set_run_verdict(conn, run_id, verdict)
-            if verdict == "APPROVED":
-                release_payload: dict[str, Any] = {
-                    "verdict": verdict,
-                    "completed_run_id": run_id,
-                }
-                row = conn.execute(
-                    "SELECT payload FROM task_events WHERE task_id = ? "
-                    "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if row and row["payload"]:
-                    try:
-                        submitted_payload = json.loads(row["payload"]) or {}
-                    except Exception:
-                        submitted_payload = {}
-                    if isinstance(submitted_payload, dict):
-                        for key in ("review_tier", "review_stage", "target_profile"):
-                            if key in submitted_payload:
-                                release_payload[key] = submitted_payload[key]
-                _append_event(
-                    conn,
-                    task_id,
-                    "review_released",
-                    release_payload,
-                    run_id=run_id,
-                )
-            if verdict and verdict != "APPROVED":
-                block_reason = summary if summary is not None else result
-                block_reason = block_reason or f"review verdict: {verdict}"
-                conn.execute(
-                    """
-                    UPDATE tasks
-                       SET status = 'blocked',
-                           result = ?,
-                           completed_at = NULL
-                     WHERE id = ?
-                    """,
-                    (block_reason, task_id),
-                )
-                _append_event(
-                    conn,
-                    task_id,
-                    "blocked",
-                    {"reason": block_reason, "review_verdict": verdict},
-                    run_id=run_id,
-                )
-                return True
         # Carry the handoff summary in the event payload so gateway
         # notifiers and dashboard WS consumers can render it without a
         # second SQL round-trip. First line only, 400 char cap — the
@@ -11657,6 +11775,37 @@ def complete_task(
                     },
                     run_id=run_id,
                 )
+        release_context = {
+            key: _wt_outcome[key]
+            for key in (
+                "merge_commit",
+                "release_gate_child_id",
+                "release_gate_auto_executed",
+                "release_gate_required",
+            )
+            if _wt_outcome is not None and key in _wt_outcome
+        }
+        if "release_gate_child_id" not in release_context:
+            release_row = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? "
+                "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if release_row is not None:
+                try:
+                    release_payload = json.loads(release_row["payload"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    release_payload = {}
+                child_id = str(release_payload.get("child_id") or "").strip()
+                if child_id:
+                    release_context["release_gate_child_id"] = child_id
+        _enqueue_closeout_in_txn(
+            conn,
+            task_id,
+            run_id=run_id,
+            summary=summary if summary is not None else result,
+            release_context=release_context,
+        )
         _append_event(
             conn,
             task_id,
@@ -11760,80 +11909,9 @@ def complete_task(
         run_id=run_id,
         summary=(summary if summary is not None else result),
     )
-    # C3 (auto-release): when this completion closes the LAST open slice of a
-    # freigabe:complete PlanSpec chain and the release.autonomous kill-switch
-    # is ON (default OFF), deploy + live-verify + rollback-on-red. Strictly
-    # fail-open — completion semantics must never depend on release plumbing.
-    try:
-        from hermes_cli import auto_release as _auto_release
-
-        if _wt_outcome and _wt_outcome.get("release_gate_auto_executed"):
-            # Mutual-exclusion (double-deploy guard): the worker-isolation
-            # integrator already spawned a release-gate activation
-            # (deploy_dashboard.sh) for this web/ chain-tip via the parked-gate
-            # path earlier in THIS complete_task(). Skip maybe_auto_release's own
-            # release_chain deploy so a single completion triggers at most ONE
-            # dashboard restart. A held/non-web chain leaves the flag unset and
-            # reaches maybe_auto_release unchanged.
-            _log.info(
-                "auto-release: skipping chain-release for %s "
-                "(release-gate already auto-executed this completion)",
-                task_id,
-            )
-            _ar_outcome = None
-        else:
-            _ar_outcome = _auto_release.maybe_auto_release(conn, task_id)
-        if _ar_outcome is not None:
-            with write_txn(conn):
-                _append_event(conn, task_id, "auto_release", _ar_outcome)
-    except Exception as _ar_exc:
-        _log.error("auto-release hook failed for %s", task_id, exc_info=True)
-        # A2 (S3 chronic-red-refinement): a swallowed hook crash used to be a
-        # SILENT non-release — a chain that SHOULD have deployed just sits
-        # `done` with nothing to show for it and no forensic trail. Record a
-        # forensic event, best-effort: this whole block is its OWN inner
-        # try/except so a failure recording the failure can never turn into a
-        # broken `complete_task` (completion semantics must never depend on
-        # release plumbing, same fail-open contract as above).
-        #
-        # Visibility (traced, not closed here — outside this slice's file
-        # scope): the only existing push-to-operator path for auto-release
-        # events is gateway/kanban_alerts.py::_rule_auto_release_attention,
-        # which watches ``task_events.kind == "auto_release"`` (constant
-        # ``_AUTO_RELEASE_EVENT``) and pushes to Discord only when
-        # ``payload["outcome"]`` is a key of ``_AUTO_RELEASE_ATTENTION_EMOJI``
-        # (today: rolled_back / deploy_failed / held_critical). This event's
-        # kind (``auto_release_hook_crashed``) is deliberately a DISTINCT kind
-        # — a hook crash never produced an "outcome" at all, so folding it
-        # under ``auto_release`` would misrepresent what happened — which
-        # means it does NOT yet ride that rule as-is. Making it push needs one
-        # small, config/constant-level follow-up in
-        # ``gateway/kanban_alerts.py`` (extend the rule's ``kind`` filter to
-        # also include ``auto_release_hook_crashed`` and give it a fixed
-        # always-alert emoji, mirroring how ``held_critical`` already pushes)
-        # — flagged to the orchestrator rather than done here, since that
-        # file is outside this slice's declared Zieldateien.
-        try:
-            chain_root = None
-            try:
-                from hermes_cli import kanban_worktrees as _kwt
-
-                chain_root = _kwt.chain_root_id(conn, task_id)
-            except Exception:
-                chain_root = None
-            with write_txn(conn):
-                _append_event(
-                    conn,
-                    task_id,
-                    "auto_release_hook_crashed",
-                    {"error": str(_ar_exc)[:500], "chain_root": chain_root},
-                )
-        except Exception:
-            _log.error(
-                "auto-release-hook-crashed event append also failed for %s",
-                task_id,
-                exc_info=True,
-            )
+    # Release and receipt delivery are processed from the durable outbox by a
+    # detached closeout unit. It survives dashboard restarts and reconciles the
+    # release-gate child before invoking any generic auto-release fallback.
     return True
 
 
@@ -12803,13 +12881,10 @@ def block_task(
         # B2: only the review lane writes structured verdicts; ordinary blocks
         # (a coder hitting a wall) leave task_runs.verdict NULL.
         if _run_originated_from_review(conn, task_id, run_id):
-            verdict = _extract_review_verdict(
-                summary=reason,
-                metadata=reviewer_metadata,
-                default="REQUEST_CHANGES",
-            )
-            if verdict is not None:
-                _set_run_verdict(conn, run_id, verdict)
+            # The block action itself is explicit negative review authority.
+            # Metadata can carry findings, but can never turn a blocked run
+            # into an APPROVED verdict.
+            _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
         blocked_payload = {
             "reason": reason,
             "kind": block_kind,
@@ -13603,6 +13678,12 @@ def respec_task(
              WHERE id = ?
             """,
             (now, pointer, task_id),
+        )
+        _enqueue_closeout_in_txn(
+            conn,
+            task_id,
+            summary=pointer,
+            release_context={"auto_release_candidate": False},
         )
         _append_event(
             conn,
@@ -16053,6 +16134,12 @@ def repair_deliverable_posted_not_completed(
                 "evidence": evidence,
             },
         )
+        _enqueue_closeout_in_txn(
+            conn,
+            task_id,
+            run_id=run_id,
+            summary=summary,
+        )
         _append_event(
             conn,
             task_id,
@@ -17635,6 +17722,12 @@ def _finalize_integration_retry(
                 "merge_commit": merge_commit,
             },
         )
+        _enqueue_closeout_in_txn(
+            conn,
+            task_id,
+            summary=summary_line,
+            release_context={"merge_commit": merge_commit} if merge_commit else None,
+        )
         # Mirror the normal done-path completion signal so dashboards/notifiers
         # render the finish without a second SQL round-trip.
         _append_event(
@@ -17957,7 +18050,7 @@ def no_silent_stall_sweep(
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
-    # 2) review-without-verifier: nonspawnable review owner parks visibly.
+    # 2) review-without-verifier: keep the review hold retryable and visible.
     for row in conn.execute(
         "SELECT * FROM tasks WHERE status = 'review' AND claim_lock IS NULL"
     ).fetchall():
@@ -17981,16 +18074,9 @@ def no_silent_stall_sweep(
             is not None
         )
         if not spawnable:
-            reason = "review task has no runnable verifier/reviewer profile"
-            if _park_stall_once(
-                conn,
-                row,
-                stall_class=stall_class,
-                reason=reason,
-                evidence={"assignee": assignee or None, "attempts": 1},
-                now=ts,
-            ):
-                summary["parked"].append({"task_id": row["id"], "class": stall_class})
+            target = _review_chain_target(conn, row["id"], _review_gate_config())
+            with write_txn(conn):
+                _append_review_unavailable_event(conn, row["id"], target)
 
     # 3) triage-decompose-failed: auto-decompose failed repeatedly.
     for row in conn.execute(
@@ -21744,34 +21830,23 @@ def _dispatch_once_locked(
         # event), NOT the task's own code-writing assignee. The override is
         # in-memory only — the DB ``assignee`` stays the original coder, so a
         # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
-        # coder for a follow-up fix. ``_review_spawn_profile_for`` resolves the
-        # stage target, falling back to the assignee, and returns None only when
-        # neither maps to a real profile. Keying spawnability off the stage
-        # target (not the assignee) means a staged task whose coder lane profile
-        # is gone is still spawnable and never stranded as nonspawnable.
+        # coder for a follow-up fix. ``_review_spawn_profile_for`` resolves only
+        # the frozen stage target; a missing target is a retryable hold and can
+        # never fall back to coder self-review.
         _rg_cfg = _review_gate_config()
         _spawn_profile = _review_spawn_profile_for(
             conn, row["id"], row["assignee"], _rg_cfg
         )
         if _spawn_profile is None:
             result.skipped_nonspawnable.append(row["id"])
-            # Emit ONE deduped ``nonspawnable`` event so a review task with no
-            # runnable stage/assignee profile is visible on the timeline instead
-            # of silently rotting in ``review``.
+            # Emit ONE deduped typed hold. The task stays in ``review`` and the
+            # next dispatcher tick re-resolves the profile automatically.
             if not dry_run:
-                latest = conn.execute(
-                    "SELECT kind FROM task_events WHERE task_id = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (row["id"],),
-                ).fetchone()
-                if latest is None or latest["kind"] != "nonspawnable":
-                    with write_txn(conn):
-                        _append_event(
-                            conn,
-                            row["id"],
-                            "nonspawnable",
-                            {"assignee": row["assignee"]},
-                        )
+                target = _review_chain_target(conn, row["id"], _rg_cfg)
+                with write_txn(conn):
+                    _append_review_unavailable_event(
+                        conn, row["id"], target
+                    )
             continue
         # Befund 4 review-path gap — chain-worktree-serialization guard
         # mirrored from the ready path above: a ``dir`` review candidate
@@ -23072,6 +23147,19 @@ def run_daemon(
                     max_spawn=max_spawn,
                     failure_limit=failure_limit,
                 )
+                try:
+                    from hermes_cli import kanban_closeout as _closeout
+
+                    _closeout.spawn_pending_closeouts(
+                        conn,
+                        board=board_slug_for_conn(conn),
+                        limit=10,
+                    )
+                except Exception:
+                    _log.debug(
+                        "standalone dispatcher: closeout spawn sweep failed",
+                        exc_info=True,
+                    )
             if on_tick is not None:
                 try:
                     on_tick(res)

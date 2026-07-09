@@ -299,7 +299,11 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
         # Verifier claims + approves WITHOUT artifacts -> terminal done.
         kb.claim_review_task(conn, tid)
         assert kb.complete_task(
-            conn, tid, summary="APPROVED — tests pass", review_gate=True,
+            conn,
+            tid,
+            summary="APPROVED — tests pass",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
         )
         assert kb.get_task(conn, tid).status == "done"
 

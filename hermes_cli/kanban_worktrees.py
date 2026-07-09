@@ -29,10 +29,12 @@ receipt comments) via lazy imports so module import never cycles.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -176,13 +178,9 @@ _ARTIFACT_RECEIPTS_ROOT = Path(
 DIRTY_WORKTREE_CLASS = "DIRTY_WORKTREE"
 PRESERVABLE_ARTIFACTS_CLASS = "PRESERVABLE_ARTIFACTS"
 ARTIFACT_POLICY_MISSING_CLASS = "ARTIFACT_POLICY_MISSING"
-# P1 2026-07-05 (t_2fa852c6): the post-merge gate runs in the shared LIVE
-# checkout, so a foreign session's untracked/dirty file OUTSIDE this chain's
-# OWN diff (e.g. a half-written AutoReleaseTile.test.tsx from a parallel
-# session) can fail the gate even though the chain's own diff is clean. This
-# park class attributes that honestly instead of the generic "post-merge gate
-# failed" chain-blame reason — see ``_gate_stage_scope_predicate`` and its use
-# in ``integrate_chain``.
+# Retained for classifying/retrying historical parked events created before
+# gates moved out of the shared live checkout. New gates run in clean detached
+# validation worktrees and no longer emit this class.
 FOREIGN_DIRTY_CHECKOUT_CLASS = "foreign_dirty_checkout"
 
 
@@ -209,7 +207,6 @@ _RELEASE_GATE_COMMANDS = (
     "cd /home/piet/.hermes/hermes-agent/web",
     "npm run build",
     "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
-    "curl -fsS http://127.0.0.1:9119/control >/dev/null",
 )
 
 
@@ -742,16 +739,9 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
             _reap_partial(repo_root, wt)
             raise
 
-    # node_modules symlinks (untracked, never committed) so frontend gates
-    # run inside the worktree without an npm ci.
-    for rel in _NODE_MODULES_LINKS:
-        src = Path(repo_root) / rel
-        dst = wt / rel
-        if src.is_dir() and not dst.exists() and dst.parent.is_dir():
-            try:
-                dst.symlink_to(src, target_is_directory=True)
-            except OSError:
-                _log.warning("could not symlink %s into worktree %s", rel, wt)
+    # node_modules/.venv symlinks (untracked, never committed) let worker and
+    # validation worktrees share the checkout's installed dependencies.
+    _link_shared_dependencies(Path(repo_root), wt)
 
     return {"path": wt, "branch": branch, "base_branch": base_branch,
             "created": True}
@@ -904,6 +894,7 @@ def _create_parked_release_gate_child(
     title = _release_gate_title(task_id, root_id)
     existing = _release_gate_child_exists(conn, task_id, title)
     if existing:
+        outcome["release_gate_child_id"] = existing
         return existing
 
     from hermes_cli import kanban_db as kb
@@ -917,6 +908,9 @@ def _create_parked_release_gate_child(
         parents=(task_id,),
         initial_status="blocked",
     )
+    # The completion outbox persists this stable id in its release context so
+    # closeout recovery observes this gate instead of starting a second deploy.
+    outcome["release_gate_child_id"] = child_id
     payload = {
         "state": GREEN_CODE_NOT_RUNTIME_ACTIVATED,
         "source_task": task_id,
@@ -934,30 +928,10 @@ def _create_parked_release_gate_child(
             "release_gate_created",
             {"child_id": child_id, **payload},
         )
-    if release_gate_mode() == "auto":
-        # Operator-forced auto mode (``kanban.release_gate.mode: auto``) —
-        # unchanged, byte-exact today's behaviour, guard-free by explicit
-        # operator opt-in.
-        # Mutual-exclusion signal: only when the deploy was actually spawned
-        # (systemd-run accepted the unit) do we suppress maybe_auto_release's
-        # release_chain — otherwise a failed launch here would drop BOTH deploys
-        # (Codex-caught deploy-gap). A failed spawn leaves the flag unset so the
-        # maybe_auto_release fallback still runs.
-        if _spawn_gate_activation_logged(conn, child_id, payload, mode="auto"):
-            outcome["release_gate_auto_executed"] = True
-    else:
-        # AD-S2: the global ``release.autonomous`` switch also auto-executes the
-        # gate — but only through the guarded hook (kill-switch on AND every
-        # auto_release guard green). Off / any guard held → the child stays
-        # parked (byte-exact today's behaviour when the switch is off).
-        if maybe_auto_execute_gate(
-            conn, child_id, source_task_id=task_id, root_id=root_id, payload=payload,
-        ):
-            # Same mutual-exclusion signal as the mode:auto branch above — only
-            # set when the guarded hook actually spawned the detached activation
-            # (a held/parked gate leaves it False so a non-web or guard-held chain
-            # still reaches maybe_auto_release unchanged).
-            outcome["release_gate_auto_executed"] = True
+    # Creating the gate is a database-only operation.  The terminal task and its
+    # closeout intent have not committed yet, so starting a deploy here would let
+    # runtime activation escape a later completion rollback.  The durable
+    # closeout worker calls ``start_parked_release_gate`` after commit.
     return child_id
 
 
@@ -987,12 +961,9 @@ def _spawn_gate_activation_logged(
     the CLI runs (gate + real backend restart via deploy_dashboard.sh) and writes
     the child result itself. Detaching keeps the integration process from
     blocking on the deploy AND makes the activation immune to the restart it
-    triggers (self-termination trap). The ``systemd-run --user`` unit does NOT
-    inherit ``HERMES_KANBAN_BOARD``/``HERMES_KANBAN_DB`` (spawn forwards only
-    PATH/HERMES_HOME/bus vars), so reverse-map the integration connection's DB to
-    its board slug and thread it — a non-default-board child would otherwise be
-    resolved (and greened) against the wrong board. ``None`` (custom/sandbox DB
-    path) → board-agnostic resolution, as before."""
+    triggers (self-termination trap). Reverse-map the integration connection's
+    DB to its board slug and also forward explicit Kanban path overrides so both
+    named boards and custom/sandbox DBs resolve the same child."""
     from hermes_cli import kanban_db as kb
 
     try:
@@ -1086,24 +1057,76 @@ def maybe_auto_execute_gate(
     return _spawn_gate_activation_logged(conn, child_id, payload, mode="autonomous")
 
 
+def start_parked_release_gate(
+    conn: sqlite3.Connection,
+    child_id: str,
+) -> str:
+    """Start one parked gate after its source completion committed.
+
+    Returns ``started``, ``held``, or ``ambiguous``.  A failed
+    ``systemd-run`` acknowledgement is ambiguous because the unit may have been
+    accepted before the caller timed out; callers must never fall back to a
+    second release path when a release-gate child exists.
+    """
+
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'release_gate_parked' ORDER BY id DESC LIMIT 1",
+        (child_id,),
+    ).fetchone()
+    if row is None:
+        return "held"
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    source_task_id = str(payload.get("source_task") or "").strip()
+    root_id = str(payload.get("root_id") or source_task_id).strip()
+    if not source_task_id or not root_id:
+        return "held"
+
+    if release_gate_mode() == "auto":
+        started = _spawn_gate_activation_logged(
+            conn, child_id, payload, mode="auto",
+        )
+    else:
+        started = maybe_auto_execute_gate(
+            conn,
+            child_id,
+            source_task_id=source_task_id,
+            root_id=root_id,
+            payload=payload,
+        )
+    if started:
+        return "started"
+    failed = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'release_gate_auto_execute_failed' LIMIT 1",
+        (child_id,),
+    ).fetchone()
+    return "ambiguous" if failed is not None else "held"
+
+
 # ---------------------------------------------------------------------------
 # Release-gate executor (R2 / P2-release-executor)
 #
 # The parked release-gate child above documents the activation commands but
 # nothing runs them. This executor processes such a child end to end: it runs
-# the gate in the LIVE checkout (the commands are hardcoded to that path), and
+# the gate at the recorded commit in a clean detached validation worktree, and
 # on green reports success to the board. On RED it spawns a BOUNDED fixer on
 # the ``premium`` lane EXCLUSIVELY inside the chain worktree/branch — the
 # fixer reads the gate error, fixes, and the gate is re-run. After the retry
 # budget (``kanban.release_gate_fixer_max_retries``, default 2) it escalates to
-# the operator. Hard boundary: the fixer never edits live-main; only the gate's
-# build/smoke touch the live checkout. The event trail is purely additive
+# the operator. Hard boundary: the fixer never edits live-main; validation build
+# output stays in the detached worktree. The event trail is purely additive
 # (``release_gate_executed`` / ``release_gate_fix_attempt``).
 # ---------------------------------------------------------------------------
 
-# The release-gate commands are hardcoded to the live checkout, so the fixer's
-# chain worktree is provisioned under the SAME repo (its ``.worktrees/kanban/``
-# namespace), never the live working tree.
+# Persisted release-gate commands use the canonical checkout path; the runner
+# rebinds that prefix to the clean validation worktree. The fixer's chain
+# worktree remains under the same repo's ``.worktrees/kanban/`` namespace.
 LIVE_CHECKOUT_ROOT = Path("/home/piet/.hermes/hermes-agent")
 # npm build + loopback smoke can be slow; keep generous so a slow-but-green
 # build is not misreported as red.
@@ -1171,8 +1194,8 @@ def release_gate_mode() -> str:
     """Configured release-gate execution mode: ``manual`` (default) or ``auto``.
 
     Reads the root Hermes config directly for the same profile-isolation reason
-    as :func:`release_gate_fixer_max_retries`: release gates operate on the live
-    checkout and should not vary by worker profile.
+    as :func:`release_gate_fixer_max_retries`: release activation targets the
+    live checkout and should not vary by worker profile.
     """
     try:
         import yaml
@@ -1539,15 +1562,26 @@ def _resolve_fixer_worktree(
 
 def _default_release_gate_runner(
     commands: Optional[Sequence[str]] = None,
+    *,
+    repo_root: Optional[Path] = None,
 ) -> tuple[bool, str]:
-    """Run the release-gate commands as one shell sequence in the live
-    checkout and return ``(ok, output_tail)``. The commands are a fixed,
-    code-defined tuple (web build + artifact check + loopback smoke), joined
+    """Run the release-gate commands in *repo_root* and return output.
+
+    Production callers pass a detached validation worktree. The commands are a
+    fixed, code-defined tuple (web build + artifact check), joined
     with ``&&`` so the leading ``cd <web>`` carries to ``npm run build`` —
-    no untrusted input reaches the shell."""
+    no untrusted input reaches the shell. Historical absolute live-checkout
+    paths in the persisted command tuple are rebound to the validation root.
+    Runtime health belongs to the later activation, which deploys this commit and
+    checks ``/api/status``; probing the old live process here would not validate
+    the detached commit.
+    """
+    root = Path(repo_root or LIVE_CHECKOUT_ROOT)
     cmds = list(commands or _RELEASE_GATE_COMMANDS)
+    quoted_root = shlex.quote(str(root))
+    cmds = [cmd.replace(str(LIVE_CHECKOUT_ROOT), quoted_root) for cmd in cmds]
     script = " && ".join(cmds)
-    cwd = str(LIVE_CHECKOUT_ROOT) if LIVE_CHECKOUT_ROOT.is_dir() else None
+    cwd = str(root) if root.is_dir() else None
     try:
         proc = subprocess.run(  # noqa: S602 -- fixed code-defined commands
             ["bash", "-c", script],
@@ -1565,7 +1599,7 @@ def _default_release_gate_runner(
     ok = proc.returncode == 0
     tail = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
     if ok and visual_gate_enabled():
-        err = _run_visual_gate(LIVE_CHECKOUT_ROOT, _VISUAL_GATE_SCREENSHOTS_ROOT)
+        err = _run_visual_gate(root, _VISUAL_GATE_SCREENSHOTS_ROOT)
         if err:
             return False, err
         tail = "\n".join(part for part in (tail, _VISUAL_GATE_IME_NOTE) if part)
@@ -1769,7 +1803,8 @@ def _default_release_gate_fixer(
     premium fixer inside it. The chain worktree is removed after the
     merge that created the release-gate child, so ``ensure_worktree`` recreates
     it (idempotent) on the chain branch. The live checkout is never modified
-    here — only the gate's build/smoke run there, via the gate runner."""
+    here; its commit reaches the live checkout only through ``integrate_chain``
+    after clean branch validation."""
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
     ensure_worktree(repo_root, root_id)
     prompt = _release_gate_fixer_prompt(
@@ -1785,6 +1820,8 @@ def _record_release_gate_executed(
     conn: sqlite3.Connection, task_id: str, *,
     attempt: int, ok: bool, output: str, root_id: str,
     fixer_error: Optional[str] = None,
+    phase: Optional[str] = None,
+    validation_commit: Optional[str] = None,
 ) -> None:
     from hermes_cli import kanban_db as kb
 
@@ -1797,12 +1834,65 @@ def _record_release_gate_executed(
     }
     if fixer_error:
         payload["fixer_error"] = fixer_error
+    if phase:
+        payload["phase"] = phase
+    if validation_commit:
+        payload["validation_commit"] = validation_commit
     try:
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, "release_gate_executed", payload)
     except Exception:
         _log.warning("could not record release_gate_executed for %s",
                      task_id, exc_info=True)
+
+
+def _invoke_release_gate_runner(runner, validation_root: Path) -> tuple[bool, str]:
+    """Call an injected runner while preserving the historical zero-arg seam.
+
+    New path-aware tests/runners may accept the clean validation root as their
+    sole positional argument; existing ``lambda: (...)`` runners remain valid.
+    """
+    try:
+        signature = inspect.signature(runner)
+        accepts_root = any(
+            parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+            )
+            for parameter in signature.parameters.values()
+        )
+    except (TypeError, ValueError):
+        accepts_root = False
+    return runner(validation_root) if accepts_root else runner()
+
+
+def _run_release_gate_at_commit(
+    repo_root: Path,
+    commit: Optional[str],
+    gate: Callable[[Path, list[str]], tuple[bool, str]],
+    *,
+    allow_injected_legacy_fallback: bool,
+) -> tuple[bool, str]:
+    """Validate one release candidate commit in a clean detached worktree.
+
+    The fallback exists only for old injected unit-test seams whose synthetic
+    release event contains no real git commit. Production/default execution is
+    fail-closed when the event commit cannot be resolved.
+    """
+    if commit:
+        try:
+            return _run_gate_in_validation_worktree(repo_root, commit, [], gate)
+        except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
+            error = f"release validation commit unavailable ({commit}): {exc}"
+    else:
+        error = "release validation commit missing"
+    if allow_injected_legacy_fallback:
+        try:
+            return gate(repo_root, [])
+        except Exception as exc:
+            return False, f"injected release gate crashed: {exc}"
+    return False, error
 
 
 def _record_release_gate_fix_attempt(
@@ -2107,10 +2197,12 @@ def execute_release_gate(
 ) -> dict:
     """Process a parked release-gate child end to end.
 
-    Runs the gate in the live checkout. On red: spawn up to *max_retries*
-    bounded premium fixers inside the chain worktree/branch (never live-main),
-    re-running the gate after each. Persistent red → ``operator_escalation`` and
-    the child stays blocked.
+    Runs every gate at an exact commit in a clean detached validation worktree.
+    On red: spawn up to *max_retries* bounded premium fixers inside the chain
+    worktree/branch (never live-main). A green fixer branch is integrated through
+    the serialized integrator and revalidated at the resulting live merge commit;
+    activation can never consume an unmerged fixer commit. Persistent red or a
+    failed integration → ``operator_escalation`` and the child stays blocked.
 
     On green CODE it does NOT stop at "builds" — it performs the REAL runtime
     activation (build + backend restart + post-restart health via
@@ -2123,8 +2215,8 @@ def execute_release_gate(
     :func:`spawn_release_gate_activation`) so the restart cannot kill the writer.
 
     ``gate_runner``/``fixer_runner``/``activation_runner`` are injectable seams
-    (defaults wire to the live subprocess gate, the claude-CLI fixer, and the
-    ``deploy_dashboard.sh`` restart). Returns a result dict with ``status``
+    (defaults wire to the detached-worktree subprocess gate, the claude-CLI
+    fixer, and the ``deploy_dashboard.sh`` restart). Returns a result dict with ``status``
     (``"green"`` | ``"escalated"``) and ``fixer_attempts``.
     """
     ctx = _release_gate_context(conn, task_id)
@@ -2138,24 +2230,110 @@ def execute_release_gate(
     if max_retries is None:
         max_retries = release_gate_fixer_max_retries()
     max_retries = max(0, int(max_retries))
-    gate_runner = gate_runner or _default_release_gate_runner
+    injected_gate_runner = gate_runner
     fixer_runner = fixer_runner or _default_release_gate_fixer
     activation_runner = activation_runner or _default_release_gate_activation
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+
+    def release_gate(
+        validation_root: Path, _changed_files: list[str],
+    ) -> tuple[bool, str]:
+        if injected_gate_runner is not None:
+            return _invoke_release_gate_runner(
+                injected_gate_runner, validation_root,
+            )
+        return _default_release_gate_runner(
+            ctx["commands"], repo_root=validation_root,
+        )
 
     def _retry_budget_for(output: str) -> int:
         if not explicit_max_retries and (output or "").startswith("visual-gate:"):
             return visual_gate_max_retries()
         return max_retries
 
-    # Attempt 0: bare gate run.
-    ok, output = gate_runner()
+    def activate_if_still_current(validated_commit: Optional[str], attempts: int) -> dict:
+        """Never deploy a different live commit than the one just validated."""
+        if not validated_commit:
+            return _activate_and_finalize(
+                conn, task_id, root_id, attempts, activation_runner,
+            )
+
+        guard_error = None
+        lock_path = _integrator_lock_path(repo_root)
+        with _PROCESS_LOCK:
+            try:
+                lock = _acquire_file_lock(lock_path)
+            except WorktreeError as exc:
+                guard_error = f"release activation lock failed: {exc}"
+            else:
+                try:
+                    try:
+                        expected = _git(
+                            repo_root,
+                            "rev-parse",
+                            f"{validated_commit}^{{commit}}",
+                        )
+                        live_head = _git(repo_root, "rev-parse", "HEAD")
+                    except WorktreeError as exc:
+                        guard_error = (
+                            f"release activation HEAD guard failed: {exc}"
+                        )
+                    else:
+                        guard_error = (
+                            "release activation refused: live HEAD advanced from "
+                            f"validated {expected} to {live_head}"
+                            if expected != live_head
+                            else None
+                        )
+                    if not guard_error:
+                        return _activate_and_finalize(
+                            conn,
+                            task_id,
+                            root_id,
+                            attempts,
+                            activation_runner,
+                        )
+                finally:
+                    _release_file_lock(lock)
+
+        _escalate_release_gate(
+            conn,
+            task_id,
+            root_id,
+            attempts=attempts,
+            last_error=guard_error or "release activation guard failed",
+        )
+        return {
+            "ok": False,
+            "status": "escalated",
+            "fixer_attempts": attempts,
+            "root_id": root_id,
+        }
+
+    # Attempt 0: validate the integration commit recorded when this release
+    # child was created. Synthetic old unit-test seams may not carry a real ref;
+    # default production execution never takes that compatibility fallback.
+    ok, output = _run_release_gate_at_commit(
+        repo_root,
+        ctx.get("merge_commit"),
+        release_gate,
+        allow_injected_legacy_fallback=injected_gate_runner is not None,
+    )
     _record_release_gate_executed(
         conn, task_id, attempt=0, ok=ok, output=output, root_id=root_id,
+        phase="merged_commit", validation_commit=ctx.get("merge_commit"),
     )
     if ok:
-        return _activate_and_finalize(
-            conn, task_id, root_id, 0, activation_runner,
+        guarded_commit = ctx.get("merge_commit")
+        if injected_gate_runner is not None and guarded_commit:
+            try:
+                _git(repo_root, "rev-parse", f"{guarded_commit}^{{commit}}")
+            except WorktreeError:
+                # Synthetic legacy test seam: the injected gate ran directly
+                # because its fixture carries no real repository commit.
+                guarded_commit = None
+        return activate_if_still_current(
+            guarded_commit, 0,
         )
 
     fixer_attempts = 0
@@ -2176,16 +2354,98 @@ def execute_release_gate(
             fix_error = f"{type(exc).__name__}: {exc}"
             _log.warning("release-gate fixer attempt %d failed for %s: %s",
                          fixer_attempts, task_id, fix_error, exc_info=True)
-        # Re-run the gate after the fixer.
-        ok, output = gate_runner()
+        branch_commit = None
+        if (worktree / ".git").exists() and _branch_exists(repo_root, branch):
+            try:
+                branch_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
+            except WorktreeError:
+                branch_commit = None
+
+        if branch_commit is None and injected_gate_runner is not None:
+            # Compatibility for existing isolated executor tests whose fake
+            # fixer intentionally creates no git branch. Production fixers are
+            # required to leave a real commit and never use this path.
+            ok, output = release_gate(repo_root, [])
+            phase = "injected_legacy"
+        elif branch_commit is None:
+            ok, output = False, (
+                "release-gate fixer produced no integratable branch commit"
+            )
+            phase = "fixer_branch"
+        else:
+            ok, output = _run_release_gate_at_commit(
+                repo_root,
+                branch_commit,
+                release_gate,
+                allow_injected_legacy_fallback=False,
+            )
+            phase = "fixer_branch"
         _record_release_gate_executed(
             conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
-            root_id=root_id, fixer_error=fix_error,
+            root_id=root_id, fixer_error=fix_error, phase=phase,
+            validation_commit=branch_commit,
         )
-        if ok:
+        if ok and branch_commit is None:
+            # Synthetic legacy test seam only: there is no real ref to guard.
             return _activate_and_finalize(
                 conn, task_id, root_id, fixer_attempts, activation_runner,
             )
+        if not ok:
+            continue
+
+        merged_gate_result: list[tuple[bool, str, str]] = []
+
+        def merged_release_gate(
+            validation_root: Path, changed_files: list[str],
+        ) -> tuple[bool, str]:
+            result = release_gate(validation_root, changed_files)
+            merged_gate_result.append(
+                (result[0], result[1], _git(validation_root, "rev-parse", "HEAD"))
+            )
+            return result
+
+        try:
+            target = current_branch(repo_root)
+            integration = integrate_chain(
+                repo_root,
+                worktree,
+                branch,
+                target,
+                gate_runner=merged_release_gate,
+            )
+        except Exception as exc:
+            integration = {
+                "action": "parked",
+                "reason": f"release-gate fixer integration crashed: {exc}",
+            }
+
+        if merged_gate_result:
+            merged_ok, merged_output, merged_commit = merged_gate_result[-1]
+            _record_release_gate_executed(
+                conn,
+                task_id,
+                attempt=fixer_attempts,
+                ok=merged_ok,
+                output=merged_output,
+                root_id=root_id,
+                phase="integrated_fixer_commit",
+                validation_commit=merged_commit,
+            )
+
+        if integration.get("action") == "merged":
+            return activate_if_still_current(
+                integration.get("merge_commit"), fixer_attempts,
+            )
+        if integration.get("action") == "clean":
+            live_commit = _git(repo_root, "rev-parse", "HEAD")
+            if live_commit == branch_commit:
+                return activate_if_still_current(
+                    live_commit, fixer_attempts,
+                )
+        output = (
+            "release-gate fixer integration failed: "
+            + str(integration.get("reason") or integration.get("action"))
+        )
 
     _escalate_release_gate(
         conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
@@ -2252,7 +2512,13 @@ def spawn_release_gate_activation(
     existing_path = os.environ.get("PATH", "")
     merged_path = ":".join(path_prefix + ([existing_path] if existing_path else []))
     setenv = [f"--setenv=PATH={merged_path}"]
-    for key in ("HERMES_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+    for key in (
+        "HERMES_HOME",
+        "HERMES_KANBAN_HOME",
+        "HERMES_KANBAN_DB",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ):
         val = os.environ.get(key)
         if val:
             setenv.append(f"--setenv={key}={val}")
@@ -2813,6 +3079,23 @@ def _acquire_file_lock(lock_path: Path, timeout: int = LOCK_TIMEOUT_SECONDS):
                 time.sleep(1.0)
 
 
+def _integrator_lock_path(repo_root: Path) -> Path:
+    """Cross-process serialization lock shared by merge and activation."""
+    repo_root = Path(repo_root)
+    try:
+        return (
+            Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
+            / "hermes-kanban-integrator.lock"
+        )
+    except (WorktreeError, subprocess.SubprocessError, OSError):
+        return (
+            repo_root
+            / WORKTREES_DIRNAME
+            / WORKTREES_NAMESPACE
+            / ".integrator.lock"
+        )
+
+
 def _release_file_lock(handle) -> None:
     try:
         if isinstance(handle, tuple):
@@ -2915,142 +3198,71 @@ def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
     return None
 
 
-# Path-membership predicates for the two scopes ``default_quick_gate`` itself
-# gates its stages on — ``_changed_py`` (``f.endswith(".py")``, gates
-# ruff+pytest) and ``any(f.startswith("web/") ...)`` (gates lint:control/
-# tsc/vitest/the visual gate). Deliberately mirrors those exact conditions
-# rather than a hand-picked directory allowlist: ruff/pytest select by file
-# suffix/mapping regardless of which top-level dir a .py file lives in, so a
-# fixed prefix list (e.g. only hermes_cli/, tests/, scripts/) would silently
-# miss changes elsewhere in the repo.
-def _py_gate_scope(path: str) -> bool:
-    return path.endswith(".py")
+def _link_shared_dependencies(repo_root: Path, worktree: Path) -> None:
+    """Expose the checkout's dependency trees in a short-lived worktree."""
+    for rel in _NODE_MODULES_LINKS:
+        src = Path(repo_root) / rel
+        dst = Path(worktree) / rel
+        if src.is_dir() and not dst.exists() and dst.parent.is_dir():
+            try:
+                dst.symlink_to(src, target_is_directory=True)
+            except OSError:
+                _log.warning("could not symlink %s into worktree %s", rel, worktree)
 
 
-def _web_gate_scope(path: str) -> bool:
-    return path.startswith("web/")
+def _cleanup_validation_worktree(repo_root: Path, worktree: Path) -> None:
+    """Remove a detached validation worktree and all of its registration."""
+    for rel in _NODE_MODULES_LINKS:
+        link = worktree / rel
+        try:
+            if link.is_symlink():
+                link.unlink()
+        except OSError:
+            _log.warning("could not unlink %s from validation worktree", link)
+    _reap_partial(repo_root, worktree)
+    try:
+        worktree.rmdir()
+    except OSError:
+        pass
+    for parent in (worktree.parent, worktree.parent.parent):
+        try:
+            parent.rmdir()
+        except OSError:
+            break
 
 
-# Leading ``label:`` token (as emitted by ``default_quick_gate``'s internal
-# ``_run`` helper / the visual-gate error builders) for each stage, mapped to
-# its scope predicate above. Used to attribute a RED gate to the scope of the
-# FIRST failing stage (default_quick_gate short-circuits on the first
-# failure, so ``detail``'s label IS that stage).
-# ``ruff`` is deliberately ABSENT from the py prefixes: default_quick_gate runs
-# ruff exclusively over the chain's OWN diff files (``_changed_py``), so a ruff
-# failure can never be caused by a foreign non-diff file — attributing it to
-# foreign dirt would falsely exculpate a genuinely broken chain (Codex review
-# finding 1, 2026-07-06). pytest stays: affected test modules import shared
-# code and conftests, so any foreign dirty .py can break that stage.
-# ``visual-gate`` is listed but its failures are free-form (``visual-gate:
-# <message>``, no ``exit N`` remainder), so the run-failure guard in
-# ``_gate_stage_scope_predicate`` keeps it unattributed — conservative default.
-_GATE_STAGE_SCOPES: tuple[tuple[tuple[str, ...], Callable[[str], bool]], ...] = (
-    (("pytest[",), _py_gate_scope),
-    (("lint:control", "tsc -b", "vitest[control]", "visual-gate"), _web_gate_scope),
-)
-
-
-def _gate_stage_label(detail: str) -> str:
-    """The leading ``label`` of a gate ``detail`` string, as emitted by
-    ``default_quick_gate``'s internal ``_run`` helper (``f"{label}: {msg}"``).
-
-    Splits on the first ``": "`` (colon-SPACE), not bare ``":"``: the
-    ``lint:control`` label itself contains a colon, so a bare-``":"`` split
-    would truncate it to ``lint`` and lose the match below."""
-    return (detail or "").split(": ", 1)[0].strip()
-
-
-def _gate_stage_scope_predicate(detail: str) -> Optional[Callable[[str], bool]]:
-    """Scope predicate for the stage that produced gate ``detail``, or
-    ``None`` when the leading label doesn't match a known stage (a crashed
-    gate, a custom test ``gate_runner``, or the FO ``npm run build`` gate) —
-    callers then treat the scope as indeterminate and skip foreign-dirty
-    attribution rather than guess."""
-    label = _gate_stage_label(detail)
-    # Only a real RUN failure of the stage (``<label>: exit N``) is evidence
-    # the stage executed against the contaminated tree. TIMEOUT, ``command
-    # not found`` and the fail-closed missing-binary messages ("tsc: web/ in
-    # diff but tsc not found...", "vitest[control]: ... not found") are
-    # tooling/environment problems — foreign dirty files are not the cause,
-    # so those must keep today's generic classification (Codex review
-    # finding 2 + the vitest-missing collision, 2026-07-06).
-    remainder = (detail or "").split(": ", 1)
-    if len(remainder) < 2 or not remainder[1].lstrip().startswith("exit "):
-        return None
-    for prefixes, predicate in _GATE_STAGE_SCOPES:
-        if label.startswith(prefixes):
-            return predicate
-    return None
-
-
-def _quick_gate_scopes_attempted(changed_files: list[str]) -> list[Callable[[str], bool]]:
-    """Scope predicates for every stage ``default_quick_gate`` actually runs
-    for *changed_files* — the same conditions the gate uses to decide whether
-    to run each stage at all. Used on the GREEN path: when the gate passes,
-    ANY attempted stage could have run against a foreign dirty file within its
-    scope without failing loudly (a false green)."""
-    scopes: list[Callable[[str], bool]] = []
-    if any(_py_gate_scope(f) for f in changed_files):
-        scopes.append(_py_gate_scope)
-    if any(_web_gate_scope(f) for f in changed_files):
-        scopes.append(_web_gate_scope)
-    return scopes
-
-
-def _foreign_dirty_checkout_reason(detail: str, foreign_files: list[str]) -> str:
-    """Park reason for the ``FOREIGN_DIRTY_CHECKOUT_CLASS`` path — the
-    ``_integration_park_class`` transient prefix (``"foreign dirty checkout
-    ("``) must match the start of this string exactly."""
-    return (
-        "foreign dirty checkout ("
-        + (_gate_stage_label(detail) or "gate")
-        + " stage): " + ", ".join(foreign_files[:10])
-    )
-
-
-def _gate_with_foreign_dirty_evidence(
+def _run_gate_in_validation_worktree(
     repo_root: Path,
+    commit: str,
     diff_files: list[str],
     gate: Callable[[Path, list[str]], tuple[bool, str]],
-) -> tuple[bool, str, list[str]]:
-    """Run *gate* and additionally report which foreign (non-diff) dirty
-    files in the live checkout sat within the scope the gate exercised.
+) -> tuple[bool, str]:
+    """Run a gate at exactly *commit* in a clean, detached worktree.
 
-    Shared by BOTH ``integrate_chain`` gate call sites — the standard merge
-    and the ancestry reintegration-after-revert branch — so the P1
-    2026-07-05 (t_2fa852c6) foreign-dirty-checkout attribution logic isn't
-    duplicated. Callers own the git revert mechanics and the ``parked``/
-    result dict shape (which legitimately differ between the two sites).
-
-    Returns ``(ok, detail, foreign_files)``:
-    - RED (``ok`` is False): ``foreign_files`` = foreign dirty files within
-      the FIRST failing stage's scope (empty if none, or the label doesn't
-      match a known stage — caller keeps today's generic gate-failed park).
-    - GREEN (``ok`` is True): ``foreign_files`` = foreign dirty files within
-      ANY stage *gate* actually attempted for *diff_files* (empty if none —
-      caller's result stays a plain green, no ``gate_environment`` flag).
+    The worktree is registered under ``.worktrees/kanban-validation`` so it is
+    invisible to live-checkout dirty detection, and is removed in ``finally``
+    on green, red, timeout, or a crashing injected runner.
     """
-    # Snapshot taken right before the gate runs so it reflects the ACTUAL
-    # environment the gate is about to be exercised against. The overlap
-    # pre-check (a) in integrate_chain already parked anything intersecting
-    # diff_files, so everything here is genuinely foreign.
-    foreign_dirty = sorted(set(dirty_files(repo_root)) - set(diff_files))
+    repo_root = Path(repo_root)
+    expected = _git(repo_root, "rev-parse", f"{commit}^{{commit}}")
+    base = repo_root / WORKTREES_DIRNAME / "kanban-validation"
+    base.mkdir(parents=True, exist_ok=True)
+    token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+    worktree = base / token
     try:
-        ok, detail = gate(repo_root, diff_files)
+        _git(repo_root, "worktree", "add", "--detach", str(worktree), expected)
+        actual = _git(worktree, "rev-parse", "HEAD")
+        if actual != expected:
+            return False, (
+                "validation worktree commit mismatch: "
+                f"expected {expected}, got {actual}"
+            )
+        _link_shared_dependencies(repo_root, worktree)
+        return gate(worktree, diff_files)
     except Exception as exc:  # a broken gate must not pass silently
-        ok, detail = False, f"gate crashed: {exc}"
-    if not foreign_dirty:
-        return ok, detail, []
-    if not ok:
-        scope_pred = _gate_stage_scope_predicate(detail)
-        foreign_files = [f for f in foreign_dirty if scope_pred(f)] if scope_pred else []
-    else:
-        scopes_attempted = _quick_gate_scopes_attempted(diff_files)
-        foreign_files = sorted(
-            f for f in foreign_dirty if any(pred(f) for pred in scopes_attempted)
-        )
-    return ok, detail, foreign_files
+        return False, f"validation worktree gate failed: {exc}"
+    finally:
+        _cleanup_validation_worktree(repo_root, worktree)
 
 
 def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
@@ -3251,17 +3463,8 @@ def integrate_chain(
         return out
 
     # Lock lives in the repo's .git dir: never visible in `git status`,
-    # never blocks the empty-namespace rmdir tidy in remove_worktree, and
-    # exactly one location per repo regardless of worktree layout.
-    try:
-        lock_path = (
-            Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
-            / "hermes-kanban-integrator.lock"
-        )
-    except (WorktreeError, subprocess.SubprocessError, OSError):
-        lock_path = (
-            repo_root / WORKTREES_DIRNAME / WORKTREES_NAMESPACE / ".integrator.lock"
-        )
+    # never blocks worktree cleanup, and is shared with release activation.
+    lock_path = _integrator_lock_path(repo_root)
     with _PROCESS_LOCK:
         try:
             lock = _acquire_file_lock(lock_path)
@@ -3393,13 +3596,8 @@ def integrate_chain(
                                 if _is_fo_repo(repo_root)
                                 else default_quick_gate
                             )
-                            # Same foreign-dirty-checkout attribution as the
-                            # standard merge path below (P1 2026-07-05,
-                            # t_2fa852c6) — shared helper, not duplicated.
-                            ok, detail, foreign_files = (
-                                _gate_with_foreign_dirty_evidence(
-                                    repo_root, diff_files, gate,
-                                )
+                            ok, detail = _run_gate_in_validation_worktree(
+                                repo_root, restored_commit, diff_files, gate,
                             )
                             if not ok:
                                 try:
@@ -3415,24 +3613,6 @@ def integrate_chain(
                                     _git(repo_root, "revert", "--abort", check=False)
                                     reverted = False
                                     detail += f" — AND REVERT FAILED: {exc}"
-                                if foreign_files:
-                                    # Attribute honestly instead of the
-                                    # generic "post-reintegration gate
-                                    # failed" reason — same chain-blame
-                                    # concern as the standard merge path.
-                                    return parked(
-                                        _foreign_dirty_checkout_reason(
-                                            detail, foreign_files,
-                                        ),
-                                        park_class=FOREIGN_DIRTY_CHECKOUT_CLASS,
-                                        foreign_dirty_files=foreign_files[:10],
-                                        merge_commit=merge_commit,
-                                        revert_commit=restore_commit,
-                                        restored_commit=restored_commit,
-                                        reverted=reverted,
-                                        reintegrated_after_revert=True,
-                                        gate_output=detail,
-                                    )
                                 return parked(
                                     f"post-reintegration gate failed: {detail}",
                                     merge_commit=merge_commit,
@@ -3456,9 +3636,6 @@ def integrate_chain(
                                 "changed_files": diff_files,
                                 "reintegrated_after_revert": True,
                             }
-                            if foreign_files:
-                                result["gate_environment"] = "foreign_dirty"
-                                result["foreign_dirty_files"] = foreign_files[:10]
                             if artifact_receipt:
                                 result["artifact_receipt"] = artifact_receipt
                             return result
@@ -3535,14 +3712,13 @@ def integrate_chain(
             merge_commit = _git(repo_root, "rev-parse", "HEAD")
 
             # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
-            # ``_gate_with_foreign_dirty_evidence`` additionally reports any
-            # foreign (non-diff) dirty file in the live checkout that sat
-            # within the scope the gate exercised (P1 2026-07-05, t_2fa852c6).
+            # The gate runs at the exact merge commit in a clean detached
+            # validation worktree, never in the potentially dirty live checkout.
             gate = gate_runner or (
                 fo_integration_gate if _is_fo_repo(repo_root) else default_quick_gate
             )
-            ok, detail, foreign_files = _gate_with_foreign_dirty_evidence(
-                repo_root, diff_files, gate,
+            ok, detail = _run_gate_in_validation_worktree(
+                repo_root, merge_commit, diff_files, gate,
             )
             if not ok:
                 try:
@@ -3553,22 +3729,6 @@ def integrate_chain(
                     _git(repo_root, "revert", "--abort", check=False)
                     reverted = False
                     detail += f" — AND REVERT FAILED: {exc}"
-                if foreign_files:
-                    # Attribute honestly instead of the generic "post-merge
-                    # gate failed" reason: that prefix classifies
-                    # needs_orchestrator (kanban_db._integration_park_class),
-                    # which dispatches a coder-claude conflict-fixer to
-                    # "repair" this chain's code — chain-blame for a failure
-                    # this chain's own diff didn't cause. The revert above is
-                    # unchanged: the live branch must stay green regardless of
-                    # WHY the gate failed.
-                    return parked(
-                        _foreign_dirty_checkout_reason(detail, foreign_files),
-                        park_class=FOREIGN_DIRTY_CHECKOUT_CLASS,
-                        foreign_dirty_files=foreign_files[:10],
-                        merge_commit=merge_commit, reverted=reverted,
-                        gate_output=detail,
-                    )
                 return parked(
                     f"post-merge gate failed: {detail}",
                     merge_commit=merge_commit, reverted=reverted,
@@ -3586,15 +3746,6 @@ def integrate_chain(
                 "files": len(diff_files),
                 "changed_files": diff_files,
             }
-            if foreign_files:
-                # Evidence-honesty (GREEN path): the gate passed, but a
-                # foreign dirty file sat within a stage it actually ran —
-                # flag the contaminated environment additively so this green
-                # is never read as a clean-checkout green (the same
-                # contamination can also mask a real regression this chain
-                # WOULD have caught in a clean tree).
-                result["gate_environment"] = "foreign_dirty"
-                result["foreign_dirty_files"] = foreign_files[:10]
             if artifact_receipt:
                 result["artifact_receipt"] = artifact_receipt
             return result
@@ -3642,6 +3793,8 @@ def maybe_integrate_on_complete(
         open_sibling = conn.execute(
             f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
             "AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+            "AND NOT EXISTS (SELECT 1 FROM task_events e "
+            "WHERE e.task_id = tasks.id AND e.kind = 'release_gate_parked') "
             "LIMIT 1",
             tuple(members),
         ).fetchone()
@@ -3683,6 +3836,112 @@ def maybe_integrate_on_complete(
     target = frozen_merge_target(conn, root_id)
     branch = chain_branch(root_id)
     if not _branch_exists(repo_root, branch):
+        # A previous completion attempt may have merged, gated, and removed the
+        # branch/worktree before its later DB done/outbox transaction rolled
+        # back.  Recover only from two durable integration witnesses whose
+        # commit still reaches the frozen target; a bare missing branch remains
+        # a hard park.
+        merged_row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'integration_merged' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        verified_row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'INTEGRATOR_VERIFIED' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        try:
+            merged_payload = json.loads(merged_row["payload"]) if merged_row else {}
+            verified_payload = (
+                json.loads(verified_row["payload"]) if verified_row else {}
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            merged_payload = {}
+            verified_payload = {}
+        merge_commit = str(merged_payload.get("merge_commit") or "").strip()
+        verified_commit = str(verified_payload.get("merge_commit") or "").strip()
+        recorded_target = str(merged_payload.get("target") or target).strip()
+        if (
+            merge_commit
+            and merge_commit == verified_commit
+            and recorded_target == target
+            and _branch_is_ancestor(repo_root, merge_commit, target)
+        ):
+            changed_files = [
+                str(path)
+                for path in merged_payload.get("changed_files", [])
+                if str(path).strip()
+            ]
+            content_differs = False
+            if changed_files:
+                try:
+                    _git(
+                        repo_root,
+                        "diff",
+                        "--quiet",
+                        merge_commit,
+                        target,
+                        "--",
+                        *changed_files,
+                    )
+                except WorktreeError:
+                    content_differs = True
+            if content_differs:
+                revert_commits = _revert_commits_for_merge(
+                    repo_root, merge_commit, target,
+                )
+                return {
+                    **merged_payload,
+                    "action": "parked",
+                    "reason": (
+                        "recorded green merge content is no longer active on "
+                        f"{target}; refusing already-integrated recovery"
+                    ),
+                    "branch": branch,
+                    "target": target,
+                    "merge_commit": merge_commit,
+                    "revert_commits": revert_commits,
+                    "content_drift_after_merge": True,
+                }
+            outcome = {
+                **merged_payload,
+                "action": "clean",
+                "already_integrated": True,
+                "merge_commit": merge_commit,
+                "branch": branch,
+                "target": target,
+                "reconciled_from": "integration_merged+INTEGRATOR_VERIFIED",
+            }
+            release_row = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? "
+                "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if release_row is not None:
+                try:
+                    release_payload = json.loads(release_row["payload"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    release_payload = {}
+                child_id = str(release_payload.get("child_id") or "").strip()
+                if child_id:
+                    outcome["release_gate_child_id"] = child_id
+            if (
+                "release_gate_child_id" not in outcome
+                and outcome.get("release_gate_required")
+            ):
+                try:
+                    _create_parked_release_gate_child(
+                        conn, task_id, root_id, outcome,
+                    )
+                except Exception as exc:
+                    return {
+                        **outcome,
+                        "action": "parked",
+                        "reason": f"required release-gate creation failed: {exc}",
+                        "release_gate_creation_failed": True,
+                    }
+            return outcome
         outcome = {
             "action": "parked",
             "reason": f"missing branch evidence for root finalizer: {branch}",
@@ -3699,6 +3958,11 @@ def maybe_integrate_on_complete(
     outcome = integrate_chain(
         repo_root, wt, branch, target, gate_runner=gate_runner,
     )
+    if outcome.get("action") == "merged" and any(
+        str(path).startswith("web/")
+        for path in outcome.get("changed_files", [])
+    ):
+        outcome["release_gate_required"] = True
 
     try:
         with kb.write_txn(conn):
@@ -3753,14 +4017,20 @@ def maybe_integrate_on_complete(
             )
         except Exception:
             _log.debug("integration receipt comment failed", exc_info=True)
-        if any(f.startswith("web/") for f in outcome.get("changed_files", [])):
+        if outcome.get("release_gate_required"):
             try:
                 _create_parked_release_gate_child(conn, task_id, root_id, outcome)
-            except Exception:
+            except Exception as exc:
                 _log.warning(
                     "could not create parked release-gate child for %s",
                     task_id, exc_info=True,
                 )
+                return {
+                    **outcome,
+                    "action": "parked",
+                    "reason": f"required release-gate creation failed: {exc}",
+                    "release_gate_creation_failed": True,
+                }
         if auto_complete_root_id is not None:
             try:
                 _auto_complete_decompose_root(

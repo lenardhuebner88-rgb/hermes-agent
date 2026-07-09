@@ -3,19 +3,24 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import hermes_cli.web_server as web_server
-from hermes_cli.agent_terminals import TmuxAgentSessionService
+from hermes_cli.agent_terminals import AgentTerminalError, TmuxAgentSessionService
 
 
 class FakeAgentTerminalService:
     def capabilities(self):
         return SimpleNamespace(to_dict=lambda: {"tmux_available": True, "hermes_tui_available": True, "hermes_binary": "/bin/hermes", "reason": None})
+
+    def cleanup_stale_isolated_attaches(self):
+        return []
 
     def list_sessions(self):
         return ["work"]
@@ -146,6 +151,52 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
         assert fields.isdisjoint(forbidden), (name, fields)
 
 
+def test_four_real_isolated_websockets_keep_distinct_same_session_windows(monkeypatch, tmp_path: Path):
+    socket = tmp_path / "tmux.sock"
+    service = TmuxAgentSessionService(socket_path=socket)
+    windows = ["one", "two", "three", "four"]
+    subprocess.run(["tmux", "-S", str(socket), "new-session", "-d", "-s", "work", "-n", windows[0], "sh", "-c", "while :; do sleep 60; done"], check=True)
+    for window in windows[1:]:
+        subprocess.run(["tmux", "-S", str(socket), "new-window", "-d", "-t", "work", "-n", window, "sh", "-c", "while :; do sleep 60; done"], check=True)
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    try:
+        client = TestClient(web_server.app)
+        with ExitStack() as stack:
+            sockets = [
+                stack.enter_context(client.websocket_connect(f"/api/agent-terminals/attach?session=work&window={window}&isolated=1&client_id=probe-{index}"))
+                for index, window in enumerate(windows)
+            ]
+            for index, websocket in enumerate(sockets):
+                websocket.send_text(f"\x1b]777;RESIZE:{90 + index * 10}x{25 + index}\x07")
+            time.sleep(0.25)
+            rows = subprocess.run(
+                ["tmux", "-S", str(socket), "list-clients", "-F", "#{session_name}|#{window_name}"],
+                check=True, text=True, capture_output=True,
+            ).stdout.splitlines()
+            assert len(rows) == 4
+            assert {row.split("|")[1] for row in rows} == set(windows)
+            assert all(row.startswith("__hermes_attach_") for row in rows)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            internal = [name for name in subprocess.run(
+                ["tmux", "-S", str(socket), "list-sessions", "-F", "#{session_name}"],
+                check=True, text=True, capture_output=True,
+            ).stdout.splitlines() if name.startswith("__hermes_attach_")]
+            if not internal:
+                break
+            time.sleep(0.05)
+        assert internal == []
+    finally:
+        subprocess.run(["tmux", "-S", str(socket), "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def test_agent_terminal_attach_uses_only_tmux_attach_argv(monkeypatch):
     class AttachService(FakeAgentTerminalService):
         def attach_argv(self, session, window):
@@ -186,6 +237,90 @@ def test_agent_terminal_attach_uses_only_tmux_attach_argv(monkeypatch):
 
     assert spawned["argv"] == ["tmux", "-S", "/tmp/socket", "attach-session", "-t", "work:hermes"]
     assert spawned["env"] is None
+
+
+def test_agent_terminal_isolated_attach_uses_group_and_always_cleans_up(monkeypatch):
+    events: list[object] = []
+
+    class AttachService(FakeAgentTerminalService):
+        def create_isolated_attach(self, session, window):
+            events.append(("create", session, window))
+            return SimpleNamespace(session="__hermes_attach_test", window=window)
+
+        def attach_argv(self, session, window):
+            events.append(("argv", session, window))
+            return ["tmux", "attach-session", "-t", f"{session}:{window}"]
+
+        def cleanup_isolated_attach(self, session):
+            events.append(("cleanup", session))
+            return True
+
+    class FakeBridge:
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None, cols=80, rows=24):
+            events.append(("spawn", tuple(argv)))
+            return cls()
+
+        def read(self, timeout):
+            return None
+
+        def write(self, raw):
+            pass
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: AttachService())
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "PtyBridge", FakeBridge)
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes&isolated=1"):
+        pass
+
+    assert events[:3] == [
+        ("create", "work", "hermes"),
+        ("argv", "__hermes_attach_test", "hermes"),
+        ("spawn", ("tmux", "attach-session", "-t", "__hermes_attach_test:hermes")),
+    ]
+    assert events[-1] == ("cleanup", "__hermes_attach_test")
+    assert events[3:-1] and all(event == "close" for event in events[3:-1])
+
+
+def test_agent_terminal_isolated_attach_cleans_group_when_argv_validation_fails(monkeypatch):
+    events: list[object] = []
+
+    class InvalidAttachService(FakeAgentTerminalService):
+        def create_isolated_attach(self, session, window):
+            events.append(("create", session, window))
+            return SimpleNamespace(session="__hermes_attach_invalid", window=window)
+
+        def attach_argv(self, session, window):
+            raise AgentTerminalError("target disappeared")
+
+        def cleanup_isolated_attach(self, session):
+            events.append(("cleanup", session))
+            return True
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: InvalidAttachService())
+    monkeypatch.setattr(web_server, "_PTY_BRIDGE_AVAILABLE", True)
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/agent-terminals/attach?session=work&window=hermes&isolated=1") as websocket:
+        assert "Invalid tmux target" in websocket.receive_text()
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_text()
+
+    assert events == [
+        ("create", "work", "hermes"),
+        ("cleanup", "__hermes_attach_invalid"),
+    ]
 
 
 # Live incident: Handy = 69 Spalten, Höhen 35 (Keyboard offen) / 49 (Keyboard zu).

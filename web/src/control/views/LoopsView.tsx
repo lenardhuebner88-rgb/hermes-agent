@@ -21,6 +21,7 @@ import {
   extractDetail,
   landLoop,
   saveLoopFile,
+  setLoopTimerSchedule,
   startLoop,
   stopLoop,
   toggleLoopTimer,
@@ -945,8 +946,79 @@ interface LoopCardProps {
   onStop: (name: string) => void;
   onLand: (name: string) => void;
   onToggleTimer: (name: string, enabled: boolean) => void;
+  onSaveTimerSchedule: (name: string, time: string) => void;
   onSaveFile: (pack: string, filename: string, content: string) => void;
   onDuplicate: (source: string, name: string) => void;
+}
+
+const TIMER_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+function TimerScheduleControl({
+  pack,
+  busy,
+  onToggleTimer,
+  onSaveTimerSchedule,
+}: {
+  pack: LoopPackSummary;
+  busy: boolean;
+  onToggleTimer: (name: string, enabled: boolean) => void;
+  onSaveTimerSchedule: (name: string, time: string) => void;
+}) {
+  const [time, setTime] = useState(pack.timer_schedule);
+
+  const valid = TIMER_TIME_RE.test(time);
+  const dirty = time !== pack.timer_schedule;
+  const inputId = `loop-timer-time-${pack.name}`;
+
+  return (
+    <div className="min-w-0 flex-1 rounded-xl border px-3 py-2.5" style={{ borderColor: "var(--ln-line)", background: "var(--ln-raised)" }}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <label className="inline-flex min-h-[44px] cursor-pointer items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
+          <input
+            type="checkbox"
+            checked={pack.timer_enabled}
+            disabled={busy}
+            aria-label={`${t.timerLabel} ${pack.name}`}
+            onChange={(e) => onToggleTimer(pack.name, e.target.checked)}
+            className={cn("h-5 w-5 shrink-0 accent-[var(--ln-sodium)]", NIGHT_FOCUS)}
+          />
+          <span>{t.timerLabel}: {pack.timer_enabled ? t.timerOn : t.timerOff}</span>
+        </label>
+        <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2">
+          <label htmlFor={inputId} className="text-[11px]" style={{ color: "var(--ln-ink-mute)" }}>
+            {t.timerLocalTime}
+          </label>
+          <input
+            id={inputId}
+            type="time"
+            step={60}
+            value={time}
+            disabled={busy}
+            aria-label={`${t.timerTimeLabel} ${pack.name}`}
+            onChange={(event) => setTime(event.target.value)}
+            className={cn("h-[44px] min-w-28 rounded-lg border px-3 text-sm", NIGHT_FOCUS)}
+            style={{ ...monoFont, borderColor: "var(--ln-line)", background: "var(--ln-void)", color: "var(--ln-ink)" }}
+          />
+          <Button
+            size="sm"
+            disabled={busy || !valid || !dirty}
+            onClick={() => onSaveTimerSchedule(pack.name, time)}
+            className={cn("min-h-[44px] border-0 px-3 disabled:opacity-40", NIGHT_FOCUS)}
+            style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
+          >
+            {busy ? "…" : t.timerSave}
+          </Button>
+        </div>
+      </div>
+      <p className="mt-1 text-[11px]" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
+        {pack.timer_enabled
+          ? pack.timer_next_run
+            ? t.timerNextRun(pack.timer_next_run)
+            : t.timerNextRunPending
+          : t.timerDisabledHint(valid ? time : pack.timer_schedule)}
+      </p>
+    </div>
+  );
 }
 
 function LoopCard({
@@ -981,6 +1053,7 @@ function LoopCard({
   onStop,
   onLand,
   onToggleTimer,
+  onSaveTimerSchedule,
   onSaveFile,
   onDuplicate,
 }: LoopCardProps) {
@@ -1018,19 +1091,15 @@ function LoopCard({
         </div>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>
-        <label className="inline-flex min-h-9 items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
-          <input
-            type="checkbox"
-            checked={pack.timer_enabled}
-            disabled={busy}
-            aria-label={`${t.timerLabel} ${pack.name}`}
-            onChange={(e) => onToggleTimer(pack.name, e.target.checked)}
-            className={NIGHT_FOCUS}
-          />
-          {t.timerLabel}: {pack.timer_enabled ? t.timerOn : t.timerOff}
-        </label>
-        <div className="flex flex-wrap items-center gap-2">
+      <div className="mt-3 space-y-3 border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>
+        <TimerScheduleControl
+          key={`${pack.name}:${pack.timer_schedule}`}
+          pack={pack}
+          busy={busy}
+          onToggleTimer={onToggleTimer}
+          onSaveTimerSchedule={onSaveTimerSchedule}
+        />
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {pack.running ? (
             pendingStop ? (
               <span className="inline-flex flex-wrap items-center gap-2">
@@ -1288,6 +1357,7 @@ export interface LoopsGridProps {
   onStop: (name: string) => void;
   onLand: (name: string) => void;
   onToggleTimer: (name: string, enabled: boolean) => void;
+  onSaveTimerSchedule: (name: string, time: string) => void;
   onSaveFile: (pack: string, filename: string, content: string) => void;
   onDuplicate: (source: string, name: string) => void;
 }
@@ -1326,6 +1396,7 @@ export function LoopsGrid({
   onStop,
   onLand,
   onToggleTimer,
+  onSaveTimerSchedule,
   onSaveFile,
   onDuplicate,
 }: LoopsGridProps) {
@@ -1388,6 +1459,7 @@ export function LoopsGrid({
               onStop={onStop}
               onLand={onLand}
               onToggleTimer={onToggleTimer}
+              onSaveTimerSchedule={onSaveTimerSchedule}
               onSaveFile={onSaveFile}
               onDuplicate={onDuplicate}
             />
@@ -1470,6 +1542,19 @@ export function LoopsView() {
       await loops.reload();
     } catch (e) {
       setActionErrorByPack((prev) => ({ ...prev, [name]: `${t.timerFailed}: ${extractDetail(e)}` }));
+    } finally {
+      setBusyPack(null);
+    }
+  };
+
+  const handleSaveTimerSchedule = async (name: string, time: string) => {
+    setBusyPack(name);
+    clearActionError(name);
+    try {
+      await setLoopTimerSchedule(name, time);
+      await loops.reload();
+    } catch (e) {
+      setActionErrorByPack((prev) => ({ ...prev, [name]: `${t.timerScheduleFailed}: ${extractDetail(e)}` }));
     } finally {
       setBusyPack(null);
     }
@@ -1577,6 +1662,7 @@ export function LoopsView() {
         onStop={(name) => void handleStop(name)}
         onLand={(name) => void handleLand(name)}
         onToggleTimer={(name, enabled) => void handleToggleTimer(name, enabled)}
+        onSaveTimerSchedule={(name, time) => void handleSaveTimerSchedule(name, time)}
         onSaveFile={(pack, filename, content) => void handleSaveFile(pack, filename, content)}
         onDuplicate={(source, name) => void handleDuplicate(source, name)}
       />

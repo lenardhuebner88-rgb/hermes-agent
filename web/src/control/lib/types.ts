@@ -1009,6 +1009,10 @@ export interface LoopPackSummary {
   queue: Record<string, number> | null;
   commits_ahead: number;
   timer_enabled: boolean;
+  /** Täglicher Nachtlauf in lokaler systemd-Zeit, strikt HH:MM. */
+  timer_schedule: string;
+  /** Von systemd gemeldeter nächster Lauf; null bei deaktiviertem/unbekanntem Timer. */
+  timer_next_run: string | null;
 }
 
 export type LoopPack = LoopPackSummary | LoopPackError;
