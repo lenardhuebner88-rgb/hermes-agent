@@ -93,6 +93,7 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["queue"] is None  # sweep hat keine Queue
     assert nacht["commits_ahead"] == 0
     assert nacht["timer_enabled"] is False
+    assert nacht["autoland"] is False
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
     assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"

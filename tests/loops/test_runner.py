@@ -7,6 +7,7 @@ eine Fake-Engine (keine CLI-Prozesse in Tests).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 import yaml
 
 from loops import engines
+from loops import runner as runner_module
 from loops.runner import (
     PACKS_DIR,
     PHASES_BY_TYPE,
@@ -23,7 +25,9 @@ from loops.runner import (
     bump_retry,
     load_pack,
     main,
+    parse_plan_id,
     parse_overrides,
+    pass_status_matches_plan,
     parse_retry,
     parse_worktree_paths,
     resolve_packs_dir,
@@ -37,6 +41,7 @@ title: Beispiel-Fix
 priority: P1
 retry: 0
 created_by: loop-planner
+route: /control/loops
 done_when: |
   pytest tests/test_x.py ist gruen und war vorher rot
 anti_scope: |
@@ -96,6 +101,64 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
     return pack_dir
 
 
+def write_autoland_pack(packs_dir: Path, repo: Path, **overrides) -> Path:
+    """Schreibt den exakten Fable→Sol→Fable-Vertrag für Loader-Tests."""
+    pack_dir = write_pack(
+        packs_dir, "dashboard-experience", "pipeline", repo,
+        autoland=True, **overrides,
+    )
+    manifest_path = pack_dir / "pack.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    for phase, (engine, model, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
+        source = pack_dir / f"{phase}.md"
+        (pack_dir / prompt_name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        manifest["phases"][phase].update(
+            engine=engine, model=model, prompt=prompt_name,
+        )
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, allow_unicode=True), encoding="utf-8"
+    )
+    return pack_dir
+
+
+def authorize_autoland_fixture(
+    monkeypatch, packs_dir: Path, repo: Path, pack_dir: Path
+) -> None:
+    """Bindet die Produktionsschienen für einen expliziten Temp-Test neu."""
+    manifest = pack_dir / "pack.yaml"
+    monkeypatch.setattr(runner_module, "PACKS_DIR", packs_dir)
+    monkeypatch.setattr(runner_module, "AUTOLAND_EXPECTED_REPO", repo.resolve())
+    monkeypatch.setattr(
+        runner_module,
+        "AUTOLAND_MANIFEST_SHA256",
+        {"dashboard-experience": runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()},
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "AUTOLAND_PROMPT_SHA256",
+        {
+            "dashboard-experience": {
+                prompt: runner_module.hashlib.sha256((pack_dir / prompt).read_bytes()).hexdigest()
+                for _, _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
+            }
+        },
+    )
+
+
+def load_autoland_fixture(tmp_path: Path, monkeypatch, **overrides):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo, **overrides)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    pack = load_pack(packs_dir, "dashboard-experience")
+    # Nach dem erfolgreichen Vertrags-Test nur den Prozessadapter durch den
+    # registrierten Fake ersetzen; der geladene Produktionsvertrag bleibt belegt.
+    for phase in pack.phases.values():
+        phase.engine = "fake"
+        phase.model = "fake-1"
+    return repo, pack
+
+
 def parse_kv(prompt: str) -> dict[str, str]:
     out = {}
     for line in prompt.splitlines():
@@ -128,10 +191,76 @@ def ok(status: str):
     return _run
 
 
+def write_visual_evidence(
+    state: Path, git_head: str, route: str = "/control/loops"
+) -> Path:
+    evidence_root = state / "evidence"
+    evidence_dir = evidence_root / f"test-{len(list(evidence_root.glob('*-verifier')))}-verifier"
+    evidence_dir.mkdir(parents=True)
+    results = []
+    for name, width, height in (
+        ("mobile-390", 390, 844),
+        ("tablet-820", 820, 1180),
+        ("desktop-1366", 1366, 900),
+    ):
+        png = evidence_dir / f"control-loops-{name}.png"
+        aria = evidence_dir / f"control-loops-{name}.aria.yml"
+        png.write_bytes(f"png-{width}".encode())
+        aria.write_text(f"- document: {route} @ {width}\n", encoding="utf-8")
+        results.append(
+            {
+                "route": route,
+                "viewport": {"name": name, "width": width, "height": height},
+                "ok": True,
+                "screenshotPath": str(png),
+                "ariaSnapshotPath": str(aria),
+                "ariaSnapshotError": None,
+                "consoleErrors": [],
+                "pageErrors": [],
+                "overflow": {"ok": True, "scrollWidth": width, "innerWidth": width},
+            }
+        )
+    (evidence_dir / "summary.json").write_text(
+        json.dumps(
+            {"ok": True, "gitHead": git_head, "routes": [route], "results": results}
+        ),
+        encoding="utf-8",
+    )
+    return evidence_dir
+
+
+def ok_with_visual_evidence(status: str):
+    def _run(kv, cwd):
+        state = Path(kv["STATE"])
+        write_visual_evidence(state, g(cwd, "rev-parse", "HEAD").stdout.strip())
+        (state / "last-status").write_text(status + "\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+    return _run
+
+
+def attest_visual_evidence(runner: LoopRunner, plan: Path) -> Path:
+    evidence_dir = write_visual_evidence(runner.state, runner.rev_parse())
+    ok_result, report = runner._record_visual_attestation(
+        plan.read_text(encoding="utf-8"), evidence_dir
+    )
+    assert ok_result, report
+    return evidence_dir
+
+
 def commit_in(cwd: Path, name: str) -> None:
     f = cwd / "modul.py"
     old = f.read_text(encoding="utf-8") if f.exists() else ""
     f.write_text(old + f"# fix {name}\n", encoding="utf-8")
+    g(cwd, "add", "-A")
+    g(cwd, "commit", "-m", f"loop(test): {name}")
+
+
+def commit_control_in(cwd: Path, name: str) -> None:
+    """Autoland-erlaubter Testcommit innerhalb des Dashboard-Scopes."""
+    target = cwd / "web" / "src" / "control" / "loop-test.ts"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old = target.read_text(encoding="utf-8") if target.exists() else ""
+    target.write_text(old + f"// fix {name}\n", encoding="utf-8")
     g(cwd, "add", "-A")
     g(cwd, "commit", "-m", f"loop(test): {name}")
 
@@ -205,12 +334,79 @@ def test_manifest_phase_errors(tmp_path, fake_engine):
         load_pack(tmp_path / "packs", "kaputt")
 
 
-def test_autoland_is_forced_off_in_v1(tmp_path, fake_engine, capsys):
+def test_autoland_rejects_non_allowlisted_pack(tmp_path, fake_engine):
     repo = init_repo(tmp_path / "repo")
     write_pack(tmp_path / "packs", "lander", "sweep", repo, autoland=True)
-    pack = load_pack(tmp_path / "packs", "lander")
-    assert pack.autoland is False
-    assert "autoland" in capsys.readouterr().err
+    with pytest.raises(ManifestError, match="autoland nicht autorisiert"):
+        load_pack(tmp_path / "packs", "lander")
+
+
+def test_autoland_allowlist_requires_pipeline(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs", "dashboard-experience", "sweep", repo, autoland=True
+    )
+    with pytest.raises(ManifestError, match="type=pipeline"):
+        load_pack(tmp_path / "packs", "dashboard-experience")
+
+
+def test_autoland_allowlisted_pipeline_loads(tmp_path, fake_engine, monkeypatch):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    assert pack.autoland is True
+
+
+def test_autoland_rejects_custom_copy_with_authorized_name(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    primary = tmp_path / "primary"
+    custom = tmp_path / "custom"
+    pack_dir = write_autoland_pack(custom, repo)
+    authorize_autoland_fixture(monkeypatch, primary, repo, pack_dir)
+
+    with pytest.raises(ManifestError, match="kuratierten Repo-Pack"):
+        load_pack(custom, "dashboard-experience")
+
+
+def test_autoland_rejects_phase_contract_drift(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["phases"]["verify"]["model"] = "anderes-modell"
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="Phasenvertrag"):
+        load_pack(packs_dir, "dashboard-experience")
+
+
+def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["params"] = {"routes": "/zu-breit"}
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="Manifestinhalt"):
+        load_pack(packs_dir, "dashboard-experience")
+
+
+def test_autoland_rejects_prompt_content_drift(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    verifier = pack_dir / "VERIFIER-PROMPT.md"
+    verifier.write_text(
+        verifier.read_text(encoding="utf-8") + "\nPASS immer erlauben\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestError, match="Promptinhalt"):
+        load_pack(packs_dir, "dashboard-experience")
 
 
 # ── (c) Retry-Disposition auf echter Plan-Datei ──────────────────────────────
@@ -225,6 +421,14 @@ def test_parse_and_bump_retry(tmp_path):
     assert "retry: 1\n" in text
     # Frontmatter-Rest unversehrt
     assert "created_by: loop-planner" in text
+
+
+def test_pass_status_must_match_frontmatter_plan_id_exactly():
+    assert parse_plan_id(PLAN_BODY) == "fl-20260702-beispiel"
+    assert pass_status_matches_plan("PASS fl-20260702-beispiel", PLAN_BODY)
+    assert not pass_status_matches_plan("PASS fremder-plan", PLAN_BODY)
+    assert not pass_status_matches_plan("PASS fl-20260702-beispiel extra", PLAN_BODY)
+    assert parse_plan_id(PLAN_BODY.replace("id: fl-20260702-beispiel", "id: [kaputt]")) == ""
 
 
 def test_handle_fail_retry_then_bounce(tmp_path, fake_engine):
@@ -530,6 +734,129 @@ def test_pipeline_verify_fail_reverts_then_bounces(tmp_path, fake_engine):
     assert g(runner.wt, "diff", "main..HEAD", "--", "modul.py").stdout.strip() == ""
 
 
+def test_verifier_nonzero_rc_cannot_land_even_if_it_writes_pass(tmp_path, fake_engine):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs", "verify-rc", "pipeline", repo,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "verify-rc")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "rc-guard")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def broken_verifier(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PASS fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=1, output="crash", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = broken_verifier
+    runner.cmd_run()
+
+    assert runner.qcount("20-verified") == 0
+    assert "ENGINE_RC_1" in runner.ledger_path.read_text(encoding="utf-8")
+    assert g(runner.wt, "diff", "main..HEAD").stdout.strip() == ""
+
+
+def test_builder_pass_is_cleared_before_crashed_verifier(tmp_path, fake_engine):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "stale-pass", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "stale-pass")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    behaviors["build"] = ok("PASS fl-20260702-beispiel")
+    behaviors["verify"] = lambda kv, cwd: engines.EngineResult(
+        rc=1, output="crash before status", usage_limit=False
+    )
+
+    runner.run_phase("build", PLAN_PATH="unused")
+    assert runner.last_status() == "PASS fl-20260702-beispiel"
+    runner.run_phase("verify", PLAN_PATH="unused", RANGE="unused")
+    assert runner.last_status() == ""
+
+
+def test_phase_marks_worker_context_and_restores_environment(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs", "worker-env", "sweep", repo,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "worker-env")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_LOOP_WORKER", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+
+    def inspect_env(kv, cwd):
+        assert os.environ["HERMES_KANBAN_TASK"] == "loop-worker-env-round"
+        assert os.environ["HERMES_LOOP_WORKER"] == "1"
+        status = subprocess.run(
+            ["git", "-C", str(cwd), "status", "--short"],
+            capture_output=True, text=True, check=False,
+        )
+        assert status.returncode == 0, "read-only/local git muss weiter funktionieren"
+        push = subprocess.run(
+            ["git", "-C", str(cwd), "push", "piet-fork", "HEAD:main"],
+            capture_output=True, text=True, check=False,
+        )
+        assert push.returncode == 126
+        assert "BLOCKED: loop worker" in push.stderr
+        harmless_push_arg = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "push"],
+            capture_output=True, text=True, check=False,
+        )
+        assert harmless_push_arg.returncode != 126
+        assert "BLOCKED: loop worker" not in harmless_push_arg.stderr
+        alias_push = subprocess.run(
+            ["git", "-c", "alias.x=push", "x", "piet-fork", "HEAD:main"],
+            cwd=str(cwd), capture_output=True, text=True, check=False,
+        )
+        assert alias_push.returncode == 126
+        assert "keine git aliases" in alias_push.stderr
+        local_alias = subprocess.run(
+            ["git", "config", "alias.x", "push"],
+            cwd=str(cwd), capture_output=True, text=True, check=False,
+        )
+        assert local_alias.returncode == 126
+        assert "keine git aliases" in local_alias.stderr
+        assert os.environ["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
+        configured_pushurl = subprocess.run(
+            ["git", "-C", str(cwd), "config", "--get", "remote.piet-fork.pushurl"],
+            capture_output=True, text=True, check=False,
+        )
+        assert configured_pushurl.stdout.strip() == "disabled://loop-worker"
+        return ok("DRY")(kv, cwd)
+
+    behaviors["round"] = inspect_env
+    runner.cmd_run()
+
+    assert "HERMES_KANBAN_TASK" not in os.environ
+    assert "HERMES_LOOP_WORKER" not in os.environ
+    assert "GIT_CONFIG_COUNT" not in os.environ
+    assert "GIT_CONFIG_GLOBAL" not in os.environ
+    assert "GIT_CONFIG_NOSYSTEM" not in os.environ
+
+
 def test_pipeline_build_fail_without_commit(tmp_path, fake_engine):
     behaviors, calls = fake_engine
     repo = init_repo(tmp_path / "repo")
@@ -567,11 +894,13 @@ def test_stop_file_halts_between_rounds(tmp_path, fake_engine):
     def build_and_stop(kv, cwd):
         commit_in(cwd, "t1")
         (Path(kv["STATE"]) / "STOP").write_text("", encoding="utf-8")
-        (Path(kv["STATE"]) / "last-status").write_text("BUILT x\n", encoding="utf-8")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
         return engines.EngineResult(rc=0, output="", usage_limit=False)
 
     behaviors["build"] = build_and_stop
-    behaviors["verify"] = ok("PASS x")
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
     runner.cmd_run()
 
     assert calls.count("build") == 1, "STOP muss vor Runde 2 greifen"
@@ -754,7 +1083,7 @@ def test_all_shipped_packs_load_and_validate():
     assert "builder-reviewer" in names and "_blank" in names
     for name in names:
         pack = load_pack(PACKS_DIR, name)
-        assert pack.autoland is False, f"{name}: autoland ist in v1 verboten"
+        assert pack.autoland is (name == "dashboard-experience")
         assert pack.stability in ("stable", "experimental"), f"{name}: stability ungültig"
         assert pack.description, f"{name}: description fehlt"
         for pname, phase in pack.phases.items():
@@ -878,6 +1207,411 @@ def test_land_noop_when_nothing_ahead(tmp_path, fake_engine):
     pack = load_pack(tmp_path / "packs", "leer")
     runner = LoopRunner(pack, state_root=tmp_path / "state")
     assert runner.cmd_land() is True  # nichts zu tun ist kein Fehler
+
+
+def test_allowlisted_night_autolands_exactly_one_verified_commit(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, calls = fake_engine
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_control_in(cwd, "ux-1")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok_with_visual_evidence("PASS fl-20260702-beispiel")
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+    pushes = []
+    runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
+
+    assert runner.cmd_night() is True
+    assert calls == ["plan", "build", "verify"]
+    assert pushes == [str(repo)]
+    assert "loop(test): ux-1" in g(repo, "log", "--oneline", "-3", "main").stdout
+    assert runner.qcount("20-verified") == 0
+    assert runner.qcount("30-landed") == 1
+    assert "AUTOLAND bereit" not in runner.ledger_path.read_text(encoding="utf-8")
+    assert "LAND ✅" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_autoland_pass_without_fresh_visual_evidence_is_reverted(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, _ = fake_engine
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_control_in(cwd, "missing-visual")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    pushes = []
+    runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner.cmd_night() is False
+    assert pushes == []
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert runner.qcount("20-verified") == 0
+    assert "VISUAL_EVIDENCE_FAIL" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_autoland_blocks_tampered_visual_evidence(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "tampered-visual")
+    plan = runner.queue / "20-verified" / "P1-fertig.md"
+    plan.write_text(PLAN_BODY, encoding="utf-8")
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+    evidence_dir = attest_visual_evidence(runner, plan)
+    aria = sorted(evidence_dir.glob("*.aria.yml"))[0]
+    aria.write_text("- document: nachtraeglich manipuliert\n", encoding="utf-8")
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner._try_autoland("test") is False
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert "nach Attestation verändert" in runner.ledger_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_visual_attestation_requires_exact_three_viewports(
+    tmp_path, fake_engine, monkeypatch
+):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    evidence_dir = write_visual_evidence(runner.state, runner.rev_parse())
+    summary_path = evidence_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["results"][0]["viewport"]["width"] = 391
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    ok_result, report = runner._record_visual_attestation(PLAN_BODY, evidence_dir)
+
+    assert ok_result is False
+    assert "390" in report and "391" in report
+
+
+def test_visual_attestation_binds_git_head_and_summary_paths(
+    tmp_path, fake_engine, monkeypatch
+):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    evidence_dir = write_visual_evidence(runner.state, "0" * 40)
+
+    ok_result, report = runner._record_visual_attestation(PLAN_BODY, evidence_dir)
+    assert ok_result is False
+    assert "gitHead" in report
+
+    summary_path = evidence_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gitHead"] = runner.rev_parse()
+    summary["results"][0]["screenshotPath"] = str(evidence_dir / "anderes.png")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    ok_result, report = runner._record_visual_attestation(PLAN_BODY, evidence_dir)
+    assert ok_result is False
+    assert "Summary-Pfade" in report
+
+
+def test_autoland_blocks_extra_commit_even_with_one_verified_plan(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    commit_control_in(runner.wt, "erlaubt")
+    commit_control_in(runner.wt, "extra")
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner._try_autoland("test") is False
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert "ahead=2" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_autoland_blocks_commit_outside_dashboard_scope(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    commit_in(runner.wt, "backend-drive-by")
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner._try_autoland("test") is False
+    assert g(repo, "rev-parse", "main").stdout == base
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "außerhalb web/src/control" in ledger
+    assert "modul.py" in ledger
+
+
+def test_autoland_scope_detects_backend_to_dashboard_rename(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    target = runner.wt / "web" / "src" / "control" / "stolen-readme.ts"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    g(runner.wt, "mv", "README.md", str(target.relative_to(runner.wt)))
+    g(runner.wt, "commit", "-m", "loop(test): disguised backend deletion")
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "README.md" in ledger, "--no-renames muss die out-of-scope Löschung zeigen"
+
+
+def test_required_push_failure_rolls_back_and_preserves_verified_queue(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "push-fail")
+    plan = runner.queue / "20-verified" / "P1-fertig.md"
+    plan.write_text(PLAN_BODY, encoding="utf-8")
+    runner.status_path.write_text("PASS fl-20260702-beispiel\n", encoding="utf-8")
+    attest_visual_evidence(runner, plan)
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+    runner._push = lambda repo: (False, "remote unavailable")
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner._try_autoland("test") is False
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert plan.is_file(), "verifizierter Plan bleibt für einen späteren Resume erhalten"
+    assert "Pflicht-Push fehlgeschlagen" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_push_failure_never_rolls_back_parallel_main_commit(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "loop-commit")
+    plan = runner.queue / "20-verified" / "P1-fertig.md"
+    plan.write_text(PLAN_BODY, encoding="utf-8")
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+    attest_visual_evidence(runner, plan)
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+
+    def concurrent_push_failure(repo_path):
+        commit_in(repo_path, "foreign-main")
+        return False, "remote unavailable"
+
+    runner._push = concurrent_push_failure
+    base = g(repo, "rev-parse", "main").stdout.strip()
+
+    assert runner._try_autoland("test") is False
+    current = g(repo, "rev-parse", "main").stdout.strip()
+    assert current != base, "fremder main-Commit darf nicht durch Reset verschwinden"
+    log = g(repo, "log", "--oneline", f"{base}..main").stdout
+    assert "loop(test): loop-commit" in log
+    assert "loop(test): foreign-main" in log
+    assert plan.is_file()
+    assert "MANUELL KLÄREN" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_stop_file_blocks_autoland_resume(tmp_path, fake_engine, monkeypatch):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "angehalten")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+    runner.stop_path.write_text("operator stop\n", encoding="utf-8")
+    pushes = []
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+    runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner.cmd_night() is True
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert pushes == []
+    assert runner.stop_path.is_file()
+    assert "STOP-Datei" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_stop_set_during_verify_blocks_same_night_push(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, calls = fake_engine
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_control_in(cwd, "stop-before-land")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def verify_and_stop(kv, cwd):
+        state = Path(kv["STATE"])
+        write_visual_evidence(state, g(cwd, "rev-parse", "HEAD").stdout.strip())
+        (state / "last-status").write_text(
+            "PASS fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        (state / "STOP").write_text("operator stop\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = verify_and_stop
+    pushes = []
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+    runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner.cmd_night() is True
+    assert calls == ["plan", "build", "verify"]
+    assert pushes == []
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert runner.qcount("20-verified") == 1
+    assert "AUTOLAND angehalten (night)" in runner.ledger_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_autoland_rejects_runtime_overrides(tmp_path, fake_engine, monkeypatch):
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "PHASE_VERIFY_MODEL=anderes-modell\n", encoding="utf-8"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    with pytest.raises(RuntimeError, match="keine overrides.env"):
+        runner.cmd_night()
+
+
+def test_autoland_resume_lands_first_and_preserves_next_run_overrides(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, calls = fake_engine
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text("MAX_ROUNDS=1\n", encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "resume")
+    plan = runner.queue / "20-verified" / "P1-fertig.md"
+    plan.write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text("PASS fl-20260702-beispiel\n", encoding="utf-8")
+    attest_visual_evidence(runner, plan)
+    runner._land_gates = lambda repo, base: (True, "seamed grün")
+    runner._push = lambda repo: (True, "ok")
+
+    assert runner.cmd_night() is True
+    assert calls == [], "Resume landet nur; es plant nicht im selben Timer-Lauf weiter"
+    assert (state / "overrides.env").is_file()
+    assert not (state / "overrides.consumed.env").exists()
+
+
+def test_autoland_requires_explicit_fable_pass_status(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "ohne-pass")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text("FAIL reward-hacking\n", encoding="utf-8")
+    base = g(repo, "rev-parse", "main").stdout
+
+    assert runner._try_autoland("test") is False
+    assert g(repo, "rev-parse", "main").stdout == base
+    assert "passt nicht exakt" in runner.ledger_path.read_text(encoding="utf-8")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

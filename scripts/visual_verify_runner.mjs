@@ -11,12 +11,13 @@ const viewports = [
 ];
 
 function usage() {
-  process.stderr.write("usage: visual_verify_runner.mjs --base-url URL --output-dir DIR <route> [<route>...]\n");
+  process.stderr.write("usage: visual_verify_runner.mjs --base-url URL --output-dir DIR --git-head SHA <route> [<route>...]\n");
 }
 
 function parseArgs(argv) {
   let baseUrl = "";
   let outputDir = "";
+  let gitHead = "";
   const routes = [];
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -24,6 +25,8 @@ function parseArgs(argv) {
       baseUrl = argv[++index] || "";
     } else if (arg === "--output-dir") {
       outputDir = argv[++index] || "";
+    } else if (arg === "--git-head") {
+      gitHead = argv[++index] || "";
     } else if (arg === "--help" || arg === "-h") {
       usage();
       process.exit(0);
@@ -33,11 +36,11 @@ function parseArgs(argv) {
       routes.push(arg);
     }
   }
-  if (!baseUrl || !outputDir || routes.length === 0) {
+  if (!baseUrl || !outputDir || !/^[0-9a-f]{40}$/.test(gitHead) || routes.length === 0) {
     usage();
     process.exit(2);
   }
-  return { baseUrl, outputDir, routes };
+  return { baseUrl, outputDir, gitHead, routes };
 }
 
 function routeUrl(baseUrl, route) {
@@ -57,10 +60,63 @@ async function readOverflow() {
   };
 }
 
+async function readUxSignals() {
+  const visible = (element) => {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden"
+      && Number(style.opacity || "1") > 0 && rect.width > 0 && rect.height > 0;
+  };
+  const label = (element) => {
+    const labelledBy = element.getAttribute("aria-labelledby");
+    const labelledText = labelledBy
+      ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent || "").join(" ")
+      : "";
+    return (
+      element.getAttribute("aria-label")
+      || labelledText
+      || element.getAttribute("title")
+      || element.textContent
+      || element.getAttribute("value")
+      || ""
+    ).trim().replace(/\s+/g, " ").slice(0, 120);
+  };
+  const describe = (element) => {
+    const id = element.id ? `#${element.id}` : "";
+    const role = element.getAttribute("role");
+    return `${element.tagName.toLowerCase()}${id}${role ? `[role=${role}]` : ""}`;
+  };
+  const controls = Array.from(document.querySelectorAll(
+    "button, input, select, textarea, [role=button], [role=tab], [role=switch]",
+  )).filter(visible);
+  const undersizedControls = [];
+  const unlabeledControls = [];
+  for (const element of controls) {
+    const rect = element.getBoundingClientRect();
+    const item = {
+      element: describe(element),
+      label: label(element),
+      width: Math.round(rect.width * 10) / 10,
+      height: Math.round(rect.height * 10) / 10,
+    };
+    // Strenger, maschinenlesbarer Hinweis fuer WCAG 2.5.8. Der Verifier
+    // beurteilt Ausnahmen und darf nachher nie mehr Verstösse akzeptieren.
+    if (rect.width < 24 || rect.height < 24) undersizedControls.push(item);
+    if (!item.label && element.getAttribute("aria-hidden") !== "true") unlabeledControls.push(item);
+  }
+  return {
+    interactiveControlCount: controls.length,
+    undersizedControls: undersizedControls.slice(0, 50),
+    unlabeledControls: unlabeledControls.slice(0, 50),
+    truncated: undersizedControls.length > 50 || unlabeledControls.length > 50,
+  };
+}
+
 async function checkOne(browser, baseUrl, outputDir, route, viewport) {
   const consoleErrors = [];
   const pageErrors = [];
   const screenshotPath = path.join(outputDir, safeName(route, viewport));
+  const ariaSnapshotPath = screenshotPath.replace(/\.png$/, ".aria.yml");
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height },
     isMobile: viewport.isMobile,
@@ -75,6 +131,8 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
   });
 
   let overflow = null;
+  let uxSignals = null;
+  let ariaSnapshotError = null;
   let ok = true;
   let error = null;
   try {
@@ -82,6 +140,13 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
     await page.waitForLoadState("networkidle", { timeout: CONNECT_TIMEOUT_MS }).catch(() => {});
     await page.waitForTimeout(250);
     overflow = await page.evaluate(readOverflow);
+    uxSignals = await page.evaluate(readUxSignals);
+    try {
+      const ariaSnapshot = await page.locator("body").ariaSnapshot();
+      await fs.writeFile(ariaSnapshotPath, `${ariaSnapshot.trimEnd()}\n`, "utf8");
+    } catch (caught) {
+      ariaSnapshotError = caught instanceof Error ? caught.message : String(caught);
+    }
     await page.screenshot({ path: screenshotPath, fullPage: true });
     ok = consoleErrors.length === 0 && pageErrors.length === 0 && Boolean(overflow?.ok);
   } catch (caught) {
@@ -102,15 +167,18 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
     viewport,
     ok,
     screenshotPath,
+    ariaSnapshotPath: ariaSnapshotError ? null : ariaSnapshotPath,
+    ariaSnapshotError,
     consoleErrors,
     pageErrors,
     overflow,
+    uxSignals,
     error,
   };
 }
 
 async function main() {
-  const { baseUrl, outputDir, routes } = parseArgs(process.argv);
+  const { baseUrl, outputDir, gitHead, routes } = parseArgs(process.argv);
   await fs.mkdir(outputDir, { recursive: true });
   const chromium = requirePlaywrightChromium();
   const browser = await chromium.launch({
@@ -131,6 +199,7 @@ async function main() {
   const summary = {
     ok: results.every((result) => result.ok),
     generatedAt: new Date().toISOString(),
+    gitHead,
     baseUrl,
     routes,
     viewports: viewports.map(({ name, width, height }) => ({ name, width, height })),

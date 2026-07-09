@@ -40,6 +40,41 @@ utilities.
 9. **Mobile**: no desktop tables. A table collapses to a card list; a card expands into a drawer for details. The active chain/session stays visible at all times (no dead-end views that hide current state).
 10. **Extend the mockup first.** If a new pattern isn't covered here, add it to the mockup, get it approved, then port the tokens/rules here — don't invent ad hoc colors in components.
 
+## UX contract — feature visibility and window classes
+
+The dashboard is an operator cockpit, not a gallery of routes. Responsive work
+preserves the same capabilities while changing hierarchy and pane structure.
+
+- **Compact (<600 CSS px):** one primary pane, bottom navigation, one obvious
+  next action in the first viewport. Supporting information may collapse into a
+  drawer, but critical state is not removed.
+- **Medium (600–839 CSS px):** a deliberate tablet layout. Do not merely stretch
+  the compact bottom-bar layout; use the extra width for labelled navigation or
+  a supporting pane where that improves the active job.
+- **Expanded (≥840 CSS px):** persistent navigation and multi-pane/list-detail
+  layouts where related context materially helps. Large desktop widths may widen
+  panes, but must not turn into sparse empty chrome.
+
+For every non-deprecated Control capability:
+
+1. It is reachable through labelled navigation or the command surface in at most
+   two interactions from `/control`.
+2. If it needs operator attention, its signal appears on Start or Fleet without
+   requiring the operator to know the destination route.
+3. Mobile/tablet adaptations do not hide content solely because it does not fit;
+   they change order, grouping, disclosure, or pane structure.
+4. Objective autonomous fixes may address overflow, accessible names, touch
+   targets, broken hierarchy, and existing-rule inconsistencies. New visual
+   direction, route demotion/removal, or taste-led density changes require two
+   Design-Board variants and operator choice.
+5. Primary touch controls aim for 44–48 CSS px. No authored button/form/tab target
+   may be smaller than 24×24 CSS px without a documented WCAG 2.5.8 exception.
+
+Every UX PlanSpec names the affected user journey, route, Compact/Medium/Expanded
+expectation, real/edge data state, and a visible done-when. Screenshot diffs are
+regression evidence, not a beauty score; ARIA structure and behavioral assertions
+must prove the same contract.
+
 ## Building blocks (shared components)
 
 The rules above are realised as one canonical component layer at

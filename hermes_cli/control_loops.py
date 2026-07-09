@@ -244,6 +244,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         },
         "stop": pack.stop,
         "params": pack.params,
+        "autoland": pack.autoland,
         "running": _is_running(state),
         "heartbeat": _heartbeat(state),
         "stop_requested": (state / "STOP").exists(),

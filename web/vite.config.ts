@@ -114,7 +114,11 @@ export default defineConfig({
     ],
   },
   build: {
-    outDir: "../hermes_cli/web_dist",
+    // Visual/self-verification builds must never dirty the tracked production
+    // assets in a loop worktree. scripts/visual-verify.sh points this at a
+    // disposable directory through the same HERMES_WEB_DIST variable the
+    // Python dashboard server already understands.
+    outDir: process.env.HERMES_WEB_DIST ?? "../hermes_cli/web_dist",
     emptyOutDir: true,
     // The eager entry chunk is ~785 kB minified (app bootstrap; React core is
     // already split into `vendor-react` below, heavy routes ChatPage/xterm and
