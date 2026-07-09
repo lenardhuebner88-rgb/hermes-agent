@@ -81,6 +81,8 @@ class GeminiLiveSession:
             tools=tools,
             session_resumption=types.SessionResumptionConfig(
                 handle=self._resumption_handle,
+                # We reconnect with server handles, but do not buffer/replay
+                # client messages from last_consumed_client_message_index.
                 transparent=False,
             ),
             context_window_compression=types.ContextWindowCompressionConfig(

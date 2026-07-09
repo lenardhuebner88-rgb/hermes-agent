@@ -35,11 +35,16 @@ class _FakeLive:
         self._sessions = list(sessions or [])
         self._connect_error = connect_error
         self.calls: list[tuple[str, types.LiveConnectConfig]] = []
+        self.connect_called = asyncio.Event()
+        self.second_connect_called = asyncio.Event()
 
     def connect(self, *, model: str, config: types.LiveConnectConfig):
         self.calls.append((model, config))
+        self.connect_called.set()
+        if len(self.calls) >= 2:
+            self.second_connect_called.set()
         if self._connect_error is not None:
-            raise self._connect_error
+            return _FakeConnection(None, self._connect_error)
         session = self._sessions.pop(0)
         return _FakeConnection(session, None)
 
@@ -212,6 +217,7 @@ async def test_run_streams_pcm_executes_tools_and_reenters_receive(
     assert config.speech_config.language_code == "de-DE"
     assert config.tools[0].function_declarations[0].name == "list_terminals"
     assert config.session_resumption.handle is None
+    assert config.session_resumption.transparent is False
     assert config.context_window_compression.trigger_tokens == 100_000
     assert config.context_window_compression.sliding_window.target_tokens == 50_000
 
@@ -297,8 +303,7 @@ async def test_go_away_reconnects_with_latest_resumption_handle(
     task = asyncio.create_task(
         wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
     )
-    while len(live.calls) < 2:
-        await asyncio.sleep(0)
+    await asyncio.wait_for(live.second_connect_called.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -319,8 +324,7 @@ async def test_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
     task = asyncio.create_task(
         wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
     )
-    while not live.calls:
-        await asyncio.sleep(0)
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
