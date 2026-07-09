@@ -2453,7 +2453,49 @@ class TestRestoreCronJobsIfEmptied:
 # create_pre_deploy_backup tests
 # ---------------------------------------------------------------------------
 
-class TestCreatePreDeployBackup:
+class TestWriteFullZipBackupPruneIsolation:
+    """Retention for the wrapper-driven auto-backup families (pre-deploy /
+    pre-update / pre-migration) must stay scoped by prefix, including the
+    prune pass that now runs inside ``_write_full_zip_backup`` itself right
+    after the atomic replace (defense in depth if the process dies before
+    the wrapper's own follow-up prune call runs)."""
+
+    def _make_zip(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("config.yaml", "data")
+
+    def test_pre_deploy_prunes_only_pre_deploy_family(self, tmp_path, monkeypatch):
+        """3 pre-existing pre-deploy zips + 1 unrelated pre-update zip: a
+        fresh pre-deploy backup with keep=2 only prunes the oldest
+        pre-deploy zips; the pre-update zip is never touched."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        backup_dir = hermes_home / "backups"
+        self._make_zip(backup_dir / "pre-deploy-2026-01-01-000000.zip")
+        self._make_zip(backup_dir / "pre-deploy-2026-01-02-000000.zip")
+        self._make_zip(backup_dir / "pre-deploy-2026-01-03-000000.zip")
+        pre_update = backup_dir / "pre-update-2026-01-02-120000.zip"
+        self._make_zip(pre_update)
+
+        import hermes_cli.backup as backup_mod
+        monkeypatch.setattr(backup_mod.time, "time", lambda: 2_000_000_000.0)
+
+        result = backup_mod.create_pre_deploy_backup(
+            hermes_home=hermes_home, keep=2, max_age_seconds=0
+        )
+
+        assert result is not None
+        remaining_deploy = sorted(p.name for p in backup_dir.glob("pre-deploy-*.zip"))
+        # Newest 2 pre-deploy zips (the fresh one + 2026-01-03) survive;
+        # 2026-01-01 and 2026-01-02 are pruned.
+        assert remaining_deploy == ["pre-deploy-2026-01-03-000000.zip", result.name]
+        # The pre-update zip is a different family and must be untouched.
+        assert pre_update.exists()
     def _seed_pre_deploy_backup(self, backup_dir: Path, name: str, *, mtime: float) -> Path:
         backup_dir.mkdir(parents=True, exist_ok=True)
         path = backup_dir / name
@@ -2535,7 +2577,7 @@ class TestCreatePreDeployBackup:
 
         written = []
 
-        def _fake_write(out_path, _root):
+        def _fake_write(out_path, _root, **_kw):
             written.append(out_path)
             out_path.write_bytes(b"PK\x03\x04")
             return out_path
@@ -2574,7 +2616,7 @@ class TestCreatePreDeployBackup:
 
         written = []
 
-        def _fake_write(out_path, _root):
+        def _fake_write(out_path, _root, **_kw):
             written.append(out_path)
             out_path.write_bytes(b"PK\x03\x04")
             return out_path
@@ -2836,3 +2878,256 @@ class TestMemoryProviderExternalPaths:
 
         paths = HindsightMemoryProvider().backup_paths()
         assert str(tmp_path / ".hindsight") in paths
+
+
+# ---------------------------------------------------------------------------
+# Atomic write + integrity check + retention (corrupt-zip / disk-leak fixes)
+# ---------------------------------------------------------------------------
+
+class TestVerifyZipIntegrity:
+    def test_valid_zip_passes(self, tmp_path):
+        from hermes_cli.backup import _verify_zip_integrity
+        zip_path = tmp_path / "ok.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("config.yaml", "model: test\n")
+        assert _verify_zip_integrity(zip_path) is None
+
+    def test_truncated_zip_is_detected(self, tmp_path):
+        """A real truncated zip (no end-of-central-directory record), not a
+        mock — this is the exact shape an interrupted `hermes backup` run
+        left behind in production."""
+        from hermes_cli.backup import _verify_zip_integrity
+
+        good_zip = tmp_path / "good.zip"
+        with zipfile.ZipFile(good_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("config.yaml", "model: test\n" * 200)
+            zf.writestr("state.db", b"fake-sqlite-bytes" * 200)
+
+        good_bytes = good_zip.read_bytes()
+        truncated = tmp_path / "truncated.zip"
+        # Cut off the tail (central directory + EOCD record) to simulate a
+        # process killed mid-write.
+        truncated.write_bytes(good_bytes[: len(good_bytes) // 2])
+
+        reason = _verify_zip_integrity(truncated)
+        assert reason is not None
+
+    def test_nonexistent_file_is_detected(self, tmp_path):
+        from hermes_cli.backup import _verify_zip_integrity
+        reason = _verify_zip_integrity(tmp_path / "does-not-exist.zip")
+        assert reason is not None
+
+
+class TestRunBackupAtomicWrite:
+    def test_corrupt_write_leaves_no_final_or_partial_zip(self, tmp_path, monkeypatch):
+        """If the post-write integrity check finds a broken zip (e.g. a run
+        interrupted right before the central directory was flushed), the
+        final name must never exist — no corrupt zip is left for a later
+        `hermes import` to trip over — and the `.partial` staging file is
+        cleaned up too."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        args = Namespace(output=str(out_zip))
+
+        import hermes_cli.backup as backup_mod
+        monkeypatch.setattr(backup_mod, "_verify_zip_integrity", lambda p: "simulated corruption")
+
+        with pytest.raises(SystemExit):
+            backup_mod.run_backup(args)
+
+        assert not out_zip.exists()
+        assert not out_zip.with_name(out_zip.name + ".partial").exists()
+
+    def test_successful_backup_leaves_no_partial_residue(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        from hermes_cli.backup import run_backup
+        run_backup(Namespace(output=str(out_zip)))
+
+        assert out_zip.exists()
+        assert not out_zip.with_name(out_zip.name + ".partial").exists()
+        # The finished zip must pass integrity verification itself.
+        from hermes_cli.backup import _verify_zip_integrity
+        assert _verify_zip_integrity(out_zip) is None
+
+    def test_write_full_zip_backup_corrupt_write_leaves_no_residue(self, tmp_path, monkeypatch):
+        """Same guarantee for the shared pre-update/pre-migration/pre-deploy
+        helper — this is the code path that actually produced the 23GB of
+        corrupt pre-deploy-*.zip archives in production."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backups" / "pre-deploy-test.zip"
+        out_zip.parent.mkdir(parents=True, exist_ok=True)
+
+        import hermes_cli.backup as backup_mod
+        monkeypatch.setattr(backup_mod, "_verify_zip_integrity", lambda p: "simulated corruption")
+
+        result = backup_mod._write_full_zip_backup(out_zip, hermes_home)
+
+        assert result is None
+        assert not out_zip.exists()
+        assert not out_zip.with_name(out_zip.name + ".partial").exists()
+
+    def test_write_full_zip_backup_write_error_leaves_no_residue(self, tmp_path, monkeypatch):
+        """A genuine OSError while writing (e.g. disk full) must also leave
+        no `.partial` residue behind."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backups" / "pre-deploy-test.zip"
+        out_zip.parent.mkdir(parents=True, exist_ok=True)
+
+        import hermes_cli.backup as backup_mod
+
+        def _boom_zipfile(*a, **kw):
+            raise OSError("simulated disk full opening zip")
+
+        monkeypatch.setattr(backup_mod.zipfile, "ZipFile", _boom_zipfile)
+
+        result = backup_mod._write_full_zip_backup(out_zip, hermes_home)
+
+        assert result is None
+        assert not out_zip.exists()
+        assert not out_zip.with_name(out_zip.name + ".partial").exists()
+
+
+class TestRunBackupRetention:
+    def _make_zip(self, path: Path, content: str = "config.yaml") -> None:
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr(content, "data")
+
+    def test_default_keeps_two_newest_same_prefix_backups(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_dir = tmp_path / "backups"
+        out_dir.mkdir()
+
+        # Pre-existing older backups with the same prefix as the one about
+        # to be written, plus an unrelated file that must survive pruning.
+        self._make_zip(out_dir / "pre-deploy-2026-01-01-000000.zip")
+        self._make_zip(out_dir / "pre-deploy-2026-01-02-000000.zip")
+        self._make_zip(out_dir / "pre-deploy-2026-01-03-000000.zip")
+        keep_forever = out_dir / "manual-snapshot.zip"
+        self._make_zip(keep_forever, content="notes.txt")
+
+        out_zip = out_dir / "pre-deploy-2026-01-04-000000.zip"
+        args = Namespace(output=str(out_zip))
+
+        from hermes_cli.backup import run_backup
+        run_backup(args)
+
+        remaining = sorted(p.name for p in out_dir.glob("pre-deploy-*.zip"))
+        # 4 same-prefix zips exist after the write (3 pre-existing + the
+        # fresh one); default keep=2 prunes down to the newest 2 overall.
+        assert remaining == [
+            "pre-deploy-2026-01-03-000000.zip",
+            out_zip.name,
+        ]
+        # Unrelated file is untouched.
+        assert keep_forever.exists()
+
+    def test_keep_flag_overrides_default(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_dir = tmp_path / "backups"
+        out_dir.mkdir()
+        self._make_zip(out_dir / "pre-deploy-2026-01-01-000000.zip")
+        self._make_zip(out_dir / "pre-deploy-2026-01-02-000000.zip")
+
+        out_zip = out_dir / "pre-deploy-2026-01-03-000000.zip"
+        args = Namespace(output=str(out_zip), keep=5)
+
+        from hermes_cli.backup import run_backup
+        run_backup(args)
+
+        remaining = sorted(p.name for p in out_dir.glob("pre-deploy-*.zip"))
+        assert len(remaining) == 3
+
+    def test_keep_zero_disables_pruning(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_dir = tmp_path / "backups"
+        out_dir.mkdir()
+        self._make_zip(out_dir / "pre-deploy-2026-01-01-000000.zip")
+        self._make_zip(out_dir / "pre-deploy-2026-01-02-000000.zip")
+
+        out_zip = out_dir / "pre-deploy-2026-01-03-000000.zip"
+        args = Namespace(output=str(out_zip), keep=0)
+
+        from hermes_cli.backup import run_backup
+        run_backup(args)
+
+        remaining = sorted(p.name for p in out_dir.glob("pre-deploy-*.zip"))
+        assert len(remaining) == 3
+
+
+class TestSafeCopyDbTmpLeak:
+    def test_run_backup_cleans_up_staged_tmp_db_on_write_failure(self, tmp_path, monkeypatch):
+        """A .db staged for safe-copy must not be left behind in the backup
+        directory when the subsequent zf.write() for it fails."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+        db_path = hermes_home / "state.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        args = Namespace(output=str(out_zip))
+
+        import hermes_cli.backup as backup_mod
+        real_write = zipfile.ZipFile.write
+
+        def _boom_on_db(self, filename, arcname=None, *a, **kw):
+            if str(arcname).endswith(".db"):
+                raise OSError("simulated write failure for staged db copy")
+            return real_write(self, filename, arcname, *a, **kw)
+
+        monkeypatch.setattr(backup_mod.zipfile.ZipFile, "write", _boom_on_db)
+
+        backup_mod.run_backup(args)
+
+        # No stray staged tmp*.db files left in the backup directory.
+        leaked = [p for p in tmp_path.iterdir() if p.name.startswith("tmp") and p.suffix == ".db"]
+        assert leaked == [], f"staged tmp db(s) leaked: {leaked}"

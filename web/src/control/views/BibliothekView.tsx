@@ -30,6 +30,7 @@ import {
 } from "./BibliothekView.helpers";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 import { BriefingsShelf } from "./briefings/BriefingsShelf";
+import { ErgebnisseShelf } from "./results/ErgebnisseShelf";
 // TocNav ist im Nachschlagewerk (KnowledgeReader) implementiert und exportiert
 // — read-only importiert (KEINE Edits an views/knowledge/, paralleler
 // Builder arbeitet dort), damit der Lesesaal dieselbe Inhaltsverzeichnis-UI
@@ -683,12 +684,13 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   );
 }
 
-type Mode = "briefings" | "wissen" | "lesesaal";
+type Mode = "briefings" | "wissen" | "lesesaal" | "ergebnisse";
 
 const MODE_TABS: { id: Mode; label: string; count?: (data: LibraryListResponse | null) => number }[] = [
   { id: "briefings", label: "Briefings", count: (data) => data?.count ?? 0 },
   { id: "wissen", label: "Nachschlagewerk" },
   { id: "lesesaal", label: "Lesesaal", count: (data) => data?.count ?? 0 },
+  { id: "ergebnisse", label: "Ergebnisse" },
 ];
 
 function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode: Mode) => void; lesesaalData: LibraryListResponse | null }) {
@@ -736,7 +738,7 @@ export function BibliothekView({ density }: { density?: Density }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const mode: Mode = useMemo(() => {
     const m = searchParams.get("mode");
-    if (m === "lesesaal" || m === "wissen") return m;
+    if (m === "lesesaal" || m === "wissen" || m === "ergebnisse") return m;
     return "briefings";
   }, [searchParams]);
   const setMode = useCallback((next: Mode) => {
@@ -773,6 +775,19 @@ export function BibliothekView({ density }: { density?: Density }) {
     });
   }, [setSearchParams]);
 
+  // Ergebnisse → Lesesaal deep-link (Artefakt-Links in ErgebnisseShelf tragen
+  // bereits eine Lesesaal-Item-Id, z.B. "deliverable::t_x::RESULT.md") — nur
+  // die Id, kein voller LibraryItem nötig, darum ein eigener schmaler Callback
+  // statt `openItem`s Signatur anzufassen.
+  const openLesesaalItemById = useCallback((id: string) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set("mode", "lesesaal");
+      p.set("item", id);
+      return p;
+    });
+  }, [setSearchParams]);
+
   return (
     <div className="space-y-5">
       <TabBar mode={mode} onChange={setMode} lesesaalData={lesesaalData} />
@@ -784,6 +799,9 @@ export function BibliothekView({ density }: { density?: Density }) {
       </div>
       <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={mode !== "lesesaal"}>
         <LesesaalBody />
+      </div>
+      <div id="bibliothek-panel-ergebnisse" role="tabpanel" hidden={mode !== "ergebnisse"}>
+        <ErgebnisseShelf onOpenLesesaalItem={openLesesaalItemById} />
       </div>
     </div>
   );

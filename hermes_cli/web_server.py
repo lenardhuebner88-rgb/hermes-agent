@@ -15166,6 +15166,13 @@ register_cron_observability_routes(app)
 from hermes_cli.library_view import register_library_routes  # noqa: E402
 register_library_routes(app)
 
+# Bibliothek — Ergebnisse: abgeschlossene Kanban-Tasks (task_runs-Verdict/
+# Outcome/Cost) als Mensch- und LLM-Digest (format=md). Under /api/ →
+# inherits the session-token gate; never in PUBLIC_API_PATHS. See
+# hermes_cli/library_results.py.
+from hermes_cli.library_results import register_library_results_routes  # noqa: E402
+register_library_results_routes(app)
+
 from hermes_cli.design_board_view import register_design_board_routes  # noqa: E402
 register_design_board_routes(app)
 # In-process self-metrics (route-group latency/error rates) fed by

@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BookOpen, Newspaper, Users, Workflow } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../../components/Hero";
 import { Disclosure } from "../../components/primitives";
 import { SectionHeader } from "../../components/leitstand";
 import { ToneCallout } from "../../components/atoms";
 import { fmtClock } from "../../lib/derive";
-import { useVaultProvenance } from "../../hooks/useControlData";
+import { heroAccent } from "../../lib/tones";
+import { useVaultProvenance, useKnowledgeCatalog } from "../../hooks/useControlData";
 import type { Density } from "../../hooks/useDensity";
 import { VaultProvenanceShelf } from "../BibliothekView";
 import type { LibraryItem, LibraryListResponse } from "../BibliothekView";
 import { filterBriefings, newestBriefing } from "../BibliothekView.helpers";
+import { CollectionGlyph } from "../knowledge/KnowledgeShelf";
+import type { KnowledgeCatalog } from "../knowledge/knowledge.helpers";
 
 const t = {
   heroEyebrow: "Bibliothek",
@@ -36,13 +39,6 @@ const t = {
   emptyTitle: "Noch keine Briefings",
   emptyDesc: "Sobald Crons oder Recherchen Ausgaben produzieren, erscheinen sie hier.",
 };
-
-const KNOWLEDGE_SHELVES = [
-  { id: "canon", title: "Canon", count: 12, icon: BookOpen, tone: "violet" as const },
-  { id: "skills", title: "Skills", count: 21, icon: Newspaper, tone: "cyan" as const },
-  { id: "rollen", title: "Rollen", count: 5, icon: Users, tone: "emerald" as const },
-  { id: "orchestrierung", title: "Orchestrierung", count: 8, icon: Workflow, tone: "amber" as const },
-];
 
 function BriefingCard({ item, featured = false, onOpen }: { item: LibraryItem; featured?: boolean; onOpen: (item: LibraryItem) => void }) {
   return (
@@ -135,18 +131,23 @@ function WorkingNowCard({ sessions }: { sessions: { agent: string; task: string;
   );
 }
 
-function KnowledgeQuickShelf() {
+function KnowledgeQuickShelf({ catalog, onSelect }: { catalog: KnowledgeCatalog | null; onSelect: (id: string) => void }) {
   return (
     <section className="mt-6">
       <SectionHeader label={t.knowledgeTitle} meta={t.knowledgeSubtitle} rule={false} />
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {KNOWLEDGE_SHELVES.map((shelf) => {
-          const toneVar = `var(--hc-${shelf.tone})`;
+        {(catalog?.collections ?? []).map((collection) => {
+          // Kollabiert die (theoretisch offenere) Backend-Palette auf die
+          // vier Leitstand-Statusfarben — dieselbe Kanonisierung wie Hero
+          // (siehe heroAccent): keine neuen --hc-*-Tokens für vereinzelte Töne.
+          const toneVar = heroAccent(collection.accent);
           return (
             <div
-              key={shelf.id}
+              key={collection.id}
               role="button"
               tabIndex={0}
+              onClick={() => onSelect(collection.id)}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(collection.id); } }}
               className="hc-surface-card cursor-pointer p-4 transition-all hover:-translate-y-0.5 hover:border-[var(--hc-border-strong)]"
             >
               <div
@@ -157,10 +158,10 @@ function KnowledgeQuickShelf() {
                   color: toneVar,
                 }}
               >
-                <shelf.icon className="h-5 w-5" />
+                <CollectionGlyph name={collection.icon} className="h-5 w-5" />
               </div>
-              <h4 className="mt-3 text-[0.95rem] font-semibold text-[var(--hc-text)]">{shelf.title}</h4>
-              <p className="mt-1 text-xs text-[var(--hc-text-dim)]">{shelf.count} Dokumente</p>
+              <h4 className="mt-3 text-[0.95rem] font-semibold text-[var(--hc-text)]">{collection.title}</h4>
+              <p className="mt-1 text-xs text-[var(--hc-text-dim)]">{collection.doc_count} Dokumente</p>
             </div>
           );
         })}
@@ -180,6 +181,19 @@ export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
   const [data, setData] = useState<LibraryListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const provenance = useVaultProvenance();
+  const knowledge = useKnowledgeCatalog();
+  const [, setSearchParams] = useSearchParams();
+
+  // Schnellauswahl-Kachel geklickt → Nachschlagewerk mit der Sammlung
+  // preselektiert öffnen (KnowledgeShelf liest `collection` als Filter-Param).
+  const openCollection = useCallback((id: string) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set("mode", "wissen");
+      p.set("collection", id);
+      return p;
+    });
+  }, [setSearchParams]);
 
   const load = useCallback(async () => {
     try {
@@ -217,7 +231,7 @@ export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
         tone="cyan"
         density={density}
         status={{ label: t.newBriefings(briefings.length), tone: "cyan", dot: "live" }}
-        action={<span className="rounded-full border border-white/10 bg-white/[.03] px-3 py-1.5 text-xs text-[var(--hc-text-soft)]">{t.docsCount(12)}</span>}
+        action={<span className="rounded-full border border-white/10 bg-white/[.03] px-3 py-1.5 text-xs text-[var(--hc-text-soft)]">{knowledge.data ? t.docsCount(knowledge.data.count) : "…"}</span>}
       />
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
@@ -245,7 +259,7 @@ export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
         <WorkingNowCard sessions={provenance.data?.open_sessions ?? []} />
       </div>
 
-      <KnowledgeQuickShelf />
+      <KnowledgeQuickShelf catalog={knowledge.data} onSelect={openCollection} />
 
       <Disclosure summary={<span className="text-sm font-semibold text-[var(--hc-text)]">{t.provenanceTitle}</span>} defaultOpen={false}>
         <div className="pt-2">

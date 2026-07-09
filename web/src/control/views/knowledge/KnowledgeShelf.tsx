@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ToneCallout } from "../../components/atoms";
 import { fmtAge, nowSec } from "../../lib/derive";
 import { toneClasses } from "../../lib/tones";
+import { useKnowledgeCatalog } from "../../hooks/useControlData";
 import {
   filterCatalog,
   knowledgeType,
@@ -22,7 +24,7 @@ import { KnowledgeReader } from "./KnowledgeReader";
 /** Sammlungs-Icon als statisches JSX (Backend liefert nur den Namen). Bewusst
  *  ein Switch statt dynamischer Komponenten-Auflösung → react-hooks/static-
  *  components-konform und für jeden Namen explizit. */
-function CollectionGlyph({ name, className }: { name: string; className?: string }) {
+export function CollectionGlyph({ name, className }: { name: string; className?: string }) {
   switch (name) {
     case "Landmark":
       return <Landmark className={className} />;
@@ -235,30 +237,57 @@ export function CollectionSection({ collection, now, onOpen }: {
 }
 
 export function KnowledgeShelf() {
-  const [catalog, setCatalog] = useState<KnowledgeCatalog | null>(null);
+  const [searchParams] = useSearchParams();
+  // Baseline-Katalog: dauerhaft gepollt (60 s, geteilter pollingStore-Key mit
+  // der BriefingsShelf-Schnellauswahl — s. useKnowledgeCatalog). Zeigt die
+  // Sammlungen, solange nicht gesucht wird.
+  const baseline = useKnowledgeCatalog();
   const [q, setQ] = useState("");
+  const [searchCatalog, setSearchCatalog] = useState<KnowledgeCatalog | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [activeCollection, setActiveCollection] = useState<string | null>(null);
   const [activeType, setActiveType] = useState<string | null>(null);
   const [reading, setReading] = useState<KnowledgeDoc | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (query: string) => {
+  // Deep-Link aus der Bibliothek-Schnellauswahl (BriefingsShelf-Kacheln
+  // setzen `?collection=<id>`): jede neue Collection-Id preselektiert das
+  // Regal-Filter, ohne die bestehende Filter-UX (manuelles Wechseln/Leeren)
+  // zu stören — reagiert nur auf eine tatsächliche Änderung des Werts.
+  // setTimeout(0) statt synchronem setState im Effect-Body — Hauskonvention
+  // (BibliothekView-Deep-Link), s. react-hooks/set-state-in-effect.
+  const collectionParam = searchParams.get("collection");
+  useEffect(() => {
+    if (!collectionParam) return;
+    const handle = window.setTimeout(() => setActiveCollection(collectionParam), 0);
+    return () => window.clearTimeout(handle);
+  }, [collectionParam]);
+
+  const searchLoad = useCallback(async (query: string) => {
     try {
-      const params = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
-      const res = await fetchJSON<KnowledgeCatalog>(`/api/library/knowledge${params}`);
-      setCatalog(res);
-      setError(null);
+      const res = await fetchJSON<KnowledgeCatalog>(`/api/library/knowledge?q=${encodeURIComponent(query)}`);
+      setSearchCatalog(res);
+      setSearchError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setSearchError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
-  // Erst-Load sofort, Such-Eingaben entprellt (250 ms) — Hauskonvention
-  // setTimeout statt synchronem setState im Effect-Body.
+  // Such-Eingaben entprellt (250 ms) — Hauskonvention setTimeout statt
+  // synchronem setState im Effect-Body. Ohne Suchtext zeigt das Regal den
+  // dauerhaft gepollten Baseline-Katalog statt selbst zu laden.
   useEffect(() => {
-    const handle = window.setTimeout(() => void load(q), q.trim() ? 250 : 0);
+    const trimmed = q.trim();
+    if (!trimmed) {
+      const handle = window.setTimeout(() => { setSearchCatalog(null); setSearchError(null); }, 0);
+      return () => window.clearTimeout(handle);
+    }
+    const handle = window.setTimeout(() => void searchLoad(trimmed), 250);
     return () => window.clearTimeout(handle);
-  }, [q, load]);
+  }, [q, searchLoad]);
+
+  const searching = q.trim().length > 0;
+  const catalog = searching ? searchCatalog : baseline.data;
+  const error = searching ? searchError : baseline.error;
 
   const visibleCatalog = useMemo(
     () => (catalog ? filterCatalog(catalog, activeCollection, activeType) : null),
@@ -272,7 +301,6 @@ export function KnowledgeShelf() {
   }
 
   const collections = visibleCatalog?.collections ?? [];
-  const searching = q.trim().length > 0;
   const nowTs = visibleCatalog?.now ?? nowSec();
 
   return (

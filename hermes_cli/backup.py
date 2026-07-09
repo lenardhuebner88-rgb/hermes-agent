@@ -289,6 +289,51 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+def _verify_zip_integrity(path: Path) -> Optional[str]:
+    """Open *path* as a zip and validate it.  Returns None if OK, else a
+    short reason string.  Never raises — a broken/truncated zip (e.g. from
+    an interrupted write) must be reported, not crash the caller."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return f"corrupt member: {bad}"
+    except (zipfile.BadZipFile, OSError) as exc:
+        return str(exc)
+    return None
+
+
+def _prune_backups_by_prefix(directory: Path, prefix: str, keep: int) -> int:
+    """Remove oldest ``<prefix>*.zip`` files in *directory* beyond *keep*.
+
+    Only touches files matching the given prefix so unrelated files (or
+    other backup families) in the same directory are never affected. A
+    ``keep`` of 0 or less disables pruning entirely.
+    """
+    if keep <= 0 or not directory.exists():
+        return 0
+
+    backups = sorted(
+        (p for p in directory.iterdir()
+         if p.is_file() and p.name.startswith(prefix) and p.suffix.lower() == ".zip"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+
+    deleted = 0
+    for p in backups[keep:]:
+        try:
+            p.unlink()
+            deleted += 1
+        except OSError as exc:
+            logger.warning("Failed to prune backup %s: %s", p.name, exc)
+
+    return deleted
+
+
+_BACKUP_DEFAULT_KEEP = 2
+
+
 def run_backup(args) -> None:
     """Create a zip backup of the Hermes home directory."""
     hermes_root = get_default_hermes_root()
@@ -381,51 +426,85 @@ def run_backup(args) -> None:
     errors = []
     t0 = time.monotonic()
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
-            try:
-                # Safe copy for SQLite databases (handles WAL mode)
-                if abs_path.suffix == ".db":
-                    # Stage the snapshot alongside the output zip so that the
-                    # temp file lives on the same filesystem.  The system
-                    # default (/tmp) may be a small tmpfs that cannot hold
-                    # large databases, causing silent backup incompleteness.
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".db", delete=False, dir=str(out_path.parent)
-                    ) as tmp:
-                        tmp_db = Path(tmp.name)
-                    if _safe_copy_db(abs_path, tmp_db):
-                        zf.write(tmp_db, arcname=str(rel_path))
-                        total_bytes += tmp_db.stat().st_size
-                        tmp_db.unlink(missing_ok=True)
+    # Write to a ``.partial`` sibling in the target directory first, verify
+    # it, then atomically rename onto the final name. This guarantees a
+    # backup that was interrupted (crash, kill, disk full) never leaves a
+    # corrupt zip sitting under the final name for a later `hermes import`
+    # to trip over. On any failure the partial file is removed, not left
+    # behind for the next run to discover.
+    partial_path = out_path.with_name(out_path.name + ".partial")
+    try:
+        with zipfile.ZipFile(partial_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
+                try:
+                    # Safe copy for SQLite databases (handles WAL mode)
+                    if abs_path.suffix == ".db":
+                        # Stage the snapshot alongside the output zip so that the
+                        # temp file lives on the same filesystem.  The system
+                        # default (/tmp) may be a small tmpfs that cannot hold
+                        # large databases, causing silent backup incompleteness.
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".db", delete=False, dir=str(out_path.parent)
+                        ) as tmp:
+                            tmp_db = Path(tmp.name)
+                        try:
+                            if _safe_copy_db(abs_path, tmp_db):
+                                zf.write(tmp_db, arcname=str(rel_path))
+                                total_bytes += tmp_db.stat().st_size
+                            else:
+                                errors.append(f"  {rel_path}: SQLite safe copy failed")
+                                continue
+                        finally:
+                            tmp_db.unlink(missing_ok=True)
                     else:
-                        tmp_db.unlink(missing_ok=True)
-                        errors.append(f"  {rel_path}: SQLite safe copy failed")
-                        continue
-                else:
-                    zf.write(abs_path, arcname=str(rel_path))
+                        zf.write(abs_path, arcname=str(rel_path))
+                        total_bytes += abs_path.stat().st_size
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {rel_path}: {exc}")
+                    continue
+
+                # Progress every 500 files
+                if i % 500 == 0:
+                    print(f"  {i}/{file_count} files ...")
+
+            # External memory-provider state, stored under the ``_external/`` arc
+            # prefix. These never include ``.db`` files in practice (config/env
+            # blobs), so a straight zf.write is fine.
+            for abs_path, arcname in external_to_add:
+                try:
+                    zf.write(abs_path, arcname=arcname)
                     total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"  {rel_path}: {exc}")
-                continue
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {arcname}: {exc}")
+                    continue
 
-            # Progress every 500 files
-            if i % 500 == 0:
-                print(f"  {i}/{file_count} files ...")
+        bad_reason = _verify_zip_integrity(partial_path)
+        if bad_reason is not None:
+            print(f"Error: backup zip failed integrity check ({bad_reason}); discarding.")
+            sys.exit(1)
 
-        # External memory-provider state, stored under the ``_external/`` arc
-        # prefix. These never include ``.db`` files in practice (config/env
-        # blobs), so a straight zf.write is fine.
-        for abs_path, arcname in external_to_add:
-            try:
-                zf.write(abs_path, arcname=arcname)
-                total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"  {arcname}: {exc}")
-                continue
+        os.replace(partial_path, out_path)
+    except BaseException:
+        partial_path.unlink(missing_ok=True)
+        raise
 
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
+
+    keep = getattr(args, "keep", _BACKUP_DEFAULT_KEEP)
+    if keep is None:
+        keep = _BACKUP_DEFAULT_KEEP
+    pruned = 0
+    if keep and int(keep) > 0:
+        prefix_match = out_path.name
+        # Prune same-prefix backups (e.g. "pre-deploy-") in the output
+        # directory, keeping only the newest ``keep``. Only meaningful when
+        # the caller uses a stable timestamped prefix; a one-off custom
+        # filename simply has nothing else to match.
+        for known_prefix in (_PRE_DEPLOY_PREFIX, _PRE_UPDATE_PREFIX, _PRE_MIGRATION_PREFIX, "hermes-backup-"):
+            if prefix_match.startswith(known_prefix):
+                pruned = _prune_backups_by_prefix(out_path.parent, known_prefix, keep=int(keep))
+                break
 
     # Summary
     print()
@@ -1145,12 +1224,29 @@ def run_quick_backup(args) -> None:
 # Shared full-zip backup helper
 # ---------------------------------------------------------------------------
 
-def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
+def _write_full_zip_backup(
+    out_path: Path,
+    hermes_root: Path,
+    prune_prefix: Optional[str] = None,
+    prune_keep: Optional[int] = None,
+) -> Optional[Path]:
     """Write a full zip snapshot of ``hermes_root`` to ``out_path``.
 
     Uses the same exclusion rules and SQLite safe-copy as :func:`run_backup`.
     Returns the output path on success, None on failure (nothing to back up,
     or write error — caller should surface the outcome but not raise).
+
+    When *prune_prefix* is given, same-prefix backups in ``out_path``'s
+    directory are pruned to the newest *prune_keep* right after the atomic
+    replace — before returning control to the caller. This is defense in
+    depth: each of the three creator wrappers (``create_pre_update_backup``
+    et al.) already runs its own family-scoped prune afterward, but doing it
+    here too means retention still applies to this family even if the
+    process is interrupted between the replace and the caller's prune call.
+    Pruning is skipped (not disabled-as-floor-1) when *prune_keep* is falsy
+    or <= 0 — callers that want the "floor to 1" semantics for a
+    misconfigured ``keep: 0`` handle that themselves in their own prune step
+    that still runs after this one.
     """
     files_to_add: list[tuple[Path, Path]] = []
     try:
@@ -1177,8 +1273,16 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
     if not files_to_add:
         return None
 
+    # Write to a ``.partial`` sibling first, verify it opens cleanly, then
+    # atomically rename onto the final name. Callers of this helper
+    # (pre-update/pre-migration/pre-deploy auto-backups) run unattended and
+    # can be interrupted mid-write (crash, kill, disk full); without this a
+    # truncated zip lands under the final name and both accumulates forever
+    # (nothing ever prunes a name it doesn't recognize as corrupt) and fails
+    # silently on a later `hermes import`.
+    partial_path = out_path.with_name(out_path.name + ".partial")
     try:
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        with zipfile.ZipFile(partial_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for abs_path, rel_path in files_to_add:
                 try:
                     if abs_path.suffix == ".db":
@@ -1200,14 +1304,25 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
                 except (PermissionError, OSError, ValueError) as exc:
                     logger.debug("Skipping %s in zip backup: %s", rel_path, exc)
                     continue
+
+        bad_reason = _verify_zip_integrity(partial_path)
+        if bad_reason is not None:
+            logger.warning("Full-zip backup: integrity check failed (%s); discarding.", bad_reason)
+            return None
+
+        os.replace(partial_path, out_path)
     except OSError as exc:
         logger.warning("Full-zip backup: zip write failed: %s", exc)
-        # Best-effort cleanup of partial file
-        try:
-            out_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return None
+    finally:
+        # Cleanup covers both the OSError path above and any other
+        # exception (e.g. a signal-driven interrupt) — the partial file
+        # must never be left for a future run/import to trip over. A
+        # successful run already renamed it away, so this is a no-op then.
+        partial_path.unlink(missing_ok=True)
+
+    if prune_prefix and prune_keep and prune_keep > 0:
+        _prune_backups_by_prefix(out_path.parent, prune_prefix, keep=prune_keep)
 
     return out_path
 
@@ -1218,7 +1333,7 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
 
 _PRE_UPDATE_BACKUPS_DIR = "backups"
 _PRE_UPDATE_PREFIX = "pre-update-"
-_PRE_UPDATE_DEFAULT_KEEP = 5
+_PRE_UPDATE_DEFAULT_KEEP = 2
 
 
 def _pre_update_backup_dir(hermes_home: Optional[Path] = None) -> Path:
@@ -1291,7 +1406,9 @@ def create_pre_update_backup(
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     out_path = backup_dir / f"{_PRE_UPDATE_PREFIX}{stamp}.zip"
 
-    result = _write_full_zip_backup(out_path, hermes_root)
+    result = _write_full_zip_backup(
+        out_path, hermes_root, prune_prefix=_PRE_UPDATE_PREFIX, prune_keep=keep
+    )
     if result is None:
         return None
 
@@ -1304,7 +1421,7 @@ def create_pre_update_backup(
 # ---------------------------------------------------------------------------
 
 _PRE_MIGRATION_PREFIX = "pre-migration-"
-_PRE_MIGRATION_DEFAULT_KEEP = 5
+_PRE_MIGRATION_DEFAULT_KEEP = 2
 
 
 def _prune_pre_migration_backups(backup_dir: Path, keep: int) -> int:
@@ -1336,7 +1453,7 @@ def _prune_pre_migration_backups(backup_dir: Path, keep: int) -> int:
 
 
 _PRE_DEPLOY_PREFIX = "pre-deploy-"
-_PRE_DEPLOY_DEFAULT_KEEP = 5
+_PRE_DEPLOY_DEFAULT_KEEP = 2
 _PRE_DEPLOY_DEFAULT_MAX_AGE_SECONDS = 3600
 
 
@@ -1411,7 +1528,9 @@ def create_pre_deploy_backup(
     out_path = backup_dir / f"{_PRE_DEPLOY_PREFIX}{stamp}.zip"
 
     try:
-        result = _write_full_zip_backup(out_path, hermes_root)
+        result = _write_full_zip_backup(
+            out_path, hermes_root, prune_prefix=_PRE_DEPLOY_PREFIX, prune_keep=keep
+        )
     except Exception as exc:  # pragma: no cover — defensive outer catch
         logger.warning("Pre-deploy backup failed unexpectedly: %s", exc)
         return None
@@ -1483,7 +1602,9 @@ def create_pre_migration_backup(
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     out_path = backup_dir / f"{_PRE_MIGRATION_PREFIX}{stamp}.zip"
 
-    result = _write_full_zip_backup(out_path, hermes_root)
+    result = _write_full_zip_backup(
+        out_path, hermes_root, prune_prefix=_PRE_MIGRATION_PREFIX, prune_keep=keep
+    )
     if result is None:
         return None
 

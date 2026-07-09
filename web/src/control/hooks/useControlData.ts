@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { StatsFieldConfigSchema, type StatsFieldConfig } from "../lib/statsFields";
 import type { PromptForgeCatalog } from "../views/schmiede/catalog";
+import type { KnowledgeCatalog } from "../views/knowledge/knowledge.helpers";
 import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
 import {
   AccountUsageResponseSchema,
@@ -2537,6 +2538,21 @@ export function useLibraryUnread(): number {
   }
   // Erstbesuch (kein Stempel): nichts anbrüllen — der Tab ist Einladung genug.
   return countLibraryUnread(state.data?.items ?? [], since);
+}
+
+// S6 (2026-07-09): der komplette Regal-Katalog, ungefiltert (kein `q` — die
+// Volltextsuche im Nachschlagewerk bleibt ihr eigener, debouncter Fetch,
+// s. KnowledgeShelf). Speist sowohl die BriefingsShelf-Schnellauswahl-Kacheln
+// als auch KnowledgeShelfs Baseline-Ansicht; geteilter pollingStore-Key → EIN
+// Timer/Request für beide statt zwei. Bewusst ohne zod-Schema (wie die
+// übrigen Library-Endpoints, z. B. useLibraryUnread direkt darüber) — die
+// Bibliothek validiert ihre Payloads nirgends per parseOrThrow.
+export function useKnowledgeCatalog() {
+  return usePolling<KnowledgeCatalog>(
+    "knowledge-catalog",
+    () => fetchJSON<KnowledgeCatalog>("/api/library/knowledge"),
+    60000,
+  );
 }
 
 export interface PromptForgeCatalogState {
