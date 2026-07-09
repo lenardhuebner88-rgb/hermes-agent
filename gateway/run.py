@@ -12664,11 +12664,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Use SimpleNamespace as raw_message so _get_guild_id() can extract
         # guild_id and _send_voice_reply() plays audio in the voice channel.
         from types import SimpleNamespace
+        voice_concise_instruction = (
+            "Voice mode: Antworte auf Deutsch extrem kurz: maximal 1–2 kurze Sätze. "
+            "Nur die direkt relevante Antwort, keine Zusammenfassung, keine Meta-Hinweise, "
+            "keine Usage-/Kontext-/Token-Angaben."
+        )
         event = MessageEvent(
             source=source,
             text=transcript,
             message_type=MessageType.VOICE,
             raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
+            channel_prompt=voice_concise_instruction,
         )
 
         await adapter.handle_message(event)

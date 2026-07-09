@@ -353,8 +353,8 @@ class VoiceReceiver:
     completed utterances via a callback.
     """
 
-    SILENCE_THRESHOLD = 1.5    # seconds of silence → end of utterance
-    MIN_SPEECH_DURATION = 0.5  # minimum seconds to process (skip noise)
+    SILENCE_THRESHOLD = 0.55   # seconds of silence → end of utterance (voice-chat ultra-fast path)
+    MIN_SPEECH_DURATION = 0.25 # minimum seconds to process (skip noise)
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
@@ -2839,8 +2839,9 @@ class DiscordAdapter(BasePlatformAdapter):
             self._voice_text_channels.pop(guild_id, None)
             self._voice_sources.pop(guild_id, None)
 
-    # Maximum seconds to wait for voice playback before giving up
-    PLAYBACK_TIMEOUT = 120
+    # Maximum seconds to wait for voice playback before giving up.
+    # Voice conversations should fail fast rather than block the next turn.
+    PLAYBACK_TIMEOUT = 30
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
