@@ -11,6 +11,8 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import library_view as lv
 
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
 
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
@@ -118,6 +120,66 @@ def test_cron_items_multi_store_with_redacted_response(kanban_home):
     detail = lv._get_item(wm.id)
     assert detail is not None and "WM-Morgenbrief-Inhalt." in detail.body_md
     assert "GEHEIM" not in detail.body_md
+
+
+def test_structured_ki_brief_parses_real_response_fixture():
+    raw = (FIXTURES_DIR / "ki-modell-brief-2026-07-09.md").read_text(encoding="utf-8")
+    body = lv._extract_response(raw)
+    assert body is not None
+
+    parsed = lv._parse_structured_model_brief("92adf20dd9bd", body, 1_752_087_600)
+    assert parsed is not None
+    assert parsed["run_kind"] == "abend"
+    assert parsed["top_story"].startswith("OpenAI hat GPT-5.6")
+    assert len(parsed["sources"]) == 2  # duplicate URL removed
+    assert {item["title"] for item in parsed["model_news"]} == {
+        "OpenAI - GPT-5.6 (Sol/Terra/Luna)",
+        "Meta - Muse Spark 1.1",
+    }
+    assert all(item["source_url"].startswith("https://") for item in parsed["model_news"])
+    assert len(parsed["watchlist_delta"]) == 1
+
+
+def test_structured_ki_brief_is_attached_to_list_and_detail(kanban_home):
+    response = lv._extract_response(
+        (FIXTURES_DIR / "ki-modell-brief-2026-07-09.md").read_text(encoding="utf-8")
+    )
+    assert response is not None
+    store = kanban_home / "profiles" / "research" / "cron"
+    _write_cron_store(
+        store,
+        job_id="92adf20dd9bd",
+        name="KI Modell-Brief (Abend)",
+        filename="2026-07-09_20-03-53.md",
+        response=response,
+        script="ki-modell-brief.py",
+    )
+
+    listed = lv._list_items("news", None, 10)["items"]
+    assert len(listed) == 1
+    assert listed[0]["structured"] is True
+    assert listed[0]["structured_brief"]["run_kind"] == "abend"
+    assert "body_md" not in listed[0]
+
+    detail = lv._get_item(listed[0]["id"])
+    assert detail is not None
+    payload = detail.as_dict(with_body=True)
+    assert payload["structured"] is True
+    assert payload["structured_brief"]["model_news"]
+    assert payload["body_md"].startswith("**🧠 KI-Modell-Brief")
+
+
+def test_non_model_cron_keeps_legacy_item_shape(kanban_home):
+    _write_cron_store(
+        kanban_home / "cron",
+        job_id="16dd6ac01fc0",
+        name="Morning Digest",
+        filename="2026-07-09_08-00-00.md",
+        response="**Das Wichtigste zuerst**\n- Legacy bleibt Legacy.\n\n**Quellen**\n- https://example.com",
+    )
+    item = lv._collect_cron_items(with_bodies=False)[0].as_dict(with_body=False)
+    assert "structured" not in item
+    assert "structured_brief" not in item
 
 
 def test_trivial_w_cron_outputs_are_filtered(kanban_home):

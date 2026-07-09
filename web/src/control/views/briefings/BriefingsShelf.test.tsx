@@ -26,8 +26,24 @@ const KNOWLEDGE_FIXTURE = JSON.parse(readFileSync(fixturePath, "utf-8")) as {
   collections: { id: string; title: string; doc_count: number }[];
   count: number;
 };
+const structuredFixturePath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "__fixtures__/structured-brief.json",
+);
+const STRUCTURED_BRIEF = JSON.parse(readFileSync(structuredFixturePath, "utf-8"));
 
-const EMPTY_ITEMS = { items: [], count: 0, truncated: false, has_more: false, categories: [], now: 1_700_000_000 };
+interface ItemsResponseFixture {
+  items: unknown[];
+  count: number;
+  truncated: boolean;
+  has_more: boolean;
+  categories: string[];
+  now: number;
+}
+
+const EMPTY_ITEMS: ItemsResponseFixture = {
+  items: [], count: 0, truncated: false, has_more: false, categories: [], now: 1_700_000_000,
+};
 const VAULT_PROVENANCE_FIXTURE = {
   schema: "vault-provenance/v1",
   error: null,
@@ -36,9 +52,11 @@ const VAULT_PROVENANCE_FIXTURE = {
   recent_receipts: [],
 };
 
-function mockFetch() {
+function mockFetch(itemsResponse: ItemsResponseFixture = EMPTY_ITEMS) {
   fetchJSONMock.mockImplementation(async (url: string) => {
     if (url.startsWith("/api/library/knowledge")) return KNOWLEDGE_FIXTURE;
+    if (url.startsWith("/api/library/items?category=news")) return itemsResponse;
+    if (url.startsWith("/api/library/items?category=briefings")) return EMPTY_ITEMS;
     if (url.startsWith("/api/library/items")) return EMPTY_ITEMS;
     if (url.startsWith("/api/vault/provenance")) return VAULT_PROVENANCE_FIXTURE;
     throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
@@ -126,5 +144,40 @@ describe("BriefingsShelf: Nachschlagewerk-Schnellauswahl (S6)", () => {
       const loc = screen.getByTestId("loc").textContent ?? "";
       expect(loc).toContain("collection=vault-plans");
     });
+  });
+});
+
+describe("BriefingsShelf: strukturierte KI-Frontpage (S5)", () => {
+  it("rendert Top-Story, verlinkte Modell-News, Watchlist und Frische-Stempel", async () => {
+    mockFetch({ ...EMPTY_ITEMS, items: [STRUCTURED_BRIEF], count: 1 });
+    render(
+      <MemoryRouter initialEntries={["/control/bibliothek"]}>
+        <BriefingsShelf onOpenItem={() => {}} />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Top-Story")).toBeTruthy();
+    expect(screen.getByText(/OpenAI hat GPT-5\.6 heute aus der Preview/)).toBeTruthy();
+    expect(screen.getByText("OpenAI - GPT-5.6 (Sol/Terra/Luna)")).toBeTruthy();
+    expect(screen.getByText("Meta - Muse Spark 1.1")).toBeTruthy();
+    expect(screen.getByText("Watchlist-Update")).toBeTruthy();
+    expect(screen.getByText(/Stand 20:03 · nächster Lauf 08:00/)).toBeTruthy();
+
+    const openAI = screen.getByText("OpenAI - GPT-5.6 (Sol/Terra/Luna)").closest("a");
+    expect(openAI?.getAttribute("href")).toBe("https://openai.com/index/gpt-5-6");
+  });
+
+  it("öffnet über den CTA weiterhin das vollständige kanonische Briefing", async () => {
+    mockFetch({ ...EMPTY_ITEMS, items: [STRUCTURED_BRIEF], count: 1 });
+    const onOpen = vi.fn();
+    render(
+      <MemoryRouter initialEntries={["/control/bibliothek"]}>
+        <BriefingsShelf onOpenItem={onOpen} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("Ganzes Briefing lesen →"));
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(onOpen.mock.calls[0][0].id).toBe(STRUCTURED_BRIEF.id);
   });
 });

@@ -29,6 +29,7 @@ import logging
 import re
 import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -69,6 +70,7 @@ _JOB_CATEGORY: dict[str, str] = {
     # KI-News (research-Profil-Store)
     "5a2a54ac3dae": "news",   # KI Modell-Brief (Morgen)
     "4c88cd4449a6": "news",   # KI Modell Breaking-Watch (Mittag)
+    "92adf20dd9bd": "news",   # KI Modell-Brief (Abend)
     # Familie (fo-brain-Profil-Store)
     "e28b8cd87809": "familie",  # Familien-Morgenbrief 06:30
 }
@@ -100,6 +102,16 @@ _OUTPUT_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.md$")
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 _PREVIEW_CHARS = 280
 _MAX_BODY_BYTES = 512 * 1024  # ein Digest; Kappung gegen Ausreißer
+
+_STRUCTURED_MODEL_NEWS_KINDS: dict[str, str] = {
+    "5a2a54ac3dae": "morgen",
+    "4c88cd4449a6": "breaking",
+    "92adf20dd9bd": "abend",
+}
+_FULL_BOLD_LINE_RE = re.compile(r"^\*\*(.+?)\*\*$")
+_BOLD_ITEM_TITLE_RE = re.compile(r"^\*\*(.+?)\*\*[: ]*(.*)$")
+_URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+_WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 
 
 def _hermes_home() -> Path:
@@ -180,6 +192,158 @@ def _preview(body: str) -> str:
     return flat[:_PREVIEW_CHARS]
 
 
+def _plain_markdown(value: str) -> str:
+    return " ".join(re.sub(r"[*_`]", "", value).split())
+
+
+def _markdown_section(body: str, title: str) -> str:
+    """Return a full-bold cron response section without crossing into the next.
+
+    The KI brief prompt deliberately emits Discord-friendly bold headings
+    (``**Quellen**``), not Markdown ``##`` headings.  Parsing that canonical
+    response is safer than adding a second producer-side artifact: the fetcher
+    scripts run before the agent has verified or written the final report.
+    """
+    lines = body.splitlines()
+    start: Optional[int] = None
+    for idx, line in enumerate(lines):
+        match = _FULL_BOLD_LINE_RE.match(line.strip())
+        if match and match.group(1).strip().casefold() == title.casefold():
+            start = idx + 1
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for idx in range(start, len(lines)):
+        if _FULL_BOLD_LINE_RE.match(lines[idx].strip()):
+            end = idx
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def _markdown_bullets(block: str) -> list[str]:
+    bullets: list[str] = []
+    current: list[str] = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            if current:
+                bullets.append(" ".join(current))
+            current = [stripped[2:].strip()]
+        elif current and stripped:
+            current.append(stripped)
+    if current:
+        bullets.append(" ".join(current))
+    return bullets
+
+
+def _normalize_url(value: str) -> str:
+    return value.strip().rstrip(".,;:!?)]}>'\"")
+
+
+def _structured_sources(body: str) -> list[dict[str, str]]:
+    source_block = _markdown_section(body, "Quellen")
+    candidates = _markdown_bullets(source_block)
+    if not candidates:
+        # Breaking reports put each source URL directly on the news bullet.
+        candidates = [line.strip()[2:] for line in body.splitlines() if line.strip().startswith("- ")]
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        match = _URL_RE.search(candidate)
+        if not match:
+            continue
+        url = _normalize_url(match.group(0))
+        if not url or url in seen:
+            continue
+        title = candidate[:match.start()].strip().rstrip(" -")
+        title = re.sub(r"^\[[^\]]+\]\s*", "", title)
+        out.append({"title": _plain_markdown(title) or url, "url": url})
+        seen.add(url)
+    return out
+
+
+def _source_for_news(
+    title: str,
+    summary: str,
+    sources: list[dict[str, str]],
+) -> Optional[dict[str, str]]:
+    inline = _URL_RE.search(summary)
+    if inline:
+        url = _normalize_url(inline.group(0))
+        return next((source for source in sources if source["url"] == url), {"title": title, "url": url})
+
+    ignored = {"modell", "model", "introducing", "the", "and", "with", "jetzt", "new"}
+    wanted = {
+        word.casefold() for word in _WORD_RE.findall(title)
+        if len(word) >= 3 and word.casefold() not in ignored
+    }
+    ranked: list[tuple[int, dict[str, str]]] = []
+    for source in sources:
+        source_words = {word.casefold() for word in _WORD_RE.findall(source["title"]) if len(word) >= 3}
+        ranked.append((len(wanted & source_words), source))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+
+def _parse_structured_model_brief(job_id: str, body: str, ts: int) -> Optional[dict[str, Any]]:
+    """Parse the final, already-verified cron response into a UI contract.
+
+    The existing scheduler run record is the Markdown source of truth and the
+    flat delivery file remains the Discord representation.  This adapter adds
+    no second content truth and never exposes Prompt/Script Output.
+    """
+    run_kind = _STRUCTURED_MODEL_NEWS_KINDS.get(job_id)
+    if run_kind is None:
+        return None
+
+    sources = _structured_sources(body)
+    important = _markdown_bullets(_markdown_section(body, "Das Wichtigste zuerst"))
+    news_bullets = _markdown_bullets(_markdown_section(body, "Neue Modelle & Capabilities"))
+    if run_kind == "breaking" and not news_bullets:
+        news_bullets = [
+            line.strip()[2:]
+            for line in body.splitlines()
+            if line.strip().startswith("- ") and "WATCHLIST-UPDATE:" not in line
+        ]
+    if not important and news_bullets:
+        important = [news_bullets[0]]
+
+    model_news: list[dict[str, str]] = []
+    for bullet in news_bullets:
+        title_match = _BOLD_ITEM_TITLE_RE.match(bullet)
+        title = _plain_markdown(title_match.group(1)) if title_match else _plain_markdown(bullet[:100])
+        summary = _plain_markdown(bullet)
+        source = _source_for_news(title, bullet, sources)
+        # Source hygiene: an item without a real URL stays in the canonical
+        # body but is not promoted to the structured model-news front page.
+        if source is None:
+            continue
+        model_news.append({
+            "title": title,
+            "summary": summary,
+            "source_title": source["title"],
+            "source_url": source["url"],
+        })
+
+    watchlist_delta = [
+        _plain_markdown(line.strip())
+        for line in body.splitlines()
+        if line.strip().startswith("WATCHLIST-UPDATE:")
+    ]
+    top_story = _plain_markdown(important[0]) if important else ""
+    if not top_story or not sources:
+        return None
+    return {
+        "run_kind": run_kind,
+        "generated": datetime.fromtimestamp(ts).astimezone().isoformat(),
+        "top_story": top_story,
+        "model_news": model_news,
+        "sources": sources,
+        "watchlist_delta": watchlist_delta,
+    }
+
+
 # Entrauschung 2026-06-11: ``[SILENT]``-Ausgaben sind die Selbstauskunft
 # "nichts Neues" (LLM-Pfad schreibt sie trotzdem als Output-File) — kein
 # Lesestoff. Check tolerant wie der Delivery-Skip des Schedulers
@@ -205,6 +369,8 @@ class _Item:
     source_ref: str
     series_meta: str = ""
     body_md: Optional[str] = field(default=None, repr=False)
+    structured: bool = False
+    structured_brief: Optional[dict[str, Any]] = field(default=None, repr=False)
 
     def as_dict(self, *, with_body: bool) -> dict[str, Any]:
         d = {
@@ -220,6 +386,9 @@ class _Item:
         }
         if with_body:
             d["body_md"] = self.body_md or ""
+        if self.structured and self.structured_brief is not None:
+            d["structured"] = True
+            d["structured_brief"] = self.structured_brief
         return d
 
 
@@ -336,6 +505,7 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     )
                     continue
                 ts = _output_ts(md_file.name, stat.st_mtime)
+                structured_brief = _parse_structured_model_brief(job_dir.name, body, ts)
                 day = _time.strftime("%d.%m. %H:%M", _time.localtime(ts))
                 item = _Item(
                     id=f"cron::{store_id}::{job_dir.name}::{md_file.name}",
@@ -351,6 +521,8 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     ),
                     series_meta=series_meta,
                     body_md=body,
+                    structured=structured_brief is not None,
+                    structured_brief=structured_brief,
                 )
                 _cron_parse_cache[cache_key] = (
                     stat.st_mtime_ns, stat.st_size, meta_fp, item,
@@ -386,6 +558,7 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
     if _is_trivial_test_cron_output(name, body, meta):
         return None
     ts = _output_ts(filename, target.stat().st_mtime)
+    structured_brief = _parse_structured_model_brief(job_id, body, ts)
     profile = store_id.split(":", 1)[1] if ":" in store_id else None
     item = _Item(
         id=f"cron::{store_id}::{job_id}::{filename}",
@@ -398,6 +571,8 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
         source_ref=f"cron:{profile}/{job_id}" if profile else f"cron:{job_id}",
         series_meta=meta.get("schedule_display", ""),
         body_md=body,
+        structured=structured_brief is not None,
+        structured_brief=structured_brief,
     )
     # Consistent with _collect_cron_items: silent self-reports are not readable.
     return None if _is_silent(item) else item

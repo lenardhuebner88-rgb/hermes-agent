@@ -30,6 +30,7 @@ import {
 } from "./BibliothekView.helpers";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 import { BriefingsShelf } from "./briefings/BriefingsShelf";
+import { ModelleShelf } from "./models/ModelleShelf";
 import { ErgebnisseShelf } from "./results/ErgebnisseShelf";
 // TocNav ist im Nachschlagewerk (KnowledgeReader) implementiert und exportiert
 // — read-only importiert (KEINE Edits an views/knowledge/, paralleler
@@ -94,6 +95,29 @@ export interface LibraryItem {
   preview: string;
   source_ref: string;
   series_meta: string;
+  structured?: boolean;
+  structured_brief?: StructuredModelBrief;
+}
+
+export interface StructuredBriefSource {
+  title: string;
+  url: string;
+}
+
+export interface StructuredModelNewsItem {
+  title: string;
+  summary: string;
+  source_title: string;
+  source_url: string;
+}
+
+export interface StructuredModelBrief {
+  run_kind: "morgen" | "breaking" | "abend";
+  generated: string;
+  top_story: string;
+  model_news: StructuredModelNewsItem[];
+  sources: StructuredBriefSource[];
+  watchlist_delta: string[];
 }
 
 export interface LibraryListResponse {
@@ -104,6 +128,7 @@ export interface LibraryListResponse {
    *  weitere Treffer folgen. */
   has_more: boolean;
   categories: string[];
+  now?: number;
 }
 
 type LibraryDetail = LibraryItem & { body_md: string };
@@ -684,13 +709,14 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   );
 }
 
-type Mode = "briefings" | "wissen" | "lesesaal" | "ergebnisse";
+type Mode = "briefings" | "wissen" | "lesesaal" | "ergebnisse" | "modelle";
 
 const MODE_TABS: { id: Mode; label: string; count?: (data: LibraryListResponse | null) => number }[] = [
   { id: "briefings", label: "Briefings", count: (data) => data?.count ?? 0 },
   { id: "wissen", label: "Nachschlagewerk" },
   { id: "lesesaal", label: "Lesesaal", count: (data) => data?.count ?? 0 },
   { id: "ergebnisse", label: "Ergebnisse" },
+  { id: "modelle", label: "Modelle" },
 ];
 
 function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode: Mode) => void; lesesaalData: LibraryListResponse | null }) {
@@ -738,7 +764,7 @@ export function BibliothekView({ density }: { density?: Density }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const mode: Mode = useMemo(() => {
     const m = searchParams.get("mode");
-    if (m === "lesesaal" || m === "wissen" || m === "ergebnisse") return m;
+    if (m === "lesesaal" || m === "wissen" || m === "ergebnisse" || m === "modelle") return m;
     return "briefings";
   }, [searchParams]);
   const setMode = useCallback((next: Mode) => {
@@ -802,6 +828,9 @@ export function BibliothekView({ density }: { density?: Density }) {
       </div>
       <div id="bibliothek-panel-ergebnisse" role="tabpanel" hidden={mode !== "ergebnisse"}>
         <ErgebnisseShelf onOpenLesesaalItem={openLesesaalItemById} />
+      </div>
+      <div id="bibliothek-panel-modelle" role="tabpanel" hidden={mode !== "modelle"}>
+        <ModelleShelf />
       </div>
     </div>
   );
