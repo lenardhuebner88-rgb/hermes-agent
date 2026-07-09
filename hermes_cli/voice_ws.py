@@ -15,9 +15,20 @@ class VoiceWebConfig:
 
 def voice_web_config(raw: dict) -> VoiceWebConfig:
     """Read the voice web feature flag and Live API defaults."""
-    section = (raw or {}).get("voice_web") or {}
+    section = raw.get("voice_web") if isinstance(raw, dict) else None
+    if not isinstance(section, dict):
+        section = {}
+
+    model = section.get("model")
+    if not isinstance(model, str) or not model.strip():
+        model = DEFAULT_LIVE_MODEL
+
+    language = section.get("language")
+    if not isinstance(language, str) or not language.strip():
+        language = "de-DE"
+
     return VoiceWebConfig(
-        enabled=bool(section.get("enabled", False)),
-        model=str(section.get("model", DEFAULT_LIVE_MODEL)),
-        language=str(section.get("language", "de-DE")),
+        enabled=section.get("enabled") is True,
+        model=model,
+        language=language,
     )
