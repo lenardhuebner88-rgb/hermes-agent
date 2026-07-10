@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlShell, type ControlTab } from "./ControlShell";
 import type { DecisionInboxData } from "../hooks/useControlData";
 
-vi.mock("./NotificationBridge", () => ({ NotificationBridge: () => null }));
+const notificationBridgeSpy = vi.fn((_props: unknown) => null);
+vi.mock("./NotificationBridge", () => ({ NotificationBridge: (props: unknown) => notificationBridgeSpy(props) }));
 vi.mock("./Overlay", () => ({ Overlay: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock("../lib/clock", () => ({ useClientNowSeconds: () => 1783025500 }));
 
 const baseProps = {
-  active: "fleet" as ControlTab,
   density: "compact" as const,
   inbox: {
     items: [],
@@ -31,61 +31,92 @@ const baseProps = {
   onOpenCommand: vi.fn(),
 };
 
-function renderShell() {
+function renderShell(active: ControlTab) {
   return render(
     <MemoryRouter>
-      <ControlShell {...baseProps}>
+      <ControlShell {...baseProps} active={active}>
         <main>content</main>
       </ControlShell>
     </MemoryRouter>,
   );
 }
 
-function renderShellWith(active: ControlTab) {
-  return render(
-    <MemoryRouter>
-      <ControlShell {...baseProps} active={active} density="airy">
-        <main>content</main>
-      </ControlShell>
-    </MemoryRouter>,
-  );
-}
+describe("ControlShell unified responsive shell (W2-a)", () => {
+  afterEach(() => {
+    cleanup();
+    notificationBridgeSpy.mockClear();
+  });
 
-describe("ControlShell primary navigation", () => {
-  afterEach(() => cleanup());
-
-  it("keeps desktop and compact rails on the five PlanSpec primary tabs", () => {
-    renderShell();
+  it("keeps the five PlanSpec primary tabs reachable and drops the retired ones", () => {
+    renderShell("backlog");
 
     for (const label of ["Fleet", "Start", "Terminals", "Statistik", "Bibliothek"]) {
       expect(screen.getAllByRole("button", { name: label }).length).toBeGreaterThan(0);
     }
-
     for (const retired of ["Flow", "Ketten", "Hermes", "Puls", "Pressure", "Ops"]) {
       expect(screen.queryByRole("button", { name: retired })).toBeNull();
+      expect(screen.queryByRole("link", { name: retired })).toBeNull();
     }
   });
 
-  it("hides the legacy shell header on the Start mobile bleed route", () => {
-    renderShellWith("inbox");
-
-    const header = screen.getByText("Hermes Control").closest("header");
-    expect(header?.className).toContain("hidden");
-    expect(header?.className).toContain("lg:flex");
+  it("renders the rail as a Hauptnavigation landmark, hidden below the tab breakpoint", () => {
+    renderShell("backlog");
+    const rail = screen.getByRole("navigation", { name: "Hauptnavigation" });
+    expect(rail.className).toContain("hidden");
+    expect(rail.className).toContain("tab:flex");
   });
 
-  it("hides the legacy shell header on the Statistik mobile bleed route (own Masthead)", () => {
-    renderShellWith("statistik");
-
-    const header = screen.getByText("Hermes Control").closest("header");
-    expect(header?.className).toContain("hidden");
-    expect(header?.className).toContain("lg:flex");
+  it("keeps the rail 'Mehr' flyout panel scrollable and viewport-clamped", () => {
+    renderShell("backlog");
+    const panel = screen.getByTestId("rail-more-flyout");
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel.className).toContain("max-h-");
   });
 
-  it("keeps the legacy shell header on a non-bleed route (Backlog unchanged)", () => {
-    renderShellWith("backlog");
+  it("renders the bottom bar hidden at/above the tab breakpoint", () => {
+    renderShell("backlog");
+    const bottomBar = screen.getByRole("navigation", { name: "Navigation" });
+    expect(bottomBar.className).toContain("tab:hidden");
+  });
 
-    const header = screen.getByText("Hermes Control").closest("header");
-    expect(header?.className).not.toContain("hidden");
+  it("marks the active primary tab as aria-current=page everywhere it appears", () => {
+    renderShell("statistik");
+    const matches = screen.getAllByRole("button", { name: "Statistik" });
+    expect(matches.length).toBeGreaterThan(0);
+    for (const el of matches) expect(el.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("pins the active secondary tab onto the rail with a short label and aria-current", () => {
+    renderShell("loops");
+    const pinned = screen.getAllByRole("link", { name: "Loops" }).find((el) => el.getAttribute("aria-current") === "page");
+    expect(pinned).toBeDefined();
+  });
+
+  it("keeps the MoreSheet free of the retired Übersicht entry", () => {
+    renderShell("backlog");
+    const bottomBar = screen.getByRole("navigation", { name: "Navigation" });
+    within(bottomBar).getByRole("button", { name: "Mehr" }).click();
+    expect(screen.queryByText("Übersicht")).toBeNull();
+  });
+
+  it("shows the masthead route label for a view without its own masthead", () => {
+    renderShell("crons");
+    const masthead = screen.getByTestId("control-masthead");
+    expect(masthead.textContent).toContain("Crons");
+  });
+
+  it("suppresses the masthead for a view with its own masthead (fleet)", () => {
+    renderShell("fleet");
+    expect(screen.queryByTestId("control-masthead")).toBeNull();
+  });
+
+  it("mounts NotificationBridge exactly once for a view with its own masthead", () => {
+    renderShell("fleet");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("mounts NotificationBridge exactly once for a view with the generic masthead", () => {
+    renderShell("crons");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
   });
 });

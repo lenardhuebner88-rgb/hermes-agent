@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -29,32 +29,33 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
 
 // Fleet ist an erster Stelle der mobilen Bottom-Bar (2026-07-03); Statistik
 // übernimmt den alten Flow-Slot (S6, 2026-07-05).
-// 5 Slots + "Mehr" = 6-Spalten-Grid.
+// 5 Slots + "Mehr" = 6-Spalten-Grid. Identisch mit `tabs` (die 5 Primaries
+// SIND die mobilen Slots) — auch die Rail rendert daraus.
 const mobileTabs = tabs.filter((tab) => ["fleet", "inbox", "agentTerminals", "statistik", "bibliothek"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.
-const moreTabs = [
-  { label: de.tabs.overview, path: "/control/overview", icon: Activity },
-  { label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
-  { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
-  { label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
-  { label: de.tabs.crons, path: "/control/crons", icon: Clock },
-  { label: de.tabs.loops, path: "/control/loops", icon: RefreshCw },
+// `id` matcht den ControlTab-Wert (Lookup für Masthead-Label + Rail-Pin).
+const moreTabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: "workstreams", label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
+  { id: "backlog", label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
+  { id: "orchestrator", label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
+  { id: "crons", label: de.tabs.crons, path: "/control/crons", icon: Clock },
+  { id: "loops", label: de.tabs.loops, path: "/control/loops", icon: RefreshCw },
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
-  { label: "Lanes", path: "/control/lanes", icon: Shield },
+  { id: "lanes", label: "Lanes", path: "/control/lanes", icon: Shield },
   // System (S1-Fusion): Druck + Ops Radar + Puls in einer Leitstand-Ansicht.
-  { label: "System", path: "/control/system", icon: Server },
+  { id: "system", label: "System", path: "/control/system", icon: Server },
 
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
   // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.
-  { label: "Recherche", path: "/control/research", icon: SearchCheck },
-  { label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
+  { id: "research", label: "Recherche", path: "/control/research", icon: SearchCheck },
+  { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
   // Prompt-Schmiede: Copy-Paste-Generator für Agent-Steuerbefehle (kein Dispatch).
-  { label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
-  { label: "Stratege", path: "/control/stratege", icon: Lightbulb },
-  { label: "Design", path: "/control/design-board", icon: PenTool },
+  { id: "schmiede", label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
+  { id: "stratege", label: "Stratege", path: "/control/stratege", icon: Lightbulb },
+  { id: "designBoard", label: "Design", path: "/control/design-board", icon: PenTool },
 ];
 
 const secondaryNav = [
@@ -65,6 +66,20 @@ const secondaryNav = [
   { label: "Skills", path: "/skills", icon: Sparkles },
   { label: "Konfig", path: "/config", icon: Settings },
 ];
+
+// Lookup für Masthead-Route-Label + Rail-Pin: primäre + sekundäre Tabs in
+// einer Struktur (moreTabs deckt alle ControlTab-Werte außerhalb der 5
+// Primaries ab; "overview"/"pulse"/… sind Redirect-Zwischenzustände ohne
+// eigenen Eintrag — navLabel fällt dafür sicher auf "Control" zurück).
+type NavEntry = { id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> };
+
+const navLookup: Partial<Record<ControlTab, NavEntry>> = Object.fromEntries(
+  [...tabs, ...moreTabs].map((item): [ControlTab, NavEntry] => [item.id, { id: item.id, label: item.label, path: item.path, icon: item.icon }]),
+);
+
+function navLabel(active: ControlTab): string {
+  return navLookup[active]?.label ?? "Control";
+}
 
 interface Props {
   active: ControlTab;
@@ -117,120 +132,295 @@ function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, in
   return null;
 }
 
-export function ControlShell(props: Props) {
-  return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
+interface NavBadgeArgs {
+  openProposals: number;
+  inboxTotal: number;
+  inboxTone: ToneName;
+  libraryUnread: number;
+  strategistCount: number;
 }
 
-function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
-  // "Mehr" lebt auf Mobile als 5. Bottom-Tab + Bottom-Sheet (Audit 2026-06-11,
-  // M3 Variante A) — das Header-Dropdown ist dort zu hoch und schloss sich beim
-  // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
+export function ControlShell(props: Props) {
+  const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
   const [moreOpen, setMoreOpen] = useState(false);
-  const moreActive = !mobileTabs.some((tab) => tab.id === active);
-  // Fleet/Start: full-bleed dunkel auf Mobil (Operator-Feedback von echten
-  // Handy-Screenshots) — beide Roots bringen ihr eigenes dunkles Header-Set mit
-  // ([data-fleet-theme] .fleet-header bzw. [data-command-home] .ch-masthead),
-  // daher entfällt der helle Shell-Header unter lg; die Bottom-Nav bleibt
-  // unverändert die Mobil-Navigation.
-  const fleetBleed = active === "fleet";
-  // Start (inbox) und Statistik bringen wie Fleet ihren eigenen dunklen Masthead
-  // mit ([data-command-home] .ch-masthead bzw. [data-statistik] .st-masthead) —
-  // der helle Legacy-Shell-Header ("Operator Dashboard / Hermes Control") würde
-  // sonst doppelt über dem eigenen Masthead stehen, daher unter lg unterdrückt.
-  const commandHomeBleed = active === "inbox" || active === "statistik";
-  const mobileBleed = fleetBleed || commandHomeBleed;
+  // Fleet/Start/Statistik bringen ihr eigenes dunkles Masthead mit
+  // ([data-fleet-theme] .fleet-header, [data-command-home] .ch-masthead,
+  // [data-statistik] .st-masthead) — die generische Leitstand-Masthead würde
+  // dort doppelt stehen, daher unterdrückt (vormals fleetBleed/mobileBleed).
+  const hasOwnMasthead = active === "fleet" || active === "inbox" || active === "statistik";
+  const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
+
   return (
-    <div className={cn("hc-page flex min-h-0 flex-col pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))]", fleetBleed && "fleet-bleed", mobileBleed ? "px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8")}>
-      <header className={cn("mb-4 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between", mobileBleed ? "hidden lg:flex" : "flex")}>
-        <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
-        <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
-        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} strategistCount={strategistCount ?? 0} onNavigate={onNavigate} onPrefetch={onPrefetch} />
-      </header>
-      <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
-        <div className="grid grid-cols-6">
-          {mobileTabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
-          <button type="button" onClick={() => setMoreOpen(true)} aria-label="Mehr" aria-expanded={moreOpen} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", moreActive && "text-[var(--hc-accent-text)]")}>
-            <MoreHorizontal className="h-5 w-5" />
-            <span className="max-w-full truncate px-0.5">Mehr</span>
-          </button>
-        </div>
-      </nav>
+    <div data-density={density} className={cn("hc-page flex min-h-0", hasOwnMasthead && "fleet-bleed")}>
+      <Rail
+        active={active}
+        {...badgeArgs}
+        onNavigate={onNavigate}
+        onPrefetch={onPrefetch}
+        commandButtonRef={commandButtonRef}
+        onOpenCommand={onOpenCommand}
+        health={health}
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+        {hasOwnMasthead ? (
+          // NotificationBridge trägt Side-Effects (Titel-Badge, Permission-
+          // Tracking) unabhängig von der sichtbaren Masthead — bleibt gemountet,
+          // nur unsichtbar, statt doppelt zu rendern (kein zweiter Mount-Punkt).
+          <div className="hidden"><NotificationBridge inbox={inbox} /></div>
+        ) : (
+          <Masthead active={active} inbox={inbox} health={health} onOpenCommand={onOpenCommand} />
+        )}
+        <main
+          className={cn(
+            "mx-auto w-full flex-1 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] tab:pb-6 min-[1920px]:max-w-[1520px]",
+            hasOwnMasthead ? "px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8",
+          )}
+        >
+          {children}
+        </main>
+      </div>
+      <BottomBar
+        active={active}
+        {...badgeArgs}
+        onNavigate={onNavigate}
+        onPrefetch={onPrefetch}
+        moreOpen={moreOpen}
+        onToggleMore={() => setMoreOpen(true)}
+      />
       {moreOpen ? <MoreSheet onClose={() => setMoreOpen(false)} /> : null}
     </div>
   );
 }
 
-/** Mobiles "Mehr": Bottom-Sheet über den Overlay-Portal-Wrapper — scrollbar,
- *  Scroll-Lock, große Tap-Flächen; gruppiert wie das Desktop-Dropdown. */
-function MoreSheet({ onClose }: { onClose: () => void }) {
-  const renderItem = (item: { label: string; path: string; icon: React.ComponentType<{ className?: string }> }) => {
-    const Icon = item.icon;
-    return <Link key={item.path} to={item.path} onClick={onClose} className="flex min-h-11 items-center gap-2.5 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>;
-  };
-  // Primäre Tabs außerhalb der 4-Slot-Bottom-Bar (Bibliothek, Stratege) sind auf
-  // Mobile sonst nur per Direkt-URL erreichbar — hier mit ins "Mehr"-Sheet holen.
-  const overflowPrimary = tabs.filter((tab) => !mobileTabs.some((m) => m.id === tab.id));
+/** Slim dark route-label bar über <main> für jede View OHNE eigene Masthead
+ *  (Fleet/Start/Statistik haben ihre eigene, s.o.). Rechts die geteilten
+ *  Utilities — ⌘K nur unterhalb von `tab:` (die Rail trägt ihr eigenes ab
+ *  `tab:`). */
+function Masthead({ active, inbox, health, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; onOpenCommand: () => void }) {
   return (
-    <Overlay onClose={onClose} ariaLabel="Mehr">
-      <p className="hc-eyebrow">Ansichten</p>
-      <div className="mt-2 grid gap-0.5">{[...overflowPrimary, ...moreTabs].map(renderItem)}</div>
-      <p className="hc-eyebrow mt-4">System</p>
-      <div className="mt-2 grid gap-0.5">{secondaryNav.map(renderItem)}</div>
-    </Overlay>
-  );
-}
-
-function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
-  // Fleet-Tab: gleiches dunkles Background-Treatment wie ShellAiry (keine
-  // Struktur-Umbauten an der Rail — nur der helle Papier-Rahmen fällt weg).
-  // Start bringt wie Fleet seinen eigenen Masthead mit; der Legacy-Shell-Header
-  // wird nur dort unterdrückt, damit die Rail/andere Views unverändert bleiben.
-  const fleetBleed = active === "fleet";
-  const commandHomeBleed = active === "inbox" || active === "statistik";
-  return (
-    <div className={cn("hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0", fleetBleed && "fleet-bleed")}>
-      <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
-        <div className="flex flex-col gap-2">
-          <div className="mb-2 grid h-11 w-11 place-items-center rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"><Sparkles className="h-5 w-5" /></div>
-          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
-          <button ref={commandButtonRef} type="button" title="Command Palette" aria-label="Command Palette" onClick={onOpenCommand} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><Command className="h-5 w-5" /></button>
-          <RailMoreNav />
-        </div>
-        <PanelLeft className="h-4 w-4 hc-dim" />
-      </aside>
-      <div className="min-w-0 px-6 py-5">
-        <header className={cn("mb-5 items-center justify-between gap-3", commandHomeBleed ? "hidden" : "flex")}>
-          <div><p className="hc-eyebrow">Hermes Control</p><h1 className="mt-1 text-xl font-semibold text-white">{tabs.find((t) => t.id === active)?.label}</h1></div>
-          <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><StatusDots health={health} /></div>
-        </header>
-        <main>{children}</main>
+    <div data-testid="control-masthead" className="flex items-center justify-between gap-3 border-b border-line bg-surface-1 px-4 py-3 sm:px-6 lg:px-8">
+      <p className="font-display text-emph font-semibold uppercase tracking-[0.08em] text-ink">{navLabel(active)}</p>
+      <div className="flex items-center gap-2">
+        <NotificationBridge inbox={inbox} />
+        <StatusDots health={health} />
+        <CommandButton onOpen={onOpenCommand} />
       </div>
     </div>
   );
 }
 
+interface RailProps extends NavBadgeArgs {
+  active: ControlTab;
+  onNavigate: (tab: ControlTab) => void;
+  onPrefetch?: (tab: ControlTab) => void;
+  commandButtonRef?: React.RefObject<HTMLButtonElement | null>;
+  onOpenCommand: () => void;
+  health: Props["health"];
+}
 
-function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; libraryUnread?: number; strategistCount?: number; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
+/** ≥`tab` (600px): 88px persistente Rail — ersetzt den alten Density-Fork
+ *  für alle Breiten von Medium bis Expanded/1920. */
+function Rail({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch, commandButtonRef, onOpenCommand, health }: RailProps) {
+  // Aktiver Tab außerhalb der 5 Primaries → als 6. Slot pinnen, damit der
+  // aktuelle Standort auf der Rail immer sichtbar bleibt.
+  const pinned = tabs.some((tab) => tab.id === active) ? undefined : navLookup[active];
   return (
-    <nav className="hidden w-full flex-wrap gap-2 lg:flex">
-      {tabs.map((tab) => {
-        const Icon = tab.icon;
-        const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0);
-        return (
-          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} onMouseEnter={() => onPrefetch?.(tab.id)} onFocus={() => onPrefetch?.(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
-            <Icon className="h-4 w-4" />{tab.label}
-            {badge ? <span className={cn("hc-badge", badge.cls)}>{badge.count}</span> : null}
-          </button>
-        );
-      })}
+    <nav
+      aria-label="Hauptnavigation"
+      className="hidden tab:flex sticky top-0 h-dvh w-[5.5rem] shrink-0 flex-col items-center justify-between border-r border-line bg-surface-1 px-2 py-4"
+    >
+      <div className="flex w-full flex-col items-center gap-1">
+        <div className="mb-2 grid h-11 w-11 place-items-center rounded-card border border-live bg-live/10 text-live">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        {tabs.map((tab) => (
+          <RailItem
+            key={tab.id}
+            icon={tab.icon}
+            label={tab.label}
+            active={active === tab.id}
+            badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount)}
+            onClick={() => onNavigate(tab.id)}
+            onPrefetch={() => onPrefetch?.(tab.id)}
+          />
+        ))}
+        {pinned ? (
+          <RailItem
+            key={pinned.id}
+            icon={pinned.icon}
+            label={pinned.label}
+            active
+            pinned
+            to={pinned.path}
+            badge={tabBadge(pinned.id, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount)}
+            onPrefetch={() => onPrefetch?.(pinned.id)}
+          />
+        ) : null}
+        <button
+          ref={commandButtonRef}
+          type="button"
+          title="Command Palette"
+          aria-label="Command Palette"
+          onClick={onOpenCommand}
+          className="mt-1 grid h-11 w-11 place-items-center rounded-card border border-transparent text-ink-2 hover:border-live hover:bg-live/10 hover:text-live"
+        >
+          <Command className="h-5 w-5" />
+        </button>
+        <RailMoreFlyout />
+      </div>
+      <GatewayLed health={health} />
+    </nav>
+  );
+}
+
+function RailItem({ icon: Icon, label, active, badge, to, onClick, onPrefetch, pinned }: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  badge?: BadgeInfo | null;
+  to?: string;
+  onClick?: () => void;
+  onPrefetch?: () => void;
+  pinned?: boolean;
+}) {
+  const className = cn(
+    "relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-card px-1 transition",
+    active ? "bg-surface-2 text-ink" : "text-ink-3 hover:bg-surface-2 hover:text-ink-2",
+  );
+  const content = (
+    <>
+      {active ? <span className="absolute inset-y-1 left-0 w-[3px] rounded-full bg-live" /> : null}
+      <Icon className="h-[22px] w-[22px]" />
+      <span className={cn("text-[11px] leading-none", pinned && "w-full truncate text-center")}>{label}</span>
+      {badge ? <span className={cn("hc-badge absolute -right-1 -top-1", badge.cls)}>{badge.count}</span> : null}
+    </>
+  );
+  if (to) {
+    return (
+      <Link to={to} title={label} aria-current={active ? "page" : undefined} onMouseEnter={onPrefetch} onFocus={onPrefetch} className={className}>
+        {content}
+      </Link>
+    );
+  }
+  return (
+    <button type="button" title={label} aria-current={active ? "page" : undefined} onClick={onClick} onMouseEnter={onPrefetch} onFocus={onPrefetch} className={className}>
+      {content}
+    </button>
+  );
+}
+
+/** Rail-"Mehr": leichtes anchored Flyout (kein Portal/Scroll-Lock — das
+ *  bleibt der mobilen MoreSheet vorbehalten). Click togglet, Escape/Outside
+ *  schließt (useDismissibleMenu), Fokus im Panel hält es offen. */
+function RailMoreFlyout() {
+  const { open, setOpen, ref } = useDismissibleMenu<HTMLDivElement>();
+  const renderItem = (item: { label: string; path: string; icon: React.ComponentType<{ className?: string }> }) => {
+    const Icon = item.icon;
+    return (
+      <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-card px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink">
+        <Icon className="h-4 w-4" />{item.label}
+      </Link>
+    );
+  };
+  return (
+    <div ref={ref} className="group relative mt-1">
+      <button type="button" title="Mehr" aria-label="Mehr" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="grid h-11 w-11 place-items-center rounded-card border border-transparent text-ink-2 hover:border-live hover:bg-live/10 hover:text-live">
+        <MoreHorizontal className="h-5 w-5" />
+      </button>
+      <div
+        data-testid="rail-more-flyout"
+        className={cn(
+          "fixed bottom-4 left-[6rem] z-50 w-56 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-1 p-2 shadow-xl transition-opacity duration-150 ease-out motion-reduce:transition-none group-focus-within:visible group-focus-within:opacity-100",
+          open ? "visible opacity-100" : "invisible opacity-0",
+        )}
+      >
+        <p className="px-3 pb-1 pt-1 text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
+        {moreTabs.map(renderItem)}
+        <div className="my-1.5 border-t border-line" />
+        {secondaryNav.map(renderItem)}
+      </div>
+    </div>
+  );
+}
+
+/** Mobiles "Mehr": Bottom-Sheet über den Overlay-Portal-Wrapper — scrollbar,
+ *  Scroll-Lock, große Tap-Flächen; gruppiert wie das Rail-Flyout. */
+function MoreSheet({ onClose }: { onClose: () => void }) {
+  const renderItem = (item: { label: string; path: string; icon: React.ComponentType<{ className?: string }> }) => {
+    const Icon = item.icon;
+    return (
+      <Link key={item.path} to={item.path} onClick={onClose} className="flex min-h-11 items-center gap-2.5 rounded-card px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink">
+        <Icon className="h-4 w-4" />{item.label}
+      </Link>
+    );
+  };
+  // Primäre Tabs außerhalb der 5-Slot-Bottom-Bar sind auf Mobile sonst nur per
+  // Direkt-URL erreichbar — hier mit ins "Mehr"-Sheet holen (aktuell stets
+  // leer, da `tabs` === `mobileTabs`; bleibt resilient für künftige Primaries).
+  const overflowPrimary = tabs.filter((tab) => !mobileTabs.some((m) => m.id === tab.id));
+  return (
+    <Overlay onClose={onClose} ariaLabel="Mehr">
+      <p className="text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
+      <div className="mt-2 grid gap-0.5">{[...overflowPrimary, ...moreTabs].map(renderItem)}</div>
+      <p className="mt-4 text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">System</p>
+      <div className="mt-2 grid gap-0.5">{secondaryNav.map(renderItem)}</div>
+    </Overlay>
+  );
+}
+
+interface BottomBarProps extends NavBadgeArgs {
+  active: ControlTab;
+  onNavigate: (tab: ControlTab) => void;
+  onPrefetch?: (tab: ControlTab) => void;
+  moreOpen: boolean;
+  onToggleMore: () => void;
+}
+
+/** <`tab` (600px): fixed Bottom-Bar — funktional wie bisher (5 Primaries +
+ *  Mehr → MoreSheet), Bronze-Restyle (surface-1/95 Blur, 2px Top-Indikator). */
+function BottomBar({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch, moreOpen, onToggleMore }: BottomBarProps) {
+  const moreActive = !tabs.some((tab) => tab.id === active);
+  return (
+    <nav
+      aria-label="Navigation"
+      className="tab:hidden fixed inset-x-0 bottom-0 z-40 border-t border-line bg-surface-1/95 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl"
+    >
+      <div className="grid grid-cols-6">
+        {mobileTabs.map((tab) => (
+          <TabButton
+            key={tab.id}
+            tab={tab}
+            active={active === tab.id}
+            badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount)}
+            onClick={() => onNavigate(tab.id)}
+            onPrefetch={() => onPrefetch?.(tab.id)}
+          />
+        ))}
+        <button
+          type="button"
+          onClick={onToggleMore}
+          aria-label="Mehr"
+          aria-expanded={moreOpen}
+          className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-[11px] text-ink-3", moreActive && "text-live")}
+        >
+          <MoreHorizontal className="h-5 w-5" />
+          <span className="max-w-full truncate px-0.5">Mehr</span>
+        </button>
+      </div>
     </nav>
   );
 }
 
 function CommandButton({ buttonRef, onOpen }: { buttonRef?: React.RefObject<HTMLButtonElement | null>; onOpen: () => void }) {
-  // Auf Touch-Phones ist ein "⌘K"-Hint bedeutungslos — Button erst ab sm zeigen.
-  return <button ref={buttonRef} type="button" className="hc-hit hidden items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5 sm:inline-flex" onClick={onOpen}><Command className="h-4 w-4" />⌘K</button>;
+  // Der ⌘K-Hint lebt jetzt fest auf der Rail (≥tab) — hier also nur unterhalb
+  // von `tab:` sichtbar. Die alte "erst ab sm zeigen"-Schranke (Touch-Phone-
+  // Hint irrelevant) entfällt: `tab` (600px) liegt unter `sm` (640px), beide
+  // Schranken zusammen hätten nie eine sichtbare Breite ergeben.
+  return (
+    <button ref={buttonRef} type="button" className="hc-hit inline-flex items-center gap-2 rounded-card border border-line px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink tab:hidden" onClick={onOpen}>
+      <Command className="h-4 w-4" />⌘K
+    </button>
+  );
 }
 
 function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
@@ -256,38 +446,6 @@ function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
   return { open, setOpen, ref };
 }
 
-function MoreNav() {
-  // Destrukturiert statt `menu.ref`/`menu.open`: react-hooks/refs erkennt nur
-  // direkte Ref-Bezeichner als JSX-Durchreichung, keine Property-Zugriffe.
-  const { open, setOpen, ref } = useDismissibleMenu<HTMLDetailsElement>();
-  return (
-    // hidden lg:block: unter lg übernimmt der "Mehr"-Bottom-Tab (MoreSheet);
-    // max-h + overflow: auch kleine Desktop-Fenster erreichen alle Einträge.
-    <details ref={ref} open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="group relative hidden lg:block">
-      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
-      <div className="absolute right-0 top-12 z-50 hidden max-h-[70dvh] w-56 overflow-y-auto overscroll-contain rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
-        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
-        <div className="my-1.5 border-t border-[var(--hc-border)]" />
-        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
-      </div>
-    </details>
-  );
-}
-
-function RailMoreNav() {
-  const { open, setOpen, ref } = useDismissibleMenu();
-  return (
-    <div ref={ref} className="group relative">
-      <button type="button" title="Mehr" aria-label="Mehr" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><MoreHorizontal className="h-5 w-5" /></button>
-      <div className={cn("absolute left-12 top-0 z-50 w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100", open ? "visible opacity-100" : "invisible opacity-0")}>
-        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
-        <div className="my-1.5 border-t border-[var(--hc-border)]" />
-        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
-      </div>
-    </div>
-  );
-}
-
 function healthLed(status: HealthStatus | "unknown", stale: boolean): string {
   if (stale) return "hc-led-warn";
   if (status === "healthy") return "hc-led-live";
@@ -304,17 +462,35 @@ function healthLabel(status: HealthStatus | "unknown", stale: boolean): string {
   return "unbekannt";
 }
 
-function StatusDots({ health }: { health: Props["health"] }) {
-  const gateway = health.data?.subsystems.gateway.status ?? (health.error ? "offline" : "unknown");
-  const dashboard = health.data?.overall ?? (health.error ? "offline" : "unknown");
+/** Geteilte Health-Ableitung für StatusDots (Masthead) + GatewayLed (Rail) —
+ *  eine Quelle für Gateway-Status/Stale/Zuletzt-aktuell-Titel. */
+function useGatewayHealth(health: Props["health"]): { gateway: HealthStatus | "unknown"; stale: boolean; title: string } {
+  const gateway: HealthStatus | "unknown" = health.data?.subsystems.gateway.status ?? (health.error ? "offline" : "unknown");
   const stale = Boolean(health.isStale);
   const clientNow = useClientNowSeconds();
   const checked = health.lastUpdated ? `Zuletzt aktuell vor ${Math.max(0, clientNow - health.lastUpdated)}s` : "Noch kein Health-Signal";
   const title = [health.error, checked].filter(Boolean).join(" · ");
+  return { gateway, stale, title };
+}
+
+function StatusDots({ health }: { health: Props["health"] }) {
+  const { gateway, stale, title } = useGatewayHealth(health);
+  const dashboard = health.data?.overall ?? (health.error ? "offline" : "unknown");
   return (
-    <div title={title} className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft md:flex">
-      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />Hermes<span className="hc-mono">:9119</span><span className="hc-mono hc-dim">{healthLabel(gateway, stale)}</span>
-      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(dashboard, stale))} />Dashboard<span className="hc-mono hc-dim">{healthLabel(dashboard, stale)}</span>
+    <div title={title} className="hidden items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2 md:flex">
+      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />Hermes<span className="font-data">:9119</span><span className="font-data text-ink-3">{healthLabel(gateway, stale)}</span>
+      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(dashboard, stale))} />Dashboard<span className="font-data text-ink-3">{healthLabel(dashboard, stale)}</span>
+    </div>
+  );
+}
+
+/** Rail-Bottom-Cluster: Gateway-LED + Label (aus der StatusDots-Ableitung). */
+function GatewayLed({ health }: { health: Props["health"] }) {
+  const { gateway, stale, title } = useGatewayHealth(health);
+  return (
+    <div title={title} className="flex flex-col items-center gap-1 py-1">
+      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />
+      <span className="text-[10px] text-ink-3">Gateway</span>
     </div>
   );
 }
@@ -322,20 +498,19 @@ function StatusDots({ health }: { health: Props["health"] }) {
 function TabButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
   const Icon = tab.icon;
   return (
-    <button type="button" onClick={onClick} onTouchStart={onPrefetch} onFocus={onPrefetch} aria-label={tab.label} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
+    <button
+      type="button"
+      onClick={onClick}
+      onTouchStart={onPrefetch}
+      onFocus={onPrefetch}
+      aria-label={tab.label}
+      aria-current={active ? "page" : undefined}
+      className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-[11px] text-ink-3", active && "text-live")}
+    >
+      {active ? <span className="absolute inset-x-2 top-0 h-0.5 rounded-full bg-live" /> : null}
       <Icon className="h-5 w-5" />
       <span className="max-w-full truncate px-0.5">{tab.mobileLabel}</span>
       {badge ? <span className={cn("hc-badge absolute right-4 top-2", badge.cls)}>{badge.count}</span> : null}
-    </button>
-  );
-}
-
-function RailButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
-  const Icon = tab.icon;
-  return (
-    <button type="button" title={tab.label} aria-label={tab.label} onClick={onClick} onMouseEnter={onPrefetch} onFocus={onPrefetch} className={cn("relative grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft transition", active && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
-      <Icon className="h-5 w-5" />
-      {badge ? <span className={cn("hc-badge absolute -right-1 -top-1", badge.cls)}>{badge.count}</span> : null}
     </button>
   );
 }

@@ -17,6 +17,12 @@
  */
 
 @theme {
+  /* breakpoints: `tab` (600px) is the new Medium-tier cut — kills the old
+     stretched-phone range between the Compact bottom-bar and the Expanded
+     `lg` (1024px, unchanged Tailwind default) rail cut. See DESIGN.md UX
+     contract + run-state SHELL-SPEC.md breakpoint doctrine. */
+  --breakpoint-tab: 37.5rem;
+
   /* surfaces: 4 depths, warm graphite family (NOT navy) */
   --color-surface-0: #0e100f; /* app canvas */
   --color-surface-1: #141715; /* panel */
