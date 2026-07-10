@@ -26,8 +26,9 @@ Rate limit: max one alert per rule per ``cooldown_seconds`` (default 15 min).
 A suppressed alert is dropped, not queued — the next qualifying event after
 the cooldown alerts again. Alerts go to Discord only (Telegram ist ab).
 
-Send-confirmation cursor gating (A1, 2026-07-06): the two event-cursor rules
-(``operator_escalation``, ``auto_release_attention``) accept an
+Send-confirmation cursor gating (A1, 2026-07-06): the monotonic-cursor rules
+(``operator_escalation``, ``auto_release_attention``, and since 2026-07-10
+``run_failed`` — its run-id cursor is equally irreversible) accept an
 optional ``send_fn`` — when given, the cursor for a rule only commits AFTER
 ``send_fn(alert)`` confirms delivery (truthy, no exception); a failed send
 leaves the cursor untouched so the next tick re-fetches and retries the SAME
@@ -46,9 +47,12 @@ watcher DOES pass it since the A2 wiring, 2026-07-06 — see
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 300       # 5-min tick
 DEFAULT_COOLDOWN_SECONDS = 900       # max 1 alert per rule per 15 min
@@ -85,7 +89,9 @@ _MAX_SEND_ATTEMPTS = 3
 # whose rule is in this set through its own post-hoc send loop — public so
 # ``gateway.kanban_watchers`` can filter on it without duplicating the
 # rule-name strings.
-SEND_GATED_RULES = frozenset({_OPERATOR_ESCALATION_EVENT, "auto_release_attention"})
+SEND_GATED_RULES = frozenset(
+    {_OPERATOR_ESCALATION_EVENT, "auto_release_attention", "run_failed"}
+)
 
 # Terminal failure classification. status covers the run row's own state;
 # outcome covers the dispatcher's verdict (same family the reliability stats
@@ -423,7 +429,16 @@ def _rule_auto_release_attention(
     )
 
 
-def _rule_run_failed(conn: sqlite3.Connection, acfg: dict, state: dict, now: int) -> Optional[dict]:
+def _rule_run_failed(
+    conn: sqlite3.Connection,
+    acfg: dict,
+    state: dict,
+    now: int,
+    *,
+    send_fn: Optional[Callable[[dict], bool]] = None,
+    max_send_attempts: int = _MAX_SEND_ATTEMPTS,
+    backstop_fn: Optional[Callable[[dict], None]] = None,
+) -> Optional[dict]:
     last_seen = state.get("last_seen_run_id")
     if last_seen is None:
         row = conn.execute("SELECT MAX(id) AS m FROM task_runs").fetchone()
@@ -443,10 +458,23 @@ def _rule_run_failed(conn: sqlite3.Connection, acfg: dict, state: dict, now: int
         max_id = max(max_id, int(r["id"]))
         if _is_failure(r["status"], r["outcome"]):
             failures.append(r)
-    state["last_seen_run_id"] = max_id
     if not failures:
+        # Silent batch — nothing to deliver, eager cursor commit is safe.
+        state["last_seen_run_id"] = max_id
         return None
-    if not _cooldown_ok(state, "run_failed", now, acfg["cooldown_seconds"]):
+    # A deferred batch (send failed last tick, cursor NOT advanced) must
+    # bypass the cooldown: _cooldown_ok stamped last_sent on the failed
+    # attempt, so without the bypass the retry tick would fall into the
+    # suppression branch below and eagerly commit the cursor — losing the
+    # very batch the send gate deferred.
+    _attempts = state.get("send_attempts")
+    _pending_retry = isinstance(_attempts, dict) and "run_failed" in _attempts
+    if not _pending_retry and not _cooldown_ok(
+        state, "run_failed", now, acfg["cooldown_seconds"]
+    ):
+        # Cooldown suppression is deliberate anti-spam (pre-fix semantics):
+        # these failures are dropped by design, so the cursor advances.
+        state["last_seen_run_id"] = max_id
         return None
     lines = [f"🔴 **Kanban-Alert:** {len(failures)} Run(s) failed/blocked"]
     for r in failures[:_MAX_FAILURES_LISTED]:
@@ -457,7 +485,16 @@ def _rule_run_failed(conn: sqlite3.Connection, acfg: dict, state: dict, now: int
         lines.append(f"• **{title}** ({profile}) — {kind}: {err}")
     if len(failures) > _MAX_FAILURES_LISTED:
         lines.append(f"… und {len(failures) - _MAX_FAILURES_LISTED} weitere")
-    return {"rule": "run_failed", "text": "\n".join(lines)}
+    alert = {"rule": "run_failed", "text": "\n".join(lines)}
+    # Send-confirmation cursor gate (same as the two event-cursor rules):
+    # the run-id cursor is MONOTONIC — advancing it before a confirmed send
+    # meant one failed/ratelimited Discord delivery lost those specific run
+    # failures forever (not just delayed).  Without send_fn (legacy caller)
+    # _confirm_or_defer commits eagerly, exactly like pre-fix.
+    return _confirm_or_defer(
+        state, "run_failed", "last_seen_run_id",
+        max_id, alert, send_fn, max_send_attempts, backstop_fn,
+    )
 
 
 def _rule_error_rate(conn: sqlite3.Connection, acfg: dict, state: dict, now: int) -> Optional[dict]:
@@ -548,14 +585,20 @@ def evaluate_alerts(
     """
     ts = int(now if now is not None else time.time())
     alerts: list[dict] = []
-    for rule_fn in (_rule_run_failed, _rule_error_rate, _rule_daily_cost):
+    for rule_fn in (_rule_error_rate, _rule_daily_cost):
         try:
             alert = rule_fn(conn, acfg, state, ts)
         except Exception:
+            # A broken rule must not kill the watcher tick, but dying
+            # silently means e.g. a schema drift disables the rule forever
+            # with zero trace — leave a breadcrumb.
+            logger.warning(
+                "kanban alerts: rule %s failed", rule_fn.__name__, exc_info=True
+            )
             continue
         if alert is not None:
             alerts.append(alert)
-    for rule_fn in (_rule_operator_escalation, _rule_auto_release_attention):
+    for rule_fn in (_rule_run_failed, _rule_operator_escalation, _rule_auto_release_attention):
         try:
             alert = rule_fn(
                 conn, acfg, state, ts,
@@ -564,6 +607,9 @@ def evaluate_alerts(
                 backstop_fn=backstop_fn,
             )
         except Exception:
+            logger.warning(
+                "kanban alerts: rule %s failed", rule_fn.__name__, exc_info=True
+            )
             continue
         if alert is not None:
             alerts.append(alert)
