@@ -2084,8 +2084,20 @@ def _convert_tool_message_to_result(
         result.append({"role": "user", "content": [tool_result]})
 
 
-def _convert_user_message(content: Any) -> Dict[str, Any]:
-    """Validate and convert a user message to anthropic format."""
+def _convert_user_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and convert a user message to anthropic format.
+
+    Forwards an envelope-level ``cache_control`` marker (set by
+    ``apply_anthropic_cache_control`` when the original content was
+    empty/None) onto the produced content's last block — the native
+    Messages API only accepts markers on content blocks, so dropping it
+    here silently wasted one of the 4 available breakpoints.  Mirrors
+    ``_convert_assistant_message`` / ``_convert_tool_message_to_result``,
+    which already forward ``m.get("cache_control")``.
+    """
+    content = m.get("content", "")
+    cache_control = m.get("cache_control")
+
     if isinstance(content, list):
         converted_blocks = _convert_content_to_anthropic(content)
         if not converted_blocks or all(
@@ -2094,10 +2106,25 @@ def _convert_user_message(content: Any) -> Dict[str, Any]:
             if isinstance(b, dict) and b.get("type") == "text"
         ):
             converted_blocks = [{"type": "text", "text": "(empty message)"}]
+        if isinstance(cache_control, dict) and converted_blocks:
+            last = converted_blocks[-1]
+            if isinstance(last, dict):
+                last.setdefault("cache_control", dict(cache_control))
         return {"role": "user", "content": converted_blocks}
     else:
         if not content or (isinstance(content, str) and not content.strip()):
             content = "(empty message)"
+        if isinstance(cache_control, dict):
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": dict(cache_control),
+                    }
+                ],
+            }
         return {"role": "user", "content": content}
 
 
@@ -2429,7 +2456,7 @@ def convert_messages_to_anthropic(
             continue
 
         # Regular user message
-        result.append(_convert_user_message(content))
+        result.append(_convert_user_message(m))
 
     _strip_orphaned_tool_blocks(result)
     result = _merge_consecutive_roles(result)

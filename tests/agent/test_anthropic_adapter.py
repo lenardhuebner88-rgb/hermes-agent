@@ -824,6 +824,41 @@ class TestConvertMessages:
         assert len(result) == 1
         assert result[0]["role"] == "user"
 
+    def test_user_envelope_cache_control_forwarded(self):
+        """Regression: apply_anthropic_cache_control sets an envelope-level
+        cache_control on user messages with empty/None content.  The user
+        converter used to receive only the content and silently dropped the
+        marker — one of the 4 breakpoints wasted.  Assistant and tool
+        converters already forward it; the user path must too (as a
+        block-level marker, which is what the native API accepts)."""
+        messages = [
+            {"role": "user", "content": None, "cache_control": {"type": "ephemeral"}},
+        ]
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0]["role"] == "user"
+        blocks = result[0]["content"]
+        assert isinstance(blocks, list)
+        assert blocks[-1]["cache_control"] == {"type": "ephemeral"}
+        # Placeholder text still applied for the empty content.
+        assert blocks[-1]["text"] == "(empty message)"
+
+    def test_user_list_content_envelope_cache_control_forwarded(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        _, result = convert_messages_to_anthropic(messages)
+        blocks = result[0]["content"]
+        assert blocks[-1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_user_without_cache_control_unchanged(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0] == {"role": "user", "content": "Hello"}
+
     def test_converts_user_image_url_blocks_to_anthropic_image_blocks(self):
         messages = [
             {

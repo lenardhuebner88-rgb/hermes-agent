@@ -73,6 +73,16 @@ def apply_anthropic_cache_control(
 
     remaining = 4 - breakpoints_used
     non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
+    if not native_anthropic:
+        # On the envelope layout (OpenRouter / Nous Portal), role:"tool"
+        # messages cannot carry cache_control — _apply_cache_marker no-ops
+        # on them — so selecting them silently wastes breakpoints.  With
+        # parallel tool calls the tail is very commonly
+        # ``assistant(tool_calls) → tool, tool, tool``, which used to burn
+        # all 3 message breakpoints on no-ops and leave only the system
+        # prompt cached.  Pick the last 3 messages that can actually hold
+        # a marker instead.
+        non_sys = [i for i in non_sys if messages[i].get("role") != "tool"]
     for idx in non_sys[-remaining:]:
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
