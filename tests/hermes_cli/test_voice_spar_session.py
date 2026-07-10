@@ -1,5 +1,6 @@
 import wave
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -62,6 +63,40 @@ def test_parse_tool_call_finds_line_within_surrounding_text():
     name, args = parse_tool_call(text)
     assert name == "hermes_status"
     assert args == {}
+
+
+def test_spar_system_instruction_mentions_recall_memory():
+    assert "recall_memory" in SPAR_SYSTEM_INSTRUCTION
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_dispatches_through_shared_voice_tool_executor():
+    """parse_tool_call + VoiceToolExecutor.execute for recall_memory in the
+    real spar TOOL: protocol shape, against the real (not fake) executor —
+    proves the shared tool surface actually wires up in cascade mode."""
+
+    from tools.voice_live_tools import VoiceToolExecutor
+
+    raw_reply = 'TOOL: recall_memory {"frage": "voice plan g"}'
+    name, args = parse_tool_call(raw_reply)
+    assert name == "recall_memory"
+    assert args == {"frage": "voice plan g"}
+
+    executor = VoiceToolExecutor(delegate=None)
+    process = MagicMock()
+    process.stdout = "--- Result 1 (score: 0.99) ---\nSome memory hit."
+    process.returncode = 0
+    process.stderr = ""
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/usr/local/bin/hermes-memsearch-recall",
+        ),
+        patch("tools.voice_live_tools.subprocess.run", return_value=process),
+    ):
+        result = await executor.execute(name, args)
+
+    assert result == {"memories": "--- Result 1 (score: 0.99) ---\nSome memory hit."}
 
 
 # ---------------------------------------------------------------------------

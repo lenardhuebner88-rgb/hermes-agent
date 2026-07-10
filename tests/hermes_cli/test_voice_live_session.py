@@ -477,6 +477,9 @@ def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
     # look_closely is a static persona fragment, unconditional (unlike
     # google_search, it is always declared in FUNCTION_DECLARATIONS).
     assert "look_closely" in config.system_instruction
+    # recall_memory (long-term memory) is likewise a static, unconditional
+    # persona fragment.
+    assert "recall_memory" in config.system_instruction
 
 
 def test_connect_config_google_search_enabled_keeps_tool_and_persona_sentence() -> None:
@@ -514,6 +517,7 @@ def test_connect_config_stream_video_mode_keeps_auto_still_promise() -> None:
     assert config.system_instruction == _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
     assert "ein aktuelles Standbild" in config.system_instruction
     assert "KEIN automatisches Standbild" not in config.system_instruction
+    assert "recall_memory" in config.system_instruction
 
 
 def test_connect_config_on_demand_video_mode_drops_auto_still_promise() -> None:
@@ -535,6 +539,7 @@ def test_connect_config_on_demand_video_mode_drops_auto_still_promise() -> None:
     assert "KEIN automatisches Standbild" in config.system_instruction
     assert "look_closely" in config.system_instruction
     assert "rate niemals blind" in config.system_instruction
+    assert "recall_memory" in config.system_instruction
 
 
 def test_connect_config_on_demand_custom_system_instruction_never_rewritten() -> None:

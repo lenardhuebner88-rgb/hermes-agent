@@ -541,6 +541,7 @@ def test_function_declarations_cover_all_tools():
         "send_discord_message",
         "create_kanban_task",
         "hermes_status",
+        "recall_memory",
         "schedule_reminder",
     }
 
@@ -585,6 +586,7 @@ def test_is_non_blocking_flags_only_delegate_to_hermes():
         "send_discord_message",
         "create_kanban_task",
         "hermes_status",
+        "recall_memory",
         "schedule_reminder",
         "watch_view",
         "stop_watching",
@@ -953,3 +955,166 @@ async def test_schedule_reminder_nonzero_exit_returns_structured_error(
 
     assert result["error"]["code"] == "reminder_schedule_failed"
     assert "Failed to start transient unit" in result["error"]["stderr"]
+
+
+# ---------------------------------------------------------------------------
+# recall_memory — hermes-memsearch-recall CLI wrapper
+# ---------------------------------------------------------------------------
+
+# Real output from a live `hermes-memsearch-recall -k 5 "voice plan g dictate
+# ime"` probe run (2026-07-11), truncated markers included exactly as the CLI
+# emits them — this is the actual wire format the tool has to parse/truncate,
+# not a synthetic guess.
+_REAL_MEMSEARCH_OUTPUT = """--- Result 1 (score: 0.9919) ---
+Source: /home/piet/.memsearch/shared/memory/2026-07-10.md
+Heading: 14:44
+- Claude Code präsentierte Option A (schnell): Wispr Flow's Dauer-Zuhören/Wake-Word in den Einstellungen deaktivieren, sodass Wispr das Mikro nur während aktiven Diktierens hält und danach freigibt; zusätzlich die Fehlermeldung in Hermes Voice verbessern mit Auto-Retry-Knopf.
+  ... [truncated, run 'memsearch expand 08fd02f901f6c7a9' for full content]
+
+--- Result 2 (score: 0.5000) ---
+Source: /home/piet/.memsearch/shared/memory/2026-07-10.md
+Heading: 22:45
+### 22:45
+- User forderte auf, Voice Plan G nach einem Host-Reboot vom letzten belegten Stand fortzusetzen.
+  ... [truncated, run 'memsearch expand 1e9164b0e3f16d78' for full content]
+"""
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_success_returns_real_cli_output_shape():
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/home/piet/.local/bin/hermes-memsearch-recall",
+        ),
+        patch(
+            "tools.voice_live_tools.subprocess.run",
+            return_value=_proc(_REAL_MEMSEARCH_OUTPUT),
+        ) as run,
+    ):
+        result = await executor.execute(
+            "recall_memory", {"frage": "voice plan g dictate ime"}
+        )
+
+    assert run.call_args.args[0] == [
+        "/home/piet/.local/bin/hermes-memsearch-recall",
+        "-k",
+        "5",
+        "voice plan g dictate ime",
+    ]
+    assert result == {"memories": _REAL_MEMSEARCH_OUTPUT.strip()}
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_truncates_at_word_boundary():
+    long_output = "wort " * 400  # well over _RECALL_MEMORY_MAX_CHARS (1500)
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/usr/local/bin/hermes-memsearch-recall",
+        ),
+        patch(
+            "tools.voice_live_tools.subprocess.run",
+            return_value=_proc(long_output),
+        ),
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    memories = result["memories"]
+    assert len(memories) <= 1_501  # max chars + the trailing ellipsis char
+    assert memories.endswith("…")
+    assert not memories[:-1].endswith(" ")
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_missing_frage_is_invalid_arguments():
+    executor = VoiceToolExecutor(delegate=None)
+    result = await executor.execute("recall_memory", {"frage": " "})
+    assert result["error"]["code"] == "invalid_arguments"
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_unavailable_when_binary_not_found():
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch("tools.voice_live_tools.shutil.which", return_value=None),
+        patch(
+            "tools.voice_live_tools._RECALL_MEMORY_FALLBACK_BIN",
+            Path("/definitely/not/a/real/path/hermes-memsearch-recall"),
+        ),
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    assert result["error"]["code"] == "memory_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_falls_back_to_local_bin_when_not_on_path(tmp_path):
+    fallback = tmp_path / "hermes-memsearch-recall"
+    fallback.write_text("#!/bin/sh\n", encoding="utf-8")
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch("tools.voice_live_tools.shutil.which", return_value=None),
+        patch("tools.voice_live_tools._RECALL_MEMORY_FALLBACK_BIN", fallback),
+        patch(
+            "tools.voice_live_tools.subprocess.run", return_value=_proc("some memory")
+        ) as run,
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    assert run.call_args.args[0][0] == str(fallback)
+    assert result == {"memories": "some memory"}
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_timeout_returns_structured_error():
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/usr/local/bin/hermes-memsearch-recall",
+        ),
+        patch(
+            "tools.voice_live_tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="hermes-memsearch-recall", timeout=10),
+        ),
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    assert result["error"]["code"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_nonzero_exit_returns_structured_error():
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/usr/local/bin/hermes-memsearch-recall",
+        ),
+        patch(
+            "tools.voice_live_tools.subprocess.run",
+            return_value=_proc("", rc=2, stderr="error: query required"),
+        ),
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    assert result["error"]["code"] == "recall_failed"
+    assert "query required" in result["error"]["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_empty_output_reports_no_memories_found():
+    executor = VoiceToolExecutor(delegate=None)
+    with (
+        patch(
+            "tools.voice_live_tools.shutil.which",
+            return_value="/usr/local/bin/hermes-memsearch-recall",
+        ),
+        patch("tools.voice_live_tools.subprocess.run", return_value=_proc("   ")),
+    ):
+        result = await executor.execute("recall_memory", {"frage": "test"})
+
+    assert result == {"memories": "Keine Erinnerungen gefunden."}

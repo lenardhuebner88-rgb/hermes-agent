@@ -40,9 +40,12 @@ SPAR_SYSTEM_INSTRUCTION = (
     "Du hast Werkzeuge: tmux-Terminals (einen Befehl an ein Ziel senden), "
     "Delegation größerer Aufgaben an den Hermes-Agenten, und look_closely "
     "für einen aktuellen Blick auf eine geteilte Kamera- oder "
-    "Bildschirmansicht. Laufende Beobachtung (watch_view) ist im Sparmodus "
-    "NICHT verfügbar, weil es hier keinen dauerhaften Live-Kanal gibt — sag "
-    "das ehrlich, wenn danach gefragt wird. "
+    "Bildschirmansicht, und recall_memory für dein Langzeitgedächtnis über "
+    "frühere Gespräche mit Claude Code, Codex und Hermes — nutze es, bevor "
+    "du rätst, wenn Piet sich auf Früheres bezieht. Laufende Beobachtung "
+    "(watch_view) ist im Sparmodus NICHT verfügbar, weil es hier keinen "
+    "dauerhaften Live-Kanal gibt — sag das ehrlich, wenn danach gefragt "
+    "wird. "
     "Um ein Werkzeug zu benutzen, schreibe GENAU EINE Zeile im Format "
     '\'TOOL: <name> <JSON-Argumente>\', zum Beispiel '
     '\'TOOL: send_to_terminal {"session": "work", "command": "ls"}\'. Sonst '
