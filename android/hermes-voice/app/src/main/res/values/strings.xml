@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hermes Voice</string>
+    <string name="notification_channel_screen_sharing">Screen sharing</string>
+    <string name="notification_title_sharing">Hermes Voice is sharing your screen</string>
+    <string name="notification_text_sharing">Tap Stop to end screen sharing</string>
+    <string name="notification_action_stop">Stop</string>
+</resources>
