@@ -81,6 +81,28 @@
         font-weight: 700;
       }
 
+      #mode-badge {
+        padding: 0.2rem 0.55rem;
+        border: 1px solid rgba(167, 243, 208, 0.25);
+        border-radius: 999px;
+        font-size: 0.62rem;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      #mode-badge[data-mode="live"] {
+        color: #6ee7b7;
+        border-color: rgba(52, 211, 153, 0.45);
+        background: rgba(52, 211, 153, 0.12);
+      }
+
+      #mode-badge[data-mode="fallback"] {
+        color: #fde68a;
+        border-color: rgba(250, 204, 21, 0.45);
+        background: rgba(250, 204, 21, 0.12);
+      }
+
       .state-card,
       .transcript-card {
         border: 1px solid rgba(167, 243, 208, 0.15);
@@ -317,6 +339,7 @@
       <header class="brand">
         <img src="/voice/icon.svg" alt="" width="32" height="32" />
         <h1>Hermes Voice</h1>
+        <span id="mode-badge" hidden></span>
       </header>
 
       <section class="state-card" aria-labelledby="voice-status">

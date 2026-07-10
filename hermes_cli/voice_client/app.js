@@ -7,6 +7,13 @@ const MAX_PLAYBACK_CHUNK_BYTES = OUTPUT_SAMPLE_RATE * 2 * 4;
 const PLAYBACK_DRAIN_TIMEOUT_MS = 30_000;
 const SERVER_DRAIN_TIMEOUT_MS = 180_000;
 
+// Phone WS drops (screen lock, network handover, Gemini's 10 min cap) must
+// not kill the conversation: five attempts with growing backoff before we
+// give up and surface an error.
+const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
+const MAX_RECONNECT_ATTEMPTS = 5;
+const NON_RETRYABLE_CLOSE_CODES = new Set([4401, 4403, 4408]);
+
 // Speech at normal phone distance is typically well above 0.045 RMS. Three
 // consecutive 20 ms chunks reject short clicks while keeping local barge-in
 // detection near 60 ms and comfortably inside the <300 ms reaction target.
@@ -22,11 +29,17 @@ const STATUS_COPY = {
   error: "Fehler",
 };
 
+const MODE_BADGE_COPY = {
+  live: "Live",
+  fallback: "Fallback",
+};
+
 const statusElement = document.querySelector("#voice-status");
 const statusDetailElement = document.querySelector("#status-detail");
 const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
 const emptyTranscriptElement = document.querySelector("#transcript-empty");
+const modeBadgeElement = document.querySelector("#mode-badge");
 
 let activeSession = null;
 let nextSessionId = 0;
@@ -42,6 +55,23 @@ function setStatus(value, detail) {
   if (detail) {
     statusDetailElement.textContent = detail;
   }
+  if (normalized === "idle") {
+    hideModeBadge();
+  }
+}
+
+function hideModeBadge() {
+  modeBadgeElement.hidden = true;
+  delete modeBadgeElement.dataset.mode;
+}
+
+function renderModeBadge(value) {
+  if (!Object.hasOwn(MODE_BADGE_COPY, value)) {
+    return;
+  }
+  modeBadgeElement.textContent = MODE_BADGE_COPY[value];
+  modeBadgeElement.dataset.mode = value;
+  modeBadgeElement.hidden = false;
 }
 
 function setButton(mode) {
@@ -163,10 +193,41 @@ async function mintWebSocketTicket(session) {
   return payload.ticket;
 }
 
+let inMemorySessionId = null;
+
+function getClientSessionId() {
+  const storageKey = "hermesVoiceSessionId";
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored) {
+      return stored;
+    }
+  } catch {
+    // Storage can be blocked (private mode, embedded webview) — fall through.
+  }
+  if (inMemorySessionId) {
+    return inMemorySessionId;
+  }
+  const id =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Array.from(crypto.getRandomValues(new Uint8Array(16)))
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+  inMemorySessionId = id;
+  try {
+    localStorage.setItem(storageKey, id);
+  } catch {
+    // Keep the in-memory id for this page's lifetime instead.
+  }
+  return id;
+}
+
 function createWebSocket(ticket) {
   const websocketUrl = new URL("/api/voice/live", window.location.origin);
   websocketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   websocketUrl.searchParams.set("ticket", ticket);
+  websocketUrl.searchParams.set("session", getClientSessionId());
   const websocket = new WebSocket(websocketUrl);
   websocket.binaryType = "arraybuffer";
   return websocket;
@@ -178,6 +239,7 @@ function waitForWebSocket(session) {
     const handleOpen = () => {
       websocket.removeEventListener("error", handleError);
       websocket.removeEventListener("close", handleCloseBeforeOpen);
+      session.everOpen = true;
       resolve();
     };
     const handleError = () => {
@@ -365,6 +427,11 @@ function handleJsonMessage(session, raw) {
     applyServerState(session, message.value);
     return;
   }
+  if (message.type === "mode") {
+    session.mode = message.value;
+    renderModeBadge(message.value);
+    return;
+  }
   if (message.type === "transcript") {
     appendTranscript(message.role === "assistant" ? "assistant" : "user", message.text);
     return;
@@ -416,6 +483,7 @@ async function cleanupSession(session, { closeSocket = true } = {}) {
   session.abortController.abort();
   await stopMicrophone(session);
   stopPlayback(session);
+  session.wakeLock?.release?.().catch(() => {});
   if (
     closeSocket &&
     session.websocket &&
@@ -438,6 +506,7 @@ async function finishSession(
     return;
   }
   session.finishing = true;
+  hideModeBadge();
   if (session.serverDrainTimer !== null) {
     window.clearTimeout(session.serverDrainTimer);
     session.serverDrainTimer = null;
@@ -456,9 +525,99 @@ async function finishSession(
   }
 }
 
+function finalizeWebSocketClose(session, event) {
+  if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
+    setStatus("error", "Die Anmeldung ist abgelaufen. Bitte lade die Seite neu.");
+    void finishSession(session, undefined);
+    return;
+  }
+  void finishSession(
+    session,
+    session.drainRequested
+      ? "Sitzung vollständig beendet."
+      : "Verbindung beendet. Du kannst neu starten.",
+    {
+      drainPlayback:
+        session.drainRequested && (event.wasClean || event.code === 1000),
+    },
+  );
+}
+
+function canReconnect(session, event) {
+  return (
+    isCurrent(session) &&
+    !session.drainRequested &&
+    !session.finishing &&
+    session.everOpen &&
+    event.code !== 1000 &&
+    !NON_RETRYABLE_CLOSE_CODES.has(event.code) &&
+    session.reconnectAttempts < MAX_RECONNECT_ATTEMPTS
+  );
+}
+
+async function attemptReconnect(session, event) {
+  if (!canReconnect(session, event)) {
+    finalizeWebSocketClose(session, event);
+    return;
+  }
+
+  session.reconnectAttempts += 1;
+  setStatus(
+    "connecting",
+    `Verbindung unterbrochen – verbindet neu (Versuch ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) …`,
+  );
+  stopPlayback(session);
+  session.suppressIncomingAudio = false;
+  resetBargeIn(session);
+
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, RECONNECT_BACKOFF_MS[session.reconnectAttempts - 1]);
+  });
+  if (!isCurrent(session) || session.drainRequested || session.finishing) {
+    return;
+  }
+
+  let ticket;
+  try {
+    ticket = await mintWebSocketTicket(session);
+  } catch {
+    if (!isCurrent(session) || session.drainRequested || session.finishing) {
+      return;
+    }
+    // A mint failure creates no socket, so no close event will re-drive the
+    // loop — recurse directly (with the original close event) instead.
+    await attemptReconnect(session, event);
+    return;
+  }
+  if (!isCurrent(session) || session.drainRequested || session.finishing) {
+    return;
+  }
+  // From here the new socket's own events own the outcome: "open" resets the
+  // attempt counter, a failed connect fires "close", which re-enters
+  // attemptReconnect exactly once. Never ALSO await the socket here — a
+  // second waiter would double-drive the reconnect loop.
+  session.websocket = createWebSocket(ticket);
+  attachWebSocketHandlers(session);
+}
+
 function attachWebSocketHandlers(session) {
-  session.websocket.addEventListener("message", (event) => {
-    if (!isCurrent(session)) {
+  const socket = session.websocket;
+  socket.addEventListener("open", () => {
+    if (!isCurrent(session) || session.websocket !== socket) {
+      return;
+    }
+    session.everOpen = true;
+    if (session.reconnectAttempts > 0 && !session.drainRequested) {
+      session.reconnectAttempts = 0;
+      session.voiceState = "listening";
+      setStatus(
+        "listening",
+        "Verbindung wiederhergestellt. Sag einfach, was Hermes tun soll.",
+      );
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (!isCurrent(session) || session.websocket !== socket) {
       return;
     }
     try {
@@ -472,24 +631,16 @@ function attachWebSocketHandlers(session) {
       void finishSession(session, undefined, { closeSocket: true });
     }
   });
-  session.websocket.addEventListener("error", () => {
-    if (isCurrent(session) && !session.drainRequested) {
+  socket.addEventListener("error", () => {
+    if (isCurrent(session) && session.websocket === socket && !session.drainRequested) {
       setStatus("error", "Die Sprachverbindung wurde unterbrochen.");
     }
   });
-  session.websocket.addEventListener("close", (event) => {
-    if (isCurrent(session)) {
-      void finishSession(
-        session,
-        session.drainRequested
-          ? "Sitzung vollständig beendet."
-          : "Verbindung beendet. Du kannst neu starten.",
-        {
-          drainPlayback:
-            session.drainRequested && (event.wasClean || event.code === 1000),
-        },
-      );
+  socket.addEventListener("close", (event) => {
+    if (!isCurrent(session) || session.websocket !== socket) {
+      return;
     }
+    void attemptReconnect(session, event);
   });
 }
 
@@ -529,6 +680,10 @@ async function startSession() {
     serverDrainTimer: null,
     microphoneStopped: false,
     finishing: false,
+    everOpen: false,
+    reconnectAttempts: 0,
+    mode: null,
+    wakeLock: null,
   };
   activeSession = session;
   setButton("stop");
@@ -580,6 +735,8 @@ async function startSession() {
     session.workletNode.port.onmessage = (event) => {
       handleMicFrame(session, event.data || {});
     };
+
+    session.wakeLock = await navigator.wakeLock?.request?.("screen").catch(() => null);
 
     const ticket = await mintWebSocketTicket(session);
     if (!isCurrent(session) || session.drainRequested) {
@@ -652,6 +809,30 @@ sessionButton.addEventListener("click", () => {
 window.addEventListener("pagehide", () => {
   if (activeSession) {
     void cleanupSession(activeSession);
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState !== "visible" ||
+    !activeSession ||
+    activeSession.finishing
+  ) {
+    return;
+  }
+  const session = activeSession;
+  if (!session.wakeLock || session.wakeLock.released) {
+    void navigator.wakeLock
+      ?.request?.("screen")
+      .catch(() => null)
+      .then((lock) => {
+        if (isCurrent(session)) {
+          session.wakeLock = lock;
+        }
+      });
+  }
+  if (session.audioContext?.state === "suspended") {
+    void session.audioContext.resume();
   }
 });
 

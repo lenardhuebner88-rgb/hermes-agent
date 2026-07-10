@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import logging
 from typing import Any, Protocol
 
 from google import genai
@@ -26,6 +27,8 @@ _FALLBACK_ERRORS = (
     OSError,
     TimeoutError,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class LiveFallbackRequired(RuntimeError):
@@ -62,12 +65,16 @@ class GeminiLiveSession:
         language: str,
         tool_declarations: list[dict[str, Any]],
         api_key: str,
+        *,
+        initial_handle: str | None = None,
+        on_handle_update: Callable[[str | None], None] | None = None,
     ) -> None:
         self._model = model
         self._language = language
         self._tool_declarations = list(tool_declarations)
         self._api_key = api_key
-        self._resumption_handle: str | None = None
+        self._resumption_handle: str | None = initial_handle
+        self._on_handle_update = on_handle_update
         self._replay_audio: deque[_PendingAudio] = deque()
 
     @staticmethod
@@ -216,6 +223,16 @@ class GeminiLiveSession:
         if responses:
             await session.send_tool_response(function_responses=responses)
 
+    def _notify_handle_update(self) -> None:
+        """Tell the caller about a handle change without risking the bridge."""
+
+        if self._on_handle_update is None:
+            return
+        try:
+            self._on_handle_update(self._resumption_handle)
+        except Exception:
+            _log.exception("Gemini Live resumption handle callback failed")
+
     async def _handle_message(
         self,
         session: _LiveSession,
@@ -229,8 +246,10 @@ class GeminiLiveSession:
         if update:
             if update.resumable is False:
                 self._resumption_handle = None
+                self._notify_handle_update()
             elif update.resumable and update.new_handle:
                 self._resumption_handle = update.new_handle
+                self._notify_handle_update()
 
         data = message.data
         if data:
@@ -339,6 +358,7 @@ class GeminiLiveSession:
     ) -> None:
         """Run until cancelled, or request cascade fallback on a Live API failure."""
 
+        announced_live = False
         try:
             client = genai.Client(api_key=self._api_key)
             while True:
@@ -347,6 +367,9 @@ class GeminiLiveSession:
                     model=self._model,
                     config=config,
                 ) as session:
+                    if not announced_live:
+                        await events_out.put({"type": "mode", "value": "live"})
+                        announced_live = True
                     await events_out.put({"type": "state", "value": "listening"})
                     reconnect = await self._run_connection(
                         session,

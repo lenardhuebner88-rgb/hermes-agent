@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from typing import Any
 import uuid
 import wave
@@ -58,12 +61,53 @@ _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
 _FALLBACK_CANCEL_TIMEOUT_SECONDS = 7.0
 _FFMPEG_TIMEOUT_SECONDS = 60.0
 _OUTPUT_PCM_CHUNK_BYTES = 24_000
+_RESUMPTION_TTL_SECONDS = 60 * 60
+_RESUMPTION_MAX_ENTRIES = 32
+_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 
 _log = logging.getLogger(__name__)
 
 WsAuthReason = Callable[[WebSocket], tuple[str | None, str]]
 WsReason = Callable[[WebSocket], str | None]
 WsCloseReason = Callable[[str], str]
+
+
+class ResumptionRegistry:
+    """Bound in-memory store for Gemini Live resumption handles.
+
+    A handle must outlive a single websocket so a phone reconnect can resume
+    the same Gemini Live conversation instead of starting over. Every
+    mutation happens on the event loop thread (nothing else touches this
+    registry), so no lock is required today; ``get``/``store`` each perform
+    their dict mutation at a single point so a lock could be added there
+    trivially if that ever changes.
+    """
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[str, tuple[str, float]] = OrderedDict()
+
+    def get(self, session_id: str) -> str | None:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return None
+        handle, stored_at = entry
+        if time.monotonic() - stored_at > _RESUMPTION_TTL_SECONDS:
+            del self._entries[session_id]
+            return None
+        self._entries.move_to_end(session_id)
+        return handle
+
+    def store(self, session_id: str, handle: str | None) -> None:
+        if handle is None:
+            self._entries.pop(session_id, None)
+            return
+        self._entries[session_id] = (handle, time.monotonic())
+        self._entries.move_to_end(session_id)
+        while len(self._entries) > _RESUMPTION_MAX_ENTRIES:
+            self._entries.popitem(last=False)
+
+
+_RESUMPTION_REGISTRY = ResumptionRegistry()
 
 
 @dataclass
@@ -911,18 +955,37 @@ async def _run_live_bridge(
     audio_in: asyncio.Queue[bytes],
     events_out: asyncio.Queue[dict[str, Any] | None],
     fallback_mode: asyncio.Event,
+    disconnected: asyncio.Event,
+    session_id: str | None,
 ) -> bool:
-    session = GeminiLiveSession(
-        config.model,
-        config.language,
-        FUNCTION_DECLARATIONS,
-        api_key,
-    )
+    if session_id:
+        session = GeminiLiveSession(
+            config.model,
+            config.language,
+            FUNCTION_DECLARATIONS,
+            api_key,
+            initial_handle=_RESUMPTION_REGISTRY.get(session_id),
+            on_handle_update=lambda handle: _RESUMPTION_REGISTRY.store(
+                session_id, handle
+            ),
+        )
+    else:
+        session = GeminiLiveSession(
+            config.model,
+            config.language,
+            FUNCTION_DECLARATIONS,
+            api_key,
+        )
     executor = VoiceToolExecutor(delegate=delegate_to_hermes)
     try:
         await session.run(audio_in, events_out, executor)
     except LiveFallbackRequired:
         fallback_mode.set()
+        await _put_event(
+            events_out,
+            {"type": "mode", "value": "fallback"},
+            disconnected,
+        )
         return True
     except asyncio.CancelledError:
         raise
@@ -1043,6 +1106,13 @@ def create_voice_router(
                 disconnected,
             )
         )
+        raw_session_id = websocket.query_params.get("session")
+        session_id = (
+            raw_session_id
+            if raw_session_id is not None
+            and _SESSION_ID_PATTERN.fullmatch(raw_session_id)
+            else None
+        )
         api_key = resolve_gemini_api_key()
         live_task: asyncio.Task[bool] | None = None
         if api_key:
@@ -1053,10 +1123,17 @@ def create_voice_router(
                     audio_in,
                     events_out,
                     fallback_mode,
+                    disconnected,
+                    session_id,
                 )
             )
         else:
             fallback_mode.set()
+            await _put_event(
+                events_out,
+                {"type": "mode", "value": "fallback"},
+                disconnected,
+            )
 
         run_fallback = not api_key
         reader_result = "disconnect"

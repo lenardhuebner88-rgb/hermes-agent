@@ -568,3 +568,180 @@ async def test_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_initial_handle_seeds_resumption_handle() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", initial_handle="seeded-handle"
+    )
+
+    assert wrapper._resumption_handle == "seeded-handle"
+
+
+@pytest.mark.asyncio
+async def test_resumable_update_invokes_on_handle_update_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    first = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="h2",
+                        resumable=True,
+                    ),
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ]
+    )
+    second = _FakeSDKSession()
+    live = _FakeLive([first, second])
+    _install_fake_client(monkeypatch, live)
+    updates: list[str | None] = []
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", on_handle_update=updates.append
+    )
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
+    )
+    await asyncio.wait_for(live.second_connect_called.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert updates == ["h2"]
+
+
+@pytest.mark.asyncio
+async def test_non_resumable_update_invokes_on_handle_update_with_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import (
+        GeminiLiveSession,
+        LiveFallbackRequired,
+    )
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="resume-stale",
+                        resumable=True,
+                    )
+                ),
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        resumable=False,
+                    )
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    updates: list[str | None] = []
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", on_handle_update=updates.append
+    )
+
+    with pytest.raises(LiveFallbackRequired):
+        await wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
+
+    assert updates == ["resume-stale", None]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_callback_exception_does_not_break_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    output_audio = b"\x01\x02\x03\x04"
+    session = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="h1",
+                        resumable=True,
+                    )
+                ),
+                _audio_message(output_audio),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+
+    def failing_callback(_handle: str | None) -> None:
+        raise RuntimeError("callback boom")
+
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", on_handle_update=failing_callback
+    )
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+
+    assert {"type": "audio", "data": output_audio} in emitted
+    assert wrapper._resumption_handle == "h1"
+
+
+@pytest.mark.asyncio
+async def test_mode_live_event_emitted_once_across_go_away_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    first = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="resume-123",
+                        resumable=True,
+                    ),
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ]
+    )
+    second = _FakeSDKSession()
+    live = _FakeLive([first, second])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(live.second_connect_called.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    mode_live_events = [
+        event for event in emitted if event == {"type": "mode", "value": "live"}
+    ]
+    assert len(mode_live_events) == 1
