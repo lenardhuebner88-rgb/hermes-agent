@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, Eye, Lock, OctagonX, PauseCircle, RotateCw, ScrollText, Send, Zap } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Eye, Lock, OctagonX, PauseCircle, RotateCw, ScrollText, Send, TriangleAlert, Zap } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
@@ -158,38 +158,38 @@ function TimeAxisTrack({
       <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-white/10">
         {/* Elapsed-Füllung */}
         <div
-          className="h-full rounded-full bg-cyan-400/60"
+          className="h-full rounded-full bg-live/60"
           style={{ width: `${nowPct}%` }}
         />
       </div>
       {/* p50-Marker */}
       {p50Pct != null ? (
         <div
-          className="absolute top-0 h-full w-px bg-emerald-400/70"
+          className="absolute top-0 h-full w-px bg-status-ok/70"
           style={{ left: `${p50Pct}%` }}
           title={`${de.worker.timeAxisP50}: ${fmtDur(p50!)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-emerald-300">{de.worker.timeAxisP50}</span>
+          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-ok">{de.worker.timeAxisP50}</span>
         </div>
       ) : null}
       {/* p90-Marker */}
       {p90Pct != null ? (
         <div
-          className="absolute top-0 h-full w-px bg-amber-400/70"
+          className="absolute top-0 h-full w-px bg-status-warn/70"
           style={{ left: `${p90Pct}%` }}
           title={`${de.worker.timeAxisP90}: ${fmtDur(p90!)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-amber-300">{de.worker.timeAxisP90}</span>
+          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-warn">{de.worker.timeAxisP90}</span>
         </div>
       ) : null}
       {/* Budget-Marker */}
       {budgetPct != null ? (
         <div
-          className="absolute top-0 h-full w-0.5 bg-red-400/70"
+          className="absolute top-0 h-full w-0.5 bg-status-alert/70"
           style={{ left: `${budgetPct}%` }}
           title={`${de.worker.timeAxisBudget}: ${fmtDur(budget)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-red-300">{de.worker.timeAxisBudget}</span>
+          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-alert">{de.worker.timeAxisBudget}</span>
         </div>
       ) : null}
       {/* „Jetzt"-Marker */}
@@ -225,7 +225,7 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
     <div className="space-y-1.5">
       <Text variant="eyebrow" className="hc-dim">{de.worker.activityHeading}</Text>
       {latestStale ? (
-        <Text variant="label" className="text-amber-300">{de.worker.activityStaleHint}</Text>
+        <Text variant="label" className="text-status-warn">{de.worker.activityStaleHint}</Text>
       ) : null}
       <ol className="space-y-1">
         {heartbeatNotes.map((ev) => {
@@ -305,7 +305,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
     : etaP50 != null && etaP50 > 0 ? Math.min(1, runtime / etaP50) : null;
 
   const runawayBadge = runaway.level !== "none" ? (
-    <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", runaway.level === "critical" ? "border-red-500/40 bg-red-500/10 text-red-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200")}>
+    <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", runaway.level === "critical" ? "border-status-alert/40 bg-status-alert/10 text-status-alert" : "border-status-warn/40 bg-status-warn/10 text-status-warn")}>
       <AlertTriangle className="h-3 w-3" />{runaway.level === "critical"
         ? `${de.worker.runawayCritical} — ${de.worker.runawayCriticalDetail}`
         : `${de.worker.runawayWarn} — ${de.worker.runawayWarnDetail}`}
@@ -318,11 +318,11 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
     // their content width — on a narrow single-column (mobile) the card would overflow
     // the viewport to the right (clipped by the page's overflow-x-hidden → content cut
     // off). min-w-0 lets it shrink; the truncate/line-clamp children then reflow.
-    <article className={cn("hc-surface-card min-w-0", collapsible ? "space-y-3 p-3" : "space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-red-500/40", runaway.level === "warn" && "border-amber-500/40")}>
+    <article className={cn("hc-surface-card min-w-0", collapsible ? "space-y-3 p-3" : "space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-status-alert/40", runaway.level === "warn" && "border-status-warn/40")}>
       {collapsible ? (
         <button type="button" aria-expanded={expanded} onClick={() => setOpen((v) => !v)} className="block w-full text-left">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]">{profileLabel[worker.profile] ?? worker.profile}</span>
+            <span className="rounded-full border border-line bg-white/5 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
             {runawayBadge}
             <span className="ml-auto inline-flex items-center gap-1.5">
               <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
@@ -338,7 +338,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {headerMeterPct != null ? (
             <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10">
               <div
-                className={cn("h-full rounded-full", runaway.level === "critical" ? "bg-red-400" : runaway.level === "warn" ? "bg-amber-400" : "bg-cyan-400")}
+                className={cn("h-full rounded-full", runaway.level === "critical" ? "bg-status-alert" : runaway.level === "warn" ? "bg-status-warn" : "bg-live")}
                 style={{ width: `${Math.round(headerMeterPct * 100)}%` }}
               />
             </div>
@@ -348,7 +348,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]">{profileLabel[worker.profile] ?? worker.profile}</span>
+            <span className="rounded-full border border-line bg-white/5 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
             <span className="rounded-full border border-white/10 px-2 py-0.5 text-xs hc-soft">{taskStatusLabel[worker.task_status] ?? worker.task_status}</span>
             {runawayBadge}
           </div>
@@ -367,7 +367,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
 
       {!expanded ? (
         problemText || runaway.level !== "none" ? (
-          <p className="line-clamp-2 hc-type-label text-amber-200">{problemText ?? runaway.reasons.join(" · ")}</p>
+          <p className="line-clamp-2 hc-type-label text-status-warn">{problemText ?? runaway.reasons.join(" · ")}</p>
         ) : null
       ) : (
       <>
@@ -391,11 +391,11 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         <div className="flex items-center gap-2">
           <span className={cn(
             "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-            axisState.tone === "emerald" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" :
-            axisState.tone === "cyan" ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-200" :
-            axisState.tone === "amber" ? "border-amber-500/30 bg-amber-500/10 text-amber-200" :
-            axisState.tone === "red" ? "border-red-500/30 bg-red-500/10 text-red-200" :
-            "border-zinc-500/30 bg-zinc-500/10 text-zinc-300"
+            axisState.tone === "emerald" ? "border-status-ok/30 bg-status-ok/10 text-status-ok" :
+            axisState.tone === "cyan" ? "border-live/30 bg-live/10 text-live" :
+            axisState.tone === "amber" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" :
+            axisState.tone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" :
+            "border-line bg-white/5 text-ink-2"
           )}>
             {axisState.label}
           </span>
@@ -456,12 +456,12 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         inspect.alive ? (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs hc-soft"><span>CPU</span><span className="hc-mono">{Math.round(inspect.cpu_percent)}%</span></div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.cpu_percent > 80 ? "bg-amber-400" : "bg-cyan-300")} style={{ width: `${Math.min(100, inspect.cpu_percent)}%` }} /></div>
+              <div className="flex items-center justify-between text-xs hc-soft"><span>CPU</span><span className="inline-flex items-center gap-1"><span className="hc-mono">{Math.round(inspect.cpu_percent)}%</span>{inspect.cpu_percent > 80 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.cpu_percent > 80 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, inspect.cpu_percent)}%` }} /></div>
             </div>
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs hc-soft"><span>RAM</span><span className="hc-mono">{fmtMB(inspect.rss)}</span></div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.rss > 1536 * 1048576 ? "bg-amber-400" : "bg-cyan-300")} style={{ width: `${Math.min(100, (inspect.rss / (2048 * 1048576)) * 100)}%` }} /></div>
+              <div className="flex items-center justify-between text-xs hc-soft"><span>RAM</span><span className="inline-flex items-center gap-1"><span className="hc-mono">{fmtMB(inspect.rss)}</span>{inspect.rss > 1536 * 1048576 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.rss > 1536 * 1048576 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, (inspect.rss / (2048 * 1048576)) * 100)}%` }} /></div>
             </div>
             <Text variant="label" className="hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</Text>
           </div>
@@ -486,8 +486,8 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         {burn.noData ? null : burn.ratePerMin != null ? (
           <div className={cn(
             "inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs",
-            burnTone === "red" ? "border-red-500/30 bg-red-500/10 text-red-200" :
-            burnTone === "amber" ? "border-amber-500/30 bg-amber-500/10 text-amber-200" :
+            burnTone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" :
+            burnTone === "amber" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" :
             "border-white/10 bg-white/5 hc-soft",
           )}>
             {de.worker.chipBurnRate(Math.round(burn.ratePerMin).toLocaleString("de-DE"))}
@@ -559,9 +559,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
                 onClick={() => setConfirming(key)}
                 prefix={actionBusy ? <Spinner /> : actionIcon(key)}
                 className={cn(
-                  key === "terminate" && "text-red-300",
-                  key === "hold" && "text-amber-300",
-                  key === primary && "border-[var(--hc-accent-border)]",
+                  key === primary && "border-live/32",
                 )}
               >
                 {de.worker.actions[key]}

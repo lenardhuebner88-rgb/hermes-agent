@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { PlanSpecDetailDrawer } from "./PlanSpecDetailDrawer";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
@@ -50,9 +52,26 @@ const baseDetail: PlanSpecDetailResponse = {
 
 const noop = vi.fn();
 
+// DrawerShell portals to document.body when `document` exists and falls back
+// to inline markup (its declared SSR-safe branch) when it doesn't. This file
+// runs under jsdom (for the DrawerShell-Migration interaction test below), so
+// `document` is always defined — stub it away for the plain
+// renderToStaticMarkup assertions to keep exercising that SSR-safe branch
+// instead of hitting react-dom/server's "portals unsupported" error.
+function renderStaticMarkup(el: Parameters<typeof renderToStaticMarkup>[0]): string {
+  vi.stubGlobal("document", undefined);
+  try {
+    return renderToStaticMarkup(el);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}
+
 describe("PlanSpecDetailDrawer", () => {
+  afterEach(cleanup);
+
   it("rendert Topic, mind. ein AC-Statement, Anti-Scope-Eintrag und Subtask-Titel", () => {
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <PlanSpecDetailDrawer
         item={baseItem}
         detail={baseDetail}
@@ -84,7 +103,7 @@ describe("PlanSpecDetailDrawer", () => {
 
   it("macht lange Pfade kopierbar und behält den vollständigen Pfad zugänglich", () => {
     const longPath = "vault/03-Agents/Hermes/plans/2026-06-21-dashboard-planspec-display-polish-with-a-very-long-name.md";
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <PlanSpecDetailDrawer
         item={{ ...baseItem, path: longPath }}
         detail={baseDetail}
@@ -100,7 +119,7 @@ describe("PlanSpecDetailDrawer", () => {
   });
 
   it("rendert Lade-Skeleton wenn loading=true und kein Detail vorhanden", () => {
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <PlanSpecDetailDrawer
         item={baseItem}
         detail={null}
@@ -116,7 +135,7 @@ describe("PlanSpecDetailDrawer", () => {
   });
 
   it("rendert Fehler-Callout wenn error gesetzt ist", () => {
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <PlanSpecDetailDrawer
         item={baseItem}
         detail={null}
@@ -134,7 +153,7 @@ describe("PlanSpecDetailDrawer", () => {
       kanban_root_task_id: "t_root123",
       kanban_state: "running",
     };
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <MemoryRouter>
         <PlanSpecDetailDrawer
           item={itemWithRoot}
@@ -154,7 +173,7 @@ describe("PlanSpecDetailDrawer", () => {
     // renderToStaticMarkup rendert kein interaktives DOM —
     // wir prüfen stattdessen, dass der Button mit dem aria-label vorhanden ist
     // und dass onClose als onClick korrekt gesetzt wird.
-    const html = renderToStaticMarkup(
+    const html = renderStaticMarkup(
       <PlanSpecDetailDrawer
         item={baseItem}
         detail={baseDetail}
@@ -165,5 +184,27 @@ describe("PlanSpecDetailDrawer", () => {
     );
     expect(html).toContain('aria-label="PlanSpec schließen"');
     expect(html).toContain("PlanSpec Details");
+  });
+
+  it("DrawerShell-Migration: Backdrop schließt, Panel-Klick nicht, Dialog-Semantik", () => {
+    const onClose = vi.fn();
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={onClose}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "PlanSpec Details" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+
+    fireEvent.click(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("presentation"));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

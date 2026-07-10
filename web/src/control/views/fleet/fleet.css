@@ -58,7 +58,7 @@
  *    als [data-control] (-5rem) — ohne Patch schimmert die Fläche darunter
  *    (welche Farbe sie auch hat) als Streifen über der Bottom-Nav durch.
  * Literal derselbe Wert wie --color-surface-0 (theme.css:19) — hier stand
- * vorher der leicht abweichende Hex #05090f, der gegen den in
+ * vorher ein leicht abweichender, fest kodierter Hex-Wert, der gegen den in
  * --color-surface-0 endenden Fleet-Gradienten einen sichtbaren Farbsprung
  * erzeugte. Über var() referenziert statt dupliziert: Tailwind-v4 `@theme`
  * emittiert die Custom Properties auf :root, sichtbar auch außerhalb von
@@ -109,7 +109,7 @@ body:has([data-fleet-theme]) [data-control] {
   border-color: var(--fleet-linie-stark);
 }
 .fleet-chip.fleet-chip-on {
-  color: #02131c;
+  color: var(--color-surface-0);
   background: var(--fleet-puls);
   border-color: var(--fleet-puls);
   font-weight: 600;
@@ -189,7 +189,7 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-kp-aktiv .fleet-kp-num {
   color: var(--fleet-puls);
-  text-shadow: 0 0 14px rgba(55, 224, 255, 0.4);
+  text-shadow: 0 0 14px color-mix(in oklab, var(--fleet-puls) 40%, transparent);
 }
 .fleet-kp-button {
   appearance: none;
@@ -539,7 +539,7 @@ body:has([data-fleet-theme]) [data-control] {
   inset: -40% -20% auto;
   height: 120%;
   pointer-events: none;
-  background: radial-gradient(50% 60% at 18% 0%, rgba(55, 224, 255, 0.07), transparent 70%);
+  background: radial-gradient(50% 60% at 18% 0%, color-mix(in oklab, var(--fleet-puls) 7%, transparent), transparent 70%);
 }
 .fleet-wk-top {
   display: flex;
@@ -562,7 +562,7 @@ body:has([data-fleet-theme]) [data-control] {
   flex-shrink: 0;
 }
 .fleet-avatar-default { color: var(--fleet-puls); }
-.fleet-avatar-prem    { color: #c9b3ff; }
+.fleet-avatar-prem    { color: var(--color-brand); }
 .fleet-avatar-rev     { color: var(--fleet-gruen); }
 .fleet-avatar-gross {
   width: 34px;
@@ -642,15 +642,15 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-rail {
   height: 3px;
   border-radius: 3px;
-  background: rgba(140, 170, 210, 0.10);
+  background: color-mix(in oklab, var(--color-brand) 10%, transparent);
   position: relative;
 }
 .fleet-rail-fill {
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: 3px;
-  background: linear-gradient(90deg, rgba(55, 224, 255, 0.2), var(--fleet-puls));
-  box-shadow: 0 0 8px rgba(55, 224, 255, 0.5);
+  background: linear-gradient(90deg, color-mix(in oklab, var(--fleet-puls) 20%, transparent), var(--fleet-puls));
+  box-shadow: 0 0 8px color-mix(in oklab, var(--fleet-puls) 50%, transparent);
 }
 .fleet-rail-fill::after {
   content: "";
@@ -701,9 +701,9 @@ body:has([data-fleet-theme]) [data-control] {
   border-radius: 999px;
   flex-shrink: 0;
 }
-.fleet-ps-badge-lauf  { color: var(--fleet-puls);   border: 1px solid rgba(55,224,255,.4); }
-.fleet-ps-badge-amber { color: var(--fleet-signal);  border: 1px solid rgba(245,168,60,.4); }
-.fleet-ps-badge-gruen { color: var(--fleet-gruen);   border: 1px solid rgba(67,214,154,.35); }
+.fleet-ps-badge-lauf  { color: var(--fleet-puls);   border: 1px solid color-mix(in oklab, var(--fleet-puls) 40%, transparent); }
+.fleet-ps-badge-amber { color: var(--fleet-signal);  border: 1px solid color-mix(in oklab, var(--fleet-signal) 40%, transparent); }
+.fleet-ps-badge-gruen { color: var(--fleet-gruen);   border: 1px solid color-mix(in oklab, var(--fleet-gruen) 35%, transparent); }
 .fleet-ps-meta {
   display: flex;
   gap: 12px;
@@ -846,8 +846,8 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-btn:hover { opacity: 0.85; }
 .fleet-btn-primar {
-  background: rgba(55, 224, 255, 0.12);
-  border-color: rgba(55, 224, 255, 0.45);
+  background: color-mix(in oklab, var(--fleet-puls) 12%, transparent);
+  border-color: color-mix(in oklab, var(--fleet-puls) 45%, transparent);
   color: var(--fleet-puls);
 }
 
@@ -883,8 +883,8 @@ body:has([data-fleet-theme]) [data-control] {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 9px;
-  border: 1px solid rgba(255, 93, 115, 0.3);
-  background: rgba(255, 93, 115, 0.07);
+  border: 1px solid color-mix(in oklab, var(--fleet-rot) 30%, transparent);
+  background: color-mix(in oklab, var(--fleet-rot) 7%, transparent);
 }
 .fleet-ta-confirm-text {
   flex: 1;
@@ -895,8 +895,8 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-ta-error {
   font: 400 11px/1.45 var(--hc-font-mono);
   color: var(--fleet-rot);
-  background: rgba(255, 93, 115, 0.08);
-  border: 1px solid rgba(255, 93, 115, 0.25);
+  background: color-mix(in oklab, var(--fleet-rot) 8%, transparent);
+  border: 1px solid color-mix(in oklab, var(--fleet-rot) 25%, transparent);
   border-radius: 8px;
   padding: 6px 9px;
   word-break: break-word;
@@ -1024,7 +1024,7 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-kchip:hover { border-color: var(--fleet-linie-stark); color: var(--fleet-t1); }
 .fleet-kchip-on {
-  border-color: rgba(55,224,255,.45);
+  border-color: color-mix(in oklab, var(--fleet-puls) 45%, transparent);
   color: var(--fleet-t1);
 }
 .fleet-kchip-ok {
@@ -1043,7 +1043,7 @@ body:has([data-fleet-theme]) [data-control] {
   height: 16px;
   flex-shrink: 0;
 }
-.fleet-ring-bg { fill: none; stroke: rgba(140,170,210,.18); stroke-width: 2.6; }
+.fleet-ring-bg { fill: none; stroke: var(--fleet-linie); stroke-width: 2.6; }
 .fleet-ring-fg {
   fill: none;
   stroke: var(--fleet-puls);
@@ -1051,7 +1051,7 @@ body:has([data-fleet-theme]) [data-control] {
   stroke-linecap: round;
   transform: rotate(-90deg);
   transform-origin: center;
-  filter: drop-shadow(0 0 3px rgba(55,224,255,.6));
+  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--fleet-puls) 60%, transparent));
   transition: stroke-dasharray 0.4s;
 }
 
@@ -1071,7 +1071,7 @@ body:has([data-fleet-theme]) [data-control] {
   font: 600 34px/1 var(--hc-font-mono);
   letter-spacing: -0.03em;
   color: var(--fleet-puls);
-  text-shadow: 0 0 18px rgba(55,224,255,.35);
+  text-shadow: 0 0 18px color-mix(in oklab, var(--fleet-puls) 35%, transparent);
 }
 .fleet-prog-pl {
   font: italic 400 14px/1 var(--hc-font-display);
@@ -1091,12 +1091,12 @@ body:has([data-fleet-theme]) [data-control] {
   height: 4px;
   border-radius: 4px;
   flex: 1;
-  background: rgba(140,170,210,.12);
+  background: color-mix(in oklab, var(--color-brand) 12%, transparent);
 }
 .fleet-seg-done { background: var(--fleet-gruen); }
 .fleet-seg-active {
   background: linear-gradient(90deg, var(--fleet-gruen) 0 40%, var(--fleet-puls) 40%);
-  box-shadow: 0 0 8px rgba(55,224,255,.5);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--fleet-puls) 50%, transparent);
 }
 .fleet-seg-l {
   display: flex;
@@ -1108,7 +1108,7 @@ body:has([data-fleet-theme]) [data-control] {
 /* Fokus-Karte (laufender Node, groß) */
 .fleet-fokus {
   background: var(--fleet-karte);
-  border: 1px solid rgba(55,224,255,.35);
+  border: 1px solid color-mix(in oklab, var(--fleet-puls) 35%, transparent);
   border-radius: 16px;
   padding: 13px 14px;
   display: flex;
@@ -1123,7 +1123,7 @@ body:has([data-fleet-theme]) [data-control] {
   inset: -40% -20% auto;
   height: 130%;
   pointer-events: none;
-  background: radial-gradient(55% 60% at 20% 0%, rgba(55,224,255,.09), transparent 70%);
+  background: radial-gradient(55% 60% at 20% 0%, color-mix(in oklab, var(--fleet-puls) 9%, transparent), transparent 70%);
 }
 
 /* Danach-Queue (offene Nodes) */
@@ -1276,7 +1276,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-log-pre {
   font: 400 10px/1.5 var(--hc-font-mono);
   color: var(--fleet-t2);
-  background: rgba(0,0,0,.35);
+  background: color-mix(in oklab, var(--color-surface-0) 35%, transparent);
   border: 1px solid var(--fleet-linie);
   border-radius: 8px;
   padding: 8px 10px;
@@ -1464,8 +1464,8 @@ body:has([data-fleet-theme]) [data-control] {
   width: 34px;
   height: 19px;
   border-radius: 999px;
-  background: rgba(55, 224, 255, 0.25);
-  border: 1px solid rgba(55, 224, 255, 0.5);
+  background: color-mix(in oklab, var(--fleet-puls) 25%, transparent);
+  border: 1px solid color-mix(in oklab, var(--fleet-puls) 50%, transparent);
   position: relative;
   flex: none;
   cursor: pointer;
@@ -1480,11 +1480,11 @@ body:has([data-fleet-theme]) [data-control] {
   height: 13px;
   border-radius: 50%;
   background: var(--fleet-puls);
-  box-shadow: 0 0 6px rgba(55, 224, 255, 0.6);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--fleet-puls) 60%, transparent);
   transition: left 0.15s, right 0.15s, background 0.15s;
 }
 .fleet-switch-aus {
-  background: rgba(140, 170, 210, 0.12);
+  background: color-mix(in oklab, var(--color-brand) 12%, transparent);
   border-color: var(--fleet-linie-stark);
 }
 .fleet-switch-aus::after {
@@ -1509,7 +1509,7 @@ body:has([data-fleet-theme]) [data-control] {
   cursor: pointer;
 }
 .fleet-sel-puls {
-  border-color: rgba(55, 224, 255, 0.4);
+  border-color: color-mix(in oklab, var(--fleet-puls) 40%, transparent);
   color: var(--fleet-puls);
 }
 
@@ -1551,7 +1551,7 @@ body:has([data-fleet-theme]) [data-control] {
   flex: 1;
   height: 7px;
   border-radius: 5px;
-  background: rgba(140, 170, 210, 0.10);
+  background: color-mix(in oklab, var(--color-brand) 10%, transparent);
   position: relative;
   overflow: hidden;
 }
@@ -1582,7 +1582,7 @@ body:has([data-fleet-theme]) [data-control] {
 /* Freigabe-Karte (amber) im Risiko-Tab */
 .fleet-risiko-approval {
   background: var(--fleet-karte);
-  border: 1px solid rgba(245, 168, 60, 0.4);
+  border: 1px solid color-mix(in oklab, var(--fleet-signal) 40%, transparent);
   border-radius: 14px;
   padding: 11px 13px;
   display: flex;
@@ -1597,7 +1597,7 @@ body:has([data-fleet-theme]) [data-control] {
   inset: -40% -20% auto;
   height: 120%;
   pointer-events: none;
-  background: radial-gradient(50% 60% at 15% 0%, rgba(245, 168, 60, 0.06), transparent 70%);
+  background: radial-gradient(50% 60% at 15% 0%, color-mix(in oklab, var(--fleet-signal) 6%, transparent), transparent 70%);
 }
 .fleet-risiko-approval-n {
   display: flex;

@@ -7,7 +7,7 @@ import { ControlShell, type ControlTab } from "./ControlShell";
 import type { DecisionInboxData } from "../hooks/useControlData";
 import type { SystemHealthResponse } from "../lib/types";
 
-const notificationBridgeSpy = vi.fn((_props: unknown) => null);
+const notificationBridgeSpy = vi.fn((_props: unknown) => <div data-testid="notification-bridge-mock" />);
 vi.mock("./NotificationBridge", () => ({ NotificationBridge: (props: unknown) => notificationBridgeSpy(props) }));
 vi.mock("./Overlay", () => ({ Overlay: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock("../lib/clock", () => ({ useClientNowSeconds: () => 1783025500 }));
@@ -160,6 +160,18 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
 
   it("mounts NotificationBridge exactly once for a view with the generic masthead", () => {
     renderShell("crons");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the NotificationBridge bell reachable on /control/fleet now that it shares the generic masthead (W3-1b, Codex follow-up)", () => {
+    // Fleet dropped its own masthead in W3-1a — it now takes the same
+    // generic-masthead branch as e.g. "crons" (ControlShell.tsx:193), which
+    // mounts the VISIBLE bell (ControlShell.tsx:234), not the `hidden`
+    // side-effect-only mount (ControlShell.tsx:191) reserved for routes with
+    // their own masthead (Start/Inbox/Statistik).
+    renderShell("fleet");
+    const masthead = screen.getByTestId("control-masthead");
+    within(masthead).getByTestId("notification-bridge-mock");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
   });
 

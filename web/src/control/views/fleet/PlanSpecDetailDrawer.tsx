@@ -1,11 +1,10 @@
-import { useEffect } from "react";
-import { createPortal } from "react-dom";
-import { Copy, FileText, X } from "lucide-react";
+import { Copy, FileText } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "../../lib/types";
 import { StatusPill, ToneCallout } from "../../components/atoms";
 import { Eyebrow, SkeletonCard } from "../../components/primitives";
+import { DrawerShell } from "../../components/leitstand";
 import { planSpecKanbanTone, planSpecKanbanLabel } from "./planSpecKanban";
 
 function middleEllipsis(value: string, edge = 32): string {
@@ -26,111 +25,80 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
   onClose: () => void;
 }) {
   const displayPath = middleEllipsis(item.path);
-  // Portal an document.body + Escape/Scroll-Lock: inline gerendert säße der Drawer
-  // im Stacking-Context von FlowView/RouteTransition — sein z-50 zählte nur dort,
-  // und der body-Level Capture-FAB (z-40) malte darüber (Screenshot-Audit
-  // 2026-06-19). Am body steht z-50 wieder über allem Chrome.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
-  }, [onClose]);
-  const content = (
-    // Mobil: Bottom-Sheet (items-end); Desktop (sm+): rechtsbündig (justify-end).
-    <div className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm sm:items-stretch sm:p-3" role="presentation" onClick={onClose}>
-      {/* hc-surface-card = solider Daylight-Fill (--hc-panel-card) + Border +
-          Elevation. Früher lag hier der Token hc-surface (ohne -card) als Fill —
-          den gibt es NICHT, also war das var() ohne Fallback transparent und das
-          Panel durchsichtig/unlesbar. (Klassen-Literal hier bewusst vermeiden —
-          Tailwind v4 scannt auch Kommentare und würde sonst tote CSS erzeugen.) */}
-      {/* Mobil: volle Breite, abgerundete Oberkante; Desktop (sm+): expliziter rechter Drawer mit klarer Breite. */}
-      <div className="hc-surface-card flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl sm:h-full sm:max-h-full sm:w-[min(760px,calc(100vw-2rem))] sm:rounded-2xl" role="dialog" aria-modal="true" aria-label="PlanSpec Details" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
-          <FileText className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" />
-          <div className="min-w-0 flex-1">
-            <Eyebrow>PlanSpec</Eyebrow>
-            {/* Topics sind oft ganze Sätze — als Titel auf 3 Zeilen clampen
-                (der Volltext steht ungekürzt in der „Ziel"-Sektion unten). */}
-            <h2 title={item.topic} className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-[var(--hc-text)]">{item.topic}</h2>
-            <div className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1.5">
-              <code title={item.path} aria-label={`PlanSpec-Pfad ${item.path}`} className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap hc-mono text-[0.72rem] hc-dim">{displayPath}</code>
-              <button type="button" onClick={() => copyText(item.path)} className="shrink-0 rounded-md border border-[var(--hc-border)] p-1.5 hc-soft hover:bg-white/5" aria-label="PlanSpec-Pfad kopieren" title="PlanSpec-Pfad kopieren">
-                <Copy className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-          <button type="button" onClick={onClose} className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5" aria-label="PlanSpec schließen">
-            <X className="h-4 w-4" />
+  return (
+    <DrawerShell
+      eyebrow="PlanSpec"
+      title={<span title={item.topic}>{item.topic}</span>}
+      icon={FileText}
+      onClose={onClose}
+      ariaLabel="PlanSpec Details"
+      closeLabel="PlanSpec schließen"
+      widthClassName="tab:w-[min(760px,calc(100vw-2rem))]"
+      headerExtra={
+        <div className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1.5">
+          <code title={item.path} aria-label={`PlanSpec-Pfad ${item.path}`} className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap hc-mono text-[0.72rem] hc-dim">{displayPath}</code>
+          <button type="button" onClick={() => copyText(item.path)} className="shrink-0 rounded-md border border-[var(--hc-border)] p-1.5 hc-soft hover:bg-white/5" aria-label="PlanSpec-Pfad kopieren" title="PlanSpec-Pfad kopieren">
+            <Copy className="h-3.5 w-3.5" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 pb-8">
-          <div className="flex flex-wrap gap-1.5">
-            <StatusPill tone={planSpecKanbanTone(item.kanban_state)} label={planSpecKanbanLabel(item)} />
-            <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
-            <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
-            {item.kanban_root_task_id ? (
-              <Link to={`/control/fleet?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100 hover:brightness-110">
-                Root {item.kanban_root_task_id} → Kette
-              </Link>
-            ) : null}
-          </div>
-          {loading ? <SkeletonCard rows={4} /> : null}
-          {error ? <ToneCallout tone="amber">{error}</ToneCallout> : null}
-          {detail ? (
-            <div className="mt-4 grid gap-4">
-              <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
-                <Eyebrow>Ziel</Eyebrow>
-                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed hc-soft">{detail.goal || item.topic}</p>
-              </section>
-              <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
-                <Eyebrow>Acceptance Criteria</Eyebrow>
-                <ul className="mt-2 grid gap-2">
-                  {detail.acceptance_criteria.length ? detail.acceptance_criteria.map((ac, idx) => (
-                    <li key={`${ac.id ?? idx}`} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-3 py-2 text-sm hc-soft">
-                      {ac.id ? <span className="mb-1.5 inline-flex rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-mono text-[0.7rem] text-cyan-100">{String(ac.id)}</span> : null}
-                      <p className="whitespace-pre-wrap break-words leading-relaxed">{String(ac.statement ?? "")}</p>
-                    </li>
-                  )) : <li className="text-sm hc-dim">Keine Kriterien im Detail-Payload.</li>}
-                </ul>
-              </section>
-              {detail.anti_scope.length ? (
-                <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
-                  <Eyebrow>Nicht im Scope</Eyebrow>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm hc-soft">{detail.anti_scope.map((x) => <li key={x}>{x}</li>)}</ul>
-                </section>
-              ) : null}
-              {/* Dashboard-Prose-Plan: kein YAML-Frontmatter, kein AC/Anti-Scope —
-                  der Volltext-Button muss trotzdem den geschriebenen Markdown zeigen. */}
-              {detail.prose_plan && detail.full_text ? (
-                <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
-                  <Eyebrow>Volltext</Eyebrow>
-                  <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed hc-soft">{detail.full_text}</pre>
-                </section>
-              ) : null}
-              <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
-                <Eyebrow>Subtask-Kette</Eyebrow>
-                <ol className="mt-2 grid gap-2">
-                  {detail.subtasks.map((task, idx) => (
-                    <li key={`${task.id}:${idx}`} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--hc-text)]"><span className="hc-mono text-[0.7rem] hc-dim">{idx + 1}</span><strong>{task.title || task.id}</strong></div>
-                      <p className="mt-1 hc-type-label hc-dim">{task.id} · {task.lane || "ohne Lane"}{task.deps.length ? ` · deps: ${task.deps.join(", ")}` : ""}</p>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            </div>
-          ) : null}
-        </div>
+      }
+    >
+      <div className="flex flex-wrap gap-1.5">
+        <StatusPill tone={planSpecKanbanTone(item.kanban_state)} label={planSpecKanbanLabel(item)} />
+        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
+        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
+        {item.kanban_root_task_id ? (
+          <Link to={`/control/fleet?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="rounded-full border border-live/30 bg-live/10 px-2 py-0.5 hc-type-label text-live hover:brightness-110">
+            Root {item.kanban_root_task_id} → Kette
+          </Link>
+        ) : null}
       </div>
-    </div>
+      {loading ? <SkeletonCard rows={4} /> : null}
+      {error ? <ToneCallout tone="amber">{error}</ToneCallout> : null}
+      {detail ? (
+        <div className="mt-4 grid gap-4">
+          <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+            <Eyebrow>Ziel</Eyebrow>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed hc-soft">{detail.goal || item.topic}</p>
+          </section>
+          <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+            <Eyebrow>Acceptance Criteria</Eyebrow>
+            <ul className="mt-2 grid gap-2">
+              {detail.acceptance_criteria.length ? detail.acceptance_criteria.map((ac, idx) => (
+                <li key={`${ac.id ?? idx}`} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-3 py-2 text-sm hc-soft">
+                  {ac.id ? <span className="mb-1.5 inline-flex rounded-full border border-line bg-white/5 px-2 py-0.5 font-data text-[0.7rem] text-ink-2">{String(ac.id)}</span> : null}
+                  <p className="whitespace-pre-wrap break-words leading-relaxed">{String(ac.statement ?? "")}</p>
+                </li>
+              )) : <li className="text-sm hc-dim">Keine Kriterien im Detail-Payload.</li>}
+            </ul>
+          </section>
+          {detail.anti_scope.length ? (
+            <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+              <Eyebrow>Nicht im Scope</Eyebrow>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm hc-soft">{detail.anti_scope.map((x) => <li key={x}>{x}</li>)}</ul>
+            </section>
+          ) : null}
+          {/* Dashboard-Prose-Plan: kein YAML-Frontmatter, kein AC/Anti-Scope —
+              der Volltext-Button muss trotzdem den geschriebenen Markdown zeigen. */}
+          {detail.prose_plan && detail.full_text ? (
+            <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+              <Eyebrow>Volltext</Eyebrow>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed hc-soft">{detail.full_text}</pre>
+            </section>
+          ) : null}
+          <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
+            <Eyebrow>Subtask-Kette</Eyebrow>
+            <ol className="mt-2 grid gap-2">
+              {detail.subtasks.map((task, idx) => (
+                <li key={`${task.id}:${idx}`} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--hc-text)]"><span className="hc-mono text-[0.7rem] hc-dim">{idx + 1}</span><strong>{task.title || task.id}</strong></div>
+                  <p className="mt-1 hc-type-label hc-dim">{task.id} · {task.lane || "ohne Lane"}{task.deps.length ? ` · deps: ${task.deps.join(", ")}` : ""}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        </div>
+      ) : null}
+    </DrawerShell>
   );
-  // SSR-/Static-Render-sicher: ohne DOM (renderToStaticMarkup im Test) inline
-  // rendern; im Browser an document.body portalen, damit das z-50 über FAB/Glocke
-  // und allem View-Chrome liegt (sonst im Stacking-Context von FlowView gefangen).
-  if (typeof document === "undefined") return content;
-  // data-control (display:contents): außerhalb des [data-control]-Scopes wären
-  // die --hc-*-Tokens unaufgelöst — gleiche Technik wie Overlay/FlowCapture.
-  return createPortal(<div data-control className="contents">{content}</div>, document.body);
 }

@@ -4,6 +4,7 @@
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
 import { useMemo, useState } from "react";
+import { cn } from "@/lib/utils";
 import {
   fmtSeconds,
   fmtTokens,
@@ -17,6 +18,7 @@ import { de } from "../../i18n/de";
 import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
+import { Eyebrow } from "../../components/primitives";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
 import { FleetTaskActions } from "./TaskActions";
@@ -95,7 +97,7 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
             {profileInitial(task?.assignee ?? "?")}
           </div>
           <div className="fleet-dr-title">
-            <span style={{ fontSize: 14 }}>{task?.title || taskId}</span>
+            <span className="text-sec">{task?.title || taskId}</span>
             <span>
               <button
                 type="button"
@@ -105,14 +107,13 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
                 aria-label={de.fleet.detailKopieren}
               >
                 {taskId}
-                <span style={{ fontSize: 9, opacity: 0.7 }}>{copied ? " ✓" : " ⊕"}</span>
+                <span className="text-[9px] opacity-70">{copied ? " ✓" : " ⊕"}</span>
               </button>
             </span>
           </div>
           <button
             type="button"
-            className="fleet-btn"
-            style={{ flex: "0 0 auto", padding: "6px 10px", minHeight: "auto" }}
+            className="fleet-btn min-h-[auto] flex-none px-2.5 py-1.5"
             onClick={onClose}
             aria-label={de.fleet.detailSchliessen}
           >
@@ -264,7 +265,7 @@ function TaskReassignControl({
           <button
             type="button"
             className="fleet-ta-btn"
-            style={{ color: "var(--fleet-puls)", borderColor: "rgba(55,224,255,.45)" }}
+            style={{ color: "var(--color-live)", borderColor: "color-mix(in oklab, var(--color-live) 45%, transparent)" }}
             disabled={busy}
             onClick={() => void fire()}
           >
@@ -275,10 +276,10 @@ function TaskReassignControl({
           </button>
         </div>
       ) : (
-        <div className="fleet-ta-row" style={{ alignItems: "center" }}>
+        <div className="fleet-ta-row items-center">
           <label
             htmlFor={`fleet-reassign-${taskId}`}
-            style={{ font: "500 10px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", textTransform: "uppercase" }}
+            className="font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3"
           >
             {de.fleet.reassignProfileLabel}
           </label>
@@ -291,16 +292,7 @@ function TaskReassignControl({
               setNote("");
             }}
             disabled={busy || lanesCatalog.loading}
-            style={{
-              flex: "1 1 150px",
-              minHeight: 32,
-              borderRadius: 9,
-              border: "1px solid var(--fleet-linie-stark)",
-              background: "var(--fleet-karte)",
-              color: "var(--fleet-t1)",
-              font: "500 11px/1 var(--hc-font-sans)",
-              padding: "7px 9px",
-            }}
+            className="min-h-8 flex-[1_1_150px] rounded-[9px] border border-line bg-surface-2 px-[9px] py-[7px] text-micro font-medium text-ink"
           >
             {profiles.map((profile) => (
               <option key={profile} value={profile}>{profile}</option>
@@ -377,18 +369,26 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
 
   return (
     <>
-      {/* Status-Badge */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{
-          fontFamily: "var(--hc-font-mono)", fontSize: 10,
-          padding: "3px 8px", borderRadius: 999,
-          border: `1px solid ${task.status === "running" ? "rgba(55,224,255,.4)" : task.status === "done" ? "rgba(67,214,154,.35)" : "var(--fleet-linie)"}`,
-          color: task.status === "running" ? "var(--fleet-puls)" : task.status === "done" ? "var(--fleet-gruen)" : "var(--fleet-t2)",
-        }}>
+      {/* Status-Badge — LED + Label, nie farb-only (DESIGN.md Regel 2). */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2 py-[3px] text-micro",
+            task.status === "running" ? "border-live/40 text-live"
+              : task.status === "done" ? "border-status-ok/35 text-status-ok"
+              : "border-line text-ink-2",
+          )}
+        >
+          {task.status === "running" || task.status === "done" ? (
+            <span
+              aria-hidden
+              className={cn("h-1.5 w-1.5 shrink-0 rounded-full", task.status === "running" ? "bg-live" : "bg-status-ok")}
+            />
+          ) : null}
           {task.status ?? "—"}
         </span>
         {task.review_tier ? (
-          <span style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, padding: "3px 8px", borderRadius: 999, border: "1px solid var(--fleet-linie)", color: "var(--fleet-t3)" }}>
+          <span className="rounded-full border border-line px-2 py-[3px] text-micro text-ink-3">
             {task.review_tier}
           </span>
         ) : null}
@@ -396,7 +396,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
 
       {/* Block-Reason */}
       {task.block_reason ? (
-        <div style={{ background: "rgba(245,168,60,.08)", border: "1px solid rgba(245,168,60,.3)", borderRadius: 10, padding: "8px 10px", fontSize: 11.5, color: "var(--fleet-signal)", lineHeight: 1.5 }}>
+        <div className="rounded-panel border border-status-warn/30 bg-status-warn/10 px-2.5 py-2 text-micro text-status-warn">
           {de.fleet.detailLabelBlockReason}: {task.block_reason}
         </div>
       ) : null}
@@ -445,10 +445,8 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
       {/* Task-Body */}
       {task.body ? (
         <div>
-          <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-            {de.fleet.detailBodyLabel}
-          </div>
-          <div style={{ font: "400 12px/1.6 var(--hc-font-sans)", color: "var(--fleet-t2)", borderLeft: "2px solid var(--fleet-puls)", paddingLeft: 10, maxHeight: 160, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>
+          <Eyebrow className="mb-1.5">{de.fleet.detailBodyLabel}</Eyebrow>
+          <div className="max-h-40 overflow-y-auto wrap-anywhere whitespace-pre-wrap border-l-2 border-line pl-2.5 text-sec text-ink-2">
             {task.body}
           </div>
         </div>
@@ -457,12 +455,10 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
       {/* Acceptance-Criteria */}
       {acList.length > 0 ? (
         <div>
-          <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-            {de.fleet.detailAcceptanceLabel}
-          </div>
-          <ul style={{ paddingLeft: 16, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          <Eyebrow className="mb-1.5">{de.fleet.detailAcceptanceLabel}</Eyebrow>
+          <ul className="m-0 flex flex-col gap-1 pl-4">
             {acList.slice(0, 8).map((item, i) => (
-              <li key={i} style={{ font: "400 11.5px/1.45 var(--hc-font-sans)", color: "var(--fleet-t2)" }}>
+              <li key={i} className="text-sec text-ink-2">
                 {item}
               </li>
             ))}
@@ -473,20 +469,18 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
       {/* Deliverables-Liste — Auth-geschützte Endpoints: openAuthedApiFile statt raw href */}
       {deliverables.length > 0 ? (
         <div>
-          <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-            {de.fleet.detailDeliverables}
-          </div>
+          <Eyebrow className="mb-1.5">{de.fleet.detailDeliverables}</Eyebrow>
           {deliverables.map((d) => (
             <button
               key={d.url || d.filename}
               type="button"
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
-              style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-puls)", background: "none", border: "none", cursor: "pointer", width: "100%", textAlign: "left", borderBottom: "1px solid var(--fleet-linie)" }}
+              className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span className="flex-1 truncate">
                 {d.filename}
               </span>
-              <span style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>
+              <span className="font-data text-micro text-ink-3">
                 {d.size > 0 ? `${Math.round(d.size / 1024)} kB` : "↗"}
               </span>
             </button>
@@ -523,13 +517,13 @@ export function AktivitaetTab({
   }
   if (events.length === 0) {
     return (
-      <p style={{ font: "400 11.5px/1.4 var(--hc-font-sans)", color: "var(--fleet-t3)", padding: "8px 2px" }}>
+      <p className="px-0.5 py-2 text-sec text-ink-3">
         {de.fleet.detailActivityEmpty}
       </p>
     );
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+    <div className="flex flex-col gap-0.5">
       {events.slice(0, 20).map((ev) => {
         const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
         const kindMeta = REVIEW_ECONOMY_KIND_META[ev.kind];
@@ -538,7 +532,7 @@ export function AktivitaetTab({
             <span className="fleet-activity-time">{age != null ? fmtSeconds(age) : "—"}</span>
             <span
               className="fleet-activity-kind"
-              style={kindMeta?.tone === "ok" ? { color: "var(--fleet-gruen)", borderColor: "rgba(67,214,154,.35)" } : undefined}
+              style={kindMeta?.tone === "ok" ? { color: "var(--color-status-ok)", borderColor: "color-mix(in oklab, var(--color-status-ok) 35%, transparent)" } : undefined}
             >
               {kindMeta?.label ?? ev.kind}
             </span>
@@ -568,7 +562,7 @@ function ErgebnisTab({
 }) {
   if (verdicts.length === 0 && deliverables.length === 0 && chainCost.value == null) {
     return (
-      <p style={{ font: "400 11.5px/1.4 var(--hc-font-sans)", color: "var(--fleet-t3)", padding: "8px 2px" }}>
+      <p className="px-0.5 py-2 text-sec text-ink-3">
         {de.fleet.detailErgebnisEmpty}
       </p>
     );
@@ -579,18 +573,16 @@ function ErgebnisTab({
       {/* Review-Verdicts */}
       {verdicts.length > 0 ? (
         <div>
-          <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-            Review-Verdicts
-          </div>
+          <Eyebrow className="mb-1.5">Review-Verdicts</Eyebrow>
           {verdicts.map((v) => (
-            <div key={`${v.task_id}-${v.reviewer_profile ?? "reviewer"}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--fleet-linie)", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-t2)" }}>
-              <span style={{ flex: 1 }}>{v.reviewer_profile ?? "reviewer"}</span>
-              <span style={{
-                fontFamily: "var(--hc-font-mono)", fontSize: 10,
-                padding: "2px 7px", borderRadius: 999,
-                border: `1px solid ${v.verifier_verdict === "APPROVED" ? "rgba(67,214,154,.35)" : "rgba(245,168,60,.4)"}`,
-                color: v.verifier_verdict === "APPROVED" ? "var(--fleet-gruen)" : "var(--fleet-signal)",
-              }}>
+            <div key={`${v.task_id}-${v.reviewer_profile ?? "reviewer"}`} className="flex items-center gap-2 border-b border-line py-1.5 text-sec text-ink-2">
+              <span className="flex-1">{v.reviewer_profile ?? "reviewer"}</span>
+              <span
+                className={cn(
+                  "rounded-full border px-[7px] py-0.5 font-data text-micro",
+                  v.verifier_verdict === "APPROVED" ? "border-status-ok/35 text-status-ok" : "border-status-warn/40 text-status-warn",
+                )}
+              >
                 {v.verifier_verdict ?? v.review_run_state ?? "—"}
               </span>
             </div>
@@ -601,20 +593,18 @@ function ErgebnisTab({
       {/* Deliverables — Auth-geschützte Endpoints: openAuthedApiFile statt raw href */}
       {deliverables.length > 0 ? (
         <div>
-          <div style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-            {de.fleet.detailDeliverables}
-          </div>
+          <Eyebrow className="mb-1.5">{de.fleet.detailDeliverables}</Eyebrow>
           {deliverables.map((d) => (
             <button
               key={d.url || d.filename}
               type="button"
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
-              style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", font: "400 11.5px/1 var(--hc-font-sans)", color: "var(--fleet-puls)", background: "none", border: "none", cursor: "pointer", width: "100%", textAlign: "left", borderBottom: "1px solid var(--fleet-linie)" }}
+              className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span className="flex-1 truncate">
                 {d.filename}
               </span>
-              <span style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>
+              <span className="font-data text-micro text-ink-3">
                 {d.size > 0 ? `${Math.round(d.size / 1024)} kB` : "↗"}
               </span>
             </button>

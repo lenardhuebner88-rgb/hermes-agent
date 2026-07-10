@@ -21,6 +21,7 @@ import { usePlanSpecDetail } from "../../hooks/useControlData";
 import type { RunsCostsResponse, LanesCatalogResponse } from "../../lib/schemas";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
+import { Eyebrow } from "../../components/primitives";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
 
@@ -290,7 +291,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       <div className="fleet-plan-kopf">
         <div className="fleet-plan-kopf-n">
           {ps.topic || ps.filename}
-          <span className={`fleet-ps-badge ${isSignedParkedChain ? "fleet-ps-badge-ok" : "fleet-ps-badge-amber"}`} style={{ marginLeft: "auto" }}>
+          <span className={`fleet-ps-badge ${isSignedParkedChain ? "fleet-ps-badge-gruen" : "fleet-ps-badge-amber"}`} style={{ marginLeft: "auto" }}>
             {isSignedParkedChain ? "signiert · geparkt" : "freigabe: operator"}
           </span>
         </div>
@@ -366,7 +367,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
               {ps.live_test_depth}
             </span>
           ) : (
-            <span style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>—</span>
+            <span className="font-data text-micro text-ink-3">—</span>
           )}
         </div>
 
@@ -491,11 +492,10 @@ function ProfileSelect({ value, options, changed, onChange }: ProfileSelectProps
       className={`fleet-sel${changed ? " fleet-sel-puls" : ""}`}
       style={{
         background: "var(--fleet-karte)",
-        border: `1px solid ${changed ? "rgba(55,224,255,.4)" : "var(--fleet-linie-stark)"}`,
-        color: changed ? "var(--fleet-puls)" : "var(--fleet-t1)",
+        border: `1px solid ${changed ? "color-mix(in oklab, var(--color-live) 40%, transparent)" : "var(--fleet-linie-stark)"}`,
+        color: changed ? "var(--color-live)" : "var(--fleet-t1)",
         borderRadius: 9,
         padding: "6px 9px",
-        font: "500 11px var(--hc-font-mono)",
         cursor: "pointer",
         minHeight: 40,
         minWidth: 90,
@@ -540,7 +540,7 @@ function TokenBudgetBlock({
       </div>
 
       {groups.length === 0 ? (
-        <p style={{ font: "400 11px/1.4 var(--hc-font-sans)", color: "var(--fleet-t3)" }}>
+        <p className="text-sec text-ink-3">
           {de.fleet.planBudgetNichtVerfuegbar}
         </p>
       ) : (
@@ -559,12 +559,12 @@ function TokenBudgetBlock({
           return (
             <div key={gi} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: gi > 0 ? 4 : 0 }}>
               <div className="fleet-bg-head">
-                <span style={{ font: "500 9.5px/1 var(--hc-font-sans)", color: "var(--fleet-t3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                <Eyebrow>
                   {group.title}
-                  {group.plan ? <span style={{ textTransform: "none", letterSpacing: 0, opacity: 0.75 }}> · {group.plan}</span> : null}
-                </span>
+                  {group.plan ? <span className="normal-case tracking-normal opacity-75"> · {group.plan}</span> : null}
+                </Eyebrow>
                 {earliestReset ? (
-                  <code style={{ fontFamily: "var(--hc-font-mono)", fontSize: 10, color: "var(--fleet-t3)" }}>
+                  <code className="font-data text-micro text-ink-3">
                     {de.fleet.planTokenReset(fmtResetAt(earliestReset))}
                   </code>
                 ) : null}
@@ -576,8 +576,8 @@ function TokenBudgetBlock({
                 const barColor = tone === "danger"
                   ? "linear-gradient(90deg,color-mix(in srgb, var(--fleet-rot) 50%, transparent),var(--fleet-rot))"
                   : tone === "warn"
-                  ? "linear-gradient(90deg,rgba(245,168,60,.4),var(--fleet-signal))"
-                  : "linear-gradient(90deg,rgba(67,214,154,.5),var(--fleet-gruen))";
+                  ? "linear-gradient(90deg,color-mix(in srgb, var(--fleet-signal) 40%, transparent),var(--fleet-signal))"
+                  : "linear-gradient(90deg,color-mix(in srgb, var(--fleet-gruen) 50%, transparent),var(--fleet-gruen))";
 
                 return (
                   <div key={i} className="fleet-bg-row">

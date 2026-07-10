@@ -127,9 +127,9 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
       />,
     );
 
-    expect(html).toContain("overflow-y:auto");
-    expect(html).toContain("overflow-wrap:anywhere");
-    expect(html).toContain("white-space:pre-wrap");
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain("wrap-anywhere");
+    expect(html).toContain("whitespace-pre-wrap");
     expect(html).toContain("ENDE");
     expect(html).not.toContain("mask-image");
   });
