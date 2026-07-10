@@ -60,7 +60,9 @@ class _ToolExecutor(Protocol):
 
 
 class _LiveSession(Protocol):
-    async def send_realtime_input(self, *, audio: types.Blob) -> None: ...
+    async def send_realtime_input(
+        self, *, audio: types.Blob | None = None, video: types.Blob | None = None
+    ) -> None: ...
 
     async def send_client_content(
         self, *, turns: types.Content, turn_complete: bool = True
@@ -262,6 +264,45 @@ class GeminiLiveSession:
             await session.send_client_content(
                 turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True,
+            )
+
+    async def _send_video(
+        self,
+        session: _LiveSession,
+        video_in: asyncio.Queue[bytes],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Drain camera/screen stills into the live session.
+
+        Like :meth:`_send_text`, a video frame has no replay queue: ``run()``
+        drains ``video_in`` at the start of every (re)connect iteration, so a
+        frame queued before a drop never survives into the next session
+        anyway — a stale still is worthless once the moment it captured has
+        passed, unlike audio which is retained for at-least-once replay. So
+        there is nothing to track here beyond stopping cleanly — if the
+        connection dies between popping an item and sending it, that frame is
+        simply gone.
+        """
+        while not stop_event.is_set():
+            get_task = asyncio.create_task(video_in.get())
+            stop_task = asyncio.create_task(stop_event.wait())
+            try:
+                await asyncio.wait(
+                    {get_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in (get_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(get_task, stop_task, return_exceptions=True)
+            if not (get_task.done() and not get_task.cancelled()):
+                return
+            if stop_event.is_set():
+                return
+            frame = get_task.result()
+            await session.send_realtime_input(
+                video=types.Blob(data=frame, mime_type="image/jpeg")
             )
 
     async def _execute_tool_calls(
@@ -552,6 +593,7 @@ class GeminiLiveSession:
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
         text_in: asyncio.Queue[str] | None,
+        video_in: asyncio.Queue[bytes] | None,
     ) -> bool:
         stop_sender = asyncio.Event()
         sender = asyncio.create_task(self._send_audio(session, audio_in, stop_sender))
@@ -563,7 +605,16 @@ class GeminiLiveSession:
             if text_in is not None
             else None
         )
-        pending = {sender, receiver} | ({text_sender} if text_sender else set())
+        video_sender = (
+            asyncio.create_task(self._send_video(session, video_in, stop_sender))
+            if video_in is not None
+            else None
+        )
+        pending = (
+            {sender, receiver}
+            | ({text_sender} if text_sender else set())
+            | ({video_sender} if video_sender else set())
+        )
         try:
             done, _ = await asyncio.wait(
                 pending,
@@ -591,11 +642,35 @@ class GeminiLiveSession:
                 return reconnect
             if text_sender is not None and text_sender in done:
                 raise ConnectionError("Gemini Live text sender stopped unexpectedly")
+            if video_sender is not None and video_sender in done:
+                raise ConnectionError("Gemini Live video sender stopped unexpectedly")
             raise ConnectionError("Gemini Live audio sender stopped unexpectedly")
         finally:
             await self._cancel_tasks(
-                *({sender, receiver} | ({text_sender} if text_sender else set()))
+                *(
+                    {sender, receiver}
+                    | ({text_sender} if text_sender else set())
+                    | ({video_sender} if video_sender else set())
+                )
             )
+
+    @staticmethod
+    def _drain_video_queue(video_in: asyncio.Queue[bytes] | None) -> None:
+        """Discard any stills queued before this connect attempt.
+
+        A frame captured for a session that is about to be replaced by a
+        reconnect is stale by the time the new session would send it — video
+        is not part of the audio replay path (see :meth:`_send_video`), so
+        each (re)connect iteration starts from an empty queue instead of
+        carrying old frames forward.
+        """
+        if video_in is None:
+            return
+        while True:
+            try:
+                video_in.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     async def run(
         self,
@@ -603,13 +678,16 @@ class GeminiLiveSession:
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
         text_in: asyncio.Queue[str] | None = None,
+        video_in: asyncio.Queue[bytes] | None = None,
     ) -> None:
         """Run until cancelled, or request cascade fallback on a Live API failure.
 
         ``text_in`` is optional so a caller that never offers typed input
         keeps today's behavior byte-identical: with it ``None`` (the
         default), no text-drain task is ever created and
-        ``send_client_content`` is never called.
+        ``send_client_content`` is never called. ``video_in`` is optional the
+        same way, and additionally has its queue drained (see
+        :meth:`_drain_video_queue`) at the start of every connect attempt.
         """
 
         self._input_transcript_parts = []
@@ -618,6 +696,7 @@ class GeminiLiveSession:
         try:
             client = genai.Client(api_key=self._api_key)
             while True:
+                self._drain_video_queue(video_in)
                 config = self._connect_config()
                 async with client.aio.live.connect(
                     model=self._model,
@@ -635,6 +714,7 @@ class GeminiLiveSession:
                             events_out,
                             tool_executor,
                             text_in,
+                            video_in,
                         )
                     finally:
                         self._active_session = None

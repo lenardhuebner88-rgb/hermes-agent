@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,14 @@ from hermes_cli.voice_ws import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "voice_sample_16k.pcm"
+FIXTURE_VIDEO = Path(__file__).parent / "fixtures" / "vision_marker.jpg"
+
+
+def _video_frame_message(data: bytes, *, source: str | None = "camera") -> dict:
+    payload = {"type": "video_frame", "data": base64.b64encode(data).decode("ascii")}
+    if source is not None:
+        payload["source"] = source
+    return {"text": json.dumps(payload)}
 
 
 def _voice_app(
@@ -473,7 +482,9 @@ def test_live_failure_falls_back_on_same_websocket(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             await audio_in.get()
             audio_in.task_done()
             raise LiveFallbackRequired("quota")
@@ -656,7 +667,9 @@ def test_live_route_seeds_and_updates_resumption_handle_for_valid_session(
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -694,7 +707,9 @@ def test_live_route_ignores_malformed_session_param(monkeypatch, raw_session):
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -725,7 +740,9 @@ def test_live_route_passes_configured_voice_and_persona_to_session(monkeypatch):
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -751,7 +768,9 @@ def test_live_session_mode_live_event_precedes_listening_state(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             await events_out.put({"type": "mode", "value": "live"})
             await events_out.put({"type": "state", "value": "listening"})
             await asyncio.Event().wait()
@@ -788,6 +807,7 @@ async def _read_test_voice_frames(websocket, fallback_mode):
     events_out = asyncio.Queue()
     disconnected = asyncio.Event()
     text_in = asyncio.Queue(maxsize=8)
+    video_in = asyncio.Queue(maxsize=voice_ws._VIDEO_QUEUE_MAXSIZE)
     config = voice_ws.VoiceWebConfig()
     text_turn = voice_ws._FallbackTextTurn()
     result = await voice_ws._read_voice_frames(
@@ -798,10 +818,11 @@ async def _read_test_voice_frames(websocket, fallback_mode):
         fallback_mode,
         disconnected,
         text_in,
+        video_in,
         config,
         text_turn,
     )
-    return result, fallback_pcm, events_out
+    return result, fallback_pcm, events_out, video_in
 
 
 @pytest.mark.asyncio
@@ -814,7 +835,7 @@ async def test_healthy_live_audio_keeps_recent_bounded_fallback_preroll(monkeypa
     messages = [{"bytes": frame} for frame in frames]
     messages.append({"text": json.dumps({"type": "end"})})
 
-    result, fallback_pcm, events_out = await _read_test_voice_frames(
+    result, fallback_pcm, events_out, _video_in = await _read_test_voice_frames(
         _FakeVoiceInput(messages),
         asyncio.Event(),
     )
@@ -840,7 +861,7 @@ async def test_live_failure_keeps_preroll_then_counts_new_fallback_audio(monkeyp
         if index == 3:
             fallback_mode.set()
 
-    result, fallback_pcm, events_out = await _read_test_voice_frames(
+    result, fallback_pcm, events_out, _video_in = await _read_test_voice_frames(
         _FakeVoiceInput(messages, enter_fallback),
         fallback_mode,
     )
@@ -862,7 +883,7 @@ async def test_missing_key_fallback_keeps_full_audio_up_to_hard_cap(monkeypatch)
     messages = [{"bytes": frame} for frame in frames]
     messages.append({"text": json.dumps({"type": "end"})})
 
-    result, fallback_pcm, events_out = await _read_test_voice_frames(
+    result, fallback_pcm, events_out, _video_in = await _read_test_voice_frames(
         _FakeVoiceInput(messages),
         fallback_mode,
     )
@@ -883,7 +904,7 @@ async def test_fallback_audio_exceeding_hard_cap_returns_structured_error(monkey
     frame = b"\x01\x00" * 2
     messages = [{"bytes": frame} for _ in range(4)]
 
-    result, fallback_pcm, events_out = await _read_test_voice_frames(
+    result, fallback_pcm, events_out, _video_in = await _read_test_voice_frames(
         _FakeVoiceInput(messages),
         fallback_mode,
     )
@@ -900,7 +921,7 @@ async def test_single_oversize_live_frame_still_hits_hard_cap(monkeypatch):
     monkeypatch.setattr(voice_ws, "_MAX_FALLBACK_PCM_BYTES", 12)
     monkeypatch.setattr(voice_ws, "_FALLBACK_PREROLL_PCM_BYTES", 4)
 
-    result, fallback_pcm, events_out = await _read_test_voice_frames(
+    result, fallback_pcm, events_out, _video_in = await _read_test_voice_frames(
         _FakeVoiceInput([{"bytes": b"\x01\x00" * 7}]),
         asyncio.Event(),
     )
@@ -1115,7 +1136,9 @@ def test_unexpected_live_error_is_safe_and_never_cascades(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             raise ValueError(f"programmer failure containing {secret}")
 
     async def unexpected_fallback(*args, **kwargs):
@@ -1156,7 +1179,9 @@ def test_interrupt_flushes_playback_semantics_and_live_keeps_receiving(
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             for _ in range(2):
                 frame = await audio_in.get()
                 received_frames.append(frame)
@@ -1675,7 +1700,9 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             raise voice_ws.LiveFallbackRequired("done")
 
     captured_executor = {}
@@ -1729,7 +1756,9 @@ def test_live_mode_text_frame_emits_transcript_and_reaches_session_text_in(
         def __init__(self, *args, **kwargs):
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
             captured["text_in"] = text_in
             await asyncio.Event().wait()
 
@@ -1935,6 +1964,196 @@ def test_invalid_text_frames_return_structured_error_and_session_keeps_working(
         assert ws.receive_json() == {"type": "state", "value": "speaking"}
         assert ws.receive_bytes()
         assert ws.receive_json() == {"type": "state", "value": "listening"}
+
+
+def test_live_route_video_frame_reaches_session_video_in_byte_exact(monkeypatch):
+    """Real client wire format: ``{"type":"video_frame","data":"<base64-
+    jpeg>","source":"camera"}`` must arrive byte-exact in the Live bridge's
+    ``video_in`` queue, decoded from a real JPEG fixture (live-verified
+    against the Gemini API)."""
+    from hermes_cli import voice_ws
+
+    fixture_bytes = FIXTURE_VIDEO.read_bytes()
+    captured = {}
+    constructed = threading.Event()
+
+    class CapturingGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            constructed.set()
+
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
+            captured["video_in"] = video_in
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
+    monkeypatch.setattr(voice_ws, "_LIVE_END_GRACE_SECONDS", 0.01)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        assert constructed.wait(timeout=2)
+        ws.send_json(
+            {
+                "type": "video_frame",
+                "data": base64.b64encode(fixture_bytes).decode("ascii"),
+                "source": "camera",
+            }
+        )
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+    video_in = captured["video_in"]
+    assert video_in.get_nowait() == fixture_bytes
+
+
+@pytest.mark.asyncio
+async def test_video_frame_oversize_rejected_then_valid_frame_still_lands():
+    from hermes_cli import voice_ws
+
+    oversized = voice_ws._VIDEO_FRAME_MAGIC + b"\x00" * voice_ws._MAX_VIDEO_FRAME_BYTES
+    valid = FIXTURE_VIDEO.read_bytes()
+    messages = [
+        _video_frame_message(oversized),
+        _video_frame_message(valid),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), asyncio.Event()
+    )
+
+    assert result == "end"
+    error_event = events_out.get_nowait()
+    assert error_event["type"] == "error"
+    assert error_event["error"]["code"] == "video_frame_too_large"
+    assert events_out.empty()
+    assert video_in.get_nowait() == valid
+
+
+@pytest.mark.asyncio
+async def test_video_frame_rate_limit_drops_third_rapid_frame():
+    valid = FIXTURE_VIDEO.read_bytes()
+    messages = [
+        _video_frame_message(valid),
+        _video_frame_message(valid),
+        _video_frame_message(valid),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), asyncio.Event()
+    )
+
+    assert result == "end"
+    error_event = events_out.get_nowait()
+    assert error_event["type"] == "error"
+    assert error_event["error"]["code"] == "video_rate_limited"
+    assert events_out.empty()
+    landed = []
+    while not video_in.empty():
+        landed.append(video_in.get_nowait())
+    assert landed == [valid, valid]
+
+
+@pytest.mark.asyncio
+async def test_video_frame_fallback_mode_returns_advisory_and_queues_nothing():
+    valid = FIXTURE_VIDEO.read_bytes()
+    fallback_mode = asyncio.Event()
+    fallback_mode.set()
+    messages = [
+        _video_frame_message(valid),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), fallback_mode
+    )
+
+    assert result == "end"
+    assert events_out.get_nowait() == {
+        "type": "error",
+        "error": {
+            "code": "video_unavailable_fallback",
+            "message": "Sehen ist im Fallback-Modus nicht verfügbar.",
+        },
+    }
+    assert events_out.empty()
+    assert video_in.empty()
+
+
+@pytest.mark.asyncio
+async def test_video_frame_invalid_base64_and_non_jpeg_return_invalid_video_frame():
+    messages = [
+        {
+            "text": json.dumps(
+                {
+                    "type": "video_frame",
+                    "data": "not-base64!!",
+                    "source": "camera",
+                }
+            )
+        },
+        {
+            "text": json.dumps(
+                {
+                    "type": "video_frame",
+                    "data": base64.b64encode(b"not a jpeg at all").decode("ascii"),
+                    "source": "camera",
+                }
+            )
+        },
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), asyncio.Event()
+    )
+
+    assert result == "end"
+    for _ in range(2):
+        error_event = events_out.get_nowait()
+        assert error_event["type"] == "error"
+        assert error_event["error"]["code"] == "invalid_video_frame"
+    assert events_out.empty()
+    assert video_in.empty()
+
+
+@pytest.mark.asyncio
+async def test_video_frame_missing_or_invalid_source_returns_invalid_video_frame():
+    valid = FIXTURE_VIDEO.read_bytes()
+    messages = [
+        _video_frame_message(valid, source=None),
+        _video_frame_message(valid, source="microphone"),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), asyncio.Event()
+    )
+
+    assert result == "end"
+    for _ in range(2):
+        error_event = events_out.get_nowait()
+        assert error_event["type"] == "error"
+        assert error_event["error"]["code"] == "invalid_video_frame"
+    assert events_out.empty()
+    assert video_in.empty()
+
+
+def test_enqueue_video_frame_drops_oldest_when_queue_is_full():
+    from hermes_cli import voice_ws
+
+    video_in = asyncio.Queue(maxsize=voice_ws._VIDEO_QUEUE_MAXSIZE)
+    frames = [f"frame-{index}".encode() for index in range(5)]
+    for frame in frames:
+        voice_ws._enqueue_video_frame(video_in, frame)
+
+    remaining = []
+    while not video_in.empty():
+        remaining.append(video_in.get_nowait())
+
+    assert remaining == frames[1:]
 
 
 def test_voice_client_composer_form_present_with_max_length():

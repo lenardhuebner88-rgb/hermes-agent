@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+import base64
+import binascii
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
@@ -65,6 +67,12 @@ _PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
 _FALLBACK_CANCEL_TIMEOUT_SECONDS = 7.0
 _MAX_TEXT_FRAME_CHARS = 4000
+_VIDEO_FRAME_MAGIC = b"\xff\xd8"
+_MAX_VIDEO_FRAME_BYTES = 512 * 1024
+_VIDEO_FRAME_RATE_LIMIT = 2
+_VIDEO_FRAME_RATE_WINDOW_SECONDS = 1.0
+_VIDEO_QUEUE_MAXSIZE = 4
+_VALID_VIDEO_SOURCES = {"camera", "screen"}
 _FFMPEG_TIMEOUT_SECONDS = 60.0
 _OUTPUT_PCM_CHUNK_BYTES = 24_000
 _RESUMPTION_TTL_SECONDS = 60 * 60
@@ -862,6 +870,56 @@ def _validated_text_frame(control: dict[str, Any]) -> str | None:
     return text
 
 
+def _decode_video_frame(control: dict[str, Any]) -> bytes | None:
+    """Decode+validate a ``video_frame`` control payload; ``None`` means invalid.
+
+    ``source`` is required to be one of the known values (forward-compat for
+    future sources is limited to that allowlist, not left wide open) and
+    ``data`` must be strict base64 of a JPEG still (checked via its magic
+    bytes) — anything else is rejected without ever touching a logger.
+    """
+    if control.get("source") not in _VALID_VIDEO_SOURCES:
+        return None
+    raw_data = control.get("data")
+    if not isinstance(raw_data, str) or not raw_data:
+        return None
+    try:
+        decoded = base64.b64decode(raw_data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not decoded.startswith(_VIDEO_FRAME_MAGIC):
+        return None
+    return decoded
+
+
+def _video_frame_rate_allowed(frame_times: deque[float]) -> bool:
+    """Allow at most ``_VIDEO_FRAME_RATE_LIMIT`` frames per rolling second."""
+    now = time.monotonic()
+    while frame_times and now - frame_times[0] >= _VIDEO_FRAME_RATE_WINDOW_SECONDS:
+        frame_times.popleft()
+    if len(frame_times) >= _VIDEO_FRAME_RATE_LIMIT:
+        return False
+    frame_times.append(now)
+    return True
+
+
+def _enqueue_video_frame(video_in: asyncio.Queue[bytes], frame: bytes) -> None:
+    """Queue one decoded JPEG still, dropping the oldest queued frame if full.
+
+    A stale queued frame is worthless for live vision, so a full queue makes
+    room for the newest frame instead of ever blocking or rejecting it.
+    """
+    while True:
+        try:
+            video_in.put_nowait(frame)
+            return
+        except asyncio.QueueFull:
+            try:
+                video_in.get_nowait()
+            except asyncio.QueueEmpty:
+                continue
+
+
 async def _try_start_fallback_text_turn(
     text: str,
     config: VoiceWebConfig,
@@ -914,9 +972,11 @@ async def _read_voice_frames(
     fallback_mode: asyncio.Event,
     disconnected: asyncio.Event,
     text_in: asyncio.Queue[str],
+    video_in: asyncio.Queue[bytes],
     config: VoiceWebConfig,
     text_turn: _FallbackTextTurn,
 ) -> str:
+    video_frame_times: deque[float] = deque()
     try:
         while True:
             message = await websocket.receive()
@@ -1031,6 +1091,68 @@ async def _read_voice_frames(
                     text_turn,
                     emit_transcript=True,
                 )
+                continue
+            if control_type == "video_frame":
+                if fallback_mode.is_set():
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_unavailable_fallback",
+                                "message": (
+                                    "Sehen ist im Fallback-Modus nicht verfügbar."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                decoded_frame = _decode_video_frame(control)
+                if decoded_frame is None:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_video_frame",
+                                "message": "Das Video-Frame ist ungültig.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                if len(decoded_frame) > _MAX_VIDEO_FRAME_BYTES:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_frame_too_large",
+                                "message": (
+                                    "Das Video-Frame überschreitet das Größenlimit."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                if not _video_frame_rate_allowed(video_frame_times):
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_rate_limited",
+                                "message": (
+                                    "Zu viele Video-Frames. Bitte langsamer senden."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                _enqueue_video_frame(video_in, decoded_frame)
                 continue
             await _put_event(
                 events_out,
@@ -1219,6 +1341,7 @@ async def _run_live_bridge(
     disconnected: asyncio.Event,
     session_id: str | None,
     text_in: asyncio.Queue[str] | None = None,
+    video_in: asyncio.Queue[bytes] | None = None,
 ) -> bool:
     if session_id:
         session = GeminiLiveSession(
@@ -1248,7 +1371,9 @@ async def _run_live_bridge(
         )
     )
     try:
-        await session.run(audio_in, events_out, executor, text_in=text_in)
+        await session.run(
+            audio_in, events_out, executor, text_in=text_in, video_in=video_in
+        )
     except LiveFallbackRequired:
         fallback_mode.set()
         await _put_event(
@@ -1361,6 +1486,7 @@ def create_voice_router(
             maxsize=_EVENT_QUEUE_ITEMS
         )
         text_in: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+        video_in: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_VIDEO_QUEUE_MAXSIZE)
         fallback_pcm = bytearray()
         fallback_mode = asyncio.Event()
         disconnected = asyncio.Event()
@@ -1377,6 +1503,7 @@ def create_voice_router(
                 fallback_mode,
                 disconnected,
                 text_in,
+                video_in,
                 config,
                 text_turn,
             )
@@ -1401,6 +1528,7 @@ def create_voice_router(
                     disconnected,
                     session_id,
                     text_in,
+                    video_in,
                 )
             )
         else:

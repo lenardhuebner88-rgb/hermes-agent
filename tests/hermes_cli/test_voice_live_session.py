@@ -103,6 +103,8 @@ class _FakeSDKSession:
         self.audio_sent = asyncio.Event()
         self.expected_audio_sent = asyncio.Event()
         self.realtime_inputs: list[types.Blob] = []
+        self.video_inputs: list[types.Blob] = []
+        self.video_sent = asyncio.Event()
         self.tool_responses: list[list[types.FunctionResponse]] = []
         self.client_contents: list[tuple[types.Content, bool]] = []
         self.client_content_sent = asyncio.Event()
@@ -113,12 +115,18 @@ class _FakeSDKSession:
         self.client_contents.append((turns, turn_complete))
         self.client_content_sent.set()
 
-    async def send_realtime_input(self, *, audio: types.Blob) -> None:
+    async def send_realtime_input(
+        self, *, audio: types.Blob | None = None, video: types.Blob | None = None
+    ) -> None:
         self.send_started.set()
         if self._send_gate is not None:
             await self._send_gate.wait()
         if self._send_error is not None:
             raise self._send_error
+        if video is not None:
+            self.video_inputs.append(video)
+            self.video_sent.set()
+            return
         self.realtime_inputs.append(audio)
         self.audio_sent.set()
         if len(self.realtime_inputs) >= self._expected_sends:
@@ -1314,6 +1322,162 @@ async def test_run_without_text_in_never_calls_send_client_content(
         await task
 
     assert sdk_session.client_contents == []
+
+
+@pytest.mark.asyncio
+async def test_run_with_video_in_sends_realtime_input_with_jpeg_mime_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+    frame = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), video_in=video_in
+        )
+    )
+    # Queued only after connecting so the per-connect drain (see
+    # ``_drain_video_queue``) does not discard it before ``_send_video``
+    # ever gets to it.
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    await video_in.put(frame)
+    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(sdk_session.video_inputs) == 1
+    blob = sdk_session.video_inputs[0]
+    assert blob.data == frame
+    assert blob.mime_type == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_video_drain_stops_cleanly_and_does_not_keep_draining_after_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaked drain task would silently keep calling ``send_realtime_input``
+    on the (now-exited) session forever — assert it does not."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), video_in=video_in
+        )
+    )
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    await video_in.put(b"\xff\xd8erstes-bild")
+    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await video_in.put(b"\xff\xd8sollte-nicht-mehr-gesendet-werden")
+    await asyncio.sleep(0.05)
+
+    assert len(sdk_session.video_inputs) == 1
+
+
+def test_drain_video_queue_clears_all_queued_frames() -> None:
+    """Direct unit test of the mechanism ``run()`` calls at every (re)connect
+    iteration: a frame sitting unconsumed in ``video_in`` must not survive
+    into whichever session connects next."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+    video_in.put_nowait(b"\xff\xd8one")
+    video_in.put_nowait(b"\xff\xd8two")
+
+    GeminiLiveSession._drain_video_queue(video_in)
+
+    assert video_in.empty()
+
+
+def test_drain_video_queue_accepts_none() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    GeminiLiveSession._drain_video_queue(None)
+
+
+@pytest.mark.asyncio
+async def test_video_in_flight_frame_is_not_replayed_after_go_away_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike audio (see ``test_go_away_replays_blocked_frame_first_after_
+    reconnect``), a video frame already pulled from ``video_in`` and blocked
+    mid-``send_realtime_input`` when a go-away reconnect lands is simply
+    dropped — it must never reach the second session. A fresh frame queued
+    after the reconnect must still reach the new session normally."""
+
+    from hermes_cli import voice_live_session
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    blocked_send = asyncio.Event()
+    first = _FakeSDKSession(
+        turns=[
+            [
+                types.LiveServerMessage(
+                    session_resumption_update=types.LiveServerSessionResumptionUpdate(
+                        new_handle="resume-123",
+                        resumable=True,
+                    )
+                ),
+                types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s")),
+            ]
+        ],
+        send_gate=blocked_send,
+        wait_for_send_before_receive=True,
+    )
+    second = _FakeSDKSession()
+    live = _FakeLive([first, second])
+    _install_fake_client(monkeypatch, live)
+    monkeypatch.setattr(
+        voice_live_session,
+        "_SENDER_HANDOFF_SECONDS",
+        0.01,
+        raising=False,
+    )
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), video_in=video_in
+        )
+    )
+    # Queued only after the first connect so ``run()``'s per-iteration drain
+    # (see ``_drain_video_queue``) does not remove it before the session
+    # even exists — this frame must instead be dropped by the in-flight
+    # cancellation below, which is the behavior under test.
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    stale_frame = b"\xff\xd8stale-frame"
+    await video_in.put(stale_frame)
+    await asyncio.wait_for(first.send_started.wait(), timeout=1)
+    await asyncio.wait_for(live.second_connect_called.wait(), timeout=1)
+
+    fresh_frame = b"\xff\xd8fresh-frame"
+    await video_in.put(fresh_frame)
+    await asyncio.wait_for(second.video_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert first.video_inputs == []
+    assert [blob.data for blob in second.video_inputs] == [fresh_frame]
 
 
 @pytest.mark.asyncio
