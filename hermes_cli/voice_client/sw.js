@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE = "hermes-voice-v1";
+const CACHE = "hermes-voice-v2";
 const CORE_ASSETS = [
   "/voice/offline.html",
   "/voice/app.js",

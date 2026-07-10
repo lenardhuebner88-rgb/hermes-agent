@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#071310" />
+    <meta name="theme-color" content="#0e100f" />
     <meta name="color-scheme" content="dark" />
     <meta
       name="description"
@@ -14,13 +14,52 @@
     <link rel="apple-touch-icon" href="/voice/icon-192.png" />
     <title>Hermes Voice</title>
     <style>
+      /* Token sheet copied 1:1 from web/src/control/theme.css ("Bronze auf
+         Graphit") — voice_client is a standalone vanilla app and does not
+         import the /control theme, so the values are duplicated here as
+         plain CSS custom properties. Keep in sync by hand if theme.css
+         changes the calibrated palette. */
       :root {
+        --color-surface-0: #0e100f;
+        --color-surface-1: #141715;
+        --color-surface-2: #1a1e1b;
+        --color-surface-3: #232824;
+        --color-line: #2a302b;
+        --color-line-soft: #1e2420;
+        --color-live: #c9884a;
+        --color-bronze: #c9884a;
+        --color-bronze-hi: #dda05f;
+        --color-status-ok: #86b97e;
+        --color-status-warn: #d9b23a;
+        --color-status-alert: #e0604f;
+        --color-spar: #5fb8a8;
+        --color-spar-hi: #7bd0c0;
+        --color-ink: #ebe7de;
+        --color-ink-2: #a9a59b;
+        --color-ink-3: #757166;
+        --radius-panel: 10px;
+        --radius-card: 7px;
+
+        /* Voice-local aliases: the state the app is actually IN drives the
+           dominant accent everywhere (orb, action button, focus rings).
+           `--accent`/`--accent-hi` default to bronze (live); the mode
+           attribute on <body> (data-mode) swaps them to the cool teal spar
+           channel once the budget-saver mode ships (next slice) — the
+           switch itself is wired now so that slice is CSS-only. */
+        --accent: var(--color-bronze);
+        --accent-hi: var(--color-bronze-hi);
+
         font-family:
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
           "Segoe UI", sans-serif;
-        color: #f2fbf7;
-        background: #071310;
+        color: var(--color-ink);
+        background: var(--color-surface-0);
         font-synthesis: none;
+      }
+
+      body[data-mode="spar"] {
+        --accent: var(--color-spar);
+        --accent-hi: var(--color-spar-hi);
       }
 
       * {
@@ -32,8 +71,9 @@
         min-height: 100svh;
         margin: 0;
         background:
-          radial-gradient(circle at 50% -10%, rgba(52, 211, 153, 0.22), transparent 42%),
-          linear-gradient(165deg, #0b1d18 0%, #071310 55%, #040a09 100%);
+          radial-gradient(circle at 50% -10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
+          linear-gradient(165deg, var(--color-surface-1) 0%, var(--color-surface-0) 55%, #050605 100%);
+        transition: background 220ms ease-out;
       }
 
       body::before {
@@ -41,8 +81,8 @@
         inset: 0;
         z-index: -1;
         content: "";
-        opacity: 0.16;
-        background-image: linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+        opacity: 0.14;
+        background-image: linear-gradient(rgba(235, 231, 222, 0.05) 1px, transparent 1px);
         background-size: 100% 3rem;
         mask-image: linear-gradient(to bottom, black, transparent 70%);
       }
@@ -65,9 +105,9 @@
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 0.7rem;
+        gap: 0.5rem;
         row-gap: 0.5rem;
-        color: #b8d9cb;
+        color: var(--color-ink-2);
         letter-spacing: 0.13em;
         text-transform: uppercase;
       }
@@ -78,14 +118,18 @@
       }
 
       .brand h1 {
-        margin: 0;
+        margin: 0 0.2rem 0 0;
+        color: var(--color-ink);
         font-size: 0.82rem;
         font-weight: 700;
       }
 
       #mode-badge {
-        padding: 0.2rem 0.55rem;
-        border: 1px solid rgba(167, 243, 208, 0.25);
+        display: inline-flex;
+        align-items: center;
+        min-height: 1.6rem;
+        padding: 0.2rem 0.6rem;
+        border: 1px solid var(--color-line);
         border-radius: 999px;
         font-size: 0.62rem;
         font-weight: 750;
@@ -94,82 +138,64 @@
       }
 
       #mode-badge[data-mode="live"] {
-        color: #6ee7b7;
-        border-color: rgba(52, 211, 153, 0.45);
-        background: rgba(52, 211, 153, 0.12);
+        color: var(--color-bronze-hi);
+        border-color: color-mix(in srgb, var(--color-bronze) 55%, transparent);
+        background: color-mix(in srgb, var(--color-bronze) 16%, transparent);
       }
 
       #mode-badge[data-mode="fallback"] {
-        color: #fde68a;
-        border-color: rgba(250, 204, 21, 0.45);
-        background: rgba(250, 204, 21, 0.12);
+        color: #fbe3a1;
+        border-color: color-mix(in srgb, var(--color-status-warn) 55%, transparent);
+        background: color-mix(in srgb, var(--color-status-warn) 16%, transparent);
       }
 
-      #install-chip {
-        padding: 0.2rem 0.55rem;
-        border: 1px solid rgba(167, 243, 208, 0.25);
+      .chip-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        min-height: 2.75rem;
+        padding: 0.35rem 0.75rem;
+        border: 1px solid var(--color-line);
         border-radius: 999px;
-        color: #b8d9cb;
-        background: transparent;
+        color: var(--color-ink-2);
+        background: var(--color-surface-2);
         font: inherit;
-        font-size: 0.62rem;
+        font-size: 0.68rem;
         font-weight: 750;
-        letter-spacing: 0.1em;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
         cursor: pointer;
-        transition: transform 120ms ease, background 120ms ease;
+        transition: transform 140ms ease-out, background 140ms ease-out, border-color 140ms ease-out;
+        touch-action: manipulation;
       }
 
-      #install-chip:hover {
-        background: rgba(167, 243, 208, 0.14);
+      .chip-button:hover:not(:disabled) {
+        border-color: color-mix(in srgb, var(--accent) 55%, var(--color-line));
+        background: var(--color-surface-3);
         transform: translateY(-1px);
       }
 
-      #install-chip:focus-visible {
-        outline: 3px solid #f8fafc;
-        outline-offset: 3px;
+      .chip-button:focus-visible {
+        outline: 2px solid var(--accent-hi);
+        outline-offset: 2px;
       }
 
-      .share-chip {
-        padding: 0.2rem 0.55rem;
-        border: 1px solid rgba(167, 243, 208, 0.25);
-        border-radius: 999px;
-        color: #b8d9cb;
-        background: transparent;
-        font: inherit;
-        font-size: 0.62rem;
-        font-weight: 750;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        cursor: pointer;
-        transition: transform 120ms ease, background 120ms ease;
-      }
-
-      .share-chip:hover:not(:disabled) {
-        background: rgba(167, 243, 208, 0.14);
-        transform: translateY(-1px);
-      }
-
-      .share-chip:focus-visible {
-        outline: 3px solid #f8fafc;
-        outline-offset: 3px;
-      }
-
-      .share-chip[aria-pressed="true"] {
-        color: #fff1f2;
-        background: #be123c;
-        border-color: rgba(190, 18, 60, 0.6);
-      }
-
-      .share-chip:disabled {
-        color: #5c7268;
+      .chip-button:disabled {
+        color: var(--color-ink-3);
         cursor: not-allowed;
-        opacity: 0.5;
+        opacity: 0.55;
+      }
+
+      .chip-button[aria-pressed="true"] {
+        color: #fff1f2;
+        background: var(--color-status-alert);
+        border-color: color-mix(in srgb, var(--color-status-alert) 65%, transparent);
       }
 
       .share-hint {
         flex-basis: 100%;
-        color: #8fa99d;
+        color: var(--color-ink-3);
         font-size: 0.68rem;
         letter-spacing: 0.01em;
         line-height: 1.35;
@@ -183,14 +209,15 @@
       .sharing-indicator {
         display: flex;
         align-items: center;
-        gap: 0.35rem;
+        gap: 0.4rem;
+        min-height: 1.75rem;
         /* class beats the UA [hidden] rule — restate it or the pill
            renders permanently (ui-verifier catch 2026-07-10) */
-        padding: 0.2rem 0.55rem;
-        border: 1px solid rgba(251, 113, 133, 0.45);
+        padding: 0.2rem 0.6rem;
+        border: 1px solid color-mix(in srgb, var(--color-status-alert) 55%, transparent);
         border-radius: 999px;
         color: #fecdd3;
-        background: rgba(190, 18, 60, 0.14);
+        background: color-mix(in srgb, var(--color-status-alert) 16%, transparent);
         font-size: 0.62rem;
         font-weight: 750;
         letter-spacing: 0.1em;
@@ -205,7 +232,7 @@
         width: 0.5rem;
         height: 0.5rem;
         border-radius: 50%;
-        background: #fb7185;
+        background: var(--color-status-alert);
         animation: sharing-pulse 1.2s ease-in-out infinite;
       }
 
@@ -220,61 +247,114 @@
         width: 96px;
         height: auto;
         max-height: 72px;
-        border-radius: 0.6rem;
-        border: 1px solid rgba(167, 243, 208, 0.25);
+        border-radius: var(--radius-card);
+        border: 1px solid var(--color-line);
         object-fit: cover;
       }
 
       .state-card,
       .transcript-card {
-        border: 1px solid rgba(167, 243, 208, 0.15);
-        border-radius: 1.5rem;
-        background: rgba(9, 27, 22, 0.72);
-        box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.24);
+        border: 1px solid var(--color-line);
+        border-radius: var(--radius-panel);
+        background: color-mix(in srgb, var(--color-surface-1) 92%, transparent);
+        box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.28);
         backdrop-filter: blur(1rem);
       }
 
       .state-card {
         position: relative;
         display: grid;
-        min-height: 15rem;
+        min-height: 16rem;
         padding: 2rem 1.5rem;
         overflow: hidden;
         place-items: center;
         text-align: center;
       }
 
-      .state-card::after {
+      /* Status orb — the single dominant per-state visual: idle/connecting/
+         listening ("live")/thinking/speaking/error each get a distinct
+         color + motion so the session state reads at a glance without
+         parsing the copy underneath it. */
+      .status-orb {
         position: absolute;
-        width: 11rem;
-        height: 11rem;
-        border: 1px solid rgba(110, 231, 183, 0.18);
+        top: 50%;
+        left: 50%;
+        z-index: 0;
+        width: 13rem;
+        height: 13rem;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle at 50% 42%,
+          color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 38%, transparent),
+          transparent 68%
+        );
+        transform: translate(-50%, -50%) scale(1);
+        pointer-events: none;
+        transition: background 220ms ease-out;
+      }
+
+      .status-orb::before,
+      .status-orb::after {
+        position: absolute;
+        inset: 0;
+        border: 1px solid color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 55%, transparent);
         border-radius: 50%;
         content: "";
-        box-shadow:
-          0 0 0 2rem rgba(52, 211, 153, 0.025),
-          0 0 0 4rem rgba(52, 211, 153, 0.018);
-        pointer-events: none;
-        transition: border-color 180ms ease, transform 180ms ease;
       }
 
-      body[data-voice-state="listening"] .state-card::after {
-        border-color: rgba(52, 211, 153, 0.58);
-        animation: breathe 2.4s ease-in-out infinite;
+      .status-orb::after {
+        inset: 2.1rem;
+        background: color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 22%, transparent);
+        box-shadow: 0 0 2.5rem color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 45%, transparent);
       }
 
-      body[data-voice-state="thinking"] .state-card::after {
-        border-color: rgba(250, 204, 21, 0.58);
-        animation: rotate-pulse 1.5s linear infinite;
+      body[data-voice-state="idle"] .status-orb {
+        --orb-color: var(--color-ink-3);
       }
 
-      body[data-voice-state="speaking"] .state-card::after {
-        border-color: rgba(96, 165, 250, 0.62);
-        animation: speak 650ms ease-in-out infinite alternate;
+      body[data-voice-state="connecting"] .status-orb {
+        --orb-color: var(--accent);
+        animation: orb-breathe 1.6s ease-in-out infinite;
       }
 
-      body[data-voice-state="error"] .state-card::after {
-        border-color: rgba(251, 113, 133, 0.62);
+      body[data-voice-state="listening"] .status-orb {
+        --orb-color: var(--accent);
+        animation: orb-breathe 2.4s ease-in-out infinite;
+      }
+
+      body[data-voice-state="thinking"] .status-orb {
+        --orb-color: var(--color-status-warn);
+        animation: orb-rotate 1.5s linear infinite;
+      }
+
+      body[data-voice-state="speaking"] .status-orb {
+        --orb-color: var(--color-status-ok);
+        animation: orb-speak 650ms ease-in-out infinite alternate;
+      }
+
+      body[data-voice-state="error"] .status-orb {
+        --orb-color: var(--color-status-alert);
+      }
+
+      @keyframes orb-breathe {
+        50% {
+          transform: translate(-50%, -50%) scale(1.07);
+        }
+      }
+
+      @keyframes orb-rotate {
+        50% {
+          transform: translate(-50%, -50%) rotate(180deg) scale(0.94);
+        }
+        100% {
+          transform: translate(-50%, -50%) rotate(360deg) scale(1);
+        }
+      }
+
+      @keyframes orb-speak {
+        to {
+          transform: translate(-50%, -50%) scale(1.09);
+        }
       }
 
       .state-copy {
@@ -284,37 +364,65 @@
 
       #voice-status {
         margin: 0;
-        font-size: clamp(2.8rem, 15vw, 6.5rem);
+        color: var(--color-ink);
+        font-size: clamp(2.6rem, 14vw, 5.8rem);
         font-weight: 720;
         line-height: 0.94;
-        letter-spacing: -0.055em;
+        letter-spacing: -0.05em;
       }
 
       #status-detail {
         max-width: 31rem;
         min-height: 2.8em;
-        margin: 1.2rem auto 0;
-        color: #a7c7ba;
+        margin: 1.1rem auto 0;
+        color: var(--color-ink-2);
         font-size: 0.98rem;
         line-height: 1.45;
       }
 
-      .usage-line {
-        margin: 0.4rem auto 0;
-        color: #7dd3b0;
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.02em;
+      .usage-meter {
+        display: grid;
+        gap: 0.35rem;
+        width: min(100%, 22rem);
+        margin: 1rem auto 0;
       }
 
-      /* class beats the UA [hidden] rule — restate it or the line renders
+      /* class beats the UA [hidden] rule — restate it or the meter renders
          permanently (same trap as .sharing-indicator above). */
-      .usage-line[hidden] {
+      .usage-meter[hidden] {
         display: none;
       }
 
+      .usage-meter-track {
+        height: 0.4rem;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--color-surface-2);
+      }
+
+      .usage-meter-fill {
+        height: 100%;
+        width: var(--usage-pct, 0%);
+        background: var(--accent);
+        border-radius: 999px;
+        transition: width 260ms ease-out, background 220ms ease-out;
+      }
+
+      .usage-meter--warn .usage-meter-fill {
+        background: var(--color-status-warn);
+      }
+
+      .usage-line {
+        margin: 0;
+        color: var(--color-ink-2);
+        font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+        font-size: 0.76rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
       .usage-line--warn {
-        color: #fde68a;
+        color: var(--color-status-warn);
       }
 
       .transcript-card {
@@ -324,7 +432,7 @@
 
       .section-title {
         margin: 0 0 1rem;
-        color: #89a99c;
+        color: var(--color-ink-3);
         font-size: 0.72rem;
         font-weight: 750;
         letter-spacing: 0.14em;
@@ -333,12 +441,13 @@
 
       #transcript {
         display: grid;
-        gap: 0.85rem;
+        gap: 0.6rem;
+        scroll-behavior: smooth;
       }
 
       #transcript-empty {
         margin: 2rem 0;
-        color: #6f8e82;
+        color: var(--color-ink-3);
         text-align: center;
       }
 
@@ -347,14 +456,17 @@
         max-width: 92%;
         padding: 0.9rem 1rem;
         gap: 0.2rem;
-        border-radius: 1rem 1rem 1rem 0.25rem;
-        background: rgba(255, 255, 255, 0.055);
+        border-radius: var(--radius-card) var(--radius-card) var(--radius-card) 0.2rem;
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-line-soft);
+        justify-self: start;
       }
 
       .transcript-entry--assistant {
         justify-self: end;
-        border-radius: 1rem 1rem 0.25rem;
-        background: rgba(52, 211, 153, 0.11);
+        border-radius: var(--radius-card) var(--radius-card) 0.2rem var(--radius-card);
+        background: color-mix(in srgb, var(--accent) 12%, var(--color-surface-2));
+        border-color: color-mix(in srgb, var(--accent) 35%, var(--color-line-soft));
       }
 
       .transcript-role,
@@ -363,17 +475,42 @@
       }
 
       .transcript-role {
-        color: #7dd3b0;
-        font-size: 0.72rem;
+        color: var(--color-ink-3);
+        font-size: 0.68rem;
         font-weight: 750;
-        letter-spacing: 0.06em;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
+      .transcript-entry--assistant .transcript-role {
+        color: var(--accent-hi);
+      }
+
       .transcript-text {
-        color: #e8f5ef;
+        color: var(--color-ink);
         line-height: 1.5;
         overflow-wrap: anywhere;
+      }
+
+      .transcript-entry--tool {
+        justify-self: start;
+        display: inline-flex;
+        align-items: center;
+        max-width: none;
+        padding: 0.35rem 0.7rem;
+        border-radius: 999px;
+        background: var(--color-surface-2);
+        border-color: var(--color-line);
+      }
+
+      .transcript-entry--tool .transcript-role {
+        color: var(--color-ink-3);
+      }
+
+      .transcript-entry--tool .transcript-text {
+        color: var(--color-ink-2);
+        font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+        font-size: 0.78rem;
       }
 
       #composer {
@@ -385,50 +522,52 @@
       #composer-input {
         flex: 1;
         min-width: 0;
+        min-height: 2.75rem;
         padding: 0.65rem 1rem;
-        border: 1px solid rgba(167, 243, 208, 0.15);
+        border: 1px solid var(--color-line);
         border-radius: 999px;
-        color: #f2fbf7;
-        background: rgba(255, 255, 255, 0.05);
+        color: var(--color-ink);
+        background: var(--color-surface-2);
         font: inherit;
         font-size: 0.92rem;
       }
 
       #composer-input::placeholder {
-        color: #6f8e82;
+        color: var(--color-ink-3);
       }
 
       #composer-input:focus-visible {
-        outline: 2px solid #6ee7b7;
+        outline: 2px solid var(--accent-hi);
         outline-offset: 2px;
       }
 
       #composer-input[aria-disabled="true"] {
-        color: #7d9189;
+        color: var(--color-ink-3);
       }
 
       #composer-submit {
+        min-height: 2.75rem;
         padding: 0 1.2rem;
         border: 0;
         border-radius: 999px;
-        color: #032018;
-        background: #6ee7b7;
+        color: var(--color-surface-0);
+        background: var(--accent);
         font: inherit;
         font-size: 0.82rem;
         font-weight: 750;
         cursor: pointer;
-        transition: transform 120ms ease, background 120ms ease;
+        transition: transform 120ms ease-out, background 120ms ease-out;
         touch-action: manipulation;
       }
 
       #composer-submit:hover {
-        background: #a7f3d0;
+        background: var(--accent-hi);
         transform: translateY(-1px);
       }
 
       #composer-submit:focus-visible {
-        outline: 3px solid #f8fafc;
-        outline-offset: 3px;
+        outline: 2px solid var(--accent-hi);
+        outline-offset: 2px;
       }
 
       .action-bar {
@@ -443,30 +582,30 @@
         min-height: 4.25rem;
         border: 0;
         border-radius: 999px;
-        color: #032018;
-        background: #6ee7b7;
-        box-shadow: 0 0.9rem 2.4rem rgba(16, 185, 129, 0.22);
+        color: var(--color-surface-0);
+        background: var(--accent);
+        box-shadow: 0 0.9rem 2.4rem color-mix(in srgb, var(--accent) 35%, transparent);
         font: inherit;
         font-size: 1.08rem;
         font-weight: 800;
         cursor: pointer;
-        transition: transform 120ms ease, background 120ms ease;
+        transition: transform 120ms ease-out, background 120ms ease-out;
         touch-action: manipulation;
       }
 
       #session-button:hover:not(:disabled) {
-        background: #a7f3d0;
+        background: var(--accent-hi);
         transform: translateY(-1px);
       }
 
       #session-button:focus-visible {
-        outline: 3px solid #f8fafc;
-        outline-offset: 3px;
+        outline: 2px solid var(--accent-hi);
+        outline-offset: 2px;
       }
 
       #session-button:disabled {
-        color: #7d9189;
-        background: #263d35;
+        color: var(--color-ink-3);
+        background: var(--color-surface-2);
         box-shadow: none;
         cursor: wait;
       }
@@ -474,31 +613,8 @@
       body:not([data-voice-state="idle"]):not([data-voice-state="error"])
         #session-button:not(:disabled) {
         color: #fff1f2;
-        background: #be123c;
-        box-shadow: 0 0.9rem 2.4rem rgba(190, 18, 60, 0.2);
-      }
-
-      @keyframes breathe {
-        50% {
-          opacity: 0.65;
-          transform: scale(1.08);
-        }
-      }
-
-      @keyframes rotate-pulse {
-        50% {
-          border-radius: 38%;
-          transform: rotate(180deg) scale(0.92);
-        }
-        100% {
-          transform: rotate(360deg);
-        }
-      }
-
-      @keyframes speak {
-        to {
-          transform: scale(1.11);
-        }
+        background: var(--color-status-alert);
+        box-shadow: 0 0.9rem 2.4rem color-mix(in srgb, var(--color-status-alert) 30%, transparent);
       }
 
       @media (min-width: 42rem) {
@@ -573,11 +689,11 @@
         <img src="/voice/icon.svg" alt="" width="32" height="32" />
         <h1>Hermes Voice</h1>
         <span id="mode-badge" hidden></span>
-        <button id="install-chip" type="button" hidden>Installieren</button>
+        <button id="install-chip" type="button" class="chip-button" hidden>Installieren</button>
         <button
           id="camera-chip"
           type="button"
-          class="share-chip"
+          class="chip-button"
           aria-pressed="false"
           title="Kamera für Hermes freigeben"
         >
@@ -586,7 +702,7 @@
         <button
           id="screen-chip"
           type="button"
-          class="share-chip"
+          class="chip-button"
           aria-pressed="false"
           title="Bildschirm für Hermes freigeben"
         >
@@ -611,10 +727,16 @@
       </header>
 
       <section class="state-card" aria-labelledby="voice-status">
+        <div class="status-orb" aria-hidden="true"></div>
         <div class="state-copy" role="status" aria-live="polite" aria-atomic="true">
           <p id="voice-status">bereit</p>
           <p id="status-detail">Starte eine sichere Sprachsitzung, wenn du bereit bist.</p>
-          <p id="usage-line" class="usage-line" hidden></p>
+          <div id="usage-meter" class="usage-meter" hidden>
+            <div class="usage-meter-track">
+              <div id="usage-meter-fill" class="usage-meter-fill"></div>
+            </div>
+            <p id="usage-line" class="usage-line" hidden></p>
+          </div>
         </div>
       </section>
 

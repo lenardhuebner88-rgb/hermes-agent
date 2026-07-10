@@ -37,6 +37,8 @@ const MODE_BADGE_COPY = {
 
 const statusElement = document.querySelector("#voice-status");
 const statusDetailElement = document.querySelector("#status-detail");
+const usageMeterElement = document.querySelector("#usage-meter");
+const usageMeterFillElement = document.querySelector("#usage-meter-fill");
 const usageLineElement = document.querySelector("#usage-line");
 const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
@@ -95,6 +97,10 @@ function setStatus(value, detail) {
 function hideModeBadge() {
   modeBadgeElement.hidden = true;
   delete modeBadgeElement.dataset.mode;
+  // Mirrors onto <body data-mode="…"> so the CSS accent (bronze for "live",
+  // teal reserved for the upcoming "spar" budget mode) can key off the root
+  // element instead of a header chip that scrolls out of view.
+  delete document.body.dataset.mode;
 }
 
 function renderModeBadge(value) {
@@ -104,6 +110,7 @@ function renderModeBadge(value) {
   modeBadgeElement.textContent = MODE_BADGE_COPY[value];
   modeBadgeElement.dataset.mode = value;
   modeBadgeElement.hidden = false;
+  document.body.dataset.mode = value;
 }
 
 function setComposerEnabled(enabled) {
@@ -178,7 +185,7 @@ function upsertTranscript(session, role, text, partial) {
     while (transcriptElement.children.length > 100) {
       transcriptElement.firstElementChild.remove();
     }
-    entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    scrollTranscriptIntoView(entry);
     if (partial) {
       session.pendingTranscript[key] = entry;
     }
@@ -188,9 +195,40 @@ function upsertTranscript(session, role, text, partial) {
   setTranscriptEntryText(pending, text);
   if (!partial) {
     session.pendingTranscript[key] = null;
-    pending.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    scrollTranscriptIntoView(pending);
   }
 }
+
+// Auto-scroll follows new turns only while the operator is already at (or
+// near) the bottom — once they scroll up to re-read earlier context, new
+// messages must not yank the view back down. `transcriptUserScrolledUp`
+// tracks both scroll surfaces the CSS can put the transcript on: the
+// internal `#transcript` scrollbox on the desktop two-pane layout, and the
+// page scroll on mobile where the whole `<main>` scrolls instead.
+let transcriptUserScrolledUp = false;
+
+function isNearBottom(element, threshold) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+function scrollTranscriptIntoView(entry) {
+  if (transcriptUserScrolledUp) {
+    return;
+  }
+  entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+transcriptElement.addEventListener("scroll", () => {
+  transcriptUserScrolledUp = !isNearBottom(transcriptElement, 24);
+});
+
+window.addEventListener("scroll", () => {
+  const doc = document.documentElement;
+  if (!doc) {
+    return;
+  }
+  transcriptUserScrolledUp = !isNearBottom(doc, 48);
+});
 
 async function acquireMicrophoneStream() {
   // Preferred path: hardware echo cancellation / noise suppression. On some Android
@@ -682,6 +720,29 @@ function formatUsageDetail(message) {
   return `Kosten ≈ ${amount} · ${minutes} Min`;
 }
 
+// Fill percentage for the budget meter, derived from the same
+// estimated_usd/soft_budget_usd pair the text label already renders — never
+// a second source of truth. `usageMeterElement.style` is absent in the
+// node:vm test harness (its fake elements only model what the tests assert
+// on), so the guard also doubles as the harness compatibility check.
+function updateUsageMeter(message, isWarn) {
+  if (!usageMeterElement) {
+    return;
+  }
+  usageMeterElement.hidden = false;
+  usageMeterElement.classList.toggle("usage-meter--warn", isWarn);
+  if (!usageMeterFillElement || !usageMeterFillElement.style) {
+    return;
+  }
+  const budget = Number(message.soft_budget_usd);
+  const spent = Number(message.estimated_usd);
+  const pct =
+    Number.isFinite(budget) && budget > 0 && Number.isFinite(spent)
+      ? Math.max(0, Math.min(100, (spent / budget) * 100))
+      : 0;
+  usageMeterFillElement.style.setProperty("--usage-pct", `${pct}%`);
+}
+
 function speakUsageWarningOnce(session, text) {
   if (session.usageWarningSpoken || typeof window.speechSynthesis === "undefined") {
     return;
@@ -930,10 +991,9 @@ function handleJsonMessage(session, raw) {
   if (message.type === "usage_update") {
     usageLineElement.textContent = formatUsageDetail(message);
     usageLineElement.hidden = false;
-    usageLineElement.classList.toggle(
-      "usage-line--warn",
-      message.soft_budget_exceeded === true,
-    );
+    const isWarn = message.soft_budget_exceeded === true;
+    usageLineElement.classList.toggle("usage-line--warn", isWarn);
+    updateUsageMeter(message, isWarn);
     return;
   }
   if (message.type === "usage_warning") {
@@ -1203,6 +1263,7 @@ async function startSession() {
     terminalDetail: null,
   };
   activeSession = session;
+  transcriptUserScrolledUp = false;
   setButton("stop");
   setStatus("connecting", "Mikrofon und sichere Sprachverbindung werden vorbereitet.");
 
@@ -1415,5 +1476,5 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice" }).catch(() => {});
+  navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice/" }).catch(() => {});
 }
