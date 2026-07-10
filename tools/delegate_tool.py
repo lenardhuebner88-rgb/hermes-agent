@@ -1473,9 +1473,25 @@ def _dump_subagent_timeout_diagnostic(
         ):
             try:
                 val = getattr(child, attr, None)
-                # Redact api_key-shaped values defensively
-                if isinstance(val, str) and attr == "base_url":
-                    pass
+                # base_url can embed credentials anywhere — userinfo,
+                # ?api_key=… query strings, or token-bearing PATH segments
+                # (https://host/<token>/v1). Log only scheme + host(:port),
+                # which is non-secret by construction, plus a marker for
+                # whether a path/query existed. (The old "redaction" here
+                # was a no-op `pass` that wrote the URL verbatim.)
+                if attr == "base_url" and isinstance(val, str):
+                    try:
+                        from urllib.parse import urlsplit
+                        parts = urlsplit(val)
+                        host = parts.netloc.rsplit("@", 1)[-1]  # drop userinfo
+                        suffix = ""
+                        if parts.path.strip("/") or parts.query:
+                            suffix = "/<path redacted>"
+                        val = f"{parts.scheme}://{host}{suffix}" if host else (
+                            "<unparseable base_url redacted>"
+                        )
+                    except Exception:
+                        val = "<unparseable base_url redacted>"
                 _w(f"  {attr}: {val!r}")
             except Exception:
                 _w(f"  {attr}: <unreadable>")
@@ -2828,10 +2844,16 @@ def delegate_task(
         _session_key = get_current_session_key(default="")
         _child_agents = [c for (_, _, c) in children]
 
-        # Detach every child from the parent's interrupt-propagation list — the
-        # batch's lifecycle is owned by the async registry now, not the parent
-        # turn. _build_child_agent attached them (correct for sync runs).
-        if hasattr(parent_agent, "_active_children"):
+        def _detach_children_from_parent():
+            # Detach from the parent's interrupt-propagation list — called
+            # ONLY once the async registry has accepted the batch (its
+            # lifecycle is owned by the registry then, via _batch_interrupt).
+            # Detaching BEFORE the dispatch decision orphaned the
+            # capacity-reject fallback: parent_agent.interrupt() fans out via
+            # _active_children, so the children of the then-SYNCHRONOUS run
+            # were unreachable by any interrupt — unstoppable mid-turn.
+            if not hasattr(parent_agent, "_active_children"):
+                return
             _ac_lock = getattr(parent_agent, "_active_children_lock", None)
             for _c in _child_agents:
                 try:
@@ -2872,6 +2894,7 @@ def delegate_task(
         )
 
         if dispatch.get("status") == "dispatched":
+            _detach_children_from_parent()
             n = len(_goals)
             note = (
                 "Subagent is running in the background. You and the user can "
@@ -2895,9 +2918,10 @@ def delegate_task(
             }
             return json.dumps(payload, ensure_ascii=False)
 
-        # Pool at capacity / schedule failure — children are still attached
-        # (we detach above only on the parent list, but the async unit was
-        # never accepted, so re-attaching isn't needed: we just run inline).
+        # Pool at capacity / schedule failure — the async unit was never
+        # accepted, so the children stay attached to the parent's
+        # _active_children and the synchronous fallback below remains fully
+        # interruptible via parent_agent.interrupt().
         logger.info(
             "delegate_task: async pool at capacity (%s); running the whole "
             "batch synchronously instead.",

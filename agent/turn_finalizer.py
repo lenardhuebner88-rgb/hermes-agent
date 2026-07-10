@@ -514,12 +514,15 @@ def finalize_turn(
     agent._stream_callback = None
 
     # Check skill trigger NOW — based on how many tool iterations THIS turn used.
+    # The counter is NOT reset here: it resets only after the spawn below
+    # actually succeeds. Resetting at decision time silently skipped a full
+    # review interval whenever the spawn was gated off (no final_response /
+    # interrupted) or raised (swallowed as best-effort).
     _should_review_skills = False
     if (agent._skill_nudge_interval > 0
             and agent._iters_since_skill >= agent._skill_nudge_interval
             and "skill_manage" in agent.valid_tool_names):
         _should_review_skills = True
-        agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
     agent._sync_external_memory_for_turn(
@@ -538,8 +541,14 @@ def finalize_turn(
                 review_memory=_should_review_memory,
                 review_skills=_should_review_skills,
             )
+            if _should_review_skills:
+                agent._iters_since_skill = 0
         except Exception:
-            pass  # Background review is best-effort
+            # Best-effort, but never silent: a persistent spawn failure would
+            # otherwise disable skill/memory review with zero trace.
+            logger.warning(
+                "finalize_turn: background review spawn failed", exc_info=True
+            )
 
     # Note: Memory provider on_session_end() + shutdown_all() are NOT
     # called here — run_conversation() is called once per user message in
