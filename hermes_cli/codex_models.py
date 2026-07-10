@@ -12,6 +12,13 @@ import os
 logger = logging.getLogger(__name__)
 
 DEFAULT_CODEX_MODELS: List[str] = [
+    # gpt-5.6 lane family (sol/terra/luna) — live on the Codex OAuth backend
+    # since the 2026-07-09 lane retune (verified in ~/.codex/models_cache.json
+    # 2026-07-10). Without them here, a fresh install / missing cache made
+    # the static fallback reject correctly-configured gpt-5.6 profiles.
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4-mini",
     "gpt-5.4",
@@ -44,6 +51,9 @@ DEFAULT_CODEX_MODELS: List[str] = [
 ]
 
 _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
+    ("gpt-5.6-sol", ("gpt-5.5", "gpt-5.4")),
+    ("gpt-5.6-terra", ("gpt-5.5", "gpt-5.4")),
+    ("gpt-5.6-luna", ("gpt-5.5", "gpt-5.4")),
     ("gpt-5.5", ("gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex")),
     ("gpt-5.4-mini", ("gpt-5.3-codex",)),
     ("gpt-5.4", ("gpt-5.3-codex",)),

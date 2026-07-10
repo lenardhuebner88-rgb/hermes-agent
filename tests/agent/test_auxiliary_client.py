@@ -703,6 +703,78 @@ class TestResolveProviderClientUniversalModelFallback:
         assert model == "gpt-5.4"
         assert mock_build.call_args.args[0] == "gpt-5.4"
 
+    def test_codex_borrow_substitutes_foreign_main_model(self):
+        """Regression: a provider-pinned openai-codex aux task with an empty
+        model borrowed the user's main model WITHOUT catalog validation — a
+        non-Codex main model (e.g. a Gemini slug) produced a guaranteed
+        HTTP 400 per call ('model is not supported when using Codex with a
+        ChatGPT account'; live journal 2026-07-08). The borrow now
+        substitutes a catalog-verified model up front."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        with (
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gemini-3.5-flash",
+            ),
+            patch(
+                "agent.auxiliary_client._get_aux_model_for_provider",
+                return_value="",
+            ),
+            patch(
+                "hermes_cli.codex_models.get_codex_model_ids",
+                return_value=["gpt-5.5", "gpt-5.4-mini"],
+            ),
+            patch(
+                "agent.auxiliary_client._build_codex_client",
+                side_effect=lambda m, *a, **k: (MagicMock(), m),
+            ) as mock_build,
+            patch(
+                "agent.auxiliary_client._select_pool_entry",
+                return_value=(True, None),
+            ),
+        ):
+            client, model = resolve_provider_client("openai-codex", "")
+
+        assert client is not None
+        assert model == "gpt-5.4-mini"
+        assert mock_build.call_args.args[0] == "gpt-5.4-mini", (
+            "the doomed foreign model must never reach the Codex client"
+        )
+
+    def test_codex_borrow_keeps_servable_main_model(self):
+        """The guard must not over-trigger: a main model that IS in the
+        Codex catalog keeps the main-model-first behavior (#31845)."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        with (
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-5.6-terra",
+            ),
+            patch(
+                "agent.auxiliary_client._get_aux_model_for_provider",
+                return_value="",
+            ),
+            patch(
+                "hermes_cli.codex_models.get_codex_model_ids",
+                return_value=["gpt-5.6-terra", "gpt-5.4-mini"],
+            ),
+            patch(
+                "agent.auxiliary_client._build_codex_client",
+                side_effect=lambda m, *a, **k: (MagicMock(), m),
+            ) as mock_build,
+            patch(
+                "agent.auxiliary_client._select_pool_entry",
+                return_value=(True, None),
+            ),
+        ):
+            client, model = resolve_provider_client("openai-codex", "")
+
+        assert client is not None
+        assert model == "gpt-5.6-terra"
+        assert mock_build.call_args.args[0] == "gpt-5.6-terra"
+
     def test_empty_model_for_catalog_provider_uses_catalog_default(self):
         """anthropic / nous / openrouter / etc.: catalog default wins
         over main model when no explicit model is passed.

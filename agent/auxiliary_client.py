@@ -3934,6 +3934,28 @@ def _codex_auto_aux_model_allowed(model: str) -> bool:
     return candidate.lower() in allowed
 
 
+def _codex_safe_aux_model() -> str:
+    """A catalog-verified Codex model for provider-pinned aux calls.
+
+    Used when the model borrowed from the user's main config is NOT
+    servable by the Codex OAuth backend (e.g. a Gemini slug while
+    ``auxiliary.<task>.provider: openai-codex`` with an empty model) —
+    substituting a known-good model up front avoids a guaranteed HTTP 400
+    round-trip per call. Prefers the small default the live fallback
+    chains already use; otherwise the first catalog entry.
+    """
+    try:
+        from hermes_cli.codex_models import get_codex_model_ids
+
+        ids = get_codex_model_ids(access_token=None)
+    except Exception:
+        return ""
+    for candidate in ids:
+        if candidate.lower() == "gpt-5.4-mini":
+            return candidate
+    return ids[0] if ids else ""
+
+
 # ── Centralized Provider Router ─────────────────────────────────────────────
 #
 # resolve_provider_client() is the single entry point for creating a properly
@@ -4107,7 +4129,34 @@ def resolve_provider_client(
     # missing-credentials returns and ``_resolve_auto`` falls through to
     # the Step-2 chain as before.
     if not model:
-        model = _get_aux_model_for_provider(provider) or _read_main_model() or model
+        model = _get_aux_model_for_provider(provider)
+        if not model:
+            borrowed = _read_main_model()
+            # The main-model borrow is load-bearing for OAuth providers
+            # (#31845) but must not send a foreign-family model to the
+            # Codex OAuth backend: 7 live aux tasks pin
+            # provider: openai-codex with an empty model, and a non-Codex
+            # main model (e.g. a Gemini slug) produced a guaranteed
+            # HTTP 400 per call ("model is not supported when using Codex
+            # with a ChatGPT account") before the reactive fallback chain
+            # kicked in — and vision has no fallback chain at all.
+            # _resolve_auto's Step 1 already guards its own path; this
+            # covers the provider-pinned path that bypasses it.
+            if (
+                borrowed
+                and provider == "openai-codex"
+                and not _codex_auto_aux_model_allowed(borrowed)
+            ):
+                replacement = _codex_safe_aux_model()
+                if replacement:
+                    logger.warning(
+                        "aux: main model is not in the local Codex OAuth "
+                        "catalog; using %s for the provider-pinned "
+                        "openai-codex call instead",
+                        replacement,
+                    )
+                    borrowed = replacement
+            model = borrowed or model
 
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
         """Decide if a plain OpenAI client should be wrapped for Responses API.
@@ -4975,6 +5024,21 @@ def resolve_vision_provider_client(
                     "Vision auto-detect: skipping main provider %s "
                     "(reports no vision capability) — falling through to "
                     "aggregator chain",
+                    main_provider,
+                )
+            elif (
+                main_provider == "openai-codex"
+                and vision_model == main_model
+                and not _codex_auto_aux_model_allowed(vision_model)
+            ):
+                # Borrowed main model that the Codex OAuth backend cannot
+                # serve (same guard class as _resolve_auto Step 1 / the
+                # resolve_provider_client borrow) — sending it would 400 on
+                # every vision request. Fall through to the aggregator chain.
+                logger.debug(
+                    "Vision auto-detect: skipping main provider %s (main "
+                    "model not in the local Codex OAuth catalog) — falling "
+                    "through to aggregator chain",
                     main_provider,
                 )
             else:
