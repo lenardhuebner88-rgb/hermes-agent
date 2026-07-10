@@ -190,3 +190,28 @@ describe("BibliothekView: Deep-Link stellt Modus + Dokument aus der URL wieder h
     );
   });
 });
+
+describe("BibliothekView: Fokus-Rückgabe nach Briefings→Lesesaal-Moduswechsel", () => {
+  it("fokussiert beim Schließen den sichtbaren Lesesaal-Tab, wenn der ursprüngliche Briefing-Trigger hidden ist", async () => {
+    mockLibraryFetch((url) => {
+      if (url.startsWith("/api/library/item?id=")) return { ...ITEM, body_md: "Kurzer Lesetext." };
+      return undefined;
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
+
+    const titles = await briefingsPanel().findAllByText(ITEM.title);
+    const trigger = titles.map((title) => title.closest('[role="button"]')).find(Boolean) as HTMLElement | null;
+    expect(trigger).not.toBeNull();
+    trigger?.focus();
+    fireEvent.click(trigger as HTMLElement);
+
+    const dialog = await screen.findByRole("dialog");
+    const closeButtons = within(dialog).getAllByRole("button", { name: "← Übersicht" });
+    fireEvent.click(closeButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole("tab", { name: /Lesesaal/ }));
+    });
+  });
+});

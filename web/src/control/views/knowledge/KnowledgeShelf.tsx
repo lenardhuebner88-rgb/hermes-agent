@@ -2,10 +2,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { FleetEmptyState } from "../../components/fleet/atoms";
-import { ToneCallout } from "../../components/atoms";
+import { FleetEmptyState, SignalLabel } from "../../components/leitstand";
+import { Eyebrow } from "../../components/primitives";
 import { fmtAge, nowSec } from "../../lib/derive";
-import { toneClasses } from "../../lib/tones";
 import { useKnowledgeCatalog } from "../../hooks/useControlData";
 import {
   filterCatalog,
@@ -66,10 +65,10 @@ function FilterButton({ active, onClick, children }: { active: boolean; onClick:
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[0.74rem] transition-colors ${
+      className={`inline-flex min-h-12 items-center gap-1.5 rounded-card border px-3 text-sec transition-colors ${
         active
-          ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
-          : "border-white/10 hc-soft hover:bg-white/5"
+          ? "border-live bg-surface-3 text-ink"
+          : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3"
       }`}
     >
       {children}
@@ -78,7 +77,7 @@ function FilterButton({ active, onClick, children }: { active: boolean; onClick:
 }
 
 function CountBadge({ count }: { count: number }) {
-  return <span className="hc-mono text-[0.66rem] hc-dim">{count}</span>;
+  return <span className="font-data text-micro tabular-nums text-ink-3">{count}</span>;
 }
 
 function CatalogFilters({
@@ -96,23 +95,23 @@ function CatalogFilters({
 }) {
   const types: KnowledgeTypeCount[] = typeCounts(catalog.collections);
   return (
-    <div className="space-y-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
+    <div className="space-y-3 rounded-panel border border-line bg-surface-1 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="hc-eyebrow">{t.total(totalDocs(catalog.collections))}</p>
+        <Eyebrow>{t.total(totalDocs(catalog.collections))}</Eyebrow>
         <button
           type="button"
           onClick={() => {
             onCollection(null);
             onType(null);
           }}
-          className="inline-flex min-h-8 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.72rem] hc-soft hover:bg-white/5"
+          className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-micro text-ink-2 hover:border-live/40 hover:bg-surface-3"
         >
           Filter leeren
         </button>
       </div>
 
       <div className="space-y-2">
-        <p className="text-[0.72rem] font-medium uppercase text-[var(--hc-muted)]">{t.collections}</p>
+        <Eyebrow>{t.collections}</Eyebrow>
         <div className="flex flex-wrap gap-1.5">
           <FilterButton active={activeCollection === null} onClick={() => onCollection(null)}>
             {t.all}
@@ -133,7 +132,7 @@ function CatalogFilters({
 
       {types.length > 0 ? (
         <div className="space-y-2">
-          <p className="text-[0.72rem] font-medium uppercase text-[var(--hc-muted)]">{t.types}</p>
+          <Eyebrow>{t.types}</Eyebrow>
           <div className="flex flex-wrap gap-1.5">
             <FilterButton active={activeType === null} onClick={() => onType(null)}>
               {t.all}
@@ -163,19 +162,19 @@ export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: Know
     <button
       type="button"
       onClick={() => onOpen(doc)}
-      className="hc-surface-card flex h-full min-h-[11rem] flex-col gap-2 p-4 text-left transition-colors hover:bg-white/5"
+      className="flex h-full min-h-[11rem] flex-col gap-2 rounded-card border border-line bg-surface-2 p-4 text-left transition-colors hover:bg-surface-3"
     >
-      <p className="hc-eyebrow">{typeLabel}</p>
-      <h4 className="text-[0.95rem] font-semibold leading-snug text-white">{doc.title}</h4>
-      <p className="line-clamp-2 flex-1 text-[0.8rem] leading-relaxed hc-soft">{doc.summary}</p>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] hc-dim">
-        <span className="hc-mono truncate">{doc.source_ref}</span>
+      <Eyebrow>{typeLabel}</Eyebrow>
+      <h4 className="text-body font-semibold leading-snug text-ink">{doc.title}</h4>
+      <p className="line-clamp-2 flex-1 text-sec leading-relaxed text-ink-2">{doc.summary}</p>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-micro text-ink-3">
+        <span className="truncate font-data">{doc.source_ref}</span>
         {doc.heading_count > 0 ? <span>· {sectionsLabel(doc.heading_count)}</span> : null}
       </div>
       {doc.tags.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {doc.tags.map((tag) => (
-            <span key={tag} className="rounded-full border border-white/10 px-1.5 py-0.5 text-[0.6rem] hc-dim">{tag}</span>
+            <span key={tag} className="rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{tag}</span>
           ))}
         </div>
       ) : null}
@@ -188,13 +187,13 @@ export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: Know
 function PulseStrip({ pulse }: { pulse: NonNullable<KnowledgeCollection["pulse"]> }) {
   return (
     <div className="mt-2 flex items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5">
-      <span className="shrink-0 text-[0.68rem] hc-dim">{t.pulsePrefix}</span>
+      <span className="shrink-0 text-micro text-ink-3">{t.pulsePrefix}</span>
       {pulse.map((item, i) => (
         <span
           key={`${item.model}-${i}`}
-          className="shrink-0 rounded-full border border-white/10 px-2 py-0.5 text-[0.66rem] hc-soft"
+          className="shrink-0 rounded-card border border-line px-2 py-0.5 text-micro text-ink-2"
         >
-          <span className="hc-mono">{item.model}</span> · {item.date}
+          <span className="font-data">{item.model}</span> · {item.date}
         </span>
       ))}
     </div>
@@ -211,19 +210,19 @@ export function CollectionSection({ collection, now, onOpen }: {
 }) {
   return (
     <section className="space-y-3">
-      <header className="flex items-start gap-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
-        <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${toneClasses(collection.accent)}`}>
+      <header className="flex items-start gap-3 rounded-panel border border-line bg-surface-1 p-3">
+        <span className="grid size-12 shrink-0 place-items-center rounded-card border border-line bg-surface-2 text-brand">
           <CollectionGlyph name={collection.icon} className="h-5 w-5" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <h3 className="text-[1.02rem] font-semibold text-white">{collection.title}</h3>
-            <span className="hc-mono text-[0.7rem] hc-dim">{t.docs(collection.docs.length)}</span>
+            <h3 className="text-body font-semibold text-ink">{collection.title}</h3>
+            <span className="font-data text-micro tabular-nums text-ink-3">{t.docs(collection.docs.length)}</span>
             {collection.updated_ts > 0 ? (
-              <span className="hc-mono text-[0.7rem] hc-dim">· {t.updatedAgo(fmtAge(collection.updated_ts, now))}</span>
+              <span className="font-data text-micro tabular-nums text-ink-3">· {t.updatedAgo(fmtAge(collection.updated_ts, now))}</span>
             ) : null}
           </div>
-          <p className="mt-0.5 text-[0.8rem] leading-relaxed hc-soft">{collection.description}</p>
+          <p className="mt-0.5 text-sec leading-relaxed text-ink-2">{collection.description}</p>
           {collection.pulse && collection.pulse.length > 0 ? <PulseStrip pulse={collection.pulse} /> : null}
         </div>
       </header>
@@ -306,18 +305,18 @@ export function KnowledgeShelf() {
   return (
     <div className="space-y-4">
       <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 hc-dim" />
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
         <input
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder={t.searchPlaceholder}
           aria-label={t.searchAria}
-          className="w-full rounded-lg border border-[var(--hc-border)] bg-black/25 py-2 pl-9 pr-3 text-sm text-white placeholder:hc-dim"
+          className="min-h-12 w-full rounded-card border border-line bg-surface-2 pl-9 pr-3 text-sec text-ink placeholder:text-ink-3"
         />
       </div>
 
-      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       {catalog ? (
         <CatalogFilters
@@ -330,11 +329,11 @@ export function KnowledgeShelf() {
       ) : null}
 
       {searching && visibleCatalog ? (
-        <p className="text-[0.78rem] hc-dim">{t.hitsFor(totalDocs(collections), q.trim())}</p>
+        <p className="text-sec text-ink-3">{t.hitsFor(totalDocs(collections), q.trim())}</p>
       ) : null}
 
       {catalog === null && !error ? (
-        <p className="text-sm hc-dim">{t.loading}</p>
+        <p className="text-sec text-ink-3">{t.loading}</p>
       ) : collections.length === 0 ? (
         <FleetEmptyState title={t.emptyTitle} desc={t.emptyDesc} />
       ) : (

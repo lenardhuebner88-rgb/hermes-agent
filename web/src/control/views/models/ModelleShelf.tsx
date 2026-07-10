@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
-import { StatusPill, ToneCallout } from "../../components/atoms";
 import {
   DrawerShell,
   FleetEmptyState,
   SectionHeader,
+  SignalChip,
+  SignalLabel,
   SubtabChips,
+  signalToneFromLegacy,
 } from "../../components/leitstand";
-import { SkeletonCard } from "../../components/primitives";
+import { Eyebrow, SkeletonCard } from "../../components/primitives";
 import { ProseMarkdown } from "../../components/ProseMarkdown";
 import { extractToc } from "../../lib/slug";
-import { toneClasses } from "../../lib/tones";
 import { TocNav } from "../knowledge/KnowledgeReader";
-import type { ToneName } from "../../lib/types";
 
 // Modelle: Landscape (model-landscape.md) + gequellte Benchmarks
 // (benchmarks.json) + Prompting-Guides (wiki/prompting/*.md) — Backend:
@@ -114,7 +114,7 @@ function humanizeSuite(suite: string): string {
     .join(" ");
 }
 
-const MATURITY_TONE: Record<string, ToneName> = {
+const MATURITY_TONE: Record<string, string> = {
   curated: "emerald",
   "auto-drafted": "amber",
 };
@@ -123,15 +123,13 @@ function ScoreChip({ score }: { score: ModelScore }) {
   return (
     <span
       title={`${score.source_name} · ${score.as_of}`}
-      className="inline-flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 text-[0.68rem] hc-soft"
+      className="inline-flex items-center gap-1 rounded-card border border-line px-2 py-0.5 text-micro text-ink-2"
     >
-      <span className="hc-mono text-white">{score.score}{score.unit}</span>
+      <span className="font-data tabular-nums text-ink">{score.score}{score.unit}</span>
       {humanizeSuite(score.suite)}
-      <span className="hc-dim">· {shortDate(score.as_of)}</span>
+      <span className="text-ink-3">· {shortDate(score.as_of)}</span>
       {score.claimed_by_provider ? (
-        <span className={`rounded-full border px-1 text-[0.58rem] ${toneClasses("amber")}`}>
-          {t.providerAngabe}
-        </span>
+        <SignalLabel tone="warn" label={t.providerAngabe} />
       ) : null}
     </span>
   );
@@ -140,20 +138,20 @@ function ScoreChip({ score }: { score: ModelScore }) {
 function PulseHero({ pulse, updated }: { pulse: ModelPulseItem[]; updated: string }) {
   if (pulse.length === 0 && !updated) return null;
   return (
-    <div className="hc-surface-card space-y-1.5 p-3">
+    <div className="space-y-1.5 rounded-card border border-line bg-surface-1 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="hc-eyebrow">{t.eyebrow}</p>
-        {updated ? <span className="hc-mono text-[0.7rem] hc-dim">{t.stand(updated)}</span> : null}
+        <Eyebrow>{t.eyebrow}</Eyebrow>
+        {updated ? <span className="font-data text-micro tabular-nums text-ink-3">{t.stand(updated)}</span> : null}
       </div>
       {pulse.length > 0 ? (
         <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5">
-          <span className="shrink-0 text-[0.68rem] hc-dim">{t.pulsePrefix}</span>
+          <span className="shrink-0 text-micro text-ink-3">{t.pulsePrefix}</span>
           {pulse.map((item, i) => (
             <span
               key={`${item.model}-${i}`}
-              className="shrink-0 rounded-full border border-white/10 px-2 py-0.5 text-[0.66rem] hc-soft"
+              className="shrink-0 rounded-card border border-line px-2 py-0.5 text-micro text-ink-2"
             >
-              <span className="hc-mono">{item.model}</span> · {item.date}
+              <span className="font-data">{item.model}</span> · {item.date}
             </span>
           ))}
         </div>
@@ -164,14 +162,14 @@ function PulseHero({ pulse, updated }: { pulse: ModelPulseItem[]; updated: strin
 
 function ModelCard({ model, onOpenGuide }: { model: LandscapeModel; onOpenGuide: (family: string) => void }) {
   return (
-    <div className="hc-surface-card flex h-full flex-col gap-2 p-4">
+    <div className="flex h-full flex-col gap-2 rounded-card border border-line bg-surface-2 p-4">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="hc-eyebrow">{model.provider}</p>
-          <h4 className="hc-mono truncate text-[0.85rem] font-semibold text-white">{model.id}</h4>
+          <Eyebrow>{model.provider}</Eyebrow>
+          <h4 className="truncate text-body font-semibold text-ink">{model.id}</h4>
         </div>
       </div>
-      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[0.72rem] hc-dim">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-micro text-ink-3">
         <span>{model.context}</span>
         <span>{priceLabel(model.price_in)} / {priceLabel(model.price_out)} · 1M</span>
         {model.created ? <span>{model.created}</span> : null}
@@ -183,13 +181,13 @@ function ModelCard({ model, onOpenGuide }: { model: LandscapeModel; onOpenGuide:
           ))}
         </div>
       ) : (
-        <p className="text-[0.72rem] hc-dim">{t.noScores}</p>
+        <p className="text-micro text-ink-3">{t.noScores}</p>
       )}
       {model.guide_family ? (
         <button
           type="button"
           onClick={() => onOpenGuide(model.guide_family!)}
-          className="mt-auto self-start text-[0.74rem] text-[var(--hc-accent)] hover:underline"
+          className="mt-auto inline-flex min-h-12 items-center self-start rounded-card text-sec text-bronze-hi hover:underline"
         >
           {t.guideLink}
         </button>
@@ -239,17 +237,17 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
   }
 
   return (
-    <div className="hc-surface-card overflow-x-auto p-0">
-      <table className="w-full min-w-[36rem] border-collapse text-[0.78rem]">
+    <div className="overflow-x-auto rounded-panel border border-line bg-surface-1">
+      <table className="w-full min-w-[36rem] border-collapse text-sec">
         <thead>
-          <tr className="border-b border-[var(--hc-border)] text-left">
-            <th className="p-2.5 font-medium hc-dim">{t.modelColumn}</th>
+          <tr className="border-b border-line-soft text-left">
+            <th className="p-2.5 font-display text-micro font-medium uppercase tracking-[0.08em] text-ink-3">{t.modelColumn}</th>
             {suites.map((suite) => (
               <th key={suite} className="p-2.5">
                 <button
                   type="button"
                   onClick={() => toggleSort(suite)}
-                  className="font-medium hc-dim hover:text-white"
+                  className="min-h-12 font-display text-micro font-medium uppercase tracking-[0.08em] text-ink-3 hover:text-ink"
                 >
                   {humanizeSuite(suite)}
                   {sortKey === suite ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
@@ -260,8 +258,8 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
         </thead>
         <tbody>
           {sorted.map((model) => (
-            <tr key={model.id} className="border-b border-white/5">
-              <td className="hc-mono p-2.5 text-white">{model.id}</td>
+            <tr key={model.id} className="border-b border-line-soft">
+              <td className="p-2.5 font-data text-ink">{model.id}</td>
               {suites.map((suite) => {
                 const score = scoreFor(model, suite);
                 return (
@@ -270,13 +268,11 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
                       <span className="inline-flex items-center gap-1">
                         {score.score}{score.unit}
                         {score.claimed_by_provider ? (
-                          <span className={`rounded-full border px-1 text-[0.58rem] ${toneClasses("amber")}`}>
-                            {t.providerAngabe}
-                          </span>
+                          <SignalLabel tone="warn" label={t.providerAngabe} />
                         ) : null}
                       </span>
                     ) : (
-                      <span className="hc-dim">{t.dash}</span>
+                      <span className="text-ink-3">{t.dash}</span>
                     )}
                   </td>
                 );
@@ -300,15 +296,15 @@ function GuideList({ guides, onOpen }: { guides: GuideSummary[]; onOpen: (family
           <button
             type="button"
             onClick={() => onOpen(guide.family)}
-            className="hc-surface-card flex w-full flex-col gap-1.5 p-3.5 text-left hover:bg-white/5"
+            className="flex min-h-12 w-full flex-col gap-1.5 rounded-card border border-line bg-surface-2 p-3.5 text-left hover:bg-surface-3"
           >
             <div className="flex items-center justify-between gap-2">
-              <h4 className="text-sm font-semibold text-white">{guide.title}</h4>
+              <h4 className="text-sec font-semibold text-ink">{guide.title}</h4>
               {guide.maturity ? (
-                <StatusPill tone={MATURITY_TONE[guide.maturity] ?? "zinc"} label={guide.maturity} />
+                <SignalChip tone={signalToneFromLegacy(MATURITY_TONE[guide.maturity])} label={guide.maturity} />
               ) : null}
             </div>
-            <p className="hc-mono text-[0.7rem] hc-dim">{guide.family} · {guide.updated}</p>
+            <p className="font-data text-micro text-ink-3">{guide.family} · {guide.updated}</p>
           </button>
         </li>
       ))}
@@ -349,16 +345,16 @@ function GuideDrawer({ family, onClose }: { family: string; onClose: () => void 
       widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
     >
       {error ? (
-        <ToneCallout tone="red">{t.guideLoadError}<br />{error}</ToneCallout>
+        <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.guideLoadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div>
       ) : detail ? (
         <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
           <aside className="hidden xl:block">
-            <div className="hc-surface-card sticky top-4 p-3">
-              <p className="mb-2 hc-eyebrow">{t.toc}</p>
+            <div className="sticky top-4 rounded-card border border-line bg-surface-2 p-3">
+              <Eyebrow className="mb-2">{t.toc}</Eyebrow>
               <TocNav entries={toc} onJump={jump} />
             </div>
           </aside>
-          <article className="hc-surface-card min-w-0 p-4 sm:p-5">
+          <article className="min-w-0 rounded-card border border-line bg-surface-2 p-4 sm:p-5">
             <ProseMarkdown slugHeadings wrapTables>{detail.body_md}</ProseMarkdown>
           </article>
         </div>
@@ -422,9 +418,9 @@ export function ModelleShelf() {
 
   return (
     <div className="space-y-4">
-      <SubtabChips items={subtabItems} active={subtab} onSelect={setSubtab} ariaLabelPrefix={t.eyebrow} />
+      <SubtabChips items={subtabItems} active={subtab} onSelect={setSubtab} ariaLabelPrefix={t.eyebrow} className="[&_button]:min-h-12" />
 
-      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       {data === null && !error ? (
         <SkeletonCard rows={4} />
@@ -435,7 +431,7 @@ export function ModelleShelf() {
           {subtab === "uebersicht" ? (
             <div className="space-y-4">
               <PulseHero pulse={data.pulse} updated={data.updated} />
-              <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} />
+              <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} className="[&_button]:min-h-12" />
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {filteredModels.map((model) => (
                   <ModelCard key={model.id} model={model} onOpenGuide={openGuide} />
@@ -447,7 +443,7 @@ export function ModelleShelf() {
           {subtab === "benchmarks" ? (
             <div className="space-y-4">
               <SectionHeader label={t.subtabBenchmarks} meta={t.stand(data.updated)} />
-              <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} />
+              <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} className="[&_button]:min-h-12" />
               <BenchmarksTable models={filteredModels} />
             </div>
           ) : null}

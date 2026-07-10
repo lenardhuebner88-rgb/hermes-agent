@@ -2,16 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ListTree } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { Led, ToneCallout } from "../components/atoms";
 import {
   DrawerShell,
   FleetEmptyState,
   FleetPanel,
   ListRow,
   SectionHeader,
+  SignalChip,
+  SignalLabel,
   SubtabChips,
 } from "../components/leitstand";
-import { SkeletonCard } from "../components/primitives";
+import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -186,8 +187,8 @@ export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unre
         <ListRow
           title={item.title}
           meta={fmtClock(item.ts)}
-          trailing={item.ts > unreadSince ? <span className="rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span> : null}
-          className="hover:bg-white/5"
+          trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
+          className="hover:bg-surface-3"
         >
           {CATEGORY_LABEL[item.category] ?? item.category} · {item.series}
         </ListRow>
@@ -198,14 +199,14 @@ export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unre
 
 export function TopicFollowCard({ topic, onToggle, pending }: { topic: LibraryTopic; onToggle: (topic: LibraryTopic) => void; pending: boolean }) {
   return (
-    <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+    <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate text-[0.9rem] font-semibold text-white">{topic.title}</h3>
+          <h3 className="truncate text-sec font-semibold text-ink">{topic.title}</h3>
           {topic.followed ? (
-            <p className="mt-1 text-[0.72rem] text-emerald-300">{t.topicFollowing}</p>
+            <SignalLabel className="mt-1" tone="ok" label={t.topicFollowing} />
           ) : (
-            <p className="mt-1 text-[0.72rem] hc-dim">{t.topicFollow}</p>
+            <p className="mt-1 text-micro text-ink-3">{t.topicFollow}</p>
           )}
         </div>
         <button
@@ -213,11 +214,7 @@ export function TopicFollowCard({ topic, onToggle, pending }: { topic: LibraryTo
           disabled={pending}
           onClick={() => onToggle(topic)}
           aria-pressed={topic.followed}
-          className={`inline-flex min-h-8 shrink-0 items-center rounded-full border px-2.5 py-1 text-[0.72rem] ${
-            topic.followed
-              ? "border-emerald-500/40 text-emerald-200"
-              : "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]"
-          } disabled:opacity-50`}
+          className="inline-flex min-h-12 shrink-0 items-center rounded-card border border-live/40 bg-live/10 px-3 text-micro text-bronze-hi transition hover:bg-live/15 disabled:opacity-50"
         >
           {pending ? t.topicPending : topic.followed ? t.topicUnfollow : t.topicFollow}
         </button>
@@ -242,24 +239,24 @@ export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySaved
   return (
     <FleetPanel eyebrow={t.savedTitle} meta={t.savedMeta}>
       {searches.length === 0 ? (
-        <p className="text-sm hc-dim">{t.savedEmpty}</p>
+        <p className="text-sec text-ink-3">{t.savedEmpty}</p>
       ) : (
         <ul className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {searches.map((search) => (
-            <li key={search.id} className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+            <li key={search.id} className="rounded-card border border-line bg-surface-2 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <h3 className="truncate text-[0.9rem] font-semibold text-white">{search.title || search.name}</h3>
-                  <p className="mt-1 line-clamp-2 text-[0.78rem] hc-soft">{search.query}</p>
+                  <h3 className="truncate text-sec font-semibold text-ink">{search.title || search.name}</h3>
+                  <p className="mt-1 line-clamp-2 text-sec text-ink-2">{search.query}</p>
                   {[...search.topic_tags, ...search.person_tags].length ? (
                     <p className="mt-2 flex flex-wrap gap-1">
                       {[...search.topic_tags, ...search.person_tags].map((tag) => (
-                        <span key={tag} className="rounded-full border border-white/10 px-1.5 py-0.5 text-[0.62rem] hc-dim">{tag}</span>
+                        <span key={tag} className="rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{tag}</span>
                       ))}
                     </p>
                   ) : null}
                 </div>
-                <button type="button" onClick={() => onApply(search)} className="inline-flex min-h-8 shrink-0 items-center rounded-full border border-white/10 px-2.5 py-1 text-[0.72rem] hc-soft hover:bg-white/5">
+                <button type="button" onClick={() => onApply(search)} className="inline-flex min-h-12 shrink-0 items-center rounded-card border border-line px-3 text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3">
                   {t.savedApply}
                 </button>
               </div>
@@ -317,15 +314,15 @@ export function ReadingView({ item, neighbors, onNavigate, onBack }: {
   return (
     <FleetPanel eyebrow={item.series} meta={`${CATEGORY_LABEL[item.category] ?? item.category} · ${fmtClock(item.ts)} · ${item.source_ref}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <button type="button" onClick={onBack} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5">{t.back}</button>
-        <button type="button" disabled={!neighbors.prev} onClick={() => neighbors.prev && onNavigate(neighbors.prev)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5 disabled:opacity-40">{t.prev}</button>
-        <button type="button" disabled={!neighbors.next} onClick={() => neighbors.next && onNavigate(neighbors.next)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5 disabled:opacity-40">{t.next}</button>
+        <button type="button" onClick={onBack} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-sec text-ink-2 transition hover:border-live/40 hover:bg-surface-3">{t.back}</button>
+        <button type="button" disabled={!neighbors.prev} onClick={() => neighbors.prev && onNavigate(neighbors.prev)} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-sec text-ink-2 transition hover:border-live/40 hover:bg-surface-3 disabled:opacity-40">{t.prev}</button>
+        <button type="button" disabled={!neighbors.next} onClick={() => neighbors.next && onNavigate(neighbors.next)} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-sec text-ink-2 transition hover:border-live/40 hover:bg-surface-3 disabled:opacity-40">{t.next}</button>
       </div>
-      <h3 className="mb-2 text-base font-semibold text-white">{item.title}</h3>
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
+      <h3 className="mb-2 text-body font-semibold text-ink">{item.title}</h3>
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={error} /></div> : null}
       {toc.length >= 3 ? (
-        <details className="mb-3 rounded-lg border border-[var(--hc-border)] bg-black/20 p-3">
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 hc-eyebrow">
+        <details className="mb-3 rounded-card border border-line bg-surface-2 p-3">
+          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-1.5 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">
             <ListTree className="h-3.5 w-3.5" />
             {t.toc}
           </summary>
@@ -389,6 +386,18 @@ export function LesesaalBody() {
       p.delete("item");
       return p;
     }, { replace: true });
+    // A Briefings card can open the Lesesaal drawer while switching the view
+    // mode. Its trigger then remains mounted inside a `hidden` tabpanel, so
+    // DrawerShell's normal focus restoration cannot move focus back to it.
+    // Preserve the normal visible-trigger path, but fall back to the now-active
+    // Lesesaal tab when the portalled drawer removal leaves focus on BODY or
+    // on the original trigger inside a now-hidden tabpanel.
+    window.setTimeout(() => {
+      const active = document.activeElement;
+      if (active === document.body || (active instanceof HTMLElement && active.closest("[hidden]"))) {
+        document.getElementById("bibliothek-tab-lesesaal")?.focus();
+      }
+    }, 0);
   }, [setSearchParams]);
 
   const fetchPage = useCallback(async (offset: number) => {
@@ -519,13 +528,14 @@ export function LesesaalBody() {
 
   return (
     <div className="space-y-4">
-      <div className="hc-surface-card p-3">
+      <div className="rounded-card border border-line bg-surface-1 p-3">
         <div className="flex flex-wrap items-center gap-2">
           <SubtabChips
             items={categoryTabs}
             active={category ?? ALL_CATEGORY_TAB}
             onSelect={(next) => { setCategory(next === ALL_CATEGORY_TAB ? null : next); closeItem(); }}
             ariaLabelPrefix={t.eyebrow}
+            className="[&_button]:min-h-12"
           />
           <input
             type="search"
@@ -533,7 +543,7 @@ export function LesesaalBody() {
             onChange={(e) => setQ(e.target.value)}
             placeholder={t.searchPlaceholder}
             aria-label={t.searchPlaceholder}
-            className="min-w-48 flex-1 rounded-md border border-[var(--hc-border)] bg-black/25 px-3 py-1.5 text-sm text-white placeholder:hc-dim"
+            className="min-h-12 min-w-48 flex-1 rounded-card border border-line bg-surface-2 px-3 text-sec text-ink placeholder:text-ink-3"
           />
         </div>
         <div className="mt-2 flex items-center gap-2">
@@ -544,7 +554,7 @@ export function LesesaalBody() {
       <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
       <SavedSearchShelf searches={savedSearches} onApply={applySavedSearch} />
 
-      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       {data === null && !error ? (
         <SkeletonCard rows={4} />
@@ -565,12 +575,12 @@ export function LesesaalBody() {
               <ListRow
                 title={item.title}
                 meta={fmtClock(item.ts)}
-                leading={<span className="hc-eyebrow">{CATEGORY_LABEL[item.category] ?? item.category}</span>}
-                trailing={item.ts > unreadSince ? <span className="rounded-full border border-cyan-500/40 px-1.5 py-0.5 text-[0.62rem] text-cyan-300">{t.newBadge}</span> : null}
-                className="h-full hover:bg-white/5"
+                leading={<Eyebrow>{CATEGORY_LABEL[item.category] ?? item.category}</Eyebrow>}
+                trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
+                className="h-full hover:bg-surface-3"
               >
                 <span className="line-clamp-3">{item.preview}</span>
-                <span className="mt-2 block hc-mono text-[0.7rem] hc-dim">{item.series}</span>
+                <span className="mt-2 block font-data text-micro text-ink-3">{item.series}</span>
               </ListRow>
             </div>
           ))}
@@ -608,7 +618,7 @@ export function LesesaalBody() {
             type="button"
             onClick={() => void loadMore()}
             disabled={loadingMore}
-            className="inline-flex min-h-9 items-center rounded-full border border-white/10 px-4 py-1.5 text-[0.78rem] hc-soft hover:bg-white/5 disabled:opacity-50"
+            className="inline-flex min-h-12 items-center rounded-card border border-line px-4 text-sec text-ink-2 transition hover:border-live/40 hover:bg-surface-3 disabled:opacity-50"
           >
             {loadingMore ? t.loadingMore : t.loadMore}
           </button>
@@ -629,6 +639,7 @@ function SortToggle({ sort, onChange }: { sort: LesesaalSort; onChange: (sort: L
       active={sort}
       onSelect={(next) => onChange(next as LesesaalSort)}
       ariaLabelPrefix={t.sortLabel}
+      className="[&_button]:min-h-12"
     />
   );
 }
@@ -646,14 +657,9 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   const isUnknown = !data || Boolean(detail);
 
   return (
-    <section className="hc-surface-card space-y-3 p-3" aria-label={de.provenance.title}>
+    <section className="space-y-3 rounded-card border border-line bg-surface-1 p-3" aria-label={de.provenance.title}>
       <SectionHeader
-        label={(
-          <span className="inline-flex items-center gap-2">
-            <Led kind={isUnknown ? "idle" : stale > 0 ? "warn" : "live"} size={8} />
-            {de.provenance.title}
-          </span>
-        )}
+        label={<SignalLabel tone={isUnknown ? "neutral" : stale > 0 ? "warn" : "ok"} label={de.provenance.title} />}
         meta={stale > 0 ? de.provenance.staleBadge(stale) : "Vault"}
         rule={false}
       />
@@ -664,7 +670,7 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
           <div className="space-y-2">
             <SectionHeader label={de.provenance.openTitle} rule={false} />
             {opens.length === 0 ? (
-              <p className="text-sm hc-dim">{de.provenance.openEmpty}</p>
+              <p className="text-sec text-ink-3">{de.provenance.openEmpty}</p>
             ) : (
               <ul className="space-y-2">
                 {opens.map((session) => (
@@ -672,8 +678,8 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
                     <ListRow
                       title={session.task}
                       meta={session.started}
-                      leading={<span className="hc-mono text-[11px] hc-dim">[{session.agent}]</span>}
-                      trailing={session.stale ? <span className="text-xs text-amber-200">⚠ {de.provenance.staleInline}</span> : null}
+                      leading={<span className="font-data text-micro text-ink-3">[{session.agent}]</span>}
+                      trailing={session.stale ? <SignalLabel tone="warn" label={de.provenance.staleInline} /> : null}
                     >
                       {session.path}
                     </ListRow>
@@ -686,7 +692,7 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
           <div className="space-y-2">
             <SectionHeader label={de.provenance.recentTitle} rule={false} />
             {receipts.length === 0 ? (
-              <p className="text-sm hc-dim">—</p>
+              <p className="text-sec text-ink-3">—</p>
             ) : (
               <ul className="space-y-2">
                 {receipts.slice(0, 5).map((receipt) => (
@@ -694,7 +700,7 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
                     <ListRow
                       title={receipt.file}
                       meta={receipt.when}
-                      leading={<span className="hc-mono text-[11px] hc-dim">[{receipt.agent}]</span>}
+                      leading={<span className="font-data text-micro text-ink-3">[{receipt.agent}]</span>}
                     >
                       {receipt.path}
                     </ListRow>
@@ -721,7 +727,7 @@ const MODE_TABS: { id: Mode; label: string; count?: (data: LibraryListResponse |
 
 function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode: Mode) => void; lesesaalData: LibraryListResponse | null }) {
   return (
-    <div role="tablist" aria-label={t.eyebrow} className="flex gap-1 border-b border-[var(--hc-border)]">
+    <div role="tablist" aria-label={t.eyebrow} className="flex gap-1 overflow-x-auto border-b border-line">
       {MODE_TABS.map((tab) => {
         const active = mode === tab.id;
         const count = tab.count?.(tab.id === "lesesaal" ? lesesaalData : null) ?? 0;
@@ -729,25 +735,26 @@ function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode:
           <button
             key={tab.id}
             type="button"
+            id={`bibliothek-tab-${tab.id}`}
             role="tab"
             aria-selected={active}
             aria-controls={`bibliothek-panel-${tab.id}`}
             onClick={() => onChange(tab.id)}
-            className={`relative px-4 py-2.5 text-sm font-medium transition-colors ${
+            className={`relative min-h-12 shrink-0 px-4 text-sec font-medium transition-colors ${
               active
-                ? "text-[var(--hc-accent)]"
-                : "hc-soft hover:text-[var(--hc-text)]"
+                ? "text-bronze-hi"
+                : "text-ink-2 hover:text-ink"
             }`}
           >
             <span className="flex items-center gap-2">
               {tab.label}
               {count > 0 ? (
-                <span className={`inline-flex min-w-[1.25rem] items-center justify-center rounded-full px-1.5 py-0.5 text-[0.65rem] font-bold ${active ? "bg-[var(--hc-accent)] text-black" : "bg-white/10 text-[var(--hc-text-soft)]"}`}>
+                <sup className={`font-data text-micro font-semibold tabular-nums ${active ? "text-bronze-hi" : "text-ink-3"}`}>
                   {count}
-                </span>
+                </sup>
               ) : null}
             </span>
-            {active ? <span className="absolute inset-x-0 -bottom-px h-0.5 bg-[var(--hc-aurora)]" /> : null}
+            {active ? <span className="absolute inset-x-0 -bottom-px h-0.5 bg-live" /> : null}
           </button>
         );
       })}

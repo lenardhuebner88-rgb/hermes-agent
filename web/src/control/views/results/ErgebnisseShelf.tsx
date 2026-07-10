@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
-import { StatusPill, ToneCallout } from "../../components/atoms";
 import {
   DrawerShell,
   FleetEmptyState,
   ListRow,
   SectionHeader,
+  SignalChip,
+  SignalLabel,
   SubtabChips,
+  signalToneFromLegacy,
 } from "../../components/leitstand";
-import { SkeletonCard } from "../../components/primitives";
+import { Eyebrow, SkeletonCard } from "../../components/primitives";
 import { ProseMarkdown } from "../../components/ProseMarkdown";
 import { fmtClock } from "../../lib/derive";
 import { dedupeById } from "../BibliothekView.helpers";
 import { CopyButton } from "../backlog/CopyButton";
-import type { ToneName } from "../../lib/types";
 
 // Ergebnisse: abgeschlossene Kanban-Tasks (task_runs-Verdict/Outcome/Cost) als
 // Mensch- UND LLM-lesbares Digest — Backend: hermes_cli/library_results.py
@@ -86,14 +87,14 @@ interface ResultListResponse {
 }
 
 // Real outcome/verdict enum values (harvested from the live task_runs schema,
-// 2026-07-09 — see test_library_results.py fixture) mapped to --hc-* tones.
+// 2026-07-09 — see test_library_results.py fixture) mapped to shared signals.
 // Unknown/unseen values fall back to a neutral chip, never invented labels.
-const VERDICT_TONE: Record<string, ToneName> = {
+const VERDICT_TONE: Record<string, string> = {
   APPROVED: "emerald",
   REQUEST_CHANGES: "red",
 };
 
-const OUTCOME_TONE: Record<string, ToneName> = {
+const OUTCOME_TONE: Record<string, string> = {
   completed: "emerald",
   blocked: "red",
   crashed: "red",
@@ -161,12 +162,12 @@ function composeAgentCopyText(detail: ResultItemDetail): string {
 function ResultBadges({ item }: { item: ResultItem }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {item.kind ? <span className="hc-eyebrow">{item.kind}</span> : null}
+      {item.kind ? <Eyebrow>{item.kind}</Eyebrow> : null}
       {item.profile ? (
-        <span className="rounded-full border border-white/10 px-2 py-0.5 text-[0.65rem] hc-soft">{item.profile}</span>
+        <span className="rounded-card border border-line px-2 py-0.5 text-micro text-ink-2">{item.profile}</span>
       ) : null}
-      {item.verdict ? <StatusPill tone={VERDICT_TONE[item.verdict] ?? "zinc"} label={item.verdict} /> : null}
-      {item.outcome ? <StatusPill tone={OUTCOME_TONE[item.outcome] ?? "zinc"} label={item.outcome} /> : null}
+      {item.verdict ? <SignalChip tone={signalToneFromLegacy(VERDICT_TONE[item.verdict])} label={item.verdict} /> : null}
+      {item.outcome ? <SignalChip tone={signalToneFromLegacy(OUTCOME_TONE[item.outcome])} label={item.outcome} /> : null}
     </div>
   );
 }
@@ -185,10 +186,10 @@ function ResultRowItem({ item, onOpen }: { item: ResultItem; onOpen: (item: Resu
           leading={<ResultBadges item={item} />}
           title={item.title}
           meta={item.completed_at ? fmtClock(toEpoch(item.completed_at)) : undefined}
-          trailing={<span className="hc-mono text-xs hc-dim">{costLabel(item.cost_usd)}</span>}
-          className="hover:bg-white/5"
+          trailing={<span className="font-data text-micro tabular-nums text-ink-3">{costLabel(item.cost_usd)}</span>}
+          className="hover:bg-surface-3"
         >
-          <span className="line-clamp-3 text-sm hc-soft">{item.result_summary}</span>
+          <span className="line-clamp-3 text-sec text-ink-2">{item.result_summary}</span>
         </ListRow>
       </div>
     </li>
@@ -199,14 +200,14 @@ function RunsTable({ runs }: { runs: ResultRun[] }) {
   return (
     <div className="space-y-1.5">
       {runs.map((run, idx) => (
-        <div key={`${run.started ?? "run"}-${idx}`} className="rounded-lg border border-[var(--hc-border)] bg-black/20 p-2.5">
-          <div className="flex flex-wrap items-center gap-2 text-[0.72rem]">
-            <span className="hc-mono hc-dim">{run.started ? fmtClock(toEpoch(run.started)) : "–"}</span>
-            {run.outcome ? <StatusPill tone={OUTCOME_TONE[run.outcome] ?? "zinc"} label={run.outcome} /> : null}
-            {run.verdict ? <StatusPill tone={VERDICT_TONE[run.verdict] ?? "zinc"} label={run.verdict} /> : null}
-            <span className="ml-auto hc-mono hc-dim">{costLabel(run.cost_usd)}</span>
+        <div key={`${run.started ?? "run"}-${idx}`} className="rounded-card border border-line bg-surface-2 p-2.5">
+          <div className="flex flex-wrap items-center gap-2 text-micro">
+            <span className="font-data tabular-nums text-ink-3">{run.started ? fmtClock(toEpoch(run.started)) : "–"}</span>
+            {run.outcome ? <SignalChip tone={signalToneFromLegacy(OUTCOME_TONE[run.outcome])} label={run.outcome} /> : null}
+            {run.verdict ? <SignalChip tone={signalToneFromLegacy(VERDICT_TONE[run.verdict])} label={run.verdict} /> : null}
+            <span className="ml-auto font-data tabular-nums text-ink-3">{costLabel(run.cost_usd)}</span>
           </div>
-          {run.summary ? <p className="mt-1.5 text-sm hc-soft">{run.summary}</p> : null}
+          {run.summary ? <p className="mt-1.5 text-sec text-ink-2">{run.summary}</p> : null}
         </div>
       ))}
     </div>
@@ -228,7 +229,7 @@ function DetailBody({
       <RunsTable runs={detail.runs} />
       <SectionHeader label={t.artifactsTitle} />
       {detail.artifacts.length === 0 ? (
-        <p className="text-sm hc-dim">{t.noArtifacts}</p>
+        <p className="text-sec text-ink-3">{t.noArtifacts}</p>
       ) : (
         <ul className="space-y-1">
           {detail.artifacts.map((artifact) => (
@@ -236,7 +237,7 @@ function DetailBody({
               <button
                 type="button"
                 onClick={() => onOpenArtifact(artifact.id)}
-                className="text-left text-sm text-[var(--hc-accent)] hover:underline"
+                className="inline-flex min-h-12 items-center rounded-card text-left text-sec text-bronze-hi hover:underline"
               >
                 {artifact.title}
               </button>
@@ -372,21 +373,21 @@ export function ErgebnisseShelf({ onOpenLesesaalItem }: { onOpenLesesaalItem: (i
 
   return (
     <div className="space-y-4">
-      <div className="hc-surface-card space-y-2.5 p-3">
+      <div className="space-y-2.5 rounded-card border border-line bg-surface-1 p-3">
         <input
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder={t.searchPlaceholder}
           aria-label={t.searchPlaceholder}
-          className="w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-3 py-1.5 text-sm text-white placeholder:hc-dim"
+          className="min-h-12 w-full rounded-card border border-line bg-surface-2 px-3 text-sec text-ink placeholder:text-ink-3"
         />
-        <SubtabChips items={kindTabs} active={kind ?? ALL_TAB} onSelect={(next) => setKind(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.kindFilterLabel} />
-        <SubtabChips items={profileTabs} active={profile ?? ALL_TAB} onSelect={(next) => setProfile(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.profileFilterLabel} />
-        <SubtabChips items={verdictTabs} active={verdict ?? ALL_TAB} onSelect={(next) => setVerdict(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.verdictFilterLabel} />
+        <SubtabChips items={kindTabs} active={kind ?? ALL_TAB} onSelect={(next) => setKind(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.kindFilterLabel} className="[&_button]:min-h-12" />
+        <SubtabChips items={profileTabs} active={profile ?? ALL_TAB} onSelect={(next) => setProfile(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.profileFilterLabel} className="[&_button]:min-h-12" />
+        <SubtabChips items={verdictTabs} active={verdict ?? ALL_TAB} onSelect={(next) => setVerdict(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.verdictFilterLabel} className="[&_button]:min-h-12" />
       </div>
 
-      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       {total === null && !error ? (
         <SkeletonCard rows={4} />
@@ -413,7 +414,7 @@ export function ErgebnisseShelf({ onOpenLesesaalItem }: { onOpenLesesaalItem: (i
             type="button"
             onClick={() => void loadMore()}
             disabled={loadingMore}
-            className="inline-flex min-h-9 items-center rounded-full border border-white/10 px-4 py-1.5 text-[0.78rem] hc-soft hover:bg-white/5 disabled:opacity-50"
+            className="inline-flex min-h-12 items-center rounded-card border border-line px-4 text-sec text-ink-2 hover:border-live/40 hover:bg-surface-3 disabled:opacity-50"
           >
             {loadingMore ? t.loadingMore : t.loadMore}
           </button>
@@ -431,7 +432,7 @@ export function ErgebnisseShelf({ onOpenLesesaalItem }: { onOpenLesesaalItem: (i
           footer={reading ? <CopyButton text={composeAgentCopyText(reading)} label={t.copyForAgent} copiedLabel={t.copied} /> : undefined}
         >
           {readingError ? (
-            <ToneCallout tone="red">{t.loadError}<br />{readingError}</ToneCallout>
+            <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{readingError}</p></div>
           ) : reading ? (
             <DetailBody detail={reading} onOpenArtifact={onOpenLesesaalItem} />
           ) : (

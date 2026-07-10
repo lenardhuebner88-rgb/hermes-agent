@@ -1,12 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { Hero } from "../../components/Hero";
-import { Disclosure } from "../../components/primitives";
-import { SectionHeader } from "../../components/leitstand";
-import { ToneCallout } from "../../components/atoms";
+import { Disclosure, Eyebrow } from "../../components/primitives";
+import { FleetEmptyState, KpiTile, SectionHeader, SignalLabel } from "../../components/leitstand";
 import { fmtClock } from "../../lib/derive";
-import { heroAccent } from "../../lib/tones";
 import { useVaultProvenance, useKnowledgeCatalog } from "../../hooks/useControlData";
 import type { Density } from "../../hooks/useDensity";
 import { VaultProvenanceShelf } from "../BibliothekView";
@@ -81,25 +78,22 @@ function StructuredBriefCard({
   onOpen: (item: LibraryItem) => void;
 }) {
   return (
-    <article className="hc-surface-card relative overflow-hidden p-5 sm:p-6 lg:col-span-2 lg:row-span-2">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_100%_at_100%_0%,rgba(79,216,235,.08),transparent_55%)]" />
-      <div className="relative space-y-5">
+    <article className="relative overflow-hidden rounded-panel border border-line bg-surface-1 p-5 sm:p-6 lg:col-span-2 lg:row-span-2">
+      <div className="space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="inline-flex items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 py-1 text-[0.62rem] font-bold uppercase tracking-wider text-[var(--hc-accent)]">
-            {t.topStory}
-          </span>
-          <span className="hc-mono text-[0.7rem] text-[var(--hc-text-dim)]">
+          <Eyebrow>{t.topStory}</Eyebrow>
+          <span className="font-data text-micro tabular-nums text-ink-3">
             Stand {berlinTimeParts(item.ts).label} · nächster Lauf {nextBriefRun(item.ts)}
           </span>
         </div>
 
-        <h3 className="max-w-4xl text-xl font-semibold leading-snug text-[var(--hc-text)] sm:text-2xl">
+        <h3 className="max-w-4xl text-h2 font-semibold leading-snug text-ink">
           {brief.top_story}
         </h3>
 
         {brief.model_news.length > 0 ? (
           <section>
-            <p className="mb-2 hc-eyebrow">{t.modelNews}</p>
+            <Eyebrow className="mb-2">{t.modelNews}</Eyebrow>
             <div className="grid gap-2 sm:grid-cols-2">
               {brief.model_news.slice(0, 4).map((news) => (
                 <a
@@ -107,11 +101,11 @@ function StructuredBriefCard({
                   href={news.source_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="rounded-xl border border-white/10 bg-white/[.025] p-3 transition-colors hover:border-[var(--hc-border-strong)]"
+                  className="min-h-12 rounded-card border border-line bg-surface-2 p-3 transition-colors hover:border-live/40 hover:bg-surface-3"
                 >
-                  <span className="block text-sm font-semibold text-[var(--hc-text)]">{news.title}</span>
-                  <span className="mt-1 block line-clamp-3 text-xs leading-relaxed text-[var(--hc-text-soft)]">{news.summary}</span>
-                  <span className="mt-2 block truncate text-[0.68rem] text-[var(--hc-accent)]">{news.source_title} ↗</span>
+                  <span className="block text-sec font-semibold text-ink">{news.title}</span>
+                  <span className="mt-1 block line-clamp-3 text-sec leading-relaxed text-ink-2">{news.summary}</span>
+                  <span className="mt-2 block truncate text-micro text-bronze-hi">{news.source_title} ↗</span>
                 </a>
               ))}
             </div>
@@ -120,15 +114,11 @@ function StructuredBriefCard({
 
         {brief.watchlist_delta.length > 0 ? (
           <div
-            className="rounded-xl border px-3 py-2.5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--hc-amber) 30%, transparent)",
-              background: "color-mix(in srgb, var(--hc-amber) 9%, transparent)",
-            }}
+            className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2.5"
           >
-            <p className="text-[0.62rem] font-bold uppercase tracking-wider text-[var(--hc-amber)]">{t.watchlistDelta}</p>
+            <SignalLabel tone="warn" label={t.watchlistDelta} />
             {brief.watchlist_delta.slice(0, 2).map((delta) => (
-              <p key={delta} className="mt-1 text-xs leading-relaxed text-[var(--hc-text-soft)]">{delta}</p>
+              <p key={delta} className="mt-1 text-sec leading-relaxed text-ink-2">{delta}</p>
             ))}
           </div>
         ) : null}
@@ -136,7 +126,7 @@ function StructuredBriefCard({
         <button
           type="button"
           onClick={() => onOpen(item)}
-          className="text-sm font-semibold text-[var(--hc-accent)] hover:underline"
+          className="inline-flex min-h-12 items-center rounded-card px-1 text-sec font-semibold text-bronze-hi hover:underline"
         >
           {t.readFullBrief} →
         </button>
@@ -152,17 +142,14 @@ function BriefingCard({ item, featured = false, onOpen }: { item: LibraryItem; f
       tabIndex={0}
       onClick={() => onOpen(item)}
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(item); } }}
-      className={`hc-surface-card cursor-pointer transition-all hover:-translate-y-0.5 hover:border-[var(--hc-border-strong)] ${featured ? "col-span-2 row-span-2 relative overflow-hidden" : ""}`}
+      className={`min-h-12 cursor-pointer rounded-card border border-line bg-surface-2 transition-all hover:-translate-y-0.5 hover:border-live/40 hover:bg-surface-3 ${featured ? "col-span-2 row-span-2 relative overflow-hidden" : ""}`}
     >
-      {featured ? <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_100%_at_100%_0%,rgba(79,216,235,.08),transparent_55%)]" /> : null}
-      <div className={`relative ${featured ? "p-6" : "p-5"}`}>
-        <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[0.62rem] font-bold uppercase tracking-wider ${featured ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent)]" : "border-white/10 text-[var(--hc-text-soft)]"}`}>
-          {featured ? t.featuredLabel : t.briefingLabel}
-        </span>
-        <h3 className={`mt-4 font-semibold leading-snug text-[var(--hc-text)] ${featured ? "text-2xl" : "text-lg"}`}>{item.title}</h3>
-        <p className={`mt-2 text-[var(--hc-text-soft)] leading-relaxed ${featured ? "text-base line-clamp-4" : "text-sm line-clamp-3"}`}>{item.preview}</p>
-        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.72rem] text-[var(--hc-text-dim)]">
-          <span className="hc-mono">{item.series}</span>
+      <div className={featured ? "p-6" : "p-5"}>
+        <Eyebrow>{featured ? t.featuredLabel : t.briefingLabel}</Eyebrow>
+        <h3 className={`mt-4 font-semibold leading-snug text-ink ${featured ? "text-h2" : "text-emph"}`}>{item.title}</h3>
+        <p className={`mt-2 leading-relaxed text-ink-2 ${featured ? "line-clamp-4 text-body" : "line-clamp-3 text-sec"}`}>{item.preview}</p>
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-micro text-ink-3">
+          <span className="font-data">{item.series}</span>
           <span>·</span>
           <span>{fmtClock(item.ts)}</span>
         </div>
@@ -171,42 +158,27 @@ function BriefingCard({ item, featured = false, onOpen }: { item: LibraryItem; f
   );
 }
 
-// Kleine, farbcodierte Sektions-Marke im Stil der KnowledgeQuickShelf-Icons
-// (Inline-Style statt Tailwind-Arbitrary, damit color-mix gate-sicher bleibt
-// und kein Roh-Hex in den DESIGN-Ratchet läuft).
-function PreviewLabel({ label, tone }: { label: string; tone: "violet" | "amber" }) {
-  const toneVar = `var(--hc-${tone})`;
-  return (
-    <span
-      className="inline-flex items-center rounded-full border px-2.5 py-1 text-[0.62rem] font-bold uppercase tracking-wider"
-      style={{ borderColor: `color-mix(in srgb, ${toneVar} 30%, transparent)`, color: toneVar }}
-    >
-      {label}
-    </span>
-  );
-}
-
 // Mittelzeile (Desktop-only, laut Mockup): Lesesaal-Vorschau + Provenienz-
 // Vorschau unter dem Featured-Briefing. Beide speisen sich aus bereits
 // vorhandenen Endpoints/Hooks — kein Backend-Change.
 function RecentIssuesCard({ items, onOpen }: { items: LibraryItem[]; onOpen: (item: LibraryItem) => void }) {
   return (
-    <article className="hc-surface-card p-5">
-      <PreviewLabel label={t.issuesLabel} tone="violet" />
-      <h3 className="mt-3 text-base font-semibold text-[var(--hc-text)]">{t.recentIssuesTitle}</h3>
+    <article className="rounded-card border border-line bg-surface-2 p-5">
+      <Eyebrow>{t.issuesLabel}</Eyebrow>
+      <h3 className="mt-3 text-body font-semibold text-ink">{t.recentIssuesTitle}</h3>
       <div className="mt-3 space-y-0.5">
         {items.length === 0 ? (
-          <p className="text-sm text-[var(--hc-text-dim)]">{t.recentIssuesEmpty}</p>
+          <p className="text-sec text-ink-3">{t.recentIssuesEmpty}</p>
         ) : (
           items.slice(0, 3).map((item) => (
             <button
               key={item.id}
               type="button"
               onClick={() => onOpen(item)}
-              className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left hover:bg-white/5"
+              className="flex min-h-12 w-full items-center justify-between gap-3 rounded-card px-2 text-left hover:bg-surface-3"
             >
-              <span className="truncate text-sm text-[var(--hc-text-soft)]">{item.title}</span>
-              <span className="shrink-0 hc-mono text-[0.7rem] text-[var(--hc-text-dim)]">{fmtClock(item.ts)}</span>
+              <span className="truncate text-sec text-ink-2">{item.title}</span>
+              <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">{fmtClock(item.ts)}</span>
             </button>
           ))
         )}
@@ -217,17 +189,17 @@ function RecentIssuesCard({ items, onOpen }: { items: LibraryItem[]; onOpen: (it
 
 function WorkingNowCard({ sessions }: { sessions: { agent: string; task: string; path: string }[] }) {
   return (
-    <article className="hc-surface-card p-5">
-      <PreviewLabel label={t.workingLabel} tone="amber" />
-      <h3 className="mt-3 text-base font-semibold text-[var(--hc-text)]">{t.workingNowTitle}</h3>
+    <article className="rounded-card border border-line bg-surface-2 p-5">
+      <Eyebrow>{t.workingLabel}</Eyebrow>
+      <h3 className="mt-3 text-body font-semibold text-ink">{t.workingNowTitle}</h3>
       <div className="mt-3 space-y-0.5">
         {sessions.length === 0 ? (
-          <p className="text-sm text-[var(--hc-text-dim)]">{t.workingNowEmpty}</p>
+          <p className="text-sec text-ink-3">{t.workingNowEmpty}</p>
         ) : (
           sessions.slice(0, 3).map((session) => (
-            <div key={session.path} className="flex items-center justify-between gap-3 px-2 py-1.5">
-              <span className="shrink-0 hc-mono text-[0.72rem] text-[var(--hc-text-soft)]">[{session.agent}]</span>
-              <span className="truncate text-[0.72rem] text-[var(--hc-text-dim)]">{session.task}</span>
+            <div key={session.path} className="flex min-h-12 items-center justify-between gap-3 px-2">
+              <span className="shrink-0 font-data text-micro text-ink-2">[{session.agent}]</span>
+              <span className="truncate text-micro text-ink-3">{session.task}</span>
             </div>
           ))
         )}
@@ -242,10 +214,6 @@ function KnowledgeQuickShelf({ catalog, onSelect }: { catalog: KnowledgeCatalog 
       <SectionHeader label={t.knowledgeTitle} meta={t.knowledgeSubtitle} rule={false} />
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {(catalog?.collections ?? []).map((collection) => {
-          // Kollabiert die (theoretisch offenere) Backend-Palette auf die
-          // vier Leitstand-Statusfarben — dieselbe Kanonisierung wie Hero
-          // (siehe heroAccent): keine neuen --hc-*-Tokens für vereinzelte Töne.
-          const toneVar = heroAccent(collection.accent);
           return (
             <div
               key={collection.id}
@@ -253,20 +221,13 @@ function KnowledgeQuickShelf({ catalog, onSelect }: { catalog: KnowledgeCatalog 
               tabIndex={0}
               onClick={() => onSelect(collection.id)}
               onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(collection.id); } }}
-              className="hc-surface-card cursor-pointer p-4 transition-all hover:-translate-y-0.5 hover:border-[var(--hc-border-strong)]"
+              className="min-h-12 cursor-pointer rounded-card border border-line bg-surface-2 p-4 transition-all hover:-translate-y-0.5 hover:border-live/40 hover:bg-surface-3"
             >
-              <div
-                className="grid h-10 w-10 place-items-center rounded-xl border"
-                style={{
-                  borderColor: `color-mix(in srgb, ${toneVar} 30%, transparent)`,
-                  background: `color-mix(in srgb, ${toneVar} 12%, transparent)`,
-                  color: toneVar,
-                }}
-              >
+              <div className="grid size-12 place-items-center rounded-card border border-line bg-surface-1 text-brand">
                 <CollectionGlyph name={collection.icon} className="h-5 w-5" />
               </div>
-              <h4 className="mt-3 text-[0.95rem] font-semibold text-[var(--hc-text)]">{collection.title}</h4>
-              <p className="mt-1 text-xs text-[var(--hc-text-dim)]">{collection.doc_count} Dokumente</p>
+              <h4 className="mt-3 text-body font-semibold text-ink">{collection.title}</h4>
+              <p className="mt-1 font-data text-micro tabular-nums text-ink-3">{collection.doc_count} Dokumente</p>
             </div>
           );
         })}
@@ -280,7 +241,7 @@ interface BriefingsShelfProps {
   density?: Density;
 }
 
-export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
+export function BriefingsShelf({ onOpenItem }: BriefingsShelfProps) {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [issues, setIssues] = useState<LibraryItem[]>([]);
   const [data, setData] = useState<LibraryListResponse | null>(null);
@@ -346,25 +307,26 @@ export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
 
   return (
     <div className="space-y-6">
-      <Hero
-        eyebrow={t.heroEyebrow}
-        title={t.heroTitle}
-        subtitle={t.heroSubtitle}
-        tone="cyan"
-        density={density}
-        status={{ label: t.newBriefings(todayCount), tone: "cyan", dot: "live" }}
-        action={<span className="rounded-full border border-white/10 bg-white/[.03] px-3 py-1.5 text-xs text-[var(--hc-text-soft)]">{knowledge.data ? t.docsCount(knowledge.data.count) : "…"}</span>}
-      />
+      <section className="rounded-panel border border-line bg-surface-1 p-5 sm:p-6">
+        <Eyebrow>{t.heroEyebrow}</Eyebrow>
+        <h2 className="mt-2 max-w-4xl font-display text-h2 font-semibold text-ink">{t.heroTitle}</h2>
+        <p className="mt-2 max-w-4xl text-body text-ink-2">{t.heroSubtitle}</p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <KpiTile label="Briefings heute" value={todayCount} delta={t.newBriefings(todayCount)} />
+          <KpiTile
+            label="Nachschlagewerk"
+            value={knowledge.data?.count ?? "…"}
+            delta={typeof knowledge.data?.count === "number" ? t.docsCount(knowledge.data.count) : "…"}
+          />
+        </div>
+      </section>
 
-      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       <div>
         <SectionHeader label={t.todayForYou} meta={data === null && !error ? "…" : t.todayMeta(Math.min(briefings.length, 3), total)} rule={false} />
         {data !== null && briefings.length === 0 && !error ? (
-          <div className="hc-fleet-empty mt-3">
-            <span className="hc-fleet-empty-title">{t.emptyTitle}</span>
-            <span className="hc-fleet-empty-desc">{t.emptyDesc}</span>
-          </div>
+          <FleetEmptyState title={t.emptyTitle} desc={t.emptyDesc} />
         ) : (
           <div className="mt-3 grid gap-4 lg:grid-cols-3">
             {featured?.structured && featured.structured_brief ? (
@@ -387,14 +349,14 @@ export function BriefingsShelf({ onOpenItem, density }: BriefingsShelfProps) {
 
       <KnowledgeQuickShelf catalog={knowledge.data} onSelect={openCollection} />
 
-      <Disclosure summary={<span className="text-sm font-semibold text-[var(--hc-text)]">{t.provenanceTitle}</span>} defaultOpen={false}>
+      <Disclosure className="[&>button]:min-h-12" summary={<span className="text-sec font-semibold text-ink">{t.provenanceTitle}</span>} defaultOpen={false}>
         <div className="pt-2">
           <VaultProvenanceShelf data={provenance.data} error={provenance.error} />
         </div>
       </Disclosure>
 
-      <Disclosure summary={<span className="text-sm font-semibold text-[var(--hc-text)]">{t.topicsTitle}</span>} defaultOpen={false}>
-        <div className="pt-2 text-sm text-[var(--hc-text-soft)]">
+      <Disclosure className="[&>button]:min-h-12" summary={<span className="text-sec font-semibold text-ink">{t.topicsTitle}</span>} defaultOpen={false}>
+        <div className="pt-2 text-sec text-ink-2">
           <p>Beobachtete Themen erscheinen hier, sobald du Themen im Lesesaal folgst.</p>
         </div>
       </Disclosure>

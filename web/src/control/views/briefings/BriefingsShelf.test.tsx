@@ -31,6 +31,24 @@ const structuredFixturePath = path.join(
   "__fixtures__/structured-brief.json",
 );
 const STRUCTURED_BRIEF = JSON.parse(readFileSync(structuredFixturePath, "utf-8"));
+const BRIEFINGS_SOURCE = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "BriefingsShelf.tsx"),
+  "utf-8",
+);
+
+const REMOVED_LEGACY_MARKS = [
+  "rgba(79,216,235",
+  "bg-[radial-gradient",
+  "bg-white/[.025]",
+  "border-white/10",
+  "text-[var(--hc-text)]",
+  "text-[var(--hc-accent)]",
+  "ToneCallout",
+];
+
+function expectRemovedLegacyMarksGone(html: string): void {
+  for (const mark of REMOVED_LEGACY_MARKS) expect(html).not.toContain(mark);
+}
 
 interface ItemsResponseFixture {
   items: unknown[];
@@ -179,5 +197,46 @@ describe("BriefingsShelf: strukturierte KI-Frontpage (S5)", () => {
     fireEvent.click(await screen.findByText("Ganzes Briefing lesen →"));
     expect(onOpen).toHaveBeenCalledOnce();
     expect(onOpen.mock.calls[0][0].id).toBe(STRUCTURED_BRIEF.id);
+  });
+});
+
+describe("BriefingsShelf: Sheet-A negative guard über alle Renderzweige", () => {
+  it("enthält weder die beiden alten Cyan-Glows noch die migrierten Legacy-Klassen im Quelltext", () => {
+    expectRemovedLegacyMarksGone(BRIEFINGS_SOURCE);
+  });
+
+  it("hält den leeren Zweig frei von den entfernten Briefings-Legacy-Marken", async () => {
+    mockFetch();
+    const { container } = render(
+      <MemoryRouter><BriefingsShelf onOpenItem={() => {}} /></MemoryRouter>,
+    );
+    await screen.findByText("Noch keine Briefings");
+    expectRemovedLegacyMarksGone(container.innerHTML);
+  });
+
+  it("hält den strukturierten und den klassischen Karten-Zweig frei von den entfernten Marken", async () => {
+    const plain = {
+      ...STRUCTURED_BRIEF,
+      id: "plain-brief",
+      title: "Klassisches Briefing",
+      structured: false,
+      structured_brief: undefined,
+    };
+    mockFetch({ ...EMPTY_ITEMS, items: [STRUCTURED_BRIEF, plain], count: 2 });
+    const { container } = render(
+      <MemoryRouter><BriefingsShelf onOpenItem={() => {}} /></MemoryRouter>,
+    );
+    await screen.findByText("Top-Story");
+    expect(screen.getByText("Klassisches Briefing")).toBeTruthy();
+    expectRemovedLegacyMarksGone(container.innerHTML);
+  });
+
+  it("hält den Fehlerzweig frei von den entfernten Briefings-Legacy-Marken", async () => {
+    fetchJSONMock.mockRejectedValue(new Error("offline"));
+    const { container } = render(
+      <MemoryRouter><BriefingsShelf onOpenItem={() => {}} /></MemoryRouter>,
+    );
+    await screen.findByText("Briefings konnten nicht geladen werden.");
+    expectRemovedLegacyMarksGone(container.innerHTML);
   });
 });
