@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reminder payload has no text: {payload_path}", file=sys.stderr)
         return 1
 
+    # A systemd-run unit starts with a clean environment: seed the .env
+    # credentials (bot token, home channel) the Discord adapter resolves.
+    from tools.voice_live_tools import _ensure_hermes_env
+
+    _ensure_hermes_env()
     from tools.send_message_tool import send_message_tool
 
     message = f"⏰ Erinnerung: {text}"

@@ -153,9 +153,28 @@ def _required_text(args: dict[str, Any], key: str) -> str | None:
     return value
 
 
+def _ensure_hermes_env() -> None:
+    """Seed ``os.environ`` from ``~/.hermes/.env`` without clobbering it.
+
+    Neither the dashboard process nor a bare ``systemd-run`` unit carries the
+    .env credentials (DISCORD_BOT_TOKEN, DISCORD_HOME_CHANNEL, ...) that the
+    message adapters resolve from the environment — the same gap
+    ``resolve_gemini_api_key`` closes for the Gemini key.
+    """
+
+    import os
+
+    from hermes_cli.config import load_env
+
+    for key, value in load_env().items():
+        if value is not None:
+            os.environ.setdefault(key, str(value))
+
+
 def _send_discord_message_sync(text: str) -> str:
     """Post ``text`` to the Discord home channel; returns the raw JSON result."""
 
+    _ensure_hermes_env()
     from tools.send_message_tool import send_message_tool
 
     return send_message_tool({"target": "discord", "message": text})

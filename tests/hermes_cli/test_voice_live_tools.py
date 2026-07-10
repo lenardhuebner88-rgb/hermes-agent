@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -182,16 +183,42 @@ def test_is_non_blocking_flags_only_delegate_to_hermes():
 @pytest.mark.asyncio
 async def test_send_discord_message_success():
     executor = VoiceToolExecutor(delegate=None)
-    with patch(
-        "tools.send_message_tool.send_message_tool",
-        return_value=json.dumps({"success": True}),
-    ) as sender:
+    with (
+        patch("tools.voice_live_tools._ensure_hermes_env") as seeder,
+        patch(
+            "tools.send_message_tool.send_message_tool",
+            return_value=json.dumps({"success": True}),
+        ) as sender,
+    ):
         result = await executor.execute(
             "send_discord_message", {"text": "hallo piet"}
         )
 
     assert result == {"ok": True}
+    seeder.assert_called_once_with()
     sender.assert_called_once_with({"target": "discord", "message": "hallo piet"})
+
+
+def test_ensure_hermes_env_seeds_without_clobbering(monkeypatch):
+    from tools.voice_live_tools import _ensure_hermes_env
+
+    monkeypatch.setenv("VOICE_ENV_EXISTING", "keep-me")
+    monkeypatch.delenv("VOICE_ENV_MISSING", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_env",
+        lambda: {
+            "VOICE_ENV_EXISTING": "overwrite-attempt",
+            "VOICE_ENV_MISSING": "seeded",
+            "VOICE_ENV_NONE": None,
+        },
+    )
+
+    _ensure_hermes_env()
+
+    assert os.environ["VOICE_ENV_EXISTING"] == "keep-me"
+    assert os.environ["VOICE_ENV_MISSING"] == "seeded"
+    assert "VOICE_ENV_NONE" not in os.environ
+    monkeypatch.delenv("VOICE_ENV_MISSING", raising=False)
 
 
 @pytest.mark.asyncio
@@ -204,9 +231,12 @@ async def test_send_discord_message_missing_text_is_invalid_arguments():
 @pytest.mark.asyncio
 async def test_send_discord_message_failure_returns_structured_error():
     executor = VoiceToolExecutor(delegate=None)
-    with patch(
-        "tools.send_message_tool.send_message_tool",
-        return_value=json.dumps({"error": "no home channel set"}),
+    with (
+        patch("tools.voice_live_tools._ensure_hermes_env"),
+        patch(
+            "tools.send_message_tool.send_message_tool",
+            return_value=json.dumps({"error": "no home channel set"}),
+        ),
     ):
         result = await executor.execute(
             "send_discord_message", {"text": "hallo piet"}
@@ -219,9 +249,12 @@ async def test_send_discord_message_failure_returns_structured_error():
 @pytest.mark.asyncio
 async def test_send_discord_message_exception_returns_structured_error():
     executor = VoiceToolExecutor(delegate=None)
-    with patch(
-        "tools.send_message_tool.send_message_tool",
-        side_effect=RuntimeError("gateway down"),
+    with (
+        patch("tools.voice_live_tools._ensure_hermes_env"),
+        patch(
+            "tools.send_message_tool.send_message_tool",
+            side_effect=RuntimeError("gateway down"),
+        ),
     ):
         result = await executor.execute(
             "send_discord_message", {"text": "hallo piet"}
@@ -235,10 +268,13 @@ async def test_send_discord_message_exception_returns_structured_error():
 async def test_send_discord_message_truncates_long_text():
     executor = VoiceToolExecutor(delegate=None)
     long_text = "x" * 2000
-    with patch(
-        "tools.send_message_tool.send_message_tool",
-        return_value=json.dumps({"success": True}),
-    ) as sender:
+    with (
+        patch("tools.voice_live_tools._ensure_hermes_env"),
+        patch(
+            "tools.send_message_tool.send_message_tool",
+            return_value=json.dumps({"success": True}),
+        ) as sender,
+    ):
         result = await executor.execute("send_discord_message", {"text": long_text})
 
     assert result == {"ok": True, "truncated": True}
