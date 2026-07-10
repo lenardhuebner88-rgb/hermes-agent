@@ -1426,7 +1426,7 @@ export function LoopsGrid({
 }: LoopsGridProps) {
   if (packs.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed p-8 text-center" style={{ borderColor: "var(--ln-line)" }}>
+      <div className="rounded-card border border-dashed p-4 text-left" style={{ borderColor: "var(--ln-line)" }}>
         <p className="text-base font-semibold" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.empty}</p>
         <p className="mt-1 text-sm" style={{ color: "var(--ln-ink-soft)" }}>{t.emptyHint}</p>
       </div>

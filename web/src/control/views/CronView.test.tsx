@@ -1,8 +1,19 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CronJob } from "../lib/types";
+
+const hooks = vi.hoisted(() => ({
+  useCronObservability: vi.fn(),
+  useCronOutput: vi.fn(),
+}));
+
+vi.mock("../hooks/useControlData", () => ({
+  useCronObservability: hooks.useCronObservability,
+  useCronOutput: hooks.useCronOutput,
+}));
+
 import { CronView } from "./CronView";
 import { jobTone } from "./CronView.helpers";
-import type { CronJob } from "../lib/types";
 
 const baseJob: CronJob = {
   id: "j1",
@@ -45,10 +56,60 @@ describe("jobTone", () => {
 });
 
 describe("CronView", () => {
+  beforeEach(() => {
+    hooks.useCronObservability.mockReturnValue({
+      data: null,
+      error: null,
+      errorObj: null,
+      loading: true,
+      lastUpdated: null,
+      isStale: false,
+      busyJob: null,
+      actionError: null,
+      reload: vi.fn(),
+      updateData: vi.fn(),
+      trigger: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    hooks.useCronOutput.mockReturnValue({
+      outputById: {},
+      errorById: {},
+      loadingId: null,
+      load: vi.fn(),
+    });
+  });
+
   it("renders the title and a gateway-down banner when no data is loaded yet", () => {
     const html = renderToStaticMarkup(<CronView density="airy" />);
     expect(html).toContain("Crons");
     // No data yet → gateway.running defaults false → operator-critical banner shows.
     expect(html).toContain("Gateway läuft nicht");
+  });
+
+  it("renders an empty cron inventory with neutral tone and no status-ok class", () => {
+    hooks.useCronObservability.mockReturnValue({
+      data: { jobs: [], gateway: { running: true, pid: 42 } },
+      error: null,
+      errorObj: null,
+      loading: false,
+      lastUpdated: 1,
+      isStale: false,
+      busyJob: null,
+      actionError: null,
+      reload: vi.fn(),
+      updateData: vi.fn(),
+      trigger: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(<CronView density="airy" />);
+
+    expect(html).toContain('class="hc-fleet-empty"');
+    expect(html).toContain("Keine Cron-Jobs gefunden.");
+    expect(html).toContain("Es gibt derzeit nichts auszuführen.");
+    expect(html).not.toContain("hc-fleet-empty ok");
+    expect(html).not.toContain("status-ok");
   });
 });

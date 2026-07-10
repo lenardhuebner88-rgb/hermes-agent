@@ -59,4 +59,12 @@ describe("OpsRadarContent", () => {
     expect(html.toLowerCase()).not.toContain("kill");
     expect(html.toLowerCase()).not.toContain("update");
   });
+
+  it("does not leave a loading skeleton behind after a terminal load error", () => {
+    const html = renderToStaticMarkup(<OpsRadarContent data={null} lastUpdated={null} error="offline" />);
+
+    expect(html).toContain("Ops Radar konnte nicht geladen werden: offline");
+    expect(html).not.toContain("hc-skeleton");
+    expect(html).not.toContain('aria-busy="true"');
+  });
 });

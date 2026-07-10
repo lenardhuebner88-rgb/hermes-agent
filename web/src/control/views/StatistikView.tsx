@@ -53,7 +53,7 @@ import type {
   WindowedRollupWorker,
 } from "../lib/schemas";
 import { AccountUsageTile } from "../components/AccountUsageTile";
-import { Eyebrow } from "../components/primitives";
+import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
 import { DrawerShell, KpiTile, SectionHeader, FleetEmptyState } from "../components/leitstand";
 import { cn } from "@/lib/utils";
@@ -323,7 +323,7 @@ export function ReliabilitySection({ profiles }: { profiles: ReliabilityProfile[
     <section className="space-y-2">
       <SectionHeader label={de.stats.secReliability} meta={de.stats.secReliabilityMeta} />
       {rows.length === 0 ? (
-        <FleetEmptyState title={de.stats.leaderEmpty} desc={de.stats.leaderEmpty} ok />
+        <FleetEmptyState title={de.stats.leaderEmpty} desc={de.stats.leaderEmptyDesc} />
       ) : (
         <div className="st-panel space-y-1.5 p-2">
           {rows.map((r, i) => (
@@ -347,7 +347,7 @@ export function ErrorTaxonomySection({ issues }: { issues: IssueGroup[] }) {
   const tax = useMemo(() => errorTaxonomy(issues), [issues]);
   let verdict: ReactNode;
   if (tax.buckets.length === 0) {
-    verdict = <FleetEmptyState title={de.stats.errEmpty} desc={de.stats.errEmpty} ok />;
+    verdict = <FleetEmptyState title={de.stats.errEmpty} desc={de.stats.errEmptyDesc} ok />;
   } else if (tax.allLifecycle) {
     verdict = (
       <StNote tone="calm">
@@ -408,7 +408,7 @@ export function BudgetLedgerSection({ providers }: { providers: AccountUsageProv
         </StLead>
       ) : null}
       {rows.length === 0 ? (
-        <FleetEmptyState title={de.stats.budgetEmpty} desc={de.stats.budgetEmpty} ok />
+        <FleetEmptyState title={de.stats.budgetEmpty} desc={de.stats.budgetEmptyDesc} />
       ) : (
         <div className="st-panel space-y-2 p-3">
           {rows.map((r) => (
@@ -435,14 +435,14 @@ function WorkerEfficiencyMap({ rows }: { rows: WorkerEfficiencyRow[] }) {
   if (!hasReviewSignal) {
     return (
       <div className="st-we-map st-we-map-empty">
-        <FleetEmptyState title="Review zurück offen" desc="Review zurück offen" ok />
+        <FleetEmptyState title="Keine Review-Daten im Fenster." desc="Die Rücklaufquote ist noch nicht bewertbar." />
       </div>
     );
   }
   if (chartRows.length === 0) {
     return (
       <div className="st-we-map st-we-map-empty">
-        <FleetEmptyState title="Token/min offen" desc="Token/min offen" ok />
+        <FleetEmptyState title="Keine Laufzeitdaten im Fenster." desc="Token/min ist noch nicht bewertbar." />
       </div>
     );
   }
@@ -535,7 +535,7 @@ function WorkerLevers({ rows }: { rows: WorkerEfficiencyRow[] }) {
   return (
     <div className="st-we-levers">
       {levers.length === 0 ? (
-        <span className="st-we-lever st-we-lever-empty">Noch kein belastbarer Hebel</span>
+        <span className="st-we-lever st-we-lever-empty">Kein belastbarer Hebel aus den aktuellen Daten.</span>
       ) : (
         levers.map((lever) => (
           <span key={lever.key} className="st-we-lever">
@@ -643,11 +643,11 @@ export function WorkerEfficiencySection({
       </div>
 
       {loading && empty ? (
-        <FleetEmptyState title="Worker-Daten laden" desc="Worker-Daten laden" ok />
+        <SkeletonCard rows={4} />
       ) : error && empty ? (
         <StNote tone="warn">Worker-Daten nicht frisch</StNote>
       ) : empty ? (
-        <FleetEmptyState title="Noch keine Worker-Daten im Fenster." desc="Noch keine Worker-Daten im Fenster." ok />
+        <FleetEmptyState title="Noch keine Worker-Daten im Fenster." desc="Der Vergleich ist noch nicht belastbar." />
       ) : (
         <>
           <WorkerEfficiencyMap rows={rows} />
@@ -688,7 +688,7 @@ export function EffizienzSection({
 
       <SectionHeader label={de.stats.secBurn} meta={de.stats.secBurnMeta} rule={false} />
       {lanes.length === 0 ? (
-        <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmpty} ok />
+        <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmptyDesc} />
       ) : (
         <div className="st-panel space-y-1.5 p-2">
           {lanes.map((l, i) => {
@@ -723,7 +723,7 @@ export function EffizienzSection({
 
       <SectionHeader label={de.stats.secReviewValue} meta={de.stats.secReviewValueMeta} rule={false} />
       {stages.length === 0 ? (
-        <FleetEmptyState title={de.stats.reviewValueEmpty} desc={de.stats.reviewValueEmpty} ok />
+        <FleetEmptyState title={de.stats.reviewValueEmpty} desc={de.stats.reviewValueEmptyDesc} />
       ) : (
         <div className="st-panel space-y-1.5 p-2">
           {stages.map((r, i) => {
@@ -808,11 +808,11 @@ function CostTrendSection({
     <section className="space-y-2">
       <SectionHeader label={de.stats.secCostTrend} meta={de.stats.secCostTrendMeta} />
       {loading ? (
-        <FleetEmptyState title={de.stats.costTrendLoading} desc={de.stats.costTrendLoading} ok />
+        <SkeletonCard rows={4} />
       ) : error ? (
         <StNote tone="warn">{de.stats.costTrendError} {error}</StNote>
       ) : !hasTrend ? (
-        <FleetEmptyState title={de.stats.costTrendEmpty} desc={de.stats.costTrendEmpty} ok />
+        <FleetEmptyState title={de.stats.costTrendEmpty} desc={de.stats.costTrendEmptyDesc} />
       ) : (
         <>
           <div className="st-trend" data-testid="runs-costs-series-trend">
@@ -842,7 +842,7 @@ function CostTrendSection({
       {drawerOpen ? (
         <DrawerShell title={de.stats.modelLaneDrilldown} ariaLabel={de.stats.modelLaneDrilldown} onClose={() => setDrawerOpen(false)}>
           {!hasDrilldown ? (
-            <FleetEmptyState title={de.stats.modelDrilldownEmpty} desc={de.stats.modelDrilldownEmpty} ok />
+            <FleetEmptyState title={de.stats.modelDrilldownEmpty} desc={de.stats.modelDrilldownEmptyDesc} />
           ) : (
             /* Host-Wrapper traegt den Query-Container: ein Element ist per Spec
                nie sein eigener @container (css-contain-3) — Reviewer-P1 W3-3. */
@@ -893,11 +893,11 @@ export function SubscriptionBurnSection({
     <section className="space-y-2">
       <SectionHeader label={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
       {loading ? (
-        <FleetEmptyState title={de.stats.burnLoading} desc={de.stats.burnLoading} ok />
+        <SkeletonCard rows={4} />
       ) : error ? (
         <StNote tone="warn">{error}</StNote>
       ) : !hasBurn ? (
-        <FleetEmptyState title={de.stats.subscriptionBurnEmpty} desc={de.stats.subscriptionBurnEmpty} ok />
+        <FleetEmptyState title={de.stats.subscriptionBurnEmpty} desc={de.stats.subscriptionBurnEmptyDesc} />
       ) : (
         <div className="st-panel st-subburn space-y-3 p-3" data-testid="subscription-burn-breakdown">
           <div className="st-subburn-hero">
@@ -1087,11 +1087,11 @@ export function MotherLedgerSection() {
         </div>
       </div>
       {rollup.loading && !rollup.data ? (
-        <FleetEmptyState title={de.stats.burnLoading} desc={de.stats.burnLoading} ok />
+        <SkeletonCard rows={5} />
       ) : rollup.error && !rollup.data ? (
         <StNote tone="warn">{de.ketten.chainCostsLoadError}</StNote>
       ) : roots.length === 0 ? (
-        <FleetEmptyState title={de.ketten.chainCostsEmpty} desc={de.ketten.chainCostsEmpty} ok />
+        <FleetEmptyState title={de.ketten.chainCostsEmpty} desc={de.ketten.chainCostsEmptyDesc} />
       ) : (
         <div className="st-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
           <div className="st-ledger-hero">

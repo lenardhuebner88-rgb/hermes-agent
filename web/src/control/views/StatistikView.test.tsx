@@ -435,7 +435,8 @@ describe("WorkerEfficiencySection (B3)", () => {
       />,
     );
 
-    expect(html).toContain("Review zurück offen");
+    expect(html).toContain("Keine Review-Daten im Fenster.");
+    expect(html).toContain("Die Rücklaufquote ist noch nicht bewertbar.");
     expect(html).toContain("Token/Task");
     expect(html).toContain("—");
   });
@@ -619,6 +620,8 @@ describe("ReliabilitySection (ST4)", () => {
   it("renders a calm empty state with no roster runs", () => {
     const html = renderToStaticMarkup(<ReliabilitySection profiles={[profile({ profile: "w" })]} />);
     expect(html).toContain("Noch keine Profil-Läufe im Fenster.");
+    expect(html).toContain("Die Verlässlichkeit ist noch nicht bewertbar.");
+    expect((html.match(/Noch keine Profil-Läufe im Fenster\./g) ?? []).length).toBe(1);
   });
 });
 
@@ -643,7 +646,7 @@ describe("ErrorTaxonomySection (ST4)", () => {
 
   it("shows a clean-window verdict and no bar when there are no issues", () => {
     const html = renderToStaticMarkup(<ErrorTaxonomySection issues={[]} />);
-    expect(html).toContain("sauberes Fenster");
+    expect(html).toContain("Das Fehlerfenster ist unauffällig.");
     expect(html).not.toContain("st-estack");
   });
 

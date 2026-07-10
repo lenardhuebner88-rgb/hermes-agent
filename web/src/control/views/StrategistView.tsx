@@ -40,7 +40,7 @@ const t = {
   listEyebrow: "Warten auf deine Entscheidung",
   listMeta: "Vorschläge des Strategen — du gibst frei oder verwirfst",
   empty: "Keine Vorschläge warten auf Freigabe.",
-  emptyDesc: "Der Stratege läuft 2×/Tag und reiht nur ROI-positive, self-gated Specs hier ein.",
+  emptyDesc: "Es ist keine Freigabe nötig; der Stratege prüft zweimal täglich auf neue Kandidaten.",
   // Zwei Untergruppen derselben freigabe:operator-Fläche, getrennt nach echter Herkunft.
   groupStrategistTitle: "Vom Strategen vorgeschlagen",
   groupStrategistDesc: "Self-gated, ROI-annotiert — das eigentliche Strategen-Ergebnis (propose-Lauf).",
@@ -181,7 +181,7 @@ export function StrategistView({ density }: { density: Density }) {
         {data === null ? (
           <p className="text-sm text-ink-3">…</p>
         ) : proposals.length === 0 ? (
-          <FleetEmptyState title={t.empty} desc={t.emptyDesc} ok />
+          <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
         ) : (
           <div className="space-y-4">
             {strategistProposals.length > 0 ? (

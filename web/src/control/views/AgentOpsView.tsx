@@ -328,7 +328,7 @@ export function AgentOpsView({ density }: { density: Density }) {
             <a href="/control/orchestrator" className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1.5 text-sec text-live hover:border-live hover:bg-live/10">Orchestrator</a>
           </div>
           {snapshot.dispatchCandidates.length === 0 ? (
-            <FleetEmptyState ok title="Keine beauftragbaren Kandidaten." desc="Kein ready Task wartet auf Dispatch." />
+            <FleetEmptyState title="Keine beauftragbaren Kandidaten." desc="Der Dispatch hat derzeit keinen nächsten Auftrag." />
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
               {snapshot.dispatchCandidates.map((candidate) => {

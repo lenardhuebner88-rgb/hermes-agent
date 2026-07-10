@@ -188,7 +188,7 @@ export function CronView(_props: { density: Density }) {
       </div>
 
       {jobs.length === 0 && !controls.loading ? (
-        <FleetEmptyState ok title={t.empty} desc={t.subtitle} />
+        <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
       ) : (
         <div className="space-y-3">
           {jobs.map((job) => (

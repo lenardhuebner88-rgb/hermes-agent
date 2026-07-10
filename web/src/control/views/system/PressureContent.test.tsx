@@ -98,4 +98,12 @@ describe("PressureContent", () => {
     expect(html).toContain("Keine Tests, Browser oder Agenten als Druckquelle erkannt.");
     expect(html).not.toContain("mit hoher Last erkannt");
   });
+
+  it("does not leave a loading skeleton behind after a terminal load error", () => {
+    const html = renderToStaticMarkup(<PressureContent data={null} lastUpdated={null} error="timeout" />);
+
+    expect(html).toContain("Pressure konnte nicht geladen werden: timeout");
+    expect(html).not.toContain("hc-skeleton");
+    expect(html).not.toContain('aria-busy="true"');
+  });
 });

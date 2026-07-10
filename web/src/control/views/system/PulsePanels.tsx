@@ -29,7 +29,7 @@ export function PulseTimeline({ data }: { data: PulseData }) {
   const navigate = useNavigate();
   if (data.loading) return <SkeletonCard rows={4} />;
   if (data.events.length === 0) {
-    return <FleetEmptyState ok title={de.pulse.empty} desc={de.pulse.emptyHint(data.windowHours)} />;
+    return <FleetEmptyState title={de.pulse.empty} desc={de.pulse.emptyHint(data.windowHours)} />;
   }
   return (
     <div className="space-y-5">

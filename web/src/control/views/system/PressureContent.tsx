@@ -85,7 +85,7 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
     return (
       <div className="space-y-4">
         {error ? <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />Pressure konnte nicht geladen werden: {error}</div> : null}
-        <SkeletonCard rows={6} />
+        {!error ? <SkeletonCard rows={6} /> : null}
       </div>
     );
   }

@@ -126,7 +126,17 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       )}
       {!error && cards.length === 0 && (
         <div className="mt-4">
-          <FleetEmptyState title="Noch keine Design-Karten" desc="Tippe ＋ Neue Karte, um zu starten." />
+          <FleetEmptyState
+            title="Noch keine Design-Karten"
+            desc={(
+              <span className="inline-flex flex-col items-start gap-2">
+                <span>Der Arbeitsbereich ist noch unbestückt.</span>
+                <button type="button" onClick={() => setShowForm(true)} className="inline-flex min-h-12 items-center rounded-card border border-live px-3 text-sec text-live hover:bg-live/10">
+                  Neue Karte anlegen
+                </button>
+              </span>
+            )}
+          />
         </div>
       )}
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

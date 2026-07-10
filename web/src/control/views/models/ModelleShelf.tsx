@@ -32,12 +32,14 @@ const t = {
   pulsePrefix: "Neu entdeckt:",
   stand: (s: string) => `Stand ${s}`,
   noScores: "Noch keine gequellten Benchmarks.",
+  noScoresDesc: "Die Modelle sind noch nicht belastbar vergleichbar.",
   providerAngabe: "Provider-Angabe",
   guideLink: "Prompting-Guide →",
   guideBack: "Alle Guides",
   guideLoadError: "Guide konnte nicht geladen werden.",
   guideLoading: "Lade …",
   guidesEmpty: "Noch keine Prompting-Guides.",
+  guidesEmptyDesc: "Für die gelisteten Modelle liegt noch keine Anleitung vor.",
   toc: "Inhalt",
   modelColumn: "Modell",
   dash: "—",
@@ -233,7 +235,7 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
   };
 
   if (suites.length === 0) {
-    return <FleetEmptyState title={t.noScores} desc="" />;
+    return <FleetEmptyState title={t.noScores} desc={t.noScoresDesc} />;
   }
 
   return (
@@ -287,7 +289,7 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
 
 function GuideList({ guides, onOpen }: { guides: GuideSummary[]; onOpen: (family: string) => void }) {
   if (guides.length === 0) {
-    return <FleetEmptyState title={t.guidesEmpty} desc="" />;
+    return <FleetEmptyState title={t.guidesEmpty} desc={t.guidesEmptyDesc} />;
   }
   return (
     <ul className="grid gap-2 sm:grid-cols-2">

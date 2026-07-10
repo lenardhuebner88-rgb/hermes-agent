@@ -203,6 +203,22 @@ The rules above are realised as one canonical component layer at
 `components/leitstand` instead of re-deriving the idiom per view. Props and
 usage: `components/leitstand/README.md`.
 
+## Empty States (Doktrin, W4-7)
+
+- **Eine Stimme:** ruhiges Operator-Deutsch, faktisch. Keine Ausrufezeichen, keine Emojis,
+  kein Jubel ("Keine offenen Fragen." — nicht "Super! Alles erledigt").
+- **Muster, immer in dieser Reihenfolge:** *Situation* (was ist leer) → *Bewertung* (ist das
+  gut, neutral oder handlungsbedürftig) → *nächste Aktion* (der EINE offensichtliche nächste
+  Schritt, als Link/Button wenn es ihn gibt; sonst entfällt die Zeile).
+- **Kein ok-Grün auf Neutral-Zuständen:** eine leere Liste ist KEIN Erfolgszustand. Empty
+  States rendern in ink-2/ink-3, ohne status-ok-Farbe, ohne grünes Häkchen-Icon. Statusfarben
+  erscheinen nur, wenn die Leere selbst ein beurteilter Zustand ist (z. B. "0 Blocker" in
+  einem Alarm-Kontext darf ok aussagen).
+- **Leer ≠ Ladend ≠ Fehler:** drei visuell unterscheidbare Zustände. Skeletons dürfen nie als
+  Pseudo-Empty stehen bleiben ("… wird geladen" auf Dauer = Defekt).
+- **Form:** keine raumgreifenden Hero-Boxen für Routine-Leere; ein ruhiger Ein- bis
+  Zweizeiler, optionales Icon in ink-3, ausgerichtet an der Listengeometrie, die er ersetzt.
+
 ## VISUAL-SELF-VERIFY
 
 VISUAL-SELF-VERIFY runs through `scripts/visual-verify.sh`, never against the
