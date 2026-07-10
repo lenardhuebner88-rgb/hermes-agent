@@ -1,11 +1,10 @@
 import { useEffect } from "react";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink, TriangleAlert, X } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 
 import { de } from "../../i18n/de";
-import { ToneCallout } from "../../components/atoms";
 import { CommissionButton } from "../../components/fleet/CommissionButton";
-import { Stat } from "../../components/primitives";
+import { Eyebrow } from "../../components/primitives";
 import { DUR, EASE_OUT, EASE_RISE } from "../../lib/motion";
 import { nextActionForFoItem } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
@@ -16,19 +15,39 @@ import { operatorBrief, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 function SectionLines({ title, lines, fallback }: { title: string; lines: string[] | undefined; fallback: string }) {
   const visible = lines?.filter((line) => line.trim() !== "") ?? [];
   return (
-    <section className="border-t border-[var(--hc-border)] pt-3">
-      <h3 className="text-[11px] font-semibold uppercase text-zinc-400">{title}</h3>
+    <section className="border-t border-line-soft pt-3">
+      <Eyebrow>{title}</Eyebrow>
       {visible.length ? (
         <ul className="mt-2 space-y-1.5">
           {visible.map((line, index) => (
-            <li key={`${title}-${index}-${line}`} className="break-words text-sm text-zinc-100">{line}</li>
+            <li key={`${title}-${index}-${line}`} className="break-words text-body text-ink">{line}</li>
           ))}
         </ul>
       ) : (
-        <p className="mt-2 text-sm hc-soft">{fallback}</p>
+        <p className="mt-2 text-body text-ink-2">{fallback}</p>
       )}
     </section>
   );
+}
+
+function DetailMetric({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "alert" }) {
+  const dotClass = tone === "ok" ? "bg-status-ok" : tone === "warn" ? "bg-status-warn" : tone === "alert" ? "bg-status-alert" : "bg-ink-3";
+  return (
+    <div className="min-w-0 rounded-card border border-line bg-surface-2 px-3 py-2.5">
+      <Eyebrow>{label}</Eyebrow>
+      <div className="mt-1 flex items-center gap-1.5 text-sec font-medium text-ink">
+        {tone ? <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${dotClass}`} /> : null}
+        <span className="truncate">{value}</span>
+      </div>
+    </div>
+  );
+}
+
+function metricTone(tone: string | undefined): "ok" | "warn" | "alert" | undefined {
+  if (tone === "emerald") return "ok";
+  if (tone === "amber") return "warn";
+  if (tone === "red" || tone === "rose") return "alert";
+  return undefined;
 }
 
 export function FoDetailDrawer({
@@ -86,35 +105,35 @@ export function FoDetailDrawer({
         role="dialog"
         aria-modal="true"
         aria-labelledby="fo-detail-title"
-        className="hc-surface-raised absolute right-0 top-0 flex h-full w-full max-w-xl flex-col rounded-none border-y-0 border-l border-[var(--hc-border)] shadow-2xl"
+        className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col rounded-none border-y-0 border-l border-line bg-surface-1 shadow-2xl"
         initial={drawer.initial}
         animate={drawer.animate}
         exit={drawer.exit}
         transition={drawer.transition}
       >
-        <header className="flex items-start justify-between gap-3 border-b border-[var(--hc-border)] p-5">
+        <header className="flex items-start justify-between gap-3 border-b border-line-soft p-5">
           <div className="min-w-0">
-            <h2 id="fo-detail-title" className="text-lg font-semibold text-white">{item.title}</h2>
-            <p className="mt-1 truncate text-xs hc-mono hc-dim">{detail?.source_path || sourceRef(item)}</p>
+            <h2 id="fo-detail-title" className="font-display text-h2 font-semibold text-ink">{item.title}</h2>
+            <p className="mt-1 truncate font-data text-micro text-ink-3">{detail?.source_path || sourceRef(item)}</p>
           </div>
-          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[.03] text-zinc-200 hover:bg-white/[.07]" aria-label="Schließen" onClick={onClose}>
+          <button type="button" className="grid size-12 shrink-0 place-items-center rounded-card border border-line text-ink-2 hover:border-live hover:bg-live/10 hover:text-live" aria-label="Schließen" onClick={onClose}>
             <X className="h-4 w-4" />
           </button>
         </header>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-          {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-          {loading && !detail ? <ToneCallout tone="zinc">{de.backlog.loading}</ToneCallout> : null}
+          {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+          {loading && !detail ? <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">{de.backlog.loading}</div> : null}
 
           <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="Status" value={item.status || "-"} tone={STATUS_TONE[item.status] ?? "zinc"} />
-            <Stat label="Risk" value={item.risk || "-"} tone={RISK_TONE[item.risk] ?? "amber"} />
-            <Stat label="Owner" value={item.owner || "-"} tone={item.owner ? "cyan" : "amber"} />
-            <Stat label="Area" value={item.area || "-"} tone="zinc" />
+            <DetailMetric label="Status" value={item.status || "-"} tone={metricTone(STATUS_TONE[item.status])} />
+            <DetailMetric label="Risk" value={item.risk || "-"} tone={metricTone(RISK_TONE[item.risk] ?? "amber")} />
+            <DetailMetric label="Owner" value={item.owner || "-"} tone={item.owner ? undefined : "warn"} />
+            <DetailMetric label="Area" value={item.area || "-"} />
           </section>
 
-          <section className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
-            <h3 className="text-[11px] font-semibold uppercase text-emerald-200">Next Action</h3>
-            <p className="mt-1 text-sm text-white">{nextActionForFoItem(item, detail)}</p>
+          <section className="rounded-card border border-line bg-surface-2 px-3 py-2">
+            <Eyebrow>Next Action</Eyebrow>
+            <p className="mt-1 text-body text-ink">{nextActionForFoItem(item, detail)}</p>
           </section>
 
           <SectionLines title="Decision / Why now" lines={detail?.decision} fallback={item.excerpt || "Keine explizite Entscheidung im Body gefunden."} />
@@ -122,23 +141,23 @@ export function FoDetailDrawer({
           <SectionLines title="Current Evidence / Last Proof" lines={detail?.proofs} fallback={item.result || "Kein letzter Beleg gefunden."} />
           <SectionLines title="Blockers" lines={detail?.blockers} fallback="Keine Blocker im Body gefunden." />
 
-          <section className="border-t border-[var(--hc-border)] pt-3">
-            <h3 className="text-[11px] font-semibold uppercase text-zinc-400">Source path/ref</h3>
-            <dl className="mt-2 space-y-2 text-sm">
-              <div><dt className="text-[10px] uppercase text-zinc-500">Path</dt><dd className="break-words hc-mono text-zinc-100">{detail?.source_path || sourceRef(item)}</dd></div>
-              <div><dt className="text-[10px] uppercase text-zinc-500">Ref</dt><dd className="break-words hc-mono text-zinc-100">{detail?.source_ref || "git:origin/main"}</dd></div>
+          <section className="border-t border-line-soft pt-3">
+            <Eyebrow>Source path/ref</Eyebrow>
+            <dl className="mt-2 space-y-2 text-body">
+              <div><dt className="font-display text-micro uppercase tracking-[0.08em] text-ink-3">Path</dt><dd className="break-words font-data text-ink">{detail?.source_path || sourceRef(item)}</dd></div>
+              <div><dt className="font-display text-micro uppercase tracking-[0.08em] text-ink-3">Ref</dt><dd className="break-words font-data text-ink">{detail?.source_ref || "git:origin/main"}</dd></div>
             </dl>
           </section>
 
           {onCommission ? (
-            <section className="border-t border-[var(--hc-border)] pt-3">
+            <section className="border-t border-line-soft pt-3">
               <CommissionButton variant="full" state={commissionState} onClick={() => onCommission()} />
               {commissionState === "done" ? (
-                <p className="mt-2 text-xs text-emerald-300">In der Fleet geparkt (Stufe Plan) — im Hermes-Tab mit Dispatch starten, dann Verify / Ship.</p>
+                <p className="mt-2 text-sec text-status-ok">In der Fleet geparkt (Stufe Plan) — im Hermes-Tab mit Dispatch starten, dann Verify / Ship.</p>
               ) : commissionState === "error" && commissionError ? (
-                <p className="mt-2 text-xs text-red-300">{de.fleet.commissionFailed}: {commissionError}</p>
+                <p className="mt-2 text-sec text-status-alert">{de.fleet.commissionFailed}: {commissionError}</p>
               ) : (
-                <p className="mt-2 text-xs hc-dim">{de.fleet.commissionTitle}</p>
+                <p className="mt-2 text-sec text-ink-3">{de.fleet.commissionTitle}</p>
               )}
             </section>
           ) : null}
@@ -149,11 +168,11 @@ export function FoDetailDrawer({
           </div>
 
           {detail?.links?.length ? (
-            <section className="border-t border-[var(--hc-border)] pt-3">
-              <h3 className="text-[11px] font-semibold uppercase text-zinc-400">Links</h3>
+            <section className="border-t border-line-soft pt-3">
+              <Eyebrow>Links</Eyebrow>
               <div className="mt-2 space-y-1">
                 {detail.links.map((link) => (
-                  <a key={`${link.label}-${link.href}`} href={link.href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-2 text-sm text-cyan-200 hover:text-cyan-100">
+                  <a key={`${link.label}-${link.href}`} href={link.href} target="_blank" rel="noreferrer" className="flex min-h-12 min-w-0 items-center gap-2 text-body text-live hover:text-bronze-hi">
                     <ExternalLink className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate">{link.label}</span>
                   </a>

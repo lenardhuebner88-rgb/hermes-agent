@@ -21,10 +21,10 @@ export function CopyButton({ text, label, copiedLabel }: { text: string | undefi
       onClick={copy}
       disabled={!text}
       className={cn(
-        "inline-flex min-h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-medium transition",
+        "inline-flex min-h-12 items-center justify-center gap-2 rounded-card border px-3 text-sec font-medium transition",
         copied
-          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-          : "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-500",
+          ? "border-live/50 bg-live/15 text-bronze-hi"
+          : "border-live/40 bg-live/10 text-bronze-hi hover:bg-live/15 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-ink-3",
       )}
     >
       {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}

@@ -1,7 +1,7 @@
 import { ArrowRight, Check, Loader2, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { StatusPill } from "../../components/atoms";
 import { CommissionButton } from "../../components/fleet/CommissionButton";
+import { SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { Skeleton, SkeletonRow } from "../../components/primitives";
 import {
   nextActionForFoItem,
@@ -12,7 +12,7 @@ import {
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
 import type { CommissionState, DispatchFoState, FoBoardStatus } from "../../hooks/useControlData";
 import { de } from "../../i18n/de";
-import { OWNER_TONE, relLabel, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
+import { relLabel, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 
 // Statuses where the operator needs to click "Freigeben" to move the task onto
 // the board. Running/review/done = already active or past, blocked = stuck.
@@ -36,13 +36,10 @@ function DispatchButton({
       title={de.backlog.dispatchTitle}
       aria-label={de.backlog.dispatchLabel}
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border font-medium transition disabled:cursor-default",
-        "min-h-7 px-2.5 text-[11px]",
+        "inline-flex min-h-12 items-center gap-1 rounded-card border px-3 text-sec font-medium transition disabled:cursor-default",
         done
-          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-          : err
-            ? "border-red-500/40 text-red-200 hover:bg-red-500/10"
-            : "border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:brightness-110",
+          ? "border-line bg-surface-2 text-ink-2"
+          : "border-live/40 bg-live/10 text-bronze-hi hover:bg-live/15",
       )}
     >
       {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : done ? <Check className="h-3 w-3" /> : err ? <RotateCcw className="h-3 w-3" /> : <ArrowRight className="h-3 w-3" />}
@@ -86,9 +83,9 @@ export function FoBacklogQueueTable({
   dispatchStateByTaskId?: Record<string, DispatchFoState>;
 }) {
   return (
-    <div className="overflow-x-auto rounded-md border border-[var(--hc-border)] bg-white/[.015]">
+    <div className="overflow-x-auto rounded-panel border border-line bg-surface-1">
       <table className="w-full table-fixed border-collapse text-left text-sm">
-        <thead className="bg-white/[.035] text-[11px] uppercase text-zinc-400">
+        <thead className="bg-surface-2 font-display text-micro uppercase tracking-[0.08em] text-ink-3">
           <tr>
             <th className="w-[30%] px-3 py-2">Title</th>
             <th className="w-[9%] px-3 py-2">Status</th>
@@ -122,40 +119,37 @@ export function FoBacklogQueueTable({
                   }
                 }}
                 className={cn(
-                  "cursor-pointer border-t border-[var(--hc-border)] align-top outline-none transition hover:bg-white/[.035] focus-visible:bg-white/[.045]",
-                  item.id === nextTaskId && "bg-cyan-500/[.06]",
-                  item.id === activeId && "bg-white/[.05] ring-2 ring-inset ring-cyan-400/70",
+                  "cursor-pointer border-t border-line-soft align-top outline-none transition hover:bg-surface-3 focus-visible:bg-surface-3",
+                  item.id === nextTaskId && "bg-live/5",
+                  item.id === activeId && "bg-surface-3 ring-2 ring-inset ring-live/70",
                 )}
               >
-                <td className="px-3 py-2">
+                <td className="h-12 px-3 py-2">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate font-medium text-white">{item.title}</span>
-                      {item.id === nextTaskId ? <span className="shrink-0 rounded-sm bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">NEXT</span> : null}
+                      <span className="truncate font-medium text-ink">{item.title}</span>
+                      {item.id === nextTaskId ? <span className="shrink-0 font-display text-micro font-semibold uppercase tracking-[0.08em] text-live">NEXT</span> : null}
                     </div>
-                    {item.excerpt ? <p className="mt-1 line-clamp-2 text-xs hc-dim">{item.excerpt}</p> : null}
+                    {item.excerpt ? <p className="mt-1 line-clamp-2 text-sec text-ink-2">{item.excerpt}</p> : null}
                     {flags.length ? (
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {flags.slice(0, 3).map((flag) => <span key={`${item.id}-${flag.kind}`} className={cn("rounded-sm px-1.5 py-0.5 text-[10px]", flag.severity === "risk" ? "bg-amber-500/10 text-amber-200" : "bg-zinc-500/10 text-zinc-300")}>{flag.label}</span>)}
+                        {flags.slice(0, 3).map((flag) => <span key={`${item.id}-${flag.kind}`} className={cn("rounded-card border px-1.5 py-0.5 text-micro", flag.severity === "risk" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" : "border-line bg-surface-2 text-ink-2")}>{flag.label}</span>)}
                       </div>
                     ) : null}
                   </div>
                 </td>
-                <td className="px-3 py-2"><StatusPill tone={queueState.state === "drift" ? "amber" : STATUS_TONE[queueState.state]} label={item.status || "missing"} /></td>
-                <td className="hidden px-3 py-2 md:table-cell"><StatusPill tone={RISK_TONE[item.risk] ?? "amber"} label={item.risk || "missing"} /></td>
-                <td className="hidden px-3 py-2 lg:table-cell"><StatusPill tone={OWNER_TONE[item.owner] ?? "amber"} label={item.owner || "missing"} /></td>
-                <td className="hidden px-3 py-2 text-zinc-200 xl:table-cell">{item.area || "-"}</td>
-                <td className="hidden px-3 py-2 md:table-cell"><span className="hc-mono text-xs hc-soft">{relLabel(item.updated, nowSec)}</span></td>
-                <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("text-xs", stale.state === "stale" ? "text-red-200" : stale.state === "missing_update" ? "text-amber-200" : "hc-soft")}>{stale.label}</span></td>
-                <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate hc-mono text-[11px] text-zinc-400">{sourceRef(item)}</span><span className="hc-mono text-[11px] text-zinc-500">{item.id}</span></td>
+                <td className="px-3 py-2"><SignalChip tone={signalToneFromLegacy(queueState.state === "drift" ? "amber" : STATUS_TONE[queueState.state])} label={item.status || "missing"} /></td>
+                <td className="hidden px-3 py-2 md:table-cell"><SignalChip tone={signalToneFromLegacy(RISK_TONE[item.risk] ?? "amber")} label={item.risk || "missing"} /></td>
+                <td className="hidden px-3 py-2 text-sec text-ink-2 lg:table-cell">{item.owner || "missing"}</td>
+                <td className="hidden px-3 py-2 text-ink-2 xl:table-cell">{item.area || "-"}</td>
+                <td className="hidden px-3 py-2 md:table-cell"><span className="font-data text-sec tabular-nums text-ink-2">{relLabel(item.updated, nowSec)}</span></td>
+                <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("text-sec", stale.state === "stale" ? "text-status-alert" : stale.state === "missing_update" ? "text-status-warn" : "text-ink-2")}>{stale.label}</span></td>
+                <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate font-data text-micro text-ink-2">{sourceRef(item)}</span><span className="font-data text-micro text-ink-3">{item.id}</span></td>
                 <td className="px-3 py-2">
-                  <p className="line-clamp-3 text-sm text-zinc-100">{nextActionForFoItem(item, detail)}</p>
+                  <p className="line-clamp-3 text-sec text-ink">{nextActionForFoItem(item, detail)}</p>
                   {boardStatus ? (
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <StatusPill
-                        tone={BOARD_STATUS_TONE[boardStatus.status] ?? "zinc"}
-                        label={`Im Board · ${boardStatus.label}`}
-                      />
+                      <SignalChip tone={signalToneFromLegacy(BOARD_STATUS_TONE[boardStatus.status] ?? "zinc")} label={`Im Board · ${boardStatus.label}`} />
                       {DISPATCH_ELIGIBLE.has(boardStatus.status) && onDispatch ? (
                         <DispatchButton
                           state={dispatchStateByTaskId[boardStatus.taskId]}
@@ -180,8 +174,8 @@ export function FoBacklogQueueTable({
 
 export function FoBacklogQueueSkeleton() {
   return (
-    <div className="overflow-hidden rounded-md border border-[var(--hc-border)] bg-white/[.015]" aria-busy="true" aria-label="Backlog queue loading">
-      <div className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-b border-[var(--hc-border)] bg-white/[.035] px-3 py-2">
+    <div className="overflow-hidden rounded-panel border border-line bg-surface-1" aria-busy="true" aria-label="Backlog queue loading">
+      <div className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-b border-line-soft bg-surface-2 px-3 py-2">
         <Skeleton className="h-3 w-24" />
         <Skeleton className="h-3 w-14" />
         <Skeleton className="h-3 w-14" />
@@ -189,7 +183,7 @@ export function FoBacklogQueueSkeleton() {
       </div>
       <div className="space-y-0">
         {Array.from({ length: 5 }).map((_, index) => (
-          <div key={index} className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-t border-[var(--hc-border)] px-3 py-3 first:border-t-0">
+          <div key={index} className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-t border-line-soft px-3 py-3 first:border-t-0">
             <div className="space-y-2">
               <SkeletonRow className="w-3/4" />
               <SkeletonRow className="w-11/12" />

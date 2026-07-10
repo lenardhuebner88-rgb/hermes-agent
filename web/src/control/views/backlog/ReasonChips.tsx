@@ -12,8 +12,8 @@ export function ReasonChips({ codes, max = 4 }: { codes: FoReasonCode[]; max?: n
           <span
             key={code}
             className={cn(
-              "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
-              negative ? "bg-amber-500/10 text-amber-200" : "bg-cyan-500/10 text-cyan-200",
+              "rounded-card border px-1.5 py-0.5 text-micro font-medium",
+              negative ? "border-status-warn/30 bg-status-warn/10 text-status-warn" : "border-line bg-surface-2 text-ink-2",
             )}
           >
             {FO_REASON_LABELS[code] ?? code}

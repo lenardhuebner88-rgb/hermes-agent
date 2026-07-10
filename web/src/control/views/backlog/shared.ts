@@ -37,7 +37,6 @@ export const STATUS_TONE: Record<string, ToneName> = {
 };
 
 export const RISK_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
-export const OWNER_TONE: Record<string, ToneName> = { claude: "violet", hermes: "cyan", piet: "emerald", codex: "sky", unassigned: "zinc" };
 
 export function clockLabel(nowSec: number): string {
   return new Date(nowSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });

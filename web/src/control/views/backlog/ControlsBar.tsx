@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
-import { Card } from "../../components/primitives";
+import { Card, Eyebrow } from "../../components/primitives";
 import type { FoSortKey } from "../../lib/foBacklog";
 
 export function ControlsBar({
@@ -30,32 +30,36 @@ export function ControlsBar({
 }) {
   return (
     <Card surface="card" className="p-3">
+      <label htmlFor="fo-backlog-search">
+        <Eyebrow>Backlog durchsuchen</Eyebrow>
+      </label>
       <input
+        id="fo-backlog-search"
         type="search"
         value={q}
         onChange={(e) => onQ(e.target.value)}
         placeholder={de.backlog.searchPlaceholder}
-        className="w-full rounded-md border border-white/10 bg-white/[.04] px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-cyan-400/50 focus:outline-none"
+        className="mt-2 h-12 w-full rounded-card border border-line bg-surface-1 px-3 text-body text-ink placeholder:text-ink-3 focus:border-live focus:outline-none focus:ring-2 focus:ring-live/30"
       />
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {(["", "high", "medium", "low"] as const).map((risk) => (
-          <button key={risk || "all-risk"} type="button" onClick={() => onFilterRisk(risk)} className={cn("rounded-md border px-2.5 py-1 text-xs font-medium transition", filterRisk === risk ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200")}>
+          <button key={risk || "all-risk"} type="button" onClick={() => onFilterRisk(risk)} className={cn("inline-flex min-h-12 items-center rounded-card border px-3 text-sec font-medium transition", filterRisk === risk ? "border-live bg-live/10 text-bronze-hi" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink")}>
             {risk || de.backlog.filterAll}
           </button>
         ))}
-        <button type="button" onClick={() => onFilterStale(!filterStale)} className={cn("rounded-md border px-2.5 py-1 text-xs font-medium transition", filterStale ? "border-red-400/50 bg-red-500/15 text-red-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200")}>
+        <button type="button" onClick={() => onFilterStale(!filterStale)} aria-pressed={filterStale} className={cn("inline-flex min-h-12 items-center rounded-card border px-3 text-sec font-medium transition", filterStale ? "border-live bg-live/10 text-bronze-hi" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink")}>
           {de.backlog.filterStale}
         </button>
         {owners.length > 1 ? (
-          <select value={filterOwner} onChange={(e) => onFilterOwner(e.target.value)} className="rounded-md border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200 focus:outline-none">
+          <select aria-label="Nach Owner filtern" value={filterOwner} onChange={(e) => onFilterOwner(e.target.value)} className="h-12 rounded-card border border-line bg-surface-1 px-3 text-sec text-ink-2 focus:border-live focus:outline-none focus:ring-2 focus:ring-live/30">
             <option value="">{de.backlog.filterAll} Owner</option>
             {owners.map((owner) => <option key={owner} value={owner}>{owner}</option>)}
           </select>
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">
-          <span className="text-xs hc-dim">{de.backlog.sortLabel}:</span>
+          <Eyebrow>{de.backlog.sortLabel}</Eyebrow>
           {(["risk", "age", "status"] as FoSortKey[]).map((key) => (
-            <button key={key} type="button" onClick={() => onSort(key)} className={cn("rounded-md border px-2 py-1 text-xs transition", sortKey === key ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")}>
+            <button key={key} type="button" onClick={() => onSort(key)} className={cn("inline-flex min-h-12 items-center rounded-card border px-3 text-sec transition", sortKey === key ? "border-live bg-live/10 text-bronze-hi" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink")}>
               {key === "risk" ? de.backlog.sortRisk : key === "age" ? de.backlog.sortAge : de.backlog.sortStatus}
             </button>
           ))}

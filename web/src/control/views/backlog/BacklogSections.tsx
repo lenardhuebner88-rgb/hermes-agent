@@ -2,8 +2,8 @@ import { Keyboard, LayoutGrid, List } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { FoBacklogCard } from "../../components/FoBacklogCard";
-import { StatusPill, ToneCallout } from "../../components/atoms";
-import { Card, Disclosure, Panel, Section, SkeletonCard, Stagger, StaggerItem } from "../../components/primitives";
+import { Card, Disclosure, Eyebrow, Panel, Section, SkeletonCard, Stagger, StaggerItem } from "../../components/primitives";
+import { KpiTile, SignalLabel, signalToneFromLegacy } from "../../components/leitstand";
 import { de } from "../../i18n/de";
 import {
   buildFoCommissionPrompt,
@@ -45,33 +45,27 @@ export function BacklogHeroPanel({
       surface="card"
       actions={
         <>
-          <div className="mr-2 text-xs hc-soft">{loading ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
+          <div className={cn("mr-2 text-ink-3", loading ? "text-sec" : "font-data text-micro tabular-nums")}>{loading ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
           <CopyButton text={auditPrompt} label={de.backlog.audit} copiedLabel={de.backlog.auditCopied} />
-          <button type="button" onClick={() => onViewMode("queue")} aria-label="Queue-Ansicht" aria-pressed={viewMode === "queue"} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "queue" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Queue">
+          <button type="button" onClick={() => onViewMode("queue")} aria-label="Queue-Ansicht" aria-pressed={viewMode === "queue"} className={cn("grid size-12 place-items-center rounded-card border transition", viewMode === "queue" ? "border-live bg-live/10 text-live" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink")} title="Queue">
             <List className="h-4 w-4" />
           </button>
-          <button type="button" onClick={() => onViewMode("board")} aria-label="Board-Ansicht" aria-pressed={viewMode === "board"} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "board" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Board">
+          <button type="button" onClick={() => onViewMode("board")} aria-label="Board-Ansicht" aria-pressed={viewMode === "board"} className={cn("grid size-12 place-items-center rounded-card border transition", viewMode === "board" ? "border-live bg-live/10 text-live" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink")} title="Board">
             <LayoutGrid className="h-4 w-4" />
           </button>
         </>
       }
     >
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center" aria-label="Backlog Zusammenfassung">
-        <p className="text-xs leading-relaxed hc-soft">
+        <p className="text-sec leading-relaxed text-ink-2">
           {activeTotal > 0
             ? de.backlog.summaryBreakdown(breakdown.now, breakdown.next, breakdown.in_progress, breakdown.blocked, breakdown.later)
             : de.backlog.subtitle}
         </p>
-        <dl className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:flex sm:flex-wrap lg:justify-end">
-          <div className="rounded-md border border-cyan-400/25 bg-cyan-500/[.08] px-3 py-2">
-            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] text-cyan-300">Aktiv</dt>
-            <dd className="hc-mono text-lg font-semibold tabular-nums text-[var(--hc-text)]">{activeTotal}</dd>
-          </div>
-          <div className="rounded-md border border-[var(--hc-border)] bg-white/[.03] px-3 py-2">
-            <dt className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">Erledigt</dt>
-            <dd className="hc-mono text-lg font-semibold tabular-nums text-[var(--hc-text)]">{doneTotal}</dd>
-          </div>
-        </dl>
+        <div className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:flex sm:flex-wrap lg:justify-end">
+          <KpiTile className="sm:min-w-28" label="Aktiv" value={activeTotal} />
+          <KpiTile className="sm:min-w-28" label="Erledigt" value={doneTotal} />
+        </div>
       </div>
     </Panel>
   );
@@ -89,15 +83,15 @@ export function NextTaskSpotlight({
   commissionPrompt?: string;
 }) {
   if (!nextTask) {
-    return allItemsLength > 0 ? <ToneCallout tone="zinc">{de.backlog.noNextTask}</ToneCallout> : null;
+    return allItemsLength > 0 ? <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">{de.backlog.noNextTask}</div> : null;
   }
   return (
-    <Card tone="sky" surface="card" className="p-3">
+    <Card surface="card" className="border-live/30 p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase text-cyan-300">{de.backlog.nextTask}</p>
-          <p className="mt-0.5 truncate text-sm font-medium text-white">{nextTask.title}</p>
-          <p className="mt-0.5 hc-mono text-[11px] hc-dim">{sourceRef(nextTask)}</p>
+          <Eyebrow className="text-live">{de.backlog.nextTask}</Eyebrow>
+          <p className="mt-0.5 truncate text-sec font-medium text-ink">{nextTask.title}</p>
+          <p className="mt-0.5 font-data text-micro tabular-nums text-ink-3">{sourceRef(nextTask)}</p>
           <div className="mt-1.5">
             <ReasonChips codes={reasonCodesForFoItem(nextTask, nowSec)} />
           </div>
@@ -121,22 +115,22 @@ export function CandidateCompareStrip({
 }) {
   if (topCandidates.length <= 1) return null;
   return (
-    <Section title="Top-Kandidaten vergleichen" className="rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3">
+    <Section title="Top-Kandidaten vergleichen" className="rounded-panel border border-line bg-surface-1 p-3">
       <Stagger className="grid gap-2 md:grid-cols-3">
         {topCandidates.map((candidate, index) => {
           const item = candidate.item;
           const candidateDetail = detailById[item.id];
           return (
             <StaggerItem key={item.id}>
-              <article className="flex min-w-0 flex-col gap-1.5 rounded-md border border-[var(--hc-border)] bg-white/[.02] p-2.5">
+              <article className="flex min-w-0 flex-col gap-1.5 rounded-card border border-line bg-surface-2 p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="hc-mono text-[10px] text-zinc-500">#{index + 1} · {item.id}</span>
-                  <StatusPill tone={STATUS_TONE[item.status] ?? "amber"} label={item.status || "?"} />
+                  <span className="font-data text-micro tabular-nums text-ink-3">#{index + 1} · {item.id}</span>
+                  <SignalLabel tone={signalToneFromLegacy(STATUS_TONE[item.status] ?? "amber")} label={item.status || "?"} />
                 </div>
-                <button type="button" onClick={() => onOpen(item.id)} className="truncate text-left text-sm font-medium text-white hover:text-cyan-200">
+                <button type="button" onClick={() => onOpen(item.id)} className="inline-flex min-h-12 items-center truncate text-left text-sec font-medium text-ink hover:text-live">
                   {item.title}
                 </button>
-                <p className="text-[11px] hc-dim">{item.risk || "?"} · {item.area || "?"} · {staleSignalForFoItem(item, nowSec).label}</p>
+                <p className="text-micro text-ink-2">{item.risk || "?"} · {item.area || "?"} · {staleSignalForFoItem(item, nowSec).label}</p>
                 <ReasonChips codes={candidate.reasonCodes} max={3} />
                 <div className="mt-auto pt-1">
                   <CopyButton text={candidateDetail ? buildFoCommissionPrompt(candidateDetail) : undefined} label={de.backlog.commission} copiedLabel={de.backlog.commissionCopied} />
@@ -157,10 +151,10 @@ export function OwnerLoadStrip({ ownerLoad }: { ownerLoad: FoOwnerLoad[] }) {
       {ownerLoad.map((owner) => (
         <Card key={owner.owner} surface="card" className="px-3 py-2">
           <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-sm font-medium text-white">{owner.owner}</span>
-            <span className="hc-mono text-xs hc-soft">{owner.total}</span>
+            <span className="truncate text-sec font-medium text-ink">{owner.owner}</span>
+            <span className="font-data text-sec tabular-nums text-ink-2">{owner.total}</span>
           </div>
-          <p className="mt-1 text-xs hc-dim">High {owner.highRisk} · Stale {owner.stale} · Unready {owner.unready}</p>
+          <p className="mt-1 text-sec text-ink-2">High {owner.highRisk} · Stale {owner.stale} · Unready {owner.unready}</p>
         </Card>
       ))}
     </section>
@@ -190,8 +184,8 @@ export function QuickViewChips({
           aria-pressed={quickView === view.id}
           onClick={() => onQuickView(view.id)}
           className={cn(
-            "rounded-md border px-2.5 py-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70",
-            quickView === view.id ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
+            "inline-flex min-h-12 items-center rounded-card border px-2.5 text-sec font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-live/70",
+            quickView === view.id ? "border-live bg-live/10 text-bronze-hi" : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink",
           )}
         >
           {view.label}
@@ -202,7 +196,7 @@ export function QuickViewChips({
         aria-pressed={showHelp}
         onClick={onToggleHelp}
         title="Tastenkürzel"
-        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-2.5 text-xs text-zinc-400 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70"
+        className="ml-auto inline-flex min-h-12 items-center gap-1.5 rounded-card border border-line px-2.5 text-sec text-ink-2 transition hover:bg-surface-3 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-live/70"
       >
         <Keyboard className="h-3.5 w-3.5" /> Tasten
       </button>
@@ -214,12 +208,12 @@ export function KeyboardHelp({ showHelp }: { showHelp: boolean }) {
   if (!showHelp) return null;
   return (
     <section aria-label="Tastenkürzel">
-      <Card tone="sky" surface="card" className="px-3 py-2 text-xs text-zinc-200">
-        <span className="font-semibold text-cyan-200">Tastatur:</span>{" "}
-        <kbd className="hc-mono">j</kbd>/<kbd className="hc-mono">k</kbd> bewegen ·{" "}
-        <kbd className="hc-mono">Enter</kbd> öffnen ·{" "}
-        <kbd className="hc-mono">Esc</kbd> schließen ·{" "}
-        <kbd className="hc-mono">?</kbd> Hilfe
+      <Card surface="card" className="border-line px-3 py-2 text-sec text-ink-2">
+        <Eyebrow className="inline">Tastatur:</Eyebrow>{" "}
+        <kbd className="font-data">j</kbd>/<kbd className="font-data">k</kbd> bewegen ·{" "}
+        <kbd className="font-data">Enter</kbd> öffnen ·{" "}
+        <kbd className="font-data">Esc</kbd> schließen ·{" "}
+        <kbd className="font-data">?</kbd> Hilfe
       </Card>
     </section>
   );
@@ -252,13 +246,13 @@ export function BacklogBoard({
       {ACTIVE_COLUMNS.map((col) => {
         const items = filteredByStatus[col.key] ?? [];
         return (
-          <section key={col.key} className="min-w-0 rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3">
+          <section key={col.key} className="min-w-0 rounded-panel border border-line bg-surface-1 p-3">
             <div className="mb-2 flex items-center justify-between">
-              <StatusPill tone={col.tone} label={col.label} />
-              <span className="hc-mono text-xs hc-dim">{items.length}</span>
+              <SignalLabel tone={signalToneFromLegacy(col.tone)} label={col.label} />
+              <span className="font-data text-sec tabular-nums text-ink-3">{items.length}</span>
             </div>
             <div className="space-y-2">
-              {items.length ? items.map((item) => <FoBacklogCard key={item.id} item={item} nowSec={nowSec} isNext={item.id === nextTaskId} onOpen={onOpen} />) : <p className="py-3 text-center text-xs hc-dim">{de.backlog.emptyColumn}</p>}
+              {items.length ? items.map((item) => <FoBacklogCard key={item.id} item={item} nowSec={nowSec} isNext={item.id === nextTaskId} onOpen={onOpen} />) : <p className="py-3 text-center text-sec text-ink-3">{de.backlog.emptyColumn}</p>}
             </div>
           </section>
         );
@@ -299,8 +293,8 @@ export function ReadinessZones({
       {/* Zone 1 — Bereit: always open */}
       <section aria-label="Bereit">
         <div className="mb-2 flex items-center gap-2">
-          <span className="text-xs font-semibold uppercase text-cyan-300">Bereit</span>
-          <span className="hc-mono text-xs hc-dim">{ready.length}</span>
+          <SignalLabel tone="ok" label="Bereit" />
+          <span className="font-data text-sec tabular-nums text-ink-3">{ready.length}</span>
         </div>
         {ready.length ? (
           <FoBacklogQueueTable
@@ -317,7 +311,7 @@ export function ReadinessZones({
             dispatchStateByTaskId={dispatchStateByTaskId}
           />
         ) : (
-          <p className="py-3 text-center text-xs hc-dim">Keine bereit-Tasks.</p>
+          <p className="py-3 text-center text-sec text-ink-3">Keine bereit-Tasks.</p>
         )}
       </section>
 
@@ -326,9 +320,9 @@ export function ReadinessZones({
         <Disclosure
           defaultOpen={false}
           summary={
-            <div className="flex min-h-[44px] items-center gap-2">
-              <span className="text-xs font-semibold uppercase text-amber-300">Schleifen</span>
-              <span className="hc-mono text-xs hc-dim">{grooming.length}</span>
+            <div className="flex min-h-12 items-center gap-2">
+              <SignalLabel tone="warn" label="Schleifen" />
+              <span className="font-data text-sec tabular-nums text-ink-3">{grooming.length}</span>
             </div>
           }
         >
@@ -347,7 +341,7 @@ export function ReadinessZones({
               dispatchStateByTaskId={dispatchStateByTaskId}
             />
           ) : (
-            <p className="py-3 text-center text-xs hc-dim">{de.backlog.empty}</p>
+            <p className="py-3 text-center text-sec text-ink-3">{de.backlog.empty}</p>
           )}
         </Disclosure>
       </section>
@@ -357,9 +351,9 @@ export function ReadinessZones({
         <Disclosure
           defaultOpen={false}
           summary={
-            <div className="flex min-h-[44px] items-center gap-2">
-              <span className="text-xs font-semibold uppercase text-zinc-400">Ideenspeicher</span>
-              <span className="hc-mono text-xs hc-dim">{ideas.length}</span>
+            <div className="flex min-h-12 items-center gap-2">
+              <Eyebrow>Ideenspeicher</Eyebrow>
+              <span className="font-data text-sec tabular-nums text-ink-3">{ideas.length}</span>
             </div>
           }
         >
@@ -378,7 +372,7 @@ export function ReadinessZones({
               dispatchStateByTaskId={dispatchStateByTaskId}
             />
           ) : (
-            <p className="py-3 text-center text-xs hc-dim">{de.backlog.empty}</p>
+            <p className="py-3 text-center text-sec text-ink-3">{de.backlog.empty}</p>
           )}
         </Disclosure>
       </section>
@@ -429,7 +423,7 @@ export function QueueSurface({
       dispatchStateByTaskId={dispatchStateByTaskId}
     />
   ) : (
-    <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
+    <p className="py-4 text-center text-body text-ink-3">{de.backlog.empty}</p>
   );
 }
 
@@ -452,11 +446,11 @@ export function DoneSection({
     <Card surface="card" className="p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <StatusPill tone="emerald" label={de.backlog.colDone} />
-          <span className="hc-mono text-xs hc-dim">{doneItems.length}</span>
+          <SignalLabel tone="ok" label={de.backlog.colDone} />
+          <span className="font-data text-sec tabular-nums text-ink-3">{doneItems.length}</span>
         </div>
         {doneItems.length > 5 ? (
-          <button type="button" onClick={onToggleShowAll} className="rounded-md border border-white/10 px-2 py-1 text-xs hc-soft hover:bg-white/5">
+          <button type="button" onClick={onToggleShowAll} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-sec text-ink-2 hover:bg-surface-3 hover:text-ink">
             {showAllDone ? de.backlog.showRecent : de.backlog.showAll}
           </button>
         ) : null}
@@ -464,15 +458,15 @@ export function DoneSection({
       <Disclosure
         open
         summary={
-          <div className="text-[11px] font-semibold uppercase text-zinc-400">
-            {de.backlog.colDone} Queue
+          <div className="flex min-h-12 items-center">
+            <Eyebrow>{de.backlog.colDone} Queue</Eyebrow>
           </div>
         }
       >
         {doneItems.length ? (
           <FoBacklogQueueTable items={showAllDone ? doneItems : doneItems.slice(0, 5)} nowSec={nowSec} nextTaskId={null} detailById={detailById} onOpen={onOpen} />
         ) : (
-          <p className="py-2 text-xs hc-dim">{de.backlog.empty}</p>
+          <p className="py-2 text-sec text-ink-3">{de.backlog.empty}</p>
         )}
       </Disclosure>
     </Card>

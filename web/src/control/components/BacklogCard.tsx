@@ -1,11 +1,11 @@
 import { cn } from "@/lib/utils";
-import { StatusPill } from "./atoms";
+import { Eyebrow } from "./primitives";
+import { SignalLabel, type SignalTone } from "./leitstand";
 import { ageLabel, depState, projectFromRoot, readiness } from "../lib/orchestration";
 import { de } from "../i18n/de";
-import type { ToneName } from "../lib/types";
 import type { OrchestrationItem } from "../lib/schemas";
 
-const PRIORITY_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
+const PRIORITY_TONE: Record<string, SignalTone> = { high: "alert", medium: "warn", low: "neutral" };
 
 type ExtItem = OrchestrationItem & { root?: string; excerpt?: string };
 
@@ -30,42 +30,40 @@ export function BacklogCard({
     <button
       type="button"
       className={cn(
-        "w-full cursor-pointer rounded-lg border p-3 text-left transition hover:bg-white/[.03] focus:outline-none focus:ring-2 focus:ring-cyan-400/60",
+        "min-h-12 w-full cursor-pointer rounded-card border bg-surface-2 p-3 text-left transition hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-live/60",
         isNext
-          ? "border-cyan-400/40 ring-1 ring-cyan-400/20 hover:border-cyan-400/60"
-          : "border-white/10 hover:border-white/20",
+          ? "border-live/40 ring-1 ring-live/20 hover:border-live/60"
+          : "border-line hover:border-live/40",
       )}
       onClick={() => onOpen(item.id)}
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
           {isNext && (
-            <span className="mb-1 inline-block rounded bg-cyan-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
-              {de.orchestrator.nextBadge}
-            </span>
+            <Eyebrow className="mb-1 text-live">{de.orchestrator.nextBadge}</Eyebrow>
           )}
-          <p className="text-sm font-medium leading-snug text-white">{item.title}</p>
+          <p className="text-sec font-medium leading-snug text-ink">{item.title}</p>
           {item.excerpt ? (
-            <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug hc-soft">{item.excerpt}</p>
+            <p className="mt-0.5 line-clamp-2 text-micro leading-snug text-ink-2">{item.excerpt}</p>
           ) : null}
         </div>
-        <span className="hc-mono shrink-0 text-[11px] hc-dim">{item.id}</span>
+        <span className="shrink-0 font-data text-micro text-ink-3">{item.id}</span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        {showProject ? <StatusPill tone="violet" label={project} /> : null}
-        {r.state === "ready" ? <StatusPill tone="emerald" label={de.orchestrator.ready} /> : null}
+        {showProject ? <span className="text-micro text-ink-2">{project}</span> : null}
+        {r.state === "ready" ? <SignalLabel tone="ok" label={de.orchestrator.ready} /> : null}
         {r.state === "blocked" ? (
-          <StatusPill tone="red" label={`${de.orchestrator.blockedBy} ${r.blockedBy.slice(0, 2).join(", ")}`} />
+          <SignalLabel tone="alert" label={`${de.orchestrator.blockedBy} ${r.blockedBy.slice(0, 2).join(", ")}`} />
         ) : null}
-        <StatusPill tone={PRIORITY_TONE[item.priority] ?? "zinc"} label={item.priority} />
-        {item.planGate ? <StatusPill tone="indigo" label={de.orchestrator.planGate} /> : null}
+        <SignalLabel tone={PRIORITY_TONE[item.priority] ?? "neutral"} label={item.priority} />
+        {item.planGate ? <SignalLabel tone="neutral" label={de.orchestrator.planGate} /> : null}
         {item.dependsOn?.length ? (
-          <StatusPill
-            tone={(item.dependsOn ?? []).some((depId) => depState(depId, allItems) !== "done") ? "red" : "emerald"}
+          <SignalLabel
+            tone={(item.dependsOn ?? []).some((depId) => depState(depId, allItems) !== "done") ? "alert" : "ok"}
             label={de.orchestrator.dependsOn(item.dependsOn.length)}
           />
         ) : null}
-        <span className="ml-auto text-[11px] hc-soft">{ageLabel(item.created, nowSec)}</span>
+        <span className="ml-auto font-data text-micro tabular-nums text-ink-2">{ageLabel(item.created, nowSec)}</span>
       </div>
     </button>
   );

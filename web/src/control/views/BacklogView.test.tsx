@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FoBacklogQueueTable, FoHealthStrip, ReasonChips } from "./BacklogView";
 import { BacklogHeroPanel } from "./backlog/BacklogSections";
+import { ControlsBar } from "./backlog/ControlsBar";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
 import type { CommissionState, DispatchFoState, FoBoardStatus } from "../hooks/useControlData";
 
@@ -112,7 +113,7 @@ describe("Family Organizer queue-first view pieces", () => {
     );
 
     expect(html).toContain('aria-current="true"');
-    expect(html).toContain("ring-cyan-400/70");
+    expect(html).toContain("ring-live/70");
   });
 
   it("renders queue reason codes as German labels", () => {
@@ -165,10 +166,35 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).not.toContain("hc-type-display");
   });
 
+  it("labels the search and owner controls in German and gives authored controls a >=44px class", () => {
+    const html = renderToStaticMarkup(
+      <ControlsBar
+        q=""
+        onQ={() => undefined}
+        filterOwner=""
+        onFilterOwner={() => undefined}
+        filterRisk=""
+        onFilterRisk={() => undefined}
+        filterStale={false}
+        onFilterStale={() => undefined}
+        sortKey="status"
+        onSort={() => undefined}
+        owners={["claude", "hermes"]}
+      />,
+    );
+
+    expect(html).toContain('<label for="fo-backlog-search"');
+    expect(html).toContain("Backlog durchsuchen");
+    expect(html).toContain('aria-label="Nach Owner filtern"');
+    expect(html).toContain('id="fo-backlog-search"');
+    expect(html).toContain("h-12");
+    expect(html).toContain("min-h-12");
+  });
+
   // S4 — error-state visibility tests: commission and dispatch failures must be
   // visible in the rendered UI, never silently swallowed.
 
-  it("commission error state renders a retry affordance and red colour (not silent)", () => {
+  it("commission error state renders a bronze retry affordance (not silent or status-coloured)", () => {
     // commissionState[id] = "error" must produce visible error UI on the row.
     const id = "0010";
     const errorState: Record<string, CommissionState> = { [id]: "error" };
@@ -185,11 +211,11 @@ describe("Family Organizer queue-first view pieces", () => {
     // The error button must contain the retry label text
     expect(html).toContain("nochmal");
     // And must NOT show the normal "→ Fleet" / commission label (error state replaces it)
-    // The button should have the red border class
-    expect(html).toContain("red-500");
+    expect(html).toContain("border-live/40");
+    expect(html).not.toContain("red-500");
   });
 
-  it("commission done state renders success indicator, not an error", () => {
+  it("commission done state renders a neutral completed action, not a status-coloured button", () => {
     const id = "0011";
     const doneState: Record<string, CommissionState> = { [id]: "done" };
     const html = renderToStaticMarkup(
@@ -202,12 +228,12 @@ describe("Family Organizer queue-first view pieces", () => {
         commissionState={doneState}
       />,
     );
-    // Done state uses emerald, not red
-    expect(html).toContain("emerald");
+    expect(html).toContain("border-line");
+    expect(html).not.toContain("emerald");
     expect(html).not.toContain("red-500");
   });
 
-  it("dispatch error state renders a retry affordance and red colour (not silent)", () => {
+  it("dispatch error state renders a bronze retry affordance (not silent or status-coloured)", () => {
     // A board task in triage/scheduled status + dispatchStateByTaskId = "error"
     // must make the dispatch error visible.
     const foId = "0012";
@@ -227,12 +253,13 @@ describe("Family Organizer queue-first view pieces", () => {
         dispatchStateByTaskId={dispatchState}
       />,
     );
-    // Dispatch error also renders "nochmal" and red
+    // Dispatch error renders "nochmal" in the action channel, not the status channel.
     expect(html).toContain("nochmal");
-    expect(html).toContain("red-500");
+    expect(html).toContain("border-live/40");
+    expect(html).not.toContain("red-500");
   });
 
-  it("dispatch done state renders success indicator, not an error", () => {
+  it("dispatch done state renders a neutral completed action, not a status-coloured button", () => {
     const foId = "0013";
     const boardTaskId = "t-board-888";
     const boardStatusById: Record<string, FoBoardStatus> = {
@@ -250,7 +277,8 @@ describe("Family Organizer queue-first view pieces", () => {
         dispatchStateByTaskId={dispatchState}
       />,
     );
-    expect(html).toContain("emerald");
+    expect(html).toContain("border-line");
+    expect(html).not.toContain("emerald");
     expect(html).not.toContain("red-500");
   });
 });

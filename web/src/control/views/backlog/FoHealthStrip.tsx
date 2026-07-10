@@ -1,24 +1,27 @@
-import { Stat } from "../../components/primitives";
+import { KpiTile } from "../../components/leitstand";
 import { foHealthStripCounts } from "../../lib/foBacklog";
 import type { BacklogContractHealth, BacklogItem } from "../../lib/schemas";
-import type { ToneName } from "../../lib/types";
+import type { DotKind } from "../../lib/tones";
 
+/** Kontrakt-Gesundheit als KpiTile-Zeile (W4-1-Nachzügler: war bei der
+ *  Backlog-Migration nicht im Inventar; gleiche Grammatik wie die
+ *  Orchestrator-SignalStrip — Zähler in Ruhe, Defekt-Zähler mit LED). */
 export function FoHealthStrip({ items, contractHealth }: { items: BacklogItem[]; contractHealth?: BacklogContractHealth }) {
   const counts = foHealthStripCounts(items, contractHealth);
-  const cells: Array<{ label: string; value: number; tone: ToneName }> = [
-    { label: "Now", value: counts.now, tone: "sky" },
-    { label: "Next Ready", value: counts.nextReady, tone: "indigo" },
-    { label: "Blocked", value: counts.blocked, tone: "red" },
-    { label: "Unowned", value: counts.unowned, tone: "amber" },
-    { label: "Stale", value: counts.stale, tone: "red" },
-    { label: "High Risk", value: counts.highRisk, tone: "red" },
-    { label: "Contract Drift", value: counts.contractDrift, tone: counts.contractDrift ? "amber" : "zinc" },
-    { label: "Missing Acceptance", value: counts.missingAcceptance, tone: counts.missingAcceptance ? "amber" : "zinc" },
+  const cells: Array<{ label: string; value: number; dot?: DotKind }> = [
+    { label: "Now", value: counts.now },
+    { label: "Next Ready", value: counts.nextReady, dot: "ready" },
+    { label: "Blocked", value: counts.blocked, dot: "error" },
+    { label: "Unowned", value: counts.unowned, dot: "warn" },
+    { label: "Stale", value: counts.stale, dot: "error" },
+    { label: "High Risk", value: counts.highRisk, dot: "error" },
+    { label: "Contract Drift", value: counts.contractDrift, dot: counts.contractDrift ? "warn" : "idle" },
+    { label: "Missing Acceptance", value: counts.missingAcceptance, dot: counts.missingAcceptance ? "warn" : "idle" },
   ];
   return (
     <section className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8" aria-label="FO Contract Health">
       {cells.map((cell) => (
-        <Stat key={cell.label} label={cell.label} value={cell.value} tone={cell.tone} />
+        <KpiTile key={cell.label} label={cell.label} value={cell.value} dot={cell.dot} />
       ))}
     </section>
   );

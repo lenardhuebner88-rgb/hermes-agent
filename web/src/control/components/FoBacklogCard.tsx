@@ -1,16 +1,10 @@
 import { cn } from "@/lib/utils";
-import { StatusPill } from "./atoms";
+import { Eyebrow } from "./primitives";
+import { SignalLabel, type SignalTone } from "./leitstand";
 import { de } from "../i18n/de";
 import type { BacklogItem } from "../lib/schemas";
-import type { ToneName } from "../lib/types";
 
-const OWNER_TONE: Record<string, ToneName> = {
-  claude: "violet",
-  hermes: "cyan",
-  piet: "emerald",
-  unassigned: "zinc",
-};
-const RISK_TONE: Record<string, ToneName> = { low: "zinc", medium: "amber", high: "red" };
+const RISK_TONE: Record<string, SignalTone> = { low: "neutral", medium: "warn", high: "alert" };
 
 function relLabel(updated: string, nowSec: number): string {
   if (!updated) return "—";
@@ -37,13 +31,13 @@ export function FoBacklogCard({ item, nowSec, isNext, onOpen }: FoBacklogCardPro
       role="button"
       tabIndex={0}
       className={cn(
-        "cursor-pointer rounded-lg border p-3 outline-none transition-colors",
-        "hover:bg-white/[.04] focus-visible:ring-2 focus-visible:ring-sky-400/70",
+        "min-h-12 cursor-pointer rounded-card border bg-surface-2 p-3 outline-none transition-colors",
+        "hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-live/70",
         item.stale
-          ? "border-red-500/40 bg-red-500/10"
+          ? "border-status-alert/40"
           : isNext
-            ? "border-cyan-400/40 bg-cyan-500/5 ring-1 ring-cyan-400/20"
-            : "border-white/10",
+            ? "border-live/40 bg-live/5 ring-1 ring-live/20"
+            : "border-line",
       )}
       onClick={() => onOpen(item.id)}
       onKeyDown={(event) => {
@@ -57,24 +51,22 @@ export function FoBacklogCard({ item, nowSec, isNext, onOpen }: FoBacklogCardPro
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             {isNext && (
-              <span className="shrink-0 rounded-full bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
-                {de.backlog.nextBadge}
-              </span>
+              <Eyebrow className="shrink-0 text-live">{de.backlog.nextBadge}</Eyebrow>
             )}
-            <p className="truncate text-sm font-medium leading-snug text-white">{item.title}</p>
+            <p className="truncate text-sec font-medium leading-snug text-ink">{item.title}</p>
           </div>
           {item.excerpt && (
-            <p className="mt-0.5 line-clamp-2 text-xs hc-dim">{item.excerpt}</p>
+            <p className="mt-0.5 line-clamp-2 text-sec text-ink-2">{item.excerpt}</p>
           )}
         </div>
-        <span className="hc-mono shrink-0 text-[11px] hc-dim">{item.id}</span>
+        <span className="shrink-0 font-data text-micro text-ink-3">{item.id}</span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <StatusPill tone={OWNER_TONE[item.owner] ?? "zinc"} label={item.owner} />
-        {item.area ? <StatusPill tone="cyan" label={item.area} /> : null}
-        <StatusPill tone={RISK_TONE[item.risk] ?? "zinc"} label={item.risk} />
-        {item.stale && <StatusPill tone="red" label={de.backlog.staleBadge} />}
-        <span className={cn("ml-auto text-[11px]", item.stale ? "text-red-300" : "hc-soft")}>
+        <span className="text-micro text-ink-2">{item.owner}</span>
+        {item.area ? <span className="text-micro text-ink-2">· {item.area}</span> : null}
+        <SignalLabel tone={RISK_TONE[item.risk] ?? "neutral"} label={item.risk} />
+        {item.stale && <SignalLabel tone="alert" label={de.backlog.staleBadge} />}
+        <span className={cn("ml-auto font-data text-micro tabular-nums", item.stale ? "text-status-alert" : "text-ink-2")}>
           {relLabel(item.updated, nowSec)}
         </span>
       </div>
