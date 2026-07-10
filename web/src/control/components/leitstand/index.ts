@@ -8,6 +8,7 @@ export { KpiTile } from "./KpiTile";
 export { SectionHeader } from "./SectionHeader";
 export { SubtabChips, type SubtabItem, type SubtabChipClasses } from "./SubtabChips";
 export { ListRow } from "./ListRow";
+export { SignalChip, SignalLabel, signalToneFromLegacy, type SignalTone } from "./StatusSignal";
 export { DrawerShell } from "./DrawerShell";
 export { PulsLeiste, type PulsLeisteGateway } from "./PulsLeiste";
 // StatusChip is already the single shared tinted KPI chip — re-exported here so

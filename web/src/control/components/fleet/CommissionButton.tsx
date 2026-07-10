@@ -31,13 +31,13 @@ export function CommissionButton({
       title={de.fleet.commissionTitle}
       aria-label={de.fleet.commissionDrawer}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border font-medium transition disabled:cursor-default",
-        variant === "full" ? "min-h-9 w-full justify-center px-4 text-sm" : "min-h-8 px-3 text-xs",
+        "inline-flex min-h-12 items-center gap-1.5 rounded-card border font-medium transition disabled:cursor-default",
+        variant === "full" ? "w-full justify-center px-4 text-sec" : "px-3 text-sec",
         done
-          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+          ? "border-line bg-surface-2 text-ink-2"
           : err
-            ? "border-red-500/40 text-red-200 hover:bg-red-500/10"
-            : "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] hover:brightness-110",
+            ? "border-live/40 bg-live/10 text-bronze-hi hover:bg-live/15"
+            : "border-live/40 bg-live/10 text-bronze-hi hover:bg-live/15",
         className,
       )}
     >
