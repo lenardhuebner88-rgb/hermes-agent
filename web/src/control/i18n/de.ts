@@ -1109,6 +1109,7 @@ export const de = {
     summaryBreakdown: (now: number, next: number, inProgress: number, blocked: number, later: number) =>
       `${now} jetzt · ${next} als Nächstes · ${inProgress} in Arbeit · ${blocked} blockiert · ${later} später`,
     // Controls bar
+    searchLabel: "Backlog durchsuchen",
     searchPlaceholder: "Suche (Titel, Id, Bereich, Owner …)",
     filterAll: "Alle",
     filterStale: "überfällig",

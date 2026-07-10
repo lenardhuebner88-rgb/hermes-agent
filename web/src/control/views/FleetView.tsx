@@ -383,6 +383,7 @@ function PendingBar({ items, onNavigate }: PendingBarProps) {
       className="mb-2 flex min-h-12 w-full items-center gap-2.5 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-left text-status-warn"
       onClick={handleClick}
       aria-label={text}
+      aria-live="polite"
     >
       <Led kind="warn" />
       <span className="flex-1 truncate text-sec font-medium">{text}</span>

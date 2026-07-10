@@ -31,11 +31,12 @@ export function ControlsBar({
   return (
     <Card surface="card" className="p-3">
       <label htmlFor="fo-backlog-search">
-        <Eyebrow>Backlog durchsuchen</Eyebrow>
+        <Eyebrow>{de.backlog.searchLabel}</Eyebrow>
       </label>
       <input
         id="fo-backlog-search"
         type="search"
+        aria-label={de.backlog.searchLabel}
         value={q}
         onChange={(e) => onQ(e.target.value)}
         placeholder={de.backlog.searchPlaceholder}

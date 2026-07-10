@@ -174,6 +174,14 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(screen.queryByText("Keine aktiven Ketten")).toBeNull();
   });
 
+  it("announces the pending operator callout politely", () => {
+    const { container } = renderFleetView();
+
+    const pendingCallout = container.querySelector<HTMLButtonElement>('button[aria-live="polite"]');
+    expect(pendingCallout).toBeTruthy();
+    expect(pendingCallout?.getAttribute("aria-label")).toBeTruthy();
+  });
+
   it("opens the PlanSpec full-text drawer from Plan tab approval cards", () => {
     renderFleetView();
 

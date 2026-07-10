@@ -207,6 +207,7 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).toContain('<label for="fo-backlog-search"');
     expect(html).toContain("Backlog durchsuchen");
     expect(html).toContain('aria-label="Nach Owner filtern"');
+    expect(html).toContain('aria-label="Backlog durchsuchen"');
     expect(html).toContain('id="fo-backlog-search"');
     expect(html).toContain("h-12");
     expect(html).toContain("min-h-12");

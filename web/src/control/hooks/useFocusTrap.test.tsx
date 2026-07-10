@@ -16,6 +16,18 @@ function Dialog({ active }: { active: boolean }) {
   );
 }
 
+function DialogWithHiddenFirst({ active }: { active: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useFocusTrap(ref, active);
+  return (
+    <div ref={ref} data-testid="dialog">
+      <button type="button" hidden>Hidden first</button>
+      <button type="button">Visible first</button>
+      <button type="button">Visible last</button>
+    </div>
+  );
+}
+
 function Harness({ mounted }: { mounted: boolean }) {
   return (
     <div>
@@ -44,6 +56,17 @@ describe("useFocusTrap", () => {
     first.focus();
     fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
+  });
+
+  it("skips a hidden focusable child when choosing and wrapping focus", () => {
+    render(<DialogWithHiddenFirst active />);
+    const visibleFirst = screen.getByRole("button", { name: "Visible first" });
+    const visibleLast = screen.getByRole("button", { name: "Visible last" });
+
+    expect(document.activeElement).toBe(visibleFirst);
+    visibleLast.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(visibleFirst);
   });
 
   it("restores focus to the previously-focused element once the trap unmounts", () => {

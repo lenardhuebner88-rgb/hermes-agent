@@ -1,13 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const documentedExceptions = new Map([
-  // Parked orphan; W5 owns deletion/migration. It is not reachable from the app graph.
-  ["components/FunnelFreigaben.tsx", /ToneCallout/g],
-  // Compatibility export required only by the parked orphan above; W5 removes both.
-  ["components/atoms.tsx", /ToneCallout/g],
-]);
-
 function productionSources(directory: "views" | "components"): string[] {
   const paths: string[] = [];
   const walk = (relativeDirectory: string) => {
@@ -29,7 +22,7 @@ function source(path: string) {
 
 describe("W4 canonical status vocabulary source guards", () => {
   it.each(productionFiles)("%s has no retired status primitives", (path) => {
-    const contents = source(path).replace(documentedExceptions.get(path) ?? /$^/, "");
+    const contents = source(path);
     expect(contents).not.toMatch(/StatusPill|ToneCallout|toneClasses/);
   });
 

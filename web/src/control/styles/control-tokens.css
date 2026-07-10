@@ -127,6 +127,21 @@ body:has([data-control]) header[role="banner"] { display: none; }
 [data-control] pre,
 [data-control] .hc-mono { font-family: var(--hc-font-mono); }
 
+/* Central reduced-motion kill switch for the entire Control surface, including
+   portalled [data-control] wrappers. Component-specific Motion variants may
+   provide a more deliberate static state, but CSS animations and transitions
+   always stop here. xterm owns its rendering pipeline and is intentionally
+   excluded from this dashboard-level policy. */
+@media (prefers-reduced-motion: reduce) {
+  [data-control] :where(*):not(.xterm, .xterm *),
+  [data-control] :where(*):not(.xterm, .xterm *)::before,
+  [data-control] :where(*):not(.xterm, .xterm *)::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Agent terminal composer lives on a dark terminal rail inside the otherwise
    light-schemed Control UI. iOS/WebKit can apply light form-control text fill
    despite Tailwind `text-white`, so pin the input paint explicitly. */

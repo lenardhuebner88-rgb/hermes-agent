@@ -7,8 +7,8 @@
  */
 
 // ── Minimal shapes matching the API responses ────────────────────────────────
-// These mirror only what the count functions need; the full types live in the
-// component files (TriageStrip.tsx and FunnelFreigaben.tsx).
+// These mirror only what the count functions need; the full types live at the
+// API consumers.
 
 export interface TriageFailureShape {
   run_id: number;
@@ -38,11 +38,8 @@ export function countActionableFailures(data: FailuresResponseShape): number {
 }
 
 /**
- * Count of open funnel drafts awaiting operator approval — matches the number of
- * rows the operator sees in FunnelFreigaben (ALL items in the drafts array; no
- * client-side filter).
- * Source: FunnelFreigaben.tsx line 191 renders when data.drafts.length > 0 and
- * maps every element into a visible list item.
+ * Count of open funnel drafts awaiting operator approval. The endpoint already
+ * returns only open drafts, so no additional client-side filter is applied.
  */
 export function countOpenFunnelDrafts(data: DraftsResponseShape): number {
   return data.drafts.length;

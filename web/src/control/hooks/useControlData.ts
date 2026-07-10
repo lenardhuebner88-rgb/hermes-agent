@@ -2675,9 +2675,9 @@ export function useStrategistOutcomes() {
 // ── Flow attention counts ────────────────────────────────────────────────────
 // These two hooks feed the FlowView hero attention band with real counts.
 // They are lightweight (count only, ~10s interval) and read-only; the
-// components below (TriageStrip, FunnelFreigaben) continue to poll the same
-// endpoints independently for their own rendering — that duplication is
-// intentional (read-only, single operator, low risk).
+// The detailed triage surface continues to poll the same endpoint for its own
+// rendering. Funnel drafts remain count-only after the parked approval surface
+// was removed.
 
 export interface FlowTriageFailuresResponse {
   failures: { run_id: number; task_id: string }[];

@@ -5,26 +5,13 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { diffStats, withLineNumbers } from "../lib/diff";
 import { fmtAge, nowSec } from "../lib/derive";
-import type { DiffLine, ToneName } from "../lib/types";
+import type { DiffLine } from "../lib/types";
 import type { DotKind } from "../lib/tones";
 import type { StructuredError } from "../hooks/pollingStore";
 import { de } from "../i18n/de";
 
 export function Led({ kind, size = 8 }: { kind: DotKind; size?: number }) {
   return <span aria-hidden className={cn("hc-led inline-block shrink-0 rounded-full", `hc-led-${kind}`)} style={{ width: size, height: size }} />;
-}
-
-/** W5 compatibility only: FunnelFreigaben is parked but remains inside the
- * TypeScript include graph. Live views use explicit token callouts instead. */
-export function ToneCallout({ tone, children }: { tone: ToneName; children: React.ReactNode }) {
-  const classes = tone === "red" || tone === "rose"
-    ? "border-status-alert/30 bg-status-alert/10 text-status-alert"
-    : tone === "amber"
-      ? "border-status-warn/30 bg-status-warn/10 text-status-warn"
-      : tone === "emerald"
-        ? "border-status-ok/30 bg-status-ok/10 text-status-ok"
-        : "border-line bg-surface-2 text-ink-2";
-  return <div className={cn("rounded-card border px-3 py-2 text-sec", classes)}>{children}</div>;
 }
 
 export function StaleBadge({ isStale, lastUpdated, errorObj, error, now = nowSec(), className }: {

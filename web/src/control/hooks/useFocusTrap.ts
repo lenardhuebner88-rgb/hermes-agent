@@ -3,7 +3,20 @@ import { useEffect, useRef, type RefObject } from "react";
 const FOCUSABLE_SELECTOR = "button,[href],input,select,textarea,[tabindex]:not([tabindex='-1'])";
 
 function focusableIn(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"));
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
+    if (el.hasAttribute("disabled")) return false;
+    // Walk the local layout tree explicitly instead of relying only on
+    // offsetParent: jsdom has no layout, and fixed-position controls can have
+    // no offset parent despite being visible. Hidden/display:none ancestors
+    // and visibility:hidden make a descendant ineligible for the trap.
+    for (let current: HTMLElement | null = el; current; current = current.parentElement) {
+      if (current.hidden) return false;
+      const style = window.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (current === container) break;
+    }
+    return true;
+  });
 }
 
 /**
