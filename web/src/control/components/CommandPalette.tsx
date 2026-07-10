@@ -6,6 +6,7 @@ import { boardLoader, cronObservabilityLoader, epicsLoader } from "../hooks/useC
 import { KEYMAP } from "../lib/keymap";
 import type { Worker } from "../lib/types";
 import { buildCommandPaletteItems, filterCommandPaletteItems, readCommandPaletteSnapshots, type CommandItem } from "./commandPaletteItems";
+import { Eyebrow } from "./primitives";
 
 interface Props {
   open: boolean;
@@ -130,29 +131,29 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
   let lastGroup = "";
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start bg-black/70 px-3 pt-[12vh] backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Command Palette" className="mx-auto w-full max-w-2xl overflow-hidden rounded-xl border border-[var(--hc-border-strong)] bg-[var(--hc-panel)] shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="flex min-h-14 items-center gap-3 border-b border-[var(--hc-border)] px-4">
-          <Search className="h-4 w-4 hc-dim" />
-          <input ref={inputRef} value={query} onChange={(e) => { setQuery(e.target.value); setActive(0); }} placeholder="Springe zu..." className="h-12 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-zinc-600" />
-          <span className="rounded border border-white/10 px-2 py-1 text-xs hc-dim">Esc</span>
+    <div className="fixed inset-0 z-50 grid place-items-start bg-surface-0/80 px-3 pt-[12vh] backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Befehlspalette" className="mx-auto w-full max-w-2xl overflow-hidden rounded-panel border border-line bg-surface-1 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="flex min-h-14 items-center gap-3 border-b border-line px-4">
+          <Search className="h-4 w-4 text-ink-3" />
+          <input ref={inputRef} aria-label="Befehle durchsuchen" value={query} onChange={(e) => { setQuery(e.target.value); setActive(0); }} placeholder="Springe zu..." className="h-12 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3" />
+          <span className="rounded-card border border-line px-2 py-1 text-micro text-ink-3">Esc</span>
         </div>
         <div className="max-h-[60vh] overflow-auto p-2">
-          {filtered.length === 0 ? <p className="px-3 py-6 text-sm hc-soft">Kein Treffer.</p> : filtered.map((item, index) => {
+          {filtered.length === 0 ? <p className="px-3 py-6 text-sec text-ink-2">Kein Treffer.</p> : filtered.map((item, index) => {
             const showGroup = item.group !== lastGroup;
             lastGroup = item.group;
             return (
               <div key={item.id}>
-                {showGroup ? <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[.18em] hc-dim">{item.group}</p> : null}
-                <button type="button" aria-selected={active === index} onMouseEnter={() => setActive(index)} onClick={() => { item.action(); onClose(); }} className={cn("flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm", active === index ? "bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "text-zinc-200 hover:bg-white/5")}>
+                {showGroup ? <Eyebrow className="px-3 pb-1 pt-3">{item.group}</Eyebrow> : null}
+                <button type="button" aria-selected={active === index} onMouseEnter={() => setActive(index)} onClick={() => { item.action(); onClose(); }} className={cn("flex min-h-12 w-full items-center justify-between gap-3 rounded-card px-3 py-2 text-left text-sec", active === index ? "bg-live/10 text-bronze-hi" : "text-ink-2 hover:bg-surface-3 hover:text-ink")}>
                   <span className="flex min-w-0 items-center gap-3">{item.icon}<span className="truncate">{item.label}</span></span>
-                  {item.hint ? <span className="hc-mono shrink-0 text-xs hc-dim">{item.hint}</span> : null}
+                  {item.hint ? <span className="shrink-0 font-data text-micro text-ink-3">{item.hint}</span> : null}
                 </button>
               </div>
             );
           })}
         </div>
-        <div className="flex items-center justify-between border-t border-[var(--hc-border)] px-4 py-2 text-xs hc-dim">
+        <div className="flex items-center justify-between border-t border-line px-4 py-2 text-micro text-ink-3">
           <span>↑/↓ auswählen · Enter öffnen · g i/f/t/a/u/p</span>
           <span>⌘K / Ctrl+K · / suchen</span>
         </div>

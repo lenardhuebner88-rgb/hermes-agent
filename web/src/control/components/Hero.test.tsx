@@ -11,15 +11,15 @@ import type { ToneName } from "../lib/types";
 describe("Hero", () => {
   describe("heroAccent", () => {
     const cases: Array<[ToneName, string]> = [
-      ["red", "var(--hc-red)"],
-      ["rose", "var(--hc-red)"],
-      ["amber", "var(--hc-amber)"],
-      ["emerald", "var(--hc-emerald)"],
-      ["cyan", "var(--hc-cyan)"],
-      ["sky", "var(--hc-cyan)"],
-      ["indigo", "var(--hc-cyan)"],
-      ["violet", "var(--hc-accent)"],
-      ["zinc", "var(--hc-accent)"],
+      ["red", "var(--color-status-alert)"],
+      ["rose", "var(--color-status-alert)"],
+      ["amber", "var(--color-status-warn)"],
+      ["emerald", "var(--color-status-ok)"],
+      ["cyan", "var(--color-brand)"],
+      ["sky", "var(--color-brand)"],
+      ["indigo", "var(--color-brand)"],
+      ["violet", "var(--color-brand)"],
+      ["zinc", "var(--color-brand)"],
     ];
     it.each(cases)("maps %s → %s", (tone, expected) => {
       expect(heroAccent(tone)).toBe(expected);
@@ -49,9 +49,9 @@ describe("Hero", () => {
 
   it("drives the shell accent from the tone", () => {
     const calm = renderToStaticMarkup(<Hero eyebrow="x" title="y" tone="emerald" />);
-    expect(calm).toContain("--hc-hero-accent:var(--hc-emerald)");
+    expect(calm).toContain("--hc-hero-accent:var(--color-status-ok)");
     const alarm = renderToStaticMarkup(<Hero eyebrow="x" title="y" tone="red" />);
-    expect(alarm).toContain("--hc-hero-accent:var(--hc-red)");
+    expect(alarm).toContain("--hc-hero-accent:var(--color-status-alert)");
   });
 
   it("renders an optional status pill and primary action", () => {
@@ -65,6 +65,7 @@ describe("Hero", () => {
     );
     expect(html).toContain("Alles ruhig");
     expect(html).toContain("Auftrag");
+    expect(html).toContain("border-status-ok/30");
   });
 
   it("tightens padding in compact density", () => {

@@ -452,7 +452,7 @@ function WorkerEfficiencyMap({ rows }: { rows: WorkerEfficiencyRow[] }) {
   const maxCost = Math.max(0.01, ...chartRows.map((row) => row.cost_per_task ?? 0));
 
   return (
-    <div className="st-we-map" role="img" aria-label="Worker Efficiency Map">
+    <div className="st-we-map" role="img" aria-label={de.stats.workerEfficiencyMap}>
       <span className="st-we-axis st-we-axis-x">Token/min</span>
       <span className="st-we-axis st-we-axis-y">Review zurück</span>
       <div className="st-we-grid" aria-hidden="true" />
@@ -630,7 +630,7 @@ export function WorkerEfficiencySection({
         </div>
         <div className="st-we-title">
           <div>
-            <Eyebrow>Worker Efficiency Map</Eyebrow>
+            <Eyebrow>{de.stats.workerEfficiencyMap}</Eyebrow>
             <h2>Worker vergleichen</h2>
             <p><b>Token</b><span>Geld</span><b>Rework</b></p>
           </div>

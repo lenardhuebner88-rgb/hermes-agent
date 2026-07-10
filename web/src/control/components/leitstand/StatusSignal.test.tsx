@@ -20,6 +20,13 @@ describe("StatusSignal", () => {
     expect((container.firstChild as HTMLElement).className).toContain("border-status-warn/30");
   });
 
+  it("SignalChip hält lange Labels per Ellipsis + title vollständig erreichbar", () => {
+    render(<SignalChip tone="neutral" label="sehr langer PlanSpec-Status" title="sehr langer PlanSpec-Status" className="max-w-24" />);
+    const label = screen.getByText("sehr langer PlanSpec-Status");
+    expect(label.className).toContain("truncate");
+    expect(label.getAttribute("title")).toBe("sehr langer PlanSpec-Status");
+  });
+
   it("neutral nutzt Ink-Vokabular, keine Statusfarbe und kein Bronze", () => {
     const { container } = render(<SignalChip tone="neutral" label="später" />);
     const cls = (container.firstChild as HTMLElement).className;

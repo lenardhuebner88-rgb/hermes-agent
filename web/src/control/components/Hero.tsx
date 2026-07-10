@@ -22,7 +22,7 @@ import type { DotKind } from "../lib/tones";
 import { heroAccent } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";
 import { Eyebrow, Text } from "./primitives";
-import { StatusPill } from "./atoms";
+import { SignalChip, signalToneFromLegacy } from "./leitstand";
 
 export interface HeroStatus {
   label: string;
@@ -88,22 +88,22 @@ export function Hero({
             <div className={cn("hc-aurora-text mt-1.5 tabular-nums", tight ? "hc-type-display-tight" : "hc-type-display")}>{count}</div>
           ) : null}
           {countHint != null ? (
-            <Text variant="label" className="mt-1 hc-soft">{countHint}</Text>
+            <Text variant="label" className="mt-1 text-ink-2">{countHint}</Text>
           ) : null}
           <Text
             as="h1"
             variant="title"
-            className={cn("hc-hero-statement line-clamp-2 text-[var(--hc-text)]", hasNumber ? "mt-2" : "mt-1")}
+            className={cn("hc-hero-statement line-clamp-2 text-ink", hasNumber ? "mt-2" : "mt-1")}
           >
             {title}
           </Text>
           {subtitle != null ? (
-            <Text variant="body" className="mt-1.5 line-clamp-2 hc-soft" >{subtitle}</Text>
+            <Text variant="body" className="mt-1.5 line-clamp-2 text-ink-2" >{subtitle}</Text>
           ) : null}
         </div>
         {status || action ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2 sm:flex-col sm:items-end">
-            {status ? <StatusPill tone={status.tone} label={status.label} dot={status.dot} size="md" /> : null}
+            {status ? <SignalChip tone={signalToneFromLegacy(status.tone)} label={status.label} /> : null}
             {action}
           </div>
         ) : null}

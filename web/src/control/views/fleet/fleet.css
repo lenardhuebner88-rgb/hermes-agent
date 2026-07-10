@@ -151,7 +151,10 @@ body:has([data-fleet-theme]) [data-control] {
 /* ── KPI-Panel ────────────────────────────────────────────────────────────── */
 .fleet-kpanel {
   display: grid;
-  grid-template-columns: 1fr 1fr 1.15fr 1fr;
+  /* Spaltenzahl kommt seit W4-6 vom HeuteTab (2-4 Tiles je Dimensions-Regel);
+     als Custom-Property statt Inline-Style, damit die Phone-Media-Query unten
+     weiterhin gewinnt (Inline-Styles schlagen Media-Queries — belegte Falle). */
+  grid-template-columns: repeat(var(--fleet-kp-count, 4), minmax(0, 1fr));
   background: var(--fleet-tiefe);
   border: 1px solid var(--fleet-linie);
   border-radius: 13px;
@@ -1786,7 +1789,10 @@ body:has([data-fleet-theme]) [data-control] {
 @media (min-width: 768px) {
   /* KPI-Panel auf md bleibt 4-spaltig (genug Platz) */
   .fleet-kpanel {
-    grid-template-columns: 1fr 1fr 1.15fr 1fr;
+    /* Spaltenzahl kommt seit W4-6 vom HeuteTab (2-4 Tiles je Dimensions-Regel);
+     als Custom-Property statt Inline-Style, damit die Phone-Media-Query unten
+     weiterhin gewinnt (Inline-Styles schlagen Media-Queries — belegte Falle). */
+  grid-template-columns: repeat(var(--fleet-kp-count, 4), minmax(0, 1fr));
   }
 }
 

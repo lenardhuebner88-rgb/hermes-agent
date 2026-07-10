@@ -10,7 +10,7 @@ const baseGateway = { status: "healthy" as const, stale: false, title: "Zuletzt 
 /**
  * Guards the W2-b shared instrument strip (SHELL-SPEC.md "Puls-Leiste data
  * contract" / DESIGN.md "Puls-Leiste contract"): null-safety (never a 0-fake),
- * the Fragen "never color-only" rule, tabular/mono value styling, and the
+ * the Inbox "never color-only" rule, tabular/mono value styling, and the
  * Gateway LED+label pairing.
  */
 describe("PulsLeiste", () => {
@@ -19,7 +19,7 @@ describe("PulsLeiste", () => {
       <PulsLeiste label="Crons" workers={null} fragen={null} kostenUsd={null} gateway={{ ...baseGateway, status: "unknown" }} />,
     );
     expect(screen.getByText("Crons")).toBeTruthy();
-    // Worker, Fragen, Kosten all fall back to "—" — never a fake 0.
+    // Worker, Inbox, Kosten all fall back to "—" — never a fake 0.
     expect(screen.getAllByText("—").length).toBe(3);
   });
 
@@ -47,22 +47,22 @@ describe("PulsLeiste", () => {
     expect(workerLed?.className).toContain("hc-led-live");
   });
 
-  it("renders Fragen as a plain dashed instrument (no icon) when the count is 0", () => {
+  it("renders Inbox as a plain dashed instrument (no icon) when the count is 0", () => {
     render(<PulsLeiste label="Fleet" workers={0} fragen={0} kostenUsd={null} gateway={baseGateway} />);
     expect(document.querySelector("svg")).toBeNull();
   });
 
-  it("pairs the Fragen count with a warn-LED + AlertTriangle icon when > 0 — never color-only", () => {
+  it("pairs the Inbox count with a warn-LED + AlertTriangle icon when > 0 — never color-only", () => {
     render(<PulsLeiste label="Fleet" workers={0} fragen={2} fragenTone="amber" kostenUsd={null} gateway={baseGateway} />);
     // Count + label text is present regardless of the icon (never color-only).
     expect(screen.getByText("2")).toBeTruthy();
-    expect(screen.getByText("Fragen")).toBeTruthy();
+    expect(screen.getByText("Inbox")).toBeTruthy();
     // The icon itself carries the warn signal alongside the LED.
     expect(document.querySelector("svg")).not.toBeNull();
     expect(document.querySelector(".hc-led-warn")).not.toBeNull();
   });
 
-  it("escalates the Fragen LED/icon to the alert tone when the worst tone is red/rose", () => {
+  it("escalates the Inbox LED/icon to the alert tone when the worst tone is red/rose", () => {
     render(<PulsLeiste label="Fleet" workers={0} fragen={1} fragenTone="red" kostenUsd={null} gateway={baseGateway} />);
     expect(document.querySelector(".hc-led-error")).not.toBeNull();
     expect(document.querySelector("svg.text-status-alert")).not.toBeNull();

@@ -120,13 +120,13 @@ export function CommissionBanner({
 }
 
 export function SignalStrip({ signals }: { signals: ReturnType<typeof deriveQueueSignals> }) {
-  const tiles: Array<{ label: string; value: number; dot: "ready" | "warn" | "error" | "idle" }> = [
+  const tiles: Array<{ label: string; value: number; dot?: "ready" | "warn" | "error" }> = [
     { label: de.orchestrator.readyStrip, value: signals.ready, dot: "ready" },
-    { label: de.orchestrator.blockedStrip, value: signals.blocked, dot: "error" },
-    { label: de.orchestrator.unownedStrip, value: signals.unowned, dot: "warn" },
-    { label: de.orchestrator.staleProofStrip, value: signals.staleProof, dot: "warn" },
-    { label: de.orchestrator.highRiskStrip, value: signals.highRisk, dot: "error" },
-    { label: de.orchestrator.contractDrift, value: signals.contractDrift, dot: signals.contractDrift ? "error" : "idle" },
+    { label: de.orchestrator.blockedStrip, value: signals.blocked, dot: signals.blocked > 0 ? "error" : undefined },
+    { label: de.orchestrator.unownedStrip, value: signals.unowned, dot: signals.unowned > 0 ? "warn" : undefined },
+    { label: de.orchestrator.staleProofStrip, value: signals.staleProof, dot: signals.staleProof > 0 ? "warn" : undefined },
+    { label: de.orchestrator.highRiskStrip, value: signals.highRisk, dot: signals.highRisk > 0 ? "error" : undefined },
+    { label: de.orchestrator.contractDrift, value: signals.contractDrift, dot: signals.contractDrift > 0 ? "error" : undefined },
   ];
   return (
     <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { partitionReadinessZones } from "./readinessZones";
 import type { BacklogItem } from "../../lib/schemas";
+import { STATUS_TONE } from "./shared";
 
 function item(overrides: Partial<BacklogItem> & { id: string }): BacklogItem {
   return {
@@ -19,6 +20,12 @@ function item(overrides: Partial<BacklogItem> & { id: string }): BacklogItem {
 }
 
 describe("partitionReadinessZones", () => {
+  it("maps non-judging archive lifecycle states to neutral", () => {
+    expect(STATUS_TONE.deferred).toBe("zinc");
+    expect(STATUS_TONE.superseded).toBe("zinc");
+    expect(STATUS_TONE.archived).toBe("zinc");
+  });
+
   it("empty input returns three empty zones", () => {
     const { ready, grooming, ideas } = partitionReadinessZones([]);
     expect(ready).toHaveLength(0);

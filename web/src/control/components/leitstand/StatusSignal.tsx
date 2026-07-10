@@ -56,11 +56,11 @@ export function SignalLabel({ tone, label, className }: { tone: SignalTone; labe
   );
 }
 
-export function SignalChip({ tone, label, className }: { tone: SignalTone; label: string; className?: string }) {
+export function SignalChip({ tone, label, className, title }: { tone: SignalTone; label: string; className?: string; title?: string }) {
   return (
     <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-micro font-medium", CHIP[tone], className)}>
       <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[tone])} />
-      {label}
+      <span className="truncate" title={title}>{label}</span>
     </span>
   );
 }

@@ -306,6 +306,15 @@ describe("LoopsGrid — Mono-Konsolidierung (W3-5)", () => {
       expect(line.style.fontFamily).toBe("");
     }
   });
+
+  it("überschreibt den Mono-Default der Dependency für alle sichtbaren Aktionslabels mit Display-Schrift", () => {
+    const { container } = renderInteractiveGrid([runningPipeline, idleSweepWithCommits]);
+    for (const action of [t.actions.stop, t.actions.start, t.actions.workshop, t.timerSave]) {
+      const buttons = within(container).getAllByRole("button", { name: action });
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) expect(button.className).toContain("!font-display");
+    }
+  });
 });
 
 describe("LoopsGrid — frei einstellbarer Nachttimer", () => {

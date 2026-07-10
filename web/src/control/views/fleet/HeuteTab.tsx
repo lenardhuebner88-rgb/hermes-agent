@@ -26,6 +26,8 @@ import type { Worker } from "../../lib/types";
 import type { CostBucket, CostProfileRow, RunsCostsResponse, RunsDailyResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "./shared";
 import { LaneQuickSwitch } from "./LaneQuickSwitch";
+import { SignalChip, type SignalTone } from "../../components/leitstand";
+import { profileLabel } from "../../lib/tones";
 
 // ─── Heute-Subtab ────────────────────────────────────────────────────────────
 
@@ -55,6 +57,14 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
   // 7-Tage-Sparkline aus der bestehenden runs/daily-Serie (kein neuer Endpoint).
   // Liefert null bei <2 Punkten → keine Sparkline (kein Fake, keine Platzhalter).
   const sparklinePts = useMemo(() => deriveSparklinePoints(daily), [daily]);
+  const activeProfileBreakdown = useMemo(() => formatActiveProfileBreakdown(activeWorkers), [activeWorkers]);
+  const costAverageDimension = useMemo(
+    () => formatCostAverageDimension(costs, kpi.kosten24hEquiv),
+    [costs, kpi.kosten24hEquiv],
+  );
+  const showActiveKpi = kpi.aktiv > 0 && activeProfileBreakdown !== null;
+  const showCostKpi = kpi.kosten24h != null && costAverageDimension !== null;
+  const kpiTileCount = 2 + Number(showActiveKpi) + Number(showCostKpi);
 
   return (
     <>
@@ -64,11 +74,14 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       </p>
 
       {/* KPI-Panel */}
-      <div className="fleet-kpanel">
-        <div className={`fleet-kp${kpi.aktiv > 0 ? " fleet-kp-aktiv" : ""}`}>
-          <div className="fleet-kp-num">{kpi.aktiv}</div>
-          <div className="fleet-kp-label">{de.fleet.kpiAktiv}</div>
-        </div>
+      <div className="fleet-kpanel" style={{ "--fleet-kp-count": kpiTileCount } as React.CSSProperties}>
+        {showActiveKpi ? (
+          <div className="fleet-kp fleet-kp-aktiv">
+            <div className="fleet-kp-num">{kpi.aktiv}</div>
+            <div className="fleet-kp-label">{de.fleet.kpiAktiv}</div>
+            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={activeProfileBreakdown}>{activeProfileBreakdown}</div>
+          </div>
+        ) : null}
         <div className="fleet-kp">
           <div className="fleet-kp-num">{kpi.blockiert}</div>
           <div className="fleet-kp-label">{de.fleet.kpiBlockiert}</div>
@@ -78,23 +91,22 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
           <div className="fleet-kp-label">{de.fleet.kpiFertig}</div>
           {sparklinePts && <FleetSparkline points={sparklinePts} />}
         </div>
-        <button
-          type="button"
-          className="fleet-kp fleet-kp-button"
-          onClick={() => setCostDrawerOpen(true)}
-          aria-label="Kosten-Details öffnen"
-        >
-          <div className="fleet-kp-num">
-            {kpi.kosten24h != null ? (
-              <>
-                {kpi.kosten24h.toFixed(1).replace(".", ",")}
-                <small>$</small>
-                {kpi.kosten24hEquiv ? <small> äquiv.</small> : null}
-              </>
-            ) : "—"}
-          </div>
-          <div className="fleet-kp-label">{de.fleet.kpiKosten}</div>
-        </button>
+        {showCostKpi ? (
+          <button
+            type="button"
+            className="fleet-kp fleet-kp-button"
+            onClick={() => setCostDrawerOpen(true)}
+            aria-label="Kosten-Details öffnen"
+          >
+            <div className="fleet-kp-num">
+              {kpi.kosten24h!.toFixed(1).replace(".", ",")}
+              <small>$</small>
+              {kpi.kosten24hEquiv ? <small> äquiv.</small> : null}
+            </div>
+            <div className="fleet-kp-label">{de.fleet.kpiKosten}</div>
+            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={costAverageDimension}>{costAverageDimension}</div>
+          </button>
+        ) : null}
       </div>
 
       {costDrawerOpen ? (
@@ -254,6 +266,27 @@ function formatSubscription(subscription: string | null | undefined) {
   return subscription ?? "—";
 }
 
+function formatActiveProfileBreakdown(activeWorkers: Worker[]): string | null {
+  if (activeWorkers.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const worker of activeWorkers) {
+    const label = profileLabel[worker.profile] ?? worker.profile;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([labelA, countA], [labelB, countB]) => countB - countA || labelA.localeCompare(labelB, "de"))
+    .map(([label, count]) => `${label} ${count}`)
+    .join(" · ");
+}
+
+function formatCostAverageDimension(costs: RunsCostsResponse | null, equivalent: boolean): string | null {
+  if (!costs || costs.days <= 0) return null;
+  const windowCost = equivalent ? costs.window.cost_usd_equivalent : costs.window.actual_cost_usd;
+  if (windowCost == null) return null;
+  const average = (windowCost / costs.days).toFixed(1).replace(".", ",");
+  return `Ø ${costs.days}T ${average}$${equivalent ? " äquiv." : ""}`;
+}
+
 // ─── Lagezeile-Formatter ─────────────────────────────────────────────────────
 
 function LagezeileFormatted({ text }: { text: string }) {
@@ -346,16 +379,16 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   const isRunning = ps.kanban_state === "running";
 
-  let badgeClass = "fleet-ps-badge-gruen";
+  let badgeTone = planSpecStatusTone(ps.status, ps.kanban_state);
   let badgeLabel = ps.status;
   if (waitsForOp) {
-    badgeClass = "fleet-ps-badge-amber";
+    badgeTone = "warn";
     badgeLabel = de.fleet.psWaitsForOperator;
   } else if (isSignedParkedChain) {
-    badgeClass = "fleet-ps-badge-ok";
+    badgeTone = "ok";
     badgeLabel = de.fleet.planKetteStarten;
   } else if (isRunning) {
-    badgeClass = "fleet-ps-badge-lauf";
+    badgeTone = "ok";
     badgeLabel = `läuft${ps.kanban_child_total > 0 ? ` · ${ps.kanban_child_done}/${ps.kanban_child_total}` : ""}`;
   }
 
@@ -363,7 +396,12 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
     <button type="button" className="fleet-ps" onClick={onClick}>
       <div className="fleet-ps-top">
         <span className="fleet-ps-name">{ps.topic || ps.filename}</span>
-        <span className={`fleet-ps-badge ${badgeClass}`}>{badgeLabel}</span>
+        <SignalChip
+          tone={badgeTone}
+          label={badgeLabel}
+          title={badgeLabel}
+          className="ml-auto min-w-0 max-w-[min(52%,28rem)] shrink overflow-hidden"
+        />
       </div>
       {fraction != null ? (
         <div className="fleet-rail">
@@ -379,6 +417,32 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
       </div>
     </button>
   );
+}
+
+const PLAN_SPEC_STATUS_TONE: Record<string, SignalTone> = {
+  blocked: "alert",
+  failed: "alert",
+  error: "alert",
+  review: "warn",
+  waiting: "warn",
+  running: "ok",
+  completed: "ok",
+  done: "ok",
+  shipped: "ok",
+  deferred: "neutral",
+  superseded: "neutral",
+  archived: "neutral",
+  obsolete: "neutral",
+  closed: "neutral",
+  open: "neutral",
+  ready: "neutral",
+  not_ingested: "neutral",
+  queued: "neutral",
+  unknown: "neutral",
+};
+
+function planSpecStatusTone(status: string, kanbanState: string): SignalTone {
+  return PLAN_SPEC_STATUS_TONE[status] ?? PLAN_SPEC_STATUS_TONE[kanbanState] ?? "neutral";
 }
 
 // ─── FleetSparkline (Fertig-24h 7-Tage-Trend) ─────────────────────────────────

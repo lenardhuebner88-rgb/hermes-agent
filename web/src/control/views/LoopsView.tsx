@@ -98,6 +98,10 @@ const displayFont: React.CSSProperties = { fontFamily: "var(--ln-font-display)" 
  *  mit — hier explizit auf --ln-sodium überschrieben). */
 const NIGHT_FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ln-sodium)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ln-void)]";
+// @nous Button setzt mono immer intern. Leitstand-Aktionen sind Chrome, keine
+// Daten: der wichtige Display-Override gewinnt gezielt über diesen Dependency-
+// Default; Datenfelder und Datei-/Zeitwerte behalten font-data.
+const NIGHT_ACTION_CLASS = cn(NIGHT_FOCUS, "!font-display");
 
 /** DECIDED — stays as engine-identity DATA palette (not skin) until the W6
  *  chart-palette slice calibrates it. Nur als Punkt neben dem Namen, nie farbe-allein
@@ -758,12 +762,12 @@ function LoopStartForm({
           size="sm"
           disabled={busy}
           onClick={handleSubmit}
-          className={cn("border-0", NIGHT_FOCUS)}
+          className={cn("border-0", NIGHT_ACTION_CLASS)}
           style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
         >
           {busy ? "…" : t.submitStart}
         </Button>
-        <Button size="sm" ghost disabled={busy} onClick={onCancel} className={NIGHT_FOCUS} style={{ color: "var(--ln-ink-soft)" }}>
+        <Button size="sm" ghost disabled={busy} onClick={onCancel} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>
           {t.cancelStart}
         </Button>
       </div>
@@ -805,7 +809,7 @@ function LoopWorkstationFileEditor({
             size="xs"
             disabled={saveBusy || draft === file.content}
             onClick={() => onSave(file.name, draft)}
-            className={cn("border-0", NIGHT_FOCUS)}
+            className={cn("border-0", NIGHT_ACTION_CLASS)}
             style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
           >
             {saveBusy ? "…" : t.workshopSave}
@@ -895,7 +899,7 @@ function LoopWorkstationPanel({
             size="xs"
             disabled={duplicateBusy || !dupName.trim()}
             onClick={() => onDuplicate(dupName.trim())}
-            className={cn("border-0", NIGHT_FOCUS)}
+            className={cn("border-0", NIGHT_ACTION_CLASS)}
             style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
           >
             {duplicateBusy ? "…" : t.workshopDuplicateSubmit}
@@ -1020,7 +1024,7 @@ function TimerScheduleControl({
             size="sm"
             disabled={busy || !valid || !dirty}
             onClick={() => onSaveTimerSchedule(pack.name, time)}
-            className={cn("min-h-[44px] border-0 px-3 disabled:opacity-40", NIGHT_FOCUS)}
+            className={cn("min-h-[44px] border-0 px-3 disabled:opacity-40", NIGHT_ACTION_CLASS)}
             style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
           >
             {busy ? "…" : t.timerSave}
@@ -1121,13 +1125,13 @@ function LoopCard({
             pendingStop ? (
               <span className="inline-flex flex-wrap items-center gap-2">
                 <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
-                <Button size="xs" disabled={busy} onClick={() => onStop(pack.name)} className={NIGHT_FOCUS} style={{ background: "var(--ln-fail)", color: "var(--ln-ink)" }}>
+                <Button size="xs" disabled={busy} onClick={() => onStop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-fail)", color: "var(--ln-ink)" }}>
                   {busy ? "…" : t.confirmYes}
                 </Button>
-                <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(null)} className={NIGHT_FOCUS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
               </span>
             ) : (
-              <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(pack.name)} className={NIGHT_FOCUS} style={{ color: "var(--ln-fail)" }}>
+              <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-fail)" }}>
                 <Square className="h-3.5 w-3.5" />{t.actions.stop}
               </Button>
             )
@@ -1137,7 +1141,7 @@ function LoopCard({
                 size="xs"
                 disabled={busy}
                 onClick={() => onOpenStart(pack.name)}
-                className={cn("border-0", NIGHT_FOCUS)}
+                className={cn("border-0", NIGHT_ACTION_CLASS)}
                 style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
               >
                 <Play className="h-3.5 w-3.5" />{t.actions.start}
@@ -1146,20 +1150,20 @@ function LoopCard({
                 pendingLand ? (
                   <span className="inline-flex flex-wrap items-center gap-2">
                     <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmLand}</span>
-                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)} className={NIGHT_FOCUS} style={{ background: "var(--ln-ok)", color: "var(--ln-sodium-ink)" }}>
+                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-ok)", color: "var(--ln-sodium-ink)" }}>
                       {busy ? "…" : t.confirmYes}
                     </Button>
-                    <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(null)} className={NIGHT_FOCUS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                    <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
                   </span>
                 ) : (
-                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)} className={NIGHT_FOCUS} style={{ color: "var(--ln-ok)", borderColor: "var(--ln-ok)" }}>
+                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ok)", borderColor: "var(--ln-ok)" }}>
                     <Anchor className="h-3.5 w-3.5" />{t.actions.land}
                   </Button>
                 )
               ) : null}
             </>
           )}
-          <Button size="xs" ghost disabled={busy} onClick={() => onToggleWorkshop(pack.name)} className={NIGHT_FOCUS} style={{ color: "var(--ln-ink-soft)" }}>
+          <Button size="xs" ghost disabled={busy} onClick={() => onToggleWorkshop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>
             <Wrench className="h-3.5 w-3.5" />{t.actions.workshop}
           </Button>
         </div>
@@ -1300,15 +1304,15 @@ function LoopsHero({
                     size="xs"
                     disabled={busyPack === hero.name}
                     onClick={() => onStop(hero.name)}
-                    className={NIGHT_FOCUS}
+                    className={NIGHT_ACTION_CLASS}
                     style={{ background: "var(--ln-fail)", color: "var(--ln-ink)" }}
                   >
                     {busyPack === hero.name ? "…" : t.confirmYes}
                   </Button>
-                  <Button size="xs" ghost onClick={() => onSetPendingStop(null)} className={NIGHT_FOCUS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                  <Button size="xs" ghost onClick={() => onSetPendingStop(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
                 </span>
               ) : (
-                <Button size="xs" ghost onClick={() => onSetPendingStop(hero.name)} className={NIGHT_FOCUS} style={{ color: "var(--ln-fail)" }}>
+                <Button size="xs" ghost onClick={() => onSetPendingStop(hero.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-fail)" }}>
                   <Square className="h-3.5 w-3.5" />{t.actions.stop}
                 </Button>
               )}

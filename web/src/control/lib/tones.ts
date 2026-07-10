@@ -76,9 +76,10 @@ export const severitySpine: Record<ToneName, string> = {
 };
 
 /**
- * tone → die CSS-Farbe, die `--hc-hero-accent` speist (Hero-Shell-Gradient +
+ * tone → die Sheet-A-Farbe, die `--hc-hero-accent` speist (Hero-Shell-Gradient +
  * Aurora-Kante, control-tokens.css). Status-Töne mappen auf ihren Farbton;
- * Marke/Neutral (violet/zinc/rose-as-red etc.) fallen auf den Akzent zurück.
+ * Info/Marke/Neutral fallen auf das ruhige Brand-Grau zurück — nicht auf den
+ * interaktiven Bronze-Kanal.
  * Eigenständige Funktion (kein Record), damit der Hero sie teilen kann, ohne
  * dass die Komponentendatei einen Nicht-Komponenten-Export bekommt.
  */
@@ -86,16 +87,16 @@ export function heroAccent(tone: ToneName): string {
   switch (tone) {
     case 'red':
     case 'rose':
-      return 'var(--hc-red)';
+      return 'var(--color-status-alert)';
     case 'amber':
-      return 'var(--hc-amber)';
+      return 'var(--color-status-warn)';
     case 'emerald':
-      return 'var(--hc-emerald)';
+      return 'var(--color-status-ok)';
     case 'cyan':
     case 'sky':
     case 'indigo':
-      return 'var(--hc-cyan)';
+      return 'var(--color-brand)';
     default:
-      return 'var(--hc-accent)';
+      return 'var(--color-brand)';
   }
 }

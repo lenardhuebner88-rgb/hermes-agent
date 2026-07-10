@@ -26,7 +26,7 @@ function scaleY(v: number, max: number): number {
 }
 
 /** Linien-Sparkline mit weicher Fläche darunter. Werte ≥ 0. */
-export function Sparkline({ points, stroke = "var(--hc-accent)", fillOpacity = 0.12, valueFmt }: {
+export function Sparkline({ points, stroke = "var(--color-live)", fillOpacity = 0.12, valueFmt }: {
   points: SeriesPoint[];
   stroke?: string;
   fillOpacity?: number;
@@ -57,7 +57,7 @@ export function Sparkline({ points, stroke = "var(--hc-accent)", fillOpacity = 0
 }
 
 /** Tages-Balken (Durchsatz/Kosten). Jeder Balken trägt seinen Tooltip. */
-export function DayBars({ points, color = "var(--hc-accent)", valueFmt }: {
+export function DayBars({ points, color = "var(--color-live)", valueFmt }: {
   points: SeriesPoint[];
   color?: string;
   valueFmt?: (v: number) => string;
@@ -79,7 +79,7 @@ export function DayBars({ points, color = "var(--hc-accent)", valueFmt }: {
             width={Math.max(0.5, bw).toFixed(1)}
             height={p.value > 0 ? (H - PAD - y).toFixed(1) : 1}
             rx="1"
-            fill={p.value > 0 ? color : "var(--hc-border)"}
+            fill={p.value > 0 ? color : "var(--color-line)"}
             opacity={p.value > 0 ? 0.9 : 0.6}
           >
             <title>{`${p.label}: ${valueFmt ? valueFmt(p.value) : p.value}`}</title>
@@ -91,11 +91,11 @@ export function DayBars({ points, color = "var(--hc-accent)", valueFmt }: {
 }
 
 /** Horizontale Rate (0..1) als gefüllte Leiste — für Reliability-Zeilen. */
-export function RateBar({ rate, color = "var(--hc-emerald)" }: { rate: number | null; color?: string }) {
+export function RateBar({ rate, color = "var(--color-status-ok)" }: { rate: number | null; color?: string }) {
   const pct = rate == null ? 0 : Math.max(0, Math.min(1, rate)) * 100;
   return (
-    <div className="hc-stage-rail w-full" aria-hidden>
-      <i style={{ width: `${pct}%`, background: rate == null ? "var(--hc-border)" : color }} />
+    <div className="h-0.5 w-full overflow-hidden rounded-[2px] bg-line" aria-hidden>
+      <i className="block h-full rounded-[2px]" style={{ width: `${pct}%`, background: rate == null ? "var(--color-line)" : color }} />
     </div>
   );
 }

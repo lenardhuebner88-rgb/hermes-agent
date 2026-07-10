@@ -3,8 +3,7 @@ import { AlertTriangle, RotateCw, Zap } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { fmtClock } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
-import { FleetPanel } from "./fleet/atoms";
-import { ToneCallout } from "./atoms";
+import { FleetPanel, SignalChip, SignalLabel } from "./leitstand";
 import {
   ESCALATION_MODEL,
   escalationPatchSequence,
@@ -142,10 +141,10 @@ export function TriageStrip() {
 
   return (
     <FleetPanel eyebrow={t.eyebrow} meta={t.meta(data?.hours ?? 48)}>
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {notice ? <ToneCallout tone="emerald">{notice}</ToneCallout> : null}
-      {data === null ? <p className="text-sm hc-dim">…</p> : data.failures.length === 0 ? (
-        <p className="text-sm hc-dim">{t.empty}</p>
+      {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2"><SignalLabel tone="alert" label={error} /></div> : null}
+      {notice ? <div role="status" className="rounded-card border border-status-ok/30 bg-status-ok/10 px-3 py-2"><SignalLabel tone="ok" label={notice} /></div> : null}
+      {data === null ? <p className="text-sec text-ink-3">…</p> : data.failures.length === 0 ? (
+        <p className="text-sec text-ink-3">{t.empty}</p>
       ) : (
         <ul className="space-y-1.5">
           {data.failures.map((f) => {
@@ -153,21 +152,19 @@ export function TriageStrip() {
             const escalation = escalationPlan(f.profile, lanes);
             const requeue = triageRequeueState(f.task_status);
             return (
-              <li key={f.task_id} className="rounded-md border border-red-500/20 px-3 py-2.5">
+              <li key={f.task_id} className="rounded-card border border-status-alert/30 bg-surface-2 px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-300" />
-                  <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">{f.title}</span>
-                  <span className="hc-mono shrink-0 rounded-full border border-red-500/30 px-2 py-0.5 text-[0.68rem] text-red-200">{f.outcome}</span>
-                  <span className="hc-mono shrink-0 text-[0.72rem] hc-soft">{f.profile ? (profileLabel[f.profile] ?? f.profile) : "—"}</span>
-                  {(f.auto_retry_count ?? 0) > 0 ? <span className="hc-mono shrink-0 rounded-full border border-amber-400/30 px-2 py-0.5 text-[0.68rem] text-amber-200">Auto {Math.min(f.auto_retry_count ?? 0, f.auto_retry_limit ?? 2)}/{f.auto_retry_limit ?? 2}</span> : null}
-                  <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(f.ended_at)}</span>
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-alert" />
+                  <span className="min-w-0 flex-1 basis-56 truncate text-sec font-medium text-ink">{f.title}</span>
+                  <SignalChip tone="alert" label={f.outcome} className="shrink-0 font-data" />
+                  <span className="shrink-0 font-data text-micro text-ink-2">{f.profile ? (profileLabel[f.profile] ?? f.profile) : "—"}</span>
+                  {(f.auto_retry_count ?? 0) > 0 ? <SignalChip tone="warn" label={`Auto ${Math.min(f.auto_retry_count ?? 0, f.auto_retry_limit ?? 2)}/${f.auto_retry_limit ?? 2}`} className="shrink-0 font-data" /> : null}
+                  <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">{fmtClock(f.ended_at)}</span>
                 </div>
-                {f.reason ? <p className="mt-1 line-clamp-2 text-[0.76rem] hc-dim">{f.reason}</p> : null}
+                {f.reason ? <p className="mt-1 line-clamp-2 text-sec text-ink-3">{f.reason}</p> : null}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {requeue.requeued ? (
-                    <span className="hc-mono inline-flex min-h-9 items-center rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[0.72rem] text-emerald-200">
-                      {requeue.label}
-                    </span>
+                    <SignalChip tone="ok" label={requeue.label ?? "eingereiht"} className="min-h-12 font-data" />
                   ) : null}
                   {isPending ? (
                     <>
@@ -175,30 +172,30 @@ export function TriageStrip() {
                         type="button"
                         disabled={busy || (isPending.kind === "escalate" && escalation.disabled)}
                         onClick={() => void act(f, isPending.kind)}
-                        className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+                        className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live/40 bg-live/10 px-3 py-1 text-sec font-medium text-bronze-hi disabled:opacity-50"
                       >
                         {isPending.kind === "escalate" ? <Zap className="h-3.5 w-3.5" /> : <RotateCw className="h-3.5 w-3.5" />}
                         {isPending.kind === "escalate" ? t.escalate : t.retry} · {t.confirm}
                       </button>
-                      <button type="button" disabled={busy} onClick={() => setPending(null)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
+                      <button type="button" disabled={busy} onClick={() => setPending(null)} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1 text-sec text-ink-2 hover:bg-surface-3 hover:text-ink">{t.cancel}</button>
                       {isPending.kind === "escalate" ? (
-                        <span className={escalation.warns ? "text-[0.72rem] text-amber-200" : "text-[0.72rem] hc-dim"}>{escalation.hint}</span>
+                        <span className={escalation.warns ? "text-micro text-status-warn" : "text-micro text-ink-3"}>{escalation.hint}</span>
                       ) : (
-                        <span className="text-[0.72rem] hc-dim">{t.retryHint}</span>
+                        <span className="text-micro text-ink-3">{t.retryHint}</span>
                       )}
                     </>
                   ) : (
                     <>
                       {requeue.requeued ? null : (
-                        <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "retry" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft hover:bg-white/5">
+                        <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "retry" })} className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-line px-3 py-1 text-sec text-ink-2 hover:bg-surface-3 hover:text-ink">
                           <RotateCw className="h-3.5 w-3.5" />{t.retry}
                         </button>
                       )}
-                      <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "escalate" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[0.78rem] text-amber-200 hover:brightness-110">
+                      <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "escalate" })} className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-line bg-surface-2 px-3 py-1 text-sec text-ink-2 hover:border-live/40 hover:text-bronze-hi">
                         <AlertTriangle className="h-3.5 w-3.5" />{t.escalate}
                       </button>
                       {requeue.requeued ? (
-                        <span className="text-[0.72rem] hc-dim">{t.escalateQueuedHint}</span>
+                        <span className="text-micro text-ink-3">{t.escalateQueuedHint}</span>
                       ) : null}
                     </>
                   )}

@@ -13,7 +13,6 @@ import type {
   AccountUsageWindow,
   ToneName,
 } from "../lib/types";
-import { TONE_HEX } from "../lib/tones";
 import {
   classifyWindow,
   formatReset,
@@ -36,11 +35,11 @@ function fallbackProviderLabel(provider: string): string {
   return provider;
 }
 
-function limitTone(value: number | null): ToneName {
-  if (value == null) return "zinc";
-  if (value >= 90) return "red";
-  if (value >= 75) return "amber";
-  return "emerald";
+function limitColor(value: number | null): string {
+  if (value == null) return "var(--color-line)";
+  if (value >= 90) return "var(--color-status-alert)";
+  if (value >= 75) return "var(--color-status-warn)";
+  return "var(--color-status-ok)";
 }
 
 /** Eine Fenster-Zeile: deutsches Label · waagerechter Balken · % + Reset-Countdown. */
@@ -71,7 +70,7 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
         {reset ? <span className="hc-dim"> · {reset}</span> : null}
       </span>
       <div className="order-3 col-span-2 sm:order-2 sm:col-span-1">
-        <RateBar rate={used == null ? null : used / 100} color={TONE_HEX[limitTone(used)]} />
+        <RateBar rate={used == null ? null : used / 100} color={limitColor(used)} />
       </div>
     </div>
   );

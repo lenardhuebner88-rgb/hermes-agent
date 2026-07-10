@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { fetchJSON } from "../../../lib/api";
 import { de } from "../../i18n/de";
+import { SignalChip, SignalLabel } from "../leitstand";
 
 const DEFAULT_PROSE = `# Plan title
 **Goal:** One sentence.
@@ -94,15 +95,15 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
   const canIngest = preview != null && busy === "idle";
 
   return (
-    <section className="mb-3 grid min-w-0 gap-3 rounded-lg border border-line bg-surface-1 p-3 text-ink">
+    <section className="mb-3 grid min-w-0 gap-3 rounded-panel border border-line bg-surface-1 p-3 text-ink">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <label htmlFor="plan-composer-prose" className="text-xs font-semibold text-ink-2">
           {de.fleet.planProseLabel}
         </label>
         {ingestedRoot ? (
-          <span className="inline-flex max-w-full items-center gap-1 truncate rounded-lg border border-status-ok/30 bg-status-ok/10 px-2 py-1 text-[11px] text-status-ok">
-            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate">{ingestedRoot}</span>
+          <span className="inline-flex max-w-full items-center gap-1">
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-status-ok" aria-hidden="true" />
+            <SignalChip tone="ok" label={ingestedRoot} className="max-w-full font-data" title={ingestedRoot} />
           </span>
         ) : null}
       </div>
@@ -116,13 +117,13 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
           setPreview(null);
           setIngestedRoot(null);
         }}
-        className="min-h-48 w-full min-w-0 resize-y rounded-lg border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-ink outline-none placeholder:text-ink-3 focus:border-live/60"
+        className="min-h-48 w-full min-w-0 resize-y rounded-card border border-line bg-surface-2 p-3 font-data text-[12px] leading-5 text-ink outline-none placeholder:text-ink-3 focus:border-live/60"
       />
 
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
         <button
           type="button"
-          className="inline-flex min-h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border border-live/40 bg-live/10 px-3 py-2 text-sm font-medium text-live hover:bg-live/15 disabled:cursor-not-allowed disabled:opacity-45"
+          className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-live/40 bg-live/10 px-3 py-2 text-sec font-medium text-bronze-hi hover:bg-live/15 disabled:cursor-not-allowed disabled:opacity-45"
           onClick={() => void handlePreview()}
           disabled={!canPreview}
           aria-busy={previewBusy}
@@ -140,14 +141,14 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
             value={freigabeMode}
             onChange={(event) => setFreigabeMode(event.target.value as FreigabeMode)}
             disabled={ingestBusy}
-            className="min-h-10 min-w-0 rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs font-medium text-ink-2 outline-none focus:border-live/60 disabled:cursor-not-allowed disabled:opacity-45"
+            className="min-h-12 min-w-0 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec font-medium text-ink-2 outline-none focus:border-live/60 disabled:cursor-not-allowed disabled:opacity-45"
           >
             <option value="operator">{de.fleet.planFreigabeOperator}</option>
             <option value="sofort">{de.fleet.planFreigabeSofort}</option>
           </select>
           <button
             type="button"
-            className="inline-flex min-h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 hover:border-live/40 hover:text-live disabled:cursor-not-allowed disabled:opacity-45"
+            className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec font-medium text-ink-2 hover:border-live/40 hover:text-bronze-hi disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => void handleIngest()}
             disabled={!canIngest}
             aria-busy={ingestBusy}
@@ -160,13 +161,13 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
       </div>
 
       {error ? (
-        <div role="alert" className="rounded-lg border border-status-alert/30 bg-status-alert/10 p-2 text-xs text-status-alert">
-          {error}
+        <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2">
+          <SignalLabel tone="alert" label={error} />
         </div>
       ) : null}
 
       {preview ? (
-        <section aria-label={de.fleet.planCompilePreviewResult} className="grid min-w-0 gap-3 rounded-lg border border-line bg-surface-2 p-3">
+        <section aria-label={de.fleet.planCompilePreviewResult} className="grid min-w-0 gap-3 rounded-card border border-line bg-surface-2 p-3">
           <div className="grid min-w-0 gap-2">
             <div className="text-xs font-semibold text-ink-2">{de.fleet.planChildren}</div>
             <div className="grid min-w-0 gap-1.5">
@@ -174,9 +175,9 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
                 <div key={`${child.title}-${index}`} className="grid min-w-0 gap-1 border-b border-line-soft pb-2 last:border-b-0 last:pb-0">
                   <div className="min-w-0 truncate text-sm font-medium text-ink">{child.title}</div>
                   <div className="flex min-w-0 flex-wrap gap-1.5 text-[11px] text-ink-3">
-                    <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildLane}: {child.assignee || "coder"}</span>
-                    <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildParents}: {(child.parents ?? []).join(", ") || de.fleet.planChildNone}</span>
-                    {child.review_tier ? <span className="rounded-lg border border-line px-2 py-0.5">{de.fleet.planChildTier}: {child.review_tier}</span> : null}
+                    <span className="rounded-card border border-line px-2 py-0.5">{de.fleet.planChildLane}: {child.assignee || "coder"}</span>
+                    <span className="rounded-card border border-line px-2 py-0.5">{de.fleet.planChildParents}: {(child.parents ?? []).join(", ") || de.fleet.planChildNone}</span>
+                    {child.review_tier ? <span className="rounded-card border border-line px-2 py-0.5">{de.fleet.planChildTier}: {child.review_tier}</span> : null}
                   </div>
                 </div>
               ))}
@@ -193,18 +194,13 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
 
 function SignalList({ title, items, tone }: { title: string; items: string[]; tone: "ok" | "warn" }) {
   if (items.length === 0) return null;
-  const toneClass = tone === "ok"
-    ? "border-status-ok/30 bg-status-ok/10 text-status-ok"
-    : "border-status-warn/30 bg-status-warn/10 text-status-warn";
 
   return (
     <div className="grid min-w-0 gap-1.5">
       <div className="text-xs font-semibold text-ink-2">{title}</div>
       <div className="flex min-w-0 flex-wrap gap-1.5">
         {items.map((item, index) => (
-          <span key={`${title}-${index}`} className={`max-w-full break-words rounded-lg border px-2 py-1 text-[11px] ${toneClass}`}>
-            {item}
-          </span>
+          <SignalLabel key={`${title}-${index}`} tone={tone} label={item} className="max-w-full break-words" />
         ))}
       </div>
     </div>

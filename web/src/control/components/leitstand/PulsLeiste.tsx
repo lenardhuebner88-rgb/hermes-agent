@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { fmtUsd } from "../../lib/fleetHub";
 import { healthLed, healthLabel } from "../../lib/health";
 import type { HealthStatus, ToneName } from "../../lib/types";
+import { de } from "../../i18n/de";
 
 export interface PulsLeisteGateway {
   status: HealthStatus | "unknown";
@@ -17,7 +18,7 @@ interface PulsLeisteProps {
   subtitle?: string;
   /** Laufende Worker (running-Filter, s. fleetHub.deriveKpi). `null` = keine Quelle. */
   workers: number | null;
-  /** Fragen-Inbox-Gesamtzahl (deduped). `null` = keine Quelle. */
+  /** Entscheidungs-Inbox-Gesamtzahl (deduped). `null` = keine Quelle. */
   fragen: number | null;
   /** Schwerster Ton der offenen Fragen — färbt LED + Icon, wenn `fragen > 0`. */
   fragenTone?: ToneName;
@@ -40,7 +41,7 @@ interface PulsLeisteProps {
  * PulsLeiste — das eine geteilte Instrumenten-Band, das jede Route trägt
  * (DESIGN.md "Puls-Leiste contract" / SHELL-SPEC.md W2-b). Links der
  * Routen-Masthead, rechts vier Live-Instrumente in fester Reihenfolge —
- * Worker · Fragen · Kosten · Gateway — dieselbe Muskelgedächtnis-Geometrie
+ * Worker · Inbox · Kosten · Gateway — dieselbe Muskelgedächtnis-Geometrie
  * auf jeder View. Rein präsentational: KEIN eigenes Daten-Fetching, alle
  * Werte kommen von den bestehenden Hooks des Aufrufers.
  */
@@ -63,10 +64,10 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
       </div>
       <div className="flex min-w-0 items-center gap-4 overflow-x-auto">
         <div className="hidden items-center gap-6 tab:flex">
-          <Instrument label="Worker" value={workers ?? "—"} valueMuted={!workerActive}>
+          <Instrument label={de.pulsLeiste.worker} value={workers ?? "—"} valueMuted={!workerActive}>
             <span className={cn("hc-led h-1.5 w-1.5 rounded-full", workerActive ? "hc-led-live" : "hc-led-idle")} />
           </Instrument>
-          <Instrument label="Fragen" value={fragen ?? "—"} valueMuted={!fragenActive}>
+          <Instrument label={de.pulsLeiste.inbox} value={fragen ?? "—"} valueMuted={!fragenActive}>
             {fragenActive ? (
               <>
                 <span className={cn("hc-led h-1.5 w-1.5 rounded-full", fragenLedClass(fragenTone))} />
@@ -75,7 +76,7 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
             ) : null}
           </Instrument>
           <Instrument
-            label="Kosten"
+            label={de.pulsLeiste.costs}
             value={
               <>
                 {fmtUsd(kostenUsd)}
@@ -83,7 +84,7 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
               </>
             }
           />
-          <Instrument label="Gateway" value={healthLabel(gateway.status, gateway.stale)} title={gateway.title}>
+          <Instrument label={de.pulsLeiste.gateway} value={healthLabel(gateway.status, gateway.stale)} title={gateway.title}>
             <span className={cn("hc-led h-1.5 w-1.5 rounded-full", healthLed(gateway.status, gateway.stale))} />
           </Instrument>
         </div>
@@ -104,7 +105,7 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
   );
 }
 
-// Fragen ist "nie color-only": LED + AlertTriangle-Icon teilen sich denselben
+// Inbox ist "nie color-only": LED + AlertTriangle-Icon teilen sich denselben
 // Zwei-Stufen-Ton (roter Alarm bei red/rose, sonst warn) — dieselbe
 // Vereinfachung wie ControlShell.tabBadge für den Postfach-Badge.
 function fragenLedClass(tone: ToneName): string {

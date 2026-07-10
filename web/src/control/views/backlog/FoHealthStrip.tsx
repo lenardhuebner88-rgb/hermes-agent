@@ -11,12 +11,12 @@ export function FoHealthStrip({ items, contractHealth }: { items: BacklogItem[];
   const cells: Array<{ label: string; value: number; dot?: DotKind }> = [
     { label: "Now", value: counts.now },
     { label: "Next Ready", value: counts.nextReady, dot: "ready" },
-    { label: "Blocked", value: counts.blocked, dot: "error" },
-    { label: "Unowned", value: counts.unowned, dot: "warn" },
-    { label: "Stale", value: counts.stale, dot: "error" },
-    { label: "High Risk", value: counts.highRisk, dot: "error" },
-    { label: "Contract Drift", value: counts.contractDrift, dot: counts.contractDrift ? "warn" : "idle" },
-    { label: "Missing Acceptance", value: counts.missingAcceptance, dot: counts.missingAcceptance ? "warn" : "idle" },
+    { label: "Blocked", value: counts.blocked, dot: counts.blocked > 0 ? "error" : undefined },
+    { label: "Unowned", value: counts.unowned, dot: counts.unowned > 0 ? "warn" : undefined },
+    { label: "Stale", value: counts.stale, dot: counts.stale > 0 ? "error" : undefined },
+    { label: "High Risk", value: counts.highRisk, dot: counts.highRisk > 0 ? "error" : undefined },
+    { label: "Contract Drift", value: counts.contractDrift, dot: counts.contractDrift > 0 ? "warn" : undefined },
+    { label: "Missing Acceptance", value: counts.missingAcceptance, dot: counts.missingAcceptance > 0 ? "warn" : undefined },
   ];
   return (
     <section className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8" aria-label="FO Contract Health">

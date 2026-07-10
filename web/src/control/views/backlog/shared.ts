@@ -34,6 +34,9 @@ export const STATUS_TONE: Record<string, ToneName> = {
   blocked: "red",
   later: "zinc",
   done: "emerald",
+  deferred: "zinc",
+  superseded: "zinc",
+  archived: "zinc",
 };
 
 export const RISK_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };

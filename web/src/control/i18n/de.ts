@@ -91,6 +91,7 @@ export const de = {
     subscriptionInputOutput: (input: string, output: string) => `In ${input} · Out ${output}`,
     subscriptionEquivalent: (cost: string) => `≈ ${cost} API-Wert`,
     subscriptionNoData: "Noch kein Abo-Tokenverbrauch im Fenster.",
+    workerEfficiencyMap: "Worker-Effizienz-Karte",
     // F6: Absprung zum Issue-Board.
     issuesLink: "Issues — wiederkehrende Fehler →",
     // ST4: Masthead-Broadsheet — Akzeptanz-Headline, Stütz-KPIs, Verlässlich-
@@ -603,6 +604,12 @@ export const de = {
     epicClose: "Epic schließen",
     epicCloseConfirm: "Epic schließen? Die Tasks bleiben unberührt.",
     epicCloseBusy: "schließt …",
+  },
+  pulsLeiste: {
+    worker: "Worker",
+    inbox: "Inbox",
+    costs: "Kosten",
+    gateway: "Gateway",
   },
   pulse: {
     eyebrow: "Puls",
