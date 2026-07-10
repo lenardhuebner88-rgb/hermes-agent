@@ -63,7 +63,7 @@ enum class ErrorKind {
 
 /** Semantic view of SpeechRecognizer error codes; the service does the int mapping. */
 enum class RecognizerFailure {
-    NO_MATCH,
+    NO_SPEECH,
     BUSY,
     LANGUAGE_UNAVAILABLE,
     UNAVAILABLE,
@@ -167,7 +167,7 @@ class DictationController(
 
     fun recognizerError(failure: RecognizerFailure): List<Cmd> = when (phase) {
         Phase.LISTENING -> when (failure) {
-            RecognizerFailure.NO_MATCH -> emptySegmentRound()
+            RecognizerFailure.NO_SPEECH -> emptySegmentRound()
             RecognizerFailure.BUSY ->
                 if (busyRestarts < MAX_BUSY_RESTARTS) {
                     busyRestarts += 1

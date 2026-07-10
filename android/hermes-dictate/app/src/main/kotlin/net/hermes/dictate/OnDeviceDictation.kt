@@ -1,126 +1,150 @@
 package net.hermes.dictate
 
-import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 
 /**
- * Thin wrapper around Android's SpeechRecognizer for the default dictation path.
+ * Factory for the [Intent] passed to [SpeechRecognizer.startListening].
+ * Extracted so unit tests can capture and assert the extras without an Android runtime.
+ */
+fun interface RecognizeIntentFactory {
+    fun create(language: String): Intent
+}
+
+private object DefaultRecognizeIntentFactory : RecognizeIntentFactory {
+    override fun create(language: String): Intent {
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            // S24/German on-device quality: ask for spoken punctuation marks where the platform
+            // supports them; unsupported extras are ignored, so this is safe. 0 is not a documented
+            // constant for this extra on all SDK levels, so pass it as a raw int.
+            putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, 0)
+            // Short silence windows for responsive keyboard feel while still allowing short pauses.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 500)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 250)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300)
+            // Prefer the on-device model if the device supports it.
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        }
+    }
+}
+
+/**
+ * On-device recognizer backed by Android's [SpeechRecognizer].
  *
- * Privacy contract (PlanSpec): this path must never send audio off the device, so ONLY the
- * dedicated on-device recognizer (API 31+) is ever bound — the generic recognizer is documented
- * to stream audio to a server and EXTRA_PREFER_OFFLINE is merely best-effort, which would break
- * the guarantee silently (Codex review finding, 2026-07-10). Missing recognizer or missing
- * offline language pack surfaces visibly; there is no networked fallback.
+ * Lifecycle semantics:
+ * - The [SpeechRecognizer] instance is created once and reused until [recreate] or [destroy].
+ * - A *segment* is one continuous listen -> final result cycle. Only one segment may be pending at a
+ *   time; this is tracked by [pendingSegment], not by the long-lived recognizer availability flag.
+ * - [isRunning] tracks whether the recognizer instance itself is bound and usable. It is set during
+ *   construction and cleared on [destroy]; it must NOT be used to reject the start of a new segment,
+ *   otherwise repeated dictations in the same input field die after the first segment.
  */
 class OnDeviceDictation(
-    private val context: Context,
-    private val events: Events,
+    private val recognizer: SpeechRecognizer,
+    private val callbacks: Callbacks,
+    private val intentFactory: RecognizeIntentFactory = DefaultRecognizeIntentFactory,
 ) {
-    interface Events {
+    interface Callbacks {
         fun onPartial(text: String)
         fun onFinal(text: String)
         fun onError(failure: RecognizerFailure)
     }
 
-    private var recognizer: SpeechRecognizer? = null
+    private var isRunning = false
+    private var pendingSegment = false
 
-    /** True when a recognizer could be created at all. */
-    fun startSegment(languageTag: String?): Boolean {
-        val r = recognizer ?: createRecognizer() ?: return false
-        r.cancel()
-        r.startListening(buildIntent(languageTag))
+    init {
+        recognizer.setRecognitionListener(Listener())
+        isRunning = true
+    }
+
+    val isAvailable: Boolean get() = isRunning
+
+    fun startSegment(languageTag: String): Boolean {
+        // Guard against overlapping segments, not against the long-lived recognizer being "running".
+        if (pendingSegment) return false
+        if (!isRunning) return false
+        pendingSegment = true
+
+        val intent = intentFactory.create(languageTag.ifBlank { "de-DE" })
+        recognizer.startListening(intent)
         return true
     }
 
     fun stopSegment() {
-        recognizer?.stopListening()
+        if (!pendingSegment) return
+        recognizer.stopListening()
     }
 
-    fun cancel() {
-        recognizer?.cancel()
-    }
-
-    /** Drops the current instance so the next segment binds a fresh recognizer (BUSY recovery). */
+    /** Recreate the internal listener and clear any stuck pending-segment state. */
     fun recreate() {
-        recognizer?.destroy()
-        recognizer = null
+        isRunning = true
+        pendingSegment = false
+        recognizer.setRecognitionListener(Listener())
     }
 
     fun destroy() {
-        recognizer?.destroy()
-        recognizer = null
+        isRunning = false
+        pendingSegment = false
+        recognizer.destroy()
     }
 
-    private fun createRecognizer(): SpeechRecognizer? {
-        if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-            return null
-        }
-        val created = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-        created.setRecognitionListener(listener)
-        recognizer = created
-        return created
-    }
-
-    private fun buildIntent(languageTag: String?): Intent =
-        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            // Belt and braces besides the on-device recognizer: never use networked models.
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            // Dictation pauses (thinking) shouldn't end the segment instantly; chaining in the
-            // controller covers longer gaps.
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1600)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1600)
-            languageTag?.let { putExtra(RecognizerIntent.EXTRA_LANGUAGE, it) }
-        }
-
-    private val listener = object : RecognitionListener {
-        override fun onPartialResults(partialResults: Bundle?) {
-            firstResult(partialResults)?.let { events.onPartial(it) }
-        }
-
-        override fun onResults(results: Bundle?) {
-            events.onFinal(firstResult(results) ?: "")
-        }
-
-        override fun onError(error: Int) {
-            events.onError(mapError(error))
-        }
-
+    private inner class Listener : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
+
+        override fun onResults(results: Bundle?) {
+            pendingSegment = false
+            val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                ?.takeIf { it.isNotBlank() }
+            if (text != null) {
+                callbacks.onFinal(text)
+            } else {
+                callbacks.onError(RecognizerFailure.NO_SPEECH)
+            }
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                ?.takeIf { it.isNotBlank() }
+            if (text != null) callbacks.onPartial(text)
+        }
+
+        override fun onError(error: Int) {
+            pendingSegment = false
+            val failure = when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH -> RecognizerFailure.NO_SPEECH
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> RecognizerFailure.NO_SPEECH
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> RecognizerFailure.PERMISSION
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> RecognizerFailure.LANGUAGE_UNAVAILABLE
+                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> RecognizerFailure.LANGUAGE_UNAVAILABLE
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> RecognizerFailure.BUSY
+                SpeechRecognizer.ERROR_CLIENT,
+                SpeechRecognizer.ERROR_SERVER,
+                SpeechRecognizer.ERROR_NETWORK,
+                SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> RecognizerFailure.OTHER
+                else -> RecognizerFailure.OTHER
+            }
+            if (failure == RecognizerFailure.BUSY) {
+                // A busy recognizer is wedged; clear the running flag so the service will recreate.
+                isRunning = false
+            }
+            callbacks.onError(failure)
+        }
+
         override fun onEvent(eventType: Int, params: Bundle?) {}
-    }
-
-    private fun firstResult(bundle: Bundle?): String? =
-        bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.takeIf { it.isNotBlank() }
-
-    private fun mapError(code: Int): RecognizerFailure = when (code) {
-        SpeechRecognizer.ERROR_NO_MATCH,
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-        -> RecognizerFailure.NO_MATCH
-
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> RecognizerFailure.BUSY
-
-        // 12/13 exist from API 31; referenced numerically so minSdk 29 compiles.
-        ERROR_LANGUAGE_NOT_SUPPORTED, ERROR_LANGUAGE_UNAVAILABLE -> RecognizerFailure.LANGUAGE_UNAVAILABLE
-
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> RecognizerFailure.PERMISSION
-
-        else -> RecognizerFailure.OTHER
-    }
-
-    companion object {
-        private const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
-        private const val ERROR_LANGUAGE_UNAVAILABLE = 13
     }
 }

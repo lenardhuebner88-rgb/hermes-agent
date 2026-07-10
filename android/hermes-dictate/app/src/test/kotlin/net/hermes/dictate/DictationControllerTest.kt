@@ -35,6 +35,26 @@ class DictationControllerTest {
     }
 
     @Test
+    fun `two consecutive dictations work without restarting the IME`() {
+        val c = controller()
+        // First dictation: tap, final, stop tap, final.
+        c.micTapped()
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("erster teil"), Cmd.StartRecognizer), c.recognizerFinal("erster teil"))
+        assertEquals(listOf<Cmd>(Cmd.StopRecognizer), c.micTapped())
+        val firstStop = c.recognizerFinal("erster teil.")
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("erster teil."), Cmd.Status(UiStatus.Idle)), firstStop)
+        assertEquals(DictationController.Phase.IDLE, c.phase)
+
+        // Second dictation in the same field: must start again from idle.
+        assertEquals(listOf<Cmd>(Cmd.StartRecognizer, Cmd.Status(UiStatus.Listening)), c.micTapped())
+        assertEquals(listOf<Cmd>(Cmd.Preview("zweiter teil")), c.recognizerPartial("zweiter teil"))
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("zweiter teil"), Cmd.StartRecognizer), c.recognizerFinal("zweiter teil"))
+        assertEquals(listOf<Cmd>(Cmd.StopRecognizer), c.micTapped())
+        val secondStop = c.recognizerFinal("zweiter teil.")
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("zweiter teil."), Cmd.Status(UiStatus.Idle)), secondStop)
+    }
+
+    @Test
     fun `second tap stops gracefully and the final result ends the session`() {
         val c = controller()
         c.micTapped()
@@ -63,10 +83,10 @@ class DictationControllerTest {
         repeat(DictationController.MAX_EMPTY_ROUNDS - 1) {
             assertEquals(
                 listOf<Cmd>(Cmd.ClearPreview, Cmd.StartRecognizer),
-                c.recognizerError(RecognizerFailure.NO_MATCH),
+                c.recognizerError(RecognizerFailure.NO_SPEECH),
             )
         }
-        val last = c.recognizerError(RecognizerFailure.NO_MATCH)
+        val last = c.recognizerError(RecognizerFailure.NO_SPEECH)
         assertTrue(last.contains(Cmd.Status(UiStatus.Failed(ErrorKind.NO_SPEECH))))
         assertEquals(DictationController.Phase.IDLE, c.phase)
     }
@@ -76,13 +96,13 @@ class DictationControllerTest {
         val c = controller()
         c.micTapped()
         repeat(DictationController.MAX_EMPTY_ROUNDS - 1) {
-            c.recognizerError(RecognizerFailure.NO_MATCH)
+            c.recognizerError(RecognizerFailure.NO_SPEECH)
         }
         c.recognizerFinal("text")
         // Counter reset: the next silent round restarts instead of stopping.
         assertEquals(
             listOf<Cmd>(Cmd.ClearPreview, Cmd.StartRecognizer),
-            c.recognizerError(RecognizerFailure.NO_MATCH),
+            c.recognizerError(RecognizerFailure.NO_SPEECH),
         )
     }
 
@@ -107,6 +127,28 @@ class DictationControllerTest {
         c.micTapped()
         val cmds = c.recognizerError(RecognizerFailure.LANGUAGE_UNAVAILABLE)
         assertTrue(cmds.contains(Cmd.Status(UiStatus.Failed(ErrorKind.LANGUAGE_UNAVAILABLE))))
+    }
+
+    @Test
+    fun `late recognizer final after stop is ignored`() {
+        val c = controller()
+        c.micTapped()
+        c.micTapped()
+        // User stops and then a delayed final from the previous segment arrives.
+        c.recognizerFinal("noch da")
+        // After finishing idle, a new dictation should start normally.
+        assertEquals(listOf<Cmd>(Cmd.StartRecognizer, Cmd.Status(UiStatus.Listening)), c.micTapped())
+    }
+
+    @Test
+    fun `late recognizer error after stop is ignored`() {
+        val c = controller()
+        c.micTapped()
+        c.micTapped()
+        c.recognizerError(RecognizerFailure.NO_SPEECH)
+        assertEquals(DictationController.Phase.IDLE, c.phase)
+        // Must be able to start a fresh dictation.
+        assertEquals(listOf<Cmd>(Cmd.StartRecognizer, Cmd.Status(UiStatus.Listening)), c.micTapped())
     }
 
     // --- Cloud opt-in per use ---

@@ -33,8 +33,8 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.13.0")
 
     testImplementation("junit:junit:4.13.2")
-    // Host-JVM unit tests run against the android.jar org.json *stub* (throws "Stub!"); this
-    // pulls in a real implementation of the same API for the test classpath only — production
-    // code still only ever sees the platform's built-in org.json.
     testImplementation("org.json:json:20260522")
+    testImplementation("org.mockito:mockito-core:5.18.0")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
 }

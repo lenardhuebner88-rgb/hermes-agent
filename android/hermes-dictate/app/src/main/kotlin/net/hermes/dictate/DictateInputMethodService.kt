@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
+import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -34,7 +35,7 @@ import java.util.concurrent.Executors
  */
 class DictateInputMethodService :
     InputMethodService(),
-    OnDeviceDictation.Events,
+    OnDeviceDictation.Callbacks,
     CloudRecorder.Events {
 
     private val controller = DictationController()
@@ -174,7 +175,7 @@ class DictateInputMethodService :
             when (cmd) {
                 Cmd.StartRecognizer -> startRecognizerSegment()
                 Cmd.StopRecognizer -> dictation?.stopSegment()
-                Cmd.CancelRecognizer -> dictation?.cancel()
+                Cmd.CancelRecognizer -> dictation?.stopSegment()
                 Cmd.StartRecording -> startRecording()
                 Cmd.StopRecording -> stopRecordingAndReport()
                 Cmd.AbortRecording -> {
@@ -194,11 +195,14 @@ class DictateInputMethodService :
     private fun startRecognizerSegment() {
         // Snapshot the field BEFORE composing text appears; every preview/commit of this
         // segment formats against it. Chained segments re-snapshot after the previous commit.
-        segmentBefore = currentInputConnection?.getTextBeforeCursor(64, 0)
-        val d = dictation ?: OnDeviceDictation(this, this).also { dictation = it }
-        if (!d.startSegment(prefs.languageTag)) {
-            // Defer: the controller emitted this command synchronously — don't nest transitions.
-            mainHandler.post { run(controller.recognizerError(RecognizerFailure.UNAVAILABLE)) }
+        segmentBefore = currentInputConnection?.getTextBeforeCursor(64, 0)?.toString() ?: ""
+        val d = dictation ?: OnDeviceDictation(SpeechRecognizer.createSpeechRecognizer(this), this).also { dictation = it }
+        if (!d.startSegment(prefs.languageTag ?: "")) {
+            // If the recognizer rejected the segment, it is likely wedged. Recreate and retry once.
+            d.recreate()
+            if (!d.startSegment(prefs.languageTag ?: "")) {
+                mainHandler.post { run(controller.recognizerError(RecognizerFailure.BUSY)) }
+            }
         }
     }
 
