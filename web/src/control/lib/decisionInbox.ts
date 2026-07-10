@@ -80,6 +80,9 @@ const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneN
   role_fit_held: { weight: 55, tone: "cyan" },
   decompose_failed: { weight: 52, tone: "cyan" },
   stranded_by_stuck_parent: { weight: 50, tone: "cyan" },
+  // Critical: a decompose root's shared branch holds unmerged commits no
+  // sweep can recover — needs manual branch triage, not a plain unblock.
+  stranded_decompose_root_branch: { weight: 90, tone: "red" },
   deliverable_posted_not_completed: { weight: 84, tone: "amber" },
   disposition_risk: { weight: 83, tone: "amber" },
   disposition_stale: { weight: 60, tone: "cyan" },
@@ -97,6 +100,7 @@ const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
   role_fit_held: "Rolle passt nicht",
   decompose_failed: "Decompose fehlgeschlagen",
   stranded_by_stuck_parent: "Wartet auf blockierten Vorgänger",
+  stranded_decompose_root_branch: "Decompose-Branch nicht gemerged",
   deliverable_posted_not_completed: "Deliverable da — Repair nötig",
   disposition_risk: "Offenes Risiko aus Abschluss",
   disposition_stale: "Alterndes offenes Item",
