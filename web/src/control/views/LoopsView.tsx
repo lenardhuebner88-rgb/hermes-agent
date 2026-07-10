@@ -122,14 +122,14 @@ function NightCallout({ tone, children }: { tone: SignalTone; children: ReactNod
 // Default; Datenfelder und Datei-/Zeitwerte behalten font-data.
 const NIGHT_ACTION_CLASS = cn(NIGHT_FOCUS, "!font-display");
 
-/** DECIDED — stays as engine-identity DATA palette (not skin) until the W6
- *  chart-palette slice calibrates it. Nur als Punkt neben dem Namen, nie farbe-allein
+/** DONE W6-4 — Engine-Identität nutzt die geteilte DATA-Palette, nie Skin,
+ *  Status oder Interaktion. Nur als Punkt neben dem Namen, nie farbe-allein
  *  (immer Text daneben). Unbekannte Engines: ink-mute. */
 const ENGINE_COLOR: Record<string, string> = {
-  claude: "#D95926",
-  codex: "#3987E5",
-  kimi: "#D55181",
-  hermes: "#199E70",
+  claude: "var(--color-data-1)",
+  codex: "var(--color-data-4)",
+  kimi: "var(--color-data-5)",
+  hermes: "var(--color-data-2)",
 };
 const engineColor = (engine: string): string => ENGINE_COLOR[engine] ?? "var(--ln-ink-mute)";
 

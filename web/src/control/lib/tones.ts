@@ -1,13 +1,21 @@
 import type { ToneName } from './types';
 
 /**
- * Legacy-Datenton → Rohfarbe. Bleibt vorerst ausschließlich für die zwei
- * SVG/Data-Viz-Pfade RoleChip und FleetPipeline erhalten; UI-Statusflächen
- * verwenden SignalChip/SignalLabel und die Sheet-A-Status-Tokens.
+ * Legacy-Tonname → geteilte Daten-Identität. Der API-Name bleibt für die zwei
+ * bestehenden SVG/Data-Viz-Consumer RoleChip und FleetPipeline kompatibel;
+ * Werte sind seit W6-4 ausschließlich CSS-Token-Referenzen, keine Rohhexe.
+ * Statusflächen verwenden weiterhin SignalChip/SignalLabel und nie diese Map.
  */
 export const TONE_HEX: Record<ToneName, string> = {
-  emerald: '#0a8a60', cyan: '#0a87a8', sky: '#0369a1', indigo: '#4338ca',
-  amber: '#b3590a', rose: '#be123c', red: '#d23b4e', zinc: '#79808f', violet: '#2e45d4',
+  emerald: 'var(--color-data-2)',
+  cyan: 'var(--color-data-1)',
+  sky: 'var(--color-data-4)',
+  indigo: 'var(--color-data-1)',
+  amber: 'var(--color-data-3)',
+  rose: 'var(--color-data-5)',
+  red: 'var(--color-data-5)',
+  zinc: 'var(--color-data-6)',
+  violet: 'var(--color-data-4)',
 };
 
 /** Task-Status → Ton (für Hermes task_status). */

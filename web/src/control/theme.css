@@ -49,6 +49,28 @@
   --color-status-warn: #d9b23a;
   --color-status-alert: #e0604f;
 
+  /* data identity only — never status, affordance, or a color-only signal.
+   * Deliberately DISTINCT from bronze + status trio + lane-prem: identity dots/
+   * chips share the dot/chip FORM with status LEDs, so value-aliasing the status
+   * hues would collapse the two channels (doctrine: channel separation by form
+   * needs distinct color vocabularies wherever the form overlaps). Print-ink
+   * desaturation keeps them reading as data, not signal.
+   * WCAG AA contrast (W6-4, director-calibrated):
+   * | token | value | on surface-1 | on surface-2 |
+   * | data-1 | #a8ad6a olive   | 7.61:1 | 7.11:1 |
+   * | data-2 | #7ba89d sage    | 6.82:1 | 6.37:1 |
+   * | data-3 | #8fa3bd slate   | 7.00:1 | 6.54:1 |
+   * | data-4 | #9d8bc4 violett | 5.95:1 | 5.56:1 |
+   * | data-5 | #c47d92 rose    | 5.76:1 | 5.38:1 |
+   * | data-6 | #96938a neutral | 5.88:1 | 5.49:1 |
+   */
+  --color-data-1: #a8ad6a;
+  --color-data-2: #7ba89d;
+  --color-data-3: #8fa3bd;
+  --color-data-4: #9d8bc4;
+  --color-data-5: #c47d92;
+  --color-data-6: #96938a;
+
   /* text hierarchy */
   --color-ink: #ebe7de; /* primary */
   --color-ink-2: #a9a59b; /* secondary — AA on surface-1/2, body text minimum */

@@ -10,7 +10,8 @@ export { SubtabChips, type SubtabItem, type SubtabChipClasses } from "./SubtabCh
 export { ListRow } from "./ListRow";
 export { SignalChip, SignalLabel, signalToneFromLegacy, type SignalTone } from "./StatusSignal";
 export { DrawerShell } from "./DrawerShell";
-export { TwoPane, useTwoPaneExpanded, type TwoPaneProps } from "./TwoPane";
+export { TwoPane, type TwoPaneProps } from "./TwoPane";
+export { useTwoPaneExpanded } from "./useTwoPaneExpanded";
 export { PulsLeiste, type PulsLeisteGateway } from "./PulsLeiste";
 // StatusChip is already the single shared tinted KPI chip — re-exported here so
 // the Leitstand layer is the one import surface for the whole building-block set.

@@ -2,7 +2,8 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KpiTile, SectionHeader, SubtabChips, type SubtabItem } from "./index";
+import { TONE_HEX } from "../../lib/tones";
+import { KpiTile, RoleChip, SectionHeader, SubtabChips, type SubtabItem } from "./index";
 
 afterEach(cleanup);
 
@@ -36,6 +37,26 @@ describe("leitstand building blocks", () => {
       expect(screen.getByText("%")).toBeTruthy();
       const delta = screen.getByText("▲ 3");
       expect(delta.className).toContain("text-status-ok");
+    });
+  });
+
+  describe("RoleChip data identity", () => {
+    it("uses the shared data token mapping and keeps a textual role marker", () => {
+      const { container } = render(<RoleChip role={{ label: "Verifier", short: "V", tone: "sky" }} />);
+      const chip = container.querySelector<HTMLElement>(".hc-role-chip");
+
+      expect(chip?.style.getPropertyValue("--hc-role")).toBe("var(--color-data-4)");
+      expect(container.textContent).toContain("V");
+      expect(container.textContent).toContain("Verifier");
+      expect(Object.values(TONE_HEX)).toEqual(expect.arrayContaining([
+        "var(--color-data-1)",
+        "var(--color-data-2)",
+        "var(--color-data-3)",
+        "var(--color-data-4)",
+        "var(--color-data-5)",
+        "var(--color-data-6)",
+      ]));
+      expect(Object.values(TONE_HEX).every((value) => /^var\(--color-data-[1-6]\)$/.test(value))).toBe(true);
     });
   });
 

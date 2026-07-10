@@ -793,6 +793,21 @@ describe("Loops — kein Remote-Font-Loader (W3-5 Director-Fix, Codex-P1-gehärt
   });
 });
 
+describe("Loops — Engine-Datenpalette (W6-4)", () => {
+  it("mappt Engine-Identität ausschließlich auf data-N-Tokens ohne Rohhex", () => {
+    const engineColors = loopsViewSource.match(
+      /const ENGINE_COLOR: Record<string, string> = \{([\s\S]*?)\};/,
+    )?.[1];
+
+    expect(engineColors).toBeTruthy();
+    expect(engineColors).not.toMatch(/#[0-9a-f]{6}/i);
+    expect(engineColors).toContain('claude: "var(--color-data-1)"');
+    expect(engineColors).toContain('codex: "var(--color-data-4)"');
+    expect(engineColors).toContain('kimi: "var(--color-data-5)"');
+    expect(engineColors).toContain('hermes: "var(--color-data-2)"');
+  });
+});
+
 describe("Loops — Nacht auf Graphit (W4-8)", () => {
   it("entfernt den Navy-Fork und leitet NIGHT_VARS ausschließlich aus Sheet-Tokens ab", () => {
     const bannedNavy = [
