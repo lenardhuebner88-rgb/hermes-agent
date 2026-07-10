@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, Eye, Lock, OctagonX, PauseCircle, RotateCw, ScrollText, Send, TriangleAlert, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Eye, Lock, OctagonX, PauseCircle, RotateCw, ScrollText, Send, TriangleAlert, Zap } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
@@ -105,18 +105,18 @@ export function WorkerLogTail({ taskId }: { taskId: string }) {
   }, [taskId]);
 
   if (error) return <WorkerCallout tone="alert">{error}</WorkerCallout>;
-  if (log === null) return <Text variant="label" className="hc-dim">…</Text>;
+  if (log === null) return <Text variant="label" className="text-ink-3">…</Text>;
   if (!log.exists || !log.content.trim()) {
-    return <Text variant="label" className="hc-dim">{de.worker.logEmpty}</Text>;
+    return <Text variant="label" className="text-ink-3">{de.worker.logEmpty}</Text>;
   }
   const lines = log.content.split("\n");
   const tail = lines.slice(-LOG_MAX_LINES).join("\n");
   return (
     <div className="space-y-1">
       {log.truncated || lines.length > LOG_MAX_LINES ? (
-        <Text variant="label" className="hc-dim">{de.worker.logTruncated}</Text>
+        <Text variant="label" className="text-ink-3">{de.worker.logTruncated}</Text>
       ) : null}
-      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-[var(--hc-border)] bg-black/30 p-2 text-[0.7rem] leading-relaxed hc-soft">
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-card border border-line bg-surface-1 p-2 font-data text-micro leading-relaxed text-ink-2">
         {tail}
       </pre>
     </div>
@@ -164,7 +164,7 @@ function TimeAxisTrack({
   return (
     <div className="relative h-6 w-full" role="img" aria-label={ariaLabel}>
       {/* Track-Hintergrund */}
-      <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-white/10">
+      <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-line">
         {/* Elapsed-Füllung */}
         <div
           className="h-full rounded-full bg-live/60"
@@ -203,7 +203,7 @@ function TimeAxisTrack({
       ) : null}
       {/* „Jetzt"-Marker */}
       <div
-        className="absolute top-0 h-full w-0.5 rounded bg-white/90"
+        className="absolute top-0 h-full w-0.5 rounded bg-ink"
         style={{ left: `${nowPct}%` }}
         title={`${de.worker.timeAxisNow}: ${fmtDur(elapsed)}`}
       />
@@ -220,10 +220,10 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
     .slice(0, 10);
 
   if (loading && !data) {
-    return <Text variant="label" className="hc-dim">{de.worker.activityLoading}</Text>;
+    return <Text variant="label" className="text-ink-3">{de.worker.activityLoading}</Text>;
   }
   if (heartbeatNotes.length === 0) {
-    return <Text variant="label" className="hc-dim">{de.worker.activityEmpty}</Text>;
+    return <Text variant="label" className="text-ink-3">{de.worker.activityEmpty}</Text>;
   }
 
   const latestAt = heartbeatNotes[0]?.at ?? 0;
@@ -232,7 +232,7 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
 
   return (
     <div className="space-y-1.5">
-      <Text variant="eyebrow" className="hc-dim">{de.worker.activityHeading}</Text>
+      <Text variant="eyebrow" className="text-ink-3">{de.worker.activityHeading}</Text>
       {latestStale ? (
         <Text variant="label" className="text-status-warn">{de.worker.activityStaleHint}</Text>
       ) : null}
@@ -241,10 +241,10 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
           const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
           return (
             <li key={ev.id} className="flex items-start gap-2">
-              <span className="mt-0.5 shrink-0 hc-mono hc-type-label hc-dim min-w-[3.5rem] text-right">
+              <span className="mt-0.5 min-w-[3.5rem] shrink-0 text-right font-data text-micro text-ink-3">
                 {age != null ? de.worker.activityAgo(fmtDur(age)) : "—"}
               </span>
-              <span className="hc-type-label hc-soft leading-snug">{ev.note}</span>
+              <span className="text-micro leading-snug text-ink-2">{ev.note}</span>
             </li>
           );
         })}
@@ -314,11 +314,12 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
     : etaP50 != null && etaP50 > 0 ? Math.min(1, runtime / etaP50) : null;
 
   const runawayBadge = runaway.level !== "none" ? (
-    <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", runaway.level === "critical" ? "border-status-alert/40 bg-status-alert/10 text-status-alert" : "border-status-warn/40 bg-status-warn/10 text-status-warn")}>
-      <AlertTriangle className="h-3 w-3" />{runaway.level === "critical"
+    <SignalChip
+      tone={runaway.level === "critical" ? "alert" : "warn"}
+      label={runaway.level === "critical"
         ? `${de.worker.runawayCritical} — ${de.worker.runawayCriticalDetail}`
         : `${de.worker.runawayWarn} — ${de.worker.runawayWarnDetail}`}
-    </span>
+    />
   ) : null;
 
   return (
@@ -331,21 +332,21 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       {collapsible ? (
         <button type="button" aria-expanded={expanded} onClick={() => setOpen((v) => !v)} className="block w-full text-left">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-line bg-white/5 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
+            <span className="rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
             {runawayBadge}
             <span className="ml-auto inline-flex items-center gap-1.5">
               <SignalChip tone={signalToneFromLegacy(health.tone)} label={health.label} />
-              {expanded ? <ChevronDown className="h-3.5 w-3.5 hc-soft" /> : <ChevronRight className="h-3.5 w-3.5 hc-soft" />}
+              {expanded ? <ChevronDown className="h-3.5 w-3.5 text-ink-2" /> : <ChevronRight className="h-3.5 w-3.5 text-ink-2" />}
             </span>
           </div>
-          <h3 className="mt-1.5 line-clamp-1 text-sm font-semibold leading-snug text-white">{worker.task_title}</h3>
-          <p className="mt-1 truncate hc-mono hc-type-label hc-dim">
+          <h3 className="mt-1.5 line-clamp-1 text-sm font-semibold leading-snug text-ink">{worker.task_title}</h3>
+          <p className="mt-1 truncate font-data text-micro text-ink-3">
             ⏱ {fmtDur(runtime)}
             {worker.max_runtime_seconds > 0 ? ` / ${fmtDur(worker.max_runtime_seconds)}` : ""}
             {note ? ` · ${note}` : ""}
           </p>
           {headerMeterPct != null ? (
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10">
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-line">
               <div
                 className={cn("h-full rounded-full", runaway.level === "critical" ? "bg-status-alert" : runaway.level === "warn" ? "bg-status-warn" : "bg-live")}
                 style={{ width: `${Math.round(headerMeterPct * 100)}%` }}
@@ -357,16 +358,16 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-line bg-white/5 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
-            <span className="rounded-full border border-white/10 px-2 py-0.5 text-xs hc-soft">{taskStatusLabel[worker.task_status] ?? worker.task_status}</span>
+            <span className="rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
+            <SignalChip tone="neutral" label={taskStatusLabel[worker.task_status] ?? worker.task_status} />
             {runawayBadge}
           </div>
-          <h3 className="line-clamp-2 text-base font-semibold leading-snug text-white">{worker.task_title}</h3>
+          <h3 className="line-clamp-2 text-base font-semibold leading-snug text-ink">{worker.task_title}</h3>
           {note ? (
-            <Text variant="label" className="hc-soft">
-              <span className="hc-eyebrow mr-1.5">{de.worker.doingNow}:</span>
+            <Text variant="label" className="text-ink-2">
+              <span className="mr-1.5 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">{de.worker.doingNow}:</span>
               {note}
-              {noteAge != null ? <span className="hc-dim"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
+              {noteAge != null ? <span className="text-ink-3"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
             </Text>
           ) : null}
         </div>
@@ -376,15 +377,15 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
 
       {!expanded ? (
         problemText || runaway.level !== "none" ? (
-          <p className="line-clamp-2 hc-type-label text-status-warn">{problemText ?? runaway.reasons.join(" · ")}</p>
+          <p className="line-clamp-2 text-micro text-status-warn">{problemText ?? runaway.reasons.join(" · ")}</p>
         ) : null
       ) : (
       <>
       {collapsible && note ? (
-        <Text variant="label" className="hc-soft">
-          <span className="hc-eyebrow mr-1.5">{de.worker.doingNow}:</span>
+        <Text variant="label" className="text-ink-2">
+          <span className="mr-1.5 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">{de.worker.doingNow}:</span>
           {note}
-          {noteAge != null ? <span className="hc-dim"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
+          {noteAge != null ? <span className="text-ink-3"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
         </Text>
       ) : null}
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
@@ -398,18 +399,9 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       <div className="space-y-1.5">
         {/* Zustandswort */}
         <div className="flex items-center gap-2">
-          <span className={cn(
-            "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-            axisState.tone === "emerald" ? "border-status-ok/30 bg-status-ok/10 text-status-ok" :
-            axisState.tone === "cyan" ? "border-live/30 bg-live/10 text-live" :
-            axisState.tone === "amber" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" :
-            axisState.tone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" :
-            "border-line bg-white/5 text-ink-2"
-          )}>
-            {axisState.label}
-          </span>
-          <span className="hc-mono hc-type-label hc-dim">{fmtDur(runtime)}</span>
-          {budget > 0 ? <span className="hc-type-label hc-dim">/ {fmtDur(budget)}</span> : null}
+          <SignalChip tone={signalToneFromLegacy(axisState.tone)} label={axisState.label} />
+          <span className="font-data text-micro text-ink-3">{fmtDur(runtime)}</span>
+          {budget > 0 ? <span className="text-micro text-ink-3">/ {fmtDur(budget)}</span> : null}
         </div>
         {/* Zeit-Achsen-Track */}
         <TimeAxisTrack
@@ -421,7 +413,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         />
         {/* Kein ETA-Hinweis */}
         {axisState.noEta ? (
-          <Text variant="label" className="hc-dim">{de.worker.timeAxisNoEta}</Text>
+          <Text variant="label" className="text-ink-3">{de.worker.timeAxisNoEta}</Text>
         ) : null}
       </div>
 
@@ -429,33 +421,33 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       <div className="flex flex-wrap gap-2">
         {/* Modell-Chip */}
         {effectiveModel ? (
-          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs">
-            <span className="hc-dim">{de.worker.chipModel}:</span>
-            <span className="text-white">{effectiveModel}</span>
-            {modelOverride == null ? <span className="hc-dim">{de.worker.chipModelFromLane}</span> : null}
+          <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs">
+            <span className="text-ink-3">{de.worker.chipModel}:</span>
+            <span className="font-data text-ink">{effectiveModel}</span>
+            {modelOverride == null ? <span className="text-ink-3">{de.worker.chipModelFromLane}</span> : null}
           </div>
         ) : null}
         {/* Schritt-Chip */}
         {stepKey ? (
-          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs">
-            <span className="hc-dim">{de.worker.chipStep}:</span>
-            <span className="text-white">{stepKey}</span>
+          <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs">
+            <span className="text-ink-3">{de.worker.chipStep}:</span>
+            <span className="font-data text-ink">{stepKey}</span>
           </div>
         ) : null}
         {/* Token-Chips */}
         {hasLiveTokens ? (
           <>
-            <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs" title={de.worker.chipTokensIn}>
-              <span className="hc-dim">↑</span>
-              <span className="text-white">{inputTokens != null ? fmtTokens(inputTokens) : de.worker.chipNoValue}</span>
+            <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs" title={de.worker.chipTokensIn}>
+              <span className="text-ink-3">↑</span>
+              <span className="font-data text-ink">{inputTokens != null ? fmtTokens(inputTokens) : de.worker.chipNoValue}</span>
             </div>
-            <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs" title={de.worker.chipTokensOut}>
-              <span className="hc-dim">↓</span>
-              <span className="text-white">{outputTokens != null ? fmtTokens(outputTokens) : de.worker.chipNoValue}</span>
+            <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs" title={de.worker.chipTokensOut}>
+              <span className="text-ink-3">↓</span>
+              <span className="font-data text-ink">{outputTokens != null ? fmtTokens(outputTokens) : de.worker.chipNoValue}</span>
             </div>
           </>
         ) : (
-          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs hc-dim" title={de.worker.chipTokensNoLiveTitle}>
+          <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs text-ink-3" title={de.worker.chipTokensNoLiveTitle}>
             {de.worker.chipTokensNoLive}
           </div>
         )}
@@ -465,19 +457,19 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         inspect.alive ? (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs hc-soft"><span>CPU</span><span className="inline-flex items-center gap-1"><span className="hc-mono">{Math.round(inspect.cpu_percent)}%</span>{inspect.cpu_percent > 80 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.cpu_percent > 80 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, inspect.cpu_percent)}%` }} /></div>
+              <div className="flex items-center justify-between text-xs text-ink-2"><span>CPU</span><span className="inline-flex items-center gap-1"><span className="font-data">{Math.round(inspect.cpu_percent)}%</span>{inspect.cpu_percent > 80 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-line"><div className={cn("h-full rounded-full", inspect.cpu_percent > 80 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, inspect.cpu_percent)}%` }} /></div>
             </div>
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs hc-soft"><span>RAM</span><span className="inline-flex items-center gap-1"><span className="hc-mono">{fmtMB(inspect.rss)}</span>{inspect.rss > 1536 * 1048576 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className={cn("h-full rounded-full", inspect.rss > 1536 * 1048576 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, (inspect.rss / (2048 * 1048576)) * 100)}%` }} /></div>
+              <div className="flex items-center justify-between text-xs text-ink-2"><span>RAM</span><span className="inline-flex items-center gap-1"><span className="font-data">{fmtMB(inspect.rss)}</span>{inspect.rss > 1536 * 1048576 ? <TriangleAlert aria-label="hoch" className="h-3 w-3 shrink-0 text-status-warn" /> : null}</span></div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-line"><div className={cn("h-full rounded-full", inspect.rss > 1536 * 1048576 ? "bg-status-warn" : "bg-live")} style={{ width: `${Math.min(100, (inspect.rss / (2048 * 1048576)) * 100)}%` }} /></div>
             </div>
-            <Text variant="label" className="hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</Text>
+            <Text variant="label" className="text-ink-2 sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</Text>
           </div>
         ) : (
           // Kein greifbarer Prozess (z.B. claude-cli ohne erfasste PID):
           // ehrliche Begründung statt irreführender 0-Meter.
-          <Text variant="label" className="hc-soft">{de.worker.inspectUnavailable}{inspect.reason ? ` — ${inspect.reason}` : ""}</Text>
+          <Text variant="label" className="text-ink-2">{de.worker.inspectUnavailable}{inspect.reason ? ` — ${inspect.reason}` : ""}</Text>
         )
       ) : null}
 
@@ -489,17 +481,10 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           sagt bereits, dass Zahlen erst nach Abschluss kommen. */}
       <div className="flex flex-wrap gap-2">
         {burn.noData ? null : burn.ratePerMin != null ? (
-          <div className={cn(
-            "inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs",
-            burnTone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" :
-            burnTone === "amber" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" :
-            "border-white/10 bg-white/5 hc-soft",
-          )}>
-            {de.worker.chipBurnRate(Math.round(burn.ratePerMin).toLocaleString("de-DE"))}
-            {burn.projectedTotal != null ? (
-              <span className="hc-dim ml-1">· {de.worker.chipBurnProjected(fmtTokens(Math.round(burn.projectedTotal)))}</span>
-            ) : null}
-          </div>
+          <SignalChip
+            tone={burnTone === "red" ? "alert" : burnTone === "amber" ? "warn" : "neutral"}
+            label={`${de.worker.chipBurnRate(Math.round(burn.ratePerMin).toLocaleString("de-DE"))}${burn.projectedTotal != null ? ` · ${de.worker.chipBurnProjected(fmtTokens(Math.round(burn.projectedTotal)))}` : ""}`}
+          />
         ) : null}
       </div>
 
@@ -511,11 +496,11 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {/* F3: Lane-Auswahl beim Neu-Starten (optional). */}
           {confirming === "restart" ? (
             <div className="flex items-center gap-2">
-              <Text variant="label" className="hc-soft shrink-0">{de.worker.restartLaneLabel}:</Text>
+              <Text variant="label" className="shrink-0 text-ink-2">{de.worker.restartLaneLabel}:</Text>
               <select
                 value={restartLane}
                 onChange={(e) => setRestartLane(e.target.value)}
-                className="rounded border border-[var(--hc-border)] bg-black/40 px-2 py-0.5 text-xs text-white hc-soft focus:outline-none"
+                className="rounded-card border border-line bg-surface-1 px-2 py-0.5 text-xs text-ink focus:outline-none"
               >
                 <option value="">{de.worker.restartLaneNone}</option>
                 {WORKER_LANE_OPTIONS.map((lane) => (
@@ -569,13 +554,13 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
               >
                 {de.worker.actions[key]}
               </Button>
-              <span className="px-1 text-[0.6rem] hc-dim">{ACTION_EFFECT[key]}</span>
+              <span className="px-1 text-[0.6rem] text-ink-3">{ACTION_EFFECT[key]}</span>
             </div>
           )) : null}
         </div>
       )}
       {confirming ? (
-        <Text variant="label" className="hc-soft">
+        <Text variant="label" className="text-ink-2">
           {confirming === "terminate" ? de.worker.terminateHint
             : confirming === "restart" ? de.worker.restartHint
             : confirming === "hold" ? de.worker.holdHint

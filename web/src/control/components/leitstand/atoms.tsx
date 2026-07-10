@@ -1,7 +1,7 @@
 /**
  * Leitstand atoms — the small building blocks that reproduce the Claude-design
  * "command" surfaces (KPI pod, titled panel with right-meta, quiet dashed
- * empty state, coloured run-role chip) on top of the existing --hc-* tokens.
+ * empty state, coloured run-role chip) on top of the Sheet-A tokens.
  * Layout is Tailwind; the few bespoke looks live in control-tokens.css
  * (.hc-fleet-*, .hc-role-*).
  *
@@ -60,7 +60,7 @@ export function FleetPanel({
     <section className={cn("hc-surface-card p-4", className)}>
       <div className="flex items-baseline justify-between gap-3">
         <Eyebrow>{eyebrow}</Eyebrow>
-        {meta != null ? <span className="hc-type-label hc-dim truncate text-right">{meta}</span> : null}
+        {meta != null ? <span className="truncate text-right text-micro text-ink-3">{meta}</span> : null}
       </div>
       <div className="mt-3">{children}</div>
     </section>

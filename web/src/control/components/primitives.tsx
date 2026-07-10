@@ -4,7 +4,7 @@
  * The keystone every tab inherits: one type voice, one card, one panel
  * header, one stat, one skeleton, one disclosure, one route/list motion.
  * Everything here is additive, dark-only, scoped under [data-control], and
- * built on the --hc-* tokens + the shared motion language (lib/motion.ts).
+ * built on the Sheet-A tokens + the shared motion language (lib/motion.ts).
  *
  * Contracts kept throughout:
  *  · type-only imports for types (verbatimModuleSyntax),
@@ -40,7 +40,7 @@ const TYPE_CLASS: Record<TypeStep, string> = {
   title: "hc-type-title",
   subtitle: "hc-type-subtitle",
   body: "hc-type-body",
-  label: "hc-type-label",
+  label: "text-micro font-medium",
   eyebrow: "hc-eyebrow",
 };
 
@@ -138,7 +138,7 @@ function RegionHeader({ eyebrow, title, actions, titleVariant }: HeaderProps) {
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0">
         {eyebrow ? <Eyebrow>{eyebrow}</Eyebrow> : null}
-        <Text as="h2" variant={titleVariant} className="text-[var(--hc-text)]">
+        <Text as="h2" variant={titleVariant} className="text-ink">
           {title}
         </Text>
       </div>
@@ -160,7 +160,7 @@ export function Panel({ eyebrow, title, actions, surface = "card", className, ch
   return (
     <section className={cn(SURFACE_CLASS[surface], "p-4", className)}>
       <RegionHeader eyebrow={eyebrow} title={title} actions={actions} titleVariant="subtitle" />
-      <div className="mt-3 border-t border-[var(--hc-border)] pt-3">{children}</div>
+      <div className="mt-3 border-t border-line pt-3">{children}</div>
     </section>
   );
 }
@@ -201,7 +201,7 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
       <div className={cn("space-y-1", className)}>
         <Eyebrow>{label}</Eyebrow>
         <div className="hc-aurora-text hc-type-display font-data tabular-nums">{value}</div>
-        {hint ? <Text variant="label" className="hc-soft">{hint}</Text> : null}
+        {hint ? <Text variant="label" className="text-ink-2">{hint}</Text> : null}
       </div>
     );
   }
@@ -300,7 +300,7 @@ export function Disclosure({ summary, children, defaultOpen = false, open, onTog
       >
         <motion.span
           aria-hidden
-          className="shrink-0 text-[var(--hc-text-dim)]"
+          className="shrink-0 text-ink-3"
           animate={{ rotate: isOpen ? 90 : 0 }}
           transition={reduce ? { duration: 0 } : chevronTransition}
         >

@@ -64,10 +64,10 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
       aria-valuenow={used == null ? undefined : Math.round(used)}
       aria-valuetext={used == null ? "unbekannt" : undefined}
     >
-      <span className="order-1 min-w-0 truncate hc-soft">{label}</span>
-      <span className="order-2 whitespace-nowrap tabular-nums text-white sm:order-3">
+      <span className="order-1 min-w-0 truncate text-ink-2">{label}</span>
+      <span className="order-2 whitespace-nowrap tabular-nums text-ink sm:order-3">
         {used == null ? "?" : `${Math.round(used)} %`}
-        {reset ? <span className="hc-dim"> · {reset}</span> : null}
+        {reset ? <span className="text-ink-3"> · {reset}</span> : null}
       </span>
       <div className="order-3 col-span-2 sm:order-2 sm:col-span-1">
         <RateBar rate={used == null ? null : used / 100} color={limitColor(used)} />
@@ -107,11 +107,11 @@ function AccountProviderCard({
         : "ok";
   const hasExtras = others.length > 0 || provider.details.length > 0;
   return (
-    <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+    <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-white">{configuredProviderLabel(config, provider.provider) || fallbackProviderLabel(provider.provider)}</p>
-          {provider.plan ? <p className="text-xs hc-dim">{provider.plan}</p> : null}
+          <p className="truncate text-sm font-semibold text-ink">{configuredProviderLabel(config, provider.provider) || fallbackProviderLabel(provider.provider)}</p>
+          {provider.plan ? <p className="text-xs text-ink-3">{provider.plan}</p> : null}
         </div>
         <div className="justify-self-end">
           <SignalChip
@@ -128,19 +128,19 @@ function AccountProviderCard({
         // Gleichwertige Abo-Karte auch ohne Provider-Fenster (Kimi = lokale
         // Schätzung) bzw. wenn der Provider gerade offline ist: ehrlicher
         // Leerzustand statt zusammengeworfener Strichel-Fußzeile.
-        <p className="mt-3 text-xs hc-soft">
+        <p className="mt-3 text-xs text-ink-2">
           {unavailable ? provider.unavailable_reason ?? "nicht verfügbar" : "keine Fensterdaten vom Provider"}
         </p>
       )}
       {align ? (
-        <p className="mt-2 text-[0.7rem] hc-dim">
+        <p className="mt-2 text-micro text-ink-3">
           ↳ Abgleich: {fmtTokens(align.tokens)} Tok diese Woche laut Worker-Runs ({align.runs} Runs)
         </p>
       ) : null}
       {hasExtras ? (
         <details className="mt-2 text-xs">
-          <summary className="cursor-pointer hc-dim hover:text-white">Details</summary>
-          <div className="mt-1 space-y-1 hc-soft">
+          <summary className="cursor-pointer text-ink-3 hover:text-ink">Details</summary>
+          <div className="mt-1 space-y-1 text-ink-2">
             {others.map((w) => (
               <p key={w.window_key ?? w.label}>
                 {windowLabelDe(w, config)}{" "}
@@ -215,7 +215,7 @@ export function AccountUsageTile({
             label={loading ? "lädt…" : error ? "teilweise unbekannt" : providers.length === 0 ? "Limit unbekannt" : `${available}/${providers.length} live`}
           />
         </div>
-        {usage ? <span className="text-xs hc-dim">TTL {usage.cache_ttl_seconds}s</span> : null}
+        {usage ? <span className="text-xs text-ink-3">TTL {usage.cache_ttl_seconds}s</span> : null}
       </div>
       {bottleneck ? (
         <div role={bnTone === "neutral" ? undefined : "alert"} className={`flex items-start gap-2 rounded-card border px-3 py-2 text-sec ${bnTone === "alert" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" : bnTone === "warn" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" : "border-line bg-surface-2 text-ink-2"}`}>
@@ -234,15 +234,15 @@ export function AccountUsageTile({
           })}
         </div>
       ) : providers.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-4 text-sm hc-soft">Limit unbekannt — noch keine Abo-Daten geladen.</div>
+        <div className="rounded-panel border border-dashed border-line px-4 py-4 text-sm text-ink-2">Limit unbekannt — noch keine Abo-Daten geladen.</div>
       ) : null}
       {footer.length ? (
-        <div className="rounded-lg border border-dashed border-[var(--hc-border)] px-3 py-2 text-xs hc-soft">
-          <span className="hc-dim">Ohne Fenster-Limit: </span>
+        <div className="rounded-card border border-dashed border-line px-3 py-2 text-xs text-ink-2">
+          <span className="text-ink-3">Ohne Fenster-Limit: </span>
           {footer.map((p, i) => (
             <span key={p.provider}>
               {i > 0 ? " · " : ""}
-              <span className="text-white">{configuredProviderLabel(config, p.provider) || fallbackProviderLabel(p.provider)}</span>{" "}
+              <span className="text-ink">{configuredProviderLabel(config, p.provider) || fallbackProviderLabel(p.provider)}</span>{" "}
               {p.available
                 ? p.details.length
                   ? p.details.join(", ")
@@ -252,7 +252,7 @@ export function AccountUsageTile({
           ))}
         </div>
       ) : null}
-      {error ? <p className="text-xs text-amber-300/80">{error}</p> : null}
+      {error ? <SignalLabel tone="warn" label={error} /> : null}
     </section>
   );
 }

@@ -45,28 +45,28 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="ml-auto inline-flex min-h-12 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft transition hover:bg-white/5"
+          className="ml-auto inline-flex min-h-12 items-center gap-1 rounded-card border border-line px-3 text-xs text-ink-2 transition hover:bg-surface-3"
         >
           {de.fleet.details}
           <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
         </button>
       </div>
 
-      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{result.task_title}</h3>
-      <p className="mt-1.5 hc-mono text-[0.7rem] hc-dim">
+      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-ink">{result.task_title}</h3>
+      <p className="mt-1.5 font-data text-micro text-ink-3">
         ⏱ {fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)} · {receiptLabel(result)}
       </p>
 
       {open ? (
-        <div className="mt-3 space-y-3 border-t border-[var(--hc-border)] pt-3">
-          <p className="hc-mono text-[0.7rem] hc-dim">{result.task_id} · Run {result.run_id} · {result.run_role_label}</p>
+        <div className="mt-3 space-y-3 border-t border-line pt-3">
+          <p className="font-data text-micro text-ink-3">{result.task_id} · Run {result.run_id} · {result.run_role_label}</p>
           {result.summary ? (
-            <div className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/20 p-3 text-sm leading-6 text-zinc-100">{result.summary}</div>
+            <div className="whitespace-pre-wrap rounded-card border border-line bg-surface-1 p-3 text-sm leading-6 text-ink">{result.summary}</div>
           ) : null}
           {result.verification.length ? (
             <div className="flex flex-wrap gap-1.5">
               {result.verification.map((item) => (
-                <span key={item} className="inline-flex max-w-full items-center gap-1 rounded-full border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200">
+                <span key={item} className="inline-flex max-w-full items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 py-1 text-xs text-ink-2">
                   <FileText className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{item}</span>
                 </span>
@@ -76,12 +76,12 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
           {deliverables.length ? (
             <ul className="space-y-1.5">
               {deliverables.map((item) => (
-                <li key={item.relative_path} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-3 py-1.5">
+                <li key={item.relative_path} className="flex items-center justify-between gap-2 rounded-card border border-line bg-surface-2 px-3 py-1.5">
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-white">{item.relative_path}</span>
-                    <span className="hc-mono text-[0.7rem] hc-dim">{item.content_type} · {formatBytes(item.size)}</span>
+                    <span className="block truncate text-sm font-medium text-ink">{item.relative_path}</span>
+                    <span className="font-data text-micro text-ink-3">{item.content_type} · {formatBytes(item.size)}</span>
                   </span>
-                  <a className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-400/30 px-2 py-1 text-xs text-emerald-100 hover:bg-emerald-500/10" href={item.url} target="_blank" rel="noreferrer">
+                  <a className="inline-flex shrink-0 items-center gap-1 rounded-card border border-live/30 px-2 py-1 text-xs text-bronze-hi hover:bg-live/10" href={item.url} target="_blank" rel="noreferrer">
                     <ExternalLink className="h-3.5 w-3.5" />
                     Öffnen
                   </a>
@@ -91,15 +91,15 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
           ) : null}
           {verifierEvidence.length ? (
             <div className="space-y-1.5">
-              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-cyan-200"><Quote className="h-3.5 w-3.5" />Verifier-Belege</p>
+              <p className="flex items-center gap-1.5 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3"><Quote className="h-3.5 w-3.5" />Verifier-Belege</p>
               {verifierEvidence.map((line) => (
-                <blockquote key={line} className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-sm leading-6 text-cyan-50">{line}</blockquote>
+                <blockquote key={line} className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sm leading-6 text-ink-2">{line}</blockquote>
               ))}
             </div>
           ) : null}
           {result.followups.length ? (
-            <ul className="space-y-1 text-sm text-zinc-200">
-              {result.followups.map((item) => <li key={item} className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-300" /><span>{item}</span></li>)}
+            <ul className="space-y-1 text-sm text-ink-2">
+              {result.followups.map((item) => <li key={item} className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" /><span>{item}</span></li>)}
             </ul>
           ) : null}
           {result.residual_risk ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span><span className="font-medium">{de.hermes.residualRisk}:</span> {result.residual_risk}</span></div> : null}

@@ -46,7 +46,7 @@ import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge } from "../components/atoms";
-import { KpiTile, RoleChip, SignalChip, type SignalTone } from "../components/leitstand";
+import { KpiTile, RoleChip, SignalChip, SignalLabel, type SignalTone } from "../components/leitstand";
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
@@ -212,7 +212,7 @@ export function CommandHome({ density }: { density: Density }) {
                   onClick={() => chooseSurfaceFilter(c.id)}
                   className={cn("ch-chip", surfaceFilter === c.id && "ch-chip-on")}
                 >
-                  {c.label}<span className="hc-mono opacity-70">{c.count}</span>
+                  {c.label}<span className="font-data opacity-70">{c.count}</span>
                 </button>
               ))}
             </div>
@@ -249,7 +249,7 @@ export function CommandHome({ density }: { density: Density }) {
 function AttentionCount({ label, value }: { label: string; value: number }) {
   return (
     <div className="ch-card px-2 py-2 text-center">
-      <div className="hc-mono text-base font-semibold tabular-nums text-ink">{value}</div>
+      <div className="font-data text-base font-semibold tabular-nums text-ink">{value}</div>
       <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] text-ink-3">{label}</div>
     </div>
   );
@@ -295,7 +295,7 @@ function QuickJumps({ fleetCount, blocked, shippedToday, accountProviders, onNav
           <button key={row.path} type="button" onClick={() => onNavigate(row.path)} className="ch-jump">
             <span className="min-w-0 flex-1">
               <span className="block text-sm font-semibold text-ink">{row.label}</span>
-              <span className="mt-0.5 block hc-mono text-[0.7rem] text-ink-3">{row.detail}</span>
+              <span className="mt-0.5 block font-data text-micro text-ink-3">{row.detail}</span>
             </span>
             <ChevronRight className="h-4 w-4 shrink-0 text-ink-3" />
           </button>
@@ -322,7 +322,7 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
           <SignalChip tone={surface.tone} label={surface.label} />
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">Als Erstes</span>
           {item.ageSeconds != null ? (
-            <span className="hc-mono text-[10px] tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
+            <span className="font-data text-[10px] tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
           ) : null}
         </div>
         <p title={item.title} className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug text-ink sm:line-clamp-2">{item.title}</p>
@@ -482,10 +482,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
           {sysLabel.map(([label, st]) => (
             <div key={label} className="flex items-center justify-between text-xs">
               <span className="text-ink-2">{label}</span>
-              <span className={cn("inline-flex items-center gap-1.5 hc-mono", st === "healthy" ? "text-status-ok" : st === "degraded" ? "text-status-warn" : st === "offline" ? "text-status-alert" : "text-ink-3")}>
-                <span className={cn("h-1.5 w-1.5 rounded-full", st === "healthy" ? "bg-status-ok" : st === "degraded" ? "bg-status-warn" : st === "offline" ? "bg-status-alert" : "bg-ink-3")} />
-                {st ?? "—"}
-              </span>
+              <SignalLabel tone={st === "healthy" ? "ok" : st === "degraded" ? "warn" : st === "offline" ? "alert" : "neutral"} label={st ?? "—"} />
             </div>
           ))}
         </div>
@@ -526,7 +523,7 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
                   </span>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-ink">{w.task_title}</p>
-                <p className="mt-1 hc-mono text-[0.66rem] text-ink-3">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
+                <p className="mt-1 font-data text-micro text-ink-3">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
               </div>
             );
           })}
@@ -546,7 +543,7 @@ function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onO
           <SignalChip tone={surface.tone} label={surface.label} />
           <span className="truncate text-sm font-semibold text-ink">{item.title}</span>
         </div>
-        <p className="mt-1 line-clamp-1 text-xs text-ink-2">{item.ageSeconds != null ? <span className="hc-mono tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-ink">{item.nextAction}</span></p>
+        <p className="mt-1 line-clamp-1 text-xs text-ink-2">{item.ageSeconds != null ? <span className="font-data tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-ink">{item.nextAction}</span></p>
       </button>
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
       {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
