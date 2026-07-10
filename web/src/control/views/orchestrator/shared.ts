@@ -5,26 +5,26 @@ import {
 } from "../../lib/orchestration";
 import type { Readiness } from "../../lib/orchestration";
 import type { OrchestrationDetail, OrchestrationItem } from "../../lib/schemas";
-import type { ToneName } from "../../lib/types";
+import type { SignalTone } from "../../components/leitstand";
 
 export type ViewMode = "queue" | "board";
-export type DetailChip = { label: string; tone?: ToneName };
+export type DetailChip = { label: string; tone?: SignalTone };
 
-export const ACTIVE_COLUMNS: Array<{ key: string; label: string; tone: ToneName }> = [
-  { key: "doing", label: de.orchestrator.colDoing, tone: "violet" },
-  { key: "review", label: de.orchestrator.colReview, tone: "amber" },
-  { key: "todo", label: de.orchestrator.colTodo, tone: "sky" },
-  { key: "backlog", label: de.orchestrator.colBacklog, tone: "zinc" },
-  { key: "__drift", label: de.orchestrator.statusDrift, tone: "red" },
+export const ACTIVE_COLUMNS: Array<{ key: string; label: string; tone: SignalTone }> = [
+  { key: "doing", label: de.orchestrator.colDoing, tone: "ok" },
+  { key: "review", label: de.orchestrator.colReview, tone: "warn" },
+  { key: "todo", label: de.orchestrator.colTodo, tone: "neutral" },
+  { key: "backlog", label: de.orchestrator.colBacklog, tone: "neutral" },
+  { key: "__drift", label: de.orchestrator.statusDrift, tone: "alert" },
 ];
 
-const PRIORITY_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
-const STATUS_TONE: Record<string, ToneName> = { doing: "violet", review: "amber", todo: "sky", backlog: "zinc", done: "emerald" };
+const PRIORITY_TONE: Record<string, SignalTone> = { high: "alert", medium: "warn", low: "neutral" };
+const STATUS_TONE: Record<string, SignalTone> = { doing: "ok", review: "warn", todo: "neutral", backlog: "neutral", done: "ok" };
 
 export function readinessChip(value: Readiness): DetailChip | null {
-  if (value.state === "ready") return { tone: "emerald", label: de.orchestrator.ready };
+  if (value.state === "ready") return { tone: "ok", label: de.orchestrator.ready };
   if (value.state === "blocked") {
-    return { tone: "red", label: `${de.orchestrator.blockedBy} ${value.blockedBy.join(", ")}` };
+    return { tone: "alert", label: `${de.orchestrator.blockedBy} ${value.blockedBy.join(", ")}` };
   }
   return null;
 }
@@ -33,13 +33,13 @@ export function clockLabel(nowSec: number): string {
   return new Date(nowSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
-export function statusTone(status: string): ToneName {
-  if (!isKnownStatus(status)) return "red";
-  return STATUS_TONE[status] ?? "zinc";
+export function statusTone(status: string): SignalTone {
+  if (!isKnownStatus(status)) return "alert";
+  return STATUS_TONE[status] ?? "neutral";
 }
 
-export function priorityTone(priority: string): ToneName {
-  return PRIORITY_TONE[priority] ?? "rose";
+export function priorityTone(priority: string): SignalTone {
+  return PRIORITY_TONE[priority] ?? "neutral";
 }
 
 export function proofLabel(item: OrchestrationItem): string {

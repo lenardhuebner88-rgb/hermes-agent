@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
+import { TriangleAlert } from "lucide-react";
 
 import { de } from "../i18n/de";
 import { useOrchestrationBacklog, useOrchestrationBacklogDetail, useCommissionToFleet, type CommissionPayload } from "../hooks/useControlData";
 import { BacklogDetailDrawer } from "../components/BacklogDetailDrawer";
-import { ToneCallout } from "../components/atoms";
 import {
   buildCommissionPrompt,
   computeNextTaskId,
@@ -159,8 +159,8 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
   const detailReadiness = selectedItem ? readinessChip(readiness(selectedItem, allItems)) : null;
   const detailChips: DetailChip[] = [
     ...(detailReadiness ? [detailReadiness] : []),
-    ...(selectedItem && !isKnownStatus(selectedItem.status) ? [{ label: `${de.orchestrator.statusDrift}: ${selectedItem.status}`, tone: "red" as const }] : []),
-    ...((selectedItem?.dependsOn ?? detail?.dependsOn ?? []).length ? [{ label: de.orchestrator.dependsOn((selectedItem?.dependsOn ?? detail?.dependsOn ?? []).length), tone: "cyan" as const }] : []),
+    ...(selectedItem && !isKnownStatus(selectedItem.status) ? [{ label: `${de.orchestrator.statusDrift}: ${selectedItem.status}`, tone: "alert" as const }] : []),
+    ...((selectedItem?.dependsOn ?? detail?.dependsOn ?? []).length ? [{ label: de.orchestrator.dependsOn((selectedItem?.dependsOn ?? detail?.dependsOn ?? []).length), tone: "neutral" as const }] : []),
   ];
   const detailFields: Array<{ label: string; value: string }> = detail
     ? (
@@ -197,8 +197,8 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
         data={data ?? undefined}
       />
 
-      {backlog.error ? <ToneCallout tone="red">{de.orchestrator.error}</ToneCallout> : null}
-      {data?.error ? <ToneCallout tone="amber">{de.orchestrator.sourceMissing}</ToneCallout> : null}
+      {backlog.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.orchestrator.error}</div> : null}
+      {data?.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.orchestrator.sourceMissing}</div> : null}
       {hasContractDrift && data ? <ContractDriftCallout data={data} /> : null}
 
       {allItems.length > 0 ? <SignalStrip signals={signals} /> : null}
@@ -210,7 +210,7 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
           prompt={commissionPromptForNext}
         />
       ) : allItems.length > 0 ? (
-        <ToneCallout tone="zinc">{de.orchestrator.noNextTask}</ToneCallout>
+        <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">{de.orchestrator.noNextTask}</div>
       ) : null}
 
       {allItems.length > 0 ? (

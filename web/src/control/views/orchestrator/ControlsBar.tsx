@@ -1,7 +1,7 @@
 import { Columns3, List } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Card } from "../../components/primitives";
+import { Card, Eyebrow } from "../../components/primitives";
 import { de } from "../../i18n/de";
 import type { SortKey } from "../../lib/orchestration";
 import type { ViewMode } from "./shared";
@@ -41,12 +41,16 @@ export function ControlsBar({
 }) {
   return (
     <Card surface="card" className="p-3">
+      <label htmlFor="orch-backlog-search" className="mb-2 block">
+        <Eyebrow>Backlog durchsuchen</Eyebrow>
+      </label>
       <input
+        id="orch-backlog-search"
         type="search"
         value={q}
         onChange={(event) => onQ(event.target.value)}
         placeholder={de.orchestrator.searchPlaceholder}
-        className="w-full rounded-md border border-white/10 bg-white/[.04] px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-cyan-400/50 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
+        className="min-h-12 w-full rounded-card border border-line bg-surface-2 px-3 text-sec text-ink placeholder:text-ink-3 focus:border-live focus:outline-none focus:ring-2 focus:ring-live/30"
       />
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {(["", "high", "medium", "low"] as const).map((priority) => (
@@ -55,10 +59,10 @@ export function ControlsBar({
             type="button"
             onClick={() => onFilterPriority(priority)}
             className={cn(
-              "rounded-md border px-2.5 py-1 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/50",
+              "inline-flex min-h-12 items-center rounded-card border px-3 text-sec font-medium transition focus:outline-none focus:ring-2 focus:ring-live/50",
               filterPriority === priority
-                ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200"
-                : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
+                ? "border-live bg-live/10 text-bronze-hi"
+                : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink",
             )}
           >
             {priority || de.orchestrator.filterAll}
@@ -69,10 +73,10 @@ export function ControlsBar({
           type="button"
           onClick={() => onFilterPlanGate(filterPlanGate === "true" ? "" : "true")}
           className={cn(
-            "rounded-md border px-2.5 py-1 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/50",
+            "inline-flex min-h-12 items-center rounded-card border px-3 text-sec font-medium transition focus:outline-none focus:ring-2 focus:ring-live/50",
             filterPlanGate === "true"
-              ? "border-indigo-400/50 bg-indigo-400/15 text-indigo-200"
-              : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
+              ? "border-live bg-live/10 text-bronze-hi"
+              : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink",
           )}
         >
           {de.orchestrator.filterPlanGate}
@@ -84,12 +88,10 @@ export function ControlsBar({
             type="button"
             onClick={() => onFilterReadiness(filterReadiness === readiness ? "" : readiness)}
             className={cn(
-              "rounded-md border px-2.5 py-1 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/50",
+              "inline-flex min-h-12 items-center rounded-card border px-3 text-sec font-medium transition focus:outline-none focus:ring-2 focus:ring-live/50",
               filterReadiness === readiness
-                ? readiness === "ready"
-                  ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
-                  : "border-red-500/50 bg-red-500/15 text-red-200"
-                : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
+                ? "border-live bg-live/10 text-bronze-hi"
+                : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink",
             )}
           >
             {readiness === "ready" ? de.orchestrator.filterReady : de.orchestrator.filterBlocked}
@@ -100,7 +102,8 @@ export function ControlsBar({
           <select
             value={filterProject}
             onChange={(event) => onFilterProject(event.target.value)}
-            className="rounded-md border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
+            aria-label="Projekt filtern"
+            className="min-h-12 rounded-card border border-line bg-surface-2 px-3 text-sec text-ink-2 focus:outline-none focus:ring-2 focus:ring-live/50"
           >
             <option value="">{de.orchestrator.filterAll} Projekt</option>
             {projects.map((project) => <option key={project} value={project}>{project}</option>)}
@@ -108,27 +111,29 @@ export function ControlsBar({
         ) : null}
 
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          <span className="text-xs hc-dim">{de.orchestrator.sortLabel}:</span>
+          <Eyebrow>{de.orchestrator.sortLabel}:</Eyebrow>
           {(["priority", "age", "readiness"] as SortKey[]).map((key) => (
             <button
               key={key}
               type="button"
               onClick={() => onSort(key)}
               className={cn(
-                "rounded-md border px-2 py-1 text-xs transition focus:outline-none focus:ring-2 focus:ring-cyan-400/50",
+                "inline-flex min-h-12 items-center rounded-card border px-3 text-sec transition focus:outline-none focus:ring-2 focus:ring-live/50",
                 sortKey === key
-                  ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-200"
-                  : "border-white/10 text-zinc-400 hover:text-zinc-200",
+                  ? "border-live bg-live/10 text-bronze-hi"
+                  : "border-line text-ink-2 hover:bg-surface-3 hover:text-ink",
               )}
             >
               {key === "priority" ? de.orchestrator.sortPriority : key === "age" ? de.orchestrator.sortAge : de.orchestrator.sortReadiness}
             </button>
           ))}
-          <div className="ml-1 inline-flex rounded-md border border-white/10 bg-black/20 p-0.5" aria-label="Ansicht">
+          <div className="ml-1 inline-flex rounded-card border border-line bg-surface-1 p-0.5" aria-label="Ansicht">
             <button
               type="button"
               onClick={() => onViewMode("queue")}
-              className={cn("grid h-8 w-8 place-items-center rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-cyan-400/50", viewMode === "queue" ? "bg-cyan-500/15 text-cyan-200" : "hc-soft hover:bg-white/5")}
+              aria-label={de.orchestrator.queueView}
+              aria-pressed={viewMode === "queue"}
+              className={cn("grid size-12 place-items-center rounded-card focus:outline-none focus:ring-2 focus:ring-live/50", viewMode === "queue" ? "bg-live/10 text-bronze-hi" : "text-ink-2 hover:bg-surface-3 hover:text-ink")}
               title={de.orchestrator.queueView}
             >
               <List className="h-3.5 w-3.5" />
@@ -136,7 +141,9 @@ export function ControlsBar({
             <button
               type="button"
               onClick={() => onViewMode("board")}
-              className={cn("grid h-8 w-8 place-items-center rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-cyan-400/50", viewMode === "board" ? "bg-cyan-500/15 text-cyan-200" : "hc-soft hover:bg-white/5")}
+              aria-label={de.orchestrator.boardView}
+              aria-pressed={viewMode === "board"}
+              className={cn("grid size-12 place-items-center rounded-card focus:outline-none focus:ring-2 focus:ring-live/50", viewMode === "board" ? "bg-live/10 text-bronze-hi" : "text-ink-2 hover:bg-surface-3 hover:text-ink")}
               title={de.orchestrator.boardView}
             >
               <Columns3 className="h-3.5 w-3.5" />
