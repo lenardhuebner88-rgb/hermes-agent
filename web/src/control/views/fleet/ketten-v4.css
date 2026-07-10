@@ -374,7 +374,12 @@
   border: 2px solid;
 }
 .ketten-v4 .avatar-coder { background: var(--kt-live-soft); color: var(--kt-live); border-color: var(--kt-live); }
-.ketten-v4 .avatar-premium { background: color-mix(in oklab, var(--kt-live) 18%, transparent); color: var(--kt-live); border-color: var(--kt-live); }
+.ketten-v4 .avatar-premium {
+  background: color-mix(in oklab, var(--color-lane-prem) 15%, transparent);
+  color: var(--color-lane-prem);
+  border-color: var(--color-lane-prem);
+  box-shadow: 0 0 0 1px var(--color-surface-1), 0 0 0 2.5px var(--color-lane-prem);
+}
 .ketten-v4 .avatar-reviewer { background: var(--kt-brand-soft); color: var(--kt-brand); border-color: var(--kt-brand); }
 .ketten-v4 .avatar-critic { background: var(--kt-warn-soft); color: var(--kt-warn); border-color: var(--kt-warn); }
 .ketten-v4 .avatar-default { background: var(--kt-surface-3); color: var(--kt-ink-3); border-color: var(--kt-ink-3); }

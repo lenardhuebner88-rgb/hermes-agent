@@ -17,6 +17,7 @@ import {
   fmtUsd,
   fmtDurationClock,
   profileInitial,
+  premiumLaneMarker,
 
   buildChainChips,
   pickFocusNode,
@@ -428,7 +429,10 @@ function KettenGraphV4({
           aria-label={`Node ${focusNode.title} öffnen`}
         >
           <div className="detail-header">
-            <div className={`detail-avatar ${avatarClass(focusNode.assignee)}`}>
+            <div
+              className={`detail-avatar ${avatarClass(focusNode.assignee)}`}
+              {...premiumLaneMarker(focusNode.assignee)}
+            >
               {profileInitial(focusNode.assignee ?? "?")}
             </div>
             <div className="detail-meta">
@@ -515,7 +519,7 @@ function KettenGraphV4({
                 onClick={() => onOpenNodeDetail(n.id, nodes)}
                 aria-label={`Node ${n.title} öffnen`}
               >
-                <div className={`uavatar ${avatarClass(n.assignee)}`}>
+                <div className={`uavatar ${avatarClass(n.assignee)}`} {...premiumLaneMarker(n.assignee)}>
                   {profileInitial(n.assignee ?? "?")}
                 </div>
                 <div className="ucontent">

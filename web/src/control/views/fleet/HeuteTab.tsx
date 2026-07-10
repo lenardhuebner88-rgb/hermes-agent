@@ -17,6 +17,7 @@ import {
   planSpecWaitsForOperator,
   profileInitial,
   profileColorClass,
+  premiumLaneMarker,
   deriveSparklinePoints,
   type SparklinePoint,
 } from "../../lib/fleetHub";
@@ -296,7 +297,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
     >
       {/* Top-Zeile: Avatar + Name + LED */}
       <div className="fleet-wk-top">
-        <div className={`fleet-avatar ${colorCls}`}>{initial}</div>
+        <div className={`fleet-avatar ${colorCls}`} {...premiumLaneMarker(w.profile)}>{initial}</div>
         <div className="fleet-wk-name">
           {w.profile}
           <span>{w.task_id.slice(0, 10)}</span>

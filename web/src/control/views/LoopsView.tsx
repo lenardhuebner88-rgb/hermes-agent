@@ -53,9 +53,10 @@ import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 const t = de.loops;
 
 /**
- * "Nachtschicht" — bewusst nicht im Einheitslook des restlichen Dashboards
- * (siehe Design-Spec im Auftrag). Alle Farben/Fonts hängen an den `--ln-*`-
- * Custom-Properties unten, gesetzt auf dem View-Root (`NIGHT_VARS`). Da diese
+ * "Nachtschicht" — dunklere warm-graphitene Tiefenvariation aus den geteilten
+ * Sheet-Tokens (One-Skin-Doktrin); der frühere Navy-Fork ist tot. Alle
+ * Farben/Fonts hängen an den `--ln-*`-Custom-Properties unten, gesetzt auf dem
+ * View-Root (`NIGHT_VARS`). Da diese
  * Datei sowohl die hook-verdrahtete `LoopsView` als auch die reine
  * `LoopsGrid` (von den Tests direkt gerendert, ohne den Root-Wrapper) exportiert,
  * referenzieren alle `var(--ln-…)`-Aufrufe nur Farben/Fonts — layoutrelevante
@@ -68,26 +69,22 @@ const t = de.loops;
  * theme.css); Prosa/Labels wurden de-mono't. Display seit W3-5 ebenfalls auf
  * dem Sheet-Token (`--ln-font-display` → var(--font-display), Archivo): der
  * frühere Bricolage-Runtime-Loader holte Google Fonts zur Laufzeit und
- * verletzte die W1-A-Doktrin "zero network font requests". Die Nachtschicht-
- * FARB-Palette (NIGHT_VARS) bleibt vorerst eigenständig → W4-Entscheid.
+ * verletzte die W1-A-Doktrin "zero network font requests".
  */
 const NIGHT_VARS = {
-  "--ln-void": "#060913",
-  "--ln-surface": "#0D1322",
-  "--ln-raised": "#141C31",
-  "--ln-line": "#1E2A47",
-  "--ln-ink": "#E9EEFA",
-  "--ln-ink-soft": "#93A0C2",
-  "--ln-ink-mute": "#5E6B8C",
-  "--ln-sodium": "#FFB454",
-  "--ln-sodium-ink": "#1A1205",
-  "--ln-ok": "#34C383",
-  "--ln-fail": "#E66767",
-  "--ln-warn": "#C98500",
-  // Ambient Header-Glow (radial+linear Wash oben auf der View) — vorher als
-  // literaler Hex-Wert im Gradient dupliziert; jetzt hier zentralisiert wie
-  // jede andere Nachtschicht-Farbe (W3-5 raw-hex-Aufräumung).
-  "--ln-header-glow": "#1A2344",
+  "--ln-void": "color-mix(in oklab, var(--color-surface-0) 72%, black)",
+  "--ln-surface": "color-mix(in oklab, var(--color-surface-1) 82%, black)",
+  "--ln-raised": "color-mix(in oklab, var(--color-surface-2) 85%, black)",
+  "--ln-line": "color-mix(in oklab, var(--color-line) 80%, black)",
+  "--ln-ink": "var(--color-ink)",
+  "--ln-ink-soft": "var(--color-ink-2)",
+  "--ln-ink-mute": "var(--color-ink-3)",
+  "--ln-sodium": "var(--color-bronze-hi)",
+  "--ln-sodium-ink": "var(--color-surface-0)",
+  "--ln-ok": "var(--color-status-ok)",
+  "--ln-fail": "var(--color-status-alert)",
+  "--ln-warn": "var(--color-status-warn)",
+  "--ln-header-glow": "color-mix(in oklab, var(--color-bronze) 10%, var(--color-surface-0))",
   // Display-Stimme = Sheet-Token (Archivo Variable, self-hosted). Der frühere
   // Bricolage-Runtime-Loader von Google Fonts verletzte die W1-A-Doktrin
   // "zero network font requests" und ist entfernt (W3-5 Director-Fix).
@@ -102,8 +99,9 @@ const displayFont: React.CSSProperties = { fontFamily: "var(--ln-font-display)" 
 const NIGHT_FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ln-sodium)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ln-void)]";
 
-/** Validierte Dark-Palette je Engine — nur als Punkt neben dem Namen, nie
- *  farbe-allein (immer Text daneben). Unbekannte Engines: ink-mute. */
+/** DECIDED — stays as engine-identity DATA palette (not skin) until the W6
+ *  chart-palette slice calibrates it. Nur als Punkt neben dem Namen, nie farbe-allein
+ *  (immer Text daneben). Unbekannte Engines: ink-mute. */
 const ENGINE_COLOR: Record<string, string> = {
   claude: "#D95926",
   codex: "#3987E5",
@@ -329,7 +327,7 @@ function NightPill({
 }) {
   // Referenziert dieselben Werte wie NIGHT_VARS statt sie zu duplizieren
   // (vorher vier literale Hex-Codes hier — W3-5 raw-hex-Aufräumung).
-  const hex = { ok: "var(--ln-ok)", warn: "var(--ln-warn)", sodium: "var(--ln-sodium)", neutral: "var(--ln-ink-mute)" }[tone];
+  const hex = { ok: "var(--ln-ok)", warn: "var(--ln-warn)", sodium: "var(--ln-sodium)", neutral: "var(--ln-ink-soft)" }[tone];
   return (
     <span
       className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium"
@@ -418,7 +416,7 @@ function PhaseHistoryBars({ last }: { last: LoopHeartbeatHistoryEntry[] }) {
               className="block h-4 rounded-sm"
               style={{ width: widthPx, backgroundColor: ok ? "var(--ln-ok)" : "var(--ln-fail)" }}
             />
-            <span className="hidden font-data text-[10px] sm:inline" style={{ color: "var(--ln-ink-mute)" }}>
+            <span className="hidden font-data text-[10px] sm:inline" style={{ color: "var(--ln-ink-soft)" }}>
               {entry.phase} {entry.secs}s {ok ? "✓" : "✗"}
             </span>
           </div>
@@ -450,7 +448,7 @@ function LoopQueueStepper({ queue }: { queue: Record<string, number> }) {
               }}
             >
               <span className="block font-data text-sm font-semibold" style={{ color: "var(--ln-ink)" }}>{n}</span>
-              <span className="block text-[10px] uppercase tracking-[0.06em]" style={{ color: "var(--ln-ink-mute)" }}>
+              <span className="block text-[10px] uppercase tracking-[0.06em]" style={{ color: "var(--ln-ink-soft)" }}>
                 {QUEUE_STAGE_LABEL[key]}
               </span>
             </span>
@@ -519,7 +517,7 @@ function LogbookFeed({ lines }: { lines: string[] }) {
 }
 
 function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
-  const caption: React.CSSProperties = { color: "var(--ln-ink-mute)" };
+  const caption: React.CSSProperties = { color: "var(--ln-ink-soft)" };
   return (
     <div className="space-y-3 text-xs">
       <div>
@@ -527,7 +525,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
         {detail.ledger_tail.length > 0 ? (
           <div className="mt-1"><LogbookFeed lines={detail.ledger_tail} /></div>
         ) : (
-          <p className="mt-1" style={{ color: "var(--ln-ink-mute)" }}>{t.detailNoLedger}</p>
+          <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoLedger}</p>
         )}
       </div>
       {detail.queue_entries ? (
@@ -549,7 +547,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
             {detail.commits.map((line) => <li key={line}>{line}</li>)}
           </ul>
         ) : (
-          <p className="mt-1" style={{ color: "var(--ln-ink-mute)" }}>{t.detailNoCommits}</p>
+          <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoCommits}</p>
         )}
       </div>
       <div>
@@ -559,7 +557,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
             {Object.entries(detail.overrides).map(([key, value]) => <li key={key}>{key}={value}</li>)}
           </ul>
         ) : (
-          <p className="mt-1" style={{ color: "var(--ln-ink-mute)" }}>{t.detailNoOverrides}</p>
+          <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoOverrides}</p>
         )}
       </div>
     </div>
@@ -571,7 +569,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
 // font-data: Feldwerte (Engine/Modell-Namen, Zahlen, Param-/Datei-Inhalte)
 // sind Daten, kein Fließtext — geteilte Klasse statt lokalem Mono-Fork.
 const NIGHT_FIELD_CLASS = cn(
-  "min-h-11 w-full rounded-md border px-2 py-1.5 text-base sm:min-h-9 sm:text-sm placeholder:text-[var(--ln-ink-mute)] disabled:opacity-60 font-data",
+  "min-h-12 w-full rounded-md border px-2 py-1.5 text-base sm:text-sm placeholder:text-[var(--ln-ink-mute)] disabled:opacity-60 font-data",
   NIGHT_FOCUS,
 );
 const nightFieldStyle: React.CSSProperties = {
@@ -608,7 +606,7 @@ function LoopStartForm({
 
   const engines = models?.engines ?? {};
   const engineNames = Object.keys(engines);
-  const captionStyle: React.CSSProperties = { color: "var(--ln-ink-mute)" };
+  const captionStyle: React.CSSProperties = { color: "var(--ln-ink-soft)" };
 
   const handleSubmit = () => {
     const overrides = buildPhaseOverrides(pack, phaseValues);
@@ -737,7 +735,7 @@ function LoopStartForm({
         </label>
       ) : null}
       {failStreak != null && dryRounds != null ? (
-        <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>
+        <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>
           {t.stopCriteria(failStreak, dryRounds)}
         </p>
       ) : null}
@@ -848,9 +846,9 @@ function LoopWorkstationPanel({
   const active = fileList.find((f) => f.name === activeName) ?? fileList[0] ?? null;
   const [dupName, setDupName] = useState("");
 
-  if (loading) return <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.loading}</p>;
+  if (loading) return <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.loading}</p>;
   if (error) return <ToneCallout tone="red">{t.workshopError}: {error}</ToneCallout>;
-  if (!files || fileList.length === 0) return <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.workshopEmpty}</p>;
+  if (!files || fileList.length === 0) return <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.workshopEmpty}</p>;
 
   return (
     <div className="space-y-3 text-xs">
@@ -890,7 +888,7 @@ function LoopWorkstationPanel({
             placeholder={t.workshopDuplicatePlaceholder}
             aria-label={t.workshopDuplicateTitle}
             onChange={(e) => setDupName(e.target.value)}
-            className={cn(NIGHT_FIELD_CLASS, "min-h-9 w-auto")}
+            className={cn(NIGHT_FIELD_CLASS, "w-auto")}
             style={nightFieldStyle}
           />
           <Button
@@ -1004,7 +1002,7 @@ function TimerScheduleControl({
           <span>{t.timerLabel}: {pack.timer_enabled ? t.timerOn : t.timerOff}</span>
         </label>
         <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2">
-          <label htmlFor={inputId} className="text-[11px]" style={{ color: "var(--ln-ink-mute)" }}>
+          <label htmlFor={inputId} className="text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
             {t.timerLocalTime}
           </label>
           <input
@@ -1029,7 +1027,7 @@ function TimerScheduleControl({
           </Button>
         </div>
       </div>
-      <p className="mt-1 text-[11px]" style={{ color: "var(--ln-ink-mute)" }}>
+      <p className="mt-1 text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
         {pack.timer_enabled
           ? pack.timer_next_run
             ? t.timerNextRun(pack.timer_next_run)
@@ -1098,7 +1096,7 @@ function LoopCard({
         <TypeBadge type={pack.type} />
       </div>
 
-      <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-mute)" }}>{statusLabel}</p>
+      <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-soft)" }}>{statusLabel}</p>
       <p className="mt-1.5 line-clamp-2 text-[13px]" style={{ color: "var(--ln-ink-soft)" }}>{pack.description}</p>
 
       <CardTelemetryLine pack={pack} nowMs={nowMs} />
@@ -1207,7 +1205,7 @@ function LoopCard({
           // der Summary-Inhalt zieht die Zeile jetzt auf ≥44px hoch.
           summary={<span className="inline-flex min-h-12 items-center text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.actions.detail}</span>}
         >
-          {detailLoading ? <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.loading}</p> : null}
+          {detailLoading ? <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.loading}</p> : null}
           {detailError ? <ToneCallout tone="red">{t.detailError}</ToneCallout> : null}
           {detail ? <LoopDetailPanel detail={detail} /> : null}
         </Disclosure>
@@ -1332,7 +1330,7 @@ function LoopsHero({
               const last = newestGlobalEvent(packs);
               if (!last) return null;
               return (
-                <p className="mt-0.5 text-sm" style={{ color: "var(--ln-ink-mute)" }}>
+                <p className="mt-0.5 text-sm" style={{ color: "var(--ln-ink-soft)" }}>
                   {t.heroLastEvent(last.phase, last.rc === 0, ageFromIso(last.at, nowMs))}
                 </p>
               );
@@ -1636,7 +1634,7 @@ export function LoopsView() {
         className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[420px]"
         style={{
           background:
-            "radial-gradient(ellipse 900px 420px at 50% -10%, rgba(255,180,84,0.07), transparent 60%), " +
+            "radial-gradient(ellipse 900px 420px at 50% -10%, color-mix(in oklab, var(--color-bronze) 7%, transparent), transparent 60%), " +
             "linear-gradient(180deg, var(--ln-header-glow) 0%, transparent 70%)",
         }}
       />
@@ -1644,13 +1642,13 @@ export function LoopsView() {
         <p className="text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--ln-ink-soft)" }}>{t.eyebrow}</p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-[28px] font-semibold md:text-[36px]" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.title}</h2>
-          <span className="text-sm" style={{ color: "var(--ln-ink-mute)" }}>{t.subtitle}</span>
+          <span className="text-sm" style={{ color: "var(--ln-ink-soft)" }}>{t.subtitle}</span>
         </div>
       </header>
 
       {loops.error ? <ToneCallout tone="amber">{t.error}</ToneCallout> : null}
 
-      <div className="flex items-center gap-2 text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.packCount(packs.length)}</div>
+      <div className="flex items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.packCount(packs.length)}</div>
 
       <LoopsGrid
         packs={packs}

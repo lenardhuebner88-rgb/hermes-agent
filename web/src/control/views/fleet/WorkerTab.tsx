@@ -19,6 +19,7 @@ import {
   derivePulse,
   profileInitial,
   profileColorClass,
+  premiumLaneMarker,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import type { Worker, BoardResponse, BoardTask } from "../../lib/types";
@@ -346,7 +347,7 @@ function WorkerDrawer({
 
         {/* Header */}
         <div className="fleet-dr-head">
-          <div className={`fleet-avatar fleet-avatar-gross ${colorCls}`}>{initial}</div>
+          <div className={`fleet-avatar fleet-avatar-gross ${colorCls}`} {...premiumLaneMarker(w.profile)}>{initial}</div>
           <div className="fleet-dr-title">
             {w.profile}
             <span>läuft seit {fmtSeconds(elapsedSec)} · {w.task_assignee}</span>

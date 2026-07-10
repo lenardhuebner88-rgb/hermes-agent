@@ -562,7 +562,12 @@ body:has([data-fleet-theme]) [data-control] {
   flex-shrink: 0;
 }
 .fleet-avatar-default { color: var(--fleet-puls); }
-.fleet-avatar-prem    { color: var(--color-brand); }
+.fleet-avatar-prem {
+  background: color-mix(in oklab, var(--color-lane-prem) 15%, transparent);
+  color: var(--color-lane-prem);
+  border-color: var(--color-lane-prem);
+  box-shadow: 0 0 0 1px var(--color-surface-1), 0 0 0 2.5px var(--color-lane-prem);
+}
 .fleet-avatar-rev     { color: var(--fleet-gruen); }
 .fleet-avatar-gross {
   width: 34px;

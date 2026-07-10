@@ -784,6 +784,45 @@ describe("Loops — kein Remote-Font-Loader (W3-5 Director-Fix, Codex-P1-gehärt
   });
 });
 
+describe("Loops — Nacht auf Graphit (W4-8)", () => {
+  it("entfernt den Navy-Fork und leitet NIGHT_VARS ausschließlich aus Sheet-Tokens ab", () => {
+    const bannedNavy = [
+      "#060913",
+      "#0D1322",
+      "#141C31",
+      "#1E2A47",
+      "#1A2344",
+      "#FFB454",
+      "#34C383",
+      "#E66767",
+      "#C98500",
+    ];
+    for (const literal of bannedNavy) {
+      expect(loopsViewSource.toLowerCase()).not.toContain(literal.toLowerCase());
+    }
+
+    const nightVars = loopsViewSource.match(/const NIGHT_VARS = \{([\s\S]*?)\} as React\.CSSProperties;/)?.[1];
+    expect(nightVars).toBeTruthy();
+    expect(nightVars).not.toMatch(/#[0-9a-f]{3,8}/i);
+    for (const token of [
+      "--color-surface-0",
+      "--color-surface-1",
+      "--color-surface-2",
+      "--color-line",
+      "--color-ink",
+      "--color-ink-2",
+      "--color-ink-3",
+      "--color-bronze",
+      "--color-bronze-hi",
+      "--color-status-ok",
+      "--color-status-alert",
+      "--color-status-warn",
+    ]) {
+      expect(nightVars).toContain(`var(${token})`);
+    }
+  });
+});
+
 describe("Workshop-Datei-Tabs — Touch-Target-Boden (W3-5 Codex-P1)", () => {
   it("gibt den Datei-Tab-Buttons min-h-12 (44px-AC; py-2 ergab nur ~30px)", () => {
     const files: LoopFilesResponse = {

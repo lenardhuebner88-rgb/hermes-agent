@@ -41,6 +41,9 @@
   --color-bronze: #c9884a;
   --color-bronze-hi: #dda05f;
 
+  /* lane identity: premium/opus only; always paired with a non-color marker */
+  --color-lane-prem: #b18bc4;
+
   /* status trio */
   --color-status-ok: #86b97e;
   --color-status-warn: #d9b23a;

@@ -8,7 +8,7 @@
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
 import { useState, useMemo } from "react";
-import { profileInitial, profileColorClass, fmtUsd } from "../../lib/fleetHub";
+import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { taskStatusLabel } from "../../lib/tones";
 import type { BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
 import { type ChainNode } from "./shared";
@@ -126,7 +126,10 @@ export function BoardTab({ board, onOpenNodeDetail }: BoardTabProps) {
                 className="fleet-boardtab-row"
                 onClick={() => onOpenNodeDetail(t.id)}
               >
-                <span className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}>
+                <span
+                  className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}
+                  {...premiumLaneMarker(t.assignee)}
+                >
                   {t.assignee ? profileInitial(t.assignee) : "?"}
                 </span>
                 <span className="fleet-boardtab-row-main">

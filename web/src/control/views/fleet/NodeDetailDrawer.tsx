@@ -13,6 +13,7 @@ import {
   type CostDisplayValue,
   profileInitial,
   profileColorClass,
+  premiumLaneMarker,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
@@ -93,7 +94,10 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
 
         {/* Kopf */}
         <div className="fleet-dr-head">
-          <div className={`fleet-avatar fleet-avatar-gross ${profileColorClass(task?.assignee ?? "")}`}>
+          <div
+            className={`fleet-avatar fleet-avatar-gross ${profileColorClass(task?.assignee ?? "")}`}
+            {...premiumLaneMarker(task?.assignee)}
+          >
             {profileInitial(task?.assignee ?? "?")}
           </div>
           <div className="fleet-dr-title">

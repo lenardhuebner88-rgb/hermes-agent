@@ -711,7 +711,7 @@ export const de = {
     actionFailed: "Cron-Aktion fehlgeschlagen",
   },
   loops: {
-    // "Nachtschicht"-Redesign (bewusst nicht im Einheitslook, siehe LoopsView.tsx).
+    // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).
     eyebrow: "Nachtschicht · Loop-Runner",
     title: "Loops",
     subtitle: "Nächtliche Builder-Reviewer- und Sweep-Loops — Start/Stop, Modell-Overrides, Timer.",

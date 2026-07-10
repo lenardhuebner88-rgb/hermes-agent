@@ -11,6 +11,8 @@ import {
   planSpecHasParkedSignedChain,
   planSpecWaitsForOperator,
   profileInitial,
+  profileColorClass,
+  premiumLaneMarker,
   buildChainChips,
   buildSegments,
   pickFocusNode,
@@ -354,6 +356,18 @@ describe("profileInitial", () => {
 
   it("Fallback auf erstes Zeichen", () => {
     expect(profileInitial("sonnet")).toBe("S");
+  });
+});
+
+describe("Premium-Lane avatar marker", () => {
+  it("pairs the premium avatar class with the non-color title/aria marker", () => {
+    expect(profileColorClass("premium")).toBe("fleet-avatar-prem");
+    expect(profileColorClass("opus-builder")).toBe("fleet-avatar-prem");
+    expect(premiumLaneMarker("premium")).toEqual({
+      title: "Premium-Lane",
+      "aria-label": "Premium-Lane",
+    });
+    expect(premiumLaneMarker("coder")).toEqual({});
   });
 });
 

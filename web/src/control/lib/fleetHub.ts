@@ -169,9 +169,23 @@ export function profileInitial(profile: string): string {
 
 /** Avatar-Farb-Klasse je Profil (für data-fleet-Scope). */
 export function profileColorClass(profile: string): string {
-  if (/premium|opus/i.test(profile)) return "fleet-avatar-prem";
+  if (isPremiumLane(profile)) return "fleet-avatar-prem";
   if (/reviewer|review/i.test(profile)) return "fleet-avatar-rev";
   return "fleet-avatar-default";
+}
+
+/** Premium-Lane ist zusätzlich zur Farbe immer per Text-Marker benannt. */
+export function isPremiumLane(profile: string | null | undefined): boolean {
+  return /premium|opus/i.test(profile ?? "");
+}
+
+export function premiumLaneMarker(profile: string | null | undefined): {
+  title?: "Premium-Lane";
+  "aria-label"?: "Premium-Lane";
+} {
+  return isPremiumLane(profile)
+    ? { title: "Premium-Lane", "aria-label": "Premium-Lane" }
+    : {};
 }
 
 // ─── Token-Formatierung ──────────────────────────────────────────────────────

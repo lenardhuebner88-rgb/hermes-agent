@@ -94,6 +94,13 @@ shift, works offline, no third-party request from the operator's browser.
     to `docs/design/werkbank-mockup.html`, get it approved, then port the
     tokens/rules here — don't invent ad hoc colors in components.
 
+### Premium-Lane-Farbe (W4-8)
+`--color-lane-prem` (warmes Aubergine) markiert ausschließlich LANE-IDENTITÄT (Avatare,
+Lane-Tags) der Premium-/Opus-Lane. Sie ist NIE Button-, Status- oder Akzentfarbe und tritt
+IMMER mit einem Nicht-Farb-Marker auf (Doppelring am Avatar + title/aria "Premium-Lane").
+AA-Beweis siehe W4-8-Report. Nacht-Tiefen-Regel: View-lokale Tiefenvariationen (z. B. Loops
+„Nachtschicht") leiten ihre Flächen per color-mix aus den Sheet-Tokens ab — nie fremde Hues.
+
 ## Mono = data only
 
 Mono type (`--font-data` / `IBM Plex Mono`) is reserved for **data**: ids,
