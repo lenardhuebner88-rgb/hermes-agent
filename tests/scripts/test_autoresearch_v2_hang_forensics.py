@@ -29,6 +29,35 @@ def mod():
     return m
 
 
+def test_main_actually_installs_hang_forensics(mod):
+    """Integration guard: main() must WIRE IN the forensics, not just define
+    it. The unit tests called _install_hang_forensics directly and stayed
+    green while main() never invoked it — the fix was dead code until this
+    test forced the call site to exist."""
+    from unittest.mock import patch
+
+    called = {}
+
+    def _spy(started, budget_seconds, **k):
+        called["started"] = started
+        called["budget"] = budget_seconds
+
+    # Run only the arg-parse + forensics-install prologue; make the first
+    # lane selection raise so we don't drive real lanes / Discord.
+    with (
+        patch.object(mod, "_install_hang_forensics", side_effect=_spy),
+        patch.object(mod, "select_subsystem", side_effect=RuntimeError("stop here")),
+        patch.object(mod, "post_summary"),
+    ):
+        try:
+            mod.main(["--no-send", "--lanes", "deep-audit"])
+        except RuntimeError:
+            pass
+
+    assert "started" in called, "main() never called _install_hang_forensics"
+    assert called["budget"] is not None
+
+
 def test_watchdog_aborts_past_deadline(mod):
     fired = threading.Event()
     codes: list[int] = []

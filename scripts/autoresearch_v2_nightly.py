@@ -354,6 +354,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     budget_seconds = args.wall_clock_budget_seconds
     if budget_seconds is None:
         budget_seconds = _env_float("AR_V2_WALL_CLOCK_BUDGET_SECONDS", 0.0)
+
+    # Install hang forensics BEFORE any lane runs: line-buffer stdout/stderr,
+    # register the SIGTERM stack dumper, and start the watchdog. Without this
+    # the 8/17-nights silent-hang-to-unit-timeout failure recurs.
+    _install_hang_forensics(started, budget_seconds)
+    print(
+        f"[autoresearch-v2-nightly] start: lanes={sorted(lanes)} day={day} "
+        f"budget={budget_seconds:.0f}s",
+        flush=True,
+    )
+
     circuit_failures = 0
 
     da_summary: dict[str, Any] | None = None
