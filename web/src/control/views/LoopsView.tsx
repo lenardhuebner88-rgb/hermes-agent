@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
@@ -60,6 +60,16 @@ const t = de.loops;
  * `LoopsGrid` (von den Tests direkt gerendert, ohne den Root-Wrapper) exportiert,
  * referenzieren alle `var(--ln-…)`-Aufrufe nur Farben/Fonts — layoutrelevante
  * Tailwind-Klassen bleiben unabhängig davon funktionsfähig.
+ *
+ * Mono seit W3-5 (2026-07-10): der lokale View-eigene Mono-Font-Fork (seit
+ * W1-A anderswo im Dashboard schon abgelöst) ist entfernt. Daten-Spans (IDs,
+ * Timer, Zähler, Zeitstempel, Ledger-/Commit-/Override-Zeilen) tragen jetzt
+ * die geteilte `font-data`-Klasse (IBM Plex Mono, `--font-data` aus
+ * theme.css); Prosa/Labels wurden de-mono't. Display seit W3-5 ebenfalls auf
+ * dem Sheet-Token (`--ln-font-display` → var(--font-display), Archivo): der
+ * frühere Bricolage-Runtime-Loader holte Google Fonts zur Laufzeit und
+ * verletzte die W1-A-Doktrin "zero network font requests". Die Nachtschicht-
+ * FARB-Palette (NIGHT_VARS) bleibt vorerst eigenständig → W4-Entscheid.
  */
 const NIGHT_VARS = {
   "--ln-void": "#060913",
@@ -74,36 +84,23 @@ const NIGHT_VARS = {
   "--ln-ok": "#34C383",
   "--ln-fail": "#E66767",
   "--ln-warn": "#C98500",
-  "--ln-font-display": '"Bricolage Grotesque", Inter, system-ui, sans-serif',
-  "--ln-font-mono": '"JetBrains Mono", ui-monospace, monospace',
+  // Ambient Header-Glow (radial+linear Wash oben auf der View) — vorher als
+  // literaler Hex-Wert im Gradient dupliziert; jetzt hier zentralisiert wie
+  // jede andere Nachtschicht-Farbe (W3-5 raw-hex-Aufräumung).
+  "--ln-header-glow": "#1A2344",
+  // Display-Stimme = Sheet-Token (Archivo Variable, self-hosted). Der frühere
+  // Bricolage-Runtime-Loader von Google Fonts verletzte die W1-A-Doktrin
+  // "zero network font requests" und ist entfernt (W3-5 Director-Fix).
+  "--ln-font-display": "var(--font-display)",
 } as React.CSSProperties;
 
 const displayFont: React.CSSProperties = { fontFamily: "var(--ln-font-display)" };
-const monoFont: React.CSSProperties = { fontFamily: "var(--ln-font-mono)" };
 
 /** A11y-Boden ohne Ankündigung: 2px Amber-Fokusring auf jedem interaktiven
  *  Element (der Shared-`Button` bringt selbst nur den Einheitslook-Accent
  *  mit — hier explizit auf --ln-sodium überschrieben). */
 const NIGHT_FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ln-sodium)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ln-void)]";
-
-const NIGHT_FONT_ID = "loops-night-font";
-const NIGHT_FONT_URL =
-  "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700&display=swap";
-
-/** Lädt Bricolage Grotesque einmalig (idempotent per id, `display=swap`,
- *  Fallback-Stack bleibt in NIGHT_VARS gesetzt — offline bricht nichts). */
-function useNightFontInjection() {
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    if (document.getElementById(NIGHT_FONT_ID)) return;
-    const link = document.createElement("link");
-    link.id = NIGHT_FONT_ID;
-    link.rel = "stylesheet";
-    link.href = NIGHT_FONT_URL;
-    document.head.appendChild(link);
-  }, []);
-}
 
 /** Validierte Dark-Palette je Engine — nur als Punkt neben dem Namen, nie
  *  farbe-allein (immer Text daneben). Unbekannte Engines: ink-mute. */
@@ -330,7 +327,9 @@ function NightPill({
   icon?: LucideIcon;
   children: ReactNode;
 }) {
-  const hex = { ok: "#34C383", warn: "#C98500", sodium: "#FFB454", neutral: "#5E6B8C" }[tone];
+  // Referenziert dieselben Werte wie NIGHT_VARS statt sie zu duplizieren
+  // (vorher vier literale Hex-Codes hier — W3-5 raw-hex-Aufräumung).
+  const hex = { ok: "var(--ln-ok)", warn: "var(--ln-warn)", sodium: "var(--ln-sodium)", neutral: "var(--ln-ink-mute)" }[tone];
   return (
     <span
       className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium"
@@ -347,7 +346,7 @@ function SourceBadge({ source }: { source?: "repo" | "custom" }) {
   return (
     <span
       className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.1em]"
-      style={{ ...monoFont, borderColor: "var(--ln-line)", color: "var(--ln-ink-soft)" }}
+      style={{ borderColor: "var(--ln-line)", color: "var(--ln-ink-soft)" }}
     >
       {source === "custom" ? t.sourceCustom : t.sourceRepo}
     </span>
@@ -372,7 +371,7 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
     const current = pack.heartbeat?.current ?? null;
     if (!current) {
       return (
-        <p className="mt-2 text-xs" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+        <p className="mt-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
           {t.heartbeatBetweenPhases}
         </p>
       );
@@ -380,7 +379,7 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
     const startedMs = Date.parse(current.started_at);
     const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
     return (
-      <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ ...monoFont, color: "var(--ln-ink)" }}>
+      <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
         <span
           aria-hidden
           className={cn("inline-block h-1.5 w-1.5 rounded-full", !reduceMotion && "animate-pulse")}
@@ -394,7 +393,7 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
   const newest = last[last.length - 1];
   if (!newest) return null;
   return (
-    <p className="mt-2 text-xs" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+    <p className="mt-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
       {t.telemetryIdleLast(newest.phase, newest.rc === 0, newest.secs, ageFromIso(newest.at, nowMs))}
     </p>
   );
@@ -419,7 +418,7 @@ function PhaseHistoryBars({ last }: { last: LoopHeartbeatHistoryEntry[] }) {
               className="block h-4 rounded-sm"
               style={{ width: widthPx, backgroundColor: ok ? "var(--ln-ok)" : "var(--ln-fail)" }}
             />
-            <span className="hidden text-[10px] sm:inline" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
+            <span className="hidden font-data text-[10px] sm:inline" style={{ color: "var(--ln-ink-mute)" }}>
               {entry.phase} {entry.secs}s {ok ? "✓" : "✗"}
             </span>
           </div>
@@ -450,7 +449,7 @@ function LoopQueueStepper({ queue }: { queue: Record<string, number> }) {
                 background: n > 0 ? "var(--ln-raised)" : "transparent",
               }}
             >
-              <span className="block text-sm font-semibold" style={{ ...monoFont, color: "var(--ln-ink)" }}>{n}</span>
+              <span className="block font-data text-sm font-semibold" style={{ color: "var(--ln-ink)" }}>{n}</span>
               <span className="block text-[10px] uppercase tracking-[0.06em]" style={{ color: "var(--ln-ink-mute)" }}>
                 {QUEUE_STAGE_LABEL[key]}
               </span>
@@ -478,8 +477,8 @@ const VERDICT_META: Record<NonNullable<LedgerVerdict>, { Icon: LucideIcon; color
 function LogChip({ children }: { children: ReactNode }) {
   return (
     <span
-      className="rounded border px-1 text-[10px]"
-      style={{ ...monoFont, borderColor: "var(--ln-line)", color: "var(--ln-ink)" }}
+      className="rounded border px-1 font-data text-[10px]"
+      style={{ borderColor: "var(--ln-line)", color: "var(--ln-ink)" }}
     >
       {children}
     </span>
@@ -496,7 +495,7 @@ function LogbookFeed({ lines }: { lines: string[] }) {
         const parsed = parseLedgerLine(line);
         const meta = parsed.verdict ? VERDICT_META[parsed.verdict] : null;
         return (
-          <div key={`${idx}-${line}`} className="flex items-start gap-2 rounded px-1 py-0.5 text-xs" style={monoFont}>
+          <div key={`${idx}-${line}`} className="flex items-start gap-2 rounded px-1 py-0.5 font-data text-xs">
             {meta ? (
               <meta.Icon aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: meta.color }} />
             ) : (
@@ -520,7 +519,7 @@ function LogbookFeed({ lines }: { lines: string[] }) {
 }
 
 function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
-  const caption: React.CSSProperties = { ...monoFont, color: "var(--ln-ink-mute)" };
+  const caption: React.CSSProperties = { color: "var(--ln-ink-mute)" };
   return (
     <div className="space-y-3 text-xs">
       <div>
@@ -534,7 +533,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
       {detail.queue_entries ? (
         <div>
           <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailQueue}</p>
-          <ul className="mt-1 space-y-1" style={monoFont}>
+          <ul className="mt-1 space-y-1 font-data">
             {Object.entries(detail.queue_entries).map(([stage, files]) => (
               <li key={stage} style={{ color: "var(--ln-ink-soft)" }}>
                 <span style={{ color: "var(--ln-ink)" }}>{stage}</span>: {files.length > 0 ? files.join(", ") : "—"}
@@ -546,7 +545,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
       <div>
         <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailCommits}</p>
         {detail.commits.length > 0 ? (
-          <ul className="mt-1 space-y-0.5" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+          <ul className="mt-1 space-y-0.5 font-data" style={{ color: "var(--ln-ink-soft)" }}>
             {detail.commits.map((line) => <li key={line}>{line}</li>)}
           </ul>
         ) : (
@@ -556,7 +555,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
       <div>
         <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailOverrides}</p>
         {Object.keys(detail.overrides).length > 0 ? (
-          <ul className="mt-1 space-y-0.5" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+          <ul className="mt-1 space-y-0.5 font-data" style={{ color: "var(--ln-ink-soft)" }}>
             {Object.entries(detail.overrides).map(([key, value]) => <li key={key}>{key}={value}</li>)}
           </ul>
         ) : (
@@ -569,12 +568,13 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
 
 // ── Formulare / Felder ───────────────────────────────────────────────────────
 
+// font-data: Feldwerte (Engine/Modell-Namen, Zahlen, Param-/Datei-Inhalte)
+// sind Daten, kein Fließtext — geteilte Klasse statt lokalem Mono-Fork.
 const NIGHT_FIELD_CLASS = cn(
-  "min-h-11 w-full rounded-md border px-2 py-1.5 text-base sm:min-h-9 sm:text-sm placeholder:text-[var(--ln-ink-mute)] disabled:opacity-60",
+  "min-h-11 w-full rounded-md border px-2 py-1.5 text-base sm:min-h-9 sm:text-sm placeholder:text-[var(--ln-ink-mute)] disabled:opacity-60 font-data",
   NIGHT_FOCUS,
 );
 const nightFieldStyle: React.CSSProperties = {
-  ...monoFont,
   backgroundColor: "var(--ln-void)",
   borderColor: "var(--ln-line)",
   color: "var(--ln-ink)",
@@ -629,7 +629,7 @@ function LoopStartForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-[11px] uppercase tracking-[0.14em]" style={{ ...monoFont, ...captionStyle }}>{t.startPanelTitle}</p>
+      <p className="text-[11px] uppercase tracking-[0.14em]" style={captionStyle}>{t.startPanelTitle}</p>
       {pack.autoland ? (
         <p className="rounded-md border px-3 py-2 text-xs leading-relaxed" style={{ borderColor: "var(--ln-sodium)", background: "var(--ln-raised)", color: "var(--ln-ink-soft)" }}>
           {t.autolandContractHint}
@@ -640,7 +640,7 @@ function LoopStartForm({
         const engineModels = engines[value.engine]?.models ?? [];
         return (
           <div key={phase} className="grid gap-2 sm:grid-cols-[minmax(0,90px)_minmax(0,1fr)_minmax(0,1fr)] sm:items-end">
-            <span className="text-xs font-semibold uppercase tracking-[0.1em]" style={{ ...monoFont, color: "var(--ln-ink)" }}>
+            <span className="font-data text-xs font-semibold uppercase tracking-[0.1em]" style={{ color: "var(--ln-ink)" }}>
               {phase}
             </span>
             <label className="min-w-0">
@@ -728,13 +728,16 @@ function LoopStartForm({
             disabled={busy}
             aria-label={t.skipPlanLabel}
             onChange={(e) => setSkipPlan(e.target.checked)}
-            className={NIGHT_FOCUS}
+            // size-12 (vorher unbemaßt = Browser-Default ~13px, undersized;
+            // s. Kommentar an der Nachttimer-Checkbox oben — box-content+
+            // padding wird von Chromium für Checkboxen ignoriert).
+            className={cn("size-12 shrink-0 accent-[var(--ln-sodium)]", NIGHT_FOCUS)}
           />
           {t.skipPlanLabel}
         </label>
       ) : null}
       {failStreak != null && dryRounds != null ? (
-        <p className="text-xs" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
+        <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>
           {t.stopCriteria(failStreak, dryRounds)}
         </p>
       ) : null}
@@ -851,7 +854,7 @@ function LoopWorkstationPanel({
 
   return (
     <div className="space-y-3 text-xs">
-      <p className="text-[11px] uppercase tracking-[0.14em]" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>{t.workshopTitle}</p>
+      <p className="text-[11px] uppercase tracking-[0.14em]" style={{ color: "var(--ln-ink-mute)" }}>{t.workshopTitle}</p>
       <div className="flex flex-wrap gap-1.5">
         {fileList.map((f) => {
           const isActive = f.name === active?.name;
@@ -860,9 +863,10 @@ function LoopWorkstationPanel({
               key={f.name}
               type="button"
               onClick={() => setActiveName(f.name)}
-              className={cn("rounded-full border px-2.5 py-1 text-[11px]", NIGHT_FOCUS)}
+              // min-h-12 (45px @15px-Root): Datei-Tab ist ein <button> und muss
+              // das 44px-Touch-AC erfüllen (Codex-P1 W3-5; py-2 ergab nur ~30px).
+              className={cn("inline-flex min-h-12 items-center rounded-full border px-2.5 font-data text-[11px]", NIGHT_FOCUS)}
               style={{
-                ...monoFont,
                 borderColor: isActive ? "var(--ln-sodium)" : "var(--ln-line)",
                 color: isActive ? "var(--ln-sodium)" : "var(--ln-ink-soft)",
                 background: isActive ? "var(--ln-raised)" : "transparent",
@@ -877,7 +881,7 @@ function LoopWorkstationPanel({
         <LoopWorkstationFileEditor key={active.name} file={active} saveBusy={saveBusy} saveError={saveError} onSave={onSave} />
       ) : null}
       <div className="border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>
-        <p className="text-[11px] uppercase tracking-[0.14em]" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>{t.workshopDuplicateTitle}</p>
+        <p className="text-[11px] uppercase tracking-[0.14em]" style={{ color: "var(--ln-ink-mute)" }}>{t.workshopDuplicateTitle}</p>
         <div className="mt-1 flex flex-wrap items-center gap-2">
           <input
             type="text"
@@ -989,7 +993,13 @@ function TimerScheduleControl({
             disabled={busy}
             aria-label={`${t.timerLabel} ${pack.name}`}
             onChange={(e) => onToggleTimer(pack.name, e.target.checked)}
-            className={cn("h-5 w-5 shrink-0 accent-[var(--ln-sodium)]", NIGHT_FOCUS)}
+            // Direkte size-12 statt box-content+padding: Chromium ignoriert
+            // Padding/box-sizing für den nativen Checkbox-Rendering-Bereich
+            // (gemessen, verifiziert — box-content-Variante blieb bei
+            // 18.8px), respektiert aber explizite h/w. Vorher h-5 w-5
+            // (18.8px, undersized — visual-verify.sh maß den <input> direkt,
+            // nicht das umschließende Label).
+            className={cn("size-12 shrink-0 accent-[var(--ln-sodium)]", NIGHT_FOCUS)}
           />
           <span>{t.timerLabel}: {pack.timer_enabled ? t.timerOn : t.timerOff}</span>
         </label>
@@ -1005,8 +1015,8 @@ function TimerScheduleControl({
             disabled={busy}
             aria-label={`${t.timerTimeLabel} ${pack.name}`}
             onChange={(event) => setTime(event.target.value)}
-            className={cn("h-[44px] min-w-28 rounded-lg border px-3 text-sm", NIGHT_FOCUS)}
-            style={{ ...monoFont, borderColor: "var(--ln-line)", background: "var(--ln-void)", color: "var(--ln-ink)" }}
+            className={cn("h-[44px] min-w-28 rounded-lg border px-3 font-data text-sm", NIGHT_FOCUS)}
+            style={{ borderColor: "var(--ln-line)", background: "var(--ln-void)", color: "var(--ln-ink)" }}
           />
           <Button
             size="sm"
@@ -1019,7 +1029,7 @@ function TimerScheduleControl({
           </Button>
         </div>
       </div>
-      <p className="mt-1 text-[11px]" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
+      <p className="mt-1 text-[11px]" style={{ color: "var(--ln-ink-mute)" }}>
         {pack.timer_enabled
           ? pack.timer_next_run
             ? t.timerNextRun(pack.timer_next_run)
@@ -1192,7 +1202,10 @@ function LoopCard({
         <Disclosure
           open={selected}
           onToggle={() => onToggleDetail(pack.name)}
-          summary={<span className="text-xs" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>{t.actions.detail}</span>}
+          // inline-flex + min-h-12: die Disclosure-Trigger-<button> hat keine
+          // eigene Höhe (sizet sich am Inhalt) — vorher 23.3px (undersized),
+          // der Summary-Inhalt zieht die Zeile jetzt auf ≥44px hoch.
+          summary={<span className="inline-flex min-h-12 items-center text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.actions.detail}</span>}
         >
           {detailLoading ? <p className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.loading}</p> : null}
           {detailError ? <ToneCallout tone="red">{t.detailError}</ToneCallout> : null}
@@ -1263,7 +1276,7 @@ function LoopsHero({
                 <NightPill tone="sodium">{t.heroMoreRunning(running.length - 1)}</NightPill>
               ) : null}
             </div>
-            <p className="mt-1 text-sm" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+            <p className="mt-1 text-sm" style={{ color: "var(--ln-ink-soft)" }}>
               {hero.heartbeat?.current ? (
                 <>
                   {t.heroPhase(
@@ -1309,7 +1322,7 @@ function LoopsHero({
           <LoopRing size={112} state="idle" />
           <div className="min-w-0 flex-1">
             <p className="text-xl font-semibold" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.heroSleeping}</p>
-            <p className="mt-1 text-sm" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>
+            <p className="mt-1 text-sm" style={{ color: "var(--ln-ink-soft)" }}>
               {(() => {
                 const timerCount = packs.filter((p) => p.timer_enabled).length;
                 return timerCount > 0 ? t.heroTimerActive(timerCount) : t.heroTimerNone;
@@ -1319,7 +1332,7 @@ function LoopsHero({
               const last = newestGlobalEvent(packs);
               if (!last) return null;
               return (
-                <p className="mt-0.5 text-sm" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>
+                <p className="mt-0.5 text-sm" style={{ color: "var(--ln-ink-mute)" }}>
                   {t.heroLastEvent(last.phase, last.rc === 0, ageFromIso(last.at, nowMs))}
                 </p>
               );
@@ -1480,7 +1493,6 @@ export function LoopsGrid({
 }
 
 export function LoopsView() {
-  useNightFontInjection();
   const loops = useLoops();
   const models = useLoopModels();
   const [selectedPack, setSelectedPack] = useState<string | null>(null);
@@ -1625,20 +1637,20 @@ export function LoopsView() {
         style={{
           background:
             "radial-gradient(ellipse 900px 420px at 50% -10%, rgba(255,180,84,0.07), transparent 60%), " +
-            "linear-gradient(180deg, #1A2344 0%, transparent 70%)",
+            "linear-gradient(180deg, var(--ln-header-glow) 0%, transparent 70%)",
         }}
       />
       <header>
-        <p className="text-[11px] uppercase tracking-[0.2em]" style={{ ...monoFont, color: "var(--ln-ink-soft)" }}>{t.eyebrow}</p>
+        <p className="text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--ln-ink-soft)" }}>{t.eyebrow}</p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-[28px] font-semibold md:text-[36px]" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.title}</h2>
-          <span className="text-sm" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>{t.subtitle}</span>
+          <span className="text-sm" style={{ color: "var(--ln-ink-mute)" }}>{t.subtitle}</span>
         </div>
       </header>
 
       {loops.error ? <ToneCallout tone="amber">{t.error}</ToneCallout> : null}
 
-      <div className="flex items-center gap-2 text-xs" style={{ ...monoFont, color: "var(--ln-ink-mute)" }}>{t.packCount(packs.length)}</div>
+      <div className="flex items-center gap-2 text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.packCount(packs.length)}</div>
 
       <LoopsGrid
         packs={packs}

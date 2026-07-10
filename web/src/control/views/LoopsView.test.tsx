@@ -1,14 +1,22 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+// Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
+import loopsViewSource from "./LoopsView.tsx?raw";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
 import { LoopsResponseSchema } from "../lib/schemas";
 import { de } from "../i18n/de";
 import type { LoopDetailResponse, LoopFilesResponse, LoopHeartbeatCurrent, LoopModelsResponse, LoopPack, LoopPackSummary } from "../lib/types";
 
 const t = de.loops;
+
+// Ohne explizites afterEach(cleanup) akkumulieren mehrfache render()-Aufrufe
+// (screen/within) im selben Testfile den DOM — belegt beim Hinzufügen der
+// W3-5-Touch-Target-Tests unten (Cross-Test-Kollision auf "Planung
+// überspringen"). Etabliertes Muster in diesem Repo, s. leitstand.test.tsx.
+afterEach(cleanup);
 
 // Manifest-Felder (phases/stop/params/description/stability/type) sind aus dem
 // ECHTEN Payload geerntet — via TestClient(app).get("/api/loops") gegen die
@@ -247,6 +255,59 @@ describe("LoopsGrid", () => {
   });
 });
 
+// W3-5: 22 undersized controls auf /control/loops (11 Nachttimer-Checkboxen +
+// 11 Logbuch-Disclosure-Trigger, gemessen via scripts/visual-verify.sh —
+// height/width < 24 CSS px). Fix = feste size-12/min-h-12-Klassen statt
+// box-content+padding (Chromium ignoriert Padding-Hitbox-Tricks bei nativen
+// Checkboxen — an dieser Stelle live verifiziert, nicht nur angenommen).
+describe("LoopsGrid — Touch-Target-Boden (W3-5)", () => {
+  it("gibt der Nachttimer-Checkbox eine size-12-Klickfläche (vorher h-5 w-5 = 18.8px, unter dem WCAG-2.5.8-Boden)", () => {
+    // Gegen ein schema-validiertes Pack (echte Manifest-Form), nicht nur das
+    // handgeschriebene Fixture-Objekt direkt.
+    const parsed = LoopsResponseSchema.parse({ packs: [runningPipeline] }).packs[0] as LoopPack;
+    const { container } = renderInteractiveGrid([parsed]);
+    const checkbox = within(container).getByLabelText(`${t.timerLabel} ${parsed.name}`) as HTMLInputElement;
+    expect(checkbox.className).toMatch(/\bsize-12\b/);
+  });
+
+  it("gibt dem Logbuch-Disclosure-Trigger eine min-h-12-Zeile (vorher 23.3px, unter dem WCAG-2.5.8-Boden)", () => {
+    const { container } = renderInteractiveGrid([runningPipeline]);
+    const summary = within(container).getByText(t.actions.detail);
+    expect(summary.className).toMatch(/\bmin-h-12\b/);
+  });
+
+  it("gibt der SKIP_PLAN-Checkbox eine size-12-Klickfläche (vorher unbemaßt = Browser-Default ~13px)", () => {
+    const { container } = renderInteractiveGrid([idlePipeline], { startOpenPack: idlePipeline.name });
+    const checkbox = within(container).getByLabelText(t.skipPlanLabel) as HTMLInputElement;
+    expect(checkbox.className).toMatch(/\bsize-12\b/);
+  });
+});
+
+// W3-5: der lokale View-eigene Mono-Font-Fork ist raus — Daten-Spans tragen
+// jetzt die geteilte font-data-Klasse (IBM Plex Mono aus theme.css), Prosa/
+// Labels haben kein fontFamily-Inline-Style mehr. Pinnt die
+// Klassifizierungs-Entscheidung als Regressionsschutz.
+describe("LoopsGrid — Mono-Konsolidierung (W3-5)", () => {
+  it("gibt Queue-Stufen-Zählern die geteilte font-data-Klasse statt eines lokalen Mono-Inline-Styles", () => {
+    const { container } = renderInteractiveGrid([runningPipeline]);
+    const count = within(container).getByText("7"); // 20-verified count aus der Fixture
+    expect(count.className).toMatch(/\bfont-data\b/);
+    expect(count.style.fontFamily).toBe("");
+  });
+
+  it("lässt eine Prosa-Zeile (Telemetrie-Satz) ohne font-data-Klasse/fontFamily-Override", () => {
+    // Der Satz erscheint zweimal (Hero + Karte, beide "zwischen Phasen") —
+    // beide Stellen sind Prosa, also gilt die Erwartung für alle Treffer.
+    const { container } = renderInteractiveGrid([betweenPhasesPipeline]);
+    const lines = within(container).getAllByText(t.heartbeatBetweenPhases);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line.className).not.toMatch(/\bfont-data\b/);
+      expect(line.style.fontFamily).toBe("");
+    }
+  });
+});
+
 describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
   it("zeigt gespeicherte lokale Uhrzeit und den echten nächsten Lauf", () => {
     const { container } = renderInteractiveGrid([runningPipeline]);
@@ -343,7 +404,12 @@ describe("LoopsGrid — Werkstatt-Panel", () => {
   };
 
   it("renders repo-pack files read-only with the 'via Git ändern' hint, no Save button", () => {
-    const html = renderGrid([runningPipeline], { workshopOpenPack: "builder-reviewer", files: repoFiles });
+    const files: LoopFilesResponse = {
+      pack: "builder-reviewer",
+      source: "repo",
+      files: [{ name: "pack.yaml", content: "name: builder-reviewer\n", editable: false }],
+    };
+    const html = renderGrid([runningPipeline], { workshopOpenPack: "builder-reviewer", files });
     expect(html).toContain(t.workshopReadOnly);
     expect(html).not.toContain(t.workshopSave);
     expect(html).toContain("pack.yaml");
@@ -696,5 +762,38 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
     expect(onSubmitStart).toHaveBeenCalledTimes(1);
     const [, overrides] = onSubmitStart.mock.calls[0];
     expect(overrides.SKIP_PLAN).toBeUndefined();
+  });
+});
+
+describe("Loops — kein Remote-Font-Loader (W3-5 Director-Fix, Codex-P1-gehärtet)", () => {
+  it("Quelltext-Guard: LoopsView enthält keinen Google-Fonts-Loader mehr (W1-A: zero network font requests)", () => {
+    // Quell-Ebene statt Komponenten-Mount: der gelöschte Loader lebte in
+    // LoopsView (nicht LoopsGrid) — ein DOM-Test auf LoopsGrid wäre gegen
+    // Wiedereinführung blind (Codex-P1). Der String-Guard fängt jede Stelle
+    // der Datei, unabhängig vom Komponentenpfad.
+    const src = loopsViewSource;
+    expect(src).not.toContain("fonts.googleapis");
+    expect(src).not.toContain("useNightFontInjection");
+  });
+
+  it("DOM-Guard: gerendertes Grid injiziert keinen Font-Link", () => {
+    renderInteractiveGrid([runningPipeline]);
+    expect(document.getElementById("loops-night-font")).toBeNull();
+    const links = Array.from(document.querySelectorAll("link[rel='stylesheet']"));
+    expect(links.filter((l) => (l.getAttribute("href") ?? "").includes("fonts.googleapis"))).toHaveLength(0);
+  });
+});
+
+describe("Workshop-Datei-Tabs — Touch-Target-Boden (W3-5 Codex-P1)", () => {
+  it("gibt den Datei-Tab-Buttons min-h-12 (44px-AC; py-2 ergab nur ~30px)", () => {
+    const files: LoopFilesResponse = {
+      pack: "builder-reviewer",
+      source: "repo",
+      files: [{ name: "pack.yaml", content: "name: builder-reviewer\n", editable: false }],
+    };
+    const html = renderGrid([runningPipeline], { workshopOpenPack: "builder-reviewer", files });
+    const tab = html.match(/<button[^>]*>[^<]*pack\.yaml/);
+    expect(tab).not.toBeNull();
+    expect(tab![0]).toContain("min-h-12");
   });
 });
