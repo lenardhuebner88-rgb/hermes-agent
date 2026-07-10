@@ -35,6 +35,15 @@ from hermes_cli.voice_live_session import (
     LiveFallbackRequired,
     LiveSessionEnded,
 )
+from hermes_cli.voice_spar_session import (
+    SPAR_SYSTEM_INSTRUCTION,
+    LlmLaneError,
+    SparLlmLane,
+    create_llm_lane as spar_create_llm_lane,
+    run_turn as spar_run_turn,
+    synthesize_to_wav as spar_synthesize_to_wav,
+    transcribe_wav as spar_transcribe_wav,
+)
 from hermes_constants import get_hermes_home
 from tools.transcription_tools import transcribe_audio
 from tools.tts_tool import text_to_speech_tool
@@ -357,6 +366,107 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
         video_mode=video_mode,
         look_model=look_model,
         pricing=pricing,
+    )
+
+
+_DEFAULT_SPAR_LLM_LANE = "codex"
+_VALID_SPAR_LLM_LANES = {"codex", "claude"}
+_DEFAULT_SPAR_WHISPER_MODEL = "small"
+_DEFAULT_SPAR_MAX_TOOL_HOPS = 2
+_DEFAULT_SPAR_LLM_TIMEOUT_SECONDS = 25.0
+# The fastest subscription model, chosen so a persistent-child claude-lane
+# turn stays inside the walkie-talkie latency budget by default; still
+# overridable via voice_web.spar.llm_model.
+_DEFAULT_SPAR_CLAUDE_MODEL = "haiku"
+_DEFAULT_SPAR_PIPER_VOICE_FILENAME = "de_DE-thorsten-medium.onnx"
+
+
+@dataclass
+class SparWebConfig:
+    """Voice-Sparmodus (cascade) settings — see ``voice_spar_session.py``."""
+
+    enabled: bool = True
+    llm_lane: str = _DEFAULT_SPAR_LLM_LANE
+    llm_model: str | None = None
+    whisper_model: str = _DEFAULT_SPAR_WHISPER_MODEL
+    piper_voice_path: str = ""
+    system_instruction: str = SPAR_SYSTEM_INSTRUCTION
+    max_tool_hops: int = _DEFAULT_SPAR_MAX_TOOL_HOPS
+    llm_timeout_seconds: float = _DEFAULT_SPAR_LLM_TIMEOUT_SECONDS
+
+
+def _default_spar_piper_voice_path() -> str:
+    return str(
+        get_hermes_home() / "voice" / "piper" / _DEFAULT_SPAR_PIPER_VOICE_FILENAME
+    )
+
+
+def spar_web_config(raw: dict) -> SparWebConfig:
+    """Read ``voice_web.spar`` — the Sparmodus cascade's own sub-section."""
+    voice_section = raw.get("voice_web") if isinstance(raw, dict) else None
+    section = (
+        voice_section.get("spar")
+        if isinstance(voice_section, dict)
+        else None
+    )
+    if not isinstance(section, dict):
+        section = {}
+
+    llm_lane = section.get("llm_lane")
+    if not isinstance(llm_lane, str) or llm_lane not in _VALID_SPAR_LLM_LANES:
+        if "llm_lane" in section:
+            _log.warning(
+                "voice_web.spar.llm_lane invalid (%r); using %r",
+                section.get("llm_lane"),
+                _DEFAULT_SPAR_LLM_LANE,
+            )
+        llm_lane = _DEFAULT_SPAR_LLM_LANE
+
+    llm_model = section.get("llm_model")
+    if not isinstance(llm_model, str) or not llm_model.strip():
+        llm_model = _DEFAULT_SPAR_CLAUDE_MODEL if llm_lane == "claude" else None
+
+    whisper_model = section.get("whisper_model")
+    if not isinstance(whisper_model, str) or not whisper_model.strip():
+        whisper_model = _DEFAULT_SPAR_WHISPER_MODEL
+
+    piper_voice_path = section.get("piper_voice_path")
+    if not isinstance(piper_voice_path, str) or not piper_voice_path.strip():
+        piper_voice_path = _default_spar_piper_voice_path()
+
+    system_instruction = section.get("system_instruction")
+    if not isinstance(system_instruction, str) or not system_instruction.strip():
+        system_instruction = SPAR_SYSTEM_INSTRUCTION
+
+    max_tool_hops = _nonnegative_int(section.get("max_tool_hops"))
+    if max_tool_hops is None:
+        if "max_tool_hops" in section:
+            _log.warning(
+                "voice_web.spar.max_tool_hops invalid (%r); using %d",
+                section.get("max_tool_hops"),
+                _DEFAULT_SPAR_MAX_TOOL_HOPS,
+            )
+        max_tool_hops = _DEFAULT_SPAR_MAX_TOOL_HOPS
+
+    llm_timeout_seconds = _positive_number(section.get("llm_timeout_seconds"))
+    if llm_timeout_seconds is None:
+        if "llm_timeout_seconds" in section:
+            _log.warning(
+                "voice_web.spar.llm_timeout_seconds invalid (%r); using %s",
+                section.get("llm_timeout_seconds"),
+                _DEFAULT_SPAR_LLM_TIMEOUT_SECONDS,
+            )
+        llm_timeout_seconds = _DEFAULT_SPAR_LLM_TIMEOUT_SECONDS
+
+    return SparWebConfig(
+        enabled=section.get("enabled") is not False,
+        llm_lane=llm_lane,
+        llm_model=llm_model,
+        whisper_model=whisper_model,
+        piper_voice_path=piper_voice_path,
+        system_instruction=system_instruction,
+        max_tool_hops=max_tool_hops,
+        llm_timeout_seconds=llm_timeout_seconds,
     )
 
 
@@ -1037,12 +1147,17 @@ async def _speak_response(
     events_out: asyncio.Queue[dict[str, Any] | None],
     disconnected: asyncio.Event,
     stop_requested: asyncio.Event,
+    *,
+    synthesize: Callable[[str, str], "asyncio.Future[bytes]"] | None = None,
 ) -> None:
     """Emit the assistant transcript, then synthesize and stream its audio.
 
     Shared tail for both the spoken cascade (:func:`_run_cascade_fallback`)
     and a fallback-mode typed turn (:func:`_run_text_cascade`), so the
-    TTS/chunk/stream logic exists exactly once.
+    TTS/chunk/stream logic exists exactly once. ``synthesize`` defaults to
+    :func:`fallback_synthesize_pcm` (the configured global TTS provider);
+    the spar cascade (:func:`_run_spar_cascade`) passes its own local-Piper
+    synth instead — same signature (``text, language`` -> PCM16/24k bytes).
     """
     if not await _put_event_checkpoint(
         events_out,
@@ -1050,7 +1165,8 @@ async def _speak_response(
         disconnected,
     ):
         return
-    audio = await fallback_synthesize_pcm(response, config.language)
+    synthesize_fn = synthesize or fallback_synthesize_pcm
+    audio = await synthesize_fn(response, config.language)
     if stop_requested.is_set():
         return
     if not audio or len(audio) % 2:
@@ -1694,6 +1810,255 @@ async def _run_controllable_cascade(
         await _cancel_task_bounded(fallback_task)
 
 
+# =============================================================================
+# Voice Sparmodus (cascade, $0 marginal cost) — additive, own websocket route.
+# Never touches the Gemini Live bridge above; only ``_speak_response``'s new
+# optional ``synthesize`` parameter is shared.
+# =============================================================================
+
+_MAX_SPAR_TURN_PCM_BYTES = _MAX_FALLBACK_PCM_BYTES
+
+
+def _spar_transcribe_pcm_sync(pcm: bytes, wav_path: Path, model_size: str, language: str) -> str:
+    try:
+        _write_pcm16_wav(wav_path, pcm)
+        return spar_transcribe_wav(str(wav_path), model_size=model_size, language=language)
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
+async def _spar_transcribe_pcm(pcm: bytes, model_size: str, language: str) -> str:
+    wav_path = _voice_cache_dir() / f"spar-input-{uuid.uuid4().hex}.wav"
+    try:
+        transcript = await _run_sync_cancel_safe(
+            _spar_transcribe_pcm_sync, pcm, wav_path, model_size, language
+        )
+    except Exception as exc:
+        raise VoiceRuntimeError(
+            "transcription_failed",
+            "Die Spracheingabe konnte nicht transkribiert werden.",
+        ) from exc
+    transcript = (transcript or "").strip()
+    if not transcript:
+        raise VoiceRuntimeError(
+            "empty_transcript",
+            "Die Spracheingabe enthielt keinen erkennbaren Text.",
+        )
+    return transcript
+
+
+def _spar_synthesize_pcm_sync(text: str, voice_path: str) -> bytes:
+    wav_path = _voice_cache_dir() / f"spar-output-{uuid.uuid4().hex}.wav"
+    try:
+        spar_synthesize_to_wav(text, voice_path=voice_path, output_path=wav_path)
+        return _transcode_to_pcm24k(wav_path)
+    finally:
+        _unlink_owned_voice_file(wav_path)
+
+
+async def _spar_synthesize_pcm_factory(
+    voice_path: str,
+) -> Callable[[str, str], Any]:
+    async def _synthesize(text: str, _language: str) -> bytes:
+        try:
+            return await _run_sync_cancel_safe(_spar_synthesize_pcm_sync, text, voice_path)
+        except VoiceRuntimeError:
+            raise
+        except Exception as exc:
+            raise VoiceRuntimeError(
+                "tts_failed", "Die Sprachausgabe ist fehlgeschlagen."
+            ) from exc
+
+    return _synthesize
+
+
+async def _read_spar_frames(
+    websocket: WebSocket,
+    turn_pcm: bytearray,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    frame_cache: VideoFrameCache,
+) -> str:
+    """Read one Sparmodus turn: accumulate PCM until ``turn_end``/``end``.
+
+    No barge-in, no live streaming — the walkie-talkie contract is
+    deliberate (see the module docstring in ``voice_spar_session``); this
+    loop only ever returns after a full client-decided turn boundary.
+    """
+    video_frame_times: deque[float] = deque()
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                disconnected.set()
+                return "disconnect"
+
+            frame = message.get("bytes")
+            if frame is not None:
+                if len(frame) % 2:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_pcm_frame",
+                                "message": "PCM16-Frames müssen eine gerade Bytezahl haben.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    return "error"
+                if len(turn_pcm) + len(frame) > _MAX_SPAR_TURN_PCM_BYTES:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "audio_too_large",
+                                "message": "Die Spracheingabe überschreitet das Größenlimit.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    return "error"
+                turn_pcm.extend(frame)
+                continue
+
+            text = message.get("text")
+            if not isinstance(text, str):
+                continue
+            try:
+                control = json.loads(text)
+            except json.JSONDecodeError:
+                await _put_event(
+                    events_out,
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "invalid_control_frame",
+                            "message": "Die Steuerungsnachricht ist kein gültiges JSON.",
+                        },
+                    },
+                    disconnected,
+                )
+                continue
+            control_type = control.get("type") if isinstance(control, dict) else None
+            if control_type == "end":
+                return "end"
+            if control_type == "turn_end":
+                return "turn_end"
+            if control_type == "video_frame":
+                if not _video_frame_rate_allowed(video_frame_times):
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_rate_limited",
+                                "message": (
+                                    "Zu viele Video-Frames. Bitte langsamer senden."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                decoded_frame = _decode_video_frame(control)
+                if decoded_frame is None or len(decoded_frame) > _MAX_VIDEO_FRAME_BYTES:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_video_frame",
+                                "message": "Das Video-Frame ist ungültig.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                frame_cache.store(decoded_frame)
+                continue
+            if control_type == "sharing_stopped":
+                frame_cache.clear()
+                continue
+            await _put_event(
+                events_out,
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "unknown_control_frame",
+                        "message": "Unbekannte Voice-Steuerungsnachricht.",
+                    },
+                },
+                disconnected,
+            )
+    except WebSocketDisconnect:
+        disconnected.set()
+        return "disconnect"
+
+
+async def _run_spar_cascade(
+    pcm: bytes,
+    spar_config: SparWebConfig,
+    voice_config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    executor: VoiceToolExecutor,
+    history: list[tuple[str, str]],
+    lane: SparLlmLane,
+) -> list[tuple[str, str]]:
+    """One full Sparmodus turn: STT -> LLM (+tool hops) -> TTS. Returns new history."""
+    if not pcm:
+        raise VoiceRuntimeError("no_audio", "Es wurde kein Audio empfangen.")
+    if not await _put_event_checkpoint(
+        events_out,
+        {"type": "state", "value": "thinking"},
+        disconnected,
+    ):
+        return history
+    transcript = await _spar_transcribe_pcm(
+        pcm, spar_config.whisper_model, voice_config.language
+    )
+    if not await _put_event_checkpoint(
+        events_out,
+        {"type": "transcript", "role": "user", "text": transcript},
+        disconnected,
+    ):
+        return history
+    try:
+        reply, history = await spar_run_turn(
+            transcript,
+            history=history,
+            lane=lane,
+            executor=executor,
+            max_tool_hops=spar_config.max_tool_hops,
+        )
+    except LlmLaneError as exc:
+        raise VoiceRuntimeError("llm_lane_failed", str(exc)) from exc
+    synthesize = await _spar_synthesize_pcm_factory(spar_config.piper_voice_path)
+    await _speak_response(
+        reply,
+        voice_config,
+        events_out,
+        disconnected,
+        asyncio.Event(),  # spar has no interrupt/barge-in
+        synthesize=synthesize,
+    )
+    await _put_event(
+        events_out,
+        {
+            "type": "usage_update",
+            "mode": "spar",
+            "estimated_usd": 0,
+            "label": "$0 (Abo)",
+            "complete": True,
+        },
+        disconnected,
+    )
+    return history
+
+
 async def _run_live_bridge(
     config: VoiceWebConfig,
     api_key: str,
@@ -1838,6 +2203,7 @@ def create_voice_router(
     config = voice_web_config(raw_config)
     if not config.enabled:
         return APIRouter(lifespan=_voice_router_lifespan)
+    spar_config = spar_web_config(raw_config)
     router = APIRouter(lifespan=_voice_router_lifespan)
 
     @router.get("/voice")
@@ -2070,6 +2436,132 @@ def create_voice_router(
             )
             if text_turn.task is not None:
                 await _cancel_task_bounded(text_turn.task)
+            await _finish_event_sender(events_out, sender_task, disconnected)
+            if not disconnected.is_set():
+                try:
+                    await websocket.close(code=1000)
+                except RuntimeError:
+                    pass
+
+    @router.websocket("/api/voice/spar")
+    async def voice_spar(websocket: WebSocket) -> None:
+        auth_reason, _credential = ws_auth_reason(websocket)
+        if auth_reason is not None:
+            await websocket.close(
+                code=4401,
+                reason=ws_close_reason(f"auth: {auth_reason}"),
+            )
+            return
+        host_origin_reason = ws_host_origin_reason(websocket)
+        if host_origin_reason is not None:
+            await websocket.close(
+                code=4403,
+                reason=ws_close_reason(host_origin_reason),
+            )
+            return
+        client_reason = ws_client_reason(websocket)
+        if client_reason is not None:
+            await websocket.close(
+                code=4408,
+                reason=ws_close_reason(client_reason),
+            )
+            return
+
+        await websocket.accept()
+        if not spar_config.enabled:
+            await websocket.close(
+                code=4404,
+                reason=ws_close_reason("Sparmodus ist deaktiviert."),
+            )
+            return
+
+        events_out: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=_EVENT_QUEUE_ITEMS
+        )
+        disconnected = asyncio.Event()
+        frame_cache = VideoFrameCache()
+        sender_task = asyncio.create_task(
+            _send_voice_events(websocket, events_out, disconnected)
+        )
+
+        async def _request_fresh_frame() -> bytes | None:
+            cached = frame_cache.peek()
+            if cached is not None:
+                return cached
+            return await frame_cache.wait_for_update(_LOOK_CLOSELY_FRAME_WAIT_SECONDS)
+
+        executor = VoiceToolExecutor(
+            delegate=lambda prompt: delegate_to_hermes(
+                prompt, timeout_seconds=_DELEGATE_TIMEOUT_SECONDS
+            ),
+            request_frame=_request_fresh_frame,
+            look_model=config.look_model,
+            gemini_api_key=resolve_gemini_api_key(),
+        )
+
+        # One LLM lane per Sparmodus session, not per turn: for the claude
+        # lane this is the persistent CLI child (see PersistentClaudeLane).
+        lane = spar_create_llm_lane(
+            spar_config.llm_lane,
+            model=spar_config.llm_model,
+            timeout=spar_config.llm_timeout_seconds,
+            system_instruction=spar_config.system_instruction,
+        )
+
+        history: list[tuple[str, str]] = []
+        try:
+            # start() is called now, before the first turn, so its ~5s CLI
+            # startup overlaps with the client's first recording/STT instead
+            # of the first reply's latency budget.
+            await lane.start()
+            while True:
+                turn_pcm = bytearray()
+                result = await _read_spar_frames(
+                    websocket, turn_pcm, events_out, disconnected, frame_cache
+                )
+                if result in ("disconnect", "error", "end"):
+                    break
+                if result != "turn_end":
+                    continue
+                try:
+                    history = await _run_spar_cascade(
+                        bytes(turn_pcm),
+                        spar_config,
+                        config,
+                        events_out,
+                        disconnected,
+                        executor,
+                        history,
+                        lane,
+                    )
+                except VoiceRuntimeError as exc:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {"code": exc.code, "message": exc.message},
+                        },
+                        disconnected,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _log.exception("Voice Sparmodus cascade failed")
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "spar_failed",
+                                "message": "Der Sparmodus ist fehlgeschlagen.",
+                            },
+                        },
+                        disconnected,
+                    )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await lane.aclose()
             await _finish_event_sender(events_out, sender_task, disconnected)
             if not disconnected.is_set():
                 try:

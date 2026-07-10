@@ -33,6 +33,7 @@ const STATUS_COPY = {
 const MODE_BADGE_COPY = {
   live: "Live",
   fallback: "Fallback",
+  spar: "Spar",
 };
 
 const statusElement = document.querySelector("#voice-status");
@@ -52,6 +53,9 @@ const screenChipElement = document.querySelector("#screen-chip");
 const screenShareHintElement = document.querySelector("#screen-share-hint");
 const sharingIndicatorElement = document.querySelector("#sharing-indicator");
 const sharingPreviewElement = document.querySelector("#sharing-preview");
+const modeLiveButton = document.querySelector('[data-mode-option="live"]');
+const modeSparButton = document.querySelector('[data-mode-option="spar"]');
+const talkButtonElement = document.querySelector("#talk-button");
 
 const NO_SESSION_TEXT_HINT =
   "Starte zuerst eine Sitzung, dann kannst du auch schreiben.";
@@ -59,6 +63,58 @@ const NO_SESSION_TEXT_HINT =
 let activeSession = null;
 let nextSessionId = 0;
 let stashedInstallPrompt = null;
+
+// Sparmodus (cascade, $0 marginal cost): chosen before Start, persisted
+// across reconnects (AC). Live stays the default — Sparmodus is opt-in.
+const VOICE_MODE_STORAGE_KEY = "hermesVoiceModePreference";
+
+function getStoredVoiceMode() {
+  try {
+    const stored = window.localStorage?.getItem(VOICE_MODE_STORAGE_KEY);
+    return stored === "spar" ? "spar" : "live";
+  } catch {
+    return "live";
+  }
+}
+
+function setStoredVoiceMode(mode) {
+  try {
+    window.localStorage?.setItem(VOICE_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Storage can be blocked (private mode) — the in-memory selection still
+    // works for the rest of this page load.
+  }
+}
+
+let selectedVoiceMode = getStoredVoiceMode();
+
+function renderModeToggle() {
+  const locked = Boolean(activeSession);
+  for (const [button, mode] of [
+    [modeLiveButton, "live"],
+    [modeSparButton, "spar"],
+  ]) {
+    if (!button) {
+      continue;
+    }
+    const checked = selectedVoiceMode === mode;
+    button.setAttribute("aria-checked", checked ? "true" : "false");
+    button.disabled = locked;
+  }
+}
+
+function selectVoiceMode(mode) {
+  if (activeSession || (mode !== "live" && mode !== "spar")) {
+    return;
+  }
+  selectedVoiceMode = mode;
+  setStoredVoiceMode(mode);
+  renderModeToggle();
+}
+
+modeLiveButton?.addEventListener("click", () => selectVoiceMode("live"));
+modeSparButton?.addEventListener("click", () => selectVoiceMode("spar"));
+renderModeToggle();
 
 // "Sehen" (camera/screen sharing): state lives outside any voice session
 // object because the toggle chips are always visible in the header — a
@@ -117,7 +173,20 @@ function setComposerEnabled(enabled) {
   composerInput.setAttribute("aria-disabled", enabled ? "false" : "true");
 }
 
+function updateTalkButtonVisibility() {
+  if (!talkButtonElement) {
+    return;
+  }
+  const isSpar = Boolean(activeSession) && activeSession.voiceMode === "spar";
+  talkButtonElement.hidden = !isSpar;
+  if (!isSpar) {
+    talkButtonElement.disabled = true;
+  }
+}
+
 function setButton(mode) {
+  renderModeToggle();
+  updateTalkButtonVisibility();
   if (mode === "start") {
     sessionButton.textContent = "Start";
     sessionButton.disabled = false;
@@ -129,7 +198,12 @@ function setButton(mode) {
     sessionButton.textContent = "Stop";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung beenden");
-    setComposerEnabled(true);
+    // Sparmodus has no typed-turn control frame server-side (walkie-talkie
+    // only) — the composer stays closed for the whole session.
+    setComposerEnabled(activeSession?.voiceMode !== "spar");
+    if (talkButtonElement) {
+      talkButtonElement.disabled = false;
+    }
     return;
   }
   sessionButton.textContent = "Wird beendet …";
@@ -138,6 +212,9 @@ function setButton(mode) {
   // After "end" the server accepts only interrupt controls — a typed frame
   // during the drain would be rejected, so the composer closes with the mic.
   setComposerEnabled(false);
+  if (talkButtonElement) {
+    talkButtonElement.disabled = true;
+  }
 }
 
 function createTranscriptEntry(role, text) {
@@ -364,8 +441,9 @@ function getClientSessionId() {
   return id;
 }
 
-function createWebSocket(ticket) {
-  const websocketUrl = new URL("/api/voice/live", window.location.origin);
+function createWebSocket(ticket, voiceMode) {
+  const path = voiceMode === "spar" ? "/api/voice/spar" : "/api/voice/live";
+  const websocketUrl = new URL(path, window.location.origin);
   websocketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   websocketUrl.searchParams.set("ticket", ticket);
   websocketUrl.searchParams.set("session", getClientSessionId());
@@ -704,6 +782,12 @@ function sumTokenGroup(group) {
 }
 
 function formatUsageDetail(message) {
+  // Sparmodus turns are $0 marginal cost by construction (local STT/TTS +
+  // a subscription-lane LLM CLI) — show that instead of a dollar amount
+  // computed from token pricing that doesn't apply to this mode.
+  if (message.mode === "spar" && typeof message.label === "string") {
+    return message.label;
+  }
   const totalTokens =
     sumTokenGroup(message.tokens?.input) + sumTokenGroup(message.tokens?.output);
   if (
@@ -842,6 +926,21 @@ initNativeBridge();
 
 function handleMicFrame(session, message) {
   if (!isCurrent(session) || session.microphoneStopped) {
+    return;
+  }
+
+  if (session.voiceMode === "spar") {
+    // Walkie-talkie contract: no barge-in, no continuous streaming — only
+    // forward PCM while the talk button is actively held, and only once
+    // the server has confirmed it's listening for the next turn.
+    if (
+      session.sparRecording &&
+      message.pcm instanceof ArrayBuffer &&
+      hasOpenWebSocket(session) &&
+      !session.drainRequested
+    ) {
+      session.websocket.send(message.pcm);
+    }
     return;
   }
 
@@ -1261,6 +1360,8 @@ async function startSession() {
     pendingTranscript: { user: null, assistant: null },
     usageWarningSpoken: false,
     terminalDetail: null,
+    voiceMode: selectedVoiceMode,
+    sparRecording: false,
   };
   activeSession = session;
   transcriptUserScrolledUp = false;
@@ -1314,7 +1415,7 @@ async function startSession() {
       await cleanupSession(session);
       return;
     }
-    session.websocket = createWebSocket(ticket);
+    session.websocket = createWebSocket(ticket, session.voiceMode);
     attachWebSocketHandlers(session);
     await waitForWebSocket(session);
     if (!isCurrent(session) || session.drainRequested) {
@@ -1322,7 +1423,14 @@ async function startSession() {
       return;
     }
     session.voiceState = "listening";
-    setStatus("listening", "Sag einfach, was Hermes tun soll.");
+    if (session.voiceMode === "spar") {
+      // No server "mode" event exists for the cascade (that event is
+      // Live-only) — the badge/accent switch to teal right here instead.
+      renderModeBadge("spar");
+      setStatus("listening", "Halte den Knopf gedrückt und sprich.");
+    } else {
+      setStatus("listening", "Sag einfach, was Hermes tun soll.");
+    }
   } catch (error) {
     if (!isCurrent(session)) {
       return;
@@ -1378,6 +1486,52 @@ sessionButton.addEventListener("click", () => {
     void startSession();
   }
 });
+
+// Sparmodus push-to-talk: hold to record one turn, release to send it —
+// the walkie-talkie contract has no server-side barge-in/VAD endpoint, so
+// the turn boundary is entirely this button.
+function canStartSparTurn(session) {
+  return (
+    Boolean(session) &&
+    session.voiceMode === "spar" &&
+    hasOpenWebSocket(session) &&
+    !session.drainRequested &&
+    !session.sparRecording
+  );
+}
+
+function startSparTurn() {
+  const session = activeSession;
+  if (!canStartSparTurn(session)) {
+    return;
+  }
+  session.sparRecording = true;
+  talkButtonElement?.setAttribute("data-recording", "true");
+  statusDetailElement.textContent = "Ich höre zu …";
+}
+
+function endSparTurn() {
+  const session = activeSession;
+  if (!session || !session.sparRecording) {
+    return;
+  }
+  session.sparRecording = false;
+  talkButtonElement?.setAttribute("data-recording", "false");
+  if (hasOpenWebSocket(session)) {
+    session.websocket.send(JSON.stringify({ type: "turn_end" }));
+    statusDetailElement.textContent = "Hermes denkt nach …";
+  }
+}
+
+if (talkButtonElement) {
+  talkButtonElement.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    startSparTurn();
+  });
+  talkButtonElement.addEventListener("pointerup", endSparTurn);
+  talkButtonElement.addEventListener("pointercancel", endSparTurn);
+  talkButtonElement.addEventListener("pointerleave", endSparTurn);
+}
 
 function submitComposerText() {
   const text = composerInput.value.trim();

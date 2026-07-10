@@ -446,7 +446,7 @@ def test_voice_sw_js_asset_sets_service_worker_allowed_header(tmp_path, monkeypa
     explicit ``scope`` wider than the script's own directory (here that's
     moot since both are "/voice", but the header is the documented opt-in
     browsers require whenever `scope` is passed explicitly at all — see
-    app.js' ``register("/voice/sw.js", { scope: "/voice" })``). Sibling
+    app.js' ``register("/voice/sw.js", { scope: "/voice/" })``). Sibling
     assets must NOT carry the header — it is sw.js-specific, not folded
     into the shared ``_NO_STORE_HEADERS``.
     """
@@ -546,7 +546,7 @@ def test_voice_client_uses_single_use_ticket_without_long_lived_ws_token():
     # breaks the app itself.
     assert 'if ("serviceWorker" in navigator)' in script
     assert (
-        'navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice" })'
+        'navigator.serviceWorker.register("/voice/sw.js", { scope: "/voice/" })'
         in script
     )
     assert ".catch(() => {})" in script
@@ -2906,3 +2906,360 @@ def test_voice_client_video_sharing_autostop_and_indicator_tripwires():
     assert 'class="sharing-preview"' in document
     assert "sharingIndicatorElement.hidden = true" in script
     assert "sharingPreviewElement.hidden = true" in script
+
+
+# =============================================================================
+# Voice Sparmodus (cascade) — additive, own websocket route
+# =============================================================================
+
+
+def test_spar_web_config_defaults():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({})
+    assert cfg.enabled is True
+    assert cfg.llm_lane == "codex"
+    assert cfg.llm_model is None
+    assert cfg.whisper_model == "small"
+    assert cfg.piper_voice_path.endswith("de_DE-thorsten-medium.onnx")
+    assert cfg.max_tool_hops == 2
+    assert cfg.llm_timeout_seconds == 25.0
+
+
+def test_spar_web_config_enabled_only_false_disables():
+    from hermes_cli.voice_ws import spar_web_config
+
+    assert spar_web_config({"voice_web": {"spar": {"enabled": False}}}).enabled is False
+    # Anything other than the literal False keeps it enabled (fail-open — a
+    # malformed 'enabled' must not silently kill the $0 lane).
+    assert spar_web_config({"voice_web": {"spar": {"enabled": "false"}}}).enabled is True
+
+
+@pytest.mark.parametrize("value", ["openrouter", "gemini", "", 1, None])
+def test_spar_web_config_invalid_llm_lane_falls_back_to_codex(value):
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"llm_lane": value}}})
+    assert cfg.llm_lane == "codex"
+
+
+def test_spar_web_config_accepts_claude_lane():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"llm_lane": "claude"}}})
+    assert cfg.llm_lane == "claude"
+
+
+def test_spar_web_config_claude_lane_defaults_model_to_haiku():
+    from hermes_cli.voice_ws import spar_web_config
+
+    # The fastest subscription model, so the persistent-child claude-lane
+    # stays inside the walkie-talkie latency budget without an explicit
+    # voice_web.spar.llm_model override.
+    cfg = spar_web_config({"voice_web": {"spar": {"llm_lane": "claude"}}})
+    assert cfg.llm_model == "haiku"
+
+
+def test_spar_web_config_claude_lane_llm_model_override_wins():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config(
+        {"voice_web": {"spar": {"llm_lane": "claude", "llm_model": "sonnet"}}}
+    )
+    assert cfg.llm_model == "sonnet"
+
+
+@pytest.mark.parametrize("value", ["", "   ", 42, False, []])
+def test_spar_web_config_invalid_whisper_model_falls_back(value):
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"whisper_model": value}}})
+    assert cfg.whisper_model == "small"
+
+
+def test_spar_web_config_accepts_whisper_model_override():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"whisper_model": "tiny"}}})
+    assert cfg.whisper_model == "tiny"
+
+
+def test_spar_web_config_accepts_piper_voice_path_override(tmp_path):
+    from hermes_cli.voice_ws import spar_web_config
+
+    override = str(tmp_path / "custom-voice.onnx")
+    cfg = spar_web_config({"voice_web": {"spar": {"piper_voice_path": override}}})
+    assert cfg.piper_voice_path == override
+
+
+@pytest.mark.parametrize("value", [-1, "two", None, 3.5])
+def test_spar_web_config_invalid_max_tool_hops_falls_back(value):
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"max_tool_hops": value}}})
+    assert cfg.max_tool_hops == 2
+
+
+def test_spar_web_config_accepts_max_tool_hops_zero():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"max_tool_hops": 0}}})
+    assert cfg.max_tool_hops == 0
+
+
+@pytest.mark.parametrize("value", [0, -5, "slow", None, float("nan")])
+def test_spar_web_config_invalid_llm_timeout_falls_back(value):
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config({"voice_web": {"spar": {"llm_timeout_seconds": value}}})
+    assert cfg.llm_timeout_seconds == 25.0
+
+
+def test_spar_web_config_accepts_llm_model_and_system_instruction_overrides():
+    from hermes_cli.voice_ws import spar_web_config
+
+    cfg = spar_web_config(
+        {
+            "voice_web": {
+                "spar": {
+                    "llm_model": "gpt-5.4-mini",
+                    "system_instruction": "Custom persona.",
+                }
+            }
+        }
+    )
+    assert cfg.llm_model == "gpt-5.4-mini"
+    assert cfg.system_instruction == "Custom persona."
+
+
+def _fake_spar_synthesize_to_wav(text, *, voice_path, output_path):
+    # A minimal-but-real PCM16 WAV — exercises the real ffmpeg transcode
+    # path in voice_ws (_transcode_to_pcm24k) instead of faking that too.
+    with wave.open(str(output_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(22050)
+        wav_file.writeframes(b"\x10\x00" * 2205)  # 0.1s of tone-ish PCM
+
+
+def test_spar_turn_runs_stt_llm_tool_tts_over_one_websocket(monkeypatch):
+    from hermes_cli import voice_ws
+
+    fixture = FIXTURE.read_bytes()
+    assert len(fixture) > 20_000
+
+    tool_calls = []
+
+    def fake_transcribe_wav(wav_path, *, model_size, language):
+        assert model_size == "small"
+        assert language == "de-DE"
+        with wave.open(wav_path, "rb") as wav_file:
+            assert wav_file.getframerate() == 16_000
+            assert wav_file.getnchannels() == 1
+        return "starte den terminal befehl"
+
+    llm_replies = iter(
+        [
+            'TOOL: send_to_terminal {"session": "work", "command": "ls"}',
+            "Erledigt, ich habe ls ausgeführt.",
+        ]
+    )
+
+    async def fake_call_llm_lane(lane, prompt, *, model, timeout, cwd=None):
+        assert lane == "codex"
+        return next(llm_replies)
+
+    async def fake_tool_execute(name, args):
+        tool_calls.append((name, args))
+        return {"ok": True}
+
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", fake_transcribe_wav)
+    monkeypatch.setattr(voice_ws, "spar_synthesize_to_wav", _fake_spar_synthesize_to_wav)
+    monkeypatch.setattr(
+        "hermes_cli.voice_spar_session.call_llm_lane", fake_call_llm_lane
+    )
+    monkeypatch.setattr(
+        voice_ws.VoiceToolExecutor, "execute", lambda self, name, args: fake_tool_execute(name, args)
+    )
+
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_bytes(fixture)
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "starte den terminal befehl",
+        }
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Erledigt, ich habe ls ausgeführt.",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        audio = ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        usage = ws.receive_json()
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert audio
+    assert usage == {
+        "type": "usage_update",
+        "mode": "spar",
+        "estimated_usd": 0,
+        "label": "$0 (Abo)",
+        "complete": True,
+    }
+    assert tool_calls == [("send_to_terminal", {"session": "work", "command": "ls"})]
+
+
+def test_spar_turn_without_tool_call_speaks_direct_reply(monkeypatch):
+    from hermes_cli import voice_ws
+
+    fixture = FIXTURE.read_bytes()
+
+    def fake_transcribe_wav(wav_path, *, model_size, language):
+        return "wie spät ist es"
+
+    async def fake_call_llm_lane(lane, prompt, *, model, timeout, cwd=None):
+        return "Ich habe keine Uhr, aber frag gern nochmal."
+
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", fake_transcribe_wav)
+    monkeypatch.setattr(voice_ws, "spar_synthesize_to_wav", _fake_spar_synthesize_to_wav)
+    monkeypatch.setattr(
+        "hermes_cli.voice_spar_session.call_llm_lane", fake_call_llm_lane
+    )
+
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_bytes(fixture)
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "wie spät ist es",
+        }
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Ich habe keine Uhr, aber frag gern nochmal.",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        assert ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        assert ws.receive_json()["type"] == "usage_update"
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+
+def test_spar_no_audio_reports_structured_error(monkeypatch):
+    from hermes_cli import voice_ws
+
+    called = False
+
+    def unexpected_transcribe(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not transcribe an empty turn")
+
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", unexpected_transcribe)
+
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {
+            "type": "error",
+            "error": {"code": "no_audio", "message": "Es wurde kein Audio empfangen."},
+        }
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+    assert called is False
+
+
+def test_spar_disabled_closes_connection():
+    app = _voice_app(extra_voice_web={"spar": {"enabled": False}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        event = ws.receive()
+        assert event["type"] == "websocket.close"
+        assert event["code"] == 4404
+
+
+def test_spar_odd_sized_pcm_frame_returns_structured_error():
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_bytes(b"\x00")
+        assert ws.receive_json() == {
+            "type": "error",
+            "error": {
+                "code": "invalid_pcm_frame",
+                "message": "PCM16-Frames müssen eine gerade Bytezahl haben.",
+            },
+        }
+        assert ws.receive()["type"] == "websocket.close"
+
+
+def test_spar_video_frame_is_cached_for_look_closely(monkeypatch):
+    """A video_frame control message is cached (not relayed) — look_closely
+    consumes it via the same VideoFrameCache the Live bridge uses."""
+    from hermes_cli import voice_ws
+
+    frame_bytes = FIXTURE_VIDEO.read_bytes()
+    stored: list[bytes] = []
+    real_store = voice_ws.VideoFrameCache.store
+
+    def spy_store(self, frame):
+        stored.append(frame)
+        return real_store(self, frame)
+
+    monkeypatch.setattr(voice_ws.VideoFrameCache, "store", spy_store)
+
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_json(
+            {
+                "type": "video_frame",
+                "source": "camera",
+                "data": base64.b64encode(frame_bytes).decode("ascii"),
+            }
+        )
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert stored == [frame_bytes]
+
+
+def test_spar_llm_lane_failure_reports_structured_error(monkeypatch):
+    from hermes_cli import voice_ws
+    from hermes_cli.voice_spar_session import LlmLaneError
+
+    fixture = FIXTURE.read_bytes()
+
+    def fake_transcribe_wav(wav_path, *, model_size, language):
+        return "hallo"
+
+    async def failing_call_llm_lane(lane, prompt, *, model, timeout, cwd=None):
+        raise LlmLaneError("Codex-Lane-Fehler (exit 1): boom")
+
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", fake_transcribe_wav)
+    monkeypatch.setattr(
+        "hermes_cli.voice_spar_session.call_llm_lane", failing_call_llm_lane
+    )
+
+    app = _voice_app(extra_voice_web={"spar": {}})
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_bytes(fixture)
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "hallo",
+        }
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert error_event["error"]["code"] == "llm_lane_failed"
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"

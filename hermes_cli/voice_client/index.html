@@ -617,6 +617,81 @@
         box-shadow: 0 0.9rem 2.4rem color-mix(in srgb, var(--color-status-alert) 30%, transparent);
       }
 
+      /* Mode toggle: Live (bronze, today's path) vs. Spar (teal, $0
+         cascade). Only choosable before a session starts — once a session
+         is active the choice is locked in (mirrored onto <body data-mode>)
+         until the next Start. */
+      #mode-toggle {
+        display: inline-flex;
+        gap: 0.15rem;
+        padding: 0.15rem;
+        border: 1px solid var(--color-line);
+        border-radius: 999px;
+        background: var(--color-surface-2);
+      }
+
+      #mode-toggle button {
+        border: 0;
+        border-radius: 999px;
+        padding: 0.3rem 0.7rem;
+        font: inherit;
+        font-size: 0.68rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-ink-2);
+        background: transparent;
+        cursor: pointer;
+      }
+
+      #mode-toggle button[aria-checked="true"] {
+        color: var(--color-surface-0);
+      }
+
+      #mode-toggle button[data-mode-option="live"][aria-checked="true"] {
+        background: var(--color-bronze);
+      }
+
+      #mode-toggle button[data-mode-option="spar"][aria-checked="true"] {
+        background: var(--color-spar);
+      }
+
+      #mode-toggle button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      #mode-badge[data-mode="spar"] {
+        border-color: var(--color-spar);
+        color: var(--color-spar-hi);
+      }
+
+      #talk-button {
+        min-height: 4.25rem;
+        border: 0;
+        border-radius: 999px;
+        color: var(--color-surface-0);
+        background: var(--color-spar);
+        box-shadow: 0 0.9rem 2.4rem color-mix(in srgb, var(--color-spar) 35%, transparent);
+        font: inherit;
+        font-size: 1.02rem;
+        font-weight: 800;
+        cursor: pointer;
+        touch-action: none;
+        user-select: none;
+      }
+
+      #talk-button[data-recording="true"] {
+        background: var(--color-spar-hi);
+      }
+
+      #talk-button:disabled {
+        color: var(--color-ink-3);
+        background: var(--color-surface-2);
+        box-shadow: none;
+        cursor: wait;
+      }
+
       @media (min-width: 42rem) {
         main {
           padding-inline: 1.5rem;
@@ -688,6 +763,24 @@
       <header class="brand">
         <img src="/voice/icon.svg" alt="" width="32" height="32" />
         <h1>Hermes Voice</h1>
+        <div id="mode-toggle" role="radiogroup" aria-label="Sprachmodus">
+          <button
+            type="button"
+            data-mode-option="live"
+            role="radio"
+            aria-checked="true"
+          >
+            Live
+          </button>
+          <button
+            type="button"
+            data-mode-option="spar"
+            role="radio"
+            aria-checked="false"
+          >
+            Spar
+          </button>
+        </div>
         <span id="mode-badge" hidden></span>
         <button id="install-chip" type="button" class="chip-button" hidden>Installieren</button>
         <button
@@ -759,6 +852,14 @@
       </section>
 
       <div class="action-bar">
+        <button
+          id="talk-button"
+          type="button"
+          hidden
+          aria-label="Gedrückt halten zum Sprechen"
+        >
+          Gedrückt halten zum Sprechen
+        </button>
         <button id="session-button" type="button" aria-label="Sprachsitzung starten">
           Start
         </button>

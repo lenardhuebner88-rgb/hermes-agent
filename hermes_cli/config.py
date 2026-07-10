@@ -973,6 +973,29 @@ DEFAULT_CONFIG = {
                 "output_per_1m": 1.50,
             },
         },
+        # Voice-Sparmodus: a $0-marginal-cost cascade (local STT -> a
+        # subscription-lane LLM CLI turn -> local TTS) offered as a Live
+        # alternative, never as its replacement. See
+        # voice_ws.spar_web_config() for validation/fallback rules and
+        # hermes_cli/voice_spar_session.py for the pipeline itself.
+        "spar": {
+            "enabled": True,
+            # "codex" | "claude" — both run on their subscription/OAuth CLI
+            # lane, never OpenRouter, never a raw provider API key.
+            "llm_lane": "codex",
+            # None uses the CLI's own configured default model.
+            "llm_model": None,
+            # faster-whisper model size; "small" chosen 2026-07-10 after a
+            # CPU latency/quality probe (tiny/base misheard German words a
+            # "small" model got right — see the builder report).
+            "whisper_model": "small",
+            # None resolves to <hermes_home>/voice/piper/de_DE-thorsten-medium.onnx
+            # (downloaded via `pip install piper-tts` +
+            # `python -m piper.download_voices`).
+            "piper_voice_path": None,
+            "max_tool_hops": 2,
+            "llm_timeout_seconds": 25.0,
+        },
     },
     "agent": {
         "max_turns": 90,
