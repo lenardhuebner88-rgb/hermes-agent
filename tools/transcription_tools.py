@@ -29,6 +29,7 @@ Usage::
 
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -620,6 +621,7 @@ def _transcribe_command_stt(
     config: Dict[str, Any],
     stt_config: Dict[str, Any],
     model_override: Optional[str] = None,
+    language_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
@@ -661,7 +663,8 @@ def _transcribe_command_stt(
     timeout = _get_command_stt_timeout(config)
     output_format = _get_command_stt_output_format(config)
     language = (
-        config.get("language")
+        language_override
+        or config.get("language")
         or stt_config.get("language")
         or DEFAULT_COMMAND_STT_LANGUAGE
     )
@@ -1113,7 +1116,7 @@ def _load_local_whisper_model(model_name: str):
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
-def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     global _local_model, _local_model_name
 
@@ -1128,9 +1131,10 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
             _local_model = _load_local_whisper_model(model_name)
             _local_model_name = model_name
 
-        # Language: config.yaml (stt.local.language) > env var > auto-detect.
+        # Language: explicit call arg > config.yaml (stt.local.language) > env var > auto-detect.
         _forced_lang = (
-            _load_stt_config().get("local", {}).get("language")
+            language
+            or _load_stt_config().get("local", {}).get("language")
             or os.getenv(LOCAL_STT_LANGUAGE_ENV)
             or None
         )
@@ -1199,7 +1203,7 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
         return None, f"Failed to convert audio for local STT: {details}"
 
 
-def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local_command(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     command_template = _get_local_command_template()
     if not command_template:
@@ -1211,9 +1215,10 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             ),
         }
 
-    # Language: config.yaml (stt.local.language) > env var > "en" default.
+    # Language: explicit call arg > config.yaml (stt.local.language) > env var > "en" default.
     language = (
-        _load_stt_config().get("local", {}).get("language")
+        language
+        or _load_stt_config().get("local", {}).get("language")
         or os.getenv(LOCAL_STT_LANGUAGE_ENV)
         or DEFAULT_LOCAL_STT_LANGUAGE
     )
@@ -1275,7 +1280,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_groq(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using Groq Whisper API (free tier available)."""
     api_key = get_env_value("GROQ_API_KEY")
     if not api_key:
@@ -1293,11 +1298,16 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
         try:
+            create_kwargs: Dict[str, Any] = {
+                "model": model_name,
+                "response_format": "text",
+            }
+            if language:
+                create_kwargs["language"] = language
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
-                    model=model_name,
                     file=audio_file,
-                    response_format="text",
+                    **create_kwargs,
                 )
 
             transcript_text = str(transcription).strip()
@@ -1327,7 +1337,7 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_openai(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using OpenAI Whisper API (paid)."""
     try:
         api_key, base_url = _resolve_openai_audio_client_config()
@@ -1350,11 +1360,16 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
+            create_kwargs: Dict[str, Any] = {
+                "model": model_name,
+                "response_format": "text" if model_name == "whisper-1" else "json",
+            }
+            if language:
+                create_kwargs["language"] = language
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
-                    model=model_name,
                     file=audio_file,
-                    response_format="text" if model_name == "whisper-1" else "json",
+                    **create_kwargs,
                 )
 
             transcript_text = _extract_transcript_text(transcription)
@@ -1384,7 +1399,7 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_mistral(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using Mistral Voxtral Transcribe API.
 
     Uses the ``mistralai`` Python SDK to call ``/v1/audio/transcriptions``.
@@ -1402,11 +1417,16 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
             pass
         from mistralai.client import Mistral
 
+        complete_kwargs: Dict[str, Any] = {}
+        if language:
+            complete_kwargs["language"] = language
+
         with Mistral(api_key=api_key) as client:
             with open(file_path, "rb") as audio_file:
                 result = client.audio.transcriptions.complete(
                     model=model_name,
                     file={"content": audio_file, "file_name": Path(file_path).name},
+                    **complete_kwargs,
                 )
 
             transcript_text = _extract_transcript_text(result)
@@ -1428,7 +1448,7 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_xai(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using xAI Grok STT API.
 
     Uses the ``POST /v1/stt`` REST endpoint with multipart/form-data.
@@ -1455,7 +1475,8 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
         or XAI_STT_BASE_URL
     ).strip().rstrip("/")
     language = str(
-        xai_config.get("language")
+        language
+        or xai_config.get("language")
         or os.getenv("HERMES_LOCAL_STT_LANGUAGE")
         or DEFAULT_LOCAL_STT_LANGUAGE
     ).strip()
@@ -1535,7 +1556,7 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_elevenlabs(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using ElevenLabs Scribe STT API."""
     api_key = get_env_value("ELEVENLABS_API_KEY")
     if not api_key:
@@ -1548,7 +1569,7 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
         or get_env_value("ELEVENLABS_STT_BASE_URL")
         or ELEVENLABS_STT_BASE_URL
     ).strip().rstrip("/")
-    language_code = str(elevenlabs_config.get("language_code") or "").strip()
+    language_code = str(language or elevenlabs_config.get("language_code") or "").strip()
     tag_audio_events = is_truthy_value(elevenlabs_config.get("tag_audio_events", False))
     diarize = is_truthy_value(elevenlabs_config.get("diarize", False))
 
@@ -1621,7 +1642,7 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(file_path: str, model: Optional[str] = None, language: Optional[str] = None) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -1632,6 +1653,10 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
+        language:  BCP-47 / ISO-639-1 language hint (e.g. "de"). Overrides any
+                   configured provider language. If None, provider auto-detects
+                   or falls back to its configured/default language (unchanged
+                   behavior).
 
     Returns:
         dict with keys:
@@ -1661,38 +1686,38 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = _normalize_local_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local(file_path, model_name)
+        return _transcribe_local(file_path, model_name, language=language)
 
     if provider == "local_command":
         local_cfg = stt_config.get("local", {})
         model_name = _normalize_local_command_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local_command(file_path, model_name)
+        return _transcribe_local_command(file_path, model_name, language=language)
 
     if provider == "groq":
         model_name = model or DEFAULT_GROQ_STT_MODEL
-        return _transcribe_groq(file_path, model_name)
+        return _transcribe_groq(file_path, model_name, language=language)
 
     if provider == "openai":
         openai_cfg = stt_config.get("openai", {})
         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
-        return _transcribe_openai(file_path, model_name)
+        return _transcribe_openai(file_path, model_name, language=language)
 
     if provider == "mistral":
         mistral_cfg = stt_config.get("mistral", {})
         model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
-        return _transcribe_mistral(file_path, model_name)
+        return _transcribe_mistral(file_path, model_name, language=language)
 
     if provider == "xai":
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
-        return _transcribe_xai(file_path, model_name)
+        return _transcribe_xai(file_path, model_name, language=language)
 
     if provider == "elevenlabs":
         elevenlabs_cfg = stt_config.get("elevenlabs", {})
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
-        return _transcribe_elevenlabs(file_path, model_name)
+        return _transcribe_elevenlabs(file_path, model_name, language=language)
 
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
@@ -1708,6 +1733,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             command_provider_config,
             stt_config,
             model_override=model,
+            language_override=language,
         )
 
     # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
@@ -1724,7 +1750,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     # forwards ``language`` from there. Top-level ``model`` argument
     # overrides any config-set model.
     plugin_cfg = stt_config.get(provider, {}) if isinstance(stt_config.get(provider), dict) else {}
-    plugin_language = plugin_cfg.get("language")
+    plugin_language = language or plugin_cfg.get("language")
     plugin_model = model or plugin_cfg.get("model")
     plugin_result = _dispatch_to_plugin_provider(
         file_path,
@@ -1797,3 +1823,121 @@ def _extract_transcript_text(transcription: Any) -> str:
             return value.strip()
 
     return str(transcription).strip()
+
+
+# ---------------------------------------------------------------------------
+# Dictation polish ("Flow polish") — opt-in post-processing of a transcript
+# ---------------------------------------------------------------------------
+#
+# Two-tier design:
+#   1. Deterministic cleanup (always available, no network/LLM dependency):
+#      trim, collapse whitespace, strip standalone filler tokens
+#      (äh/ähm/hm/mhm/uh/um), capitalize after sentence-ending punctuation.
+#   2. LLM pass via the shared ``agent.auxiliary_client.call_llm`` router
+#      (same one-shot-completion helper other tools use outside a full agent
+#      session, e.g. TTS audio-tag rewriting): fixes punctuation/casing,
+#      removes filler words, resolves self-corrections, never adds content.
+#      Bounded to ``_POLISH_TIMEOUT_SECONDS``; any error/timeout falls back
+#      to the deterministic cleanup and reports ``polished: False``.
+
+_FILLER_WORD_RE = re.compile(
+    r"(?<![\wÄÖÜäöüß])(?:äh+m?|hm+|mhm+|uh+|um+)(?![\wÄÖÜäöüß])",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_RE = re.compile(r"([.!?]\s+)([a-zà-öø-ÿ])")
+_POLISH_TIMEOUT_SECONDS = 8.0
+_POLISH_LLM_TASK = "stt_dictation_polish"
+
+
+def _deterministic_polish(text: str) -> str:
+    """Rule-based dictation cleanup — the guaranteed fallback for ``polish``.
+
+    No LLM/network dependency. Trims, collapses whitespace, strips standalone
+    filler tokens, tightens punctuation spacing, and capitalizes sentence
+    starts (Latin scripts).
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    cleaned = _FILLER_WORD_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    cleaned = _SENTENCE_BOUNDARY_RE.sub(
+        lambda m: m.group(1) + m.group(2).upper(), cleaned
+    )
+    return cleaned
+
+
+def _extract_polish_llm_text(response: Any) -> str:
+    """Best-effort extraction of a chat-completion response's message text."""
+    try:
+        choice = response.choices[0]
+        message = getattr(choice, "message", None)
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return str(getattr(message, "content", "") or "")
+    except Exception:
+        return ""
+
+
+def polish_transcript(text: str, language: Optional[str] = None) -> Dict[str, Any]:
+    """Post-process a raw dictation transcript for Wispr-Flow-style output.
+
+    Tries an LLM pass (fix punctuation/casing, drop filler words, resolve
+    self-corrections) via the shared auxiliary LLM router, bounded to
+    ``_POLISH_TIMEOUT_SECONDS``. On any error/timeout — no auxiliary
+    provider configured, network failure, empty response — falls back to
+    the deterministic rule-based cleanup, which needs no LLM/gateway.
+
+    Args:
+        text:     Raw transcript to clean up.
+        language: Optional language hint passed through to the prompt.
+
+    Returns:
+        ``{"text": str, "polished": bool}`` — ``polished`` is True only when
+        the LLM pass actually produced the returned text.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return {"text": raw, "polished": False}
+
+    deterministic = _deterministic_polish(raw)
+
+    try:
+        from agent.auxiliary_client import call_llm
+
+        lang_hint = f" The transcript is in language '{language}'." if language else ""
+        system_prompt = (
+            "You clean up a raw speech-to-text dictation transcript for a "
+            "messaging/note-taking app.\n\n"
+            "Rules:\n"
+            "- Fix punctuation and capitalization.\n"
+            "- Remove filler words (äh, ähm, um, uh, hm) and false starts.\n"
+            "- Resolve self-corrections: when the speaker corrects themselves "
+            "(e.g. \"nein, ich meine X\" / \"no wait, I mean X\"), keep only "
+            "the corrected version X and drop the retracted part.\n"
+            "- NEVER add new content, facts, or words that weren't spoken.\n"
+            "- Preserve the original spoken language." + lang_hint + "\n"
+            "- Output ONLY the cleaned transcript text — no quotes, no "
+            "commentary, no markdown."
+        )
+        response = call_llm(
+            task=_POLISH_LLM_TASK,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": raw},
+            ],
+            temperature=0.2,
+            timeout=_POLISH_TIMEOUT_SECONDS,
+        )
+        polished_text = _extract_polish_llm_text(response).strip()
+        if polished_text:
+            return {"text": polished_text, "polished": True}
+    except Exception as exc:
+        logger.info(
+            "STT dictation polish (LLM) failed, using deterministic cleanup: %s", exc,
+        )
+
+    return {"text": deterministic, "polished": False}

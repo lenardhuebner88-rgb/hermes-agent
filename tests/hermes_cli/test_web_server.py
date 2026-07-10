@@ -1056,8 +1056,9 @@ class TestWebServerEndpoints:
 
         captured = {}
 
-        def fake_transcribe_audio(path):
+        def fake_transcribe_audio(path, **kwargs):
             captured["path"] = path
+            captured["kwargs"] = kwargs
             return {
                 "success": True,
                 "transcript": "hello from voice mode",
@@ -1079,9 +1080,122 @@ class TestWebServerEndpoints:
             "ok": True,
             "transcript": "hello from voice mode",
             "provider": "test",
+            "polished": False,
         }
         assert captured["path"].endswith(".webm")
         assert not Path(captured["path"]).exists()
+        # Absent language → no kwarg forwarded, unchanged legacy call shape.
+        assert captured["kwargs"] == {}
+
+    def test_audio_transcription_passes_language_hint(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        captured = {}
+
+        def fake_transcribe_audio(path, **kwargs):
+            captured["kwargs"] = kwargs
+            return {
+                "success": True,
+                "transcript": "hallo aus dem diktat",
+                "provider": "test",
+            }
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "language": "de",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["transcript"] == "hallo aus dem diktat"
+        assert captured["kwargs"] == {"language": "de"}
+
+    def test_audio_transcription_rejects_bad_language_tag(self):
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "language": "; rm -rf /",
+            },
+        )
+        assert resp.status_code == 400
+        assert "language" in resp.json()["detail"].lower()
+
+    def test_audio_transcription_polish_deterministic_fallback(self, monkeypatch):
+        """polish=true with no LLM auxiliary backend falls back to deterministic cleanup."""
+        import tools.transcription_tools as transcription_tools
+
+        def fake_transcribe_audio(path, **kwargs):
+            return {
+                "success": True,
+                "transcript": "  äh hallo   das ist ein test.  wie gehts?  ",
+                "provider": "test",
+            }
+
+        def fake_call_llm(*args, **kwargs):
+            raise RuntimeError("no auxiliary provider configured")
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call_llm)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "polish": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["polished"] is False
+        assert payload["transcript"] == "Hallo das ist ein test. Wie gehts?"
+
+    def test_audio_transcription_polish_llm_success(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        def fake_transcribe_audio(path, **kwargs):
+            return {
+                "success": True,
+                "transcript": "äh hallo das ist ein test",
+                "provider": "test",
+            }
+
+        class _FakeMessage:
+            content = "Hallo, das ist ein Test."
+
+        class _FakeChoice:
+            message = _FakeMessage()
+
+        class _FakeResponse:
+            choices = [_FakeChoice()]
+
+        def fake_call_llm(*args, **kwargs):
+            return _FakeResponse()
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call_llm)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "polish": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["polished"] is True
+        assert payload["transcript"] == "Hallo, das ist ein Test."
 
     def test_audio_transcription_rejects_invalid_base64(self):
         resp = self.client.post(

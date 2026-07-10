@@ -1578,3 +1578,168 @@ class TestShellSafety:
         monkeypatch.delenv(LOCAL_STT_COMMAND_ENV, raising=False)
         use_shell = bool(os.getenv(LOCAL_STT_COMMAND_ENV, "").strip())
         assert use_shell is False
+
+
+# ============================================================================
+# language passthrough — Android "Hermes Diktat" dictation upgrade
+# ============================================================================
+
+class TestLanguagePassthrough:
+    def test_groq_forwards_language(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hallo"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_groq
+            _transcribe_groq(sample_wav, "whisper-large-v3-turbo", language="de")
+
+        create_kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+        assert create_kwargs["language"] == "de"
+
+    def test_groq_omits_language_when_absent(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hello"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_groq
+            _transcribe_groq(sample_wav, "whisper-large-v3-turbo")
+
+        create_kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+        assert "language" not in create_kwargs
+
+    def test_openai_forwards_language(self, monkeypatch, sample_wav):
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hallo"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch(
+                 "tools.transcription_tools._resolve_openai_audio_client_config",
+                 return_value=("sk-test", "https://api.openai.com/v1"),
+             ), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_openai
+            _transcribe_openai(sample_wav, "whisper-1", language="de")
+
+        create_kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+        assert create_kwargs["language"] == "de"
+
+    def test_local_explicit_language_overrides_config(self, monkeypatch, sample_wav):
+        from tools.transcription_tools import _transcribe_local
+
+        captured = {}
+
+        class _FakeSegment:
+            text = "hallo"
+
+        class _FakeModel:
+            def transcribe(self, path, **kwargs):
+                captured["kwargs"] = kwargs
+                info = types.SimpleNamespace(language="de", duration=1.0)
+                return [_FakeSegment()], info
+
+        monkeypatch.setattr("tools.transcription_tools._local_model", _FakeModel())
+        monkeypatch.setattr("tools.transcription_tools._local_model_name", "base")
+        monkeypatch.setattr(
+            "tools.transcription_tools._load_stt_config",
+            lambda: {"local": {"language": "en"}},
+        )
+        monkeypatch.setattr("tools.transcription_tools._HAS_FASTER_WHISPER", True)
+
+        result = _transcribe_local(sample_wav, "base", language="de")
+
+        assert result["success"] is True
+        assert captured["kwargs"]["language"] == "de"
+
+
+# ============================================================================
+# polish_transcript / _deterministic_polish — "Flow polish" dictation cleanup
+# ============================================================================
+
+class TestDeterministicPolish:
+    def test_strips_filler_words_case_insensitive(self):
+        from tools.transcription_tools import _deterministic_polish
+        cleaned = _deterministic_polish("äh hallo ÄHM das ist UM ein Hm test")
+        assert "äh" not in cleaned.lower().split()
+        assert "ähm" not in cleaned.lower()
+        assert "um" not in cleaned.lower().split()
+
+    def test_collapses_whitespace_and_trims(self):
+        from tools.transcription_tools import _deterministic_polish
+        assert _deterministic_polish("  hallo   welt  ") == "Hallo welt"
+
+    def test_capitalizes_sentence_starts(self):
+        from tools.transcription_tools import _deterministic_polish
+        cleaned = _deterministic_polish("hallo. wie geht es dir? gut!")
+        assert cleaned == "Hallo. Wie geht es dir? Gut!"
+
+    def test_empty_input_returns_empty(self):
+        from tools.transcription_tools import _deterministic_polish
+        assert _deterministic_polish("   ") == ""
+
+
+class TestPolishTranscript:
+    def test_empty_text_short_circuits(self):
+        from tools.transcription_tools import polish_transcript
+        result = polish_transcript("   ")
+        assert result == {"text": "", "polished": False}
+
+    def test_llm_success_returns_polished_true(self, monkeypatch):
+        from tools.transcription_tools import polish_transcript
+
+        class _FakeMessage:
+            content = "Hallo, das ist ein Test."
+
+        class _FakeChoice:
+            message = _FakeMessage()
+
+        class _FakeResponse:
+            choices = [_FakeChoice()]
+
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponse()
+
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call_llm)
+
+        result = polish_transcript("äh hallo das ist ein test", language="de")
+
+        assert result == {"text": "Hallo, das ist ein Test.", "polished": True}
+        assert captured["timeout"] == 8.0
+        assert captured["task"] == "stt_dictation_polish"
+
+    def test_llm_error_falls_back_to_deterministic(self, monkeypatch):
+        from tools.transcription_tools import polish_transcript
+
+        def fake_call_llm(**kwargs):
+            raise TimeoutError("auxiliary call timed out")
+
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call_llm)
+
+        result = polish_transcript("äh hallo das ist  ein   test")
+
+        assert result["polished"] is False
+        assert "äh" not in result["text"].lower()
+
+    def test_llm_empty_response_falls_back_to_deterministic(self, monkeypatch):
+        from tools.transcription_tools import polish_transcript
+
+        class _FakeMessage:
+            content = "   "
+
+        class _FakeChoice:
+            message = _FakeMessage()
+
+        class _FakeResponse:
+            choices = [_FakeChoice()]
+
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", lambda **kwargs: _FakeResponse())
+
+        result = polish_transcript("äh hallo test")
+
+        assert result["polished"] is False

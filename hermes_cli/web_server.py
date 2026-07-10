@@ -16,6 +16,7 @@ import base64
 import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import hmac
 import importlib.util
 import json
@@ -1099,6 +1100,13 @@ class TelegramOnboardingApply(BaseModel):
 class AudioTranscriptionRequest(BaseModel):
     data_url: str
     mime_type: Optional[str] = None
+    # BCP-47 / ISO-639-1 language hint (e.g. "de", "de-DE"), forwarded to the
+    # STT provider where it supports one. Absent → provider auto-detects
+    # (unchanged behavior).
+    language: Optional[str] = None
+    # Opt-in "Flow polish" pass: dictation cleanup (filler-word removal,
+    # punctuation/casing, self-correction resolution) after transcription.
+    polish: bool = False
 
 
 class ManagedFileUpload(BaseModel):
@@ -3614,6 +3622,12 @@ async def check_hermes_update(force: bool = False):
     return payload
 
 
+# Loose BCP-47 / ISO-639-1 check ("de", "de-DE", "zh-Hans", ...) — just
+# enough to reject garbage before it reaches a provider API, not a full tag
+# validator.
+_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+
+
 @app.post("/api/audio/transcribe")
 async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     data_url = (payload.data_url or "").strip()
@@ -3648,6 +3662,10 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     if len(audio_bytes) > _MAX_TRANSCRIPTION_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Audio recording is too large")
 
+    language = (payload.language or "").strip() or None
+    if language and not _LANGUAGE_TAG_RE.match(language):
+        raise HTTPException(status_code=400, detail="Invalid language tag")
+
     temp_path = ""
     try:
         suffix = _audio_extension_for_mime(mime_type)
@@ -3662,7 +3680,10 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
         from tools.transcription_tools import transcribe_audio
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, transcribe_audio, temp_path)
+        transcribe_kwargs = {"language": language} if language else {}
+        result = await loop.run_in_executor(
+            None, functools.partial(transcribe_audio, temp_path, **transcribe_kwargs)
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -3684,10 +3705,23 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
             detail=error or "Transcription failed",
         )
 
+    transcript = str(result.get("transcript") or "").strip()
+    polished = False
+    if payload.polish and transcript:
+        from tools.transcription_tools import polish_transcript
+
+        loop = asyncio.get_running_loop()
+        polish_result = await loop.run_in_executor(
+            None, polish_transcript, transcript, language
+        )
+        transcript = str(polish_result.get("text") or transcript).strip() or transcript
+        polished = bool(polish_result.get("polished"))
+
     return {
         "ok": True,
-        "transcript": str(result.get("transcript") or "").strip(),
+        "transcript": transcript,
         "provider": result.get("provider"),
+        "polished": polished,
     }
 
 
