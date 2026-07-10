@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { DecisionInboxData } from "../hooks/useControlData";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
+import { healthLed, healthLabel } from "../lib/health";
 import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
+import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
 
 export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard";
@@ -101,6 +103,15 @@ interface Props {
     isStale?: boolean;
     lastUpdated: number | null;
   };
+  /** Puls-Leiste-Werte für die generische Masthead (W2-b). Optional — additiv,
+   *  fehlt sie, rendert die Masthead nur den Routen-Label (kein Instrument-Fake). */
+  pulse?: {
+    workers: number | null;
+    fragen: number | null;
+    fragenTone?: ToneName;
+    kostenUsd: number | null;
+    kostenIsEquivalent?: boolean;
+  };
   commandButtonRef?: React.RefObject<HTMLButtonElement | null>;
   onOpenCommand: () => void;
   children: React.ReactNode;
@@ -141,13 +152,21 @@ interface NavBadgeArgs {
 }
 
 export function ControlShell(props: Props) {
-  const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
+  const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, pulse, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
   const [moreOpen, setMoreOpen] = useState(false);
+  const location = useLocation();
   // Fleet/Start/Statistik bringen ihr eigenes dunkles Masthead mit
   // ([data-fleet-theme] .fleet-header, [data-command-home] .ch-masthead,
   // [data-statistik] .st-masthead) — die generische Leitstand-Masthead würde
   // dort doppelt stehen, daher unterdrückt (vormals fleetBleed/mobileBleed).
-  const hasOwnMasthead = active === "fleet" || active === "inbox" || active === "statistik";
+  // Fix (reviewer P3): frühere Version prüfte den `active`-Tab statt der Route —
+  // /control/issues mappt auf active="statistik" (gleiche Tab-Ökonomie, s.
+  // ControlPage.activeFromPath), hat aber KEIN eigenes Masthead und verlor
+  // dadurch jedes Masthead. Exakter Pfad-Match statt Tab-Vergleich.
+  // Fix (B1): normalisiert Trailing-Slash-Cousins (/control/statistik/) und
+  // deckt die Legacy-Route /control/inbox (eigenes Masthead) mit ab.
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  const hasOwnMasthead = path === "/control" || path === "/control/inbox" || path === "/control/fleet" || path === "/control/statistik";
   const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
 
   return (
@@ -168,7 +187,7 @@ export function ControlShell(props: Props) {
           // nur unsichtbar, statt doppelt zu rendern (kein zweiter Mount-Punkt).
           <div className="hidden"><NotificationBridge inbox={inbox} /></div>
         ) : (
-          <Masthead active={active} inbox={inbox} health={health} onOpenCommand={onOpenCommand} />
+          <Masthead active={active} inbox={inbox} health={health} pulse={pulse} onOpenCommand={onOpenCommand} />
         )}
         <main
           className={cn(
@@ -192,19 +211,27 @@ export function ControlShell(props: Props) {
   );
 }
 
-/** Slim dark route-label bar über <main> für jede View OHNE eigene Masthead
- *  (Fleet/Start/Statistik haben ihre eigene, s.o.). Rechts die geteilten
- *  Utilities — ⌘K nur unterhalb von `tab:` (die Rail trägt ihr eigenes ab
- *  `tab:`). */
-function Masthead({ active, inbox, health, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; onOpenCommand: () => void }) {
+/** Generische Puls-Leiste für jede View OHNE eigene Masthead (Fleet/Start/
+ *  Statistik haben ihre eigene, s.o.) — DESIGN.md "Puls-Leiste contract" /
+ *  SHELL-SPEC.md W2-b. Rechts die geteilten Utilities — ⌘K nur unterhalb von
+ *  `tab:` (die Rail trägt ihr eigenes ab `tab:`). */
+function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; pulse: Props["pulse"]; onOpenCommand: () => void }) {
+  const { gateway, stale, title } = useGatewayHealth(health);
   return (
-    <div data-testid="control-masthead" className="flex items-center justify-between gap-3 border-b border-line bg-surface-1 px-4 py-3 sm:px-6 lg:px-8">
-      <p className="font-display text-emph font-semibold uppercase tracking-[0.08em] text-ink">{navLabel(active)}</p>
-      <div className="flex items-center gap-2">
+    <div data-testid="control-masthead">
+      <PulsLeiste
+        label={navLabel(active)}
+        workers={pulse?.workers ?? null}
+        fragen={pulse?.fragen ?? null}
+        fragenTone={pulse?.fragenTone}
+        kostenUsd={pulse?.kostenUsd ?? null}
+        kostenIsEquivalent={pulse?.kostenIsEquivalent}
+        gateway={{ status: gateway, stale, title }}
+      >
         <NotificationBridge inbox={inbox} />
         <StatusDots health={health} />
         <CommandButton onOpen={onOpenCommand} />
-      </div>
+      </PulsLeiste>
     </div>
   );
 }
@@ -444,22 +471,6 @@ function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
   }, [open]);
 
   return { open, setOpen, ref };
-}
-
-function healthLed(status: HealthStatus | "unknown", stale: boolean): string {
-  if (stale) return "hc-led-warn";
-  if (status === "healthy") return "hc-led-live";
-  if (status === "degraded") return "hc-led-warn";
-  if (status === "offline") return "hc-led-error";
-  return "hc-led-idle";
-}
-
-function healthLabel(status: HealthStatus | "unknown", stale: boolean): string {
-  if (stale) return "stale";
-  if (status === "healthy") return "gesund";
-  if (status === "degraded") return "degraded";
-  if (status === "offline") return "offline";
-  return "unbekannt";
 }
 
 /** Geteilte Health-Ableitung für StatusDots (Masthead) + GatewayLed (Rail) —

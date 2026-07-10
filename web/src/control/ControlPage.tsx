@@ -4,8 +4,9 @@ import { legacyControlRedirectTarget } from "./navigation";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
-import { useDecisionInbox, useHermesWorkers, useLibraryUnread, useProposals, useStrategistCount, useSystemHealth } from "./hooks/useControlData";
+import { useDecisionInbox, useHermesRunsCosts, useHermesWorkers, useLibraryUnread, useProposals, useStrategistCount, useSystemHealth } from "./hooks/useControlData";
 import { useLiveEvents } from "./hooks/useLiveEvents";
+import { costDisplayValue } from "./lib/fleetHub";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -192,6 +193,9 @@ export default function ControlPage() {
   const location = useLocation();
   const proposals = useProposals();
   const workers = useHermesWorkers();
+  // Puls-Leiste (W2-b): poll-key "runs/costs" dedupes with FleetView — zero
+  // new network requests, only a new subscriber to the shared polling store.
+  const runsCosts = useHermesRunsCosts();
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
   const libraryUnread = useLibraryUnread();
@@ -201,6 +205,13 @@ export default function ControlPage() {
   const gPendingRef = useRef<number>(0);
   const active = activeFromPath(location.pathname);
   useLiveEvents();
+
+  // Puls-Leiste data contract (SHELL-SPEC.md W2-b): WORKER = running-filtered
+  // count (fleetHub.deriveKpi's `aktiv` definition, NOT CommandHome's raw
+  // liveWorkers.length); KOSTEN = actual_cost_usd, falls back to the marked
+  // equivalent (fleetHub.costDisplayValue — same rule as Fleet's KPI panel).
+  const pulseWorkers = workers.data ? workers.data.workers.filter((w) => w.run_status === "running").length : null;
+  const pulseKosten = costDisplayValue(runsCosts.data?.today.actual_cost_usd, runsCosts.data?.today.cost_usd_equivalent);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -247,6 +258,7 @@ export default function ControlPage() {
         libraryUnread={active === "bibliothek" ? 0 : libraryUnread}
         strategistCount={strat.data?.count ?? 0}
         health={health}
+        pulse={{ workers: pulseWorkers, fragen: inbox.summary.total, fragenTone: inbox.worstTone, kostenUsd: pulseKosten.value, kostenIsEquivalent: pulseKosten.isEquivalent }}
         onNavigate={(tab) => navigate(tabPath[tab])}
         onPrefetch={prefetchControlView}
         commandButtonRef={commandButtonRef}

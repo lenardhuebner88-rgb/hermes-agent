@@ -126,7 +126,11 @@ One persistent instrument strip at the top of **every** route:
 - **Left:** the route masthead in Archivo expanded caps.
 - **Right:** the same four live micro-instruments on every route, in this
   order — **Worker · Fragen · Kosten heute · Gateway** — giving every route
-  identical muscle-memory geometry.
+  identical muscle-memory geometry. Kosten heute renders in **USD** (`$`,
+  de-comma — `fleetHub.fmtUsd`), not `€` (the werkbank mockup's `€4,12` is
+  illustrative only); currency follows backend field `actual_cost_usd`
+  (falls back to the marked-equivalent `cost_usd_equivalent` when the actual
+  cost is absent — see `fleetHub.costDisplayValue`).
 - Status is never color-only: every LED/dot ships with a label (and a count
   where applicable). No exceptions — this is the one place an operator must
   be able to scan without hovering.

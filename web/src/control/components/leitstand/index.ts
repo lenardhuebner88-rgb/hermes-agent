@@ -9,6 +9,7 @@ export { SectionHeader } from "./SectionHeader";
 export { SubtabChips, type SubtabItem, type SubtabChipClasses } from "./SubtabChips";
 export { ListRow } from "./ListRow";
 export { DrawerShell } from "./DrawerShell";
+export { PulsLeiste, type PulsLeisteGateway } from "./PulsLeiste";
 // StatusChip is already the single shared tinted KPI chip — re-exported here so
 // the Leitstand layer is the one import surface for the whole building-block set.
 export { StatusChip } from "../StatusChip";

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlShell, type ControlTab } from "./ControlShell";
 import type { DecisionInboxData } from "../hooks/useControlData";
+import type { SystemHealthResponse } from "../lib/types";
 
 const notificationBridgeSpy = vi.fn((_props: unknown) => null);
 vi.mock("./NotificationBridge", () => ({ NotificationBridge: (props: unknown) => notificationBridgeSpy(props) }));
@@ -31,10 +32,26 @@ const baseProps = {
   onOpenCommand: vi.fn(),
 };
 
-function renderShell(active: ControlTab) {
+// Mirrors ControlPage's `tabPath` for the tabs these tests use — the
+// masthead's `hasOwnMasthead` fork is pathname-driven (P3 fix), not
+// active-tab-driven, so `path` must default to the real route ControlPage
+// would put that tab at for the existing per-tab assertions below to keep
+// exercising the exact same fork the live app hits. Tests that need to prove
+// the fork independently of the active tab (e.g. the /control/issues P3 case)
+// override `path` explicitly.
+const TEST_TAB_PATH: Partial<Record<ControlTab, string>> = {
+  fleet: "/control/fleet",
+  inbox: "/control",
+  statistik: "/control/statistik",
+  backlog: "/control/backlog",
+  crons: "/control/crons",
+  loops: "/control/loops",
+};
+
+function renderShell(active: ControlTab, options: { path?: string; pulse?: ComponentProps<typeof ControlShell>["pulse"]; health?: ComponentProps<typeof ControlShell>["health"] } = {}) {
   return render(
-    <MemoryRouter>
-      <ControlShell {...baseProps} active={active}>
+    <MemoryRouter initialEntries={[options.path ?? TEST_TAB_PATH[active] ?? "/control"]}>
+      <ControlShell {...baseProps} active={active} pulse={options.pulse} health={options.health ?? baseProps.health}>
         <main>content</main>
       </ControlShell>
     </MemoryRouter>,
@@ -118,5 +135,57 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
   it("mounts NotificationBridge exactly once for a view with the generic masthead", () => {
     renderShell("crons");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("feeds the generic masthead's Puls-Leiste instruments when `pulse` is given (W2-b)", () => {
+    const healthyHealth = {
+      data: {
+        schema: "1",
+        checked_at: 1783025490,
+        overall: "healthy",
+        subsystems: {
+          gateway: { status: "healthy", detail: "", error: null },
+          autoresearch: { status: "healthy", detail: "", error: null },
+          kanban_db: { status: "healthy", detail: "", error: null },
+          kanban_dispatcher: { status: "healthy", detail: "", error: null },
+        },
+      } as unknown as SystemHealthResponse,
+      error: null,
+      isStale: false,
+      lastUpdated: 1783025490,
+    };
+    renderShell("crons", { pulse: { workers: 3, fragen: 2, fragenTone: "amber", kostenUsd: 4.1 }, health: healthyHealth });
+    const masthead = screen.getByTestId("control-masthead");
+    expect(within(masthead).getByText("3")).toBeTruthy();
+    expect(within(masthead).getByText("2")).toBeTruthy();
+    expect(within(masthead).getByText("$4,10")).toBeTruthy();
+    // "gesund" also appears in the legacy StatusDots (Hermes/Dashboard) that
+    // shares the masthead's right-side slot — scope to the Gateway instrument
+    // specifically via its label's sibling value.
+    const gatewayValue = within(masthead).getByText("Gateway").nextElementSibling;
+    expect(gatewayValue?.textContent).toBe("gesund");
+  });
+
+  it("shows the masthead on /control/issues even though the tab economy pins it to statistik (P3 fix)", () => {
+    // ControlPage.activeFromPath maps /control/issues -> active="statistik" (same
+    // tab), but IssuesView has no own masthead — the old active-only check
+    // suppressed it there too. The fork must key off the real pathname.
+    renderShell("statistik", { path: "/control/issues" });
+    expect(screen.getByTestId("control-masthead")).toBeTruthy();
+  });
+
+  it("still suppresses the masthead for the real Statistik route (P3 regression guard)", () => {
+    renderShell("statistik", { path: "/control/statistik" });
+    expect(screen.queryByTestId("control-masthead")).toBeNull();
+  });
+
+  it("suppresses the masthead for the legacy /control/inbox route (B1 fix)", () => {
+    renderShell("inbox", { path: "/control/inbox" });
+    expect(screen.queryByTestId("control-masthead")).toBeNull();
+  });
+
+  it("suppresses the masthead for /control/statistik/ with a trailing slash (B1 fix)", () => {
+    renderShell("statistik", { path: "/control/statistik/" });
+    expect(screen.queryByTestId("control-masthead")).toBeNull();
   });
 });
