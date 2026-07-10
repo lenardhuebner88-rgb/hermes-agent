@@ -44,6 +44,10 @@ const modeBadgeElement = document.querySelector("#mode-badge");
 const installChipElement = document.querySelector("#install-chip");
 const composerForm = document.querySelector("#composer");
 const composerInput = document.querySelector("#composer-input");
+const cameraChipElement = document.querySelector("#camera-chip");
+const screenChipElement = document.querySelector("#screen-chip");
+const sharingIndicatorElement = document.querySelector("#sharing-indicator");
+const sharingPreviewElement = document.querySelector("#sharing-preview");
 
 const NO_SESSION_TEXT_HINT =
   "Starte zuerst eine Sitzung, dann kannst du auch schreiben.";
@@ -51,6 +55,17 @@ const NO_SESSION_TEXT_HINT =
 let activeSession = null;
 let nextSessionId = 0;
 let stashedInstallPrompt = null;
+
+// "Sehen" (camera/screen sharing): state lives outside any voice session
+// object because the toggle chips are always visible in the header — a
+// share can be started before a session exists and must keep running
+// across a mic-session reconnect (see canSendVideoFrame, which reads
+// activeSession fresh on every capture tick).
+let sharingSource = null;
+let sharingStream = null;
+let sharingIntervalId = null;
+let sharingCanvasElement = null;
+let sharingCanvasContext = null;
 
 function isCurrent(session) {
   return activeSession === session;
@@ -405,6 +420,151 @@ function hasOpenWebSocket(session) {
   return session.websocket?.readyState === WebSocket.OPEN;
 }
 
+function canSendVideoFrame(session) {
+  return (
+    Boolean(session) &&
+    hasOpenWebSocket(session) &&
+    session.mode !== "fallback" &&
+    !session.muteMicUntilResponse
+  );
+}
+
+function getSharingCanvas() {
+  if (!sharingCanvasElement) {
+    sharingCanvasElement = document.createElement("canvas");
+    sharingCanvasContext = sharingCanvasElement.getContext("2d");
+  }
+  return sharingCanvasElement;
+}
+
+function encodeBlobAsBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex === -1 ? "" : result.slice(commaIndex + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function captureAndSendFrame() {
+  if (!sharingStream || !canSendVideoFrame(activeSession)) {
+    return;
+  }
+  const videoWidth = sharingPreviewElement.videoWidth;
+  const videoHeight = sharingPreviewElement.videoHeight;
+  if (!videoWidth || !videoHeight) {
+    return;
+  }
+  const longestEdge = Math.max(videoWidth, videoHeight);
+  const scale = longestEdge > 1024 ? 1024 / longestEdge : 1;
+  const canvas = getSharingCanvas();
+  canvas.width = Math.round(videoWidth * scale);
+  canvas.height = Math.round(videoHeight * scale);
+  sharingCanvasContext.drawImage(sharingPreviewElement, 0, 0, canvas.width, canvas.height);
+
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", 0.7);
+  });
+  // Re-check after each await: the share (or the session's WS/mode/mic-gate)
+  // may have changed while the canvas encode was in flight.
+  if (!blob || !sharingStream || !canSendVideoFrame(activeSession)) {
+    return;
+  }
+  const base64Data = await encodeBlobAsBase64(blob);
+  if (!base64Data || !sharingStream || !canSendVideoFrame(activeSession)) {
+    return;
+  }
+  activeSession.websocket.send(
+    JSON.stringify({ type: "video_frame", data: base64Data, source: sharingSource }),
+  );
+}
+
+function stopSharing() {
+  if (sharingIntervalId !== null) {
+    window.clearInterval(sharingIntervalId);
+    sharingIntervalId = null;
+  }
+  if (sharingStream) {
+    // track.stop() intentionally never fires "ended" (spec), so no listener
+    // teardown is needed here — only external cessation (device unplugged,
+    // browser's native "Stop sharing" UI) reaches the handler below.
+    for (const track of sharingStream.getTracks()) {
+      track.stop();
+    }
+  }
+  sharingStream = null;
+  sharingSource = null;
+  sharingPreviewElement.srcObject = null;
+  sharingPreviewElement.hidden = true;
+  sharingIndicatorElement.hidden = true;
+  cameraChipElement.setAttribute("aria-pressed", "false");
+  screenChipElement.setAttribute("aria-pressed", "false");
+}
+
+async function startSharing(source) {
+  // Mutually exclusive: activating one source stops the other first.
+  stopSharing();
+  try {
+    const stream =
+      source === "camera"
+        ? await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+          })
+        : await navigator.mediaDevices.getDisplayMedia({ video: true });
+    sharingStream = stream;
+    sharingSource = source;
+    sharingPreviewElement.srcObject = stream;
+    sharingPreviewElement.hidden = false;
+    sharingIndicatorElement.hidden = false;
+    (source === "camera" ? cameraChipElement : screenChipElement).setAttribute(
+      "aria-pressed",
+      "true",
+    );
+    for (const track of stream.getVideoTracks()) {
+      // The user can stop a screen share via the browser's own "Stop
+      // sharing" UI, bypassing our chip entirely — that fires "ended".
+      track.addEventListener("ended", () => {
+        if (sharingStream === stream) {
+          stopSharing();
+        }
+      });
+    }
+    sharingIntervalId = window.setInterval(() => {
+      void captureAndSendFrame();
+    }, 1000);
+  } catch {
+    stopSharing();
+  }
+}
+
+function toggleSharing(source) {
+  if (sharingSource === source) {
+    stopSharing();
+    return;
+  }
+  void startSharing(source);
+}
+
+function featureDetectScreenShare() {
+  if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
+    screenChipElement.disabled = true;
+    screenChipElement.title =
+      "Bildschirmfreigabe wird von diesem Browser nicht unterstützt.";
+  }
+}
+featureDetectScreenShare();
+
+cameraChipElement.addEventListener("click", () => {
+  toggleSharing("camera");
+});
+screenChipElement.addEventListener("click", () => {
+  toggleSharing("screen");
+});
+
 function handleMicFrame(session, message) {
   if (!isCurrent(session) || session.microphoneStopped) {
     return;
@@ -532,6 +692,11 @@ function handleJsonMessage(session, raw) {
     // fatal signal and has its own handler.
     statusDetailElement.textContent = text;
     clearMicGate(session);
+    if (message.error && message.error.code === "video_unavailable_fallback") {
+      // The server won't accept frames again until the session leaves
+      // fallback mode — stop hammering it and reset the toggle UI.
+      stopSharing();
+    }
     return;
   }
 }
@@ -592,6 +757,7 @@ async function finishSession(
     return;
   }
   session.finishing = true;
+  stopSharing();
   session.pendingTranscript = { user: null, assistant: null };
   hideModeBadge();
   if (session.serverDrainTimer !== null) {
@@ -881,6 +1047,7 @@ async function requestStop(session) {
     return;
   }
 
+  stopSharing();
   session.abortController.abort();
   await cleanupSession(session);
   if (isCurrent(session)) {
@@ -960,6 +1127,7 @@ window.addEventListener("appinstalled", () => {
 });
 
 window.addEventListener("pagehide", () => {
+  stopSharing();
   if (activeSession) {
     void cleanupSession(activeSession);
   }

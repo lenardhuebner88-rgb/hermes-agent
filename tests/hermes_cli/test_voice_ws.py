@@ -2187,3 +2187,79 @@ def test_voice_client_install_chip_and_text_send_and_no_session_hint():
     assert "muteMicUntilResponse" in script
     assert "activeSession.drainRequested" in script
     assert "Starte zuerst eine Sitzung, dann kannst du auch schreiben." in script
+
+
+def test_voice_client_video_sharing_capture_pipeline_tripwires():
+    """"Sehen" client tripwire: camera/screen capture and the wire format
+    sent over the voice websocket. Checks source-level, like the other
+    client tripwires in this file — no jsdom/browser harness exists for the
+    capture pipeline (canvas/MediaStream aren't available under Node)."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+
+    # Feature detection: getDisplayMedia is missing on many Android-Chrome
+    # versions, so the "Bildschirm" chip must be disabled, not left to throw.
+    assert "typeof navigator.mediaDevices?.getDisplayMedia" in script
+    assert "screenChipElement.disabled = true" in script
+    # Camera capture uses the rear/environment-facing camera by default.
+    assert 'facingMode: "environment"' in script
+    assert "navigator.mediaDevices.getUserMedia({" in script
+    assert "navigator.mediaDevices.getDisplayMedia({ video: true })" in script
+
+    # Downscale bound: longest edge stays within the server's decode limits.
+    assert "longestEdge > 1024" in script
+    # JPEG encode at the agreed quality.
+    assert "canvas.toBlob(" in script
+    assert '"image/jpeg", 0.7' in script
+
+    # 1 fps capture cadence.
+    assert "window.setInterval(" in script
+    assert "}, 1000);" in script
+
+    # The capture tick must skip (send nothing) while the WS isn't open, the
+    # session is in fallback mode, or a typed turn's mic-gate is active —
+    # the same guard `handleMicFrame` uses for PCM.
+    assert "function canSendVideoFrame(session)" in script
+    assert "hasOpenWebSocket(session)" in script
+    assert 'session.mode !== "fallback"' in script
+    assert "!session.muteMicUntilResponse" in script
+    assert "canSendVideoFrame(activeSession)" in script
+
+    # Wire format matches the server's `video_frame` control-frame contract.
+    assert 'type: "video_frame"' in script
+    assert "source: sharingSource" in script
+
+
+def test_voice_client_video_sharing_autostop_and_indicator_tripwires():
+    """"Sehen" client tripwire: auto-stop paths and the visible sharing
+    state (red pulsing indicator + mini live preview) in the markup."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+
+    assert "function stopSharing()" in script
+
+    # pagehide must stop sharing (not just the mic session).
+    assert (
+        'window.addEventListener("pagehide", () => {\n  stopSharing();' in script
+    )
+
+    # The browser's native "Stop sharing" UI (or a yanked camera) fires
+    # "ended" on the track, not a client-driven event.
+    assert 'track.addEventListener("ended", () => {' in script
+
+    # The server's fallback advisory must stop sharing, not just toast it.
+    assert '"video_unavailable_fallback"' in script
+    assert (
+        'message.error.code === "video_unavailable_fallback"' in script
+    )
+
+    # Visible sharing state: red pulsing "teilt" indicator + mini preview,
+    # both hidden by default and toggled by stopSharing()/startSharing().
+    assert 'id="sharing-indicator" class="sharing-indicator" hidden' in document
+    assert 'class="sharing-dot"' in document
+    assert ">teilt<" in document
+    assert 'id="sharing-preview"' in document
+    assert 'class="sharing-preview"' in document
+    assert "sharingIndicatorElement.hidden = true" in script
+    assert "sharingPreviewElement.hidden = true" in script

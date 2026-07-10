@@ -63,8 +63,10 @@
 
       .brand {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 0.7rem;
+        row-gap: 0.5rem;
         color: #b8d9cb;
         letter-spacing: 0.13em;
         text-transform: uppercase;
@@ -126,6 +128,82 @@
       #install-chip:focus-visible {
         outline: 3px solid #f8fafc;
         outline-offset: 3px;
+      }
+
+      .share-chip {
+        padding: 0.2rem 0.55rem;
+        border: 1px solid rgba(167, 243, 208, 0.25);
+        border-radius: 999px;
+        color: #b8d9cb;
+        background: transparent;
+        font: inherit;
+        font-size: 0.62rem;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: transform 120ms ease, background 120ms ease;
+      }
+
+      .share-chip:hover:not(:disabled) {
+        background: rgba(167, 243, 208, 0.14);
+        transform: translateY(-1px);
+      }
+
+      .share-chip:focus-visible {
+        outline: 3px solid #f8fafc;
+        outline-offset: 3px;
+      }
+
+      .share-chip[aria-pressed="true"] {
+        color: #fff1f2;
+        background: #be123c;
+        border-color: rgba(190, 18, 60, 0.6);
+      }
+
+      .share-chip:disabled {
+        color: #5c7268;
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      .sharing-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.2rem 0.55rem;
+        border: 1px solid rgba(251, 113, 133, 0.45);
+        border-radius: 999px;
+        color: #fecdd3;
+        background: rgba(190, 18, 60, 0.14);
+        font-size: 0.62rem;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .sharing-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: #fb7185;
+        animation: sharing-pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes sharing-pulse {
+        50% {
+          opacity: 0.3;
+          transform: scale(0.65);
+        }
+      }
+
+      .sharing-preview {
+        width: 96px;
+        height: auto;
+        max-height: 72px;
+        border-radius: 0.6rem;
+        border: 1px solid rgba(167, 243, 208, 0.25);
+        object-fit: cover;
       }
 
       .state-card,
@@ -459,6 +537,36 @@
         <h1>Hermes Voice</h1>
         <span id="mode-badge" hidden></span>
         <button id="install-chip" type="button" hidden>Installieren</button>
+        <button
+          id="camera-chip"
+          type="button"
+          class="share-chip"
+          aria-pressed="false"
+          title="Kamera für Hermes freigeben"
+        >
+          📷 Kamera
+        </button>
+        <button
+          id="screen-chip"
+          type="button"
+          class="share-chip"
+          aria-pressed="false"
+          title="Bildschirm für Hermes freigeben"
+        >
+          🖥️ Bildschirm
+        </button>
+        <span id="sharing-indicator" class="sharing-indicator" hidden>
+          <span class="sharing-dot" aria-hidden="true"></span>
+          <span>teilt</span>
+        </span>
+        <video
+          id="sharing-preview"
+          class="sharing-preview"
+          autoplay
+          muted
+          playsinline
+          hidden
+        ></video>
       </header>
 
       <section class="state-card" aria-labelledby="voice-status">
