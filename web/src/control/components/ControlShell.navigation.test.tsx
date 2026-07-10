@@ -270,3 +270,38 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(screen.getByTestId("control-masthead")).toBeTruthy();
   });
 });
+
+describe("label in name (WCAG 2.5.3)", () => {
+  afterEach(cleanup);
+
+  it("includes the visible Regal label in the Bibliothek bottom-bar tab name", () => {
+    renderShell("fleet");
+    const navigation = screen.getByRole("navigation", { name: "Navigation" });
+    const regalTab = within(navigation).getByRole("button", { name: /Regal/ });
+
+    expect(regalTab).toBe(within(navigation).getByRole("button", { name: /Bibliothek/ }));
+  });
+
+  it("names the mobile masthead command trigger by function and visible shortcut", () => {
+    renderShell("fleet");
+    const masthead = screen.getByTestId("control-masthead");
+    const commandButton = within(masthead).getByRole("button", { name: /Command Palette/ });
+
+    expect(commandButton).toBe(within(masthead).getByRole("button", { name: /⌘K/ }));
+  });
+
+  it("preserves the existing accessible names whose visible mobile labels already match", () => {
+    renderShell("fleet");
+    const navigation = screen.getByRole("navigation", { name: "Navigation" });
+
+    for (const [accessibleName, visibleLabel] of [
+      ["Fleet", "Fleet"],
+      ["Start", "Start"],
+      ["Terminals", "Terminal"],
+      ["Statistik", "Statistik"],
+    ] as const) {
+      const tab = within(navigation).getByRole("button", { name: accessibleName });
+      expect(tab.textContent).toContain(visibleLabel);
+    }
+  });
+});

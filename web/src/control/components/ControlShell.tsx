@@ -433,7 +433,7 @@ function CommandButton({ buttonRef, onOpen }: { buttonRef?: React.RefObject<HTML
   // Hint irrelevant) entfällt: `tab` (600px) liegt unter `sm` (640px), beide
   // Schranken zusammen hätten nie eine sichtbare Breite ergeben.
   return (
-    <button ref={buttonRef} type="button" className="hc-hit inline-flex items-center gap-2 rounded-card border border-line px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink tab:hidden" onClick={onOpen}>
+    <button ref={buttonRef} type="button" aria-label="Command Palette (⌘K)" className="hc-hit inline-flex items-center gap-2 rounded-card border border-line px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink tab:hidden" onClick={onOpen}>
       <Command className="h-4 w-4" />⌘K
     </button>
   );
@@ -506,7 +506,7 @@ function TabButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof t
       onClick={onClick}
       onTouchStart={onPrefetch}
       onFocus={onPrefetch}
-      aria-label={tab.label}
+      aria-label={tab.label.includes(tab.mobileLabel) ? tab.label : `${tab.label} (${tab.mobileLabel})`}
       aria-current={active ? "page" : undefined}
       className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-[11px] text-ink-3", active && "text-live")}
     >
