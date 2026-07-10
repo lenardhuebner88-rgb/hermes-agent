@@ -14,12 +14,29 @@ const { captureMock, fetchJSONMock } = vi.hoisted(() => ({
   fetchJSONMock: vi.fn(),
 }));
 
-vi.mock("@/lib/api", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+vi.mock("@/lib/api", () => {
   return {
-    ...actual,
     api: { captureAgentTerminalWindow: captureMock },
     fetchJSON: fetchJSONMock,
+  };
+});
+
+// This behavior suite does not exercise the shared animated primitive library
+// or Lucide's icon implementation. Keep those large UI-only imports out of the
+// worker so full-suite CPU pressure cannot delay this file's async assertions.
+vi.mock("../components/primitives", () => ({
+  Eyebrow: ({ children }: { children: React.ReactNode }) => <p>{children}</p>,
+}));
+
+vi.mock("lucide-react", () => {
+  const Icon = () => null;
+  return {
+    AlertTriangle: Icon,
+    CheckCircle2: Icon,
+    ClipboardList: Icon,
+    FileText: Icon,
+    Play: Icon,
+    X: Icon,
   };
 });
 
