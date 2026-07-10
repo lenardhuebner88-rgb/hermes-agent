@@ -1637,12 +1637,21 @@ async def test_send_audio_quiet_frame_never_flushes_relay() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_text_flushes_relay_before_send_client_content() -> None:
+async def test_send_text_embeds_relay_frame_inline_into_the_turn() -> None:
+    """Typed turns carry the still as an inline part of the turn itself.
+
+    A realtime video Blob flushed 0 ms before ``send_client_content`` is not
+    yet ingested when the turn generates — the model answers blind
+    (live-probed 2026-07-10). So no realtime video send may happen here; the
+    frame must arrive as ``inline_data`` inside the same Content, before the
+    text part, and the relay must emit its observability event.
+    """
     from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
 
     sdk_session = _FakeSDKSession()
     wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
-    relay = _VideoFrameRelay(asyncio.Queue())
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
     frame = FIXTURE_VIDEO.read_bytes()
     relay.offer(frame)
     text_in: asyncio.Queue[str] = asyncio.Queue()
@@ -1656,10 +1665,29 @@ async def test_send_text_flushes_relay_before_send_client_content() -> None:
     stop_event.set()
     await asyncio.wait_for(send_task, timeout=1)
 
-    assert sdk_session.call_order == ["video", "text"]
-    assert len(sdk_session.video_inputs) == 1
-    assert sdk_session.video_inputs[0].data == frame
+    assert sdk_session.call_order == ["text"]
+    assert sdk_session.video_inputs == []
     assert len(sdk_session.client_contents) == 1
+    parts = sdk_session.client_contents[0][0].parts
+    assert len(parts) == 2
+    assert parts[0].inline_data is not None
+    assert parts[0].inline_data.data == frame
+    assert parts[0].inline_data.mime_type == "image/jpeg"
+    assert parts[1].text == "Hallo Hermes"
+    assert events_out.get_nowait() == {"type": "video_frame_sent"}
+
+    # once-per-turn discipline holds for the inline path too
+    relay.offer(frame)
+    await text_in.put("Noch eine Frage")
+    sdk_session.client_content_sent.clear()
+    stop_event.clear()
+    send_task = asyncio.create_task(
+        wrapper._send_text(sdk_session, text_in, stop_event, relay)
+    )
+    await asyncio.wait_for(sdk_session.client_content_sent.wait(), timeout=1)
+    stop_event.set()
+    await asyncio.wait_for(send_task, timeout=1)
+    assert len(sdk_session.client_contents[1][0].parts) == 1
 
 
 def test_decode_video_frame_rejects_oversized_base64_before_decoding(

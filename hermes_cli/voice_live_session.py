@@ -129,6 +129,27 @@ class _VideoFrameRelay:
                 pass
             return True
 
+    async def take_for_turn(self) -> bytes | None:
+        """Claim the held frame for embedding inline into a typed turn.
+
+        A realtime video Blob flushed 0 ms before ``send_client_content`` is
+        not yet ingested when the turn generates — the model answers blind
+        (live-probed). Typed turns therefore carry the still as an inline
+        part of the turn itself; this hands the frame over under the same
+        once-per-turn discipline as :meth:`flush`.
+        """
+        async with self._lock:
+            if self._frame is None or self._flushed_since_turn:
+                return None
+            frame = self._frame
+            self._frame = None
+            self._flushed_since_turn = True
+            try:
+                self._events_out.put_nowait({"type": "video_frame_sent"})
+            except asyncio.QueueFull:
+                pass
+            return frame
+
     def mark_turn_complete(self) -> None:
         self._flushed_since_turn = False
 
@@ -327,10 +348,21 @@ class GeminiLiveSession:
             if stop_event.is_set():
                 return
             text = get_task.result()
-            if relay is not None:
-                await relay.flush(session)
+            # Typed turns embed the still inline: a realtime flush 0 ms before
+            # the turn is not yet ingested and the model answers blind
+            # (live-probed; the voice path keeps the realtime flush because
+            # ongoing speech gives the ingest a natural head start).
+            frame = await relay.take_for_turn() if relay is not None else None
+            parts: list[types.Part] = []
+            if frame is not None:
+                parts.append(
+                    types.Part(
+                        inline_data=types.Blob(data=frame, mime_type="image/jpeg")
+                    )
+                )
+            parts.append(types.Part(text=text))
             await session.send_client_content(
-                turns=types.Content(role="user", parts=[types.Part(text=text)]),
+                turns=types.Content(role="user", parts=parts),
                 turn_complete=True,
             )
 
