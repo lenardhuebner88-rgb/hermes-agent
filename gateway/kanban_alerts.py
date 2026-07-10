@@ -571,17 +571,17 @@ def evaluate_alerts(
     Mutates ``state`` (run cursor + per-rule rate-limit stamps). Each rule is
     individually fail-soft — one broken rule never blocks the others.
 
-    ``send_fn`` (A1, 2026-07-06, opt-in): when given, it gates the cursor for
-    the two EVENT-cursor rules (``operator_escalation``,
-    ``auto_release_attention`` — see ``_confirm_or_defer``) on a confirmed
-    send instead of advancing eagerly; ``run_failed``/``error_rate``/
-    ``daily_cost`` are unaffected (cooldown-based, not one-shot event
-    cursors). Callers that do NOT pass ``send_fn`` (today: ``gateway.
-    kanban_watchers._kanban_alerts_watcher``, which sends AFTER this
-    function already returned) keep the pre-fix eager-advance-before-send
-    behavior — closing that gap in production needs the watcher's tick loop
-    itself to adopt ``send_fn`` (out of this module's scope; see the
-    docstring note above).
+    ``send_fn`` (A1, 2026-07-06; extended to ``run_failed`` 2026-07-10):
+    when given, it gates the MONOTONIC-cursor rules (``operator_escalation``,
+    ``auto_release_attention``, ``run_failed`` — see ``_confirm_or_defer``
+    and ``SEND_GATED_RULES``) on a confirmed send instead of advancing the
+    cursor eagerly. ``error_rate``/``daily_cost`` stay ungated (no cursor —
+    window-based, the condition re-fires after cooldown, so a dropped send
+    is bounded, not permanent). The production watcher
+    (``gateway.kanban_watchers._kanban_alerts_watcher``) DOES pass
+    ``send_fn`` and filters ``SEND_GATED_RULES`` out of its post-hoc send
+    loop; a caller that omits ``send_fn`` keeps the pre-fix
+    eager-advance-before-send behavior.
     """
     ts = int(now if now is not None else time.time())
     alerts: list[dict] = []
