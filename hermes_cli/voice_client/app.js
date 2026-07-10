@@ -40,9 +40,16 @@ const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
 const emptyTranscriptElement = document.querySelector("#transcript-empty");
 const modeBadgeElement = document.querySelector("#mode-badge");
+const installChipElement = document.querySelector("#install-chip");
+const composerForm = document.querySelector("#composer");
+const composerInput = document.querySelector("#composer-input");
+
+const NO_SESSION_TEXT_HINT =
+  "Starte zuerst eine Sitzung, dann kannst du auch schreiben.";
 
 let activeSession = null;
 let nextSessionId = 0;
+let stashedInstallPrompt = null;
 
 function isCurrent(session) {
   return activeSession === session;
@@ -74,22 +81,29 @@ function renderModeBadge(value) {
   modeBadgeElement.hidden = false;
 }
 
+function setComposerEnabled(enabled) {
+  composerInput.setAttribute("aria-disabled", enabled ? "false" : "true");
+}
+
 function setButton(mode) {
   if (mode === "start") {
     sessionButton.textContent = "Start";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung starten");
+    setComposerEnabled(false);
     return;
   }
   if (mode === "stop") {
     sessionButton.textContent = "Stop";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung beenden");
+    setComposerEnabled(true);
     return;
   }
   sessionButton.textContent = "Wird beendet …";
   sessionButton.disabled = true;
   sessionButton.setAttribute("aria-label", "Sprachsitzung wird beendet");
+  setComposerEnabled(true);
 }
 
 function createTranscriptEntry(role, text) {
@@ -849,6 +863,50 @@ sessionButton.addEventListener("click", () => {
   } else {
     void startSession();
   }
+});
+
+function submitComposerText() {
+  const text = composerInput.value.trim();
+  if (!text) {
+    return;
+  }
+  if (!activeSession || !hasOpenWebSocket(activeSession)) {
+    statusDetailElement.textContent = NO_SESSION_TEXT_HINT;
+    return;
+  }
+  activeSession.websocket.send(JSON.stringify({ type: "text", text }));
+  composerInput.value = "";
+}
+
+composerForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitComposerText();
+});
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  stashedInstallPrompt = event;
+  installChipElement.hidden = false;
+});
+
+async function handleInstallChipClick() {
+  if (!stashedInstallPrompt) {
+    return;
+  }
+  const promptEvent = stashedInstallPrompt;
+  stashedInstallPrompt = null;
+  promptEvent.prompt();
+  await promptEvent.userChoice;
+  installChipElement.hidden = true;
+}
+
+installChipElement.addEventListener("click", () => {
+  void handleInstallChipClick();
+});
+
+window.addEventListener("appinstalled", () => {
+  stashedInstallPrompt = null;
+  installChipElement.hidden = true;
 });
 
 window.addEventListener("pagehide", () => {

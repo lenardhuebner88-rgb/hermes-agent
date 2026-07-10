@@ -473,7 +473,7 @@ def test_live_failure_falls_back_on_same_websocket(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             await audio_in.get()
             audio_in.task_done()
             raise LiveFallbackRequired("quota")
@@ -656,7 +656,7 @@ def test_live_route_seeds_and_updates_resumption_handle_for_valid_session(
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -694,7 +694,7 @@ def test_live_route_ignores_malformed_session_param(monkeypatch, raw_session):
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -725,7 +725,7 @@ def test_live_route_passes_configured_voice_and_persona_to_session(monkeypatch):
             captured["kwargs"] = kwargs
             constructed.set()
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
@@ -751,7 +751,7 @@ def test_live_session_mode_live_event_precedes_listening_state(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             await events_out.put({"type": "mode", "value": "live"})
             await events_out.put({"type": "state", "value": "listening"})
             await asyncio.Event().wait()
@@ -787,6 +787,9 @@ async def _read_test_voice_frames(websocket, fallback_mode):
     fallback_pcm = bytearray()
     events_out = asyncio.Queue()
     disconnected = asyncio.Event()
+    text_in = asyncio.Queue(maxsize=8)
+    config = voice_ws.VoiceWebConfig()
+    text_turn = voice_ws._FallbackTextTurn()
     result = await voice_ws._read_voice_frames(
         websocket,
         audio_in,
@@ -794,6 +797,9 @@ async def _read_test_voice_frames(websocket, fallback_mode):
         events_out,
         fallback_mode,
         disconnected,
+        text_in,
+        config,
+        text_turn,
     )
     return result, fallback_pcm, events_out
 
@@ -1109,7 +1115,7 @@ def test_unexpected_live_error_is_safe_and_never_cascades(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             raise ValueError(f"programmer failure containing {secret}")
 
     async def unexpected_fallback(*args, **kwargs):
@@ -1150,7 +1156,7 @@ def test_interrupt_flushes_playback_semantics_and_live_keeps_receiving(
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             for _ in range(2):
                 frame = await audio_in.get()
                 received_frames.append(frame)
@@ -1669,7 +1675,7 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, audio_in, events_out, tool_executor):
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
             raise voice_ws.LiveFallbackRequired("done")
 
     captured_executor = {}
@@ -1705,3 +1711,256 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
     assert result == "ok"
     assert recorded["prompt"] == "mach das"
     assert recorded["timeout_seconds"] == voice_ws._DELEGATE_LIVE_TIMEOUT_SECONDS == 600.0
+
+
+def test_live_mode_text_frame_emits_transcript_and_reaches_session_text_in(
+    monkeypatch,
+):
+    """C5: a typed turn in Live mode gets its own (non-partial) transcript
+    event and is handed to the Live bridge's ``text_in`` queue verbatim —
+    Gemini never transcribes typed input, so the server is the only source
+    of that transcript event."""
+    from hermes_cli import voice_ws
+
+    captured = {}
+    constructed = threading.Event()
+
+    class CapturingGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            constructed.set()
+
+        async def run(self, audio_in, events_out, tool_executor, text_in=None):
+            captured["text_in"] = text_in
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
+    monkeypatch.setattr(voice_ws, "_LIVE_END_GRACE_SECONDS", 0.01)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        assert constructed.wait(timeout=2)
+        ws.send_json({"type": "text", "text": "Wie spät ist es?"})
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "Wie spät ist es?",
+        }
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+    text_in = captured["text_in"]
+    assert text_in.get_nowait() == "Wie spät ist es?"
+
+
+def test_fallback_text_frame_runs_full_cascade_to_audio_and_listening(monkeypatch):
+    """(a) A typed turn while in fallback mode reuses the cascade pieces
+    minus STT: transcript(user) -> thinking -> transcript(assistant) ->
+    speaking -> >=1 audio frame -> listening."""
+    from hermes_cli import voice_ws
+
+    async def fake_delegate(prompt):
+        assert prompt == "Wie spät ist es?"
+        return "Es ist 14 Uhr."
+
+    async def fake_synthesize(text, language):
+        assert text == "Es ist 14 Uhr."
+        assert language == "de-DE"
+        return b"\x01\x00" * 240
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        ws.send_json({"type": "text", "text": "Wie spät ist es?"})
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "Wie spät ist es?",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Es ist 14 Uhr.",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        audio = ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+
+    assert audio
+
+
+def test_fallback_second_text_frame_while_first_turn_running_gets_text_busy(
+    monkeypatch,
+):
+    """(b) A second typed turn arriving while the first is still in flight
+    (gated open on delegate_to_hermes) is rejected as text_busy; the first
+    turn still completes normally afterward."""
+    from hermes_cli import voice_ws
+
+    delegate_started = threading.Event()
+    release_delegate = threading.Event()
+
+    async def gated_delegate(prompt):
+        delegate_started.set()
+        await asyncio.to_thread(release_delegate.wait)
+        return f"Antwort auf: {prompt}"
+
+    async def fake_synthesize(text, language):
+        return b"\x01\x00" * 4
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", gated_delegate)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
+
+    try:
+        with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+            assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+            ws.send_json({"type": "text", "text": "erste Nachricht"})
+            assert ws.receive_json() == {
+                "type": "transcript",
+                "role": "user",
+                "text": "erste Nachricht",
+            }
+            assert ws.receive_json() == {"type": "state", "value": "thinking"}
+            assert delegate_started.wait(timeout=2)
+
+            ws.send_json({"type": "text", "text": "zweite Nachricht"})
+            assert ws.receive_json() == {
+                "type": "error",
+                "error": {
+                    "code": "text_busy",
+                    "message": "Eine Anfrage läuft bereits. Bitte warte kurz.",
+                },
+            }
+
+            release_delegate.set()
+            assert ws.receive_json() == {
+                "type": "transcript",
+                "role": "assistant",
+                "text": "Antwort auf: erste Nachricht",
+            }
+            assert ws.receive_json() == {"type": "state", "value": "speaking"}
+            assert ws.receive_bytes()
+            assert ws.receive_json() == {"type": "state", "value": "listening"}
+    finally:
+        release_delegate.set()
+
+
+def test_interrupt_stops_running_text_turn_before_audio(monkeypatch):
+    """(c) An interrupt while a typed turn is gated open inside TTS stops
+    it: the interrupted event arrives and no audio is ever produced."""
+    from hermes_cli import voice_ws
+
+    tts_started = threading.Event()
+
+    async def fake_delegate(prompt):
+        return "Antwort"
+
+    async def hanging_synthesize(text, language):
+        tts_started.set()
+        # A plain, never-set asyncio.Event responds to task cancellation
+        # immediately (unlike a threading.Event awaited via asyncio.to_thread,
+        # whose executor thread cannot be interrupted once running) — this
+        # mirrors how the real fallback_synthesize_pcm resolves promptly on
+        # cancellation via asyncio.shield (see _run_sync_cancel_safe).
+        await asyncio.Event().wait()
+        return b"\x00\x00"  # unreachable: nothing ever sets that event
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", hanging_synthesize)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        ws.send_json({"type": "text", "text": "spiel etwas ab"})
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "spiel etwas ab",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Antwort",
+        }
+        assert tts_started.wait(timeout=2)
+
+        ws.send_json({"type": "interrupt"})
+        assert ws.receive_json() == {"type": "interrupted"}
+
+
+def test_invalid_text_frames_return_structured_error_and_session_keeps_working(
+    monkeypatch,
+):
+    """(d) empty, whitespace-only, over-length, and non-string ``text``
+    fields are all rejected as invalid_text_frame without breaking the
+    session — a valid frame afterward still runs the full cascade."""
+    from hermes_cli import voice_ws
+
+    async def fake_delegate(prompt):
+        return f"Antwort: {prompt}"
+
+    async def fake_synthesize(text, language):
+        return b"\x01\x00" * 4
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "")
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
+    monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
+
+    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+
+        for invalid_text in ("", "   ", "x" * 4001, 12345):
+            ws.send_json({"type": "text", "text": invalid_text})
+            payload = ws.receive_json()
+            assert payload["type"] == "error"
+            assert payload["error"]["code"] == "invalid_text_frame"
+
+        ws.send_json({"type": "text", "text": "funktioniert das noch?"})
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "user",
+            "text": "funktioniert das noch?",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json() == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Antwort: funktioniert das noch?",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        assert ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+
+
+def test_voice_client_composer_form_present_with_max_length():
+    """C5 client tripwire: the typed-input composer exists with the
+    protocol's 4000-char cap wired into the input itself."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+
+    assert '<form id="composer">' in document
+    assert 'id="composer-input"' in document
+    assert 'maxlength="4000"' in document
+    assert 'id="composer-submit"' in document
+
+
+def test_voice_client_install_chip_and_text_send_and_no_session_hint():
+    """C5 client tripwire: beforeinstallprompt handling, the typed-turn
+    websocket send, and the exact no-session hint string all exist."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+
+    assert 'window.addEventListener("beforeinstallprompt"' in script
+    assert "event.preventDefault();" in script
+    assert "stashedInstallPrompt" in script
+    assert '"appinstalled"' in script
+    assert (
+        'activeSession.websocket.send(JSON.stringify({ type: "text", text }));'
+        in script
+    )
+    assert "Starte zuerst eine Sitzung, dann kannst du auch schreiben." in script

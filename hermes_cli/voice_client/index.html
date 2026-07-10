@@ -103,6 +103,31 @@
         background: rgba(250, 204, 21, 0.12);
       }
 
+      #install-chip {
+        padding: 0.2rem 0.55rem;
+        border: 1px solid rgba(167, 243, 208, 0.25);
+        border-radius: 999px;
+        color: #b8d9cb;
+        background: transparent;
+        font: inherit;
+        font-size: 0.62rem;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: transform 120ms ease, background 120ms ease;
+      }
+
+      #install-chip:hover {
+        background: rgba(167, 243, 208, 0.14);
+        transform: translateY(-1px);
+      }
+
+      #install-chip:focus-visible {
+        outline: 3px solid #f8fafc;
+        outline-offset: 3px;
+      }
+
       .state-card,
       .transcript-card {
         border: 1px solid rgba(167, 243, 208, 0.15);
@@ -236,6 +261,61 @@
         overflow-wrap: anywhere;
       }
 
+      #composer {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+
+      #composer-input {
+        flex: 1;
+        min-width: 0;
+        padding: 0.65rem 1rem;
+        border: 1px solid rgba(167, 243, 208, 0.15);
+        border-radius: 999px;
+        color: #f2fbf7;
+        background: rgba(255, 255, 255, 0.05);
+        font: inherit;
+        font-size: 0.92rem;
+      }
+
+      #composer-input::placeholder {
+        color: #6f8e82;
+      }
+
+      #composer-input:focus-visible {
+        outline: 2px solid #6ee7b7;
+        outline-offset: 2px;
+      }
+
+      #composer-input[aria-disabled="true"] {
+        color: #7d9189;
+      }
+
+      #composer-submit {
+        padding: 0 1.2rem;
+        border: 0;
+        border-radius: 999px;
+        color: #032018;
+        background: #6ee7b7;
+        font: inherit;
+        font-size: 0.82rem;
+        font-weight: 750;
+        cursor: pointer;
+        transition: transform 120ms ease, background 120ms ease;
+        touch-action: manipulation;
+      }
+
+      #composer-submit:hover {
+        background: #a7f3d0;
+        transform: translateY(-1px);
+      }
+
+      #composer-submit:focus-visible {
+        outline: 3px solid #f8fafc;
+        outline-offset: 3px;
+      }
+
       .action-bar {
         position: sticky;
         bottom: max(0.75rem, env(safe-area-inset-bottom));
@@ -321,6 +401,44 @@
         }
       }
 
+      @media (min-width: 64rem) {
+        main {
+          width: min(100%, 74rem);
+          grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
+          grid-template-rows: auto 1fr auto;
+          grid-template-areas:
+            "brand transcript"
+            "state transcript"
+            "actions transcript";
+        }
+
+        .brand {
+          grid-area: brand;
+        }
+
+        .state-card {
+          grid-area: state;
+        }
+
+        .action-bar {
+          grid-area: actions;
+        }
+
+        .transcript-card {
+          grid-area: transcript;
+          display: flex;
+          flex-direction: column;
+          max-height: calc(100svh - 2.5rem);
+          overflow: hidden;
+        }
+
+        #transcript {
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+        }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         *,
         *::before,
@@ -340,6 +458,7 @@
         <img src="/voice/icon.svg" alt="" width="32" height="32" />
         <h1>Hermes Voice</h1>
         <span id="mode-badge" hidden></span>
+        <button id="install-chip" type="button" hidden>Installieren</button>
       </header>
 
       <section class="state-card" aria-labelledby="voice-status">
@@ -353,6 +472,18 @@
         <h2 class="section-title" id="transcript-title">Gespräch</h2>
         <div id="transcript" aria-live="polite" aria-relevant="additions text"></div>
         <p id="transcript-empty">Noch kein Gespräch.</p>
+        <form id="composer">
+          <input
+            id="composer-input"
+            type="text"
+            placeholder="Oder schreib Hermes …"
+            aria-label="Nachricht an Hermes"
+            aria-disabled="true"
+            autocomplete="off"
+            maxlength="4000"
+          />
+          <button id="composer-submit" type="submit">Senden</button>
+        </form>
       </section>
 
       <div class="action-bar">

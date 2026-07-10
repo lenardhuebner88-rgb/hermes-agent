@@ -64,6 +64,7 @@ _DELEGATE_LIVE_TIMEOUT_SECONDS = 600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
 _FALLBACK_CANCEL_TIMEOUT_SECONDS = 7.0
+_MAX_TEXT_FRAME_CHARS = 4000
 _FFMPEG_TIMEOUT_SECONDS = 60.0
 _OUTPUT_PCM_CHUNK_BYTES = 24_000
 _RESUMPTION_TTL_SECONDS = 60 * 60
@@ -590,6 +591,39 @@ async def _put_live_audio(
         await asyncio.gather(put_task, fallback_task, return_exceptions=True)
 
 
+async def _put_live_text(
+    text_in: asyncio.Queue[str],
+    text: str,
+    fallback_mode: asyncio.Event,
+) -> bool:
+    """Deliver one typed turn to the Live bridge unless fallback wins the race.
+
+    Mirrors :func:`_put_live_audio`'s fallback-aware put, but — unlike a raw
+    PCM frame, which is retained in ``fallback_pcm`` either way — a typed
+    turn has nowhere else to go, so this reports whether it actually reached
+    ``text_in``. The caller must run a turn that didn't make it through the
+    fallback single-flight path instead of silently losing it.
+    """
+    if fallback_mode.is_set():
+        return False
+    put_task = asyncio.create_task(text_in.put(text))
+    fallback_task = asyncio.create_task(fallback_mode.wait())
+    try:
+        await asyncio.wait(
+            {put_task, fallback_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if fallback_task.done() and not put_task.done():
+            put_task.cancel()
+            return False
+        return put_task.done() and not put_task.cancelled()
+    finally:
+        for task in (put_task, fallback_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(put_task, fallback_task, return_exceptions=True)
+
+
 async def _put_event(
     events_out: asyncio.Queue[dict[str, Any] | None],
     event: dict[str, Any],
@@ -678,6 +712,200 @@ def _append_fallback_pcm(
     return True
 
 
+async def _cancel_task_bounded(task: asyncio.Task[Any]) -> None:
+    if task.done():
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    task.cancel()
+    done, _ = await asyncio.wait(
+        {task},
+        timeout=_FALLBACK_CANCEL_TIMEOUT_SECONDS,
+    )
+    if done:
+        await asyncio.gather(task, return_exceptions=True)
+    else:
+        _log.warning("Voice fallback task did not stop within the cleanup bound")
+        task.add_done_callback(_consume_background_task)
+
+
+async def _speak_response(
+    response: str,
+    config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    stop_requested: asyncio.Event,
+) -> None:
+    """Emit the assistant transcript, then synthesize and stream its audio.
+
+    Shared tail for both the spoken cascade (:func:`_run_cascade_fallback`)
+    and a fallback-mode typed turn (:func:`_run_text_cascade`), so the
+    TTS/chunk/stream logic exists exactly once.
+    """
+    if not await _put_event_checkpoint(
+        events_out,
+        {"type": "transcript", "role": "assistant", "text": response},
+        disconnected,
+    ):
+        return
+    audio = await fallback_synthesize_pcm(response, config.language)
+    if stop_requested.is_set():
+        return
+    if not audio or len(audio) % 2:
+        raise VoiceRuntimeError(
+            "invalid_tts_audio",
+            "Die Sprachausgabe hat kein gültiges PCM16-Audio erzeugt.",
+        )
+    if not await _put_event(
+        events_out,
+        {"type": "state", "value": "speaking"},
+        disconnected,
+    ):
+        return
+    for offset in range(0, len(audio), _OUTPUT_PCM_CHUNK_BYTES):
+        if stop_requested.is_set():
+            return
+        if not await _put_event(
+            events_out,
+            {"type": "audio", "data": audio[offset : offset + _OUTPUT_PCM_CHUNK_BYTES]},
+            disconnected,
+        ):
+            return
+    if stop_requested.is_set():
+        return
+    await _put_event_checkpoint(
+        events_out,
+        {"type": "state", "value": "listening"},
+        disconnected,
+    )
+
+
+async def _run_text_cascade(
+    text: str,
+    config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    stop_requested: asyncio.Event,
+) -> None:
+    """Run one fallback-mode typed turn: delegate, then speak the reply.
+
+    The caller already emitted the user transcript event before spawning
+    this — Gemini never transcribes typed input, so unlike
+    :func:`_run_cascade_fallback` there is no STT step here. Runs as a
+    detached task (tracked by the caller's ``_FallbackTextTurn``), so a
+    failure is reported as an error event here instead of propagating to an
+    awaiter — mirroring how the route itself reports a failed
+    :func:`_run_controllable_cascade`.
+    """
+    try:
+        if stop_requested.is_set():
+            return
+        if not await _put_event_checkpoint(
+            events_out,
+            {"type": "state", "value": "thinking"},
+            disconnected,
+        ):
+            return
+        response = await delegate_to_hermes(text)
+        if stop_requested.is_set():
+            return
+        await _speak_response(response, config, events_out, disconnected, stop_requested)
+    except VoiceRuntimeError as exc:
+        await _put_event(
+            events_out,
+            {"type": "error", "error": {"code": exc.code, "message": exc.message}},
+            disconnected,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception("Voice text-turn cascade failed")
+        await _put_event(
+            events_out,
+            {
+                "type": "error",
+                "error": {
+                    "code": "fallback_failed",
+                    "message": "Der Voice-Fallback ist fehlgeschlagen.",
+                },
+            },
+            disconnected,
+        )
+
+
+@dataclass
+class _FallbackTextTurn:
+    """Single-flight tracker for a fallback-mode typed turn.
+
+    Fallback mode has no Live API session to run a typed turn through, so
+    ``_read_voice_frames`` instead runs it via :func:`_run_text_cascade` as
+    a background task — this tracks that task so a second concurrent typed
+    turn is rejected (``text_busy``) instead of interleaved, and so an
+    ``interrupt`` control frame can stop the in-flight one.
+    """
+
+    task: asyncio.Task[None] | None = None
+    stop_requested: asyncio.Event | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+
+def _validated_text_frame(control: dict[str, Any]) -> str | None:
+    """Enforce the ``text`` control-frame contract: non-empty, stripped, ≤4000 chars."""
+    raw_text = control.get("text")
+    if not isinstance(raw_text, str):
+        return None
+    text = raw_text.strip()
+    if not text or len(text) > _MAX_TEXT_FRAME_CHARS:
+        return None
+    return text
+
+
+async def _try_start_fallback_text_turn(
+    text: str,
+    config: VoiceWebConfig,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    text_turn: _FallbackTextTurn,
+    *,
+    emit_transcript: bool,
+) -> None:
+    """Single-flight fallback typed turn: reject if busy, else run it.
+
+    ``emit_transcript`` is False only for the live-mode-to-fallback
+    fall-through in ``_read_voice_frames`` (fallback flipped mid-``_put_
+    live_text`` wait): that caller already put the user transcript event on
+    ``events_out`` itself, and that path can never collide with an
+    already-running turn since no typed turn could have started while the
+    connection was still Live.
+    """
+    if emit_transcript:
+        if text_turn.running:
+            await _put_event(
+                events_out,
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "text_busy",
+                        "message": "Eine Anfrage läuft bereits. Bitte warte kurz.",
+                    },
+                },
+                disconnected,
+            )
+            return
+        await _put_event(
+            events_out,
+            {"type": "transcript", "role": "user", "text": text},
+            disconnected,
+        )
+    stop_requested = asyncio.Event()
+    text_turn.stop_requested = stop_requested
+    text_turn.task = asyncio.create_task(
+        _run_text_cascade(text, config, events_out, disconnected, stop_requested)
+    )
+
+
 async def _read_voice_frames(
     websocket: WebSocket,
     audio_in: asyncio.Queue[bytes],
@@ -685,6 +913,9 @@ async def _read_voice_frames(
     events_out: asyncio.Queue[dict[str, Any] | None],
     fallback_mode: asyncio.Event,
     disconnected: asyncio.Event,
+    text_in: asyncio.Queue[str],
+    config: VoiceWebConfig,
+    text_turn: _FallbackTextTurn,
 ) -> str:
     try:
         while True:
@@ -750,8 +981,56 @@ async def _read_voice_frames(
                 # automatic VAD/barge-in.  The explicit browser control only
                 # flushes queued server audio and tells the client to stop local
                 # playback; the SDK exposes no supported activity_start hook here.
+                if text_turn.running:
+                    assert text_turn.stop_requested is not None
+                    text_turn.stop_requested.set()
+                    await _cancel_task_bounded(text_turn.task)
                 _discard_queued_response_events(events_out)
                 await _put_event(events_out, {"type": "interrupted"}, disconnected)
+                continue
+            if control_type == "text":
+                validated_text = _validated_text_frame(control)
+                if validated_text is None:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_text_frame",
+                                "message": (
+                                    "Die Textnachricht ist leer oder länger als "
+                                    "4000 Zeichen."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                if not fallback_mode.is_set():
+                    await _put_event(
+                        events_out,
+                        {"type": "transcript", "role": "user", "text": validated_text},
+                        disconnected,
+                    )
+                    if await _put_live_text(text_in, validated_text, fallback_mode):
+                        continue
+                    await _try_start_fallback_text_turn(
+                        validated_text,
+                        config,
+                        events_out,
+                        disconnected,
+                        text_turn,
+                        emit_transcript=False,
+                    )
+                    continue
+                await _try_start_fallback_text_turn(
+                    validated_text,
+                    config,
+                    events_out,
+                    disconnected,
+                    text_turn,
+                    emit_transcript=True,
+                )
                 continue
             await _put_event(
                 events_out,
@@ -884,58 +1163,7 @@ async def _run_cascade_fallback(
     response = await delegate_to_hermes(transcript)
     if stop_requested.is_set():
         return
-    if not await _put_event_checkpoint(
-        events_out,
-        {"type": "transcript", "role": "assistant", "text": response},
-        disconnected,
-    ):
-        return
-    audio = await fallback_synthesize_pcm(response, config.language)
-    if stop_requested.is_set():
-        return
-    if not audio or len(audio) % 2:
-        raise VoiceRuntimeError(
-            "invalid_tts_audio",
-            "Die Sprachausgabe hat kein gültiges PCM16-Audio erzeugt.",
-        )
-    if not await _put_event(
-        events_out,
-        {"type": "state", "value": "speaking"},
-        disconnected,
-    ):
-        return
-    for offset in range(0, len(audio), _OUTPUT_PCM_CHUNK_BYTES):
-        if stop_requested.is_set():
-            return
-        if not await _put_event(
-            events_out,
-            {"type": "audio", "data": audio[offset : offset + _OUTPUT_PCM_CHUNK_BYTES]},
-            disconnected,
-        ):
-            return
-    if stop_requested.is_set():
-        return
-    await _put_event_checkpoint(
-        events_out,
-        {"type": "state", "value": "listening"},
-        disconnected,
-    )
-
-
-async def _cancel_task_bounded(task: asyncio.Task[Any]) -> None:
-    if task.done():
-        await asyncio.gather(task, return_exceptions=True)
-        return
-    task.cancel()
-    done, _ = await asyncio.wait(
-        {task},
-        timeout=_FALLBACK_CANCEL_TIMEOUT_SECONDS,
-    )
-    if done:
-        await asyncio.gather(task, return_exceptions=True)
-    else:
-        _log.warning("Voice fallback task did not stop within the cleanup bound")
-        task.add_done_callback(_consume_background_task)
+    await _speak_response(response, config, events_out, disconnected, stop_requested)
 
 
 async def _run_controllable_cascade(
@@ -990,6 +1218,7 @@ async def _run_live_bridge(
     fallback_mode: asyncio.Event,
     disconnected: asyncio.Event,
     session_id: str | None,
+    text_in: asyncio.Queue[str] | None = None,
 ) -> bool:
     if session_id:
         session = GeminiLiveSession(
@@ -1019,7 +1248,7 @@ async def _run_live_bridge(
         )
     )
     try:
-        await session.run(audio_in, events_out, executor)
+        await session.run(audio_in, events_out, executor, text_in=text_in)
     except LiveFallbackRequired:
         fallback_mode.set()
         await _put_event(
@@ -1131,9 +1360,11 @@ def create_voice_router(
         events_out: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
             maxsize=_EVENT_QUEUE_ITEMS
         )
+        text_in: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
         fallback_pcm = bytearray()
         fallback_mode = asyncio.Event()
         disconnected = asyncio.Event()
+        text_turn = _FallbackTextTurn()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
@@ -1145,6 +1376,9 @@ def create_voice_router(
                 events_out,
                 fallback_mode,
                 disconnected,
+                text_in,
+                config,
+                text_turn,
             )
         )
         raw_session_id = websocket.query_params.get("session")
@@ -1166,6 +1400,7 @@ def create_voice_router(
                     fallback_mode,
                     disconnected,
                     session_id,
+                    text_in,
                 )
             )
         else:
@@ -1282,6 +1517,8 @@ def create_voice_router(
                 *(task for task in (reader_task, live_task) if task is not None),
                 return_exceptions=True,
             )
+            if text_turn.task is not None:
+                await _cancel_task_bounded(text_turn.task)
             await _finish_event_sender(events_out, sender_task, disconnected)
             if not disconnected.is_set():
                 try:

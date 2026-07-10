@@ -61,6 +61,10 @@ class _ToolExecutor(Protocol):
 class _LiveSession(Protocol):
     async def send_realtime_input(self, *, audio: types.Blob) -> None: ...
 
+    async def send_client_content(
+        self, *, turns: types.Content, turn_complete: bool = True
+    ) -> None: ...
+
     async def send_tool_response(
         self, *, function_responses: Sequence[types.FunctionResponse]
     ) -> None: ...
@@ -221,6 +225,43 @@ class GeminiLiveSession:
                 raise
             else:
                 self._ack_source_queue(pending)
+
+    async def _send_text(
+        self,
+        session: _LiveSession,
+        text_in: asyncio.Queue[str],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Drain typed turns into the live session.
+
+        Unlike audio, a typed turn has no replay queue: reconnects are rare
+        and a lost typed turn during one is an acceptable one-off loss (see
+        ``run()``'s ``text_in`` docstring), so there is nothing to keep track
+        of beyond stopping cleanly — if the connection dies between popping
+        an item and sending it, that turn is simply gone.
+        """
+        while not stop_event.is_set():
+            get_task = asyncio.create_task(text_in.get())
+            stop_task = asyncio.create_task(stop_event.wait())
+            try:
+                await asyncio.wait(
+                    {get_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in (get_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(get_task, stop_task, return_exceptions=True)
+            if not (get_task.done() and not get_task.cancelled()):
+                return
+            if stop_event.is_set():
+                return
+            text = get_task.result()
+            await session.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
+                turn_complete=True,
+            )
 
     async def _execute_tool_calls(
         self,
@@ -502,15 +543,22 @@ class GeminiLiveSession:
         audio_in: asyncio.Queue[bytes],
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
+        text_in: asyncio.Queue[str] | None,
     ) -> bool:
         stop_sender = asyncio.Event()
         sender = asyncio.create_task(self._send_audio(session, audio_in, stop_sender))
         receiver = asyncio.create_task(
             self._receive_turns(session, events_out, tool_executor)
         )
+        text_sender = (
+            asyncio.create_task(self._send_text(session, text_in, stop_sender))
+            if text_in is not None
+            else None
+        )
+        pending = {sender, receiver} | ({text_sender} if text_sender else set())
         try:
             done, _ = await asyncio.wait(
-                {sender, receiver},
+                pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in done:
@@ -533,17 +581,28 @@ class GeminiLiveSession:
                         if error is not None:
                             raise error
                 return reconnect
+            if text_sender is not None and text_sender in done:
+                raise ConnectionError("Gemini Live text sender stopped unexpectedly")
             raise ConnectionError("Gemini Live audio sender stopped unexpectedly")
         finally:
-            await self._cancel_tasks(sender, receiver)
+            await self._cancel_tasks(
+                *({sender, receiver} | ({text_sender} if text_sender else set()))
+            )
 
     async def run(
         self,
         audio_in: asyncio.Queue[bytes],
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
+        text_in: asyncio.Queue[str] | None = None,
     ) -> None:
-        """Run until cancelled, or request cascade fallback on a Live API failure."""
+        """Run until cancelled, or request cascade fallback on a Live API failure.
+
+        ``text_in`` is optional so a caller that never offers typed input
+        keeps today's behavior byte-identical: with it ``None`` (the
+        default), no text-drain task is ever created and
+        ``send_client_content`` is never called.
+        """
 
         self._input_transcript_parts = []
         self._output_transcript_parts = []
@@ -567,6 +626,7 @@ class GeminiLiveSession:
                             audio_in,
                             events_out,
                             tool_executor,
+                            text_in,
                         )
                     finally:
                         self._active_session = None

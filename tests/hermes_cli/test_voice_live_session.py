@@ -104,6 +104,14 @@ class _FakeSDKSession:
         self.expected_audio_sent = asyncio.Event()
         self.realtime_inputs: list[types.Blob] = []
         self.tool_responses: list[list[types.FunctionResponse]] = []
+        self.client_contents: list[tuple[types.Content, bool]] = []
+        self.client_content_sent = asyncio.Event()
+
+    async def send_client_content(
+        self, *, turns: types.Content, turn_complete: bool = True
+    ) -> None:
+        self.client_contents.append((turns, turn_complete))
+        self.client_content_sent.set()
 
     async def send_realtime_input(self, *, audio: types.Blob) -> None:
         self.send_started.set()
@@ -1220,3 +1228,89 @@ async def test_pending_non_blocking_task_cancelled_when_run_is_cancelled(
 
     assert pending_task.cancelled()
     assert wrapper._pending_tool_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_run_with_text_in_sends_client_content_with_turn_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    text_in: asyncio.Queue[str] = asyncio.Queue()
+    await text_in.put("Hallo Hermes")
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), text_in=text_in
+        )
+    )
+    await asyncio.wait_for(sdk_session.client_content_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(sdk_session.client_contents) == 1
+    turns, turn_complete = sdk_session.client_contents[0]
+    assert turn_complete is True
+    assert turns.role == "user"
+    assert len(turns.parts) == 1
+    assert turns.parts[0].text == "Hallo Hermes"
+
+
+@pytest.mark.asyncio
+async def test_text_drain_stops_cleanly_and_does_not_keep_draining_after_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaked drain task would silently keep calling ``send_client_content``
+    on the (now-exited) session forever — assert it does not."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    text_in: asyncio.Queue[str] = asyncio.Queue()
+    await text_in.put("erste Nachricht")
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), text_in=text_in
+        )
+    )
+    await asyncio.wait_for(sdk_session.client_content_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await text_in.put("sollte nach dem Teardown nicht mehr gesendet werden")
+    await asyncio.sleep(0.05)
+
+    assert len(sdk_session.client_contents) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_without_text_in_never_calls_send_client_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    output_audio = b"\x01\x02"
+    sdk_session = _FakeSDKSession(turns=[[_audio_message(output_audio)]])
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
+    )
+    await asyncio.wait_for(sdk_session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sdk_session.client_contents == []
