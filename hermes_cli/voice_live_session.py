@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from array import array
 import asyncio
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import logging
+import math
 from typing import Any, Protocol
 
 from google import genai
@@ -18,6 +20,7 @@ _CONTEXT_TRIGGER_TOKENS = 100_000
 _CONTEXT_TARGET_TOKENS = 50_000
 _MAX_TOOL_ERROR_CHARS = 500
 _SENDER_HANDOFF_SECONDS = 1.0
+_SPEECH_RMS_THRESHOLD = 500
 _MAX_CONCURRENT_NON_BLOCKING_CALLS = 2
 _NON_BLOCKING_SESSION_WAIT_SECONDS = 10.0
 _NON_BLOCKING_SESSION_POLL_SECONDS = 0.25
@@ -73,6 +76,61 @@ class _LiveSession(Protocol):
     ) -> None: ...
 
     def receive(self) -> Any: ...
+
+
+def _pcm16_rms(frame: bytes) -> int:
+    """RMS amplitude of a PCM16 mono frame, without the deprecated ``audioop``."""
+    samples = array("h", frame)
+    if not samples:
+        return 0
+    return int(math.sqrt(sum(sample * sample for sample in samples) / len(samples)))
+
+
+class _VideoFrameRelay:
+    """Hold the freshest offered video still, forwarded on user activity only.
+
+    Live probes proved that continuous frame streaming into the upstream
+    Gemini connection makes it hang after the first answered turn (keepalive
+    ping death), and Google's own docs cap video at 1fps and put continuous
+    audio+video sessions under a 2-minute limit. Single JPEG stills sent
+    occasionally, by contrast, are rock-solid over multi-minute sessions. So
+    instead of draining every queued frame upstream immediately, this keeps
+    only the newest offered frame and forwards exactly one still per
+    user-activity burst (speech onset or a typed turn) — the upstream
+    session then only ever sees occasional single stills.
+    """
+
+    def __init__(self, events_out: asyncio.Queue[dict[str, Any]]) -> None:
+        self._events_out = events_out
+        self._frame: bytes | None = None
+        self._flushed_since_turn = False
+        self._lock = asyncio.Lock()
+
+    def offer(self, frame: bytes) -> None:
+        self._frame = frame
+
+    async def flush(self, session: _LiveSession) -> bool:
+        async with self._lock:
+            if self._frame is None or self._flushed_since_turn:
+                return False
+            frame = self._frame
+            await session.send_realtime_input(
+                video=types.Blob(data=frame, mime_type="image/jpeg")
+            )
+            self._frame = None
+            self._flushed_since_turn = True
+            try:
+                self._events_out.put_nowait({"type": "video_frame_sent"})
+            except asyncio.QueueFull:
+                pass
+            return True
+
+    def mark_turn_complete(self) -> None:
+        self._flushed_since_turn = False
+
+    def clear(self) -> None:
+        self._frame = None
+        self._flushed_since_turn = False
 
 
 @dataclass(slots=True)
@@ -202,6 +260,7 @@ class GeminiLiveSession:
         session: _LiveSession,
         audio_in: asyncio.Queue[bytes],
         stop_event: asyncio.Event,
+        relay: _VideoFrameRelay | None,
     ) -> None:
         while not stop_event.is_set():
             pending = await self._next_audio(audio_in, stop_event)
@@ -214,6 +273,8 @@ class GeminiLiveSession:
                 self._ack_source_queue(pending)
                 continue
             try:
+                if relay is not None and _pcm16_rms(pending.data) > _SPEECH_RMS_THRESHOLD:
+                    await relay.flush(session)
                 await session.send_realtime_input(
                     audio=types.Blob(
                         data=pending.data,
@@ -234,6 +295,7 @@ class GeminiLiveSession:
         session: _LiveSession,
         text_in: asyncio.Queue[str],
         stop_event: asyncio.Event,
+        relay: _VideoFrameRelay | None,
     ) -> None:
         """Drain typed turns into the live session.
 
@@ -261,6 +323,8 @@ class GeminiLiveSession:
             if stop_event.is_set():
                 return
             text = get_task.result()
+            if relay is not None:
+                await relay.flush(session)
             await session.send_client_content(
                 turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True,
@@ -268,11 +332,11 @@ class GeminiLiveSession:
 
     async def _send_video(
         self,
-        session: _LiveSession,
+        relay: _VideoFrameRelay,
         video_in: asyncio.Queue[bytes],
         stop_event: asyncio.Event,
     ) -> None:
-        """Drain camera/screen stills into the live session.
+        """Drain camera/screen stills into the freshest-frame relay.
 
         Like :meth:`_send_text`, a video frame has no replay queue: ``run()``
         drains ``video_in`` at the start of every (re)connect iteration, so a
@@ -280,8 +344,14 @@ class GeminiLiveSession:
         anyway — a stale still is worthless once the moment it captured has
         passed, unlike audio which is retained for at-least-once replay. So
         there is nothing to track here beyond stopping cleanly — if the
-        connection dies between popping an item and sending it, that frame is
-        simply gone.
+        connection dies between popping an item and offering it, that frame
+        is simply gone.
+
+        Unlike before, this no longer sends upstream itself: continuous
+        frame streaming made the upstream connection hang after the first
+        answered turn, so it only offers the freshest frame to ``relay``
+        (see :class:`_VideoFrameRelay`), which forwards at most one still
+        per user-activity burst.
         """
         while not stop_event.is_set():
             get_task = asyncio.create_task(video_in.get())
@@ -301,9 +371,7 @@ class GeminiLiveSession:
             if stop_event.is_set():
                 return
             frame = get_task.result()
-            await session.send_realtime_input(
-                video=types.Blob(data=frame, mime_type="image/jpeg")
-            )
+            relay.offer(frame)
 
     async def _execute_tool_calls(
         self,
@@ -478,6 +546,7 @@ class GeminiLiveSession:
         message: types.LiveServerMessage,
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
+        relay: _VideoFrameRelay | None,
     ) -> bool:
         """Handle one message and return whether a resumption reconnect is due."""
 
@@ -548,6 +617,8 @@ class GeminiLiveSession:
             await events_out.put({"type": "state", "value": "listening"})
         if content and content.turn_complete:
             await events_out.put({"type": "state", "value": "listening"})
+            if relay is not None:
+                relay.mark_turn_complete()
 
         if message.go_away:
             if self._resumption_handle is None:
@@ -562,6 +633,7 @@ class GeminiLiveSession:
         session: _LiveSession,
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
+        relay: _VideoFrameRelay | None,
     ) -> bool:
         """Receive complete turns, re-entering the SDK iterator after each one."""
 
@@ -574,6 +646,7 @@ class GeminiLiveSession:
                     message,
                     events_out,
                     tool_executor,
+                    relay,
                 ):
                     return True
             if not received_message:
@@ -594,19 +667,22 @@ class GeminiLiveSession:
         tool_executor: _ToolExecutor,
         text_in: asyncio.Queue[str] | None,
         video_in: asyncio.Queue[bytes] | None,
+        relay: _VideoFrameRelay | None,
     ) -> bool:
         stop_sender = asyncio.Event()
-        sender = asyncio.create_task(self._send_audio(session, audio_in, stop_sender))
+        sender = asyncio.create_task(
+            self._send_audio(session, audio_in, stop_sender, relay)
+        )
         receiver = asyncio.create_task(
-            self._receive_turns(session, events_out, tool_executor)
+            self._receive_turns(session, events_out, tool_executor, relay)
         )
         text_sender = (
-            asyncio.create_task(self._send_text(session, text_in, stop_sender))
+            asyncio.create_task(self._send_text(session, text_in, stop_sender, relay))
             if text_in is not None
             else None
         )
         video_sender = (
-            asyncio.create_task(self._send_video(session, video_in, stop_sender))
+            asyncio.create_task(self._send_video(relay, video_in, stop_sender))
             if video_in is not None
             else None
         )
@@ -693,10 +769,13 @@ class GeminiLiveSession:
         self._input_transcript_parts = []
         self._output_transcript_parts = []
         announced_live = False
+        relay = _VideoFrameRelay(events_out) if video_in is not None else None
         try:
             client = genai.Client(api_key=self._api_key)
             while True:
                 self._drain_video_queue(video_in)
+                if relay is not None:
+                    relay.clear()
                 config = self._connect_config()
                 async with client.aio.live.connect(
                     model=self._model,
@@ -715,6 +794,7 @@ class GeminiLiveSession:
                             tool_executor,
                             text_in,
                             video_in,
+                            relay,
                         )
                     finally:
                         self._active_session = None

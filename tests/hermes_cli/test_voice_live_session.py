@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from array import array
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from google import genai
 from google.genai import errors, types
+
+FIXTURE_VIDEO = Path(__file__).parent / "fixtures" / "vision_marker.jpg"
 
 
 class _FakeConnection:
@@ -108,10 +112,16 @@ class _FakeSDKSession:
         self.tool_responses: list[list[types.FunctionResponse]] = []
         self.client_contents: list[tuple[types.Content, bool]] = []
         self.client_content_sent = asyncio.Event()
+        # Records "audio"/"video"/"text" in the exact order the SDK actually
+        # received them, so tests can assert relative ordering (e.g. a video
+        # flush landing before the audio/text send that triggered it) instead
+        # of only checking each list's final contents.
+        self.call_order: list[str] = []
 
     async def send_client_content(
         self, *, turns: types.Content, turn_complete: bool = True
     ) -> None:
+        self.call_order.append("text")
         self.client_contents.append((turns, turn_complete))
         self.client_content_sent.set()
 
@@ -124,9 +134,11 @@ class _FakeSDKSession:
         if self._send_error is not None:
             raise self._send_error
         if video is not None:
+            self.call_order.append("video")
             self.video_inputs.append(video)
             self.video_sent.set()
             return
+        self.call_order.append("audio")
         self.realtime_inputs.append(audio)
         self.audio_sent.set()
         if len(self.realtime_inputs) >= self._expected_sends:
@@ -295,6 +307,16 @@ def _output_transcription_message(
             output_transcription=types.Transcription(text=text, finished=finished),
         )
     )
+
+
+def _loud_pcm_frame() -> bytes:
+    """A 3200-byte PCM16 frame at constant amplitude +-2000 (RMS 2000)."""
+    return array("h", [2000, -2000] * 800).tobytes()
+
+
+def _quiet_pcm_frame() -> bytes:
+    """A 3200-byte all-zero PCM16 frame (RMS 0)."""
+    return bytes(3200)
 
 
 def _install_fake_client(monkeypatch: pytest.MonkeyPatch, live: _FakeLive) -> None:
@@ -1325,9 +1347,14 @@ async def test_run_without_text_in_never_calls_send_client_content(
 
 
 @pytest.mark.asyncio
-async def test_run_with_video_in_sends_realtime_input_with_jpeg_mime_type(
+async def test_run_with_video_in_offers_frame_and_speech_onset_flushes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Offering a frame alone never sends it upstream (relay-on-activity, see
+    ``_VideoFrameRelay``): only a user-activity burst — here loud speech —
+    flushes the held frame, landing before the audio frame that triggered it
+    and surfacing a ``video_frame_sent`` observability event."""
+
     from hermes_cli.voice_live_session import GeminiLiveSession
 
     sdk_session = _FakeSDKSession()
@@ -1335,19 +1362,23 @@ async def test_run_with_video_in_sends_realtime_input_with_jpeg_mime_type(
     _install_fake_client(monkeypatch, live)
     wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
     video_in: asyncio.Queue[bytes] = asyncio.Queue()
-    frame = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    frame = FIXTURE_VIDEO.read_bytes()
 
     task = asyncio.create_task(
-        wrapper.run(
-            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), video_in=video_in
-        )
+        wrapper.run(audio_in, events_out, _FakeToolExecutor(), video_in=video_in)
     )
     # Queued only after connecting so the per-connect drain (see
     # ``_drain_video_queue``) does not discard it before ``_send_video``
     # ever gets to it.
     await asyncio.wait_for(live.connect_called.wait(), timeout=1)
     await video_in.put(frame)
-    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    await _wait_until(lambda: video_in.empty())
+    assert sdk_session.video_inputs == []  # offering alone never sends
+
+    await audio_in.put(_loud_pcm_frame())
+    await asyncio.wait_for(sdk_session.expected_audio_sent.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1356,14 +1387,21 @@ async def test_run_with_video_in_sends_realtime_input_with_jpeg_mime_type(
     blob = sdk_session.video_inputs[0]
     assert blob.data == frame
     assert blob.mime_type == "image/jpeg"
+    assert sdk_session.call_order.index("video") < sdk_session.call_order.index("audio")
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    assert {"type": "video_frame_sent"} in emitted
 
 
 @pytest.mark.asyncio
 async def test_video_drain_stops_cleanly_and_does_not_keep_draining_after_teardown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leaked drain task would silently keep calling ``send_realtime_input``
-    on the (now-exited) session forever — assert it does not."""
+    """A leaked drain task would silently keep pulling frames off
+    ``video_in`` forever after the wrapper is cancelled — assert it does
+    not."""
 
     from hermes_cli.voice_live_session import GeminiLiveSession
 
@@ -1380,15 +1418,15 @@ async def test_video_drain_stops_cleanly_and_does_not_keep_draining_after_teardo
     )
     await asyncio.wait_for(live.connect_called.wait(), timeout=1)
     await video_in.put(b"\xff\xd8erstes-bild")
-    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    await _wait_until(lambda: video_in.empty())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    await video_in.put(b"\xff\xd8sollte-nicht-mehr-gesendet-werden")
+    await video_in.put(b"\xff\xd8sollte-nicht-mehr-gedraint-werden")
     await asyncio.sleep(0.05)
 
-    assert len(sdk_session.video_inputs) == 1
+    assert video_in.qsize() == 1
 
 
 def test_drain_video_queue_clears_all_queued_frames() -> None:
@@ -1414,14 +1452,16 @@ def test_drain_video_queue_accepts_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_video_in_flight_frame_is_not_replayed_after_go_away_reconnect(
+async def test_video_offered_but_unflushed_frame_is_not_replayed_after_go_away_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unlike audio (see ``test_go_away_replays_blocked_frame_first_after_
-    reconnect``), a video frame already pulled from ``video_in`` and blocked
-    mid-``send_realtime_input`` when a go-away reconnect lands is simply
-    dropped — it must never reach the second session. A fresh frame queued
-    after the reconnect must still reach the new session normally."""
+    reconnect``), a video frame offered to the relay but never flushed
+    before a go-away reconnect lands is simply dropped: ``run()`` clears the
+    relay (see ``_VideoFrameRelay.clear``) at the start of every (re)connect
+    iteration, so it must never reach the second session. A fresh frame
+    offered and flushed after the reconnect must still reach the new session
+    normally."""
 
     from hermes_cli import voice_live_session
     from hermes_cli.voice_live_session import GeminiLiveSession
@@ -1442,7 +1482,13 @@ async def test_video_in_flight_frame_is_not_replayed_after_go_away_reconnect(
         send_gate=blocked_send,
         wait_for_send_before_receive=True,
     )
-    second = _FakeSDKSession()
+    # The gated quiet frame below is cancelled mid-send on the first session
+    # and, per the class's at-least-once audio replay contract, is replayed
+    # as the *first* frame the second session receives — before the loud
+    # frame this test puts on ``audio_in`` after the reconnect. Two expected
+    # sends lets the wait below observe the loud replay-successor landing,
+    # not just the replayed quiet frame.
+    second = _FakeSDKSession(expected_sends=2)
     live = _FakeLive([first, second])
     _install_fake_client(monkeypatch, live)
     monkeypatch.setattr(
@@ -1453,31 +1499,192 @@ async def test_video_in_flight_frame_is_not_replayed_after_go_away_reconnect(
     )
     wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
     video_in: asyncio.Queue[bytes] = asyncio.Queue()
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
 
     task = asyncio.create_task(
-        wrapper.run(
-            asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor(), video_in=video_in
-        )
+        wrapper.run(audio_in, asyncio.Queue(), _FakeToolExecutor(), video_in=video_in)
     )
     # Queued only after the first connect so ``run()``'s per-iteration drain
     # (see ``_drain_video_queue``) does not remove it before the session
-    # even exists — this frame must instead be dropped by the in-flight
-    # cancellation below, which is the behavior under test.
+    # even exists — this frame must instead be dropped by the reconnect's
+    # relay clear, which is the behavior under test.
     await asyncio.wait_for(live.connect_called.wait(), timeout=1)
-    stale_frame = b"\xff\xd8stale-frame"
+    stale_frame = FIXTURE_VIDEO.read_bytes()
     await video_in.put(stale_frame)
+    await _wait_until(lambda: video_in.empty())
+
+    # A quiet audio frame never triggers a flush itself, but its send blocks
+    # on the gate — satisfying ``wait_for_send_before_receive`` so the
+    # go-away message is only delivered once this send has started,
+    # deterministically ordering "frame offered" before "reconnect happens"
+    # without racing.
+    await audio_in.put(_quiet_pcm_frame())
     await asyncio.wait_for(first.send_started.wait(), timeout=1)
     await asyncio.wait_for(live.second_connect_called.wait(), timeout=1)
 
     fresh_frame = b"\xff\xd8fresh-frame"
     await video_in.put(fresh_frame)
-    await asyncio.wait_for(second.video_sent.wait(), timeout=1)
+    await _wait_until(lambda: video_in.empty())
+    await audio_in.put(_loud_pcm_frame())
+    await asyncio.wait_for(second.expected_audio_sent.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     assert first.video_inputs == []
     assert [blob.data for blob in second.video_inputs] == [fresh_frame]
+
+
+@pytest.mark.asyncio
+async def test_video_relay_offer_then_flush_sends_once_second_flush_is_noop() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    relay = _VideoFrameRelay(asyncio.Queue())
+    frame = FIXTURE_VIDEO.read_bytes()
+
+    relay.offer(frame)
+    sent = await relay.flush(sdk_session)
+
+    assert sent is True
+    assert len(sdk_session.video_inputs) == 1
+    blob = sdk_session.video_inputs[0]
+    assert blob.data == frame
+    assert blob.mime_type == "image/jpeg"
+
+    sent_again = await relay.flush(sdk_session)
+
+    assert sent_again is False
+    assert len(sdk_session.video_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_video_relay_flushes_at_most_once_per_turn() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    relay = _VideoFrameRelay(asyncio.Queue())
+    first_frame = b"\xff\xd8first"
+    second_frame = b"\xff\xd8second"
+
+    relay.offer(first_frame)
+    assert await relay.flush(sdk_session) is True
+
+    relay.offer(second_frame)
+    assert await relay.flush(sdk_session) is False
+    assert len(sdk_session.video_inputs) == 1
+
+    relay.mark_turn_complete()
+    assert await relay.flush(sdk_session) is True
+    assert [blob.data for blob in sdk_session.video_inputs] == [
+        first_frame,
+        second_frame,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_video_relay_latest_offer_wins() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    relay = _VideoFrameRelay(asyncio.Queue())
+
+    relay.offer(b"\xff\xd8stale")
+    relay.offer(b"\xff\xd8fresh")
+
+    assert await relay.flush(sdk_session) is True
+    assert [blob.data for blob in sdk_session.video_inputs] == [b"\xff\xd8fresh"]
+
+
+@pytest.mark.asyncio
+async def test_video_relay_flush_emits_video_frame_sent_event() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
+    relay.offer(b"\xff\xd8frame")
+
+    assert await relay.flush(sdk_session) is True
+
+    assert events_out.get_nowait() == {"type": "video_frame_sent"}
+
+
+@pytest.mark.asyncio
+async def test_send_audio_quiet_frame_never_flushes_relay() -> None:
+    """RMS below ``_SPEECH_RMS_THRESHOLD`` is not a speech-onset trigger, so
+    a held frame stays held and only the audio itself reaches the SDK."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes())
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    await audio_in.put(_quiet_pcm_frame())
+    stop_event = asyncio.Event()
+
+    send_task = asyncio.create_task(
+        wrapper._send_audio(sdk_session, audio_in, stop_event, relay)
+    )
+    await asyncio.wait_for(sdk_session.expected_audio_sent.wait(), timeout=1)
+    stop_event.set()
+    await asyncio.wait_for(send_task, timeout=1)
+
+    assert sdk_session.video_inputs == []
+    assert sdk_session.call_order == ["audio"]
+
+
+@pytest.mark.asyncio
+async def test_send_text_flushes_relay_before_send_client_content() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    relay = _VideoFrameRelay(asyncio.Queue())
+    frame = FIXTURE_VIDEO.read_bytes()
+    relay.offer(frame)
+    text_in: asyncio.Queue[str] = asyncio.Queue()
+    await text_in.put("Hallo Hermes")
+    stop_event = asyncio.Event()
+
+    send_task = asyncio.create_task(
+        wrapper._send_text(sdk_session, text_in, stop_event, relay)
+    )
+    await asyncio.wait_for(sdk_session.client_content_sent.wait(), timeout=1)
+    stop_event.set()
+    await asyncio.wait_for(send_task, timeout=1)
+
+    assert sdk_session.call_order == ["video", "text"]
+    assert len(sdk_session.video_inputs) == 1
+    assert sdk_session.video_inputs[0].data == frame
+    assert len(sdk_session.client_contents) == 1
+
+
+def test_decode_video_frame_rejects_oversized_base64_before_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hardening in ``hermes_cli.voice_ws``: a multi-MB base64 string must
+    never even reach ``base64.b64decode`` — this test lives here (not in
+    ``tests/hermes_cli/test_voice_ws.py``) per this slice's file scope."""
+
+    from hermes_cli import voice_ws
+
+    decode_calls: list[str] = []
+    original_b64decode = voice_ws.base64.b64decode
+
+    def _spy_b64decode(*args: Any, **kwargs: Any) -> bytes:
+        decode_calls.append("called")
+        return original_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(voice_ws.base64, "b64decode", _spy_b64decode)
+    oversized = "A" * (voice_ws._MAX_VIDEO_FRAME_BYTES * 4 // 3 + 9)
+
+    result = voice_ws._decode_video_frame({"source": "camera", "data": oversized})
+
+    assert result is None
+    assert decode_calls == []
 
 
 @pytest.mark.asyncio

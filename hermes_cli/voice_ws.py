@@ -883,6 +883,8 @@ def _decode_video_frame(control: dict[str, Any]) -> bytes | None:
     raw_data = control.get("data")
     if not isinstance(raw_data, str) or not raw_data:
         return None
+    if len(raw_data) > _MAX_VIDEO_FRAME_BYTES * 4 // 3 + 8:
+        return None
     try:
         decoded = base64.b64decode(raw_data, validate=True)
     except (binascii.Error, ValueError):
