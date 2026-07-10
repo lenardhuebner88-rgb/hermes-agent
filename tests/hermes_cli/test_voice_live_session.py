@@ -148,6 +148,48 @@ class _FakeToolExecutor:
         self.calls.append((name, args))
         return {"terminals": [{"name": "work", "attached": True}]}
 
+    def is_non_blocking(self, name: str) -> bool:
+        return False
+
+
+class _GatedNonBlockingExecutor:
+    """Executor whose ``delegate_to_hermes`` calls block on a shared gate.
+
+    Mirrors :class:`tools.voice_live_tools.VoiceToolExecutor`'s NON_BLOCKING
+    classification (only ``delegate_to_hermes``) without depending on that
+    module — this file tests the session bridge in isolation.
+    """
+
+    def __init__(
+        self,
+        *,
+        gate: asyncio.Event,
+        result: dict[str, Any] | None = None,
+    ):
+        self._gate = gate
+        self._result = result if result is not None else {"result": "erledigt"}
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((name, args))
+        if name == "delegate_to_hermes":
+            await self._gate.wait()
+            return self._result
+        return {"terminals": []}
+
+    def is_non_blocking(self, name: str) -> bool:
+        return name == "delegate_to_hermes"
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
+    """Poll ``predicate`` until truthy or raise once ``timeout`` elapses."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition not met before timeout")
+        await asyncio.sleep(interval)
+
 
 def _audio_message(data: bytes) -> types.LiveServerMessage:
     return types.LiveServerMessage(
@@ -172,6 +214,33 @@ def _tool_call_message() -> types.LiveServerMessage:
         tool_call=types.LiveServerToolCall(
             function_calls=[
                 types.FunctionCall(id="call-1", name="list_terminals", args={})
+            ]
+        )
+    )
+
+
+def _delegate_tool_call_message(*, call_id: str = "delegate-1") -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        tool_call=types.LiveServerToolCall(
+            function_calls=[
+                types.FunctionCall(
+                    id=call_id,
+                    name="delegate_to_hermes",
+                    args={"prompt": "erledige das"},
+                )
+            ]
+        )
+    )
+
+
+def _delegate_tool_call_message_multi(call_ids: list[str]) -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        tool_call=types.LiveServerToolCall(
+            function_calls=[
+                types.FunctionCall(
+                    id=call_id, name="delegate_to_hermes", args={"prompt": "erledige das"}
+                )
+                for call_id in call_ids
             ]
         )
     )
@@ -980,3 +1049,174 @@ async def test_mode_live_event_emitted_once_across_go_away_reconnect(
         event for event in emitted if event == {"type": "mode", "value": "live"}
     ]
     assert len(mode_live_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_call_does_not_block_a_later_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated NON_BLOCKING call must not stall the receive loop.
+
+    A later scripted turn (a plain audio message) must arrive on
+    ``events_out`` while the delegate call is still gated — proving the
+    result was never awaited inline.
+    """
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    gate = asyncio.Event()
+    audio_chunk = b"\x11\x22"
+    sdk_session = _FakeSDKSession(
+        turns=[
+            [_delegate_tool_call_message(call_id="delegate-1")],
+            [_audio_message(audio_chunk)],
+        ]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    executor = _GatedNonBlockingExecutor(gate=gate, result={"result": "erledigt"})
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, executor)
+    )
+
+    collected: list[dict[str, Any]] = []
+    while True:
+        event = await asyncio.wait_for(events_out.get(), timeout=1)
+        collected.append(event)
+        if event.get("type") == "audio":
+            break
+
+    assert collected[-1] == {"type": "audio", "data": audio_chunk}
+    # Still gated: the delegate call has not resolved, so no response was
+    # sent yet — the audio turn genuinely arrived first, not just first in
+    # a pre-buffered queue.
+    assert sdk_session.tool_responses == []
+
+    gate.set()
+    await _wait_until(lambda: sdk_session.tool_responses)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    while not events_out.empty():
+        collected.append(events_out.get_nowait())
+
+    assert len(sdk_session.tool_responses) == 1
+    response = sdk_session.tool_responses[0][0]
+    assert response.id == "delegate-1"
+    assert response.name == "delegate_to_hermes"
+    assert response.response == {"result": "erledigt"}
+    assert response.scheduling == types.FunctionResponseScheduling.INTERRUPT
+    assert {"type": "state", "value": "thinking"} not in collected
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_call_error_result_uses_when_idle_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    gate = asyncio.Event()
+    gate.set()
+    sdk_session = _FakeSDKSession(
+        turns=[[_delegate_tool_call_message(call_id="delegate-err")]]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    executor = _GatedNonBlockingExecutor(
+        gate=gate,
+        result={"error": {"code": "delegation_failed", "message": "boom"}},
+    )
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, executor)
+    )
+    await _wait_until(lambda: sdk_session.tool_responses)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(sdk_session.tool_responses) == 1
+    response = sdk_session.tool_responses[0][0]
+    assert response.id == "delegate-err"
+    assert response.response == {
+        "error": {"code": "delegation_failed", "message": "boom"}
+    }
+    assert response.scheduling == types.FunctionResponseScheduling.WHEN_IDLE
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_cap_rejects_third_concurrent_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    gate = asyncio.Event()  # never set: the first two calls stay in flight
+    sdk_session = _FakeSDKSession(
+        turns=[[_delegate_tool_call_message_multi(["d1", "d2", "d3"])]]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    executor = _GatedNonBlockingExecutor(gate=gate)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, executor)
+    )
+    await _wait_until(lambda: sdk_session.tool_responses)
+    await _wait_until(lambda: len(wrapper._pending_tool_tasks) == 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(sdk_session.tool_responses) == 1
+    batch = sdk_session.tool_responses[0]
+    assert len(batch) == 1
+    rejected = batch[0]
+    assert rejected.id == "d3"
+    assert rejected.response == {
+        "error": {
+            "code": "non_blocking_cap_reached",
+            "message": (
+                "Es laufen bereits zwei Hintergrund-Aufgaben. "
+                "Bitte warte, bis eine fertig ist."
+            ),
+        }
+    }
+    assert rejected.scheduling is None
+
+
+@pytest.mark.asyncio
+async def test_pending_non_blocking_task_cancelled_when_run_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    gate = asyncio.Event()  # never set: the call never resolves on its own
+    sdk_session = _FakeSDKSession(
+        turns=[[_delegate_tool_call_message(call_id="delegate-1")]]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    executor = _GatedNonBlockingExecutor(gate=gate)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, executor)
+    )
+    await _wait_until(lambda: wrapper._pending_tool_tasks)
+    pending_task = next(iter(wrapper._pending_tool_tasks))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert pending_task.cancelled()
+    assert wrapper._pending_tool_tasks == set()

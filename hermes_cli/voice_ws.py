@@ -60,6 +60,7 @@ _FALLBACK_END_TIMEOUT_SECONDS = 60.0
 _LIVE_END_GRACE_SECONDS = 1.0
 _EVENT_DRAIN_TIMEOUT_SECONDS = 10.0
 _DELEGATE_TIMEOUT_SECONDS = 120.0
+_DELEGATE_LIVE_TIMEOUT_SECONDS = 600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
 _FALLBACK_CANCEL_TIMEOUT_SECONDS = 7.0
@@ -474,8 +475,20 @@ async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
         _log.warning("Hermes delegation child did not exit after kill")
 
 
-async def delegate_to_hermes(prompt: str) -> str:
-    """Delegate one fallback turn through the supported Hermes CLI surface."""
+async def delegate_to_hermes(
+    prompt: str, *, timeout_seconds: float | None = None
+) -> str:
+    """Delegate one fallback turn through the supported Hermes CLI surface.
+
+    ``timeout_seconds`` defaults to the cascade budget (``_DELEGATE_TIMEOUT_
+    SECONDS``, read dynamically so a test/config override still applies to
+    unspecified callers); the Live bridge passes the longer
+    ``_DELEGATE_LIVE_TIMEOUT_SECONDS`` explicitly since a NON_BLOCKING
+    delegation may legitimately run far longer than one cascade turn.
+    """
+    effective_timeout = (
+        _DELEGATE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    )
     executable = resolve_hermes_executable()
     try:
         process = await asyncio.create_subprocess_exec(
@@ -495,7 +508,7 @@ async def delegate_to_hermes(prompt: str) -> str:
     try:
         stdout, _stderr = await asyncio.wait_for(
             process.communicate(),
-            timeout=_DELEGATE_TIMEOUT_SECONDS,
+            timeout=effective_timeout,
         )
     except asyncio.CancelledError:
         await _stop_subprocess(process)
@@ -1000,7 +1013,11 @@ async def _run_live_bridge(
             voice=config.voice,
             system_instruction=config.system_instruction,
         )
-    executor = VoiceToolExecutor(delegate=delegate_to_hermes)
+    executor = VoiceToolExecutor(
+        delegate=lambda prompt: delegate_to_hermes(
+            prompt, timeout_seconds=_DELEGATE_LIVE_TIMEOUT_SECONDS
+        )
+    )
     try:
         await session.run(audio_in, events_out, executor)
     except LiveFallbackRequired:

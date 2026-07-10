@@ -1620,3 +1620,88 @@ async def test_cancelled_stt_thread_finishes_before_its_temp_file_is_removed(
             break
         await asyncio.sleep(0.01)
     assert not observed_path[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_delegate_to_hermes_defaults_to_the_cascade_timeout(monkeypatch):
+    """Omitting ``timeout_seconds`` must still resolve the current cascade
+    budget dynamically (not a value frozen at import time), so a config/test
+    override of ``_DELEGATE_TIMEOUT_SECONDS`` keeps applying to unspecified
+    callers — this is exactly what
+    ``test_delegate_timeout_escalates_to_kill_and_reaps_child`` above relies
+    on when it patches the module constant without passing the kwarg."""
+    from hermes_cli import voice_ws
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"erledigt", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    captured = {}
+
+    async def fake_wait_for(awaitable, timeout):
+        captured["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.setattr(
+        voice_ws.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+    monkeypatch.setattr(voice_ws.asyncio, "wait_for", fake_wait_for)
+
+    response = await voice_ws.delegate_to_hermes("status?")
+
+    assert response == "erledigt"
+    assert captured["timeout"] == voice_ws._DELEGATE_TIMEOUT_SECONDS == 120.0
+
+
+@pytest.mark.asyncio
+async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
+    """The Live bridge's executor must delegate with the 600s Live budget,
+    not the 120s cascade default, since a NON_BLOCKING delegation may
+    legitimately outlast one cascade turn."""
+    from hermes_cli import voice_ws
+
+    class FakeGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, audio_in, events_out, tool_executor):
+            raise voice_ws.LiveFallbackRequired("done")
+
+    captured_executor = {}
+
+    class SpyExecutor:
+        def __init__(self, *, delegate):
+            captured_executor["delegate"] = delegate
+
+    recorded = {}
+
+    async def fake_delegate(prompt, *, timeout_seconds=None):
+        recorded["prompt"] = prompt
+        recorded["timeout_seconds"] = timeout_seconds
+        return "ok"
+
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", FakeGeminiLiveSession)
+    monkeypatch.setattr(voice_ws, "VoiceToolExecutor", SpyExecutor)
+    monkeypatch.setattr(voice_ws, "delegate_to_hermes", fake_delegate)
+
+    config = VoiceWebConfig(enabled=True)
+    await voice_ws._run_live_bridge(
+        config,
+        "api-key",
+        asyncio.Queue(),
+        asyncio.Queue(),
+        asyncio.Event(),
+        asyncio.Event(),
+        None,
+    )
+
+    result = await captured_executor["delegate"]("mach das")
+
+    assert result == "ok"
+    assert recorded["prompt"] == "mach das"
+    assert recorded["timeout_seconds"] == voice_ws._DELEGATE_LIVE_TIMEOUT_SECONDS == 600.0

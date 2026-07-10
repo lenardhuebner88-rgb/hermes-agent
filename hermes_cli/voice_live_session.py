@@ -18,16 +18,23 @@ _CONTEXT_TRIGGER_TOKENS = 100_000
 _CONTEXT_TARGET_TOKENS = 50_000
 _MAX_TOOL_ERROR_CHARS = 500
 _SENDER_HANDOFF_SECONDS = 1.0
+_MAX_CONCURRENT_NON_BLOCKING_CALLS = 2
+_NON_BLOCKING_SESSION_WAIT_SECONDS = 10.0
+_NON_BLOCKING_SESSION_POLL_SECONDS = 0.25
 
 DEFAULT_SYSTEM_INSTRUCTION = (
     "Du bist Hermes, Piets persönlicher Sprachassistent auf seinem Homeserver. "
     "Sprich Deutsch, außer Piet wechselt die Sprache. Deine Antworten werden "
     "vorgelesen: antworte in einem bis drei kurzen Sätzen, keine Listen, keine "
     "Markdown-Zeichen. Du hast Werkzeuge: tmux-Terminals (lesen, Befehle "
-    "senden), Delegation an den Hermes-Agenten für größere Aufgaben, und "
-    "Google-Suche für aktuelle Fakten. Kündige eine Delegation kurz an, bevor "
-    "du sie startest, und sprich weiter, während sie läuft. Wenn du etwas "
-    "nicht sicher weißt, sag es ehrlich. Bestätige ausgeführte Aktionen knapp."
+    "senden), Delegation an den Hermes-Agenten für größere Aufgaben, "
+    "Google-Suche für aktuelle Fakten, Discord-Nachrichten an Piet (für "
+    "Ergebnisse und Links zum Nachlesen), Kanban-Aufgaben anlegen, den "
+    "Hermes-Systemstatus abfragen und Erinnerungen planen, die per Discord "
+    "ankommen. Kündige eine Delegation kurz an, bevor du sie startest, und "
+    "sprich weiter, während sie läuft; das Ergebnis kommt später automatisch. "
+    "Wenn du etwas nicht sicher weißt, sag es ehrlich. Bestätige ausgeführte "
+    "Aktionen knapp."
 )
 
 _FALLBACK_ERRORS = (
@@ -47,6 +54,8 @@ class LiveFallbackRequired(RuntimeError):
 
 class _ToolExecutor(Protocol):
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]: ...
+
+    def is_non_blocking(self, name: str) -> bool: ...
 
 
 class _LiveSession(Protocol):
@@ -92,6 +101,8 @@ class GeminiLiveSession:
         self._replay_audio: deque[_PendingAudio] = deque()
         self._input_transcript_parts: list[str] = []
         self._output_transcript_parts: list[str] = []
+        self._pending_tool_tasks: set[asyncio.Task[None]] = set()
+        self._active_session: _LiveSession | None = None
 
     @staticmethod
     def _ack_source_queue(pending: _PendingAudio) -> None:
@@ -220,6 +231,30 @@ class GeminiLiveSession:
         responses = []
         for call in function_calls:
             name = call.name or ""
+            if tool_executor.is_non_blocking(name):
+                if len(self._pending_tool_tasks) >= _MAX_CONCURRENT_NON_BLOCKING_CALLS:
+                    responses.append(
+                        types.FunctionResponse(
+                            id=call.id,
+                            name=name,
+                            response={
+                                "error": {
+                                    "code": "non_blocking_cap_reached",
+                                    "message": (
+                                        "Es laufen bereits zwei Hintergrund-Aufgaben. "
+                                        "Bitte warte, bis eine fertig ist."
+                                    ),
+                                }
+                            },
+                        )
+                    )
+                    continue
+                task = asyncio.create_task(
+                    self._run_non_blocking_call(call, tool_executor)
+                )
+                self._pending_tool_tasks.add(task)
+                task.add_done_callback(self._pending_tool_tasks.discard)
+                continue
             try:
                 result = await tool_executor.execute(name, dict(call.args or {}))
             except Exception as exc:
@@ -238,6 +273,67 @@ class GeminiLiveSession:
             )
         if responses:
             await session.send_tool_response(function_responses=responses)
+
+    async def _run_non_blocking_call(
+        self,
+        call: types.FunctionCall,
+        tool_executor: _ToolExecutor,
+    ) -> None:
+        """Run one NON_BLOCKING tool call and deliver its result out of band.
+
+        Spawned as a detached task by :meth:`_execute_tool_calls` so the
+        receive loop keeps processing audio/turns while this runs. The
+        response goes through whichever session is live when the call
+        finishes — not necessarily the one active when it started, since a
+        go-away reconnect may have swapped ``self._active_session`` in the
+        meantime.
+        """
+
+        name = call.name or ""
+        try:
+            result = await tool_executor.execute(name, dict(call.args or {}))
+        except Exception as exc:
+            result = {
+                "error": {
+                    "code": "tool_execution_failed",
+                    "message": str(exc)[:_MAX_TOOL_ERROR_CHARS],
+                }
+            }
+        success = "error" not in result
+
+        active = self._active_session
+        if active is None:
+            waited = 0.0
+            while active is None and waited < _NON_BLOCKING_SESSION_WAIT_SECONDS:
+                await asyncio.sleep(_NON_BLOCKING_SESSION_POLL_SECONDS)
+                waited += _NON_BLOCKING_SESSION_POLL_SECONDS
+                active = self._active_session
+            if active is None:
+                _log.warning(
+                    "Dropping non-blocking tool response for %s: no live session",
+                    name,
+                )
+                return
+
+        try:
+            await active.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        id=call.id,
+                        name=name,
+                        response=result,
+                        scheduling=(
+                            types.FunctionResponseScheduling.INTERRUPT
+                            if success
+                            else types.FunctionResponseScheduling.WHEN_IDLE
+                        ),
+                    )
+                ]
+            )
+        except Exception:
+            _log.exception(
+                "Failed to deliver non-blocking tool response for %s", name
+            )
 
     def _notify_handle_update(self) -> None:
         """Tell the caller about a handle change without risking the bridge."""
@@ -311,7 +407,12 @@ class GeminiLiveSession:
 
         tool_call = message.tool_call
         if tool_call and tool_call.function_calls:
-            await events_out.put({"type": "state", "value": "thinking"})
+            has_blocking_call = any(
+                not tool_executor.is_non_blocking(call.name or "")
+                for call in tool_call.function_calls
+            )
+            if has_blocking_call:
+                await events_out.put({"type": "state", "value": "thinking"})
             await self._execute_tool_calls(
                 session,
                 tool_call.function_calls,
@@ -455,19 +556,25 @@ class GeminiLiveSession:
                     model=self._model,
                     config=config,
                 ) as session:
-                    if not announced_live:
-                        await events_out.put({"type": "mode", "value": "live"})
-                        announced_live = True
-                    await events_out.put({"type": "state", "value": "listening"})
-                    reconnect = await self._run_connection(
-                        session,
-                        audio_in,
-                        events_out,
-                        tool_executor,
-                    )
+                    self._active_session = session
+                    try:
+                        if not announced_live:
+                            await events_out.put({"type": "mode", "value": "live"})
+                            announced_live = True
+                        await events_out.put({"type": "state", "value": "listening"})
+                        reconnect = await self._run_connection(
+                            session,
+                            audio_in,
+                            events_out,
+                            tool_executor,
+                        )
+                    finally:
+                        self._active_session = None
                 if not reconnect:
                     raise ConnectionError("Gemini Live session ended unexpectedly")
         except asyncio.CancelledError:
             raise
         except _FALLBACK_ERRORS as exc:
             raise LiveFallbackRequired("Gemini Live is unavailable") from exc
+        finally:
+            await self._cancel_tasks(*self._pending_tool_tasks)
