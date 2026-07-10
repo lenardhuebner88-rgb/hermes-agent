@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- IME declaration. No subtypes: the dictation language is chosen in SettingsActivity, and a
+     single generic subtype keeps the system keyboard picker to one clean entry. -->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="net.hermes.dictate.SettingsActivity"
+    android:supportsSwitchingToNextInputMethod="true" />

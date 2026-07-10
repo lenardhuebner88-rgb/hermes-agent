@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hermes Diktat</string>
+    <string name="ime_label">Hermes Diktat</string>
+
+    <!-- Keyboard panel -->
+    <string name="status_idle">Bereit</string>
+    <string name="status_listening">Ich höre zu – zum Stoppen tippen</string>
+    <string name="status_recording">Cloud-Aufnahme läuft – zum Senden tippen</string>
+    <string name="status_uploading">Übertrage an Hermes …</string>
+    <string name="status_cloud_done">Cloud-Diktat eingefügt</string>
+    <string name="status_cloud_done_provider">Cloud-Diktat eingefügt (%1$s)</string>
+    <string name="chip_on_device">On-Device</string>
+    <string name="chip_cloud">Cloud</string>
+    <string name="space_label">Leerzeichen</string>
+    <string name="key_mic_desc">Diktat starten oder stoppen</string>
+    <string name="key_backspace_desc">Löschen</string>
+    <string name="key_enter_desc">Eingabe</string>
+    <string name="key_switch_desc">Tastatur wechseln</string>
+
+    <!-- Errors (always visible, never silent) -->
+    <string name="err_no_speech">Nichts gehört – Diktat gestoppt</string>
+    <string name="err_language_unavailable">Offline-Sprachpaket fehlt – in den Android-Einstellungen laden</string>
+    <string name="err_recognizer_unavailable">Keine On-Device-Spracherkennung verfügbar (braucht Android 12+ mit Sprachpaket)</string>
+    <string name="err_recognizer_busy">Spracherkennung ist belegt – bitte erneut versuchen</string>
+    <string name="err_recognizer_other">Erkennung fehlgeschlagen – bitte erneut versuchen</string>
+    <string name="err_mic_permission">Mikrofon-Berechtigung fehlt – bitte erteilen</string>
+    <string name="err_recording_failed">Aufnahme fehlgeschlagen</string>
+    <string name="err_cloud_auth">Nicht angemeldet – in den Einstellungen anmelden. Wieder On-Device.</string>
+    <string name="err_cloud_network">Hermes nicht erreichbar – wieder On-Device</string>
+    <string name="err_cloud_server">Cloud-Transkription fehlgeschlagen – wieder On-Device</string>
+    <string name="err_cloud_too_large">Aufnahme zu groß für die Cloud</string>
+    <string name="err_cloud_empty">Cloud hat nichts erkannt</string>
+
+    <!-- Settings -->
+    <string name="settings_subtitle">Systemweite Diktier-Tastatur – Push-to-Talk, On-Device zuerst</string>
+    <string name="section_setup">Einrichtung</string>
+    <string name="row_mic">Mikrofon-Berechtigung</string>
+    <string name="row_enable">Tastatur in Android aktivieren</string>
+    <string name="row_select">Als Tastatur auswählen</string>
+    <string name="state_pending">offen</string>
+    <string name="state_granted">erteilt ✓</string>
+    <string name="state_enabled">aktiv ✓</string>
+    <string name="state_selected">ausgewählt ✓</string>
+    <string name="btn_grant">Erteilen</string>
+    <string name="btn_enable">Aktivieren</string>
+    <string name="btn_select">Auswählen</string>
+    <string name="section_language">Diktiersprache</string>
+    <string name="lang_system">Systemsprache</string>
+    <string name="lang_de">Deutsch</string>
+    <string name="lang_en">Englisch</string>
+    <string name="section_cloud">Cloud-Diktat (Opt-in)</string>
+    <string name="cloud_switch">Cloud-Transkription erlauben</string>
+    <string name="cloud_hint">Standard ist On-Device: ohne Opt-in verlässt kein Audio das Gerät. Mit Opt-in zeigt die Tastatur einen Cloud-Chip; er gilt pro Diktat und springt danach automatisch auf On-Device zurück. Cloud nutzt deinen eigenen Hermes-Server (%1$s).</string>
+    <string name="row_login">Hermes-Anmeldung</string>
+    <string name="btn_login">Anmelden</string>
+    <string name="login_state_checking">prüfe …</string>
+    <string name="login_state_in">angemeldet ✓</string>
+    <string name="login_state_out">nicht angemeldet</string>
+    <string name="login_state_unreachable">Server nicht erreichbar</string>
+    <string name="toast_signed_in">Angemeldet ✓</string>
+    <string name="privacy_note">Datenschutz: Diktattext und Audio werden nie protokolliert. Audio verlässt das Gerät nur bei aktivem Cloud-Opt-in – an deinen eigenen Hermes-Server, wo es nach der Transkription gelöscht wird.</string>
+</resources>

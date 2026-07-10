@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/kb_bg"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="10dp">
+
+    <!-- Status line + cloud opt-in chip -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="28dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_idle"
+            android:textColor="@color/text_dim"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/cloud_chip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_chip"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:text="@string/chip_on_device"
+            android:textColor="@color/text_dim"
+            android:textSize="12sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- Mic row: switcher | mic | backspace -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="96dp"
+        android:layout_marginTop="6dp">
+
+        <ImageButton
+            android:id="@+id/key_switch"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_gravity="start|center_vertical"
+            android:background="@drawable/bg_key"
+            android:src="@drawable/ic_globe"
+            android:tint="@color/text_dim"
+            android:scaleType="centerInside"
+            android:padding="13dp"
+            android:contentDescription="@string/key_switch_desc" />
+
+        <ImageButton
+            android:id="@+id/key_mic"
+            android:layout_width="84dp"
+            android:layout_height="84dp"
+            android:layout_gravity="center"
+            android:background="@drawable/bg_mic"
+            android:backgroundTint="@color/accent"
+            android:src="@drawable/ic_mic"
+            android:tint="#FFFFFF"
+            android:scaleType="centerInside"
+            android:padding="24dp"
+            android:contentDescription="@string/key_mic_desc" />
+
+        <ImageButton
+            android:id="@+id/key_backspace"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_gravity="end|center_vertical"
+            android:background="@drawable/bg_key"
+            android:src="@drawable/ic_backspace"
+            android:tint="@color/text_dim"
+            android:scaleType="centerInside"
+            android:padding="14dp"
+            android:contentDescription="@string/key_backspace_desc" />
+    </FrameLayout>
+
+    <!-- Bottom row: punctuation, space, enter -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/key_period"
+            android:layout_width="44dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key"
+            android:gravity="center"
+            android:text="."
+            android:textColor="@color/text_primary"
+            android:textSize="20sp" />
+
+        <TextView
+            android:id="@+id/key_comma"
+            android:layout_width="44dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key"
+            android:gravity="center"
+            android:text=","
+            android:textColor="@color/text_primary"
+            android:textSize="20sp" />
+
+        <TextView
+            android:id="@+id/key_question"
+            android:layout_width="44dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key"
+            android:gravity="center"
+            android:text="?"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/key_exclamation"
+            android:layout_width="44dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key"
+            android:gravity="center"
+            android:text="!"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/key_space"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key"
+            android:gravity="center"
+            android:text="@string/space_label"
+            android:textColor="@color/text_dim"
+            android:textSize="13sp" />
+
+        <ImageButton
+            android:id="@+id/key_enter"
+            android:layout_width="56dp"
+            android:layout_height="match_parent"
+            android:background="@drawable/bg_key"
+            android:src="@drawable/ic_enter"
+            android:tint="@color/text_primary"
+            android:scaleType="centerInside"
+            android:padding="12dp"
+            android:contentDescription="@string/key_enter_desc" />
+    </LinearLayout>
+</LinearLayout>
