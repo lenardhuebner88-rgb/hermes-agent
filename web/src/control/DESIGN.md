@@ -117,7 +117,7 @@ independent of viewport (no per-component responsive font-size).
 | `emph` | `1.2rem` | `1.35` | Emphasized inline content, subtitle. |
 | `h2` | `1.47rem` | `1.25` | Section headings. |
 | `h1` | `1.87rem` | `1.15` | Page/route titles. |
-| `display` | `2.67rem` | `1.1` | Hero numbers, masthead statements. |
+| `hero` | `2.67rem` | `1.1` | Hero numbers, masthead statements. |
 
 ## Puls-Leiste contract
 

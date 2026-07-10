@@ -38,8 +38,8 @@ export function ListRow({
           {trailing != null ? <div className="ml-auto">{trailing}</div> : null}
         </div>
       ) : null}
-      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{title}</h3>
-      {meta != null ? <p className="mt-1.5 hc-mono text-[0.7rem] hc-dim">{meta}</p> : null}
+      <h3 className="mt-2.5 line-clamp-2 text-sec font-semibold leading-snug text-white">{title}</h3>
+      {meta != null ? <p className="mt-1.5 font-data tabular-nums text-micro hc-dim">{meta}</p> : null}
       {children}
     </article>
   );

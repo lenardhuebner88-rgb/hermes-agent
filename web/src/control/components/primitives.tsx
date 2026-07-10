@@ -57,9 +57,12 @@ export function Text({ as = "p", variant = "body", className, children }: TextPr
   return <Tag className={cn(TYPE_CLASS[variant], className)}>{children}</Tag>;
 }
 
-/** The eyebrow kicker — uppercase, tracked, dim. Sits above titles. */
+/** The eyebrow kicker — Archivo expanded caps, tracked, dim. Sits above
+ *  titles. Per DESIGN.md's type-scale + "mono = data only" rule: eyebrows are
+ *  the display voice, never mono-wallpaper (theme.css `--font-display` /
+ *  `--text-micro`). */
 export function Eyebrow({ className, children }: { className?: string; children: ReactNode }) {
-  return <p className={cn("hc-eyebrow", className)}>{children}</p>;
+  return <p className={cn("font-display uppercase tracking-[0.08em] text-micro font-semibold text-ink-3", className)}>{children}</p>;
 }
 
 /* ── Card ──────────────────────────────────────────────────────────────────
@@ -200,7 +203,7 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
     return (
       <div className={cn("space-y-1", className)}>
         <Eyebrow>{label}</Eyebrow>
-        <div className="hc-aurora-text hc-type-display font-mono tabular-nums">{value}</div>
+        <div className="hc-aurora-text hc-type-display font-data tabular-nums">{value}</div>
         {hint ? <Text variant="label" className="hc-soft">{hint}</Text> : null}
       </div>
     );
@@ -208,7 +211,7 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
   return (
     <div className={cn("rounded-lg border px-3 py-2", tone ? toneClasses(tone) : "border-white/10 bg-white/[.03]", className)}>
       <p className="hc-type-label hc-dim">{label}</p>
-      <p className="hc-mono truncate text-sm font-semibold text-white">{value}</p>
+      <p className="font-data tabular-nums truncate text-sec font-semibold text-white">{value}</p>
       {hint ? <p className="mt-0.5 hc-type-label hc-soft">{hint}</p> : null}
     </div>
   );

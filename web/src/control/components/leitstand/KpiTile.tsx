@@ -39,7 +39,7 @@ export function KpiTile({
         {Icon ? <Icon className="h-3.5 w-3.5 shrink-0 hc-dim" /> : null}
         <Eyebrow>{label}</Eyebrow>
       </div>
-      <div className="mt-1.5 truncate hc-mono text-lg font-semibold tabular-nums text-ink">
+      <div className="mt-1.5 truncate font-data text-lg font-semibold tabular-nums text-ink">
         {value}
         {suffix != null ? <small className="hc-dim"> {suffix}</small> : null}
       </div>

@@ -69,7 +69,10 @@ describe("primitives", () => {
       expect(html).toContain("Fleet");
       expect(html).toContain("Refresh");
       expect(html).toContain("panel body");
-      expect(html).toContain("hc-eyebrow");
+      // Eyebrow renders the Archivo/type-scale voice, not the old hc-eyebrow
+      // compat class (DESIGN.md: eyebrows are display caps, not mono).
+      expect(html).toContain("font-display");
+      expect(html).toContain("text-micro");
     });
   });
 

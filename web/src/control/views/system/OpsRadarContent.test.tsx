@@ -51,8 +51,10 @@ describe("OpsRadarContent", () => {
     expect(html).not.toContain("/home/");
     expect(html).not.toContain(".worktrees/");
     expect(html.toLowerCase()).not.toContain("cmdline");
-    expect(html).toContain("CPU</p><p class=\"hc-mono truncate text-sm font-semibold text-white\">-</p>");
-    expect(html).toContain("RAM</p><p class=\"hc-mono truncate text-sm font-semibold text-white\">-</p>");
+    // Stat's plain value moved from the old hc-mono/text-sm classes onto the
+    // new type-scale (font-data + text-sec) — W1-B typography rollout.
+    expect(html).toContain("CPU</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-white\">-</p>");
+    expect(html).toContain("RAM</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-white\">-</p>");
     expect(html.toLowerCase()).not.toContain("stop");
     expect(html.toLowerCase()).not.toContain("kill");
     expect(html.toLowerCase()).not.toContain("update");

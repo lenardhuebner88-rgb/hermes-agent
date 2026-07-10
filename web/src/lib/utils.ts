@@ -1,5 +1,27 @@
 import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
+
+// Tailwind's bare `text-` prefix serves both font-size (`text-lg`) and
+// text-color (`text-red-500`) utilities; tailwind-merge only resolves that
+// ambiguity for names it recognises (its own default scale, or an explicitly
+// registered theme scale) — an unrecognised custom name falls into the same
+// ambiguous bucket as an unrecognised color, so combining them silently drops
+// one. `web/src/control/theme.css` defines a custom `--text-*` scale (micro/
+// sec/body/emph/h1/h2/hero) alongside a color token) that tailwind-merge's
+// default config has no way to know about; without this, e.g.
+// `cn("text-micro font-semibold text-ink-3")` used to collapse to just
+// `"text-ink-3"` (verified via `twMerge("text-micro text-ink-3") ===
+// "text-ink-3"` before this fix — found building the /control type-scale
+// rollout, 2026-07-10). Registering the scale under `font-size` disambiguates
+// it from any text-color class without touching anything else in the
+// default config.
+const twMerge = extendTailwindMerge({
+  extend: {
+    classGroups: {
+      "font-size": [{ text: ["micro", "sec", "body", "emph", "h1", "h2", "hero"] }],
+    },
+  },
+});
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));

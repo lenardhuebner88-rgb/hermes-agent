@@ -53,7 +53,7 @@
   --font-display: 'Archivo Variable', 'Arial Narrow', sans-serif;
   --font-data: 'IBM Plex Mono', ui-monospace, 'Courier New', monospace;
 
-  /* type scale — micro through display, per-tier line heights */
+  /* type scale — micro through hero, per-tier line heights */
   --text-micro: 0.73rem;
   --text-micro--line-height: 1.3;
   --text-sec: 0.87rem;
@@ -66,6 +66,6 @@
   --text-h2--line-height: 1.25;
   --text-h1: 1.87rem;
   --text-h1--line-height: 1.15;
-  --text-display: 2.67rem;
-  --text-display--line-height: 1.1;
+  --text-hero: 2.67rem;
+  --text-hero--line-height: 1.1;
 }
