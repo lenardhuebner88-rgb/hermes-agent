@@ -547,3 +547,76 @@ def test_required_release_gate_without_child_is_held_without_generic_fallback(
         assert closeout._json_payload(held["payload"])["outcome"] == (
             "held_required_release_gate_missing"
         )
+
+
+def test_release_gate_needs_start_owns_deploy_without_auto_release_fallback(
+    kanban_home, monkeypatch,
+):
+    """Mutex on the previously-uncovered ``needs_start`` path: when a parked
+    release-gate child still has to be started, the gate path spawns the detached
+    activation (the backend restart) and ``maybe_auto_release`` MUST NOT also run
+    — otherwise flipping ``release.autonomous`` ON would risk a double backend
+    restart per completion."""
+    from hermes_cli import kanban_worktrees
+
+    release_calls = []
+    gate_starts = []
+
+    def _fake_start(conn, child_id):
+        gate_starts.append(child_id)
+        return "started"
+
+    monkeypatch.setattr(kanban_worktrees, "start_parked_release_gate", _fake_start)
+
+    with kb.connect_closing() as conn:
+        # A parked child with no reconciled events yet → _release_gate_context_state
+        # returns "release_gate_needs_start", the branch that actually spawns.
+        child_id = kb.create_task(
+            conn, title="needs start gate", initial_status="blocked"
+        )
+        task_id = _queue_done(
+            conn,
+            release_context={"release_gate_child_id": child_id},
+        )
+
+        result = closeout.closeout_sweep(
+            conn,
+            release_runner=lambda _conn, tid: release_calls.append(tid),
+        )[0]
+
+        # Exactly ONE deploy path drove: the gate spawn, never maybe_auto_release.
+        assert gate_starts == [child_id]
+        assert release_calls == []
+        assert result.state == "pending"
+        kinds = _event_kinds(conn, task_id)
+        assert closeout.CLOSEOUT_RELEASE_WAITING in kinds
+        assert closeout.CLOSEOUT_RECEIPT_WRITTEN not in kinds
+        assert closeout.CLOSEOUT_DELIVERED not in kinds
+
+
+def test_gate_child_present_but_no_gate_state_refuses_auto_release_fallback(
+    kanban_home, monkeypatch,
+):
+    """Defensive backstop: even if the gate reconciler regressed to return no
+    state while a release-gate child is recorded, the mutex refuses the
+    ``maybe_auto_release`` fallback (ambiguous, no second deploy) rather than let
+    both hook paths deploy for one completion."""
+    monkeypatch.setattr(closeout, "_release_gate_context_state", lambda *a, **k: None)
+
+    release_calls = []
+    with kb.connect_closing() as conn:
+        task_id = _queue_done(
+            conn,
+            release_context={"release_gate_child_id": "t_ghost_child"},
+        )
+        result = closeout.closeout_sweep(
+            conn,
+            release_runner=lambda _conn, tid: release_calls.append(tid),
+        )[0]
+
+        assert result.state == "ambiguous"
+        assert release_calls == []
+        kinds = _event_kinds(conn, task_id)
+        assert closeout.CLOSEOUT_RELEASE_AMBIGUOUS in kinds
+        assert closeout.CLOSEOUT_RELEASE_STARTED not in kinds
+        assert closeout.CLOSEOUT_DELIVERED not in kinds

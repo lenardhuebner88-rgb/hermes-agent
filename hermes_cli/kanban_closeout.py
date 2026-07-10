@@ -856,6 +856,22 @@ def _drive_release(
     claim: CloseoutClaim,
     release_runner: ReleaseRunner,
 ) -> str:
+    """Drive one completion's release decision through the two mutually-exclusive
+    hook paths in a FIXED order:
+
+      1. release-gate path (``_release_gate_context_state`` →
+         ``start_parked_release_gate`` → detached ``execute_release_gate``);
+      2. ``maybe_auto_release`` fallback (``release_runner``).
+
+    Both ultimately deploy through ``deploy_dashboard.sh`` — a real backend
+    restart — so at most ONE may run per completion; firing both would restart
+    the backend twice. The gate path is evaluated FIRST and OWNS the deploy
+    whenever a release-gate child exists (it returns a non-None state for every
+    gate outcome: needs-start→started/waiting, held, failed, ambiguous). Control
+    only falls through to ``maybe_auto_release`` when this completion carries no
+    release-gate child at all. This ordering is the mutex that makes
+    ``release.autonomous`` safe to flip ON without a double-backend-restart.
+    """
     gate_state = _release_gate_context_state(conn, claim.task_id)
     if gate_state == "release_gate_needs_start":
         ownership = _acquire_release_start(conn, claim)
@@ -888,6 +904,26 @@ def _drive_release(
                 {"outcome": "not_required", "reason": "not_chain_tip_completion"},
             )
         return CLOSEOUT_RELEASE_NOT_REQUIRED
+
+    # Mutex backstop: control only reaches ``maybe_auto_release`` when the gate
+    # path yielded no state, which ``_release_gate_context_state`` guarantees
+    # ONLY for a completion with no release-gate child. If a gate child is
+    # nonetheless recorded here, the gate path already owns (or will own) the
+    # backend restart — so refuse the ``maybe_auto_release`` fallback (ambiguous,
+    # no second deploy) instead of letting a future change to the gate reconciler
+    # silently open a double-backend-restart when release.autonomous is ON.
+    if str(release_context.get("release_gate_child_id") or "").strip() or (
+        release_context.get("release_gate_required")
+    ):
+        _record_ambiguous(
+            conn,
+            claim.task_id,
+            reason=(
+                "release-gate child present but gate path returned no state; "
+                "refusing maybe_auto_release fallback to avoid a double deploy"
+            ),
+        )
+        return CLOSEOUT_RELEASE_AMBIGUOUS
 
     ownership = _acquire_release_start(conn, claim)
     if ownership == "stale_claim":
