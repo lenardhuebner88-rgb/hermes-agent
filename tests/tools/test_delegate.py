@@ -436,6 +436,54 @@ class TestDelegateTask(unittest.TestCase):
         assert "interrupted" in statuses
         wedge.set()  # release the daemon worker before test exit
 
+    @patch("tools.delegate_tool._run_single_child")
+    def test_capacity_reject_keeps_children_attached_for_interrupt(self, mock_run):
+        """Regression (b316b3454 coverage gap): when the async pool is at
+        capacity, the batch falls back to a SYNCHRONOUS run. parent.interrupt()
+        fans out only via _active_children, so the fallback children must
+        still be attached at execution time — detaching before the dispatch
+        decision (the pre-fix bug) left them unstoppable mid-turn."""
+        observed = {}
+
+        def _fake_child(*, task_index, goal, child, parent_agent):
+            # Snapshot how many of the batch's children are still attached to
+            # the parent at the moment the synchronous fallback runs them.
+            observed[task_index] = len(parent_agent._active_children)
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "ok",
+                "error": None,
+                "api_calls": 0,
+                "duration_seconds": 0,
+            }
+
+        mock_run.side_effect = _fake_child
+        parent = _make_mock_parent()
+
+        with (
+            patch("run_agent.AIAgent") as MockAgent,
+            patch(
+                "tools.async_delegation.dispatch_async_delegation_batch",
+                return_value={"status": "rejected", "error": "at capacity"},
+            ),
+        ):
+            MockAgent.return_value = MagicMock()
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}],
+                    background=True,
+                    parent_agent=parent,
+                )
+            )
+
+        # Both children ran synchronously (capacity fallback, not dispatched).
+        assert result.get("mode") != "background"
+        assert len(observed) == 2
+        # Children were STILL attached during the synchronous run — the
+        # interrupt fan-out could reach them. (Pre-fix: detached → 0.)
+        assert all(count >= 1 for count in observed.values()), observed
+
     def test_depth_increments(self):
         """Verify child gets parent's depth + 1."""
         parent = _make_mock_parent(depth=0)

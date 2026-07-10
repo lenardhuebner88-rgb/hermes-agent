@@ -99,6 +99,14 @@ class _StubAgent:
     def _sync_external_memory_for_turn(self, **k):
         pass
 
+    # --- background-review surface (skill/memory nudge) ----------------
+    _skill_nudge_interval = 0
+    _iters_since_skill = 0
+    valid_tool_names = frozenset({"skill_manage"})
+
+    def _spawn_background_review(self, **k):
+        pass
+
 
 def _run(
     agent,
@@ -133,6 +141,50 @@ def _run(
         _should_review_memory=False,
         _turn_exit_reason=turn_exit_reason,
     )
+
+
+class _StubAgentSkillReviewRaises(_StubAgent):
+    """Skill nudge is due AND the background-review spawn raises."""
+
+    def __init__(self, **k):
+        super().__init__(**k)
+        # Instance attrs (parent __init__ sets these to 0, shadowing class attrs).
+        self._skill_nudge_interval = 3
+        self._iters_since_skill = 5
+
+    def _spawn_background_review(self, **k):
+        raise RuntimeError("thread start failed")
+
+
+def test_skill_nudge_counter_not_reset_when_spawn_raises():
+    """Regression (b316b3454 coverage gap): _iters_since_skill was reset at
+    decision time; a spawn that raises (swallowed best-effort) then silently
+    burned a full review interval. The counter must survive a failed spawn so
+    the review retries next interval."""
+    agent = _StubAgentSkillReviewRaises(raise_in=())
+    result = _run(agent, final_response="done", turn_exit_reason="text_response(x)")
+    # The turn still completes (spawn failure is best-effort)...
+    assert result["final_response"] == "done"
+    # ...but the skill-nudge counter is untouched (would be 0 if reset early).
+    assert agent._iters_since_skill == 5
+
+
+class _StubAgentSkillReviewOk(_StubAgent):
+    def __init__(self, **k):
+        super().__init__(**k)
+        self._skill_nudge_interval = 3
+        self._iters_since_skill = 5
+        self.spawned = False
+
+    def _spawn_background_review(self, **k):
+        self.spawned = True
+
+
+def test_skill_nudge_counter_reset_on_successful_spawn():
+    agent = _StubAgentSkillReviewOk(raise_in=())
+    _run(agent, final_response="done", turn_exit_reason="text_response(x)")
+    assert agent.spawned is True
+    assert agent._iters_since_skill == 0
 
 
 def test_all_cleanup_steps_raise_response_still_returned():
