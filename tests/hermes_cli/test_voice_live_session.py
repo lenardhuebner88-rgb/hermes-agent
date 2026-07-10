@@ -186,6 +186,32 @@ def _turn_complete_message(*, interrupted: bool = False) -> types.LiveServerMess
     )
 
 
+def _interrupted_message() -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        server_content=types.LiveServerContent(interrupted=True),
+    )
+
+
+def _input_transcription_message(
+    *, text: str | None, finished: bool | None = None
+) -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        server_content=types.LiveServerContent(
+            input_transcription=types.Transcription(text=text, finished=finished),
+        )
+    )
+
+
+def _output_transcription_message(
+    *, text: str | None, finished: bool | None = None
+) -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        server_content=types.LiveServerContent(
+            output_transcription=types.Transcription(text=text, finished=finished),
+        )
+    )
+
+
 def _install_fake_client(monkeypatch: pytest.MonkeyPatch, live: _FakeLive) -> None:
     from hermes_cli import voice_live_session
 
@@ -291,6 +317,215 @@ async def test_connect_config_serializes_through_real_developer_api_connector(
     assert len(websocket.sent) == 1
     setup = json.loads(websocket.sent[0])["setup"]
     assert setup["sessionResumption"] == {"handle": "resume-123"}
+
+
+def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
+    from hermes_cli.voice_live_session import (
+        DEFAULT_SYSTEM_INSTRUCTION,
+        GeminiLiveSession,
+    )
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    config = wrapper._connect_config()
+
+    assert (
+        config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
+    )
+    assert config.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+    assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
+    assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
+    # No function declarations were supplied, so the only tool is search.
+    assert len(config.tools) == 1
+    assert config.tools[0].google_search is not None
+
+
+def test_connect_config_carries_configured_voice_persona_and_both_tools() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [{"name": "list_terminals"}],
+        "secret",
+        voice="Charon",
+        system_instruction="Custom persona text.",
+    )
+    config = wrapper._connect_config()
+
+    assert (
+        config.speech_config.voice_config.prebuilt_voice_config.voice_name
+        == "Charon"
+    )
+    assert config.system_instruction == "Custom persona text."
+    assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
+    assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
+    assert len(config.tools) == 2
+    assert config.tools[0].function_declarations[0].name == "list_terminals"
+    assert config.tools[1].google_search is not None
+
+
+@pytest.mark.asyncio
+async def test_input_transcript_streams_partial_fragments_then_finalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fragments accumulate; a finished-only message flushes the joined text."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                _input_transcription_message(text="Hal"),
+                _input_transcription_message(text="lo"),
+                _input_transcription_message(text=None, finished=True),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+
+    transcript_events = [event for event in emitted if event.get("type") == "transcript"]
+    assert transcript_events == [
+        {"type": "transcript", "role": "user", "text": "Hal", "partial": True},
+        {"type": "transcript", "role": "user", "text": "Hallo", "partial": True},
+        {"type": "transcript", "role": "user", "text": "Hallo", "partial": False},
+    ]
+    assert wrapper._input_transcript_parts == []
+
+
+@pytest.mark.asyncio
+async def test_output_transcript_finalizes_before_turn_complete_listening_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                _output_transcription_message(text="Hallo Piet"),
+                _turn_complete_message(),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+
+    final_position = emitted.index(
+        {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Hallo Piet",
+            "partial": False,
+        }
+    )
+    assert emitted[final_position + 1] == {"type": "state", "value": "listening"}
+    assert wrapper._output_transcript_parts == []
+
+
+@pytest.mark.asyncio
+async def test_output_transcript_finalizes_before_interrupted_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                _output_transcription_message(text="Halbe Antwort"),
+                _interrupted_message(),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+
+    final_position = emitted.index(
+        {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Halbe Antwort",
+            "partial": False,
+        }
+    )
+    assert emitted[final_position + 1] == {"type": "interrupted"}
+    assert wrapper._output_transcript_parts == []
+
+
+@pytest.mark.asyncio
+async def test_transcript_fragment_with_none_text_emits_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    session = _FakeSDKSession(
+        turns=[
+            [
+                _input_transcription_message(text=None),
+                _audio_message(b"\x01\x02"),
+            ]
+        ]
+    )
+    live = _FakeLive([session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(session.receive_reentered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+
+    assert not any(event.get("type") == "transcript" for event in emitted)
+    assert wrapper._input_transcript_parts == []
 
 
 @pytest.mark.asyncio

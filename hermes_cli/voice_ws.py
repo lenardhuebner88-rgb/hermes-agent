@@ -25,7 +25,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 import psutil
 
 from hermes_cli.config import load_env
-from hermes_cli.voice_live_session import GeminiLiveSession, LiveFallbackRequired
+from hermes_cli.voice_live_session import (
+    DEFAULT_SYSTEM_INSTRUCTION,
+    GeminiLiveSession,
+    LiveFallbackRequired,
+)
 from hermes_constants import get_hermes_home
 from tools.transcription_tools import transcribe_audio
 from tools.tts_tool import text_to_speech_tool
@@ -115,6 +119,8 @@ class VoiceWebConfig:
     enabled: bool = False
     model: str = DEFAULT_LIVE_MODEL
     language: str = "de-DE"
+    voice: str = "Puck"
+    system_instruction: str = DEFAULT_SYSTEM_INSTRUCTION
 
 
 class VoiceRuntimeError(RuntimeError):
@@ -140,10 +146,24 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
     if not isinstance(language, str) or not language.strip():
         language = "de-DE"
 
+    voice = section.get("voice")
+    if not isinstance(voice, str) or not voice.strip():
+        voice = "Puck"
+
+    system_instruction = section.get("system_instruction")
+    if not isinstance(system_instruction, str):
+        system_instruction = DEFAULT_SYSTEM_INSTRUCTION
+    else:
+        system_instruction = system_instruction.strip()
+        if not system_instruction:
+            system_instruction = DEFAULT_SYSTEM_INSTRUCTION
+
     return VoiceWebConfig(
         enabled=section.get("enabled") is True,
         model=model,
         language=language,
+        voice=voice,
+        system_instruction=system_instruction,
     )
 
 
@@ -964,6 +984,8 @@ async def _run_live_bridge(
             config.language,
             FUNCTION_DECLARATIONS,
             api_key,
+            voice=config.voice,
+            system_instruction=config.system_instruction,
             initial_handle=_RESUMPTION_REGISTRY.get(session_id),
             on_handle_update=lambda handle: _RESUMPTION_REGISTRY.store(
                 session_id, handle
@@ -975,6 +997,8 @@ async def _run_live_bridge(
             config.language,
             FUNCTION_DECLARATIONS,
             api_key,
+            voice=config.voice,
+            system_instruction=config.system_instruction,
         )
     executor = VoiceToolExecutor(delegate=delegate_to_hermes)
     try:

@@ -16,9 +16,19 @@ from websockets.exceptions import WebSocketException
 _INPUT_MIME_TYPE = "audio/pcm;rate=16000"
 _CONTEXT_TRIGGER_TOKENS = 100_000
 _CONTEXT_TARGET_TOKENS = 50_000
-_VOICE_NAME = "Puck"
 _MAX_TOOL_ERROR_CHARS = 500
 _SENDER_HANDOFF_SECONDS = 1.0
+
+DEFAULT_SYSTEM_INSTRUCTION = (
+    "Du bist Hermes, Piets persönlicher Sprachassistent auf seinem Homeserver. "
+    "Sprich Deutsch, außer Piet wechselt die Sprache. Deine Antworten werden "
+    "vorgelesen: antworte in einem bis drei kurzen Sätzen, keine Listen, keine "
+    "Markdown-Zeichen. Du hast Werkzeuge: tmux-Terminals (lesen, Befehle "
+    "senden), Delegation an den Hermes-Agenten für größere Aufgaben, und "
+    "Google-Suche für aktuelle Fakten. Kündige eine Delegation kurz an, bevor "
+    "du sie startest, und sprich weiter, während sie läuft. Wenn du etwas "
+    "nicht sicher weißt, sag es ehrlich. Bestätige ausgeführte Aktionen knapp."
+)
 
 _FALLBACK_ERRORS = (
     errors.APIError,
@@ -66,6 +76,8 @@ class GeminiLiveSession:
         tool_declarations: list[dict[str, Any]],
         api_key: str,
         *,
+        voice: str = "Puck",
+        system_instruction: str = DEFAULT_SYSTEM_INSTRUCTION,
         initial_handle: str | None = None,
         on_handle_update: Callable[[str | None], None] | None = None,
     ) -> None:
@@ -73,9 +85,13 @@ class GeminiLiveSession:
         self._language = language
         self._tool_declarations = list(tool_declarations)
         self._api_key = api_key
+        self._voice = voice
+        self._system_instruction = system_instruction
         self._resumption_handle: str | None = initial_handle
         self._on_handle_update = on_handle_update
         self._replay_audio: deque[_PendingAudio] = deque()
+        self._input_transcript_parts: list[str] = []
+        self._output_transcript_parts: list[str] = []
 
     @staticmethod
     def _ack_source_queue(pending: _PendingAudio) -> None:
@@ -97,21 +113,21 @@ class GeminiLiveSession:
         tools = []
         if self._tool_declarations:
             tools.append(types.Tool(function_declarations=self._tool_declarations))
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
-            system_instruction=(
-                "Du bist Hermes, ein hilfreicher Sprachassistent. "
-                "Antworte knapp, natürlich und standardmäßig auf Deutsch."
-            ),
+            system_instruction=self._system_instruction,
             speech_config=types.SpeechConfig(
                 language_code=self._language,
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=_VOICE_NAME
+                        voice_name=self._voice
                     )
                 ),
             ),
             tools=tools,
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
             # Developer API supports handles, not transparent index replay.
             session_resumption=types.SessionResumptionConfig(
                 handle=self._resumption_handle,
@@ -233,6 +249,43 @@ class GeminiLiveSession:
         except Exception:
             _log.exception("Gemini Live resumption handle callback failed")
 
+    @staticmethod
+    async def _emit_transcript_fragment(
+        events_out: asyncio.Queue[dict[str, Any]],
+        role: str,
+        parts: list[str],
+        transcription: types.Transcription,
+    ) -> list[str]:
+        """Accumulate one transcription fragment and emit partial/final events.
+
+        Fragments arrive incrementally across messages, so ``parts`` is the
+        caller's per-turn buffer; the returned list replaces it (it is reset
+        to empty once ``transcription.finished`` closes the turn).
+        """
+
+        fragment = transcription.text
+        if fragment:
+            parts = [*parts, fragment]
+            await events_out.put(
+                {
+                    "type": "transcript",
+                    "role": role,
+                    "text": "".join(parts),
+                    "partial": True,
+                }
+            )
+        if transcription.finished:
+            await events_out.put(
+                {
+                    "type": "transcript",
+                    "role": role,
+                    "text": "".join(parts),
+                    "partial": False,
+                }
+            )
+            parts = []
+        return parts
+
     async def _handle_message(
         self,
         session: _LiveSession,
@@ -266,6 +319,39 @@ class GeminiLiveSession:
             )
 
         content = message.server_content
+        if content and content.input_transcription:
+            self._input_transcript_parts = await self._emit_transcript_fragment(
+                events_out,
+                "user",
+                self._input_transcript_parts,
+                content.input_transcription,
+            )
+        if content and content.output_transcription:
+            self._output_transcript_parts = await self._emit_transcript_fragment(
+                events_out,
+                "assistant",
+                self._output_transcript_parts,
+                content.output_transcription,
+            )
+        # turn_complete/interrupted can close a turn without the output
+        # transcription's own `finished` flag ever arriving, so flush
+        # whatever is buffered here too — before the state events below,
+        # so the client always sees the final transcript first.
+        if (
+            content
+            and (content.interrupted or content.turn_complete)
+            and self._output_transcript_parts
+        ):
+            await events_out.put(
+                {
+                    "type": "transcript",
+                    "role": "assistant",
+                    "text": "".join(self._output_transcript_parts),
+                    "partial": False,
+                }
+            )
+            self._output_transcript_parts = []
+
         if content and content.interrupted:
             await events_out.put({"type": "interrupted"})
             await events_out.put({"type": "state", "value": "listening"})
@@ -358,6 +444,8 @@ class GeminiLiveSession:
     ) -> None:
         """Run until cancelled, or request cascade fallback on a Live API failure."""
 
+        self._input_transcript_parts = []
+        self._output_transcript_parts = []
         announced_live = False
         try:
             client = genai.Client(api_key=self._api_key)

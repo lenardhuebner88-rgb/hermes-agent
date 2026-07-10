@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from hermes_cli.config import DEFAULT_CONFIG
-from hermes_cli.voice_live_session import LiveFallbackRequired
+from hermes_cli.voice_live_session import DEFAULT_SYSTEM_INSTRUCTION, LiveFallbackRequired
 from hermes_cli.voice_ws import (
     DEFAULT_LIVE_MODEL,
     VoiceWebConfig,
@@ -35,12 +35,14 @@ def _voice_app(
     client_reason=None,
     auth_required=False,
     session_token="test-session-token",
+    extra_voice_web=None,
 ):
     app = FastAPI()
     app.state.auth_required = auth_required
+    voice_web_section = {"enabled": enabled, **(extra_voice_web or {})}
     app.include_router(
         create_voice_router(
-            {"voice_web": {"enabled": enabled}},
+            {"voice_web": voice_web_section},
             ws_auth_reason=lambda _ws: auth_reason,
             ws_host_origin_reason=lambda _ws: host_reason,
             ws_client_reason=lambda _ws: client_reason,
@@ -56,11 +58,14 @@ def test_voice_web_config_defaults_off():
     assert cfg.enabled is False
     assert cfg.model == "gemini-2.5-flash-native-audio-preview-12-2025"
     assert cfg.language == "de-DE"
+    assert cfg.voice == "Puck"
+    assert cfg.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
 
     assert DEFAULT_CONFIG["voice_web"] == {
         "enabled": False,
         "model": "gemini-2.5-flash-native-audio-preview-12-2025",
         "language": "de-DE",
+        "voice": "Puck",
     }
 
 
@@ -98,6 +103,28 @@ def test_voice_web_config_accepts_nonblank_string_overrides():
     })
     assert cfg.model == "gemini-live-custom"
     assert cfg.language == "de-AT"
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 42, False, []])
+def test_voice_web_config_defaults_invalid_voice_and_system_instruction(value):
+    cfg = voice_web_config(
+        {"voice_web": {"voice": value, "system_instruction": value}}
+    )
+    assert cfg.voice == "Puck"
+    assert cfg.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+
+
+def test_voice_web_config_accepts_voice_and_system_instruction_overrides():
+    cfg = voice_web_config({
+        "voice_web": {
+            # Voice follows the same coercion pattern as model/language: a
+            # non-blank string is stored verbatim, not stripped.
+            "voice": " Charon ",
+            "system_instruction": "  Custom persona text.  ",
+        }
+    })
+    assert cfg.voice == " Charon "
+    assert cfg.system_instruction == "Custom persona text."
 
 
 @pytest.mark.parametrize(
@@ -315,6 +342,22 @@ def test_voice_client_uses_single_use_ticket_without_long_lived_ws_token():
         in script
     )
     assert ".catch(() => {})" in script
+
+
+def test_voice_client_renders_partial_transcripts_with_fallback_compat():
+    """C3: live captions stream via ``upsertTranscript`` and stay compatible
+    with the cascade fallback, which never sends a "partial" field at all.
+    """
+    script_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "app.js"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "function upsertTranscript(session, role, text, partial)" in script
+    assert "session.pendingTranscript" in script
+    assert "upsertTranscript(" in script
+    # A missing "partial" field (the cascade fallback's shape) must coerce to
+    # `false` via strict equality, so those transcripts still render
+    # immediately and completely, exactly as before this slice.
+    assert "message.partial === true" in script
 
 
 def test_voice_client_barge_in_tracks_audible_playback_not_server_state():
@@ -666,6 +709,39 @@ def test_live_route_ignores_malformed_session_param(monkeypatch, raw_session):
         assert ws.receive()["type"] == "websocket.close"
 
     assert not fresh_registry._entries
+
+
+def test_live_route_passes_configured_voice_and_persona_to_session(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+    monkeypatch.setattr(voice_ws, "_LIVE_END_GRACE_SECONDS", 0.01)
+
+    captured = {}
+    constructed = threading.Event()
+
+    class CapturingGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+            constructed.set()
+
+        async def run(self, audio_in, events_out, tool_executor):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
+
+    app = _voice_app(
+        extra_voice_web={
+            "voice": "Charon",
+            "system_instruction": "Custom persona text.",
+        }
+    )
+    with TestClient(app).websocket_connect("/api/voice/live") as ws:
+        assert constructed.wait(timeout=2)
+        assert captured["kwargs"]["voice"] == "Charon"
+        assert captured["kwargs"]["system_instruction"] == "Custom persona text."
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
 
 
 def test_live_session_mode_live_event_precedes_listening_state(monkeypatch):

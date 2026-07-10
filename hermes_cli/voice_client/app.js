@@ -92,11 +92,7 @@ function setButton(mode) {
   sessionButton.setAttribute("aria-label", "Sprachsitzung wird beendet");
 }
 
-function appendTranscript(role, text) {
-  if (typeof text !== "string" || text.trim() === "") {
-    return;
-  }
-
+function createTranscriptEntry(role, text) {
   emptyTranscriptElement.hidden = true;
   const entry = document.createElement("article");
   entry.className = `transcript-entry transcript-entry--${role}`;
@@ -110,11 +106,49 @@ function appendTranscript(role, text) {
   content.textContent = text;
 
   entry.append(label, content);
-  transcriptElement.append(entry);
-  while (transcriptElement.children.length > 100) {
-    transcriptElement.firstElementChild.remove();
+  return entry;
+}
+
+function setTranscriptEntryText(entry, text) {
+  const content = entry.querySelector(".transcript-text");
+  if (content) {
+    content.textContent = text;
   }
-  entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// Live captions stream in as fragments (partial: true) and are replaced in
+// place until the turn closes (partial: false). The cascade fallback never
+// sets "partial" at all, which `handleJsonMessage` normalizes to `false`, so
+// those transcripts still create-and-finalize an entry in one call, exactly
+// like the pre-C3 appendTranscript behavior.
+function upsertTranscript(session, role, text, partial) {
+  if (typeof text !== "string") {
+    return;
+  }
+  const key = role === "assistant" ? "assistant" : "user";
+  const pending = session.pendingTranscript[key];
+
+  if (!pending) {
+    if (text.trim() === "") {
+      return;
+    }
+    const entry = createTranscriptEntry(role, text);
+    transcriptElement.append(entry);
+    while (transcriptElement.children.length > 100) {
+      transcriptElement.firstElementChild.remove();
+    }
+    entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (partial) {
+      session.pendingTranscript[key] = entry;
+    }
+    return;
+  }
+
+  setTranscriptEntryText(pending, text);
+  if (!partial) {
+    session.pendingTranscript[key] = null;
+    pending.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 }
 
 function safeErrorMessage(error) {
@@ -433,12 +467,21 @@ function handleJsonMessage(session, raw) {
     return;
   }
   if (message.type === "transcript") {
-    appendTranscript(message.role === "assistant" ? "assistant" : "user", message.text);
+    upsertTranscript(
+      session,
+      message.role === "assistant" ? "assistant" : "user",
+      message.text,
+      message.partial === true,
+    );
     return;
   }
   if (message.type === "interrupted") {
     session.suppressIncomingAudio = true;
     stopPlayback(session);
+    // The server already finalized (or never started) the assistant's
+    // transcript before sending this; the entry itself stays as-is, only
+    // the pending ref is cleared client-side as a belt-and-braces guard.
+    session.pendingTranscript.assistant = null;
     statusDetailElement.textContent = "Antwort unterbrochen – Hermes hört weiter zu.";
     return;
   }
@@ -506,6 +549,7 @@ async function finishSession(
     return;
   }
   session.finishing = true;
+  session.pendingTranscript = { user: null, assistant: null };
   hideModeBadge();
   if (session.serverDrainTimer !== null) {
     window.clearTimeout(session.serverDrainTimer);
@@ -684,6 +728,7 @@ async function startSession() {
     reconnectAttempts: 0,
     mode: null,
     wakeLock: null,
+    pendingTranscript: { user: null, assistant: null },
   };
   activeSession = session;
   setButton("stop");

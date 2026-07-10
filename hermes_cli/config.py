@@ -919,6 +919,9 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "model": "gemini-2.5-flash-native-audio-preview-12-2025",
         "language": "de-DE",
+        # Prebuilt Gemini Live voice name; voice_web.system_instruction (str)
+        # additionally overrides the built-in German assistant persona.
+        "voice": "Puck",
     },
     "agent": {
         "max_turns": 90,
