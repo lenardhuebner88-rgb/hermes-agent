@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
+import { TriangleAlert } from "lucide-react";
 import { Hero } from "../components/Hero";
-import { ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { FleetEmptyState, FleetPanel, SignalChip, SignalLabel } from "../components/leitstand";
+import { Eyebrow } from "../components/primitives";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { useHermesWorkers } from "../hooks/useControlData";
@@ -89,40 +90,38 @@ export function ResearchEntry({ card, now }: { card: ResearchCard; now: number }
 
   const answer = detail ? pickAnswer(detail) : null;
   return (
-    <li className="rounded-md border border-[var(--hc-border)] px-3 py-2.5">
+    <li className="rounded-card border border-line px-3 py-2.5">
       <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex w-full flex-wrap items-center gap-2 text-left">
-        <span className="min-w-0 flex-1 basis-64 truncate text-[0.88rem] font-medium text-white">{card.title}</span>
-        <span className={`rounded-full border px-2 py-0.5 text-[0.7rem] ${done ? "border-emerald-500/40 text-emerald-300" : running ? "border-cyan-500/40 text-cyan-300" : "border-white/10 hc-soft"}`}>
-          {taskStatusLabel[card.status as keyof typeof taskStatusLabel] ?? card.status}
-        </span>
-        <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(card.created_at)}</span>
+        <span className="min-w-0 flex-1 basis-64 truncate text-sec font-medium text-ink">{card.title}</span>
+        <SignalChip tone={done || running ? "ok" : "neutral"} label={taskStatusLabel[card.status as keyof typeof taskStatusLabel] ?? card.status} />
+        <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtClock(card.created_at)}</span>
       </button>
       {/* Phase-A-Fortschritt erbt die Karte gratis: Note + ehrliche ETA. */}
       {worker ? (
-        <p className="mt-1.5 text-[0.78rem] hc-soft">
-          {worker.last_heartbeat_note ? <><span className="hc-eyebrow mr-1">{t.doingNow}:</span>{worker.last_heartbeat_note}</> : null}
+        <div className="mt-1.5 text-sec text-ink-2">
+          {worker.last_heartbeat_note ? <><Eyebrow className="mr-1 inline">{t.doingNow}:</Eyebrow><span>{worker.last_heartbeat_note}</span></> : null}
           {worker.eta_p50_seconds ? (
-            <span className="hc-dim"> · {t.etaLine(fmtDur(worker.eta_p50_seconds), fmtDur(Math.max(0, now - worker.started_at)))}</span>
+            <span className="text-ink-3"> · {t.etaLine(fmtDur(worker.eta_p50_seconds), fmtDur(Math.max(0, now - worker.started_at)))}</span>
           ) : null}
-        </p>
+        </div>
       ) : null}
       {open ? (
-        <div className="mt-2 space-y-3 border-t border-[var(--hc-border)] pt-2">
+        <div className="mt-2 space-y-3 border-t border-line pt-2">
           {detail?.task?.body ? (
             <details>
-              <summary className="cursor-pointer text-[0.78rem] hc-dim">{t.question}</summary>
-              <p className="mt-1 whitespace-pre-wrap text-[0.82rem] hc-soft">{detail.task.body}</p>
+              <summary className="cursor-pointer text-sec text-ink-3">{t.question}</summary>
+              <p className="mt-1 whitespace-pre-wrap text-sec text-ink-2">{detail.task.body}</p>
             </details>
           ) : null}
           {answer ? (
             <div>
               {answer.author ? (
-                <p className="mb-1 hc-type-label hc-dim">{t.answerMeta(answer.author, answer.at ? fmtClock(answer.at) : "")}</p>
+                <Eyebrow className="mb-1">{t.answerMeta(answer.author, answer.at ? fmtClock(answer.at) : "")}</Eyebrow>
               ) : null}
               <ProseMarkdown>{answer.body}</ProseMarkdown>
             </div>
           ) : (
-            <p className="text-[0.82rem] hc-dim">{t.noAnswer}</p>
+            <p className="text-sec text-ink-3">{t.noAnswer}</p>
           )}
         </div>
       ) : null}
@@ -212,14 +211,14 @@ export function ResearchView(_props: { density?: Density }) {
             aria-label={t.questionLabel}
             placeholder={t.questionPlaceholder}
             rows={3}
-            className="w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-3 py-2 text-sm text-white placeholder:hc-dim"
+            className="w-full rounded-card border border-line bg-surface-2 px-3 py-2 text-sm text-ink placeholder:text-ink-3"
           />
           <div className="flex flex-wrap items-center gap-2">
             <select
               value={depth}
               aria-label={t.depthLabel}
               onChange={(e) => setDepth(e.target.value as "kurz" | "gründlich")}
-              className="rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs text-white"
+              className="rounded-card border border-line bg-surface-2 px-2 py-1.5 text-xs text-ink"
             >
               <option value="kurz">{t.depthShort}</option>
               <option value="gründlich">{t.depthDeep}</option>
@@ -229,7 +228,7 @@ export function ResearchView(_props: { density?: Density }) {
               type="button"
               onClick={() => void submit()}
               disabled={busy || !question.trim()}
-              className="inline-flex min-h-11 items-center rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 py-1.5 text-sm font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+              className="inline-flex min-h-12 items-center rounded-card border border-live bg-live/10 px-4 py-1.5 text-sm font-medium text-live disabled:opacity-50"
             >
               {busy ? t.submitting : t.submit}
             </button>
@@ -237,11 +236,11 @@ export function ResearchView(_props: { density?: Density }) {
         </div>
       </Hero>
 
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {notice ? <ToneCallout tone="emerald">{notice}</ToneCallout> : null}
+      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      {notice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><SignalLabel tone="ok" label="Gestartet" />{notice}</div> : null}
 
       <FleetPanel eyebrow={t.history} meta={t.historyHint}>
-        {historyError ? <ToneCallout tone="red">{t.loadError}<br />{historyError}</ToneCallout> : null}
+        {historyError ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span>{t.loadError}<br />{historyError}</span></div> : null}
         {history !== null && history.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
         ) : (

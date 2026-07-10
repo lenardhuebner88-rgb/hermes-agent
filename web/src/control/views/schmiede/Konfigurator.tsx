@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { FleetPanel } from "../../components/fleet/atoms";
+import { TriangleAlert } from "lucide-react";
+import { FleetPanel, KpiTile, SignalLabel } from "../../components/leitstand";
 import { CopyButton } from "../backlog/CopyButton";
 import { FALLBACK_MODELS, type LaneModelOption } from "../lanes/api";
 import type { ForgeSelection, PromptForgeCatalog } from "./catalog";
@@ -9,7 +10,7 @@ import { score } from "./heuristic";
 import { generatePrompt } from "./api";
 
 const INPUT_CLS =
-  "min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:text-sm";
+  "min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-base text-ink sm:text-sm";
 
 const SCOPE_HINT = "Finde die relevanten Dateien selbst, bevor du etwas änderst — ändere nur, was die Aufgabe braucht.";
 
@@ -60,22 +61,24 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
     <div className="grid min-w-0 grid-cols-1 gap-4">
       <FleetPanel eyebrow="Konfigurator">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Ziel-CLI">
-            <Select value={targetId} onChange={setTargetId} options={catalog.targets.map((t) => ({ value: t.id, label: t.label }))} />
+          <Field label="Ziel-CLI" htmlFor="schmiede-target">
+            <Select id="schmiede-target" value={targetId} onChange={setTargetId} options={catalog.targets.map((t) => ({ value: t.id, label: t.label }))} />
           </Field>
-          <Field label="Task-Typ">
-            <Select value={taskTypeId} onChange={setTaskTypeId} options={catalog.taskTypes.map((t) => ({ value: t.id, label: t.label }))} />
+          <Field label="Task-Typ" htmlFor="schmiede-task-type">
+            <Select id="schmiede-task-type" value={taskTypeId} onChange={setTaskTypeId} options={catalog.taskTypes.map((t) => ({ value: t.id, label: t.label }))} />
           </Field>
-          <Field label="Modus">
-            <Select value={modeId} onChange={setModeId} options={catalog.modes.map((m) => ({ value: m.id, label: m.label }))} />
+          <Field label="Modus" htmlFor="schmiede-mode">
+            <Select id="schmiede-mode" value={modeId} onChange={setModeId} options={catalog.modes.map((m) => ({ value: m.id, label: m.label }))} />
           </Field>
-          <Field label="Modell (Ziel)">
-            <Select value={modelId} onChange={setModelId} options={modelList.map((m) => ({ value: m.id, label: m.label }))} />
+          <Field label="Modell (Ziel)" htmlFor="schmiede-model">
+            <Select id="schmiede-model" value={modelId} onChange={setModelId} options={modelList.map((m) => ({ value: m.id, label: m.label }))} />
           </Field>
         </div>
         <div className="mt-3 grid grid-cols-1 gap-2">
-          <Field label="Beschreibe dein Problem (in normalen Worten)">
+          <Field label="Beschreibe dein Problem (in normalen Worten)" htmlFor="schmiede-problem">
             <textarea
+              id="schmiede-problem"
+              aria-label="Beschreibe dein Problem in normalen Worten"
               className={`${INPUT_CLS} min-h-[96px]`}
               value={problem}
               onChange={(e) => setProblem(e.target.value)}
@@ -86,13 +89,13 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
             type="button"
             onClick={onGenerate}
             disabled={!problem.trim() || loading}
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-card border border-live bg-live/10 px-4 text-sm font-medium text-live transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading ? "Generiere …" : "Prompt generieren"}
           </button>
-          <p className="text-xs hc-dim">Die KI baut daraus einen sauberen Prompt mit messbaren Akzeptanzkriterien — du musst keine Dateien/Scope angeben.</p>
+          <p className="text-xs text-ink-3">Die KI baut daraus einen sauberen Prompt mit messbaren Akzeptanzkriterien — du musst keine Dateien/Scope angeben.</p>
         </div>
-        {target ? <p className="mt-2 text-xs hc-dim">{target.mechanicNote}</p> : null}
+        {target ? <p className="mt-2 text-xs text-ink-3">{target.mechanicNote}</p> : null}
       </FleetPanel>
 
       <FleetPanel
@@ -100,53 +103,50 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
         meta={output ? <CopyButton text={output.text} label="Kopieren" copiedLabel="Kopiert" /> : undefined}
       >
         {loading ? (
-          <p className="hc-soft text-sm">Generiere Prompt …</p>
+          <p className="text-ink-2 text-sm">Generiere Prompt …</p>
         ) : output ? (
           <>
             {output.fallback ? (
-              <p className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
-                KI nicht erreichbar — einfache Vorlage genutzt. Erneut versuchen oder den Text von Hand anpassen.
-              </p>
+              <div className="mb-2 flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />KI nicht erreichbar — einfache Vorlage genutzt. Erneut versuchen oder den Text von Hand anpassen.</div>
             ) : null}
-            <pre className="hc-mono max-h-[440px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/30 p-3 text-xs leading-relaxed text-white/90">{output.text}</pre>
+            <pre className="font-data tabular-nums max-h-[440px] overflow-auto whitespace-pre-wrap break-words rounded-card bg-surface-0 p-3 text-xs leading-relaxed text-ink">{output.text}</pre>
           </>
         ) : (
-          <p className="hc-soft text-sm">Beschreibe dein Problem oben und klicke „Prompt generieren".</p>
+          <p className="text-ink-2 text-sm">Beschreibe dein Problem oben und klicke „Prompt generieren".</p>
         )}
       </FleetPanel>
 
       {rating ? (
-        <FleetPanel eyebrow="Qualitäts-Score" meta={<span className="hc-mono text-sm">{rating.score} / {rating.max}</span>}>
+        <FleetPanel eyebrow="Qualitätsprüfung">
+          <KpiTile label="Qualitäts-Score" value={`${rating.score} / ${rating.max}`} className="mb-3" />
           <ul className="grid grid-cols-1 gap-1 text-sm">
             {rating.checks.map((c) => (
               <li key={c.id} className="flex items-center gap-2">
-                <span className={c.status === "pass" ? "text-emerald-400" : c.status === "fail" ? "text-rose-400" : "hc-dim"}>
-                  {c.status === "pass" ? "✓" : c.status === "fail" ? "✗" : "–"}
-                </span>
-                <span className={c.status === "fail" ? "text-white" : "hc-soft"}>{c.label}</span>
-                {c.status === "fail" ? <span className="hc-dim text-xs">— {c.rationale}</span> : null}
+                <SignalLabel tone={c.status === "pass" ? "ok" : c.status === "fail" ? "alert" : "neutral"} label={c.status === "pass" ? "Bestanden" : c.status === "fail" ? "Fehlt" : "Nicht relevant"} />
+                <span className={c.status === "fail" ? "text-ink" : "text-ink-2"}>{c.label}</span>
+                {c.status === "fail" ? <span className="text-ink-3 text-xs">— {c.rationale}</span> : null}
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs hc-dim">Volle Punktzahl = gut · unter der Hälfte = Drift-Risiko. Es zählen nur die für diesen Task-Typ relevanten Checks; „–" = nicht relevant.</p>
+          <p className="mt-2 text-xs text-ink-3">Volle Punktzahl = gut · unter der Hälfte = Drift-Risiko. Es zählen nur die für diesen Task-Typ relevanten Checks; „–" = nicht relevant.</p>
         </FleetPanel>
       ) : null}
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
   return (
-    <label className="grid grid-cols-1 gap-1 text-sm">
-      <span className="hc-eyebrow">{label}</span>
+    <div className="grid grid-cols-1 gap-1 text-sm">
+      <label htmlFor={htmlFor} className="font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">{label}</label>
       {children}
-    </label>
+    </div>
   );
 }
 
-function Select({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> }) {
+function Select({ id, value, onChange, options }: { id: string; value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> }) {
   return (
-    <select className={INPUT_CLS} value={value} onChange={(e) => onChange(e.target.value)}>
+    <select id={id} className={INPUT_CLS} value={value} onChange={(e) => onChange(e.target.value)}>
       {options.map((o) => (
         <option key={o.value} value={o.value}>{o.label}</option>
       ))}

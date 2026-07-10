@@ -17,6 +17,7 @@ import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRun
 import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
+import { LastRun } from "./autoresearch/panels";
 import { de } from "../i18n/de";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -76,7 +77,7 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(html).toContain("1 Karte");
     expect(html).toContain("Run lane omitted");
     expect(html).toContain("Fix-Hinweis");
-    expect(html).toContain("Evidence anzeigen");
+    expect(html).toContain("Beleg anzeigen");
   });
 
   it("summarizes the highest-risk finding as the most important point", () => {
@@ -111,6 +112,43 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(html).toContain("Noch keine Deep-Audit-Findings.");
     expect(html).toContain("2 Karten");
     expect(html).toContain("Detail-Findings sind in dieser Antwort nicht enthalten");
+  });
+
+  it("renders the technical counter and audit branches without the legacy panel vocabulary", () => {
+    const finding: DeepAuditFinding = {
+      fileline: "gateway/run.py:88",
+      severity: "critical",
+      category: "security",
+      title: "Token leak risk",
+      problem: "A token can be exposed.",
+      evidence: "token",
+      fix_hint: "Redact before logging.",
+    };
+    const status = {
+      state: "idle" as const,
+      pid: null,
+      request_id: "req-42",
+      iteration: 0,
+      max: 2,
+      last_step: "eval",
+      last_eval: "ok",
+      route_status: "configured",
+      heartbeat_age_s: 4,
+      heartbeat_fresh: true,
+      last_receipt: "reports/run-42.md",
+      last_run: { proposed: 4, kept: 2, reverted: 1, skills_researched: 7, research_errors: 2, skills_with_findings: 3, research_tokens: 12345 },
+      note: "fertig",
+    };
+    const html = [
+      renderToStaticMarkup(<LastRun status={status} latestRun={null} />),
+      renderToStaticMarkup(<DeepAuditFindings findings={[finding]} proposals={["deep-audit-x"]} />),
+    ].join("");
+
+    expect(html).toContain("font-data");
+    expect(html).toContain("text-status-alert");
+    for (const legacy of ["hc-eyebrow", "hc-mono", "white/10", "black/20", "red-500", "zinc-", "StatusPill", "ToneCallout"]) {
+      expect(html).not.toContain(legacy);
+    }
   });
 });
 

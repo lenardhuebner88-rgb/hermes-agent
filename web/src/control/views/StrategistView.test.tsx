@@ -141,7 +141,8 @@ describe("ProposalList", () => {
         onPending={() => {}}
       />,
     );
-    expect(html).toContain("text-amber-200");
+    expect(html).toContain("text-status-warn");
+    expect(html).not.toContain("amber-");
   });
 
   it("does not highlight the age badge under the stale threshold", () => {
@@ -154,7 +155,7 @@ describe("ProposalList", () => {
         onPending={() => {}}
       />,
     );
-    expect(html).not.toContain("text-amber-200");
+    expect(html).not.toContain("text-status-warn");
   });
 });
 

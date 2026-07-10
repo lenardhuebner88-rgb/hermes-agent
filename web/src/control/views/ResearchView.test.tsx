@@ -62,8 +62,11 @@ describe("ResearchEntry (Render)", () => {
     expect(html).not.toContain("Frage");
   });
 
-  it("laufende Recherche bekommt den running-Chip-Ton", () => {
+  it("laufende Recherche nutzt das geteilte Statussignal ohne Alt-Vokabular", () => {
     const html = renderToStaticMarkup(<ResearchEntry card={card({ status: "running" })} now={1781161500} />);
-    expect(html).toContain("text-cyan-300");
+    expect(html).toContain("text-status-ok");
+    for (const legacy of ["hc-", "cyan-", "emerald-", "StatusPill", "font-mono"]) {
+      expect(html).not.toContain(legacy);
+    }
   });
 });

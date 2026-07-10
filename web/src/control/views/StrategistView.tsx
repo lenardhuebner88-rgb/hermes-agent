@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, Gauge, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
+import { Activity, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2, TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
-import { ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { FleetEmptyState, FleetPanel, KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../components/leitstand";
 import { fmtAge, fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
 import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/useControlData";
@@ -14,7 +13,6 @@ import {
   outcomeDeltaValue,
   outcomeStatusLabel,
   outcomeVerdictLabel,
-  outcomeVerdictToneClass,
   partitionProposals,
   runSummaryText,
   sourceLabel,
@@ -35,7 +33,7 @@ const t = {
   title: "Vorschläge des Strategen",
   subtitle:
     "Self-gated, ROI-annotierte PlanSpecs vom Strategen-Cron — held, bis du freigibst. Freigeben baut, Verwerfen archiviert.",
-  metricsEyebrow: "Metrik-Snapshot",
+  metricsEyebrow: "Kennzahlenbild",
   metricsMeta: "destillierte Vision-Kennzahlen als Triage-Kontext",
   metricsEmpty: "Noch kein Metrik-Snapshot geschrieben.",
   metricsEmptyDesc: "Der Stratege/Heartbeat schreibt vision-metrics.json — bis dahin triagierst du ohne Kontext.",
@@ -160,8 +158,8 @@ export function StrategistView({ density }: { density: Density }) {
         density={density}
       />
 
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {notice ? <ToneCallout tone="emerald">{notice}</ToneCallout> : null}
+      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      {notice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><SignalLabel tone="ok" label="Erledigt" />{notice}</div> : null}
 
       <LastRunsStrip />
 
@@ -171,22 +169,17 @@ export function StrategistView({ density }: { density: Density }) {
         {rows.length === 0 ? (
           <FleetEmptyState title={t.metricsEmpty} desc={t.metricsEmptyDesc} />
         ) : (
-          <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {rows.map((row) => (
-              <div key={row.key} className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
-                <dt className="hc-type-label hc-dim flex items-center gap-1 truncate">
-                  <Gauge className="h-3 w-3 shrink-0" />{row.label}
-                </dt>
-                <dd className="hc-mono mt-0.5 truncate text-[0.95rem] text-white">{row.value}</dd>
-              </div>
+              <KpiTile key={row.key} label={row.label} value={row.value} />
             ))}
-          </dl>
+          </div>
         )}
       </FleetPanel>
 
       <FleetPanel eyebrow={t.listEyebrow} meta={t.listMeta}>
         {data === null ? (
-          <p className="text-sm hc-dim">…</p>
+          <p className="text-sm text-ink-3">…</p>
         ) : proposals.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} ok />
         ) : (
@@ -244,7 +237,7 @@ function OutcomesPanel() {
   const outcomes = data?.outcomes ?? [];
   return (
     <FleetPanel eyebrow={t.outcomesEyebrow} meta={t.outcomesMeta}>
-      {error ? <ToneCallout tone="red">{t.outcomesLoadError}</ToneCallout> : null}
+      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.outcomesLoadError}</div> : null}
       <OutcomeList outcomes={outcomes} />
     </FleetPanel>
   );
@@ -269,23 +262,19 @@ export function OutcomeList({ outcomes }: { outcomes: LeverOutcome[] }) {
 function OutcomeRow({ outcome }: { outcome: LeverOutcome }) {
   const delta = outcomeDeltaValue(outcome);
   return (
-    <li className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 px-3 py-2">
-      <Activity className="h-3.5 w-3.5 shrink-0 hc-dim" />
-      <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">
+    <li className="flex flex-wrap items-center gap-2 rounded-card border border-line px-3 py-2">
+      <Activity className="h-3.5 w-3.5 shrink-0 text-ink-3" />
+      <span className="min-w-0 flex-1 basis-56 truncate text-sec font-medium text-ink">
         {outcome.lever_key ?? "—"}
       </span>
-      <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
-        {outcomeStatusLabel(outcome.status)}
-      </span>
-      <span className={`hc-mono shrink-0 rounded-full border px-2 py-0.5 text-[0.68rem] ${outcomeVerdictToneClass(outcome.verdict)}`}>
-        {outcomeVerdictLabel(outcome.verdict)}
-      </span>
-      <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{outcome.metric_key ?? t.noMetric}</span>
+      <SignalChip tone={signalToneFromLegacy(outcome.status === "done" ? "emerald" : outcome.status === "failed" ? "red" : "zinc")} label={outcomeStatusLabel(outcome.status)} />
+      <SignalChip tone={signalToneFromLegacy(outcome.verdict === "improved" ? "emerald" : outcome.verdict === "worsened" ? "red" : outcome.verdict === "unmeasurable" ? "amber" : "zinc")} label={outcomeVerdictLabel(outcome.verdict)} />
+      <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{outcome.metric_key ?? t.noMetric}</span>
       {delta !== null ? (
-        <span className="hc-mono shrink-0 text-[0.78rem] text-white">{formatSignedDelta(delta)}</span>
+        <span className="font-data tabular-nums shrink-0 text-sec text-ink">{formatSignedDelta(delta)}</span>
       ) : null}
       {outcome.proposed_at != null ? (
-        <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtAge(outcome.proposed_at)}</span>
+        <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtAge(outcome.proposed_at)}</span>
       ) : null}
     </li>
   );
@@ -307,14 +296,14 @@ function ProposalGroup({
   accent: "violet" | "slate";
   children: React.ReactNode;
 }) {
-  const titleClass = accent === "violet" ? "hc-type-label text-violet-200" : "hc-type-label hc-soft";
+  const titleClass = accent === "violet" ? "font-display text-micro font-semibold uppercase tracking-[0.08em] text-brand" : "font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-2";
   return (
     <section className="space-y-1.5">
       <div>
         <p className={titleClass}>
-          {title} <span className="hc-mono hc-dim">· {count}</span>
+          {title} <span className="font-data tabular-nums text-ink-3">· {count}</span>
         </p>
-        <p className="mt-0.5 text-[0.72rem] hc-dim">{desc}</p>
+        <p className="mt-0.5 text-micro text-ink-3">{desc}</p>
       </div>
       {children}
     </section>
@@ -349,26 +338,18 @@ export function ProposalList({
         const isPending = pending?.id === p.id ? pending : null;
         const annotated = p.target_metric || p.roi || p.counter_metric || p.grounding;
         return (
-          <li key={p.id} className="rounded-md border border-[var(--hc-accent-border)] px-3 py-2.5">
+          <li key={p.id} className="rounded-card border border-line bg-surface-1 px-3 py-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <Lightbulb className="h-3.5 w-3.5 shrink-0 text-violet-200" />
-              <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">{p.display_title || p.title}</span>
-              <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
+              <Lightbulb className="h-3.5 w-3.5 shrink-0 text-brand" />
+              <span className="min-w-0 flex-1 basis-56 truncate text-sec font-medium text-ink">{p.display_title || p.title}</span>
+              <span className="shrink-0 text-micro text-ink-2">
                 {isManual ? t.manualBadge : sourceLabel(p.source)}
               </span>
-              <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
+              <span className="shrink-0 text-micro text-ink-2">
                 {t.subtasks(p.subtask_count)}
               </span>
-              <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(p.created_at)}</span>
-              <span
-                className={
-                  isStaleHold(p.age_seconds)
-                    ? "hc-mono shrink-0 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200"
-                    : "hc-mono shrink-0 text-[0.72rem] hc-dim"
-                }
-              >
-                {t.heldFor(fmtAge(p.held_since))}
-              </span>
+              <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtClock(p.created_at)}</span>
+              {isStaleHold(p.age_seconds) ? <SignalChip tone="warn" label={t.heldFor(fmtAge(p.held_since))} /> : <span className="shrink-0 text-sec text-ink-3">{t.heldFor(fmtAge(p.held_since))}</span>}
             </div>
 
             {isManual ? null : (
@@ -379,18 +360,18 @@ export function ProposalList({
                   <AnnotationCell icon={<ShieldAlert className="h-3 w-3" />} label={t.counterLabel} value={p.counter_metric} />
                 </div>
                 {p.origin ? (
-                  <p className="mt-1 text-[0.72rem] hc-dim">Entstanden aus: {p.origin}</p>
+                  <p className="mt-1 text-micro text-ink-3">Entstanden aus: {p.origin}</p>
                 ) : null}
                 {p.grounding ? (
-                  <details className="mt-1.5 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5 text-[0.74rem] hc-soft">
+                  <details className="mt-1.5 rounded-card border border-line bg-surface-2 px-2.5 py-1.5 text-sec text-ink-2">
                     <summary className="flex cursor-pointer items-center gap-1.5 list-none">
-                      <ScrollText className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
-                      <span className="hc-dim">{t.groundingLabel}</span>
+                      <ScrollText className="h-3.5 w-3.5 shrink-0 text-brand" />
+                      <span className="text-ink-3">{t.groundingLabel}</span>
                     </summary>
                     <p className="mt-1.5">{p.grounding}</p>
                   </details>
                 ) : null}
-                {!annotated ? <p className="mt-1 text-[0.72rem] hc-dim">{t.unannotated}</p> : null}
+                {!annotated ? <p className="mt-1 text-micro text-ink-3">{t.unannotated}</p> : null}
               </>
             )}
 
@@ -401,20 +382,20 @@ export function ProposalList({
                     type="button"
                     disabled={busy}
                     onClick={() => onAct(p, isPending.kind)}
-                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+                    className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live bg-live/10 px-3 py-1 text-sec font-medium text-live disabled:opacity-50"
                   >
                     {isPending.kind === "approve" ? <Rocket className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
                     {isPending.kind === "approve" ? t.approve : t.veto} · {t.confirm}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => onPending(null)} className="inline-flex min-h-[44px] items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
-                  <span className="text-[0.72rem] hc-dim">{isPending.kind === "approve" ? t.approveHint : t.vetoHint}</span>
+                  <button type="button" disabled={busy} onClick={() => onPending(null)} className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1 text-sec text-ink-2">{t.cancel}</button>
+                  <span className="text-micro text-ink-3">{isPending.kind === "approve" ? t.approveHint : t.vetoHint}</span>
                 </>
               ) : (
                 <>
-                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "approve" })} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
+                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "approve" })} className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live px-3 py-1 text-sec text-live hover:bg-live/10">
                     <Rocket className="h-3.5 w-3.5" />{t.approve}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "veto" })} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-red-500/25 px-3 py-1 text-[0.78rem] text-red-200 hover:bg-red-500/10">
+                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "veto" })} className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-line px-3 py-1 text-sec text-ink-2 hover:border-live hover:bg-live/10 hover:text-live">
                     <Trash2 className="h-3.5 w-3.5" />{t.veto}
                   </button>
                 </>
@@ -435,21 +416,21 @@ function LastRunsStrip() {
   return (
     <FleetPanel eyebrow="Letzte Läufe" meta="Harvest + Stratege-Vorschlag on-demand oder via Cron">
       <div className="grid gap-2 sm:grid-cols-2">
-        <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
+        <div className="rounded-card border border-line bg-surface-2 px-3 py-2">
           <div className="flex items-center gap-2">
-            <Moon className="h-3.5 w-3.5 shrink-0 hc-dim" />
-            <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">Harvest</span>
-            {harvest ? <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(harvest.ts)}</span> : null}
+            <Moon className="h-3.5 w-3.5 shrink-0 text-ink-3" />
+            <span className="min-w-0 flex-1 truncate text-sec font-medium text-ink">Harvest</span>
+            {harvest ? <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtClock(harvest.ts)}</span> : null}
           </div>
-          <p className="mt-1 text-[0.78rem] hc-soft">{runSummaryText("harvest", harvest)}</p>
+          <p className="mt-1 text-sec text-ink-2">{runSummaryText("harvest", harvest)}</p>
         </div>
-        <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
+        <div className="rounded-card border border-line bg-surface-2 px-3 py-2">
           <div className="flex items-center gap-2">
-            <Lightbulb className="h-3.5 w-3.5 shrink-0 text-violet-300" />
-            <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">Stratege</span>
-            {propose ? <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(propose.ts)}</span> : null}
+            <Lightbulb className="h-3.5 w-3.5 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1 truncate text-sec font-medium text-ink">Stratege</span>
+            {propose ? <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtClock(propose.ts)}</span> : null}
           </div>
-          <p className="mt-1 text-[0.78rem] hc-soft">{runSummaryText("propose", propose)}</p>
+          <p className="mt-1 text-sec text-ink-2">{runSummaryText("propose", propose)}</p>
         </div>
       </div>
     </FleetPanel>
@@ -458,9 +439,9 @@ function LastRunsStrip() {
 
 function AnnotationCell({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
   return (
-    <div className="rounded-md border border-white/10 bg-black/15 px-2.5 py-1.5">
-      <div className="hc-type-label hc-dim flex items-center gap-1">{icon}{label}</div>
-      <div className={value ? "mt-0.5 text-[0.8rem] text-white" : "mt-0.5 text-[0.8rem] hc-dim"}>{value ?? "—"}</div>
+    <div className="rounded-card border border-line bg-surface-2 px-2.5 py-1.5">
+      <div className="font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3 flex items-center gap-1">{icon}{label}</div>
+      <div className={value ? "mt-0.5 text-sec text-ink" : "mt-0.5 text-sec text-ink-3"}>{value ?? "—"}</div>
     </div>
   );
 }
@@ -515,8 +496,8 @@ export function TriggerPanel({ onRan }: { onRan: () => void }) {
 
   return (
     <FleetPanel eyebrow={t.triggerEyebrow} meta={t.triggerMeta}>
-      {err ? <ToneCallout tone="red">{err}</ToneCallout> : null}
-      {notice ? <ToneCallout tone="cyan">{notice}</ToneCallout> : null}
+      {err ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{err}</div> : null}
+      {notice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><SignalLabel tone="ok" label="Gestartet" />{notice}</div> : null}
       <div className="grid gap-2 sm:grid-cols-2">
         <TriggerRow
           label={t.runStrategist} hint={t.runStrategistHint}
@@ -541,15 +522,13 @@ function TriggerRow({ label, hint, job, which, pending, busy, onPending, onFire 
   const running = job?.running ?? false;
   const isPending = pending === which;
   return (
-    <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2.5">
+    <div className="rounded-card border border-line bg-surface-2 px-3 py-2.5">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-sec font-medium text-ink">{label}</span>
         {running ? (
-          <span className="hc-mono inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan-400/30 px-2 py-0.5 text-[0.68rem] text-cyan-200">
-            <Loader2 className="h-3 w-3 animate-spin" />{t.running}
-          </span>
+          <span className="inline-flex shrink-0 items-center gap-1.5"><Loader2 aria-hidden className="h-3 w-3 animate-spin text-status-ok" /><SignalLabel tone="ok" label={t.running} /></span>
         ) : (
-          <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">
+          <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">
             {job?.last_modified ? t.lastRun(fmtClock(job.last_modified)) : t.neverRun}
           </span>
         )}
@@ -559,24 +538,24 @@ function TriggerRow({ label, hint, job, which, pending, busy, onPending, onFire 
           <>
             <button
               type="button" disabled={busy || running} onClick={() => onFire(which)}
-              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+              className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live bg-live/10 px-3 py-1 text-sec font-medium text-live disabled:opacity-50"
             >
               <Play className="h-3.5 w-3.5" />{t.confirm}
             </button>
             <button
               type="button" disabled={busy} onClick={() => onPending(null)}
-              className="inline-flex min-h-[44px] items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft"
+              className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1 text-sec text-ink-2"
             >{t.cancel}</button>
           </>
         ) : (
           <button
             type="button" disabled={busy || running} onClick={() => onPending(which)}
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-cyan-500/30 px-3 py-1 text-[0.78rem] text-cyan-100 hover:bg-cyan-500/10 disabled:opacity-50"
+            className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live px-3 py-1 text-sec text-live hover:bg-live/10 disabled:opacity-50"
           >
             <Play className="h-3.5 w-3.5" />{label}
           </button>
         )}
-        <span className="text-[0.72rem] hc-dim">{hint}</span>
+        <span className="text-micro text-ink-3">{hint}</span>
       </div>
     </div>
   );

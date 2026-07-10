@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { Settings2 } from "lucide-react";
+import { Settings2, TriangleAlert } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { fetchJSON } from "@/lib/api";
 import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { de } from "../../i18n/de";
-import { StatusPill, ToneCallout } from "../../components/atoms";
+import { SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { Panel, SkeletonCard, Text } from "../../components/primitives";
 
 type LaneModelSlot = "skills_hub" | "code_audit" | "test_hardening";
@@ -59,12 +59,13 @@ export function LaneModelPanel() {
   return (
     <Panel eyebrow={de.autoresearch.laneModelsEyebrow} title={de.autoresearch.laneModelsHeading} actions={loading ? <Spinner /> : null} className="sm:p-5">
       {error ? (
-        <ToneCallout tone="red">
-          <div className="flex items-center justify-between gap-3">
+        <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
             <span>{de.autoresearch.laneModelsFailed}: {error}</span>
-            <Button outlined className="hc-hit shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
+            <Button outlined className="min-h-12 shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
           </div>
-        </ToneCallout>
+        </div>
       ) : null}
       {loading && !aux ? <SkeletonCard rows={2} className="mb-3" /> : null}
       <div className="grid gap-3 md:grid-cols-3">
@@ -73,16 +74,16 @@ export function LaneModelPanel() {
           const isAuto = !assignment?.provider || assignment.provider === "auto";
           const value = isAuto ? de.autoresearch.laneModelAuto : `${assignment?.provider}${assignment?.model ? ` · ${assignment.model}` : ""}`;
           return (
-            <div key={slot.task} className="rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <div key={slot.task} className="rounded-panel border border-line bg-surface-2 p-3">
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <Text as="p" variant="label" className="flex items-center gap-1.5 text-white"><Settings2 className="h-3.5 w-3.5" />{slot.lane}</Text>
-                  <p className="mt-1 text-xs hc-dim">{slot.hint}</p>
+                  <Text as="p" variant="label" className="flex items-center gap-1.5 text-ink"><Settings2 className="h-3.5 w-3.5" />{slot.lane}</Text>
+                  <p className="mt-1 text-xs text-ink-3">{slot.hint}</p>
                 </div>
-                <StatusPill tone={isAuto ? "zinc" : "cyan"} label={isAuto ? "Auto" : slot.label} />
+                <SignalChip tone={signalToneFromLegacy(isAuto ? "zinc" : "cyan")} label={isAuto ? "Auto" : slot.label} />
               </div>
-              <p className="hc-mono min-h-5 truncate text-xs hc-soft" title={value}>{value}</p>
-              <Button outlined className="hc-hit mt-3 w-full" onClick={() => setPickerTask(slot.task)} disabled={loading || !!savingTask} prefix={savingTask === slot.task ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
+              <p className="font-data tabular-nums min-h-5 truncate text-xs text-ink-2" title={value}>{value}</p>
+              <Button outlined className="min-h-12 mt-3 w-full" onClick={() => setPickerTask(slot.task)} disabled={loading || !!savingTask} prefix={savingTask === slot.task ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
                 {de.autoresearch.laneModelChange}
               </Button>
             </div>
@@ -163,21 +164,22 @@ function SingleLaneModelPicker({ task, titleLane }: { task: "code_audit" | "test
   };
 
   return (
-    <div className="rounded-lg border border-white/10 bg-black/20 p-2">
+    <div className="rounded-panel border border-line bg-surface-2 p-2">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-xs hc-soft">Modell</span>
-        {loading ? <Spinner /> : <StatusPill tone={!assignment?.provider || assignment.provider === "auto" ? "zinc" : "cyan"} label={task} />}
+        <span className="text-xs text-ink-2">Modell</span>
+        {loading ? <Spinner /> : <SignalChip tone={signalToneFromLegacy(!assignment?.provider || assignment.provider === "auto" ? "zinc" : "cyan")} label={task} />}
       </div>
       {error ? (
-        <ToneCallout tone="red">
-          <div className="flex items-center justify-between gap-2">
+        <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
             <span className="text-xs">{de.autoresearch.laneModelsFailed}: {error}</span>
-            <Button outlined className="hc-hit shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
+            <Button outlined className="min-h-12 shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
           </div>
-        </ToneCallout>
+        </div>
       ) : null}
-      <p className="hc-mono truncate text-xs hc-soft" title={value}>{value}</p>
-      <Button outlined className="hc-hit mt-2 w-full" onClick={() => setPickerOpen(true)} disabled={loading || saving} prefix={saving ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
+      <p className="font-data tabular-nums truncate text-xs text-ink-2" title={value}>{value}</p>
+      <Button outlined className="min-h-12 mt-2 w-full" onClick={() => setPickerOpen(true)} disabled={loading || saving} prefix={saving ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
         {de.autoresearch.laneModelChange}
       </Button>
       {pickerOpen ? (

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
+import { TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type useProposals } from "../hooks/useControlData";
 import { getAutoresearchActionPlan } from "../lib/autoresearchActionPlan";
@@ -18,7 +19,8 @@ import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { rankAutoresearchProposalGroups } from "../lib/proposalGroups";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
-import { StaleBadge, ToneCallout } from "../components/atoms";
+import { StaleBadge } from "../components/atoms";
+import { SignalLabel, signalToneFromLegacy } from "../components/leitstand";
 import { AutoresearchHero } from "./autoresearch/AutoresearchHero";
 import { ProposalQueue } from "./autoresearch/ProposalQueue";
 import { LoopControls } from "./autoresearch/LoopControls";
@@ -497,10 +499,15 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onPrune={() => void pruneAutoresearch()}
       />
 
-      {pruneMessage ? <ToneCallout tone={pruneMessage.tone}>{pruneMessage.text}</ToneCallout> : null}
-      {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
-      {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
-      {busyNotice ? <ToneCallout tone="violet"><Spinner />{busyNotice}</ToneCallout> : null}
+      {pruneMessage ? (
+        <div className={`flex items-start gap-2 rounded-card border px-3 py-2 text-sec ${pruneMessage.tone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" : "border-line bg-surface-2 text-ink-2"}`}>
+          {pruneMessage.tone === "red" ? <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /> : <SignalLabel tone={signalToneFromLegacy(pruneMessage.tone)} label={pruneMessage.tone === "emerald" ? "Erledigt" : "Hinweis"} />}
+          <span>{pruneMessage.text}</span>
+        </div>
+      ) : null}
+      {store.loading && open.length === 0 ? <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">Quelle wird geprüft...</div> : null}
+      {store.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{store.error}</div> : null}
+      {busyNotice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><Spinner />{busyNotice}</div> : null}
       {latestActivity && latestActivityCard ? <LatestActivityPanel at={latestActivity.at} card={latestActivityCard} /> : null}
 
       <ProposalQueue
@@ -609,7 +616,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onSkip={store.skip}
       />
 
-      {runs.error ? <ToneCallout tone="red">{runs.error}</ToneCallout> : null}
+      {runs.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{runs.error}</div> : null}
       {runs.isStale || runs.error ? (
         <div className="flex justify-end">
           <StaleBadge isStale={runs.isStale} lastUpdated={runs.lastUpdated} errorObj={runs.errorObj} error={runs.error} />
@@ -617,9 +624,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       ) : null}
       <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} loading={runs.loading && !runs.data} />
 
-      <section className="hc-card p-4">
-        <h2 className="mb-3 text-base font-semibold text-white">{de.autoresearch.activity}</h2>
-        {store.activity.length === 0 ? <p className="text-sm hc-soft">Noch keine Aktion in dieser Ansicht.</p> : (
+      <section className="rounded-panel border border-line bg-surface-1 p-4">
+        <h2 className="mb-3 text-base font-semibold text-ink">{de.autoresearch.activity}</h2>
+        {store.activity.length === 0 ? <p className="text-sm text-ink-2">Noch keine Aktion in dieser Ansicht.</p> : (
           <div className="space-y-2">
             {store.activity.map((entry) => <ActivityTimelineItem key={`${entry.at}-${entry.text}`} at={entry.at} card={getAutoresearchActivityCard(entry)} />)}
           </div>

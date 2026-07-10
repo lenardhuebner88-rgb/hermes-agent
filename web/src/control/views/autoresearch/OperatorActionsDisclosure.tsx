@@ -36,8 +36,8 @@ export function OperatorActionsDisclosure({
 }) {
   return (
     <Disclosure
-      className="border-t border-[var(--hc-border)] bg-black/20 p-4 sm:p-5"
-      summary={<span className="text-sm font-semibold text-white">Weitere Aktionen <span className="ml-1 text-xs font-normal hc-soft">— Erzeugen · Scannen · Übernehmen · Aufräumen</span></span>}
+      className="border-t border-line bg-surface-2 p-4 sm:p-5"
+      summary={<span className="flex min-h-12 items-center text-sm font-semibold text-ink">Weitere Aktionen <span className="ml-1 text-xs font-normal text-ink-2">— Erzeugen · Scannen · Übernehmen · Aufräumen</span></span>}
     >
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <OperatorActionCard
@@ -46,7 +46,7 @@ export function OperatorActionsDisclosure({
           hint={actionPlan.generate}
           title="Skill-Vorschläge holen"
           body="Sofort neue Kandidaten aus genutzten Skills erzeugen."
-          button={<Button className="hc-hit w-full justify-center" onClick={onGenerate} disabled={!!storeBusy} title={de.autoresearch.generateHint} prefix={storeBusy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>Vorschläge erzeugen</Button>}
+          button={<Button className="min-h-12 w-full justify-center" onClick={onGenerate} disabled={!!storeBusy} title={de.autoresearch.generateHint} prefix={storeBusy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>Vorschläge erzeugen</Button>}
         />
         <OperatorActionCard
           icon={<FlaskConical className="h-5 w-5" />}
@@ -56,15 +56,15 @@ export function OperatorActionsDisclosure({
           body="Findet Code-Risiken und legt gegatete Vorschläge an."
           button={
             <div className="space-y-2">
-              <Button outlined className="hc-hit w-full justify-center" onClick={() => onGenerateCodeWeaknesses("incremental")} disabled={!!storeBusy} title={de.autoresearch.scanScopeHintChanged} prefix={storeBusy === codeWeaknessBusyKey("incremental") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+              <Button outlined className="min-h-12 w-full justify-center" onClick={() => onGenerateCodeWeaknesses("incremental")} disabled={!!storeBusy} title={de.autoresearch.scanScopeHintChanged} prefix={storeBusy === codeWeaknessBusyKey("incremental") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
                 Geänderte Dateien scannen
               </Button>
-              <Disclosure className="rounded-lg border border-white/10 bg-black/20 p-2" summary={<span className="text-xs font-semibold text-white">Mehr Umfang</span>}>
+              <Disclosure className="rounded-panel border border-line bg-surface-2 p-2" summary={<span className="text-xs font-semibold text-ink">Mehr Umfang</span>}>
                 <div className="grid grid-cols-2 gap-2 text-sm">
-                  <Button outlined className="hc-hit justify-center" onClick={() => onGenerateCodeWeaknesses("full")} disabled={!!storeBusy} title={de.autoresearch.scanScopeHintFull} prefix={storeBusy === codeWeaknessBusyKey("full") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                  <Button outlined className="min-h-12 justify-center" onClick={() => onGenerateCodeWeaknesses("full")} disabled={!!storeBusy} title={de.autoresearch.scanScopeHintFull} prefix={storeBusy === codeWeaknessBusyKey("full") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
                     {de.autoresearch.scanScopeFull}
                   </Button>
-                  <Button outlined className="hc-hit justify-center" onClick={() => onGenerateCodeWeaknesses("deep")} disabled={!!storeBusy} title={de.autoresearch.deepScanHint} prefix={storeBusy === codeWeaknessBusyKey("deep") ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
+                  <Button outlined className="min-h-12 justify-center" onClick={() => onGenerateCodeWeaknesses("deep")} disabled={!!storeBusy} title={de.autoresearch.deepScanHint} prefix={storeBusy === codeWeaknessBusyKey("deep") ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
                     {de.autoresearch.scanScopeDeep}
                   </Button>
                 </div>
@@ -79,11 +79,11 @@ export function OperatorActionsDisclosure({
           title={openSkillManualReviewCount > 0 ? "Erst Review öffnen" : "Sichere Skills übernehmen"}
           body={openSkillManualReviewCount > 0 ? `${openSkillManualReviewCount} Skill-Vorschläge brauchen Einzelreview. Sammelübernahme bleibt gesperrt.` : "Nur batch-sichere Skill-Vorschläge gesammelt übernehmen; Code läuft einzeln durchs Gate."}
           button={openSkillManualReviewCount > 0 ? (
-            <Button outlined className="hc-hit w-full justify-center" onClick={onOpenReview} disabled={openSkillCount === 0} title="Öffnet die Entscheidungen, damit riskante Skill-Vorschläge einzeln geprüft werden." prefix={<ArrowDown className="h-4 w-4" />}>
+            <Button outlined className="min-h-12 w-full justify-center" onClick={onOpenReview} disabled={openSkillCount === 0} title="Öffnet die Entscheidungen, damit riskante Skill-Vorschläge einzeln geprüft werden." prefix={<ArrowDown className="h-4 w-4" />}>
               Review öffnen ({openSkillCount})
             </Button>
           ) : (
-            <Button outlined className="hc-hit w-full justify-center" onClick={onApplyAll} disabled={!canApplyAllOpenSkills} title={canApplyAllOpenSkills ? de.autoresearch.applyAllHint : "Keine batch-sicheren Skill-Vorschläge offen."} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
+            <Button outlined className="min-h-12 w-full justify-center" onClick={onApplyAll} disabled={!canApplyAllOpenSkills} title={canApplyAllOpenSkills ? de.autoresearch.applyAllHint : "Keine batch-sicheren Skill-Vorschläge offen."} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({openSkillCount})
             </Button>
           )}
@@ -94,7 +94,7 @@ export function OperatorActionsDisclosure({
           hint={actionPlan.prune}
           title="Entscheidungen aufräumen"
           body="Archiviert Erledigtes und entfernt alte Kandidaten nach Backend-Regeln."
-          button={<Button outlined className="hc-hit w-full justify-center" onClick={onPrune} disabled={!!storeBusy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
+          button={<Button outlined className="min-h-12 w-full justify-center" onClick={onPrune} disabled={!!storeBusy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
         />
       </div>
     </Disclosure>
