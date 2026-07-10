@@ -299,6 +299,24 @@
         line-height: 1.45;
       }
 
+      .usage-line {
+        margin: 0.4rem auto 0;
+        color: #7dd3b0;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      /* class beats the UA [hidden] rule — restate it or the line renders
+         permanently (same trap as .sharing-indicator above). */
+      .usage-line[hidden] {
+        display: none;
+      }
+
+      .usage-line--warn {
+        color: #fde68a;
+      }
+
       .transcript-card {
         min-height: 10rem;
         padding: 1.25rem;
@@ -596,6 +614,7 @@
         <div class="state-copy" role="status" aria-live="polite" aria-atomic="true">
           <p id="voice-status">bereit</p>
           <p id="status-detail">Starte eine sichere Sprachsitzung, wenn du bereit bist.</p>
+          <p id="usage-line" class="usage-line" hidden></p>
         </div>
       </section>
 

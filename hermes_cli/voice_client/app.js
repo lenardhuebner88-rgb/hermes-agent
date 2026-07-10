@@ -37,6 +37,7 @@ const MODE_BADGE_COPY = {
 
 const statusElement = document.querySelector("#voice-status");
 const statusDetailElement = document.querySelector("#status-detail");
+const usageLineElement = document.querySelector("#usage-line");
 const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
 const emptyTranscriptElement = document.querySelector("#transcript-empty");
@@ -68,6 +69,12 @@ let sharingIntervalId = null;
 let sharingStartGeneration = 0;
 let sharingCanvasElement = null;
 let sharingCanvasContext = null;
+
+// Native Android screen-share bridge (Bridge Protocol v1, JSON strings both
+// ways). `nativeScreen.generation` snapshots `sharingStartGeneration` at
+// request time so a stale native reply that lands after a stop/restart is
+// ignored the same way a stray getDisplayMedia() resolution already is.
+let nativeScreen = { available: false, state: "idle", generation: 0 };
 
 function isCurrent(session) {
   return activeSession === session;
@@ -485,12 +492,29 @@ async function captureAndSendFrame() {
   );
 }
 
-function stopSharing() {
+// notifyNative=false is for the path where NATIVE told us the share already
+// stopped/errored (screen_capture_stopped/screen_capture_error): echoing
+// stop_screen_capture back in that case would risk a ping-pong loop with the
+// shell. stopSharing() itself keeps its existing zero-arg shape (an existing
+// tripwire test pins `"function stopSharing()"`) and always notifies.
+function resetSharing(notifyNative) {
   // Invalidate any in-flight startSharing: a getUserMedia/getDisplayMedia
   // await that resolves after this point must not resurrect a share (its
   // late stream gets stopped in startSharing's generation check).
   sharingStartGeneration += 1;
-  const wasSharing = Boolean(sharingStream);
+  const wasNativeSharing = nativeScreen.state !== "idle";
+  const wasSharing = Boolean(sharingStream) || wasNativeSharing;
+  if (wasNativeSharing) {
+    // Reset state BEFORE notifying native: an incoming screen_capture_stopped
+    // calls this with notifyNative=false, but any other caller (chip click,
+    // requestStop, mode fallback, mutual exclusion) may still be racing a
+    // native event — resetting first means a stray reply lands on "idle" and
+    // is ignored instead of re-entering this branch.
+    nativeScreen.state = "idle";
+    if (notifyNative) {
+      sendNativeBridgeMessage({ v: 1, type: "stop_screen_capture" });
+    }
+  }
   if (wasSharing && hasOpenWebSocket(activeSession)) {
     activeSession.websocket.send(JSON.stringify({ type: "sharing_stopped" }));
   }
@@ -515,10 +539,22 @@ function stopSharing() {
   screenChipElement.setAttribute("aria-pressed", "false");
 }
 
+function stopSharing() {
+  resetSharing(true);
+}
+
 async function startSharing(source) {
   // Mutually exclusive: activating one source stops the other first.
   stopSharing();
   const generation = ++sharingStartGeneration;
+  if (source === "screen" && nativeScreen.available) {
+    // Native wins in the shell regardless of whether getDisplayMedia exists —
+    // no browser capture prompt, no local <video> preview, no capture timer.
+    nativeScreen.state = "requesting";
+    nativeScreen.generation = generation;
+    sendNativeBridgeMessage({ v: 1, type: "start_screen_capture" });
+    return;
+  }
   try {
     const stream =
       source === "camera"
@@ -587,6 +623,139 @@ cameraChipElement.addEventListener("click", () => {
 screenChipElement.addEventListener("click", () => {
   toggleSharing("screen");
 });
+
+function sendNativeBridgeMessage(message) {
+  try {
+    window.HermesNative?.postMessage(JSON.stringify(message));
+  } catch {
+    // The bridge object can vanish or throw across WebView lifecycle
+    // transitions (activity recreation, process death) — never fatal here.
+  }
+}
+
+function sumTokenGroup(group) {
+  if (!group || typeof group !== "object") {
+    return 0;
+  }
+  return Object.values(group).reduce((total, value) => {
+    const numeric = Number(value);
+    return total + (Number.isFinite(numeric) ? numeric : 0);
+  }, 0);
+}
+
+function formatUsageDetail(message) {
+  const totalTokens =
+    sumTokenGroup(message.tokens?.input) + sumTokenGroup(message.tokens?.output);
+  if (
+    typeof message.estimated_usd !== "number" ||
+    !Number.isFinite(message.estimated_usd)
+  ) {
+    return `~${Math.round(totalTokens)} Tokens (keine Preisdaten)`;
+  }
+  const amount = `$${message.estimated_usd.toFixed(3)}`;
+  if (message.estimate_incomplete === true) {
+    return `Kosten ≥ ${amount} (unvollständig)`;
+  }
+  const minutes = Math.round((Number(message.session_seconds) || 0) / 60);
+  return `Kosten ≈ ${amount} · ${minutes} Min`;
+}
+
+function speakUsageWarningOnce(session, text) {
+  if (session.usageWarningSpoken || typeof window.speechSynthesis === "undefined") {
+    return;
+  }
+  session.usageWarningSpoken = true;
+  try {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "de-DE";
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    // speechSynthesis can be unavailable or throw in some WebViews — the
+    // visible status text already carries the warning either way.
+  }
+}
+
+// Bridge Protocol v1: JSON strings both ways, never trust the shape. Bad
+// JSON, an unknown type, or a mismatched version are ignored silently — the
+// native shell may be running a newer/older bridge build than this client.
+function handleNativeBridgeMessage(raw) {
+  let message;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!message || message.v !== 1 || typeof message.type !== "string") {
+    return;
+  }
+
+  if (message.type === "native_capabilities") {
+    if (message.screen_capture === true) {
+      nativeScreen.available = true;
+      // Undo the getDisplayMedia-based disable from featureDetectScreenShare:
+      // the native shell can capture the screen even where the WebView's own
+      // getDisplayMedia is absent.
+      screenChipElement.disabled = false;
+      screenShareHintElement.hidden = true;
+      screenChipElement.title = "Bildschirm für Hermes freigeben";
+    }
+    return;
+  }
+  if (message.type === "screen_capture_started") {
+    if (nativeScreen.state === "requesting" && nativeScreen.generation === sharingStartGeneration) {
+      nativeScreen.state = "active";
+      sharingSource = "screen";
+      sharingIndicatorElement.hidden = false;
+      screenChipElement.setAttribute("aria-pressed", "true");
+    } else {
+      // Stale reply: the client already moved on (canceled, superseded by a
+      // newer start/stop) before native confirmed this one — kill the
+      // orphaned capture instead of leaving it running headless.
+      sendNativeBridgeMessage({ v: 1, type: "stop_screen_capture" });
+    }
+    return;
+  }
+  if (message.type === "screen_frame") {
+    if (
+      nativeScreen.state === "active" &&
+      canSendVideoFrame(activeSession) &&
+      typeof message.data === "string"
+    ) {
+      activeSession.websocket.send(
+        JSON.stringify({ type: "video_frame", data: message.data, source: "screen" }),
+      );
+    }
+    return;
+  }
+  if (message.type === "screen_capture_stopped" || message.type === "screen_capture_error") {
+    if (nativeScreen.state !== "idle") {
+      if (message.type === "screen_capture_error" && typeof message.message === "string") {
+        statusDetailElement.textContent = message.message;
+      }
+      // The native side already stopped/errored — reset our UI without
+      // echoing stop_screen_capture back (avoids a ping-pong loop).
+      resetSharing(false);
+    }
+    return;
+  }
+}
+
+function initNativeBridge() {
+  const bridge = window.HermesNative;
+  if (!bridge || typeof bridge.postMessage !== "function") {
+    return;
+  }
+  const handleMessage = (event) => {
+    handleNativeBridgeMessage(event && typeof event.data === "string" ? event.data : "");
+  };
+  if (typeof bridge.addEventListener === "function") {
+    bridge.addEventListener("message", handleMessage);
+  } else {
+    bridge.onmessage = handleMessage;
+  }
+  sendNativeBridgeMessage({ v: 1, type: "bridge_ready" });
+}
+initNativeBridge();
 
 function handleMicFrame(session, message) {
   if (!isCurrent(session) || session.microphoneStopped) {
@@ -729,6 +898,33 @@ function handleJsonMessage(session, raw) {
     }
     return;
   }
+  if (message.type === "usage_update") {
+    usageLineElement.textContent = formatUsageDetail(message);
+    usageLineElement.hidden = false;
+    usageLineElement.classList.toggle(
+      "usage-line--warn",
+      message.soft_budget_exceeded === true,
+    );
+    return;
+  }
+  if (message.type === "usage_warning") {
+    const minutes = Math.round(Number(message.minutes) || 0);
+    statusDetailElement.textContent = `Kostenwarnung: Sitzung läuft seit ${minutes} Minuten.`;
+    speakUsageWarningOnce(session, statusDetailElement.textContent);
+    return;
+  }
+  if (message.type === "session_ended") {
+    // The server closes the websocket right after this (code 1000), which
+    // drives finishSession with its own generic idle text — stash this
+    // reason on the session so the close/finish path can use it instead of
+    // overwriting it.
+    session.terminalDetail =
+      message.reason === "hard_budget"
+        ? "Sitzung wegen Budgetlimit beendet. Starte bei Bedarf neu."
+        : "Sitzung wegen Zeitlimit beendet. Starte bei Bedarf neu.";
+    statusDetailElement.textContent = session.terminalDetail;
+    return;
+  }
 }
 
 async function stopMicrophone(session) {
@@ -816,9 +1012,10 @@ function finalizeWebSocketClose(session, event) {
   }
   void finishSession(
     session,
-    session.drainRequested
-      ? "Sitzung vollständig beendet."
-      : "Verbindung beendet. Du kannst neu starten.",
+    session.terminalDetail ||
+      (session.drainRequested
+        ? "Sitzung vollständig beendet."
+        : "Verbindung beendet. Du kannst neu starten."),
     {
       drainPlayback:
         session.drainRequested && (event.wasClean || event.code === 1000),
@@ -972,6 +1169,8 @@ async function startSession() {
     muteMicUntilResponse: false,
     micGateTimer: null,
     pendingTranscript: { user: null, assistant: null },
+    usageWarningSpoken: false,
+    terminalDetail: null,
   };
   activeSession = session;
   setButton("stop");
