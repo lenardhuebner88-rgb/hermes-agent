@@ -125,6 +125,49 @@ class TestParseJudgeResponse:
         v, _, _, _ = _parse_judge_response('{"verdict": "maybe", "reason": "r"}')
         assert v == "continue"
 
+    def test_prose_wrapped_verdict_with_braces_in_reason(self):
+        """Regression: the old non-greedy \\{.*?\\} fallback truncated at the
+        first '}' — a reason containing a brace (JSON snippet, code, dict
+        repr) made a genuine 'done' parse as garbage, downgrading it to
+        continue + parse_failed (and after 3 such turns auto-pausing the
+        goal while blaming the judge model)."""
+        from hermes_cli.goals import _parse_judge_response
+
+        raw = (
+            "Sure — here is my verdict:\n"
+            '{"verdict": "done", "reason": "wrote config {\\"key\\": \\"value\\"} to disk"}'
+        )
+        v, reason, pf, _ = _parse_judge_response(raw)
+        assert v == "done"
+        assert pf is False
+        assert '{"key": "value"}' in reason
+
+    def test_prose_wrapped_verdict_with_nested_object(self):
+        from hermes_cli.goals import _parse_judge_response
+
+        raw = (
+            "Analysis complete.\n"
+            '{"verdict": "done", "details": {"files": 3}, "reason": "all steps finished"}'
+        )
+        v, reason, pf, _ = _parse_judge_response(raw)
+        assert v == "done"
+        assert pf is False
+        assert reason == "all steps finished"
+
+    def test_prose_with_stray_brace_before_verdict_object(self):
+        """A dangling '{' in the prose before the real JSON object must not
+        prevent extraction."""
+        from hermes_cli.goals import _parse_judge_response
+
+        raw = (
+            "The output contained { unbalanced text.\n"
+            'Verdict: {"verdict": "continue", "reason": "tests still red"}'
+        )
+        v, reason, pf, _ = _parse_judge_response(raw)
+        assert v == "continue"
+        assert pf is False
+        assert reason == "tests still red"
+
     def test_malformed_json_fails_open(self):
         """Non-JSON → continue + parse_failed, with error-ish reason."""
         from hermes_cli.goals import _parse_judge_response

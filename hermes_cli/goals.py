@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -663,7 +662,28 @@ def _session_waiting(session_id: str) -> bool:
         return False
 
 
-_JSON_OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
+def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Return the first parseable JSON object embedded in *text*, or None.
+
+    The old non-greedy ``\\{.*?\\}`` regex truncated at the first ``}`` even
+    when it sat inside a nested object or a string value — a verdict like
+    ``{"verdict": "done", "reason": "wrote {\\"k\\": 1} to disk"}`` parsed as
+    garbage, silently downgrading a genuine done to continue and (after
+    three such turns) auto-pausing the goal while blaming the judge model.
+    Scan candidate ``{`` positions with a real JSON decoder instead.
+    """
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, idx)
+        except ValueError:
+            idx = text.find("{", idx + 1)
+            continue
+        if isinstance(obj, dict):
+            return obj
+        idx = text.find("{", idx + 1)
+    return None
 
 
 def _goal_judge_max_tokens() -> int:
@@ -725,13 +745,9 @@ def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, 
     try:
         data = json.loads(text)
     except Exception:
-        # Second try: pull the first JSON object out.
-        match = _JSON_OBJECT_RE.search(text)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:
-                data = None
+        # Second try: pull the first JSON object out (decoder-based —
+        # handles nested braces and braces inside string values).
+        data = _extract_first_json_object(text)
 
     if not isinstance(data, dict):
         return "continue", f"judge reply was not JSON: {_truncate(raw, 200)!r}", True, None
@@ -1140,13 +1156,7 @@ def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(text)
     except Exception:
-        match = _JSON_OBJECT_RE.search(text)
-        if not match:
-            return None
-        try:
-            data = json.loads(match.group(0))
-        except Exception:
-            return None
+        data = _extract_first_json_object(text)
     return data if isinstance(data, dict) else None
 
 
