@@ -474,6 +474,10 @@ async def test_schedule_reminder_writes_payload_and_invokes_systemd_run(
     assert "--collect" in command
     assert "--on-active=30min" in command
     assert any(part.startswith("--unit=hermes-voice-reminder-") for part in command)
+    # The transient unit starts from the user-manager environment, so the
+    # profile-selected hermes home must be pinned explicitly — otherwise the
+    # fire script resolves the default home and rejects the payload path.
+    assert f"--setenv=HERMES_HOME={tmp_path}" in command
     assert command[-2].endswith("voice_reminder_fire.py")
 
     payload_path = Path(command[-1])

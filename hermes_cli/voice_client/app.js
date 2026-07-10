@@ -13,6 +13,7 @@ const SERVER_DRAIN_TIMEOUT_MS = 180_000;
 const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 const MAX_RECONNECT_ATTEMPTS = 5;
 const NON_RETRYABLE_CLOSE_CODES = new Set([4401, 4403, 4408]);
+const MIC_GATE_FAILSAFE_MS = 15_000;
 
 // Speech at normal phone distance is typically well above 0.045 RMS. Three
 // consecutive 20 ms chunks reject short clicks while keeping local barge-in
@@ -103,7 +104,9 @@ function setButton(mode) {
   sessionButton.textContent = "Wird beendet …";
   sessionButton.disabled = true;
   sessionButton.setAttribute("aria-label", "Sprachsitzung wird beendet");
-  setComposerEnabled(true);
+  // After "end" the server accepts only interrupt controls — a typed frame
+  // during the drain would be rejected, so the composer closes with the mic.
+  setComposerEnabled(false);
 }
 
 function createTranscriptEntry(role, text) {
@@ -243,10 +246,16 @@ async function mintWebSocketTicket(session) {
 
 let inMemorySessionId = null;
 
+// Per-TAB id (sessionStorage, not localStorage): two tabs must never share a
+// resumption key — they would overwrite each other's Gemini handle and one
+// tab's reconnect could resume the other's conversation. Residual: within ONE
+// tab a later login could resume the previous login's context until the
+// server-side 60-min registry TTL expires — acceptable for this
+// single-operator dashboard.
 function getClientSessionId() {
   const storageKey = "hermesVoiceSessionId";
   try {
-    const stored = localStorage.getItem(storageKey);
+    const stored = sessionStorage.getItem(storageKey);
     if (stored) {
       return stored;
     }
@@ -264,7 +273,7 @@ function getClientSessionId() {
           .join("");
   inMemorySessionId = id;
   try {
-    localStorage.setItem(storageKey, id);
+    sessionStorage.setItem(storageKey, id);
   } catch {
     // Keep the in-memory id for this page's lifetime instead.
   }
@@ -434,9 +443,21 @@ function handleMicFrame(session, message) {
   if (
     message.pcm instanceof ArrayBuffer &&
     hasOpenWebSocket(session) &&
-    !session.drainRequested
+    !session.drainRequested &&
+    // The SDK contract forbids interleaving realtime (mic) input with a
+    // client-content text turn — hold PCM until the server reacts to the
+    // typed turn (state/audio/error all clear the gate; 15 s failsafe).
+    !session.muteMicUntilResponse
   ) {
     session.websocket.send(message.pcm);
+  }
+}
+
+function clearMicGate(session) {
+  session.muteMicUntilResponse = false;
+  if (session.micGateTimer !== null) {
+    window.clearTimeout(session.micGateTimer);
+    session.micGateTimer = null;
   }
 }
 
@@ -444,6 +465,7 @@ function applyServerState(session, value) {
   if (!Object.hasOwn(STATUS_COPY, value) || value === "idle" || value === "error") {
     return;
   }
+  clearMicGate(session);
   session.voiceState = value;
   if (
     (value === "listening" || value === "thinking") &&
@@ -504,7 +526,13 @@ function handleJsonMessage(session, raw) {
       message.error && typeof message.error.message === "string"
         ? message.error.message
         : "Die Sprachverbindung hat einen Fehler gemeldet.";
-    throw new VoiceClientError(text);
+    // Error EVENTS are advisory: the server keeps the socket open after
+    // recoverable rejections (text_busy, invalid frames). Show the message
+    // and keep the session — the websocket close event is the one true
+    // fatal signal and has its own handler.
+    statusDetailElement.textContent = text;
+    clearMicGate(session);
+    return;
   }
 }
 
@@ -540,6 +568,7 @@ async function cleanupSession(session, { closeSocket = true } = {}) {
   session.abortController.abort();
   await stopMicrophone(session);
   stopPlayback(session);
+  clearMicGate(session);
   session.wakeLock?.release?.().catch(() => {});
   if (
     closeSocket &&
@@ -650,10 +679,9 @@ async function attemptReconnect(session, event) {
   if (!isCurrent(session) || session.drainRequested || session.finishing) {
     return;
   }
-  // From here the new socket's own events own the outcome: "open" resets the
-  // attempt counter, a failed connect fires "close", which re-enters
-  // attemptReconnect exactly once. Never ALSO await the socket here — a
-  // second waiter would double-drive the reconnect loop.
+  // From here the new socket's own events own the outcome: a failed connect
+  // fires "close", which re-enters attemptReconnect exactly once. Never ALSO
+  // await the socket here — a second waiter would double-drive the loop.
   session.websocket = createWebSocket(ticket);
   attachWebSocketHandlers(session);
 }
@@ -666,7 +694,6 @@ function attachWebSocketHandlers(session) {
     }
     session.everOpen = true;
     if (session.reconnectAttempts > 0 && !session.drainRequested) {
-      session.reconnectAttempts = 0;
       session.voiceState = "listening";
       setStatus(
         "listening",
@@ -678,6 +705,10 @@ function attachWebSocketHandlers(session) {
     if (!isCurrent(session) || session.websocket !== socket) {
       return;
     }
+    // Only real application traffic proves the connection: a proxy that
+    // accepts the handshake and then drops would otherwise reset the
+    // counter on every "open" and defeat the five-attempt bound.
+    session.reconnectAttempts = 0;
     try {
       if (typeof event.data === "string") {
         handleJsonMessage(session, event.data);
@@ -742,6 +773,8 @@ async function startSession() {
     reconnectAttempts: 0,
     mode: null,
     wakeLock: null,
+    muteMicUntilResponse: false,
+    micGateTimer: null,
     pendingTranscript: { user: null, assistant: null },
   };
   activeSession = session;
@@ -870,11 +903,28 @@ function submitComposerText() {
   if (!text) {
     return;
   }
-  if (!activeSession || !hasOpenWebSocket(activeSession)) {
+  if (
+    !activeSession ||
+    !hasOpenWebSocket(activeSession) ||
+    activeSession.drainRequested
+  ) {
     statusDetailElement.textContent = NO_SESSION_TEXT_HINT;
     return;
   }
-  activeSession.websocket.send(JSON.stringify({ type: "text", text }));
+  const session = activeSession;
+  session.websocket.send(JSON.stringify({ type: "text", text }));
+  // Hold mic PCM until the server reacts to the typed turn (SDK contract:
+  // realtime input and client-content turns must not interleave).
+  session.muteMicUntilResponse = true;
+  if (session.micGateTimer !== null) {
+    window.clearTimeout(session.micGateTimer);
+  }
+  session.micGateTimer = window.setTimeout(() => {
+    if (isCurrent(session)) {
+      session.muteMicUntilResponse = false;
+      session.micGateTimer = null;
+    }
+  }, MIC_GATE_FAILSAFE_MS);
   composerInput.value = "";
 }
 
@@ -929,8 +979,12 @@ document.addEventListener("visibilitychange", () => {
       ?.request?.("screen")
       .catch(() => null)
       .then((lock) => {
-        if (isCurrent(session)) {
+        if (isCurrent(session) && !session.finishing) {
           session.wakeLock = lock;
+        } else {
+          // The session ended while the request was in flight — releasing
+          // here prevents an idle page from keeping the phone awake.
+          void lock?.release?.().catch(() => {});
         }
       });
   }

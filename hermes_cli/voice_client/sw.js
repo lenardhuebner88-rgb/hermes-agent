@@ -66,7 +66,10 @@ self.addEventListener("fetch", (event) => {
       .then((response) => {
         if (response.status === 200 && response.type === "basic") {
           const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
+          // waitUntil keeps the worker alive until the write lands —
+          // otherwise the browser may terminate it mid-put and offline
+          // loads would keep serving the previous asset version.
+          event.waitUntil(caches.open(CACHE).then((cache) => cache.put(request, copy)));
         }
         return response;
       })

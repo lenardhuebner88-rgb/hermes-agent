@@ -1314,3 +1314,63 @@ async def test_run_without_text_in_never_calls_send_client_content(
         await task
 
     assert sdk_session.client_contents == []
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_response_retries_on_a_swapped_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result landing on a dying connection is retried on its successor.
+
+    A 600 s delegation can finish exactly while a go-away reconnect swaps the
+    live connection: the first ``send_tool_response`` raises against the
+    closing session and the result must NOT be dropped — it belongs to the
+    replacement connection the same wrapper is about to run.
+    """
+
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_SESSION_POLL_SECONDS", 0.01)
+
+    class _ClosingSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send_tool_response(self, *, function_responses):
+            self.calls += 1
+            raise ConnectionError("connection is closing")
+
+    class _AcceptingSession:
+        def __init__(self) -> None:
+            self.responses: list[Any] = []
+
+        async def send_tool_response(self, *, function_responses):
+            self.responses.append(list(function_responses))
+
+    class _InstantExecutor:
+        async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+            return {"result": "spät fertig"}
+
+        def is_non_blocking(self, name: str) -> bool:
+            return True
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    closing = _ClosingSession()
+    accepting = _AcceptingSession()
+    wrapper._active_session = closing
+
+    call = types.FunctionCall(id="delegate-9", name="delegate_to_hermes", args={})
+    task = asyncio.create_task(
+        wrapper._run_non_blocking_call(call, _InstantExecutor())
+    )
+    await _wait_until(lambda: closing.calls >= 1)
+    wrapper._active_session = accepting  # the go-away reconnect swap
+    await asyncio.wait_for(task, timeout=5)
+
+    assert closing.calls == 1
+    assert len(accepting.responses) == 1
+    delivered = accepting.responses[0][0]
+    assert delivered.id == "delegate-9"
+    assert delivered.response == {"result": "spät fertig"}
+    assert delivered.scheduling == types.FunctionResponseScheduling.INTERRUPT

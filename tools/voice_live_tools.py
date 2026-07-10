@@ -480,6 +480,11 @@ class VoiceToolExecutor:
                 "--collect",
                 f"--on-active={minutes}min",
                 f"--unit={unit}",
+                # The transient unit starts from the user-manager environment,
+                # not this process's: under a non-default profile the fire
+                # script would resolve the DEFAULT hermes home and reject the
+                # payload as outside its reminders dir. Pin the home we used.
+                f"--setenv=HERMES_HOME={get_hermes_home()}",
                 sys.executable,
                 str(fire_script),
                 str(payload_path),

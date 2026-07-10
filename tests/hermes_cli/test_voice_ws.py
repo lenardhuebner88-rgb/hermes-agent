@@ -1960,7 +1960,11 @@ def test_voice_client_install_chip_and_text_send_and_no_session_hint():
     assert "stashedInstallPrompt" in script
     assert '"appinstalled"' in script
     assert (
-        'activeSession.websocket.send(JSON.stringify({ type: "text", text }));'
+        'session.websocket.send(JSON.stringify({ type: "text", text }));'
         in script
     )
+    # Typed turns must gate mic PCM (SDK forbids interleaving realtime input
+    # with client-content turns) and must be refused during the end-drain.
+    assert "muteMicUntilResponse" in script
+    assert "activeSession.drainRequested" in script
     assert "Starte zuerst eine Sitzung, dann kannst du auch schreiben." in script

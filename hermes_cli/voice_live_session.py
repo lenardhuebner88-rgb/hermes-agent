@@ -21,6 +21,7 @@ _SENDER_HANDOFF_SECONDS = 1.0
 _MAX_CONCURRENT_NON_BLOCKING_CALLS = 2
 _NON_BLOCKING_SESSION_WAIT_SECONDS = 10.0
 _NON_BLOCKING_SESSION_POLL_SECONDS = 0.25
+_NON_BLOCKING_SEND_ATTEMPTS = 3
 
 DEFAULT_SYSTEM_INSTRUCTION = (
     "Du bist Hermes, Piets persönlicher Sprachassistent auf seinem Homeserver. "
@@ -342,39 +343,46 @@ class GeminiLiveSession:
             }
         success = "error" not in result
 
-        active = self._active_session
-        if active is None:
+        response = types.FunctionResponse(
+            id=call.id,
+            name=name,
+            response=result,
+            scheduling=(
+                types.FunctionResponseScheduling.INTERRUPT
+                if success
+                else types.FunctionResponseScheduling.WHEN_IDLE
+            ),
+        )
+
+        # A long delegation can finish exactly while a go-away reconnect swaps
+        # the live connection: the first send then targets a closing session
+        # and raises. Retry against whichever session is current, waiting out
+        # the connection gap, instead of dropping the finished result.
+        failed_session: _LiveSession | None = None
+        for _ in range(_NON_BLOCKING_SEND_ATTEMPTS):
+            active = self._active_session
             waited = 0.0
-            while active is None and waited < _NON_BLOCKING_SESSION_WAIT_SECONDS:
+            while (
+                active is None or active is failed_session
+            ) and waited < _NON_BLOCKING_SESSION_WAIT_SECONDS:
                 await asyncio.sleep(_NON_BLOCKING_SESSION_POLL_SECONDS)
                 waited += _NON_BLOCKING_SESSION_POLL_SECONDS
                 active = self._active_session
-            if active is None:
-                _log.warning(
-                    "Dropping non-blocking tool response for %s: no live session",
-                    name,
-                )
+            if active is None or active is failed_session:
+                break
+            try:
+                await active.send_tool_response(function_responses=[response])
                 return
-
-        try:
-            await active.send_tool_response(
-                function_responses=[
-                    types.FunctionResponse(
-                        id=call.id,
-                        name=name,
-                        response=result,
-                        scheduling=(
-                            types.FunctionResponseScheduling.INTERRUPT
-                            if success
-                            else types.FunctionResponseScheduling.WHEN_IDLE
-                        ),
-                    )
-                ]
-            )
-        except Exception:
-            _log.exception(
-                "Failed to deliver non-blocking tool response for %s", name
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.exception(
+                    "Failed to deliver non-blocking tool response for %s", name
+                )
+                failed_session = active
+        _log.warning(
+            "Dropping non-blocking tool response for %s: no live session", name
+        )
 
     def _notify_handle_update(self) -> None:
         """Tell the caller about a handle change without risking the bridge."""
