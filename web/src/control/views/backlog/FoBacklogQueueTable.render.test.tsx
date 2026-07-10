@@ -62,4 +62,23 @@ describe("FoBacklogQueueTable sheet-A render branches", () => {
     expect(error).toContain("min-h-12");
     expect(error).toContain("nochmal");
   });
+
+  it("binds selection to selectedId and keeps the table-discipline rider", () => {
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item("0001"), item("0002")]}
+        nowSec={1_783_700_000}
+        nextTaskId={null}
+        activeId="0001"
+        selectedId="0002"
+        onOpen={() => undefined}
+      />,
+    );
+
+    expect(html).toMatch(/<thead class="[^"]*border-t-2[^"]*font-display[^"]*uppercase/);
+    expect(html).toMatch(/data-fo-row="0001" data-active="true"/);
+    expect(html).toMatch(/data-fo-row="0002"[^>]*aria-current="true"[^>]*shadow-\[inset_3px_0_0_var\(--color-bronze\)\]/);
+    expect(html).not.toContain("ring-live/70");
+    expect(html).toContain("tabular-nums");
+  });
 });

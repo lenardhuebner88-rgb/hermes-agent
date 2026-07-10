@@ -1,11 +1,9 @@
-import { useEffect } from "react";
-import { ExternalLink, TriangleAlert, X } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { ExternalLink, TriangleAlert } from "lucide-react";
 
 import { de } from "../../i18n/de";
 import { CommissionButton } from "../../components/fleet/CommissionButton";
+import { DrawerShell } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";
-import { DUR, EASE_OUT, EASE_RISE } from "../../lib/motion";
 import { nextActionForFoItem } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
 import type { CommissionState } from "../../hooks/useControlData";
@@ -50,17 +48,7 @@ function metricTone(tone: string | undefined): "ok" | "warn" | "alert" | undefin
   return undefined;
 }
 
-export function FoDetailDrawer({
-  item,
-  detail,
-  loading,
-  error,
-  commissionPrompt,
-  onCommission,
-  commissionState,
-  commissionError,
-  onClose,
-}: {
+export interface FoDetailContentProps {
   item: BacklogItem;
   detail?: BacklogDetail;
   loading: boolean;
@@ -69,58 +57,22 @@ export function FoDetailDrawer({
   onCommission?: () => void;
   commissionState?: CommissionState;
   commissionError?: string;
-  onClose: () => void;
-}) {
-  const reduce = useReducedMotion();
+}
+
+export function FoDetailContent({
+  item,
+  detail,
+  loading,
+  error,
+  commissionPrompt,
+  onCommission,
+  commissionState,
+  commissionError,
+}: FoDetailContentProps) {
   const brief = operatorBrief(item, detail);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  const backdrop = reduce
-    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: 0 } }
-    : { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: DUR.med, ease: EASE_OUT } };
-  const drawer = reduce
-    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: 0 } }
-    : { initial: { opacity: 0, x: 32 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: 32 }, transition: { duration: DUR.slow, ease: EASE_RISE } };
-
   return (
-    <div className="fixed inset-0 z-50">
-      <motion.button
-        type="button"
-        className="absolute inset-0 bg-black/60"
-        aria-label="Schließen"
-        onClick={onClose}
-        initial={backdrop.initial}
-        animate={backdrop.animate}
-        exit={backdrop.exit}
-        transition={backdrop.transition}
-      />
-      <motion.aside
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fo-detail-title"
-        className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col rounded-none border-y-0 border-l border-line bg-surface-1 shadow-2xl"
-        initial={drawer.initial}
-        animate={drawer.animate}
-        exit={drawer.exit}
-        transition={drawer.transition}
-      >
-        <header className="flex items-start justify-between gap-3 border-b border-line-soft p-5">
-          <div className="min-w-0">
-            <h2 id="fo-detail-title" className="font-display text-h2 font-semibold text-ink">{item.title}</h2>
-            <p className="mt-1 truncate font-data text-micro text-ink-3">{detail?.source_path || sourceRef(item)}</p>
-          </div>
-          <button type="button" className="grid size-12 shrink-0 place-items-center rounded-card border border-line text-ink-2 hover:border-live hover:bg-live/10 hover:text-live" aria-label="Schließen" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+    <div className="space-y-4">
           {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
           {loading && !detail ? <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">{de.backlog.loading}</div> : null}
 
@@ -180,8 +132,29 @@ export function FoDetailDrawer({
               </div>
             </section>
           ) : null}
-        </div>
-      </motion.aside>
     </div>
+  );
+}
+
+export function FoDetailDrawer({
+  item,
+  detail,
+  onClose,
+  ...contentProps
+}: FoDetailContentProps & { onClose: () => void }) {
+  return (
+    <DrawerShell
+      eyebrow="Backlog-Detail"
+      title={item.title}
+      ariaLabel={`Backlog-Detail: ${item.title}`}
+      onClose={onClose}
+      headerExtra={(
+        <p className="mt-1 truncate font-data text-micro tabular-nums text-ink-3">
+          {detail?.source_path || sourceRef(item)}
+        </p>
+      )}
+    >
+      <FoDetailContent item={item} detail={detail} {...contentProps} />
+    </DrawerShell>
   );
 }

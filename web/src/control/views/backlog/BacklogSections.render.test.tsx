@@ -70,7 +70,7 @@ describe("BacklogSections sheet-A render branches", () => {
         <OwnerLoadStrip ownerLoad={[{ owner: "claude", total: 2, highRisk: 1, stale: 0, unready: 0 }]} />
         <QuickViewChips allItemsLength={2} quickView="all" showHelp={false} onQuickView={() => undefined} onToggleHelp={() => undefined} />
         <KeyboardHelp showHelp />
-        <QueueSurface loading={false} filteredActive={[ready]} nowSec={nowSec} nextTaskId="0001" activeId="0001" detailById={{}} onOpen={() => undefined} onCommission={() => undefined} commissionState={{ "0001": "error" }} />
+        <QueueSurface loading={false} filteredActive={[ready]} nowSec={nowSec} nextTaskId="0001" activeId="0001" selectedId="0001" detailById={{}} onOpen={() => undefined} onCommission={() => undefined} commissionState={{ "0001": "error" }} />
         <BacklogBoard filteredByStatus={{ next: [ready] }} gap="gap-3" nowSec={nowSec} nextTaskId="0001" loading={false} onOpen={() => undefined} />
         <DoneSection doneItems={doneItems} showAllDone={false} nowSec={nowSec} detailById={{}} onToggleShowAll={() => undefined} onOpen={() => undefined} />
       </>,
@@ -78,12 +78,12 @@ describe("BacklogSections sheet-A render branches", () => {
     const empty = renderToStaticMarkup(
       <>
         <NextTaskSpotlight nextTask={null} allItemsLength={1} nowSec={nowSec} />
-        <QueueSurface loading={false} filteredActive={[]} nowSec={nowSec} nextTaskId={null} activeId={null} detailById={{}} onOpen={() => undefined} />
+        <QueueSurface loading={false} filteredActive={[]} nowSec={nowSec} nextTaskId={null} activeId={null} selectedId={null} detailById={{}} onOpen={() => undefined} />
         <DoneSection doneItems={[]} showAllDone={false} nowSec={nowSec} detailById={{}} onToggleShowAll={() => undefined} onOpen={() => undefined} />
       </>,
     );
     const loading = renderToStaticMarkup(
-      <QueueSurface loading filteredActive={[]} nowSec={nowSec} nextTaskId={null} activeId={null} detailById={{}} onOpen={() => undefined} />,
+      <QueueSurface loading filteredActive={[]} nowSec={nowSec} nextTaskId={null} activeId={null} selectedId={null} detailById={{}} onOpen={() => undefined} />,
     );
 
     expectNoLegacyClasses(`${loaded}${empty}${loading}`);

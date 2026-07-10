@@ -266,6 +266,7 @@ export function ReadinessZones({
   nowSec,
   nextTaskId,
   activeId,
+  selectedId,
   detailById,
   onOpen,
   onCommission,
@@ -278,6 +279,7 @@ export function ReadinessZones({
   nowSec: number;
   nextTaskId: string | null;
   activeId: string | null;
+  selectedId: string | null;
   detailById: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
   onCommission?: (item: BacklogItem) => void;
@@ -302,6 +304,7 @@ export function ReadinessZones({
             nowSec={nowSec}
             nextTaskId={nextTaskId}
             activeId={activeId}
+            selectedId={selectedId}
             detailById={detailById}
             onOpen={onOpen}
             onCommission={onCommission}
@@ -332,6 +335,7 @@ export function ReadinessZones({
               nowSec={nowSec}
               nextTaskId={nextTaskId}
               activeId={activeId}
+              selectedId={selectedId}
               detailById={detailById}
               onOpen={onOpen}
               onCommission={onCommission}
@@ -363,6 +367,7 @@ export function ReadinessZones({
               nowSec={nowSec}
               nextTaskId={nextTaskId}
               activeId={activeId}
+              selectedId={selectedId}
               detailById={detailById}
               onOpen={onOpen}
               onCommission={onCommission}
@@ -386,6 +391,7 @@ export function QueueSurface({
   nowSec,
   nextTaskId,
   activeId,
+  selectedId,
   detailById,
   onOpen,
   onCommission,
@@ -399,6 +405,7 @@ export function QueueSurface({
   nowSec: number;
   nextTaskId: string | null;
   activeId: string | null;
+  selectedId: string | null;
   detailById: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
   onCommission?: (item: BacklogItem) => void;
@@ -414,6 +421,7 @@ export function QueueSurface({
       nowSec={nowSec}
       nextTaskId={nextTaskId}
       activeId={activeId}
+      selectedId={selectedId}
       detailById={detailById}
       onOpen={onOpen}
       onCommission={onCommission}

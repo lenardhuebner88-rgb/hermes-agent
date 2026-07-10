@@ -11,7 +11,12 @@ export interface TwoPaneProps {
   idleDetail?: ReactNode;
 }
 
-function useIsExpanded(): boolean {
+/**
+ * Shared ≥1024-Fork für TwoPane-Aufrufer (Drawer <1024 vs Pane ≥1024).
+ * Eine Quelle statt per-View-Kopien — muss mit TwoPane.css (min-width: 1024px)
+ * synchron bleiben.
+ */
+export function useTwoPaneExpanded(): boolean {
   const [matches, setMatches] = useState(() => (
     typeof window !== "undefined" && typeof window.matchMedia === "function"
       ? window.matchMedia("(min-width: 1024px)").matches
@@ -41,7 +46,7 @@ export function TwoPane({
   onCloseDetail,
   idleDetail,
 }: TwoPaneProps) {
-  const isExpanded = useIsExpanded();
+  const isExpanded = useTwoPaneExpanded();
   const detailId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const lastListFocusRef = useRef<HTMLElement | null>(null);

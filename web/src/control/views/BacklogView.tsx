@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AnimatePresence } from "motion/react";
 import { TriangleAlert } from "lucide-react";
 
 import { de } from "../i18n/de";
@@ -21,6 +20,7 @@ import {
 import type { FoQuickView, FoSortKey } from "../lib/foBacklog";
 import type { Density } from "../hooks/useDensity";
 import type { BacklogItem, BacklogDetail } from "../lib/schemas";
+import { TwoPane, useTwoPaneExpanded } from "../components/leitstand";
 import {
   BacklogBoard,
   BacklogHeroPanel,
@@ -33,7 +33,7 @@ import {
   QueueSurface,
 } from "./backlog/BacklogSections";
 import { ControlsBar } from "./backlog/ControlsBar";
-import { FoDetailDrawer } from "./backlog/FoDetailDrawer";
+import { FoDetailContent, FoDetailDrawer } from "./backlog/FoDetailDrawer";
 import { FoHealthStrip } from "./backlog/FoHealthStrip";
 import { VIEW_STORAGE_KEY, type ViewMode } from "./backlog/shared";
 
@@ -87,6 +87,7 @@ function loadPersistedView(): PersistedView {
 }
 
 export function BacklogView({ density }: { density: Density }) {
+  const isExpanded = useTwoPaneExpanded();
   const backlog = useBacklog();
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
   const fleet = useCommissionToFleet();
@@ -107,8 +108,11 @@ export function BacklogView({ density }: { density: Density }) {
   // backlog (selectedItem guard below), so seeding before data arrives is safe and
   // needs no effect/setState — keeps render pure.
   const [focusParams] = useSearchParams();
-  const [openId, setOpenId] = useState<string | null>(() => focusParams.get("focus"));
-  const [viewMode, setViewMode] = useState<ViewMode>(persisted.viewMode ?? "queue");
+  const initialFocusId = focusParams.get("focus");
+  const [openId, setOpenId] = useState<string | null>(() => initialFocusId);
+  // A decision-inbox deep link always lands in the queue instrument so expanded
+  // viewports open the inline pane even if the operator last persisted Board.
+  const [viewMode, setViewMode] = useState<ViewMode>(() => initialFocusId ? "queue" : (persisted.viewMode ?? "queue"));
   const [q, setQ] = useState("");
   const [filterOwner, setFilterOwner] = useState(persisted.filterOwner ?? "");
   const [filterRisk, setFilterRisk] = useState(persisted.filterRisk ?? "");
@@ -234,11 +238,16 @@ export function BacklogView({ density }: { density: Density }) {
     queueRef.current.querySelector<HTMLElement>(`[data-fo-row="${activeId}"]`)?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
 
-  // Queue keyboard nav: j/k move, Enter opens, ? toggles help. Ignores typing in inputs
-  // and yields to the drawer (which owns Escape while open).
+  // Queue keyboard nav: j/k move, Enter opens, ? toggles help. Ignores typing in inputs.
+  // DrawerShell owns Escape below 1024; the inline desktop pane closes it here.
   const onQueueKey = useCallback(
     (event: KeyboardEvent) => {
-      if (viewMode !== "queue" || openId) return;
+      if (viewMode !== "queue") return;
+      if (event.key === "Escape" && openId && isExpanded) {
+        setOpenId(null);
+        return;
+      }
+      if (openId) return;
       const target = event.target as HTMLElement | null;
       if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
       if (event.key === "?") {
@@ -263,7 +272,7 @@ export function BacklogView({ density }: { density: Density }) {
         setOpenId(filteredActive[clampedIndex].id);
       }
     },
-    [viewMode, openId, showHelp, filteredActive, clampedIndex],
+    [viewMode, openId, isExpanded, showHelp, filteredActive, clampedIndex],
   );
 
   useEffect(() => {
@@ -271,7 +280,7 @@ export function BacklogView({ density }: { density: Density }) {
     return () => window.removeEventListener("keydown", onQueueKey);
   }, [onQueueKey]);
 
-  return (
+  const listContent = (
     <div className="space-y-4">
       <BacklogHeroPanel
         activeTotal={activeTotal}
@@ -334,6 +343,7 @@ export function BacklogView({ density }: { density: Density }) {
             nowSec={nowSec}
             nextTaskId={nextTaskId}
             activeId={activeId}
+            selectedId={openId}
             detailById={detailById}
             onOpen={setOpenId}
             onCommission={(item) => commissionItem(item, detailById[item.id])}
@@ -356,22 +366,45 @@ export function BacklogView({ density }: { density: Density }) {
         onOpen={setOpenId}
       />
 
-      <AnimatePresence initial={false}>
-        {selectedItem ? (
-          <FoDetailDrawer
-            key={selectedItem.id}
-            item={selectedItem}
-            detail={detail}
-            loading={loadingId === selectedItem.id}
-            error={errorById[selectedItem.id] || detail?.error}
-            commissionPrompt={commissionPrompt}
-            onCommission={() => commissionItem(selectedItem, detail)}
-            commissionState={fleet.stateById[selectedItem.id]}
-            commissionError={fleet.errorById[selectedItem.id]}
-            onClose={() => setOpenId(null)}
-          />
-        ) : null}
-      </AnimatePresence>
     </div>
+  );
+
+  const detailContent = selectedItem ? (
+    <FoDetailContent
+      item={selectedItem}
+      detail={detail}
+      loading={loadingId === selectedItem.id}
+      error={errorById[selectedItem.id] || detail?.error}
+      commissionPrompt={commissionPrompt}
+      onCommission={() => commissionItem(selectedItem, detail)}
+      commissionState={fleet.stateById[selectedItem.id]}
+      commissionError={fleet.errorById[selectedItem.id]}
+    />
+  ) : undefined;
+
+  return (
+    <>
+      <TwoPane
+        list={listContent}
+        detail={viewMode === "queue" ? detailContent : undefined}
+        detailLabel={selectedItem ? `Backlog-Detail · ${selectedItem.title}` : "Backlog-Detail"}
+        onCloseDetail={() => setOpenId(null)}
+      />
+
+      {selectedItem && (!isExpanded || viewMode !== "queue") ? (
+        <FoDetailDrawer
+          key={selectedItem.id}
+          item={selectedItem}
+          detail={detail}
+          loading={loadingId === selectedItem.id}
+          error={errorById[selectedItem.id] || detail?.error}
+          commissionPrompt={commissionPrompt}
+          onCommission={() => commissionItem(selectedItem, detail)}
+          commissionState={fleet.stateById[selectedItem.id]}
+          commissionError={fleet.errorById[selectedItem.id]}
+          onClose={() => setOpenId(null)}
+        />
+      ) : null}
+    </>
   );
 }

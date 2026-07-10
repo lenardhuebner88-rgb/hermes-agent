@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { FoBacklogQueueTable, FoHealthStrip, ReasonChips } from "./BacklogView";
 import { BacklogHeroPanel } from "./backlog/BacklogSections";
 import { ControlsBar } from "./backlog/ControlsBar";
+import { FoDetailContent, FoDetailDrawer } from "./backlog/FoDetailDrawer";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
 import type { CommissionState, DispatchFoState, FoBoardStatus } from "../hooks/useControlData";
 
@@ -37,6 +38,23 @@ const health: BacklogContractHealth = {
 };
 
 describe("Family Organizer queue-first view pieces", () => {
+  it("separates detail content from DrawerShell chrome", () => {
+    const backlogItem = item({ id: "0007", title: "Detail task" });
+    const content = renderToStaticMarkup(
+      <FoDetailContent item={backlogItem} loading={false} />,
+    );
+    const drawer = renderToStaticMarkup(
+      <FoDetailDrawer item={backlogItem} loading={false} onClose={() => undefined} />,
+    );
+
+    expect(content).toContain("Next Action");
+    expect(content).not.toContain('role="dialog"');
+    expect(drawer).toContain('role="dialog"');
+    expect(drawer).toContain('aria-label="Backlog-Detail: Detail task"');
+    expect(drawer).toContain("hc-side-sheet-in");
+    expect(drawer).not.toContain("bg-black/60");
+  });
+
   it("renders the contract-health strip with operator queue counts", () => {
     const html = renderToStaticMarkup(
       <FoHealthStrip
@@ -101,19 +119,22 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).toContain("Akzeptanz fehlt");
   });
 
-  it("highlights the keyboard-active row via aria-current + ring", () => {
+  it("uses the open detail as aria-current + bronze selection, separate from keyboard-active", () => {
     const html = renderToStaticMarkup(
       <FoBacklogQueueTable
         items={[item({ id: "0002", status: "next" }), item({ id: "0003", status: "next" })]}
         nowSec={1770000000}
         nextTaskId={null}
-        activeId="0003"
+        activeId="0002"
+        selectedId="0003"
         onOpen={() => undefined}
       />,
     );
 
-    expect(html).toContain('aria-current="true"');
-    expect(html).toContain("ring-live/70");
+    expect(html).toMatch(/data-fo-row="0002" data-active="true"/);
+    expect(html).toMatch(/data-fo-row="0003"[^>]*aria-current="true"/);
+    expect(html).toContain("shadow-[inset_3px_0_0_var(--color-bronze)]");
+    expect(html).not.toContain("ring-live/70");
   });
 
   it("renders queue reason codes as German labels", () => {

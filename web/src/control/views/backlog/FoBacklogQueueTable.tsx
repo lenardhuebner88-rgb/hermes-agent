@@ -62,6 +62,7 @@ export function FoBacklogQueueTable({
   nowSec,
   nextTaskId,
   activeId = null,
+  selectedId = null,
   detailById = {},
   onOpen,
   onCommission,
@@ -74,6 +75,7 @@ export function FoBacklogQueueTable({
   nowSec: number;
   nextTaskId: string | null;
   activeId?: string | null;
+  selectedId?: string | null;
   detailById?: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
   onCommission?: (item: BacklogItem) => void;
@@ -85,7 +87,7 @@ export function FoBacklogQueueTable({
   return (
     <div className="overflow-x-auto rounded-panel border border-line bg-surface-1">
       <table className="w-full table-fixed border-collapse text-left text-sm">
-        <thead className="bg-surface-2 font-display text-micro uppercase tracking-[0.08em] text-ink-3">
+        <thead className="border-t-2 border-line bg-surface-2 font-display text-micro font-semibold uppercase tracking-[0.12em] text-ink-3">
           <tr>
             <th className="w-[30%] px-3 py-2">Title</th>
             <th className="w-[9%] px-3 py-2">Status</th>
@@ -109,9 +111,13 @@ export function FoBacklogQueueTable({
               <tr
                 key={item.id}
                 data-fo-row={item.id}
+                data-active={item.id === activeId ? "true" : undefined}
                 tabIndex={0}
-                aria-current={item.id === activeId ? "true" : undefined}
-                onClick={() => onOpen(item.id)}
+                aria-current={item.id === selectedId ? "true" : undefined}
+                onClick={(event) => {
+                  event.currentTarget.focus();
+                  onOpen(item.id);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
@@ -119,9 +125,9 @@ export function FoBacklogQueueTable({
                   }
                 }}
                 className={cn(
-                  "cursor-pointer border-t border-line-soft align-top outline-none transition hover:bg-surface-3 focus-visible:bg-surface-3",
+                  "cursor-pointer border-t border-line-soft align-top outline-none transition hover:bg-surface-3 focus-visible:bg-surface-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
                   item.id === nextTaskId && "bg-live/5",
-                  item.id === activeId && "bg-surface-3 ring-2 ring-inset ring-live/70",
+                  item.id === selectedId && "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3",
                 )}
               >
                 <td className="h-12 px-3 py-2">
@@ -144,7 +150,7 @@ export function FoBacklogQueueTable({
                 <td className="hidden px-3 py-2 text-ink-2 xl:table-cell">{item.area || "-"}</td>
                 <td className="hidden px-3 py-2 md:table-cell"><span className="font-data text-sec tabular-nums text-ink-2">{relLabel(item.updated, nowSec)}</span></td>
                 <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("text-sec", stale.state === "stale" ? "text-status-alert" : stale.state === "missing_update" ? "text-status-warn" : "text-ink-2")}>{stale.label}</span></td>
-                <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate font-data text-micro text-ink-2">{sourceRef(item)}</span><span className="font-data text-micro text-ink-3">{item.id}</span></td>
+                <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate font-data text-micro tabular-nums text-ink-2">{sourceRef(item)}</span><span className="font-data text-micro tabular-nums text-ink-3">{item.id}</span></td>
                 <td className="px-3 py-2">
                   <p className="line-clamp-3 text-sec text-ink">{nextActionForFoItem(item, detail)}</p>
                   {boardStatus ? (
@@ -175,7 +181,7 @@ export function FoBacklogQueueTable({
 export function FoBacklogQueueSkeleton() {
   return (
     <div className="overflow-hidden rounded-panel border border-line bg-surface-1" aria-busy="true" aria-label="Backlog queue loading">
-      <div className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-b border-line-soft bg-surface-2 px-3 py-2">
+      <div className="grid grid-cols-[minmax(180px,1fr)_80px_80px_minmax(160px,1fr)] gap-3 border-b border-line-soft border-t-2 border-t-line bg-surface-2 px-3 py-2">
         <Skeleton className="h-3 w-24" />
         <Skeleton className="h-3 w-14" />
         <Skeleton className="h-3 w-14" />
