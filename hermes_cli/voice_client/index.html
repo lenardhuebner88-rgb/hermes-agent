@@ -167,6 +167,19 @@
         opacity: 0.5;
       }
 
+      .share-hint {
+        flex-basis: 100%;
+        color: #8fa99d;
+        font-size: 0.68rem;
+        letter-spacing: 0.01em;
+        line-height: 1.35;
+        text-transform: none;
+      }
+
+      .share-hint[hidden] {
+        display: none;
+      }
+
       .sharing-indicator {
         display: flex;
         align-items: center;
@@ -561,6 +574,10 @@
         >
           🖥️ Bildschirm
         </button>
+        <span id="screen-share-hint" class="share-hint" role="status" hidden>
+          Bildschirmteilen wird von Chrome auf Android noch nicht unterstützt.
+          Nutze die Kamera oder einen Desktop-Browser.
+        </span>
         <span id="sharing-indicator" class="sharing-indicator" hidden>
           <span class="sharing-dot" aria-hidden="true"></span>
           <span>teilt</span>

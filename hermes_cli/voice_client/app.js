@@ -46,6 +46,7 @@ const composerForm = document.querySelector("#composer");
 const composerInput = document.querySelector("#composer-input");
 const cameraChipElement = document.querySelector("#camera-chip");
 const screenChipElement = document.querySelector("#screen-chip");
+const screenShareHintElement = document.querySelector("#screen-share-hint");
 const sharingIndicatorElement = document.querySelector("#sharing-indicator");
 const sharingPreviewElement = document.querySelector("#sharing-preview");
 
@@ -489,6 +490,10 @@ function stopSharing() {
   // await that resolves after this point must not resurrect a share (its
   // late stream gets stopped in startSharing's generation check).
   sharingStartGeneration += 1;
+  const wasSharing = Boolean(sharingStream);
+  if (wasSharing && hasOpenWebSocket(activeSession)) {
+    activeSession.websocket.send(JSON.stringify({ type: "sharing_stopped" }));
+  }
   if (sharingIntervalId !== null) {
     window.clearInterval(sharingIntervalId);
     sharingIntervalId = null;
@@ -569,6 +574,7 @@ function toggleSharing(source) {
 function featureDetectScreenShare() {
   if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
     screenChipElement.disabled = true;
+    screenShareHintElement.hidden = false;
     screenChipElement.title =
       "Bildschirmfreigabe wird von diesem Browser nicht unterstützt.";
   }

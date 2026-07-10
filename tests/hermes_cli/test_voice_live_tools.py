@@ -9,6 +9,7 @@ import pytest
 from tools.voice_live_tools import (
     FUNCTION_DECLARATIONS,
     NON_BLOCKING_TOOLS,
+    VOICE_FRAME_ARG,
     VoiceToolExecutor,
 )
 
@@ -121,6 +122,78 @@ async def test_delegate_calls_injected_callback():
     assert result["result"].startswith("erledigt")
 
 
+@pytest.mark.asyncio
+async def test_delegate_with_internal_frame_uses_image_callback_without_consuming_prompt():
+    observed = {}
+
+    async def fake_delegate(prompt):
+        raise AssertionError(f"plain delegate unexpectedly called: {prompt}")
+
+    async def fake_delegate_with_image(prompt, image):
+        observed["prompt"] = prompt
+        observed["image"] = image
+        return "Bild erhalten"
+
+    executor = VoiceToolExecutor(
+        delegate=fake_delegate,
+        delegate_with_image=fake_delegate_with_image,
+    )
+    frame = b"\xff\xd8delegation-frame\xff\xd9"
+    result = await executor.execute(
+        "delegate_to_hermes",
+        {"prompt": "prüfe den sichtbaren Fehler", VOICE_FRAME_ARG: frame},
+    )
+
+    assert result == {"result": "Bild erhalten"}
+    assert observed == {
+        "prompt": "prüfe den sichtbaren Fehler",
+        "image": frame,
+    }
+
+
+@pytest.mark.asyncio
+async def test_watch_tools_call_injected_callbacks_and_stop_is_idempotent():
+    state = {"instruction": None, "watching": False}
+
+    def watch_view(instruction):
+        state.update(instruction=instruction, watching=True)
+        return {"watching": True, "instruction": instruction}
+
+    def stop_watching():
+        was_watching = state["watching"]
+        state["watching"] = False
+        return {"watching": False, "was_watching": was_watching}
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        watch_view=watch_view,
+        stop_watching=stop_watching,
+    )
+
+    started = await executor.execute(
+        "watch_view", {"instruction": "Prüfe den Build"}
+    )
+    stopped = await executor.execute("stop_watching", {})
+    stopped_again = await executor.execute("stop_watching", {})
+
+    assert started == {"watching": True, "instruction": "Prüfe den Build"}
+    assert stopped == {"watching": False, "was_watching": True}
+    assert stopped_again == {"watching": False, "was_watching": False}
+
+
+@pytest.mark.asyncio
+async def test_watch_view_rejects_missing_instruction_and_unavailable_callback():
+    executor = VoiceToolExecutor(delegate=None)
+
+    missing = await executor.execute("watch_view", {})
+    unavailable = await executor.execute(
+        "watch_view", {"instruction": "Prüfe den Build"}
+    )
+
+    assert missing["error"]["code"] == "invalid_arguments"
+    assert unavailable["error"]["code"] == "watch_unavailable"
+
+
 def test_function_declarations_cover_all_tools():
     names = {declaration["name"] for declaration in FUNCTION_DECLARATIONS}
     assert names == {
@@ -128,6 +201,8 @@ def test_function_declarations_cover_all_tools():
         "read_terminal",
         "send_to_terminal",
         "delegate_to_hermes",
+        "watch_view",
+        "stop_watching",
         "send_discord_message",
         "create_kanban_task",
         "hermes_status",
@@ -176,6 +251,8 @@ def test_is_non_blocking_flags_only_delegate_to_hermes():
         "create_kanban_task",
         "hermes_status",
         "schedule_reminder",
+        "watch_view",
+        "stop_watching",
     ):
         assert executor.is_non_blocking(name) is False
 

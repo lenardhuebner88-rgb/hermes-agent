@@ -7,6 +7,7 @@ import base64
 import binascii
 from collections import OrderedDict, deque
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import logging
@@ -40,6 +41,9 @@ from tools.voice_live_tools import FUNCTION_DECLARATIONS, VoiceToolExecutor
 
 DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 VOICE_CLIENT_DIR = Path(__file__).with_name("voice_client")
+_HERMES_CLI_ENTRYPOINT = Path(__file__).resolve().parents[1] / "cli.py"
+_VOICE_ATTACHMENT_RETENTION_SECONDS = 24 * 60 * 60
+_VOICE_ATTACHMENT_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
 
 _ALLOWED_VOICE_ASSETS = {
     "app.js": "application/javascript",
@@ -485,7 +489,10 @@ async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
 
 
 async def delegate_to_hermes(
-    prompt: str, *, timeout_seconds: float | None = None
+    prompt: str,
+    *,
+    timeout_seconds: float | None = None,
+    image: bytes | None = None,
 ) -> str:
     """Delegate one fallback turn through the supported Hermes CLI surface.
 
@@ -498,36 +505,82 @@ async def delegate_to_hermes(
     effective_timeout = (
         _DELEGATE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     )
-    executable = resolve_hermes_executable()
-    try:
-        process = await asyncio.create_subprocess_exec(
-            executable,
+    image_path: Path | None = None
+    image_cleanup_task: asyncio.Task[None] | None = None
+    if image is not None:
+        if not image.startswith(_VIDEO_FRAME_MAGIC) or len(image) > _MAX_VIDEO_FRAME_BYTES:
+            raise VoiceRuntimeError(
+                "delegation_image_invalid",
+                "Das geteilte Bild ist ungültig.",
+            )
+        attachment_dir = get_hermes_home() / "cache" / "voice-web" / "attachments"
+        _sweep_voice_attachments(attachment_dir)
+        try:
+            attachment_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            attachment_dir.chmod(0o700)
+            image_path = attachment_dir / f"{uuid.uuid4().hex}.jpg"
+            image_path.write_bytes(image)
+            image_path.chmod(0o600)
+            image_cleanup_task = _schedule_voice_attachment_cleanup(image_path)
+        except OSError as exc:
+            if image_path is not None:
+                image_path.unlink(missing_ok=True)
+            raise VoiceRuntimeError(
+                "delegation_image_unavailable",
+                "Das geteilte Bild konnte nicht für Hermes bereitgestellt werden.",
+            ) from exc
+
+    if image_path is None:
+        command = [resolve_hermes_executable(), "-z", prompt]
+    else:
+        command = [
+            sys.executable,
+            str(_HERMES_CLI_ENTRYPOINT),
             "-q",
             prompt,
+            "--image",
+            str(image_path),
+            "--quiet",
+        ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             **_delegation_isolation_kwargs(),
         )
     except OSError as exc:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+        if image_cleanup_task is not None:
+            image_cleanup_task.cancel()
+            await asyncio.gather(image_cleanup_task, return_exceptions=True)
         raise VoiceRuntimeError(
             "delegation_unavailable",
             "Hermes konnte nicht gestartet werden.",
         ) from exc
 
     try:
-        stdout, _stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=effective_timeout,
-        )
-    except asyncio.CancelledError:
-        await _stop_subprocess(process)
-        raise
-    except TimeoutError as exc:
-        await _stop_subprocess(process)
-        raise VoiceRuntimeError(
-            "delegation_timeout",
-            "Hermes hat nicht rechtzeitig geantwortet.",
-        ) from exc
+        try:
+            stdout, _stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=effective_timeout,
+            )
+        except asyncio.CancelledError:
+            await _stop_subprocess(process)
+            raise
+        except TimeoutError as exc:
+            await _stop_subprocess(process)
+            raise VoiceRuntimeError(
+                "delegation_timeout",
+                "Hermes hat nicht rechtzeitig geantwortet.",
+            ) from exc
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+        if image_cleanup_task is not None:
+            image_cleanup_task.cancel()
+            await asyncio.gather(image_cleanup_task, return_exceptions=True)
 
     if process.returncode != 0:
         _log.warning(
@@ -539,12 +592,75 @@ async def delegate_to_hermes(
             "Hermes konnte die Anfrage nicht bearbeiten.",
         )
     response = stdout.decode("utf-8", "replace").strip()
+    if image_path is not None and response.startswith("session_id:"):
+        response = response.partition("\n")[2].strip()
     if not response:
         raise VoiceRuntimeError(
             "delegation_empty",
             "Hermes hat keine Antwort geliefert.",
         )
     return response
+
+
+def _sweep_voice_attachments(
+    attachment_dir: Path,
+    *,
+    now: float | None = None,
+) -> None:
+    """Delete crash leftovers older than the explicit 24-hour retention bound."""
+
+    if not attachment_dir.is_dir():
+        return
+    cutoff = (time.time() if now is None else now) - _VOICE_ATTACHMENT_RETENTION_SECONDS
+    for path in attachment_dir.glob("*.jpg"):
+        try:
+            if path.is_file() and path.stat().st_mtime <= cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("Could not remove expired voice attachment %s", path.name)
+
+
+async def _delete_voice_attachment_after(path: Path, delay: float) -> None:
+    """Delete one attachment at its retention deadline while the service runs."""
+
+    try:
+        await asyncio.sleep(max(0.0, delay))
+        path.unlink(missing_ok=True)
+    except asyncio.CancelledError:
+        raise
+    except OSError:
+        _log.warning("Could not remove voice attachment %s at retention deadline", path.name)
+
+
+def _schedule_voice_attachment_cleanup(
+    path: Path,
+    *,
+    now: float | None = None,
+) -> asyncio.Task[None]:
+    """Schedule deletion at 24h from mtime and retain the task strongly."""
+
+    current = time.time() if now is None else now
+    try:
+        remaining = path.stat().st_mtime + _VOICE_ATTACHMENT_RETENTION_SECONDS - current
+    except OSError:
+        remaining = 0.0
+    task = asyncio.create_task(_delete_voice_attachment_after(path, remaining))
+    _VOICE_ATTACHMENT_CLEANUP_TASKS.add(task)
+    task.add_done_callback(_VOICE_ATTACHMENT_CLEANUP_TASKS.discard)
+    return task
+
+
+@asynccontextmanager
+async def _voice_router_lifespan(_app: Any):
+    """Re-arm exact retention deadlines for attachments left by a crash."""
+
+    attachment_dir = get_hermes_home() / "cache" / "voice-web" / "attachments"
+    _sweep_voice_attachments(attachment_dir)
+    if attachment_dir.is_dir():
+        for path in attachment_dir.glob("*.jpg"):
+            if path.is_file():
+                _schedule_voice_attachment_cleanup(path)
+    yield
 
 
 def _html_safe_json(value: str) -> str:
@@ -905,7 +1021,7 @@ def _video_frame_rate_allowed(frame_times: deque[float]) -> bool:
     return True
 
 
-def _enqueue_video_frame(video_in: asyncio.Queue[bytes], frame: bytes) -> None:
+def _enqueue_video_frame(video_in: asyncio.Queue[bytes | None], frame: bytes) -> None:
     """Queue one decoded JPEG still, dropping the oldest queued frame if full.
 
     A stale queued frame is worthless for live vision, so a full queue makes
@@ -920,6 +1036,17 @@ def _enqueue_video_frame(video_in: asyncio.Queue[bytes], frame: bytes) -> None:
                 video_in.get_nowait()
             except asyncio.QueueEmpty:
                 continue
+
+
+def _enqueue_sharing_stopped(video_in: asyncio.Queue[bytes | None]) -> None:
+    """Drop queued stills and put a lifecycle sentinel behind the browser stop."""
+
+    while True:
+        try:
+            video_in.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    video_in.put_nowait(None)
 
 
 async def _try_start_fallback_text_turn(
@@ -974,7 +1101,7 @@ async def _read_voice_frames(
     fallback_mode: asyncio.Event,
     disconnected: asyncio.Event,
     text_in: asyncio.Queue[str],
-    video_in: asyncio.Queue[bytes],
+    video_in: asyncio.Queue[bytes | None],
     config: VoiceWebConfig,
     text_turn: _FallbackTextTurn,
 ) -> str:
@@ -1158,6 +1285,9 @@ async def _read_voice_frames(
                     )
                     continue
                 _enqueue_video_frame(video_in, decoded_frame)
+                continue
+            if control_type == "sharing_stopped":
+                _enqueue_sharing_stopped(video_in)
                 continue
             await _put_event(
                 events_out,
@@ -1346,7 +1476,7 @@ async def _run_live_bridge(
     disconnected: asyncio.Event,
     session_id: str | None,
     text_in: asyncio.Queue[str] | None = None,
-    video_in: asyncio.Queue[bytes] | None = None,
+    video_in: asyncio.Queue[bytes | None] | None = None,
 ) -> bool:
     if session_id:
         session = GeminiLiveSession(
@@ -1373,7 +1503,14 @@ async def _run_live_bridge(
     executor = VoiceToolExecutor(
         delegate=lambda prompt: delegate_to_hermes(
             prompt, timeout_seconds=_DELEGATE_LIVE_TIMEOUT_SECONDS
-        )
+        ),
+        delegate_with_image=lambda prompt, image: delegate_to_hermes(
+            prompt,
+            timeout_seconds=_DELEGATE_LIVE_TIMEOUT_SECONDS,
+            image=image,
+        ),
+        watch_view=getattr(session, "watch_view", None),
+        stop_watching=getattr(session, "stop_watching", None),
     )
     try:
         await session.run(
@@ -1430,10 +1567,14 @@ def create_voice_router(
     session_token: str,
 ) -> APIRouter:
     """Build an optionally empty router with dashboard auth injected."""
-    router = APIRouter()
+
+    _sweep_voice_attachments(
+        get_hermes_home() / "cache" / "voice-web" / "attachments"
+    )
     config = voice_web_config(raw_config)
     if not config.enabled:
-        return router
+        return APIRouter(lifespan=_voice_router_lifespan)
+    router = APIRouter(lifespan=_voice_router_lifespan)
 
     @router.get("/voice")
     async def voice_index(request: Request) -> HTMLResponse:
@@ -1491,7 +1632,9 @@ def create_voice_router(
             maxsize=_EVENT_QUEUE_ITEMS
         )
         text_in: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
-        video_in: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_VIDEO_QUEUE_MAXSIZE)
+        video_in: asyncio.Queue[bytes | None] = asyncio.Queue(
+            maxsize=_VIDEO_QUEUE_MAXSIZE
+        )
         fallback_pcm = bytearray()
         fallback_mode = asyncio.Event()
         disconnected = asyncio.Event()

@@ -482,6 +482,12 @@ def test_live_failure_falls_back_on_same_websocket(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
+        def watch_view(self, instruction):
+            return {"watching": True, "instruction": instruction}
+
+        def stop_watching(self):
+            return {"watching": False, "was_watching": True}
+
         async def run(
             self, audio_in, events_out, tool_executor, text_in=None, video_in=None
         ):
@@ -1024,13 +1030,157 @@ async def test_delegate_uses_bounded_shell_free_hermes_quiet_subprocess(monkeypa
     assert response == "erledigt"
     assert observed["args"] == (
         expected_executable,
-        "-q",
+        "-z",
         "prüfe den Status",
     )
     assert observed["kwargs"]["stdout"] is voice_ws.asyncio.subprocess.PIPE
     assert observed["kwargs"]["stderr"] is voice_ws.asyncio.subprocess.PIPE
     if os.name == "posix":
         assert observed["kwargs"]["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_delegate_image_is_private_cli_attachment_and_deleted(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            image_path = Path(observed["args"][observed["args"].index("--image") + 1])
+            observed["image_path"] = image_path
+            observed["image_bytes"] = image_path.read_bytes()
+            observed["image_mode"] = image_path.stat().st_mode & 0o777
+            observed["directory_mode"] = image_path.parent.stat().st_mode & 0o777
+            return "session_id: voice-test\nBild geprüft".encode(), b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        voice_ws.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    frame = FIXTURE_VIDEO.read_bytes()
+
+    response = await voice_ws.delegate_to_hermes(
+        "prüfe den sichtbaren Fehler",
+        image=frame,
+    )
+
+    assert response == "Bild geprüft"
+    assert observed["args"] == (
+        sys.executable,
+        str(voice_ws._HERMES_CLI_ENTRYPOINT),
+        "-q",
+        "prüfe den sichtbaren Fehler",
+        "--image",
+        str(observed["image_path"]),
+        "--quiet",
+    )
+    assert observed["image_bytes"] == frame
+    assert observed["image_mode"] == 0o600
+    assert observed["directory_mode"] == 0o700
+    assert not observed["image_path"].exists()
+
+
+def test_voice_attachment_sweep_removes_only_expired_jpegs(tmp_path):
+    from hermes_cli import voice_ws
+
+    attachment_dir = tmp_path / "attachments"
+    attachment_dir.mkdir()
+    expired = attachment_dir / "expired.jpg"
+    fresh = attachment_dir / "fresh.jpg"
+    unrelated = attachment_dir / "keep.txt"
+    for path in (expired, fresh, unrelated):
+        path.write_bytes(b"data")
+    now = 2_000_000.0
+    os.utime(
+        expired,
+        (now - voice_ws._VOICE_ATTACHMENT_RETENTION_SECONDS - 1,) * 2,
+    )
+    os.utime(fresh, (now - 1,) * 2)
+    os.utime(unrelated, (now - voice_ws._VOICE_ATTACHMENT_RETENTION_SECONDS - 1,) * 2)
+
+    voice_ws._sweep_voice_attachments(attachment_dir, now=now)
+
+    assert not expired.exists()
+    assert fresh.exists()
+    assert unrelated.exists()
+
+
+@pytest.mark.asyncio
+async def test_voice_attachment_scheduled_cleanup_enforces_deadline(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_VOICE_ATTACHMENT_RETENTION_SECONDS", 0.01)
+    attachment = tmp_path / "crash-leftover.jpg"
+    attachment.write_bytes(b"jpeg")
+
+    task = voice_ws._schedule_voice_attachment_cleanup(attachment)
+    await asyncio.wait_for(task, timeout=1)
+
+    assert not attachment.exists()
+    assert task not in voice_ws._VOICE_ATTACHMENT_CLEANUP_TASKS
+
+
+def test_delegate_entrypoints_expose_required_live_cli_contracts():
+    from hermes_cli import voice_ws
+
+    oneshot_help = subprocess.run(
+        [voice_ws.resolve_hermes_executable(), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    image_help = subprocess.run(
+        [sys.executable, str(voice_ws._HERMES_CLI_ENTRYPOINT), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert oneshot_help.returncode == 0
+    assert "-z" in oneshot_help.stdout
+    assert image_help.returncode == 0
+    image_help_text = image_help.stdout + image_help.stderr
+    assert "--image" in image_help_text
+    assert "--quiet" in image_help_text
+
+
+@pytest.mark.asyncio
+async def test_delegate_image_write_failure_removes_partial_attachment(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import voice_ws
+
+    original_write_bytes = Path.write_bytes
+
+    def partial_write_then_fail(path, data):
+        original_write_bytes(path, data)
+        raise OSError("disk failure after partial write")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "write_bytes", partial_write_then_fail)
+
+    with pytest.raises(voice_ws.VoiceRuntimeError) as error:
+        await voice_ws.delegate_to_hermes(
+            "prüfe den sichtbaren Fehler",
+            image=FIXTURE_VIDEO.read_bytes(),
+        )
+
+    assert error.value.code == "delegation_image_unavailable"
+    attachments = tmp_path / "cache" / "voice-web" / "attachments"
+    assert list(attachments.glob("*.jpg")) == []
 
 
 def test_disabled_web_server_does_not_import_voice_runtime(tmp_path):
@@ -1700,6 +1850,12 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
+        def watch_view(self, instruction):
+            return {"watching": True, "instruction": instruction}
+
+        def stop_watching(self):
+            return {"watching": False, "was_watching": True}
+
         async def run(
             self, audio_in, events_out, tool_executor, text_in=None, video_in=None
         ):
@@ -1708,14 +1864,25 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
     captured_executor = {}
 
     class SpyExecutor:
-        def __init__(self, *, delegate):
+        def __init__(
+            self,
+            *,
+            delegate,
+            delegate_with_image,
+            watch_view,
+            stop_watching,
+        ):
             captured_executor["delegate"] = delegate
+            captured_executor["delegate_with_image"] = delegate_with_image
+            captured_executor["watch_view"] = watch_view
+            captured_executor["stop_watching"] = stop_watching
 
     recorded = {}
 
-    async def fake_delegate(prompt, *, timeout_seconds=None):
+    async def fake_delegate(prompt, *, timeout_seconds=None, image=None):
         recorded["prompt"] = prompt
         recorded["timeout_seconds"] = timeout_seconds
+        recorded["image"] = image
         return "ok"
 
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", FakeGeminiLiveSession)
@@ -1734,10 +1901,19 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
     )
 
     result = await captured_executor["delegate"]("mach das")
+    image_result = await captured_executor["delegate_with_image"](
+        "mach das mit Bild", b"\xff\xd8frame\xff\xd9"
+    )
+    watch_result = captured_executor["watch_view"]("Prüfe den Build")
+    stop_result = captured_executor["stop_watching"]()
 
     assert result == "ok"
-    assert recorded["prompt"] == "mach das"
+    assert image_result == "ok"
+    assert recorded["prompt"] == "mach das mit Bild"
     assert recorded["timeout_seconds"] == voice_ws._DELEGATE_LIVE_TIMEOUT_SECONDS == 600.0
+    assert recorded["image"] == b"\xff\xd8frame\xff\xd9"
+    assert watch_result == {"watching": True, "instruction": "Prüfe den Build"}
+    assert stop_result == {"watching": False, "was_watching": True}
 
 
 def test_live_mode_text_frame_emits_transcript_and_reaches_session_text_in(
@@ -2156,6 +2332,19 @@ def test_enqueue_video_frame_drops_oldest_when_queue_is_full():
     assert remaining == frames[1:]
 
 
+def test_enqueue_sharing_stopped_drops_stale_frames_and_routes_sentinel():
+    from hermes_cli import voice_ws
+
+    video_in = asyncio.Queue(maxsize=voice_ws._VIDEO_QUEUE_MAXSIZE)
+    voice_ws._enqueue_video_frame(video_in, b"stale-1")
+    voice_ws._enqueue_video_frame(video_in, b"stale-2")
+
+    voice_ws._enqueue_sharing_stopped(video_in)
+
+    assert video_in.get_nowait() is None
+    assert video_in.empty()
+
+
 def test_voice_client_composer_form_present_with_max_length():
     """C5 client tripwire: the typed-input composer exists with the
     protocol's 4000-char cap wired into the input itself."""
@@ -2201,6 +2390,10 @@ def test_voice_client_video_sharing_capture_pipeline_tripwires():
     # versions, so the "Bildschirm" chip must be disabled, not left to throw.
     assert "typeof navigator.mediaDevices?.getDisplayMedia" in script
     assert "screenChipElement.disabled = true" in script
+    assert "screenShareHintElement.hidden = false" in script
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+    assert 'id="screen-share-hint" class="share-hint" role="status" hidden' in document
+    assert "Chrome auf Android noch nicht unterstützt" in document
     # Camera capture uses the rear/environment-facing camera by default.
     assert 'facingMode: "environment"' in script
     assert "navigator.mediaDevices.getUserMedia({" in script
@@ -2228,6 +2421,7 @@ def test_voice_client_video_sharing_capture_pipeline_tripwires():
     # Wire format matches the server's `video_frame` control-frame contract.
     assert 'type: "video_frame"' in script
     assert "source: sharingSource" in script
+    assert 'type: "sharing_stopped"' in script
 
 
 def test_voice_client_video_sharing_autostop_and_indicator_tripwires():

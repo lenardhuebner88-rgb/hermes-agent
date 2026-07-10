@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from array import array
 import asyncio
+from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from typing import Any
 import pytest
 from google import genai
 from google.genai import errors, types
+from PIL import Image, ImageDraw
 
 FIXTURE_VIDEO = Path(__file__).parent / "fixtures" / "vision_marker.jpg"
 
@@ -108,6 +110,7 @@ class _FakeSDKSession:
         self.expected_audio_sent = asyncio.Event()
         self.realtime_inputs: list[types.Blob] = []
         self.video_inputs: list[types.Blob] = []
+        self.text_inputs: list[str] = []
         self.video_sent = asyncio.Event()
         self.tool_responses: list[list[types.FunctionResponse]] = []
         self.client_contents: list[tuple[types.Content, bool]] = []
@@ -126,7 +129,11 @@ class _FakeSDKSession:
         self.client_content_sent.set()
 
     async def send_realtime_input(
-        self, *, audio: types.Blob | None = None, video: types.Blob | None = None
+        self,
+        *,
+        audio: types.Blob | None = None,
+        video: types.Blob | None = None,
+        text: str | None = None,
     ) -> None:
         self.send_started.set()
         if self._send_gate is not None:
@@ -137,6 +144,10 @@ class _FakeSDKSession:
             self.call_order.append("video")
             self.video_inputs.append(video)
             self.video_sent.set()
+            return
+        if text is not None:
+            self.call_order.append("realtime_text")
+            self.text_inputs.append(text)
             return
         self.call_order.append("audio")
         self.realtime_inputs.append(audio)
@@ -317,6 +328,23 @@ def _loud_pcm_frame() -> bytes:
 def _quiet_pcm_frame() -> bytes:
     """A 3200-byte all-zero PCM16 frame (RMS 0)."""
     return bytes(3200)
+
+
+def _reencode_fixture(*, quality: int) -> bytes:
+    output = BytesIO()
+    with Image.open(FIXTURE_VIDEO) as image:
+        image.save(output, format="JPEG", quality=quality)
+    return output.getvalue()
+
+
+def _changed_fixture() -> bytes:
+    output = BytesIO()
+    with Image.open(FIXTURE_VIDEO) as source:
+        image = source.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, image.width // 2, image.height // 2), fill="black")
+    image.save(output, format="JPEG", quality=70)
+    return output.getvalue()
 
 
 def _install_fake_client(monkeypatch: pytest.MonkeyPatch, live: _FakeLive) -> None:
@@ -1189,6 +1217,212 @@ async def test_non_blocking_call_error_result_uses_when_idle_scheduling(
 
 
 @pytest.mark.asyncio
+async def test_silent_non_blocking_result_sends_one_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_NUDGE_SECONDS", 0.01)
+    gate = asyncio.Event()
+    gate.set()
+    sdk_session = _FakeSDKSession(
+        turns=[[_delegate_tool_call_message(call_id="delegate-nudge")]]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(),
+            asyncio.Queue(),
+            _GatedNonBlockingExecutor(gate=gate),
+        )
+    )
+    await _wait_until(lambda: sdk_session.text_inputs)
+
+    assert len(sdk_session.tool_responses) == 1
+    assert sdk_session.text_inputs == [vls._NON_BLOCKING_NUDGE_TEXT]
+
+    # The observation task exits after its one best-effort send; it never
+    # repeats while the connection remains quiet.
+    await asyncio.sleep(0.03)
+    assert sdk_session.text_inputs == [vls._NON_BLOCKING_NUDGE_TEXT]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        _audio_message(b"\x01\x02"),
+        _output_transcription_message(text="Ergebnis", finished=False),
+    ],
+    ids=["audio", "output-transcript"],
+)
+async def test_immediate_model_output_suppresses_non_blocking_result_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+    model_output: types.LiveServerMessage,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_NUDGE_SECONDS", 0.03)
+    gate = asyncio.Event()
+    gate.set()
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    call = types.FunctionCall(
+        id="delegate-output",
+        name="delegate_to_hermes",
+        args={"prompt": "erledige das"},
+    )
+
+    await wrapper._run_non_blocking_call(
+        call,
+        _GatedNonBlockingExecutor(gate=gate),
+    )
+    await wrapper._handle_message(
+        sdk_session,
+        model_output,
+        asyncio.Queue(),
+        _FakeToolExecutor(),
+        None,
+    )
+    await asyncio.sleep(0.06)
+
+    assert len(sdk_session.tool_responses) == 1
+    assert sdk_session.text_inputs == []
+    assert wrapper._pending_nudge_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_continuation_of_existing_model_turn_does_not_suppress_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_NUDGE_SECONDS", 0.03)
+    gate = asyncio.Event()
+    gate.set()
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    # A model turn was already speaking when the background result landed.
+    await wrapper._handle_message(
+        sdk_session,
+        _audio_message(b"first chunk"),
+        events_out,
+        _FakeToolExecutor(),
+        None,
+    )
+    await wrapper._run_non_blocking_call(
+        types.FunctionCall(
+            id="delegate-mid-turn",
+            name="delegate_to_hermes",
+            args={"prompt": "erledige das"},
+        ),
+        _GatedNonBlockingExecutor(gate=gate),
+    )
+
+    # More audio from that same turn is not a new output turn and therefore
+    # must not hide a delegation result that still needs announcing.
+    await wrapper._handle_message(
+        sdk_session,
+        _audio_message(b"second chunk"),
+        events_out,
+        _FakeToolExecutor(),
+        None,
+    )
+    await wrapper._handle_message(
+        sdk_session,
+        _turn_complete_message(),
+        events_out,
+        _FakeToolExecutor(),
+        None,
+    )
+    await _wait_until(lambda: sdk_session.text_inputs)
+
+    assert sdk_session.text_inputs == [vls._NON_BLOCKING_NUDGE_TEXT]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_suppresses_non_blocking_result_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_NUDGE_SECONDS", 0.03)
+    gate = asyncio.Event()
+    gate.set()
+    first = _FakeSDKSession()
+    replacement = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = first
+    call = types.FunctionCall(
+        id="delegate-reconnect",
+        name="delegate_to_hermes",
+        args={"prompt": "erledige das"},
+    )
+
+    await wrapper._run_non_blocking_call(
+        call,
+        _GatedNonBlockingExecutor(gate=gate),
+    )
+    wrapper._active_session = replacement
+    await asyncio.sleep(0.06)
+
+    assert len(first.tool_responses) == 1
+    assert first.text_inputs == []
+    assert replacement.text_inputs == []
+    assert wrapper._pending_nudge_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_run_cancels_pending_non_blocking_result_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    monkeypatch.setattr(vls, "_NON_BLOCKING_NUDGE_SECONDS", 60.0)
+    gate = asyncio.Event()
+    gate.set()
+    sdk_session = _FakeSDKSession(
+        turns=[[_delegate_tool_call_message(call_id="delegate-cancel-nudge")]]
+    )
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    task = asyncio.create_task(
+        wrapper.run(
+            asyncio.Queue(),
+            asyncio.Queue(),
+            _GatedNonBlockingExecutor(gate=gate),
+        )
+    )
+    await _wait_until(lambda: wrapper._pending_nudge_tasks)
+    nudge_task = next(iter(wrapper._pending_nudge_tasks))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert nudge_task.cancelled()
+    assert wrapper._pending_nudge_tasks == set()
+    assert sdk_session.text_inputs == []
+
+
+@pytest.mark.asyncio
 async def test_non_blocking_cap_rejects_third_concurrent_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1540,7 +1774,8 @@ async def test_video_relay_offer_then_flush_sends_once_second_flush_is_noop() ->
     from hermes_cli.voice_live_session import _VideoFrameRelay
 
     sdk_session = _FakeSDKSession()
-    relay = _VideoFrameRelay(asyncio.Queue())
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
     frame = FIXTURE_VIDEO.read_bytes()
 
     relay.offer(frame)
@@ -1556,6 +1791,339 @@ async def test_video_relay_offer_then_flush_sends_once_second_flush_is_noop() ->
 
     assert sent_again is False
     assert len(sdk_session.video_inputs) == 1
+
+
+def test_watch_detector_ignores_same_and_jpeg_noise_but_detects_marker_change() -> None:
+    from hermes_cli.voice_live_session import _jpeg_frame_changed
+
+    original = FIXTURE_VIDEO.read_bytes()
+
+    assert _jpeg_frame_changed(original, original) is False
+    assert _jpeg_frame_changed(original, _reencode_fixture(quality=30)) is False
+    assert _jpeg_frame_changed(original, _changed_fixture()) is True
+
+
+def test_watch_requires_current_share_and_stop_is_idempotent() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
+
+    result = relay.start_watching("Prüfe den Build")
+
+    assert result["error"]["code"] == "watch_requires_sharing"
+    assert relay.stop_watching() == {"watching": False, "was_watching": False}
+
+
+def test_watch_cooldown_and_maximum_three_notifications() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    relay = _VideoFrameRelay(asyncio.Queue())
+    original = FIXTURE_VIDEO.read_bytes()
+    changed = _changed_fixture()
+    relay.offer(original, now=0.0)
+    assert relay.start_watching("Prüfe den Build")["watching"] is True
+
+    first = relay.offer(changed, now=1.0)
+    assert first is not None
+    relay.mark_watch_notification_sent(first, now=1.0)
+    cooldown_suppressed = relay.offer(original, now=10.0)
+    # The changed state remains stable. Once cooldown expires, the pending
+    # event must still fire instead of being lost when its frame became the
+    # detector baseline.
+    second = relay.offer(original, now=31.0)
+    assert second is not None
+    relay.mark_watch_notification_sent(second, now=31.0)
+    third = relay.offer(changed, now=62.0)
+    assert third is not None
+    relay.mark_watch_notification_sent(third, now=62.0)
+    capped = relay.offer(original, now=93.0)
+
+    assert cooldown_suppressed is None
+    assert capped is None
+
+
+def test_sharing_stop_clears_latest_frame_and_active_watch() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    assert relay.start_watching("Prüfe den Build")["watching"] is True
+
+    relay.sharing_stopped()
+
+    assert relay.peek() is None
+    assert relay.stop_watching() == {"watching": False, "was_watching": False}
+    assert relay.start_watching("Prüfe weiter")["error"]["code"] == (
+        "watch_requires_sharing"
+    )
+
+
+def test_reconnect_clear_rearms_inflight_watch_notification() -> None:
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    relay = _VideoFrameRelay(asyncio.Queue())
+    original = FIXTURE_VIDEO.read_bytes()
+    changed = _changed_fixture()
+    relay.offer(original, now=0.0)
+    relay.start_watching("Prüfe den Build")
+    reserved = relay.offer(changed, now=1.0)
+    assert reserved is not None
+
+    relay.clear()
+    retried = relay.offer(changed, now=2.0)
+
+    assert retried is not None
+
+
+@pytest.mark.asyncio
+async def test_watch_change_sends_exactly_one_current_still_then_realtime_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 0.0)
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("ob der Build fertig ist")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    changed = _changed_fixture()
+    await video_in.put(changed)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, stop_event)
+    )
+
+    await _wait_until(lambda: sdk_session.text_inputs)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert sdk_session.call_order == ["video", "realtime_text"]
+    assert [blob.data for blob in sdk_session.video_inputs] == [changed]
+    assert sdk_session.text_inputs == [
+        "[System] Das geteilte Bild hat sich deutlich geändert. "
+        "Prüfe: ob der Build fertig ist. Melde dich nur, wenn relevant."
+    ]
+    assert events_out.get_nowait() == {"type": "watch_notification_sent"}
+
+
+@pytest.mark.asyncio
+async def test_watch_pair_blocks_microphone_interleaving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 0.03)
+    monkeypatch.setattr(vls, "_WATCH_USER_QUIET_SECONDS", 0.0)
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("Prüfe den Build")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    await video_in.put(_changed_fixture())
+
+    video_task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, stop_event)
+    )
+    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    await audio_in.put(_quiet_pcm_frame())
+    audio_task = asyncio.create_task(
+        wrapper._send_audio(sdk_session, audio_in, stop_event, relay)
+    )
+
+    await asyncio.sleep(0.01)
+    assert sdk_session.call_order == ["video"]
+    await _wait_until(lambda: sdk_session.text_inputs and sdk_session.realtime_inputs)
+    stop_event.set()
+    await asyncio.wait_for(video_task, timeout=1)
+    await asyncio.wait_for(audio_task, timeout=1)
+
+    assert sdk_session.call_order == ["video", "realtime_text", "audio"]
+
+
+@pytest.mark.asyncio
+async def test_watch_defers_and_retries_if_speech_starts_during_image_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 0.03)
+    monkeypatch.setattr(vls, "_WATCH_USER_QUIET_SECONDS", 0.05)
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("Prüfe den Build")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    changed = _changed_fixture()
+    await video_in.put(changed)
+
+    video_task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, stop_event)
+    )
+    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    await audio_in.put(_loud_pcm_frame())
+    audio_task = asyncio.create_task(
+        wrapper._send_audio(sdk_session, audio_in, stop_event, relay)
+    )
+    await asyncio.wait_for(sdk_session.audio_sent.wait(), timeout=1)
+
+    assert sdk_session.text_inputs == []
+    assert sdk_session.call_order == ["video", "audio"]
+
+    # A stable follow-up frame must retry the still-pending notification once
+    # the user has gone quiet; the first reservation was not consumed.
+    sdk_session.video_sent.clear()
+    await video_in.put(changed)
+    await _wait_until(lambda: sdk_session.text_inputs)
+    stop_event.set()
+    await asyncio.wait_for(video_task, timeout=1)
+    await asyncio.wait_for(audio_task, timeout=1)
+
+    assert sdk_session.call_order == [
+        "video",
+        "audio",
+        "video",
+        "realtime_text",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_watch_unchanged_noisy_frame_makes_no_upstream_call() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("Prüfe den Build")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    await video_in.put(_reencode_fixture(quality=30))
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, stop_event)
+    )
+
+    await asyncio.sleep(0.03)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert sdk_session.video_inputs == []
+    assert sdk_session.text_inputs == []
+    assert sdk_session.call_order == []
+
+
+@pytest.mark.asyncio
+async def test_watch_settle_does_not_send_text_after_session_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 0.03)
+    first = _FakeSDKSession()
+    replacement = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = first
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("Prüfe den Build")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    await video_in.put(_changed_fixture())
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        wrapper._send_video(first, relay, video_in, stop_event)
+    )
+
+    await asyncio.wait_for(first.video_sent.wait(), timeout=1)
+    wrapper._active_session = replacement
+    await asyncio.sleep(0.06)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert len(first.video_inputs) == 1
+    assert first.text_inputs == []
+    assert replacement.text_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_watch_settle_cancellation_suppresses_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 60.0)
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper._active_session = sdk_session
+    relay = _VideoFrameRelay(asyncio.Queue())
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("Prüfe den Build")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    await video_in.put(_changed_fixture())
+    task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, asyncio.Event())
+    )
+
+    await asyncio.wait_for(sdk_session.video_sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(sdk_session.video_inputs) == 1
+    assert sdk_session.text_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_delegation_peeks_latest_frame_after_conversation_flush() -> None:
+    """E2 gets the freshest shared still without consuming the turn relay.
+
+    The speech-onset path commonly flushes the conversational copy before the
+    model emits its delegation tool call. The separate latest-frame snapshot
+    must therefore remain available to the worker attachment path.
+    """
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+    from tools.voice_live_tools import VOICE_FRAME_ARG
+
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    relay = _VideoFrameRelay(asyncio.Queue())
+    frame = FIXTURE_VIDEO.read_bytes()
+    relay.offer(frame)
+    assert await relay.flush(sdk_session) is True
+
+    gate = asyncio.Event()
+    executor = _GatedNonBlockingExecutor(gate=gate)
+    call = types.FunctionCall(
+        id="delegate-with-image",
+        name="delegate_to_hermes",
+        args={"prompt": "prüfe den sichtbaren Fehler"},
+    )
+
+    await wrapper._execute_tool_calls(sdk_session, [call], executor, relay)
+    await _wait_until(lambda: executor.calls)
+
+    assert executor.calls[0][0] == "delegate_to_hermes"
+    assert executor.calls[0][1]["prompt"] == "prüfe den sichtbaren Fehler"
+    assert executor.calls[0][1][VOICE_FRAME_ARG] == frame
+    assert relay.peek() == frame
+
+    await wrapper._cancel_tasks(*wrapper._pending_tool_tasks)
 
 
 @pytest.mark.asyncio

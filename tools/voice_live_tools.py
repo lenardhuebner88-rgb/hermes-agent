@@ -87,6 +87,29 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "watch_view",
+        "description": (
+            "Beobachtet die aktuell geteilte Kamera- oder Bildschirmansicht lokal "
+            "und meldet sich nur bei deutlicher Änderung passend zum Auftrag. "
+            "Nutze dies für Bitten wie 'sag Bescheid, wenn der Build fertig ist'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "description": "Was bei einer sichtbaren Änderung geprüft werden soll.",
+                }
+            },
+            "required": ["instruction"],
+        },
+    },
+    {
+        "name": "stop_watching",
+        "description": "Beendet die aktive Beobachtung der geteilten Ansicht.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
         "name": "send_discord_message",
         "description": (
             "Schickt Piet eine Textnachricht in den Discord-Home-Channel, z. B. "
@@ -138,6 +161,10 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
 NON_BLOCKING_TOOLS: frozenset[str] = frozenset({"delegate_to_hermes"})
 
 Delegate = Callable[[str], Awaitable[str]]
+DelegateWithImage = Callable[[str, bytes], Awaitable[str]]
+WatchView = Callable[[str], dict[str, Any]]
+StopWatching = Callable[[], dict[str, Any]]
+VOICE_FRAME_ARG = "_voice_frame"
 
 
 def _error(code: str, message: str, **details: Any) -> dict[str, Any]:
@@ -243,8 +270,18 @@ def _write_reminder_payload(text: str) -> Path:
 class VoiceToolExecutor:
     """Execute the small, explicit tool surface exposed to Gemini Live."""
 
-    def __init__(self, delegate: Delegate | None):
+    def __init__(
+        self,
+        delegate: Delegate | None,
+        *,
+        delegate_with_image: DelegateWithImage | None = None,
+        watch_view: WatchView | None = None,
+        stop_watching: StopWatching | None = None,
+    ):
         self._delegate = delegate
+        self._delegate_with_image = delegate_with_image
+        self._watch_view = watch_view
+        self._stop_watching = stop_watching
 
     def is_non_blocking(self, name: str) -> bool:
         return name in NON_BLOCKING_TOOLS
@@ -380,7 +417,11 @@ class VoiceToolExecutor:
                     "delegation_unavailable", "Delegation ist nicht verfügbar."
                 )
             try:
-                result = await self._delegate(prompt)
+                frame = args.get(VOICE_FRAME_ARG)
+                if isinstance(frame, bytes) and self._delegate_with_image is not None:
+                    result = await self._delegate_with_image(prompt, frame)
+                else:
+                    result = await self._delegate(prompt)
             except Exception as exc:
                 return _error(
                     "delegation_failed",
@@ -388,6 +429,23 @@ class VoiceToolExecutor:
                     detail=str(exc)[:_MAX_ERROR_CHARS],
                 )
             return {"result": result}
+
+        if name == "watch_view":
+            instruction = _required_text(args, "instruction")
+            if instruction is None:
+                return _error(
+                    "invalid_arguments", "Für watch_view fehlt der Beobachtungsauftrag."
+                )
+            if self._watch_view is None:
+                return _error(
+                    "watch_unavailable", "Bildbeobachtung ist nicht verfügbar."
+                )
+            return self._watch_view(instruction)
+
+        if name == "stop_watching":
+            if self._stop_watching is None:
+                return {"watching": False, "was_watching": False}
+            return self._stop_watching()
 
         if name == "send_discord_message":
             text = _required_text(args, "text")

@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import base64
 import getpass
+from io import BytesIO
 import json
 import os
 import sys
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from PIL import Image
 import websockets
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9119"
@@ -65,6 +67,7 @@ class TurnResult:
     transcript: str = ""
     audio_bytes: int = 0
     video_frame_sent: bool = False
+    watch_notification_sent: bool = False
     events: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -245,6 +248,8 @@ async def collect_turn(reader: EventReader, timeout: float) -> TurnResult:
                     result.transcript = (result.transcript + " " + text).strip()
         elif event_type == "video_frame_sent":
             result.video_frame_sent = True
+        elif event_type == "watch_notification_sent":
+            result.watch_notification_sent = True
         elif event_type == "mode" and event.get("value") == "fallback":
             raise E2EError(f"Live session dropped to fallback mid-turn: {event!r}")
         elif event_type == "error":
@@ -266,6 +271,44 @@ async def run_vision_turn(ws: Any, reader: EventReader, question: str) -> TurnRe
     await asyncio.sleep(VIDEO_FRAME_SETTLE_SECONDS)
     await ws.send(json.dumps({"type": "text", "text": question}))
     return await collect_turn(reader, TURN_TIMEOUT_SECONDS)
+
+
+def _watch_change_frame_b64() -> str:
+    """Build a deterministic, materially changed JPEG without persisting it."""
+
+    with Image.new("RGB", (640, 480), color=(5, 30, 80)) as image:
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+async def run_watch_probe(ws: Any, reader: EventReader) -> tuple[TurnResult, TurnResult]:
+    """Plan E: arm watch_view, then prove one local-change notification live."""
+
+    await ws.send(
+        json.dumps(
+            {
+                "type": "text",
+                "text": (
+                    "Beobachte jetzt die geteilte Ansicht. Nutze watch_view mit dem "
+                    "Auftrag: Bei der nächsten deutlichen Bildänderung sage exakt "
+                    "AENDERUNG ERKANNT."
+                ),
+            }
+        )
+    )
+    armed = await collect_turn(reader, TURN_TIMEOUT_SECONDS)
+    await ws.send(
+        json.dumps(
+            {
+                "type": "video_frame",
+                "data": _watch_change_frame_b64(),
+                "source": "screen",
+            }
+        )
+    )
+    notified = await collect_turn(reader, TURN_TIMEOUT_SECONDS)
+    return armed, notified
 
 
 async def _run_session_checks(
@@ -333,6 +376,30 @@ async def _run_session_checks(
         len(matched) >= 2,
         f"matched={matched} assistant said {turn2.transcript[:200]!r}",
     )
+    if args.plan_e:
+        try:
+            armed, notified = await run_watch_probe(ws, reader)
+        except E2EError as exc:
+            record("plan-e-watch-armed", False, str(exc))
+            record("plan-e-watch-event", False, str(exc))
+            await _send_end(ws)
+            return
+        record(
+            "plan-e-watch-armed",
+            bool(armed.transcript or armed.audio_bytes),
+            f"assistant said {armed.transcript[:200]!r}",
+        )
+        normalized = notified.transcript.lower().replace("ä", "ae")
+        record(
+            "plan-e-watch-event",
+            notified.watch_notification_sent
+            and "aenderung" in normalized
+            and "erkannt" in normalized,
+            (
+                f"watch_notification_sent={notified.watch_notification_sent} "
+                f"assistant said {notified.transcript[:200]!r}"
+            ),
+        )
     await _send_end(ws)
 
 
@@ -414,6 +481,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--question",
         default=DEFAULT_QUESTION,
         help="Question asked in the vision turn.",
+    )
+    parser.add_argument(
+        "--plan-e",
+        action="store_true",
+        help="Also arm watch_view and verify one real change notification.",
     )
     return parser.parse_args(argv)
 
