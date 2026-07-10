@@ -6877,3 +6877,71 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+class TestArtifactsEndpoints:
+    """Durable product-artifact delivery (/api/artifacts) — the APK path that must
+    survive dashboard rebuilds, unlike the old web_dist copy."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_test_client(self, monkeypatch, _isolate_hermes_home, tmp_path):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        import hermes_cli.web_server as web_server
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
+        self.artifacts_dir = tmp_path / "artifacts"
+        self.artifacts_dir.mkdir()
+        monkeypatch.setattr(web_server, "_ARTIFACTS_DIR", self.artifacts_dir)
+
+        self.client = TestClient(app)
+        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        self.token = _SESSION_TOKEN
+
+    def test_list_empty_and_populated(self):
+        resp = self.client.get("/api/artifacts")
+        assert resp.status_code == 200
+        assert resp.json() == {"artifacts": []}
+
+        (self.artifacts_dir / "hermes-dictate-debug.apk").write_bytes(b"PK\x03\x04fake")
+        (self.artifacts_dir / "hermes-dictate-debug.apk.sha256").write_text("abc123\n")
+        (self.artifacts_dir / "notes.md").write_text("not listed")  # extension not allowed
+
+        names = [a["name"] for a in self.client.get("/api/artifacts").json()["artifacts"]]
+        assert "hermes-dictate-debug.apk" in names
+        assert "hermes-dictate-debug.apk.sha256" in names
+        assert "notes.md" not in names
+
+    def test_download_apk_with_header_auth(self):
+        payload = b"PK\x03\x04fake-apk-bytes"
+        (self.artifacts_dir / "app.apk").write_bytes(payload)
+        resp = self.client.get("/api/artifacts/app.apk")
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert resp.headers["content-type"].startswith("application/vnd.android.package-archive")
+        assert "attachment" in resp.headers.get("content-disposition", "")
+
+    def test_download_with_query_token_only(self):
+        from starlette.testclient import TestClient
+        from hermes_cli.web_server import app
+
+        (self.artifacts_dir / "app.apk").write_bytes(b"PK\x03\x04x")
+        unauth = TestClient(app)
+        assert unauth.get("/api/artifacts/app.apk").status_code == 401
+        assert unauth.get(f"/api/artifacts/app.apk?token={self.token}").status_code == 200
+        # Query token must NOT leak onto paths outside the /api/artifacts/ prefix —
+        # the list route itself stays header/cookie-only.
+        assert unauth.get(f"/api/artifacts?token={self.token}").status_code == 401
+
+    def test_traversal_and_bad_names_rejected(self):
+        (self.artifacts_dir / "app.apk").write_bytes(b"PK\x03\x04x")
+        assert self.client.get("/api/artifacts/..%2Fsecret.apk").status_code in (400, 404)
+        assert self.client.get("/api/artifacts/.hidden.apk").status_code == 400
+        assert self.client.get("/api/artifacts/missing.apk").status_code == 404
+        assert self.client.get("/api/artifacts/app.py").status_code == 404

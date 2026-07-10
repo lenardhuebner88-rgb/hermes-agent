@@ -490,9 +490,15 @@ def _has_valid_session_token(request: Request) -> bool:
 # can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
 _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
 
+# Prefix variant for routes with a path parameter (artifact downloads open in a plain
+# browser tab / Android download manager, which cannot set the session header).
+_QUERY_TOKEN_API_PREFIXES: tuple[str, ...] = ("/api/artifacts/",)
+
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
-    if path not in _QUERY_TOKEN_API_PATHS:
+    if path not in _QUERY_TOKEN_API_PATHS and not path.startswith(
+        _QUERY_TOKEN_API_PREFIXES
+    ):
         return False
     token = request.query_params.get("token", "")
     return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
@@ -1958,6 +1964,55 @@ async def read_managed_file(request: Request, path: str):
         "data_url": f"data:{mime_type};base64,{encoded}",
         **_managed_response_meta(policy),
     }
+
+
+# Durable product artifacts (e.g. the Hermes Diktat debug APK). Deliberately OUTSIDE the
+# Vite-generated web_dist, which is wiped on every dashboard rebuild/deploy — that wipe
+# silently killed the previous APK download URL (receipt 2026-07-10-hermes-dictate-apk-
+# delivery-fix). Auth-gated like every other /api route; ?token= works for browser
+# downloads via the same auth_middleware precedent as /api/files/download.
+_ARTIFACTS_DIR = Path.home() / "Android" / "artifacts"
+_ARTIFACT_EXTENSIONS = {".apk", ".sha256", ".txt"}
+
+
+@app.get("/api/artifacts")
+async def list_artifacts():
+    """List downloadable artifacts (name, size, mtime) — no directory traversal surface."""
+    if not _ARTIFACTS_DIR.is_dir():
+        return {"artifacts": []}
+    items = []
+    for p in sorted(_ARTIFACTS_DIR.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in _ARTIFACT_EXTENSIONS:
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        items.append({"name": p.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+    return {"artifacts": items}
+
+
+@app.get("/api/artifacts/{name}")
+async def download_artifact(name: str):
+    """Serve one artifact by bare filename; rejects separators and unknown extensions."""
+    if "/" in name or "\\" in name or name != Path(name).name or name.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid artifact name")
+    if Path(name).suffix.lower() not in _ARTIFACT_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    target = (_ARTIFACTS_DIR / name).resolve(strict=False)
+    if not _path_is_under(_ARTIFACTS_DIR, target) or not target.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    mime_type = (
+        "application/vnd.android.package-archive"
+        if target.suffix.lower() == ".apk"
+        else mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    )
+    return FileResponse(
+        path=str(target),
+        media_type=mime_type,
+        filename=target.name,
+        content_disposition_type="attachment",
+    )
 
 
 @app.get("/api/files/download")
