@@ -700,7 +700,9 @@ class LoopRunner:
                 f"Pack {self.pack.name}: --skip-plan ist bei autoland nicht erlaubt"
             )
 
-        allowed = {"MAX_ROUNDS", "MAX_HOURS"}
+        # SKIP_BASE_REFRESH only skips the pre-night rebase — it does not
+        # alter the land contract, so it stays allowed under autoland.
+        allowed = {"MAX_ROUNDS", "MAX_HOURS", "SKIP_BASE_REFRESH"}
         for phase in self.pack.phases:
             prefix = f"PHASE_{phase.upper()}_"
             allowed.update({f"{prefix}ENGINE", f"{prefix}MODEL"})
@@ -1267,6 +1269,26 @@ class LoopRunner:
         if not skip_plan and self.overrides.get("SKIP_PLAN", "").strip().lower() in ("1", "true", "yes"):
             skip_plan = True
             self.say("SKIP_PLAN-Override aktiv — Planung übersprungen.")
+        # Basis-Refresh VOR der Nacht: ein Pack-Worktree, der auf einem alten
+        # main-Stand steht, baut gegen dessen Defekte (2026-07-10: ratchet
+        # 88>81 aus dem stale Base-Commit gebaut, obwohl der Fix längst auf
+        # main lag → falsches "vorbestand", Fail-Streak-Stop). Gleiche
+        # Schienen wie beim Landen (_auto_rebase: nur clean, Anker-Tag,
+        # Konflikt → Abort, alter Stand bleibt); ein Fehlschlag blockiert die
+        # Nacht nie — sie läuft dann bewusst auf der alten Basis weiter.
+        # fresh=True resettet den Worktree ohnehin auf main.
+        if (
+            not fresh
+            and self.wt.is_dir()
+            and self.overrides.get("SKIP_BASE_REFRESH", "").strip().lower()
+            not in ("1", "true", "yes")
+        ):
+            reb_ok, reb_msg = self._auto_rebase(self.pack.repo)
+            first_line = reb_msg.splitlines()[0] if reb_msg else ""
+            if reb_ok:
+                self.ledger(f"BASE-REFRESH: {first_line}")
+            else:
+                self.ledger(f"BASE-REFRESH übersprungen: {first_line}")
         if self.pack.type == "pipeline" and not skip_plan:
             if not self.cmd_plan(fresh=fresh):
                 return False
