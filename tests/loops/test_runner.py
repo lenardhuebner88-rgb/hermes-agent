@@ -30,6 +30,8 @@ from loops.runner import (
     pass_status_matches_plan,
     parse_retry,
     parse_worktree_paths,
+    read_all_ledger_stats,
+    read_ledger_stats,
     resolve_packs_dir,
 )
 
@@ -1783,3 +1785,188 @@ def test_status_survives_missing_repo(tmp_path):
     pack = load_pack(tmp_path / "packs", "missing")
     runner = LoopRunner(pack, state_root=tmp_path / "state")
     runner.cmd_status()  # must not raise
+
+
+# ── Strukturiertes Ledger (ledger.jsonl) ─────────────────────────────────────
+
+def test_ledger_event_appends_valid_jsonl(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "structured", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "structured")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+
+    runner.ledger_event(round=1, phase="build", verdict="ok", plan="P1-beispiel.md",
+                         build_secs=12, verify_secs=None, reason=None)
+    runner.ledger_event(round=2, phase="verify", verdict="fail", fail_kind="verify_fail")
+
+    jsonl = runner.ledger_path.parent / "ledger.jsonl"
+    lines = jsonl.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    events = [json.loads(line) for line in lines]
+    assert events[0]["pack"] == "structured"
+    assert events[0]["verdict"] == "ok"
+    assert "verify_secs" not in events[0]  # None-Felder werden nicht geschrieben
+    assert "reason" not in events[0]
+    assert events[1]["fail_kind"] == "verify_fail"
+    assert "ts" in events[0] and "ts" in events[1]
+    # LEDGER.md selbst bleibt unangetastet (kein Text-Format-Drift)
+    assert not runner.ledger_path.exists() or "verdict" not in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_ledger_event_is_best_effort_on_write_failure(tmp_path, monkeypatch, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "faulty", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "faulty")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "open", boom)
+    runner.ledger_event(round=1, phase="build", verdict="ok")  # must not raise
+
+
+def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_engine):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "structured-happy", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "structured-happy")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    runner.cmd_night()
+
+    jsonl = runner.ledger_path.parent / "ledger.jsonl"
+    events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    verified = [e for e in events if e["phase"] == "verify" and e["verdict"] == "ok"]
+    assert len(verified) == 1
+    assert verified[0]["build_secs"] is not None
+    assert verified[0]["verify_secs"] is not None
+
+
+def test_pipeline_verify_fail_writes_fail_and_bounced_events(tmp_path, fake_engine):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "structured-bounce", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "structured-bounce")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "t")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("FAIL tautologischer Test")
+
+    runner.cmd_run()
+
+    jsonl = runner.ledger_path.parent / "ledger.jsonl"
+    events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    fails = [e for e in events if e["verdict"] == "fail" and e["phase"] == "verify"]
+    bounced = [e for e in events if e["verdict"] == "bounced"]
+    stopped = [e for e in events if e["phase"] == "stop"]
+    assert len(fails) == 2
+    assert all(e["fail_kind"] == "verify_fail" for e in fails)
+    assert len(bounced) == 1
+    assert bounced[0]["fail_kind"] == "verify_fail"
+    assert len(stopped) == 1
+    assert stopped[0]["reason"] == "fail_streak"
+
+
+# ── read_ledger_stats / read_all_ledger_stats ────────────────────────────────
+
+def _write_jsonl(state_dir: Path, events: list[dict]) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "ledger.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        for event in events:
+            fh.write(json.dumps(event) + "\n")
+    return path
+
+
+def test_read_ledger_stats_aggregates_realistic_fixture(tmp_path):
+    # Feldform aus echtem /home/piet/.hermes/loops/dashboard-experience/LEDGER.md
+    # geerntet: Pack "dashboard-experience", Plan-ID "P1-control-touch-targets".
+    state_dir = tmp_path / "dashboard-experience"
+    _write_jsonl(state_dir, [
+        {"ts": "2026-07-10T00:58:00", "pack": "dashboard-experience", "round": 1,
+         "phase": "build", "verdict": "fail", "plan": "P1-control-touch-targets.md",
+         "fail_kind": "build_fail", "reason": "BUILD_FAIL frontend-gate-design-token-ratchet"},
+        {"ts": "2026-07-10T01:08:00", "pack": "dashboard-experience", "round": 2,
+         "plan": "P1-control-touch-targets.md", "phase": "fail", "verdict": "bounced",
+         "fail_kind": "build_fail", "reason": "build: BUILD_FAIL"},
+        {"ts": "2026-07-10T01:20:00", "pack": "dashboard-experience", "round": 3,
+         "phase": "verify", "verdict": "ok", "plan": "P1-follow-up.md",
+         "build_secs": 120, "verify_secs": 45},
+    ])
+
+    stats = read_ledger_stats(state_dir)
+    assert stats["rounds"] == 3
+    assert stats["verified"] == 1
+    assert stats["bounced"] == 1
+    assert stats["fails_by_kind"] == {"build_fail": 1}
+    assert stats["avg_build_secs"] == 120
+    assert stats["avg_verify_secs"] == 45
+    assert stats["last_ts"] == "2026-07-10T01:20:00"
+
+
+def test_read_ledger_stats_tolerates_malformed_lines(tmp_path):
+    state_dir = tmp_path / "flaky-pack"
+    state_dir.mkdir(parents=True)
+    path = state_dir / "ledger.jsonl"
+    path.write_text(
+        "not json at all\n"
+        + json.dumps({"ts": "2026-07-10T00:00:00", "round": 1, "phase": "verify", "verdict": "ok"}) + "\n"
+        + "\n"
+        + "[1, 2, 3]\n"  # valides JSON, aber kein dict
+        + json.dumps({"round": 2, "phase": "build", "verdict": "fail", "fail_kind": "build_fail"}) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = read_ledger_stats(state_dir)
+    assert stats["rounds"] == 2
+    assert stats["verified"] == 1
+    assert stats["fails_by_kind"] == {"build_fail": 1}
+
+
+def test_read_ledger_stats_missing_file_returns_zeroed(tmp_path):
+    stats = read_ledger_stats(tmp_path / "nicht-vorhanden")
+    assert stats == {
+        "rounds": 0, "verified": 0, "fails_by_kind": {}, "bounced": 0,
+        "avg_build_secs": None, "avg_verify_secs": None, "last_ts": None,
+    }
+
+
+def test_read_all_ledger_stats_maps_pack_name_to_stats(tmp_path):
+    root = tmp_path / "loops-state"
+    _write_jsonl(root / "pack-a", [{"round": 1, "phase": "verify", "verdict": "ok"}])
+    _write_jsonl(root / "pack-b", [{"round": 1, "phase": "build", "verdict": "fail", "fail_kind": "build_fail"}])
+    (root / "pack-c-empty").mkdir(parents=True)  # kein ledger.jsonl — muss übersprungen werden
+
+    stats = read_all_ledger_stats(root)
+    assert set(stats) == {"pack-a", "pack-b"}
+    assert stats["pack-a"]["verified"] == 1
+    assert stats["pack-b"]["fails_by_kind"] == {"build_fail": 1}
+
+
+def test_read_all_ledger_stats_missing_root_returns_empty(tmp_path):
+    assert read_all_ledger_stats(tmp_path / "nicht-da") == {}

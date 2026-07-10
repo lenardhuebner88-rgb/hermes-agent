@@ -780,3 +780,50 @@ def run_promote(
         capped,
     )
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Cycle — one-shot harvest then (conditionally) promote (L4)
+# ---------------------------------------------------------------------------
+
+
+def run_lessons_cycle(
+    *,
+    kanban_db_path: Optional[Path] = None,
+    loops_root: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    now_ts: Optional[int] = None,
+    repo_dir: Optional[Path] = None,
+    cap: int = DEFAULT_PROMOTE_CAP,
+    dry_run: bool = False,
+    board: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run :func:`run_harvest` then, if it produced candidates, :func:`run_promote`.
+
+    Promoted tasks stay HELD (blocked) as today — this does NOT auto-unblock
+    anything; it only closes the harvest -> promote gap into one call so the
+    operator (or a cron) does not have to invoke both subcommands manually.
+    When the harvest yields zero candidates, promote is skipped entirely
+    (``promote: None``) — idle is the correct outcome, not an error.
+    """
+    harvest_result = run_harvest(
+        kanban_db_path=kanban_db_path,
+        loops_root=loops_root,
+        output_path=output_path,
+        window_days=window_days,
+        now_ts=now_ts,
+    )
+    promote_result: Optional[dict[str, Any]] = None
+    if harvest_result.get("candidate_count", 0) > 0:
+        promote_result = run_promote(
+            harvest_path=Path(harvest_result["output_path"]),
+            repo_dir=repo_dir,
+            cap=cap,
+            dry_run=dry_run,
+            board=board,
+        )
+    return {
+        "harvest": harvest_result,
+        "promote": promote_result,
+    }

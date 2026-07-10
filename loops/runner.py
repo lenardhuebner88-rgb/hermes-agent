@@ -355,6 +355,82 @@ def parse_overrides(path: Path) -> dict[str, str]:
     return out
 
 
+def read_ledger_stats(pack_state_dir: Path) -> dict:
+    """Aggregate the structured ``ledger.jsonl`` for one pack (pure, read-only).
+
+    Tolerant to a missing file and to malformed/partial lines — a broken line
+    is skipped, never raises. Importable without instantiating ``LoopRunner``
+    so the strategist/dashboard can read stats without touching pack state.
+    """
+    stats = {
+        "rounds": 0,
+        "verified": 0,
+        "fails_by_kind": {},
+        "bounced": 0,
+        "avg_build_secs": None,
+        "avg_verify_secs": None,
+        "last_ts": None,
+    }
+    path = Path(pack_state_dir) / "ledger.jsonl"
+    if not path.is_file():
+        return stats
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return stats
+    rounds: set = set()
+    build_secs: list[float] = []
+    verify_secs: list[float] = []
+    last_ts: str | None = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        rnd = event.get("round")
+        if rnd is not None:
+            rounds.add(rnd)
+        verdict = event.get("verdict")
+        if verdict == "ok":
+            stats["verified"] += 1
+        elif verdict == "fail":
+            kind = event.get("fail_kind") or "unknown"
+            stats["fails_by_kind"][kind] = stats["fails_by_kind"].get(kind, 0) + 1
+        elif verdict == "bounced":
+            stats["bounced"] += 1
+        bsecs = event.get("build_secs")
+        if isinstance(bsecs, (int, float)) and not isinstance(bsecs, bool):
+            build_secs.append(bsecs)
+        vsecs = event.get("verify_secs")
+        if isinstance(vsecs, (int, float)) and not isinstance(vsecs, bool):
+            verify_secs.append(vsecs)
+        ts = event.get("ts")
+        if isinstance(ts, str) and (last_ts is None or ts > last_ts):
+            last_ts = ts
+    stats["rounds"] = len(rounds)
+    stats["avg_build_secs"] = sum(build_secs) / len(build_secs) if build_secs else None
+    stats["avg_verify_secs"] = sum(verify_secs) / len(verify_secs) if verify_secs else None
+    stats["last_ts"] = last_ts
+    return stats
+
+
+def read_all_ledger_stats(loops_state_root: Path) -> dict:
+    """Map pack-name → ``read_ledger_stats`` for every pack under a state root."""
+    root = Path(loops_state_root)
+    out: dict = {}
+    if not root.is_dir():
+        return out
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and (entry / "ledger.jsonl").is_file():
+            out[entry.name] = read_ledger_stats(entry)
+    return out
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 class LoopRunner:
@@ -403,6 +479,21 @@ class LoopRunner:
         stamp = datetime.now().strftime("%F %H:%M")
         with self.ledger_path.open("a", encoding="utf-8") as fh:
             fh.write(f"- {stamp} {msg}\n")
+
+    def ledger_event(self, **fields) -> None:
+        """Append one structured JSON line to ``ledger.jsonl`` next to LEDGER.md.
+
+        Best-effort: never raises, never alters LEDGER.md or any stop/continue
+        decision. Consumed by the strategist/dashboard via ``read_ledger_stats``.
+        """
+        try:
+            payload = {"ts": datetime.now().isoformat(timespec="seconds"), "pack": self.pack.name}
+            payload.update({k: v for k, v in fields.items() if v is not None})
+            path = self.ledger_path.parent / "ledger.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception as exc:  # noqa: BLE001 — structured ledger never breaks a loop run
+            logger.warning("ledger_event fehlgeschlagen: %s", exc)
 
     def notify(self, msg: str) -> None:
         channel = self.overrides.get("DISCORD_CHANNEL") or self.pack.notify.get("discord_channel", "")
@@ -805,7 +896,7 @@ class LoopRunner:
         )
         return plans[0] if plans else None
 
-    def handle_fail(self, plan: Path, reason: str) -> str:
+    def handle_fail(self, plan: Path, reason: str, *, round_: int | None = None, fail_kind: str = "") -> str:
         """1 Retry (mit Feedback in der Plan-Datei), danach 90-bounced."""
         append_section(plan, "Loop-Fail", reason)
         if parse_retry(plan.read_text(encoding="utf-8")) >= 1:
@@ -815,6 +906,10 @@ class LoopRunner:
                 target = target.with_name(f"{target.stem}.{stamp}.md")
             plan.rename(target)
             self.ledger(f"bounced: {target.name} ({reason})")
+            self.ledger_event(
+                round=round_, phase="fail", verdict="bounced",
+                plan=target.name, fail_kind=fail_kind or None, reason=reason,
+            )
             return "bounced"
         bump_retry(plan)
         plan.rename(self.queue / "00-planned" / plan.name)
@@ -1046,11 +1141,15 @@ class LoopRunner:
                     self.say("Usage-Limit im Build — Commit vorhanden, bleibt UNVERIFIZIERT (Plan in 10-building/).")
                     self.ledger(f"R{rnd} ⚠️ {building.name} Commit vorhanden aber UNVERIFIED (usage-limit im Build)")
                     self.notify(f"{self.pack.name}: Usage-Limit im Build — {building.name} unverifiziert, gestoppt.")
+                    self.ledger_event(round=rnd, phase="build", verdict="blocked", plan=building.name,
+                                       fail_kind="usage_limit", reason="commit vorhanden, unverified")
                 else:
                     building.rename(self.queue / "00-planned" / building.name)
                     self.say("Usage-Limit — Stop.")
                     self.ledger(f"R{rnd} ⏸ {building.name} zurück in die Queue (usage-limit, kein Commit)")
                     self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt ({verified} verified).")
+                    self.ledger_event(round=rnd, phase="build", verdict="stopped", plan=building.name,
+                                       fail_kind="usage_limit", reason="kein commit")
                 break
             status = "TIMEOUT" if build.timed_out else self.last_status()
             build_ok = build.rc == 0 and status.startswith("BUILT")
@@ -1062,12 +1161,15 @@ class LoopRunner:
                     break
                 if self.rev_parse() != prehead and not self.revert_range(prehead):
                     break
-                self.handle_fail(building, f"build: {status or 'kein Status'}")
+                self.handle_fail(building, f"build: {status or 'kein Status'}", round_=rnd, fail_kind="build_fail")
                 self.ledger(f"R{rnd} ❌ {building.name} build-fail: {status or '?'}")
+                self.ledger_event(round=rnd, phase="build", verdict="fail", plan=building.name,
+                                   fail_kind="build_fail", reason=status or "kein Status")
                 fails += 1
                 if fails >= self.stop_cfg("fail_streak"):
                     self.say("Fail-Streak — Stop für Human-Review.")
                     self.notify(f"{self.pack.name}: {fails}× Fail in Folge — gestoppt.")
+                    self.ledger_event(round=rnd, phase="stop", verdict="stopped", reason="fail_streak")
                     break
                 continue
 
@@ -1077,6 +1179,8 @@ class LoopRunner:
                 self.say("Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT (Plan in 10-building/).")
                 self.ledger(f"R{rnd} ⚠️ {building.name} BUILT aber UNVERIFIED (usage-limit)")
                 self.notify(f"{self.pack.name}: Usage-Limit im Verifier — {building.name} unverifiziert, gestoppt.")
+                self.ledger_event(round=rnd, phase="verify", verdict="blocked", plan=building.name,
+                                   fail_kind="usage_limit", reason="unverified", build_secs=self.phase_secs.get("build"))
                 break
             status = "TIMEOUT" if verify.timed_out else self.last_status()
             if not self.guard_clean():
@@ -1107,24 +1211,33 @@ class LoopRunner:
                 sha = self.rev_parse()[:9]
                 self.ledger(f"R{rnd} ✅ {building.name} verified ({sha}) [{self._secs('build', 'verify')}]")
                 self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")
+                self.ledger_event(round=rnd, phase="verify", verdict="ok", plan=building.name,
+                                   build_secs=self.phase_secs.get("build"), verify_secs=self.phase_secs.get("verify"))
             else:
+                visual_fail = False
                 if verify.rc != 0 and not verify.timed_out:
                     status = f"ENGINE_RC_{verify.rc} ({status or 'kein Status'})"
                 elif status.startswith("PASS") and not pass_matches:
                     status = f"PASS_ID_MISMATCH ({status})"
                 elif verify.rc == 0 and pass_matches and not visual_ok:
                     status = f"VISUAL_EVIDENCE_FAIL ({visual_report})"
+                    visual_fail = True
                 self.say(f"VERIFY_FAIL [{status}] — revert + retry/bounce")
                 if not self.revert_range(prehead):
                     self.notify(f"{self.pack.name}: Revert fehlgeschlagen bei {building.name} — gestoppt.")
                     break
-                self.handle_fail(building, f"verify: {status}")
+                verify_fail_kind = "verify_visual_fail" if visual_fail else "verify_fail"
+                self.handle_fail(building, f"verify: {status}", round_=rnd, fail_kind=verify_fail_kind)
                 self.ledger(f"R{rnd} ❌ {building.name} verify-fail: {status} (reverted)")
                 self.notify(f"❌ {self.pack.name} R{rnd}: {building.name} verify-fail — {status}")
+                self.ledger_event(round=rnd, phase="verify", verdict="fail", plan=building.name,
+                                   fail_kind=verify_fail_kind, reason=status,
+                                   build_secs=self.phase_secs.get("build"), verify_secs=self.phase_secs.get("verify"))
                 fails += 1
                 if fails >= self.stop_cfg("fail_streak"):
                     self.say("Fail-Streak — Stop für Human-Review.")
                     self.notify(f"{self.pack.name}: {fails}× Fail in Folge — gestoppt.")
+                    self.ledger_event(round=rnd, phase="stop", verdict="stopped", reason="fail_streak")
                     break
 
     def _run_sweep(self) -> None:
@@ -1144,21 +1257,28 @@ class LoopRunner:
             if result.usage_limit:
                 self.say("Usage-Limit — Stop.")
                 self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt.")
+                self.ledger_event(round=rnd, phase="sweep", verdict="blocked", fail_kind="usage_limit")
                 break
             status = "TIMEOUT" if result.timed_out else self.last_status()
             self.ledger(f"R{rnd} sweep status={status or '?'} [{self._secs('round')}]")
             if status.startswith("DRY"):
                 dry, blocked = dry + 1, 0
+                self.ledger_event(round=rnd, phase="sweep", verdict="ok", reason=status)
             elif status.startswith("BLOCKED") or status == "TIMEOUT":
                 blocked, dry = blocked + 1, 0
+                self.ledger_event(round=rnd, phase="sweep", verdict="blocked",
+                                   fail_kind="blocked", reason=status)
             else:
                 dry = blocked = 0
+                self.ledger_event(round=rnd, phase="sweep", verdict="ok", reason=status)
             if dry >= self.stop_cfg("dry_rounds"):
                 self.say("DRY-Konvergenz — Stop.")
+                self.ledger_event(round=rnd, phase="stop", verdict="stopped", reason="dry_rounds")
                 break
             if blocked >= self.stop_cfg("fail_streak"):
                 self.say("Blocked-Streak — Stop für Human-Review.")
                 self.notify(f"{self.pack.name}: {blocked}× BLOCKED in Folge — gestoppt.")
+                self.ledger_event(round=rnd, phase="stop", verdict="stopped", reason="fail_streak")
                 break
 
     def _autoland_queue_ready(self) -> tuple[bool, str]:
@@ -1446,6 +1566,8 @@ class LoopRunner:
                     f"⛔ {self.pack.name} LAND: Gates rot → rollback auf "
                     f"{base[:9]} (Anker {tag})."
                 )
+                self.ledger_event(phase="land", verdict="blocked", fail_kind="land_gates_fail",
+                                   reason=report.splitlines()[0])
             else:
                 self.say(
                     f"LAND MANUELL KLÄREN — Gates rot; {rollback_report}:\n{report}"
@@ -1458,6 +1580,8 @@ class LoopRunner:
                     f"⛔ {self.pack.name} LAND: Gates rot; {rollback_report}. "
                     f"Anker {tag}."
                 )
+                self.ledger_event(phase="land", verdict="blocked", fail_kind="land_gates_fail",
+                                   reason=f"{rollback_report}; {report.splitlines()[0]}")
             return False
         pushed = ""
         if push:
@@ -1532,6 +1656,7 @@ class LoopRunner:
         )
         self.say(f"LAND ✅ main={new_main} · Gates: {report}{pushed}{rebase_note}")
         self.notify(f"🛬 {self.pack.name} LAND: {ahead} Commits auf main ({new_main}); {report}{pushed}{rebase_note}")
+        self.ledger_event(phase="land", verdict="landed", reason=f"main={new_main}")
         return True
 
     def cmd_status(self) -> None:

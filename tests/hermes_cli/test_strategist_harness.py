@@ -153,7 +153,7 @@ def test_cap_limits_to_five(board_home, monkeypatch):
             "target_metric": f"metric {i} up",
             "roi": "positive",
             "counter_metric": f"guardrail {i} held",
-            "grounding": f"git log und grep belegen Luecke {i}",
+            "grounding": f"git log und grep in hermes_cli/strategist.py belegen Luecke {i}",
             "counter_risk": 0.2,
             "gain_weight": 1.0,
             "cost": 0.3,
@@ -445,7 +445,7 @@ def test_lever_markdown_round_trips_annotation():
 # --------------------------------------------------------------------------- #
 # STRATEGIST-SELF-GROUNDING-S1 — grounding presence-gate on the DRAFT path only
 # --------------------------------------------------------------------------- #
-def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes Ziel; grep in hermes_cli findet keine Implementierung"):
+def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes Ziel; grep in hermes_cli/strategist.py findet keine Implementierung"):
     """A fully-formed Opus draft carrying a non-empty grounding evidence field."""
     return {
         "key": key,
@@ -486,7 +486,7 @@ def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
     """(b) A draft WITH a non-empty grounding field is ingested and the evidence
     is visible in the held root body AND on the held_operator_proposals surface."""
     _patch_budget(monkeypatch, 20.0)
-    evidence = "git log zeigt kein vorhandenes Ziel; grep in hermes_cli findet keine Implementierung"
+    evidence = "git log zeigt kein vorhandenes Ziel; grep in hermes_cli/strategist.py findet keine Implementierung"
     draft = _grounded_draft(key="GROUNDED", grounding=evidence)
 
     out_dir = board_home / "specs"

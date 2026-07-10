@@ -46,6 +46,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -260,11 +261,24 @@ class Lever:
     # When set, reflect() uses it for delta-verdict; otherwise attempts exact
     # match against flat metric keys and falls back to None.
     metric_key: Optional[str] = None
+    # STRATEGIST-CALIBRATION-S1: human-readable stamp of the calibration factor
+    # applied to gain_weight (e.g. "x1.20 (n=4)"), None when no factor applied.
+    calibration: Optional[str] = None
 
     @property
     def roi_score(self) -> float:
         """Cheap expected-return score: signal*gain minus a fixed lever cost."""
         return round(self.signal_strength * self.gain_weight - self.cost, 4)
+
+    @property
+    def rank_score(self) -> float:
+        """CD3/WSJF-lite value density: roi_score per unit cost.
+
+        ``cost`` is floored at 0.25 so a near-zero-cost lever cannot produce an
+        unbounded rank_score. Used only for ranking (STRATEGIST-RANKING-S1);
+        :func:`self_gate` keeps judging on ``roi_score`` unchanged.
+        """
+        return round(self.roi_score / max(self.cost, 0.25), 4)
 
 
 @dataclass
@@ -580,6 +594,73 @@ def _cost_efficiency_lever(lane: str, burn: float, key: str) -> Lever:
     )
 
 
+# LOOP-HEALTH-S1: an unhealthy loop pack (repeated non-transient fails
+# outnumbering verified rounds) opens a deterministic lever. Kept small on
+# purpose: gain_weight/cost/counter_risk chosen so a pack with exactly the
+# threshold (3 fails) still passes self_gate (roi_score = 3*0.3 - 0.5 = 0.4 > 0,
+# counter_risk 0.3 <= COUNTER_BUDGET 0.5) — mirrors the other cheap templates.
+LOOP_HEALTH_MIN_FAILS = 3
+
+
+def _loop_health_lever(pack: str, fail_kind: str, fails: int, verified: int) -> Lever:
+    return Lever(
+        key=f"LOOP-HEALTH-{_cost_lane_token(pack)}",
+        title=f"Loop-Pack '{pack}' Fehlerquote senken (dominant: {fail_kind})",
+        lane="premium",
+        target_metric=(
+            f"Fails im Loop-Pack '{pack}' (ledger.jsonl, dominant fail_kind "
+            f"'{fail_kind}') von aktuell {fails} auf unter {verified or 0} "
+            "verifizierte Runden senken"
+        ),
+        roi=(
+            f"mittel-hoch: das Pack '{pack}' hat mehr Fails ({fails}) als "
+            f"verifizierte Runden ({verified}) — ein gezielter Fix am "
+            f"dominanten Fehlermuster ('{fail_kind}') bringt den Loop zurueck "
+            "in einen produktiven Zustand"
+        ),
+        counter_metric="Verify-Laufzeit und Bounce-Rate des Packs duerfen nicht steigen",
+        rationale=(
+            f"Die strukturierte Ledger des Loop-Packs '{pack}' zeigt {fails} "
+            f"Fails gegenueber {verified} verifizierten Runden, dominant "
+            f"'{fail_kind}'. Den dominanten Fehlermuster gezielt zu beheben "
+            "bringt das Pack wieder in einen gesunden Zustand, ohne den "
+            "Loop-Stop-Mechanismus anzufassen."
+        ),
+        gain_weight=0.3,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=float(fails),
+        source="loop-health",
+    )
+
+
+def _loop_health_levers(loop_stats: Any, suppressed: set[str]) -> list[Lever]:
+    """LOOP-HEALTH-S1: one lever per unhealthy pack (fails >= threshold and
+    fails > verified, excluding usage_limit fails from the count)."""
+    if not isinstance(loop_stats, dict):
+        return []
+    levers: list[Lever] = []
+    for pack, stats in sorted(loop_stats.items()):
+        if not isinstance(stats, dict):
+            continue
+        fails_by_kind = stats.get("fails_by_kind") or {}
+        if not isinstance(fails_by_kind, dict):
+            continue
+        counted = {k: v for k, v in fails_by_kind.items() if k != "usage_limit"}
+        total_fails = sum(int(v or 0) for v in counted.values())
+        if total_fails < LOOP_HEALTH_MIN_FAILS:
+            continue
+        verified = int(stats.get("verified") or 0)
+        if total_fails <= verified:
+            continue
+        dominant_kind = max(counted.items(), key=lambda kv: kv[1])[0] if counted else "unknown"
+        key = f"LOOP-HEALTH-{_cost_lane_token(pack)}"
+        if key in suppressed:
+            continue
+        levers.append(_loop_health_lever(pack, dominant_kind, total_fails, verified))
+    return levers
+
+
 def _cost_coverage_pct(metrics: Any) -> Optional[float]:
     if not isinstance(metrics, dict):
         return None
@@ -704,7 +785,70 @@ def gather_context(
     }
     if outcomes_path is not None:
         ctx["lever_outcomes"] = _outcomes_compact(_read_lever_outcomes(outcomes_path))
+        ctx["lever_calibration"] = _read_lever_calibration(
+            default_lever_calibration_path(Path(outcomes_path))
+        )
+    # LOOP-STRATEGIST-COUPLING-S1: best-effort loop-pack health signal. Never
+    # breaks gather_context — an import/read failure just leaves loop_stats
+    # absent, same degradation contract as ``cost``/``metrics`` above.
+    try:
+        from loops.runner import read_all_ledger_stats, DEFAULT_STATE_ROOT
+
+        ctx["loop_stats"] = read_all_ledger_stats(DEFAULT_STATE_ROOT)
+    except Exception:
+        pass
     return ctx
+
+
+def _lever_class_of_key(lever_key: str) -> str:
+    """Map a lever ``key`` to a stable calibration CLASS.
+
+    Static keys (``HEILER-TRANSIENT``, ``AUTON-UPLIFT``, ``GATE-STABILITY``,
+    ``COST-EFFICIENCY-<token>``) are their own class. Dynamic per-cause keys
+    (``GATE-FIX-<token>-<digest>``, ``GATE-TRIAGE-<token>-<digest>``) carry a
+    trailing 8-hex-char sha1 digest that makes every instance unique — stripped
+    here so repeated fix/triage levers of the same gate accumulate outcomes
+    under one class instead of each starting at n=0 forever.
+    """
+    prefix, _, suffix = lever_key.rpartition("-")
+    if prefix and len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix.lower()):
+        return prefix
+    return lever_key
+
+
+def _apply_calibration(lever: Lever, calibration: dict[str, Any]) -> Lever:
+    """Multiply *lever*'s ``gain_weight`` by its class's calibration factor.
+
+    No-op (lever returned unchanged) when *calibration* has no entry for the
+    lever's class — today's behaviour is preserved exactly in that case.
+    """
+    if not calibration:
+        return lever
+    entry = calibration.get(_lever_class_of_key(lever.key))
+    if not isinstance(entry, dict):
+        return lever
+    factor = entry.get("factor")
+    n = entry.get("n")
+    if not isinstance(factor, (int, float)) or not isinstance(n, (int, float)):
+        return lever
+    stamp = f"x{factor:.2f} (n={int(n)})"
+    return Lever(
+        key=lever.key,
+        title=lever.title,
+        lane=lever.lane,
+        target_metric=lever.target_metric,
+        roi=lever.roi,
+        counter_metric=lever.counter_metric,
+        rationale=f"{lever.rationale} [kalibriert {stamp}]",
+        gain_weight=round(lever.gain_weight * float(factor), 4),
+        cost=lever.cost,
+        counter_risk=lever.counter_risk,
+        signal_strength=lever.signal_strength,
+        grounding=lever.grounding,
+        source=lever.source,
+        metric_key=lever.metric_key,
+        calibration=stamp,
+    )
 
 
 def derive_levers(context: dict[str, Any]) -> list[Lever]:
@@ -715,6 +859,14 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
     raw ``by_class`` event count for legacy contexts) + autonomy/gate metric
     gaps. Suppressed (recently vetoed) keys are skipped. Empty signal → empty
     list (idle is correct).
+
+    STRATEGIST-CALIBRATION-S1: when the context carries a ``lever_calibration``
+    map (written by :func:`reflect`), each lever's ``gain_weight`` is scaled by
+    its class's factor before ranking.
+
+    STRATEGIST-RANKING-S1: the returned list is sorted by ``rank_score``
+    descending (deterministic tiebreak: lever ``key``), so callers that cap the
+    list (propose's CAP_MAX) keep the highest value-density levers first.
     """
     suppressed: set[str] = {str(item) for item in (context.get("suppressed") or ())}
     levers: list[Lever] = []
@@ -768,6 +920,12 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
     if cost_lever is not None:
         levers.append(cost_lever)
 
+    # LOOP-HEALTH-S1: one lever per unhealthy loop pack (best-effort ctx key).
+    levers.extend(_loop_health_levers(context.get("loop_stats"), suppressed))
+
+    calibration = context.get("lever_calibration") or {}
+    levers = [_apply_calibration(lv, calibration) for lv in levers]
+    levers.sort(key=lambda lv: (-lv.rank_score, lv.key))
     return levers
 
 
@@ -793,15 +951,57 @@ def self_gate(lever: Lever, *, counter_budget: float = COUNTER_BUDGET) -> GateRe
     return GateResult(True, "ROI positiv und Counter-Metrik beschraenkt")
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Token split for grounding-gate verification: whitespace and common quoting/
+# punctuation delimiters, so a token like "hermes_cli/strategist.py:265" or
+# "`green_gate_streak`" still yields a matchable candidate.
+_GROUNDING_TOKEN_SPLIT = re.compile(r"[\s,;:()\[\]{}\"'`]+")
+
+
+def _grounding_known_tokens() -> set[str]:
+    """Known metric/counter names the strategist context actually uses.
+
+    Derived from the deterministic templates (Heiler classes driving
+    :data:`_LEDGER_TEMPLATES`) and the verdict-direction map (the metric keys
+    :func:`reflect` can measure) — never a hand-authored parallel list.
+    """
+    return set(_LEDGER_TEMPLATES.keys()) | set(_VERDICT_DIRECTION.keys())
+
+
+def _grounding_path_exists(token: str) -> bool:
+    """True iff *token* looks like a path (contains ``/`` or ``.``) AND resolves
+    to an existing FILE, absolute or repo-relative.
+
+    ``os.path.exists`` alone also matches directories, so bare prose tokens
+    like "tests" or "docs" (which happen to be top-level repo directories)
+    would otherwise pass as a "verifiable path" — this requires both a
+    path-shaped token and an actual file to reject that false positive.
+    """
+    if "/" not in token and "." not in token:
+        return False
+    try:
+        if os.path.isfile(token):
+            return True
+        if not os.path.isabs(token):
+            return os.path.isfile(_REPO_ROOT / token)
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def grounding_gate(lever: Lever) -> GateResult:
-    """Deterministic PRESENCE-gate for the strategist-DRAFT path ONLY.
+    """Deterministic gate for the strategist-DRAFT path ONLY.
 
     The Opus propose-prompt is what *judges* grounding — it greps code + git log
     per lever (does the target already exist, was it shipped) and emits a
-    non-empty ``grounding`` evidence field. This gate does not re-judge that
-    evidence; it only enforces, analogous to the hardener's field-checks, that a
-    non-empty grounding field is PRESENT. An ungrounded draft can therefore never
-    reach ingest.
+    non-empty ``grounding`` evidence field. This gate does not re-judge the
+    JUDGEMENT, but (STRATEGIST-GROUNDING-HARDEN-S1) it does require the
+    evidence to contain at least one VERIFIABLE token: an existing file path
+    (repo-relative or absolute) or a known metric/counter name (the Heiler
+    classes / verdict-mapped metric keys the strategist context actually uses).
+    A non-empty but unverifiable string (e.g. free-form prose with no path or
+    known metric) is rejected with an explicit reason.
 
     SCOPE-CRITICAL (AC-2): this gate is applied solely on the ``--drafts-file`` /
     :func:`_levers_from_drafts` path in :func:`propose`. It is deliberately NOT
@@ -809,12 +1009,26 @@ def grounding_gate(lever: Lever) -> GateResult:
     ``planspecs.ingest_planspec`` — so the deterministic baseline levers, Vault
     specs and operator specs (which carry no grounding field) are unaffected.
     """
-    if not (lever.grounding or "").strip():
+    evidence = (lever.grounding or "").strip()
+    if not evidence:
         return GateResult(
             False,
             "kein nicht-leeres grounding-Evidenzfeld (Code-/git-log-Beleg fehlt)",
         )
-    return GateResult(True, "grounding-Evidenz vorhanden")
+    known = _grounding_known_tokens()
+    for raw_tok in _GROUNDING_TOKEN_SPLIT.split(evidence):
+        tok = raw_tok.strip()
+        if not tok:
+            continue
+        if tok in known:
+            return GateResult(True, f"grounding-Evidenz verifizierbar (Metrik/Counter '{tok}')")
+        if _grounding_path_exists(tok):
+            return GateResult(True, f"grounding-Evidenz verifizierbar (Pfad '{tok}')")
+    return GateResult(
+        False,
+        "grounding-Evidenz enthaelt keinen verifizierbaren Pfad und keine bekannte "
+        "Metrik/Counter (nur unverifizierbare Prosa)",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1507,6 +1721,87 @@ def default_lever_outcomes_path() -> Path:
     return Path(get_hermes_home()) / "state" / "strategist" / "lever-outcomes.json"
 
 
+# STRATEGIST-CALIBRATION-S1: the per-class calibration factors live in a
+# sibling file next to lever-outcomes.json rather than a new top-level key
+# inside it — the outcomes file's on-disk shape is a plain JSON *list*
+# (:func:`_read_lever_outcomes` returns ``[]`` for anything else) and is read
+# by several independent writers (:func:`stamp_lever_outcome_shipped`,
+# :func:`_outcomes_write_baselines`, :func:`reflect`); migrating it to a keyed
+# object would touch all of them. A dedicated file in the same "ledger"
+# directory keeps the two concerns (raw outcomes vs. derived calibration)
+# independently readable/writable while living next to each other.
+def default_lever_calibration_path(outcomes_path: Optional[Path] = None) -> Path:
+    """Return the calibration-ledger path sibling to *outcomes_path*."""
+    base = Path(outcomes_path) if outcomes_path is not None else default_lever_outcomes_path()
+    return base.parent / "lever-calibration.json"
+
+
+def _read_lever_calibration(path: Any) -> dict[str, Any]:
+    """Read the per-class calibration map from *path*; ``{}`` on missing/bad JSON."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_lever_calibration_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Persist the calibration map to *path* atomically via tmp+rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# STRATEGIST-CALIBRATION-S1: bounded mean-based mapping from measured verdicts
+# to a factor. improved=+1, worsened=-1, neutral=0; "unmeasurable"/"confounded"/
+# None carry no directional signal and are excluded from both the mean and n.
+_CALIBRATION_MIN_N = 3
+_CALIBRATION_CLAMP = (0.5, 1.5)
+_VERDICT_SCORE: dict[str, float] = {"improved": 1.0, "neutral": 0.0, "worsened": -1.0}
+
+
+def compute_lever_calibration(
+    records: list[dict[str, Any]], *, now: Optional[float] = None
+) -> dict[str, dict[str, Any]]:
+    """Aggregate measured outcome verdicts into a per-class calibration factor.
+
+    HONESTY GATE: a class only gets a factor once it has >= :data:`_CALIBRATION_MIN_N`
+    measured outcomes with a directional verdict (unmeasurable/confounded
+    excluded). ``factor`` is the mean verdict score mapped linearly onto
+    ``[0.5, 1.5]`` (mean +1 -> 1.5, mean -1 -> 0.5, mean 0 -> 1.0), then clamped.
+    """
+    by_class: dict[str, list[float]] = {}
+    for rec in records:
+        if rec.get("status") != "measured":
+            continue
+        score = _VERDICT_SCORE.get(rec.get("verdict"))
+        if score is None:
+            continue
+        lever_key = rec.get("lever_key")
+        if not lever_key:
+            continue
+        cls = _lever_class_of_key(str(lever_key))
+        by_class.setdefault(cls, []).append(score)
+
+    ts = datetime.fromtimestamp(time.time() if now is None else now).isoformat()
+    out: dict[str, dict[str, Any]] = {}
+    for cls, scores in by_class.items():
+        n = len(scores)
+        if n < _CALIBRATION_MIN_N:
+            continue
+        mean = sum(scores) / n
+        factor = 1.0 + mean * 0.5
+        factor = max(_CALIBRATION_CLAMP[0], min(_CALIBRATION_CLAMP[1], factor))
+        out[cls] = {"factor": round(factor, 4), "n": n, "updated_at": ts}
+    return out
+
+
 def stamp_lever_outcome_shipped(
     root_task_id: str,
     *,
@@ -1972,6 +2267,7 @@ def reflect(
     notes_path: Optional[Path] = None,
     outcomes_path: Optional[Path] = None,
     metrics: Optional[dict[str, Any]] = None,
+    calibration_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Score the strategist's own proposals approved-vs-vetoed since *since*.
 
@@ -2131,6 +2427,20 @@ def reflect(
 
         if changed:
             _write_lever_outcomes_atomic(Path(outcomes_path), outcome_records)
+
+        # STRATEGIST-CALIBRATION-S1: recompute the per-class calibration map
+        # from the full (possibly just-mutated) outcome history and persist it
+        # whenever it differs from what's on disk, independent of `changed` —
+        # a class can cross the min-n threshold on a run that measured a
+        # DIFFERENT lever's record.
+        calib_path = (
+            Path(calibration_path)
+            if calibration_path is not None
+            else default_lever_calibration_path(Path(outcomes_path))
+        )
+        new_calibration = compute_lever_calibration(outcome_records, now=now)
+        if new_calibration != _read_lever_calibration(calib_path):
+            _write_lever_calibration_atomic(calib_path, new_calibration)
 
     note = {
         "ts": int(time.time() if now is None else now),
