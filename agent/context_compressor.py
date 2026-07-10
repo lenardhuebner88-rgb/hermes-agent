@@ -2798,16 +2798,25 @@ This compaction should PRIORITISE preserving all information related to the focu
             # its reply.  Keep the pair intact by pushing the cut forward past
             # the whole (user + assistant + tool results) turn-pair so it is
             # summarised as a completed unit rather than a dangling ask.
+            #
+            # Crucially, keep the caller's token-budget cut: the pair sits at
+            # the head, so any ``cut_idx >= pair_end`` already contains it
+            # entirely in the summarised region.  Returning bare ``pair_end``
+            # here used to DISCARD a deep budget cut (e.g. 290 → 4), balloon
+            # the protected tail to nearly the whole transcript, and turn
+            # compression into a no-op — which the reactive overflow-recovery
+            # path then retried until "max compression attempts reached".
             pair_end = self._find_turn_pair_end(messages, last_user_idx)
             if not self.quiet_mode:
                 logger.debug(
                     "Causal Coupling: cut would split turn-pair at user %d; "
-                    "pushing cut forward to pair_end %d so the completed pair "
-                    "is summarised together (#22523)",
+                    "keeping cut at max(budget cut %d, pair_end %d) so the "
+                    "completed pair is summarised together (#22523)",
                     last_user_idx,
+                    cut_idx,
                     pair_end,
                 )
-            return max(pair_end, head_end + 1)
+            return max(cut_idx, pair_end, head_end + 1)
         return adjusted
 
     def _find_turn_pair_end(
@@ -2836,6 +2845,22 @@ This compaction should PRIORITISE preserving all information related to the focu
         while idx < n and messages[idx].get("role") == "tool":
             idx += 1
         return idx
+
+    def _head_pair_floor(self, messages: List[Dict[str, Any]], head_end: int) -> int:
+        """Lower bound for the tail cut enforcing the #22523 pair-unit rule.
+
+        When the last real user message sits exactly at ``head_end``, the
+        user anchor deliberately pushes the cut past that turn-pair so it is
+        summarised as a completed unit.  No later anchor may pull the cut
+        back INSIDE that pair — e.g. the assistant anchor targeting the
+        pair's own reply would split it (user summarised as a dangling
+        pending ask, reply kept verbatim).  Returns 0 when the rule does
+        not apply.
+        """
+        last_user_idx = self._find_last_user_message_idx(messages, head_end)
+        if last_user_idx < 0 or last_user_idx > head_end:
+            return 0
+        return self._find_turn_pair_end(messages, last_user_idx)
 
     def _find_tail_cut_by_tokens(
         self, messages: List[Dict[str, Any]], head_end: int,
@@ -2935,9 +2960,19 @@ This compaction should PRIORITISE preserving all information related to the focu
         # Ensure the most recent assistant message is always in the tail
         # so the previously-visible reply isn't silently rolled into the
         # ``[CONTEXT COMPACTION — REFERENCE ONLY]`` block (fixes #29824).
-        # Each anchor only walks ``cut_idx`` backward, so chaining them is
-        # monotonic — the tail can only grow, never shrink.
+        # The anchors only ever walk ``cut_idx`` backward (growing the tail),
+        # with one bounded exception: when the last real user message sits at
+        # ``head_end``, the user anchor may push the cut forward to that
+        # pair's end so the pair is summarised as a unit (#22523) — never
+        # past ``max(cut_idx, pair_end)``.
         cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
+
+        # No anchor may drag the cut back inside the head turn-pair the
+        # user anchor deliberately summarises as a unit (#22523).  (The
+        # assistant anchor is otherwise allowed to exceed the token budget
+        # to keep the last visible reply verbatim — that trade-off is
+        # pinned by the #29824 tests.)
+        cut_idx = max(cut_idx, self._head_pair_floor(messages, head_end))
 
         return max(cut_idx, head_end + 1)
 
