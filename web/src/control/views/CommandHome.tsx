@@ -13,6 +13,14 @@
  * Flächen aus den Leitstand-Tokens (surface-0/1/2, ink/ink-2/ink-3, line, live,
  * status-trio). IA/Funktion unverändert gegenüber dem Broadsheet-Vorgänger (S2).
  * Alles ist echte, gepollte Live-Daten (keine Mocks).
+ *
+ * Masthead: seit W3-2 (2026-07-10) rendert Start KEIN eigenes Masthead mehr —
+ * die Shell-Puls-Leiste (ControlShell) trägt Label "Start" + Instrumente + die
+ * NotificationBridge-Glocke (schließt denselben P2 "Glocke unsichtbar", den
+ * Fleet in W3-1a schon hatte). Die alte Brand-Zeile ("Hermes Start") war reine
+ * Dopplung des Shell-Labels; ihr LIVE/SYNC-Punkt dopplte die Aufmerksamkeits-
+ * Hero-StatusPill direkt darunter (settling/calm/Achtung) — beides ersatzlos
+ * entfernt statt verschoben, es gab keinen eigenständigen Signalwert.
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { ArrowRight, ChevronRight, HeartPulse, Inbox as InboxIcon } from "lucide-react";
@@ -39,7 +47,7 @@ import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge, StatusPill } from "../components/atoms";
 import { KpiTile, RoleChip } from "../components/leitstand";
-import { Text } from "../components/primitives";
+import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 import "./command-home.css";
@@ -55,16 +63,14 @@ function surfaceFromParam(value: string | null): InboxSurface | null {
   return value === "autoresearch" || value === "family" || value === "orchestrator" || value === "kanban" ? value : null;
 }
 
-/** Uppercase-mono Micro-Eyebrow — das eine Leitstand-Sektionslabel (DESIGN.md 5). */
-function ChEyebrow({ children, className }: { children: ReactNode; className?: string }) {
-  return <p className={cn("ch-eyebrow", className)}>{children}</p>;
-}
-
-/** Sektionskopf: Eyebrow links, ruhiges Meta rechts (SectionHeader-Idiom, dunkel). */
+/** Sektionskopf: Eyebrow links, ruhiges Meta rechts (SectionHeader-Idiom, dunkel).
+ *  Eyebrow ist seit W3-2 das geteilte Primitive (Archivo-Caps, DESIGN.md "Mono
+ *  = data only") statt einer eigenen Mono-Variante — mono bleibt den echten
+ *  Datenspannen (Zahlen/IDs/Zeitstempel) vorbehalten. */
 function ChSection({ label, meta }: { label: ReactNode; meta?: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <ChEyebrow>{label}</ChEyebrow>
+      <Eyebrow>{label}</Eyebrow>
       {meta ? <span className="truncate text-right text-[11px] text-ink-3">{meta}</span> : null}
     </div>
   );
@@ -121,20 +127,10 @@ export function CommandHome({ density }: { density: Density }) {
 
   return (
     <div data-command-home className={cn("space-y-5", density === "compact" && "space-y-4")}>
-      {/* ── MASTHEAD (Fleet-Idiom "Hermes Flotte" → "Hermes Start") ─────────── */}
-      <div className={cn("ch-masthead", settling && "ch-live-idle")}>
-        <div className="ch-brand">
-          <span className="ch-brand-h">Hermes</span>
-          <span className="ch-brand-f">Start</span>
-        </div>
-        <div className="ch-live">
-          <span className="ch-live-dot" />
-          {settling ? "SYNC" : "LIVE"}
-        </div>
-      </div>
-
       {/* ── ATTENTION FIRST ──────────────────────────────────────────────────
-          Oben beantwortet CommandHome: ist alles ok und was braucht mich? */}
+          Oben beantwortet CommandHome: ist alles ok und was braucht mich?
+          Kein eigenes Masthead mehr (W3-2) — die Shell-Puls-Leiste trägt
+          "Start" + Instrumente + Glocke, s. Datei-Kopfkommentar. */}
       <section
         aria-label="Aufmerksamkeit"
         className="ch-hero p-4 sm:p-6"
@@ -142,7 +138,7 @@ export function CommandHome({ density }: { density: Density }) {
       >
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <ChEyebrow>Attention Inbox</ChEyebrow>
+            <Eyebrow>Attention Inbox</Eyebrow>
             <StatusPill
               tone={calm ? "emerald" : heroTone === "red" || heroTone === "rose" ? "red" : "amber"}
               label={settling ? "lädt…" : calm ? "Alles ruhig" : "Aufmerksamkeit"}
@@ -156,7 +152,8 @@ export function CommandHome({ density }: { density: Density }) {
                 {calm ? "Ruhig. Nichts wartet auf dich." : "Was braucht mich gerade?"}
               </Text>
             </div>
-            <div className="grid grid-cols-4 gap-1.5 sm:min-w-72">
+            {/* 2×2 unter 480px: 4-up quetscht deutsche Labels ("FREIGABEN") bei 390 in Ellipsis. */}
+            <div className="grid grid-cols-2 gap-1.5 min-[480px]:grid-cols-4 sm:min-w-72">
               <AttentionCount label="Freigaben" value={inbox.summary.autoresearch + inbox.summary.family} />
               <AttentionCount label="Held" value={inbox.summary.kanban} />
               <AttentionCount label="Fragen" value={inbox.summary.orchestrator} />
@@ -206,7 +203,7 @@ export function CommandHome({ density }: { density: Density }) {
       {!calm && !settling ? (
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <ChEyebrow>Entscheidungen</ChEyebrow>
+            <Eyebrow>Entscheidungen</Eyebrow>
             <div className="flex flex-wrap items-center gap-1.5">
               {chips.map((c) => (
                 <button
@@ -504,10 +501,10 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <ChEyebrow>Die Flotte arbeitet</ChEyebrow>
+          <Eyebrow>Die Flotte arbeitet</Eyebrow>
           <StaleBadge isStale={freshness.isStale} lastUpdated={freshness.lastUpdated} errorObj={freshness.errorObj} error={freshness.error} now={now} />
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex min-h-12 items-center gap-1 text-xs text-live hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       {loading ? (
         <div className="ch-skeleton h-16 w-full" />
@@ -555,7 +552,7 @@ function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onO
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
       {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
       {item.vetoEscalationTaskId ? <VetoSignalButton taskId={item.vetoEscalationTaskId} veto={veto} /> : null}
-      <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="shrink-0">
+      <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="grid h-12 w-12 shrink-0 place-items-center rounded-card hover:bg-surface-3">
         <ChevronRight className="h-4 w-4 text-ink-3" />
       </button>
     </div>
@@ -575,10 +572,10 @@ function StatsPulse({ onOpen }: { onOpen: () => void }) {
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <ChEyebrow>Statistik-Puls · 14 Tage</ChEyebrow>
+          <Eyebrow>Statistik-Puls · 14 Tage</Eyebrow>
           <StaleBadge isStale={daily.isStale} lastUpdated={daily.lastUpdated} errorObj={daily.errorObj} error={daily.error} />
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex min-h-12 items-center gap-1 text-xs text-live hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       {hasSeries ? <div className="grid gap-3 sm:grid-cols-2">
         <div className="ch-card p-3">
@@ -604,9 +601,9 @@ function StrategistSignalTile({ onOpen }: { onOpen: () => void }) {
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <ChEyebrow>Strategen-Vorschläge</ChEyebrow>
+          <Eyebrow>Strategen-Vorschläge</Eyebrow>
         </div>
-        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-live hover:brightness-110">Stratege öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+        <button type="button" onClick={onOpen} className="inline-flex min-h-12 items-center gap-1 text-xs text-live hover:brightness-110">Stratege öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       <div className="ch-card p-3">
         <p className="text-sm text-ink-2">{count} {count === 1 ? "wartet" : "warten"} auf deine Entscheidung</p>

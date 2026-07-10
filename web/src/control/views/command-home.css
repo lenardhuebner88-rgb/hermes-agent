@@ -31,52 +31,17 @@ body:has([data-command-home]) { background: var(--color-surface-0); }
 body:has([data-command-home]) [data-layout-variant] { background: var(--color-surface-0); }
 body:has([data-command-home]) [data-control] { background: var(--color-surface-0); }
 
-/* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
- * kein Header-Pflaster mehr — die globalen .hc-soft/.hc-eyebrow ziehen jetzt die
- * Leitstand-ink-Böden (--color-ink-2/-3, control-tokens.css). */
-.hc-page:has([data-command-home]) header h1 { color: #e8ecf4; }
-
 [data-command-home] { color: var(--color-ink); }
 
-/* ── Masthead (Fleet-Idiom: "Hermes Flotte" → "Hermes Start") ───────────────── */
-.ch-masthead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 2px 8px;
-  border-bottom: 1px solid var(--color-line);
-}
-.ch-brand { display: flex; align-items: baseline; gap: 8px; }
-.ch-brand-h { font: 600 13px/1 var(--hc-font-sans); color: var(--color-ink); }
-.ch-brand-f { font: italic 500 14px/1 var(--hc-font-display); color: var(--color-ink-2); }
-.ch-live {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font: 500 11px/1 var(--hc-font-mono);
-  color: var(--color-ink-2);
-}
-.ch-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-live);
-  box-shadow: 0 0 8px var(--color-live);
-  animation: ch-pulse 2.2s infinite;
-}
-.ch-live-idle .ch-live-dot { background: var(--color-ink-3); box-shadow: none; animation: none; }
-@keyframes ch-pulse { 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) { .ch-live-dot { animation: none; } }
-
-/* ── Eyebrow (uppercase-mono Micro-Label, DESIGN.md Regel 5) ─────────────────── */
-.ch-eyebrow {
-  font: 600 10px/1.3 var(--hc-font-mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--color-ink-3);
-}
-
-/* ── Flächen-Idiome ───────────────────────────────────────────────────────────
+/* Masthead/Eyebrow-Chrome (.ch-masthead, .ch-brand*, .ch-live*, .ch-eyebrow,
+ * die dazugehörige header-h1-Pflasterung) ist mit W3-2 (2026-07-10) entfernt:
+ * Start rendert kein eigenes Masthead mehr (die Shell-Puls-Leiste trägt Label
+ * + Instrumente + Glocke, s. CommandHome.tsx Kopfkommentar), und die Eyebrow
+ * kommt jetzt aus dem geteilten `Eyebrow`-Primitive (Archivo-Caps statt
+ * Mono-Chrome — DESIGN.md "Mono = data only"). Fleet-Parallele: W3-1a entfernte
+ * denselben Header-Block analog aus fleet.css.
+ *
+ * ── Flächen-Idiome ───────────────────────────────────────────────────────────
  * panel = surface-1 (Sektions-Container), card = surface-2 (Karte/Inset). */
 .ch-panel {
   border: 1px solid var(--color-line);
@@ -199,7 +164,10 @@ body:has([data-command-home]) [data-control] { background: var(--color-surface-0
   transition: color 0.1s ease, background 0.1s ease, border-color 0.1s ease;
 }
 .ch-chip:hover { color: var(--color-ink); border-color: color-mix(in srgb, var(--color-brand) 32%, transparent); }
-.ch-chip-on { color: #02131c; background: var(--color-live); border-color: var(--color-live); font-weight: 600; }
+/* Text-auf-Bronze: --color-surface-0 statt eines eigenen Near-Black-Hex — hält
+ * die "kein raw hex"-Regel (DESIGN.md 9) und deckt sich mit dem fleet.css-
+ * Präzedenzfall (.fleet-chip-on nutzt dieselbe Token-Textfarbe). */
+.ch-chip-on { color: var(--color-surface-0); background: var(--color-live); border-color: var(--color-live); font-weight: 600; }
 
 /* ── Quick-Jump-Zeile ─────────────────────────────────────────────────────────*/
 .ch-jump {

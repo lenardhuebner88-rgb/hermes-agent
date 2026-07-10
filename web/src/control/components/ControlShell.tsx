@@ -155,21 +155,25 @@ export function ControlShell(props: Props) {
   const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, pulse, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
   const [moreOpen, setMoreOpen] = useState(false);
   const location = useLocation();
-  // Start/Statistik bringen ihr eigenes dunkles Masthead mit
-  // ([data-command-home] .ch-masthead, [data-statistik] .st-masthead) — die
-  // generische Leitstand-Masthead würde dort doppelt stehen, daher
-  // unterdrückt (vormals fleetBleed/mobileBleed). Fleet ist seit W3-1a
-  // (2026-07-10) aus dieser Liste raus: per-view Mastheads sind das Legacy-
-  // Muster, die geteilte Puls-Leiste bedient jetzt jede Route — Fleet ist der
-  // erste Adopter (schließt den bekannten P2 "Glocke auf Fleet unsichtbar").
+  // Statistik bringt ihr eigenes dunkles Masthead mit ([data-statistik]
+  // .st-masthead) — die generische Leitstand-Masthead würde dort doppelt
+  // stehen, daher unterdrückt (vormals fleetBleed/mobileBleed). Fleet
+  // (W3-1a) und Start/Inbox (W3-2, 2026-07-10) sind aus dieser Liste raus:
+  // per-view Mastheads sind das Legacy-Muster, die geteilte Puls-Leiste
+  // bedient jetzt jede Route — Start schließt damit denselben bekannten P2
+  // "Glocke unsichtbar", den Fleet schon in W3-1a hatte.
   // Fix (reviewer P3): frühere Version prüfte den `active`-Tab statt der Route —
   // /control/issues mappt auf active="statistik" (gleiche Tab-Ökonomie, s.
   // ControlPage.activeFromPath), hat aber KEIN eigenes Masthead und verlor
   // dadurch jedes Masthead. Exakter Pfad-Match statt Tab-Vergleich.
-  // Fix (B1): normalisiert Trailing-Slash-Cousins (/control/statistik/) und
-  // deckt die Legacy-Route /control/inbox (eigenes Masthead) mit ab.
+  // Fix (B1): normalisiert Trailing-Slash-Cousins (/control/statistik/); die
+  // damalige Sonderbehandlung der Legacy-Route /control/inbox (eigenes
+  // Masthead) ist seit W3-2 hinfällig — /control und /control/inbox sind
+  // Pfad-Aliase derselben CommandHome-View und werden jetzt identisch
+  // behandelt (keine eigene Masthead mehr), sonst würde ein Fix ohne den
+  // anderen die Doppel-Masthead-Regression wieder aufreißen.
   const path = location.pathname.replace(/\/+$/, "") || "/";
-  const hasOwnMasthead = path === "/control" || path === "/control/inbox" || path === "/control/statistik";
+  const hasOwnMasthead = path === "/control/statistik";
   const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
 
   return (

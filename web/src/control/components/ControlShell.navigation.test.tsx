@@ -153,6 +153,21 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(masthead.textContent).toContain("Fleet");
   });
 
+  it("shows the shared masthead for Start now that it joins the Puls-Leiste (W3-2)", () => {
+    renderShell("inbox", { path: "/control" });
+    const masthead = screen.getByTestId("control-masthead");
+    expect(masthead.textContent).toContain("Start");
+  });
+
+  it("shows the shared masthead for the legacy /control/inbox route too, was suppressed pre-W3-2 (B1 fix, now superseded)", () => {
+    // /control und /control/inbox sind Pfad-Aliase derselben CommandHome-View
+    // (W2-b Normalisierung) — beide müssen identisch behandelt werden, sonst
+    // reißt ein Fix ohne den anderen die Doppel-Masthead-Regression wieder auf.
+    renderShell("inbox", { path: "/control/inbox" });
+    const masthead = screen.getByTestId("control-masthead");
+    expect(masthead.textContent).toContain("Start");
+  });
+
   it("mounts NotificationBridge exactly once for a view with its own masthead", () => {
     renderShell("statistik");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
@@ -168,8 +183,24 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     // generic-masthead branch as e.g. "crons" (ControlShell.tsx:193), which
     // mounts the VISIBLE bell (ControlShell.tsx:234), not the `hidden`
     // side-effect-only mount (ControlShell.tsx:191) reserved for routes with
-    // their own masthead (Start/Inbox/Statistik).
+    // their own masthead (Statistik).
     renderShell("fleet");
+    const masthead = screen.getByTestId("control-masthead");
+    within(masthead).getByTestId("notification-bridge-mock");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the NotificationBridge bell reachable on /control now that Start shares the generic masthead (W3-2)", () => {
+    // Start dropped its own masthead in W3-2, same fork as Fleet in W3-1a —
+    // closes the analogous "Glocke auf Start unsichtbar" P2.
+    renderShell("inbox", { path: "/control" });
+    const masthead = screen.getByTestId("control-masthead");
+    within(masthead).getByTestId("notification-bridge-mock");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the NotificationBridge bell reachable on /control/inbox too (W3-2)", () => {
+    renderShell("inbox", { path: "/control/inbox" });
     const masthead = screen.getByTestId("control-masthead");
     within(masthead).getByTestId("notification-bridge-mock");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
@@ -228,11 +259,6 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
 
   it("still suppresses the masthead for the real Statistik route (P3 regression guard)", () => {
     renderShell("statistik", { path: "/control/statistik" });
-    expect(screen.queryByTestId("control-masthead")).toBeNull();
-  });
-
-  it("suppresses the masthead for the legacy /control/inbox route (B1 fix)", () => {
-    renderShell("inbox", { path: "/control/inbox" });
     expect(screen.queryByTestId("control-masthead")).toBeNull();
   });
 

@@ -68,8 +68,21 @@ function installCommandHomeFixtures() {
     weight: 99,
     fixTaskId: "t_held",
   };
+  // Zweiter Eintrag landet in der Queue unter dem Top-Decision-Hero (rest =
+  // items.slice(1)) — braucht es, damit DecisionRow (mit dem 44px-"Öffnen:"-
+  // Chevron) überhaupt rendert.
+  const queued: InboxItem = {
+    key: "autoresearch-t_review",
+    surface: "autoresearch",
+    title: "Autoresearch-Vorschlag wartet auf Review",
+    why: "contradiction · medium",
+    nextAction: "Prüfen & entscheiden",
+    tone: "amber",
+    target: "/control/autoresearch?task=t_review",
+    weight: 60,
+  };
   hooks.useDecisionInbox.mockReturnValue({
-    items: [item],
+    items: [item, queued],
     summary: { total: 2, autoresearch: 1, family: 0, orchestrator: 0, kanban: 1 },
     snapshot: { items: [], generated_at: 1, stale_after_seconds: 60, source: "fixture" },
     worstTone: "red",
@@ -162,5 +175,44 @@ describe("CommandHome", () => {
     expect(html).toContain("System");
     expect(html).toContain("Statistik");
     expect(html).toContain("Regal");
+  });
+
+  it("no longer renders its own masthead — the shell Puls-Leiste carries the route label since W3-2", () => {
+    installCommandHomeFixtures();
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).not.toContain("ch-masthead");
+    expect(html).not.toContain("ch-brand");
+  });
+
+  it("gives the queue row's 'Öffnen' chevron a >=44px hit-area (W3-2 touch target)", () => {
+    installCommandHomeFixtures();
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("Autoresearch-Vorschlag wartet auf Review");
+    // h-12/w-12 = 3rem = 45px am 15px-Root (h-11 wäre 41.25px < 44px-AC!)
+    expect(html).toMatch(/aria-label="Öffnen: Autoresearch-Vorschlag wartet auf Review"[^>]*class="[^"]*\bh-12\b[^"]*\bw-12\b/);
+  });
+
+  it("gives the 'Flow öffnen' bridge control a >=44px hit-area (W3-2 touch target)", () => {
+    installCommandHomeFixtures();
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Flow öffnen/);
   });
 });
