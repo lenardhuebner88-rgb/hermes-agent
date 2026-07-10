@@ -141,3 +141,52 @@ class TestStructuredContentPreservation:
         raw = handler({})
         data = json.loads(raw)
         assert data["result"] == payload
+
+
+class TestMcpSuccessPathRedaction:
+    """The SUCCESS path must redact secrets before the result is persisted /
+    returned to the model — a third-party or compromised MCP server can echo
+    an auth header or key in a normal tool result. Previously only the error
+    path was redacted."""
+
+    def test_secret_in_text_result_is_redacted(self, _patch_mcp_server):
+        session = _patch_mcp_server
+        secret = "sk-ant-api03-" + "A" * 48
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeContentBlock(f"your key is {secret} keep it safe")],
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        data = json.loads(handler({}))
+        assert secret not in data["result"]
+        assert "keep it safe" in data["result"]  # non-secret text survives
+
+    def test_secret_in_structured_content_is_redacted(self, _patch_mcp_server):
+        session = _patch_mcp_server
+        secret = "sk-" + "B" * 40
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeContentBlock("OK")],
+                structuredContent={"auth": secret, "ok": True},
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        data = json.loads(handler({}))
+        assert secret not in json.dumps(data["structuredContent"])
+        # Structure preserved (still a dict with the non-secret key).
+        assert data["structuredContent"]["ok"] is True
+
+    def test_non_secret_structured_content_unchanged(self, _patch_mcp_server):
+        """Redaction is conservative — ordinary machine data round-trips."""
+        session = _patch_mcp_server
+        payload = {"fileName": "main.py", "lines": 42, "ok": True}
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeContentBlock("file read")],
+                structuredContent=payload,
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        data = json.loads(handler({}))
+        assert data["structuredContent"] == payload
