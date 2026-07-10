@@ -96,11 +96,23 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(rail.className).toContain("h-dvh");
   });
 
+  it("gives the sticky rail its own z-40 stacking layer so content-rich pages can't occlude the flyout", () => {
+    renderShell("backlog");
+    const rail = screen.getByRole("navigation", { name: "Hauptnavigation" });
+    expect(rail.className).toContain("z-40");
+  });
+
   it("keeps the rail 'Mehr' flyout panel scrollable and viewport-clamped", () => {
     renderShell("backlog");
     const panel = screen.getByTestId("rail-more-flyout");
     expect(panel.className).toContain("overflow-y-auto");
     expect(panel.className).toContain("max-h-");
+  });
+
+  it("drives the rail 'Mehr' flyout visibility only from the open state, not the legacy focus-within hover fallback", () => {
+    renderShell("backlog");
+    const panel = screen.getByTestId("rail-more-flyout");
+    expect(panel.className).not.toContain("group-focus-within");
   });
 
   it("renders the bottom bar hidden at/above the tab breakpoint", () => {

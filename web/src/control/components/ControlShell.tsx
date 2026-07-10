@@ -262,7 +262,7 @@ function Rail({ active, openProposals, inboxTotal, inboxTone, libraryUnread, str
       // Rail hier exakt um den Rest hochziehen bringt sie flush an den
       // echten Viewport-Rand, ohne die verifizierte volle Sticky-Höhe
       // anzutasten — Masthead/Main bleiben unverändert (kein Redesign).
-      className="hidden tab:flex sticky top-0 h-dvh w-[5.5rem] shrink-0 flex-col items-center justify-between border-r border-line bg-surface-1 px-2 py-4 sm:-mt-2 lg:-mt-4"
+      className="hidden tab:flex sticky top-0 z-40 h-dvh w-[5.5rem] shrink-0 flex-col items-center justify-between border-r border-line bg-surface-1 px-2 py-4 sm:-mt-2 lg:-mt-4"
     >
       <div className="flex w-full flex-col items-center gap-1">
         <div className="mb-2 grid h-11 w-11 place-items-center rounded-card border border-live bg-live/10 text-live">
@@ -365,7 +365,7 @@ function RailMoreFlyout() {
       <div
         data-testid="rail-more-flyout"
         className={cn(
-          "fixed bottom-4 left-[6rem] z-50 w-56 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-1 p-2 shadow-xl transition-opacity duration-150 ease-out motion-reduce:transition-none group-focus-within:visible group-focus-within:opacity-100",
+          "fixed bottom-4 left-[6rem] z-50 w-56 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-1 p-2 shadow-xl transition-opacity duration-150 ease-out motion-reduce:transition-none",
           open ? "visible opacity-100" : "invisible opacity-0",
         )}
       >
