@@ -456,11 +456,12 @@ async def test_connect_config_serializes_through_real_developer_api_connector(
 
 
 def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
-    from hermes_cli.voice_live_session import (
-        _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH,
-        GeminiLiveSession,
-    )
+    from hermes_cli.voice_live_session import GeminiLiveSession
 
+    # video_mode defaults to "on_demand", so the persona is the on-demand
+    # variant (no automatic still, see the dedicated on_demand test below) —
+    # this test pins the mode-independent bits (voice, search-tool absence,
+    # transcription config).
     wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
     config = wrapper._connect_config()
 
@@ -469,7 +470,6 @@ def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
     )
     # google_search_enabled defaults False: no search tool, and the default
     # persona must not promise a capability it doesn't have.
-    assert config.system_instruction == _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
     assert "Google-Suche" not in config.system_instruction
     assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
     assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
@@ -480,17 +480,82 @@ def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
 
 
 def test_connect_config_google_search_enabled_keeps_tool_and_persona_sentence() -> None:
-    from hermes_cli.voice_live_session import DEFAULT_SYSTEM_INSTRUCTION, GeminiLiveSession
+    from hermes_cli.voice_live_session import GeminiLiveSession
 
     wrapper = GeminiLiveSession(
-        "model", "de-DE", [], "secret", google_search_enabled=True
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        google_search_enabled=True,
+        video_mode="stream",
     )
     config = wrapper._connect_config()
+
+    from hermes_cli.voice_live_session import DEFAULT_SYSTEM_INSTRUCTION
 
     assert config.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
     assert "Google-Suche" in config.system_instruction
     assert len(config.tools) == 1
     assert config.tools[0].google_search is not None
+
+
+def test_connect_config_stream_video_mode_keeps_auto_still_promise() -> None:
+    """video_mode="stream": the default persona's original wording is untouched."""
+
+    from hermes_cli.voice_live_session import (
+        _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH,
+        GeminiLiveSession,
+    )
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret", video_mode="stream")
+    config = wrapper._connect_config()
+
+    assert config.system_instruction == _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
+    assert "ein aktuelles Standbild" in config.system_instruction
+    assert "KEIN automatisches Standbild" not in config.system_instruction
+
+
+def test_connect_config_on_demand_video_mode_drops_auto_still_promise() -> None:
+    """video_mode="on_demand" (the default): no automatic still is promised.
+
+    Instead the persona is rewritten to point at look_closely for anything
+    visual, matching the fact that _VideoFrameRelay.forward_to_live is False
+    in this mode — the auto-still sentence would otherwise be a lie.
+    """
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", video_mode="on_demand"
+    )
+    config = wrapper._connect_config()
+
+    assert "ein aktuelles Standbild" not in config.system_instruction
+    assert "KEIN automatisches Standbild" in config.system_instruction
+    assert "look_closely" in config.system_instruction
+    assert "rate niemals blind" in config.system_instruction
+
+
+def test_connect_config_on_demand_custom_system_instruction_never_rewritten() -> None:
+    """A caller-supplied system_instruction is left untouched in on_demand too."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        system_instruction="Custom persona, ein aktuelles Standbild mentioned here.",
+        video_mode="on_demand",
+    )
+    config = wrapper._connect_config()
+
+    assert (
+        config.system_instruction
+        == "Custom persona, ein aktuelles Standbild mentioned here."
+    )
 
 
 def test_connect_config_carries_configured_voice_persona_and_both_tools() -> None:
@@ -2005,6 +2070,49 @@ async def test_watch_change_sends_exactly_one_current_still_then_realtime_nudge(
 
 
 @pytest.mark.asyncio
+async def test_watch_change_on_demand_relay_sends_no_image_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """video_mode="on_demand" (``forward_to_live=False``): a detected change
+    must not send a blind still into the Live session, and the notification
+    text must say so explicitly and point at look_closely — see Codex-R2
+    finding #2 (a notification implying sight while none was sent)."""
+
+    from hermes_cli import voice_live_session as vls
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    monkeypatch.setattr(vls, "_WATCH_IMAGE_SETTLE_SECONDS", 0.0)
+    sdk_session = _FakeSDKSession()
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret", video_mode="on_demand")
+    wrapper._active_session = sdk_session
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out, forward_to_live=False)
+    relay.offer(FIXTURE_VIDEO.read_bytes(), now=0.0)
+    relay.start_watching("ob der Build fertig ist")
+    video_in: asyncio.Queue[bytes | None] = asyncio.Queue()
+    changed = _changed_fixture()
+    await video_in.put(changed)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        wrapper._send_video(sdk_session, relay, video_in, stop_event)
+    )
+
+    await _wait_until(lambda: sdk_session.text_inputs)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert sdk_session.call_order == ["realtime_text"]  # no "video" call at all
+    assert sdk_session.video_inputs == []
+    assert len(sdk_session.text_inputs) == 1
+    text = sdk_session.text_inputs[0]
+    assert "KEIN Bild" in text
+    assert "look_closely" in text
+    assert "ob der Build fertig ist" in text
+    assert relay.images_sent == 0
+    assert events_out.get_nowait() == {"type": "watch_notification_sent"}
+
+
+@pytest.mark.asyncio
 async def test_watch_pair_blocks_microphone_interleaving(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2918,6 +3026,48 @@ async def test_guardrail_tick_emits_soft_warning_exactly_once() -> None:
 
     await wrapper._guardrail_tick(events_out)
     assert events_out.empty()  # not re-warned
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_soft_warning_uses_combined_live_and_look_closely_estimate() -> (
+    None
+):
+    """The soft usage_warning must fold in look_closely cost too (see
+    ``_combined_estimate``), matching the hard-budget guard — otherwise the
+    client sees a soft warning quoting a Live-only estimate that undercounts
+    the session's real cost."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+        session_soft_minutes=10.0,
+        session_max_minutes=200.0,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic() - 10.0 * 60
+    # record_look_closely_usage's own usage_update event needs self._events_out
+    # wired up (run() does that); left unset here so events_out only sees
+    # what _guardrail_tick puts on it below.
+    wrapper.record_look_closely_usage(1_000_000, 0)
+    combined_cost, incomplete = wrapper._combined_estimate()
+    assert incomplete is False
+    assert combined_cost > 0.0
+
+    await wrapper._guardrail_tick(events_out)
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    warnings = [event for event in emitted if event["type"] == "usage_warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["estimated_usd"] == pytest.approx(combined_cost)
+    assert warnings[0]["estimate_incomplete"] is False
 
 
 @pytest.mark.asyncio

@@ -92,6 +92,31 @@ _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH = DEFAULT_SYSTEM_INSTRUCTION.replace(
     _GOOGLE_SEARCH_SENTENCE_FRAGMENT, ""
 )
 
+# The default persona promises an automatically delivered still whenever
+# Piet addresses the assistant while sharing — that promise only holds in
+# video_mode "stream" (see _VideoFrameRelay.forward_to_live). In "on_demand"
+# no still is ever pushed automatically, so the promise plus the existing
+# look_closely sentence are folded into one on-demand-accurate instruction
+# below; applied only when the caller passed the literal default persona
+# (custom system_instruction overrides are left untouched, same rule as the
+# google_search fragment above).
+_VIDEO_AUTO_STILL_SENTENCE_FRAGMENT = (
+    "Wenn Piet Kamera oder Bildschirm teilt, bekommst du in dem Moment, in dem "
+    "er dich anspricht, ein aktuelles Standbild — beschreibe dann, was du "
+    "siehst. "
+)
+_LOOK_CLOSELY_SENTENCE_FRAGMENT = (
+    "Wenn du dir das geteilte Bild genau ansehen willst, um Details zu "
+    "erkennen oder zu lesen, nutze look_closely mit einer konkreten "
+    "Frage. "
+)
+_LOOK_CLOSELY_SENTENCE_ON_DEMAND = (
+    "Du bekommst dabei KEIN automatisches Standbild. Wann immer Piet dich "
+    "etwas Visuelles fragt oder du die geteilte Ansicht brauchst — auch um "
+    "Details zu erkennen oder zu lesen — rufe look_closely mit einer "
+    "konkreten Frage auf; rate niemals blind. "
+)
+
 _FALLBACK_ERRORS = (
     errors.APIError,
     WebSocketException,
@@ -839,6 +864,18 @@ class GeminiLiveSession:
             # Tool list and persona must agree: without the tool, drop the
             # default persona's search-capability sentence too.
             system_instruction = _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
+        if (
+            self._video_mode == "on_demand"
+            and self._system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+        ):
+            # Persona and video_mode must agree the same way: the default's
+            # auto-still promise only holds in "stream", so fold it into the
+            # look_closely instruction instead of leaving it a lie.
+            system_instruction = system_instruction.replace(
+                _VIDEO_AUTO_STILL_SENTENCE_FRAGMENT, ""
+            ).replace(
+                _LOOK_CLOSELY_SENTENCE_FRAGMENT, _LOOK_CLOSELY_SENTENCE_ON_DEMAND
+            )
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             system_instruction=system_instruction,
@@ -1091,13 +1128,21 @@ class GeminiLiveSession:
                             ):
                                 relay.defer_watch_notification(notification)
                                 break
-                        await session.send_realtime_input(
-                            text=(
+                        if relay.forward_to_live:
+                            watch_text = (
                                 "[System] Das geteilte Bild hat sich deutlich geändert. "
                                 f"Prüfe: {notification.instruction}. "
                                 "Melde dich nur, wenn relevant."
                             )
-                        )
+                        else:
+                            watch_text = (
+                                "[System] Die geteilte Ansicht hat sich deutlich "
+                                "geändert (Beobachtungsauftrag: "
+                                f"{notification.instruction}). Es liegt KEIN Bild bei "
+                                "— rufe look_closely mit einer konkreten Frage auf, "
+                                "um sie zu prüfen. Melde dich nur, wenn relevant."
+                            )
+                        await session.send_realtime_input(text=watch_text)
                         relay.mark_watch_notification_sent(notification)
                         break
             except asyncio.CancelledError:
@@ -1387,14 +1432,15 @@ class GeminiLiveSession:
         elapsed_minutes = (time.monotonic() - self._session_started_at) / 60.0
         if not self._soft_budget_warned and elapsed_minutes >= self._session_soft_minutes:
             self._soft_budget_warned = True
+            estimated_usd, estimate_incomplete = self._combined_estimate()
             self._put_guardrail_event_best_effort(
                 events_out,
                 {
                     "type": "usage_warning",
                     "reason": "soft_minutes",
                     "minutes": elapsed_minutes,
-                    "estimated_usd": self._usage_meter.estimated_usd(),
-                    "estimate_incomplete": self._usage_meter.estimate_incomplete,
+                    "estimated_usd": estimated_usd,
+                    "estimate_incomplete": estimate_incomplete,
                 },
             )
         if elapsed_minutes >= self._session_max_minutes:

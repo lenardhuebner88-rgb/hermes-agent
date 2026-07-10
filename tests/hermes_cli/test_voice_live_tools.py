@@ -406,6 +406,128 @@ async def test_look_closely_timeout_returns_structured_error():
     assert result["error"]["code"] == "look_timeout"
 
 
+@pytest.mark.asyncio
+async def test_look_closely_timeout_still_reports_usage_as_incomplete():
+    """Codex-R2 finding #3: a timeout after the call started must not leave
+    the cost estimate silently marked complete — report (0, 0, False)."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    async def hang_forever(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = hang_forever
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with (
+        patch("tools.voice_live_tools.genai.Client", return_value=fake_client),
+        patch("tools.voice_live_tools._LOOK_CLOSELY_TIMEOUT_SECONDS", 0.01),
+    ):
+        result = await executor.execute(
+            "look_closely", {"question": "Was ist das?"}
+        )
+
+    assert result["error"]["code"] == "look_timeout"
+    assert reported == {"input": 0, "output": 0, "complete": False}
+
+
+@pytest.mark.asyncio
+async def test_look_closely_generate_content_failure_still_reports_usage():
+    """Codex-R2 finding #3, generic-exception branch: same requirement as
+    the timeout path — a failed call must not vanish from the estimate."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    generate_content = AsyncMock(side_effect=RuntimeError("upstream exploded"))
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with patch("tools.voice_live_tools.genai.Client", return_value=fake_client):
+        result = await executor.execute(
+            "look_closely", {"question": "Was ist das?"}
+        )
+
+    assert result["error"]["code"] == "look_failed"
+    assert reported == {"input": 0, "output": 0, "complete": False}
+
+
+@pytest.mark.asyncio
+async def test_look_closely_negative_raw_token_field_clamped_and_incomplete():
+    """Codex-R2 finding #4: a negative raw field (e.g. a buggy/adversarial
+    thoughts_token_count) must be clamped to 0 for its own field before
+    summing — never let it eat into candidates_token_count — and the call
+    must be flagged incomplete rather than silently under-reporting."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    generate_content = AsyncMock(
+        return_value=_fake_generate_content_response(
+            "Antwort.", prompt_tokens=100, candidate_tokens=20, thoughts_tokens=-999
+        )
+    )
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with patch("tools.voice_live_tools.genai.Client", return_value=fake_client):
+        await executor.execute("look_closely", {"question": "Was ist das?"})
+
+    # thoughts_token_count=-999 must not subtract from candidates (20) — the
+    # negative field is clamped to 0 on its own before the sum, not summed
+    # first and clamped after (which would still report 0, masking the bug).
+    assert reported == {"input": 100, "output": 20, "complete": False}
+
+
 def test_function_declarations_cover_all_tools():
     names = {declaration["name"] for declaration in FUNCTION_DECLARATIONS}
     assert names == {

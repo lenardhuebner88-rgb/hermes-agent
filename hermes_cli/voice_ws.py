@@ -1232,12 +1232,14 @@ class VideoFrameCache:
     """Holds the freshest offered video still without relaying it anywhere.
 
     Used by ``video_mode: on_demand``: incoming ``video_frame`` control
-    messages are cached here instead of entering the Live session's
-    ``video_in`` queue (which would inflate the per-turn Gemini prompt with
-    a continuous 1fps stream). The ``look_closely`` tool requests a fresh
-    capture via :meth:`wait_for_update`, falling back to whatever is
-    cached (possibly ``None``) if no fresher frame arrives before the
-    deadline.
+    messages are cached here in ADDITION to entering the Live session's
+    ``video_in`` queue as usual (unconditional on video_mode) — the actual
+    gating against inflating the per-turn Gemini prompt with a continuous
+    1fps stream happens downstream at the relay
+    (``_VideoFrameRelay.forward_to_live``), not by withholding frames here.
+    The ``look_closely`` tool requests a fresh capture via
+    :meth:`wait_for_update`, falling back to whatever is cached (possibly
+    ``None``) if no fresher frame arrives before the deadline.
     """
 
     def __init__(self) -> None:

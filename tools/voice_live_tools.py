@@ -533,10 +533,20 @@ class VoiceToolExecutor:
                     timeout=_LOOK_CLOSELY_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
+                if self._report_look_usage is not None:
+                    try:
+                        self._report_look_usage(0, 0, False)
+                    except Exception:
+                        pass
                 return _error(
                     "look_timeout", "Die Bildanalyse hat zu lange gedauert."
                 )
             except Exception as exc:
+                if self._report_look_usage is not None:
+                    try:
+                        self._report_look_usage(0, 0, False)
+                    except Exception:
+                        pass
                 return _error(
                     "look_failed",
                     "Die Bildanalyse ist fehlgeschlagen.",
@@ -553,10 +563,19 @@ class VoiceToolExecutor:
                     thoughts_tokens = getattr(usage, "thoughts_token_count", None)
                     if prompt_tokens is None or candidates_tokens is None:
                         complete = False
-                    input_tokens = prompt_tokens or 0
+                    # Clamp each raw field to 0 individually, before summing:
+                    # a negative thoughts_token_count must never eat into
+                    # candidates_token_count, it can only ever push the
+                    # reported total down to zero for that field.
+                    for raw in (prompt_tokens, candidates_tokens, thoughts_tokens):
+                        if isinstance(raw, (int, float)) and raw < 0:
+                            complete = False
+                    input_tokens = max(0, prompt_tokens or 0)
                     # flash-lite can think; thinking tokens are billed as
                     # output, same as candidates tokens.
-                    output_tokens = (candidates_tokens or 0) + (thoughts_tokens or 0)
+                    output_tokens = max(0, candidates_tokens or 0) + max(
+                        0, thoughts_tokens or 0
+                    )
                 try:
                     self._report_look_usage(input_tokens, output_tokens, complete)
                 except Exception:

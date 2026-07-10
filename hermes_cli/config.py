@@ -944,11 +944,14 @@ DEFAULT_CONFIG = {
         # "Google-Suche" sentence so tool list and persona stay consistent.
         "google_search_enabled": False,
         "watch": {"cooldown_seconds": 30, "max_notifications": 3},
-        # "on_demand" (default): incoming video_frame stills are cached
-        # server-side only, never relayed into the Live session's prompt
-        # context; look_closely requests a fresh still on demand instead.
-        # "stream": pre-2026-07-10 behavior, every video_frame is relayed
-        # into the Live session at up to 1fps (rollback path).
+        # "on_demand" (default): incoming video_frame stills are cached AND
+        # still queued into the Live session's video_in as usual, but the
+        # relay (_VideoFrameRelay.forward_to_live) never actually sends one
+        # — look_closely requests a fresh still on demand instead.
+        # "stream": pre-2026-07-10 behavior, offered stills are forwarded
+        # into the Live session activity-gated (one still per user-activity
+        # burst, up to ~1fps), not every queued 1fps frame individually
+        # (rollback path).
         "video_mode": "on_demand",
         # Model used by the look_closely tool's on-demand image analysis
         # (a plain generate_content call, never a Live session).
