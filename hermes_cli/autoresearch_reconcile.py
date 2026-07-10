@@ -9,6 +9,7 @@ operator decisions via the existing decision-queue escalation event.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -117,20 +118,99 @@ def _task_for_idempotency(conn, idem: str) -> str | None:
     return row["id"] if row else None
 
 
-def _proposal_body(proposal: dict[str, Any]) -> str:
-    parts = [
-        "Autoresearch routed this finding for code/test implementation.",
-        f"Finding ID: {_finding_id(proposal)}",
-        f"Severity: {_severity(proposal)}",
-        f"Signal: {_signal_key(proposal)}",
+def _proposal_hash(proposal: dict[str, Any]) -> str:
+    payload = {
+        key: proposal.get(key)
+        for key in (
+            "id", "schema", "proposal_type", "finding_id", "target", "target_path",
+            "severity", "category", "evidence", "fix_hint", "rationale_plain",
+        )
+    }
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _proposal_contract_missing(proposal: dict[str, Any]) -> list[str]:
+    target = str(proposal.get("target") or proposal.get("target_path") or "").strip()
+    required = {
+        "target": target,
+        "evidence": str(proposal.get("evidence") or "").strip(),
+        "fix_hint": str(proposal.get("fix_hint") or "").strip(),
+    }
+    return [name for name, value in required.items() if not value]
+
+
+def _proposal_task_contract(proposal: dict[str, Any]) -> dict[str, Any]:
+    target = str(proposal.get("target") or proposal.get("target_path") or "").strip()
+    evidence = str(proposal.get("evidence") or "").strip()
+    fix_hint = str(proposal.get("fix_hint") or "").strip()
+    problem = str(
+        proposal.get("problem")
+        or proposal.get("rationale_plain")
+        or "Resolve the grounded Autoresearch finding."
+    ).strip()
+    pid = str(proposal.get("id") or "").strip()
+    proposal_hash = _proposal_hash(proposal)
+    validation = f"scripts/run-affected.sh {target}"
+    non_goals = [
+        "No unrelated refactor or cleanup.",
+        "No push, deploy, runtime restart, secret change, or schema migration.",
     ]
-    target = proposal.get("target_path") or proposal.get("target")
-    if target:
-        parts.append(f"Target: {target}")
-    rationale = proposal.get("rationale_plain") or proposal.get("problem") or proposal.get("fix_hint")
-    if rationale:
-        parts.append("\nRationale:\n" + str(rationale))
-    return "\n".join(parts)
+    acceptance = "\n".join([
+        f"- AC-AR1: The grounded finding at {target} is resolved without unrelated changes.",
+        "- AC-AR2: A focused regression test or equivalent executable proof covers the failure mode.",
+        f"- AC-AR3: `{validation}` passes, or an exact blocking reason is recorded.",
+        "- AC-AR4: The completion report names changed paths, validation evidence, and residual risk.",
+    ])
+    body = "\n".join([
+        "Autoresearch routed this grounded finding for code/test implementation.",
+        "",
+        "## Provenance",
+        f"- Proposal ID: {pid}",
+        f"- Proposal hash (sha256): {proposal_hash}",
+        f"- Finding ID: {_finding_id(proposal)}",
+        f"- Schema: {proposal.get('schema') or 'unknown'}",
+        f"- Type: {proposal.get('proposal_type') or proposal.get('mode') or 'unknown'}",
+        f"- Severity / review tier: {_severity(proposal)} / {_review_tier(proposal) or 'default'}",
+        f"- Signal: {_signal_key(proposal)}",
+        "",
+        "## Grounded scope",
+        f"- Exact target: {target}",
+        f"- Evidence: {evidence}",
+        f"- Problem: {problem}",
+        f"- Fix intent: {fix_hint}",
+        "",
+        "## Acceptance criteria",
+        acceptance,
+        "",
+        "## Validation",
+        f"- {validation}",
+        "",
+        "## Non-goals",
+        *(f"- {item}" for item in non_goals),
+    ])
+    scope_contract = {
+        "version": 1,
+        "source": "autoresearch",
+        "proposal_id": pid,
+        "proposal_hash_sha256": proposal_hash,
+        "proposal_schema": proposal.get("schema"),
+        "proposal_type": proposal.get("proposal_type") or proposal.get("mode"),
+        "finding_id": _finding_id(proposal),
+        "severity": _severity(proposal),
+        "review_tier": _review_tier(proposal),
+        "allowed_paths": [target],
+        "allowed_tools": ["file", "terminal", "kanban"],
+        "evidence": evidence,
+        "fix_intent": fix_hint,
+        "validation": [validation],
+        "non_goals": non_goals,
+    }
+    return {
+        "body": body,
+        "acceptance_criteria": acceptance,
+        "scope_contract": scope_contract,
+    }
 
 
 def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
@@ -138,16 +218,19 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
     existing = _task_for_idempotency(conn, idem)
     max_iter = _SEVERITY_TO_MAX_ITERATIONS.get(_severity(proposal))
     review_tier = _review_tier(proposal)
+    contract = _proposal_task_contract(proposal)
     task_id = kb.create_task(
         conn,
         title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
-        body=_proposal_body(proposal),
+        body=contract["body"],
+        acceptance_criteria=contract["acceptance_criteria"],
         assignee="coder",
         created_by=CREATED_BY,
         idempotency_key=idem,
         priority=_priority(proposal),
         initial_status="running",
         kind="code",
+        scope_contract=contract["scope_contract"],
         max_iterations=max_iter,
         review_tier=review_tier,
     )
@@ -157,6 +240,30 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
         ).fetchone()
         if row and not row["review_tier"]:
             kb.set_task_review_tier(conn, task_id, review_tier)
+    if existing is not None:
+        # Repair old idempotent Autoresearch cards that predate the grounded
+        # handoff contract. Never replace an active worker's body underneath it.
+        with kb.write_txn(conn):
+            row = conn.execute(
+                "SELECT status, created_by, body, acceptance_criteria, scope_contract "
+                "FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row and row["created_by"] == CREATED_BY:
+                updates: list[str] = []
+                values: list[Any] = []
+                safe_to_backfill = row["status"] not in {"running", "review"}
+                if safe_to_backfill and not row["acceptance_criteria"]:
+                    updates.append("acceptance_criteria = ?")
+                    values.append(kb._parse_acceptance_criteria(contract["acceptance_criteria"]))
+                if safe_to_backfill and not row["scope_contract"]:
+                    updates.append("scope_contract = ?")
+                    values.append(json.dumps(contract["scope_contract"], ensure_ascii=False))
+                if safe_to_backfill and "Proposal hash (sha256)" not in str(row["body"] or ""):
+                    updates.append("body = ?")
+                    values.append(contract["body"])
+                if updates:
+                    values.append(task_id)
+                    conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
     return task_id, existing is None
 
 
@@ -339,6 +446,8 @@ def reconcile_proposals(
         "dry_run": bool(dry_run),
         "seen": 0,
         "applied": 0,
+        "held_judge_required": 0,
+        "held_invalid_contract": 0,
         "routed_to_kanban": 0,
         "new_tasks": 0,
         "pooled": 0,
@@ -359,21 +468,24 @@ def reconcile_proposals(
                 if dry_run:
                     # Pure classification — mirror the routing decisions below
                     # without any side effect. The skill-doc lane is counted as
-                    # "applied" intent (the eval gate is NOT run in a dry pass).
+                    # held intent; only the dashboard judge may authorize apply.
                     if signal_key in suppressed_signals:
                         summary["suppressed"] += 1
                     elif _skill_doc_has_diff(proposal) and not _is_code_or_test(proposal):
-                        summary["applied"] += 1
+                        summary["held_judge_required"] += 1
                     elif _is_code_or_test(proposal) and _meets_min_severity(proposal, min_task_severity):
-                        fkey = "autoresearch:" + _finding_id(proposal)
-                        if fkey in dry_seen:
-                            summary["routed_to_kanban"] += 1
-                        elif summary["new_tasks"] >= max_new:
-                            summary["pooled"] += 1
+                        if _proposal_contract_missing(proposal):
+                            summary["held_invalid_contract"] += 1
                         else:
-                            dry_seen.add(fkey)
-                            summary["routed_to_kanban"] += 1
-                            summary["new_tasks"] += 1
+                            fkey = "autoresearch:" + _finding_id(proposal)
+                            if fkey in dry_seen:
+                                summary["routed_to_kanban"] += 1
+                            elif summary["new_tasks"] >= max_new:
+                                summary["pooled"] += 1
+                            else:
+                                dry_seen.add(fkey)
+                                summary["routed_to_kanban"] += 1
+                                summary["new_tasks"] += 1
                     else:
                         summary["escalated"] += 1
                     continue
@@ -389,25 +501,30 @@ def reconcile_proposals(
                     continue
 
                 if _skill_doc_has_diff(proposal) and not _is_code_or_test(proposal):
-                    result = proposals.apply_proposal(pid, confirm=True, judged=True)
-                    if result.get("ok") and result.get("status") == "applied":
-                        summary["applied"] += 1
-                        processed.append({"route": "applied", "proposal": proposal})
-                        continue
-                    task_id = _escalate(conn, proposal, str(result.get("detail") or "skill apply gate failed"))
-                    proposal = proposals.load_proposal(pid) or proposal
                     proposal.update({
-                        "status": "escalated",
-                        "escalation_task_id": task_id,
+                        "status": "proposed",
+                        "last_outcome": "held_judge_required",
                         "reconciled_at": _utc_now(),
-                        "result": str(result.get("detail") or "skill apply gate failed"),
+                        "result": "held: independent operator judge and batch-confirm required",
                     })
                     proposals.save_proposal(proposal)
-                    summary["escalated"] += 1
-                    processed.append({"route": "escalated", "proposal": proposal})
+                    summary["held_judge_required"] += 1
+                    processed.append({"route": "held_judge_required", "proposal": proposal})
                     continue
 
                 if _is_code_or_test(proposal) and _meets_min_severity(proposal, min_task_severity):
+                    missing = _proposal_contract_missing(proposal)
+                    if missing:
+                        proposal.update({
+                            "status": "proposed",
+                            "last_outcome": "held_invalid_contract",
+                            "reconciled_at": _utc_now(),
+                            "result": "held: missing grounded task contract fields: " + ", ".join(missing),
+                        })
+                        proposals.save_proposal(proposal)
+                        summary["held_invalid_contract"] += 1
+                        processed.append({"route": "held_invalid_contract", "proposal": proposal})
+                        continue
                     if summary["new_tasks"] >= max_new and _task_for_idempotency(conn, "autoresearch:" + _finding_id(proposal)) is None:
                         proposal.update({
                             "status": "pooled",

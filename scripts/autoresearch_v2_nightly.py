@@ -41,6 +41,11 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
 from hermes_cli import autoresearch_proposals as _proposals  # noqa: E402
 from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
 from hermes_cli import deep_audit, test_foundry  # noqa: E402
+from hermes_cli.autoresearch_lane_contracts import (  # noqa: E402
+    LaneOutcome,
+    classify_lane_outcome,
+    nightly_exit_code,
+)
 
 # Operator-assigned report channel (override with --channel-id / env at the unit).
 DEFAULT_CHANNEL_ID = "1495737862522405088"
@@ -196,14 +201,20 @@ def run_deep_audit_lane(subsystem: str, *, max_files: int) -> dict[str, Any]:
     payload = deep_audit.write_request(subsystem=subsystem, focus=None, max_files=max_files)
     result = deep_audit.run_request_file(Path(payload["request_path"]))
     findings = result.get("findings") or []
-    return {
+    scanned = len(result.get("files") or [])
+    expected_no_files = result.get("reason") == "no files resolved"
+    summary = {
         "subsystem": subsystem,
         "ok": bool(result.get("ok")),
         "findings": len(findings),
         "tokens": int(result.get("tokens") or 0),
         "model": result.get("model"),
         "reason": result.get("reason") or "",
+        "scanned": scanned,
+        "errors": 0 if result.get("ok") or expected_no_files else max(1, scanned),
     }
+    summary["outcome"] = _classify_deep_audit(summary).outcome
+    return summary
 
 
 def run_test_foundry_lane(
@@ -238,7 +249,7 @@ def run_test_foundry_lane(
             continue
         payload = test_foundry.write_request(target=target, max_mutants=max_mutants, apply=False)
         result = test_foundry.run_request_file(Path(payload["request_path"]))
-        summaries.append({
+        summary = {
             "target": target,
             "ok": bool(result.get("ok")),
             "tests_kept": int(result.get("tests_kept") or 0),
@@ -246,20 +257,54 @@ def run_test_foundry_lane(
             "tokens": int(result.get("tokens") or 0),
             "model": result.get("model"),
             "reason": result.get("reason") or "",
-        })
+            "scanned": int(result.get("mutants_run") or 0),
+            "errors": int(result.get("infra_errors") or 0) + int(result.get("invalid_outputs") or 0),
+        }
+        summary["outcome"] = _classify_test_foundry(summary).outcome
+        summaries.append(summary)
     return summaries
+
+
+def _classify_deep_audit(summary: dict[str, Any]) -> LaneOutcome:
+    reason = str(summary.get("error") or summary.get("reason") or "")
+    errors = int(summary.get("errors") or (1 if summary.get("error") else 0))
+    scanned = int(summary.get("scanned") or 0)
+    if not summary.get("ok") and errors > 0 and scanned > 0 and "no files resolved" not in reason.lower():
+        errors = max(errors, scanned)
+    return classify_lane_outcome(
+        "deep-audit",
+        scanned=scanned,
+        errors=errors,
+        yielded=int(summary.get("findings") or 0),
+        ok=bool(summary.get("ok")) and not bool(summary.get("error")),
+        reason=reason,
+    )
+
+
+def _classify_test_foundry(summary: dict[str, Any]) -> LaneOutcome:
+    return classify_lane_outcome(
+        "test-foundry",
+        scanned=int(summary.get("scanned") or 0),
+        errors=int(summary.get("errors") or 0),
+        yielded=int(summary.get("tests_kept") or 0),
+        ok=bool(summary.get("ok")),
+        reason=str(summary.get("reason") or ""),
+    )
 
 
 def _da_line(da: dict[str, Any] | None) -> str:
     if da is None:
         return "🔍 Deep-Audit · (übersprungen)"
     if da.get("error"):
-        return f"🔍 Deep-Audit · {da.get('subsystem', '?')} · FEHLER: {da['error']}"
+        outcome = da.get("outcome") or _classify_deep_audit(da).outcome
+        return f"🔍 Deep-Audit · {da.get('subsystem', '?')} · FEHLER: {da['error']} [{outcome}]"
     model = da.get("model") or "?"
     tail = f"{da['findings']} Funde · {_fmt_tok(da['tokens'])} tok · {model}"
     reason = _short_reason(da.get("reason")) if not da.get("findings") else ""
     if reason:
         tail += f" ({reason})"
+    outcome = da.get("outcome") or _classify_deep_audit(da).outcome
+    tail += f" [{outcome}]"
     return f"🔍 Deep-Audit · {da['subsystem']} · {tail}"
 
 
@@ -275,7 +320,8 @@ def _tf_line(tf: list[dict[str, Any]] | None, error: str | None = None) -> str:
             parts.append(f"{name}(+{item['tests_kept']})")
         else:
             reason = _short_reason(item.get("reason"))
-            parts.append(f"{name}(0{', ' + reason if reason else ''})")
+            outcome = item.get("outcome") or _classify_test_foundry(item).outcome
+            parts.append(f"{name}(0{', ' + reason if reason else ''}) [{outcome}]")
     total = sum(int(i.get("tokens") or 0) for i in tf)
     return f"🧪 Test-Foundry · {', '.join(parts)} · {_fmt_tok(total)} tok"
 
@@ -381,7 +427,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:  # one lane must never kill the other / the report
                 traceback.print_exc()
                 circuit_failures += 1
-                da_summary = {"subsystem": subsystem, "error": _lane_error(exc)}
+                da_summary = {
+                    "subsystem": subsystem, "error": _lane_error(exc), "ok": False,
+                    "findings": 0, "tokens": 0, "scanned": 0, "errors": 1,
+                }
+                da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
 
     if "test-foundry" in lanes:
         if _circuit_open(circuit_failures, args.circuit_breaker_threshold):
@@ -424,6 +474,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     message = build_summary(when, da_summary, tf_summary, tf_error=tf_error)
     print(message)
 
+    outcomes: list[LaneOutcome] = []
+    if "deep-audit" in lanes and da_summary is not None:
+        outcomes.append(_classify_deep_audit(da_summary))
+    if "test-foundry" in lanes:
+        outcomes.extend(_classify_test_foundry(item) for item in (tf_summary or []))
+        if tf_error:
+            outcomes.append(classify_lane_outcome(
+                "test-foundry", scanned=0, errors=1, yielded=0, ok=False, reason=tf_error
+            ))
+    result_code = nightly_exit_code(outcomes)
+
     if args.send:
         try:
             post_summary(message, channel_id=args.channel_id)
@@ -431,7 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             traceback.print_exc()
             print(f"[autoresearch-v2-nightly] Discord-Post fehlgeschlagen: {exc}", file=sys.stderr)
             return 1
-    return 0
+    return result_code
 
 
 if __name__ == "__main__":

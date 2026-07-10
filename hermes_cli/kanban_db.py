@@ -4348,6 +4348,7 @@ def create_task(
     *,
     title: str,
     body: Optional[str] = None,
+    acceptance_criteria: Optional[str] = None,
     assignee: Optional[str] = None,
     created_by: Optional[str] = None,
     workspace_kind: str = "scratch",
@@ -4405,6 +4406,15 @@ def create_task(
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
+    acceptance_criteria_json: Optional[str] = None
+    if acceptance_criteria is not None:
+        if not str(acceptance_criteria).strip():
+            raise ValueError("acceptance_criteria must not be blank")
+        acceptance_criteria_json = _parse_acceptance_criteria(str(acceptance_criteria))
+        if acceptance_criteria_json is None:
+            raise ValueError(
+                "acceptance_criteria has no recognizable 'AC-<id>: …' bullet"
+            )
     role_misuse = _role_misuse_reason(assignee=assignee, kind=kind)
     if role_misuse is not None:
         raise ValueError(role_misuse)
@@ -4666,19 +4676,20 @@ def create_task(
                 conn.execute(
                     """
                     INSERT INTO tasks (
-                        id, title, body, assignee, status, priority,
+                        id, title, body, acceptance_criteria, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
                         scope_contract, model_override, freigabe, live_test_depth, review_tier,
                         ui_impact
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
                         title.strip(),
                         task_body,
+                        acceptance_criteria_json,
                         assignee,
                         task_status,
                         priority,

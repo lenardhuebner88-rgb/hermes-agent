@@ -112,6 +112,28 @@ def test_nightly_code_night_uses_deep_caps(monkeypatch):
     assert captured["max_files"] == 40 and captured["limit"] == 8
 
 
+def test_nightly_code_night_returns_nonzero_on_total_provider_failure(monkeypatch):
+    mod = _load_nightly()
+    import hermes_cli.autoresearch_proposals as arp
+
+    monkeypatch.setattr(
+        arp,
+        "generate_code_weakness_proposals",
+        lambda **_k: {
+            "ok": False,
+            "created_count": 0,
+            "files_seen": 2,
+            "findings_seen": 0,
+            "errors": [
+                {"target": "a.py", "reason": "AuthenticationError: invalid API key"},
+                {"target": "b.py", "reason": "AuthenticationError: invalid API key"},
+            ],
+        },
+    )
+
+    assert mod._run_code_night() == 2
+
+
 def test_nightly_main_routes_by_lane(monkeypatch):
     mod = _load_nightly()
     called = {}

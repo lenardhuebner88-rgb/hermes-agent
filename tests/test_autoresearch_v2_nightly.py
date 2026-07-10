@@ -73,7 +73,7 @@ def test_select_targets_count_capped_to_list_size():
 # ---------------------------------------------------------------- summary
 
 def _da(findings=3, tokens=14000, model="MiniMax-M2.7", reason="", subsystem="credentials"):
-    return {"subsystem": subsystem, "ok": findings > 0, "findings": findings,
+    return {"subsystem": subsystem, "ok": True, "findings": findings,
             "tokens": tokens, "model": model, "reason": reason}
 
 
@@ -110,6 +110,19 @@ def test_build_summary_renders_lane_errors_without_crashing():
     assert "Test-Foundry · FEHLER: ValueError: nope" in msg
     assert "Σ 0k tok" not in msg  # 0 tokens renders as "0"
     assert "Σ 0 tok" in msg
+
+
+def test_deep_audit_generic_whole_lane_failure_is_infra_failed():
+    outcome = nightly._classify_deep_audit({
+        "subsystem": "kanban",
+        "ok": False,
+        "findings": 0,
+        "scanned": 12,
+        "errors": 12,
+        "reason": "audit protocol ended without a usable result",
+    })
+
+    assert outcome.outcome == "infra_failed"
 
 
 # ---------------------------------------------------------------- discord contract
@@ -226,6 +239,47 @@ def test_main_isolates_a_lane_crash(monkeypatch, capsys):
     assert "Test-Foundry" in out and "(+1)" in out  # other lane still ran
 
 
+def test_main_returns_nonzero_when_every_selected_lane_is_infra_failed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        nightly,
+        "run_deep_audit_lane",
+        lambda *_a, **_k: {
+            "subsystem": "credentials", "ok": False, "findings": 0, "tokens": 0,
+            "model": None, "reason": "AuthenticationError: invalid API key",
+            "scanned": 0, "errors": 1,
+        },
+    )
+    monkeypatch.setattr(
+        nightly,
+        "run_test_foundry_lane",
+        lambda *_a, **_k: [{
+            "target": "x.py", "ok": False, "tests_kept": 0, "survivors": 3,
+            "tokens": 0, "model": None, "reason": "no validated mutation tests kept",
+            "scanned": 3, "errors": 3,
+        }],
+    )
+
+    rc = nightly.main(["--no-send", "--date", "2026-06-04"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "infra_failed" in out
+
+
+def test_main_treats_authenticated_zero_yield_as_success(monkeypatch, capsys):
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", lambda *_a, **_k: _da(findings=0))
+    monkeypatch.setattr(
+        nightly,
+        "run_test_foundry_lane",
+        lambda *_a, **_k: [_tf("x.py", tests_kept=0, survivors=3,
+                               reason="no validated mutation tests kept")],
+    )
+
+    rc = nightly.main(["--no-send", "--date", "2026-06-04"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "clean" in out
+
+
 def test_main_runs_reconciler_after_prune_before_summary(monkeypatch):
     order = []
 
@@ -310,5 +364,5 @@ def test_main_circuit_breaker_skips_remaining_lanes_but_keeps_hygiene(monkeypatc
         "--no-send",
         "--date", "2026-06-04",
         "--circuit-breaker-threshold", "1",
-    ]) == 0
+    ]) == 2  # no lane completed: the nightly must surface a red/nonzero result
     assert order == ["deep-audit", "prune", "reconcile", "summary"]

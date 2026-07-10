@@ -45,6 +45,8 @@ def _proposal(pid: str, **overrides):
         "theme": "missing-section",
         "title": f"Proposal {pid}",
         "rationale_plain": "test rationale",
+        "evidence": "raise RuntimeError('grounded example')",
+        "fix_hint": "Handle the grounded failure explicitly.",
         "before_text": "before",
         "after_text": "after",
         "new_text": "new",
@@ -65,56 +67,47 @@ def _load(pid: str) -> dict:
     return loaded
 
 
-def test_skill_doc_with_diff_is_sent_through_apply_proposal(reconcile_env, monkeypatch):
+def test_skill_doc_with_diff_is_held_for_real_judge(reconcile_env, monkeypatch):
     from hermes_cli import autoresearch_reconcile as reconcile
 
     _proposal("skill-fix")
-    applied: list[str] = []
-
-    def fake_apply(pid: str, *, confirm: bool = True, judged: bool = False):
-        applied.append(pid)
-        prop = _load(pid)
-        prop["status"] = "applied"
-        prop["last_outcome"] = "applied"
-        proposals.save_proposal(prop)
-        return {"ok": True, "status": "applied", "id": pid}
-
-    monkeypatch.setattr(reconcile.proposals, "apply_proposal", fake_apply)
+    monkeypatch.setattr(
+        reconcile.proposals,
+        "apply_proposal",
+        lambda *_a, **_k: pytest.fail("reconciler must never impersonate the independent judge"),
+    )
 
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
 
-    assert applied == ["skill-fix"]
-    assert summary["applied"] == 1
-    assert _load("skill-fix")["status"] == "applied"
+    assert summary["applied"] == 0
+    assert summary["held_judge_required"] == 1
+    held = _load("skill-fix")
+    assert held["status"] == "proposed"
+    assert held["last_outcome"] == "held_judge_required"
+    digest = json.loads(reconcile_env["digest"].read_text(encoding="utf-8"))
+    assert digest["themes"][0]["count"] == 1
 
 
-def test_reverted_skill_doc_is_escalated_with_signal_key(reconcile_env, monkeypatch):
+def test_repeated_reconcile_keeps_skill_judge_hold_idempotent(reconcile_env, monkeypatch):
     from hermes_cli import autoresearch_reconcile as reconcile
 
     _proposal("skill-reverts", category="silent_except", theme="silent-except")
-
-    def fake_apply(pid: str, *, confirm: bool = True, judged: bool = False):
-        prop = _load(pid)
-        prop["status"] = "proposed"
-        prop["last_outcome"] = "reverted_no_improvement"
-        proposals.save_proposal(prop)
-        return {"ok": False, "status": "proposed", "id": pid, "reverted": True, "detail": "gate red"}
-
-    monkeypatch.setattr(reconcile.proposals, "apply_proposal", fake_apply)
+    monkeypatch.setattr(
+        reconcile.proposals,
+        "apply_proposal",
+        lambda *_a, **_k: pytest.fail("reconciler must not apply held skill proposals"),
+    )
 
     with kb.connect() as conn:
-        summary = reconcile.reconcile_proposals(conn=conn)
-        queue = kb.decision_queue(conn)
+        first = reconcile.reconcile_proposals(conn=conn)
+        second = reconcile.reconcile_proposals(conn=conn)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
 
-    assert summary["escalated"] == 1
-    routed = _load("skill-reverts")
-    assert routed["status"] == "escalated"
-    assert routed["escalation_task_id"]
-    assert queue["count"] == 1
-    event = queue["decisions"][0]["operator_escalation"]
-    assert event["source"] == "autoresearch"
-    assert event["signal_key"] == "silent-except"
+    assert first["held_judge_required"] == 1
+    assert second["held_judge_required"] == 1
+    assert task_count == 0
+    assert _load("skill-reverts")["status"] == "proposed"
 
 
 def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_env):
@@ -146,7 +139,8 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
         rows = conn.execute(
-            "SELECT id, title, assignee, idempotency_key, review_tier FROM tasks"
+            "SELECT id, title, body, acceptance_criteria, assignee, idempotency_key, "
+            "review_tier, scope_contract FROM tasks"
         ).fetchall()
 
     assert summary["routed_to_kanban"] == 2
@@ -155,8 +149,40 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert rows[0]["assignee"] == "coder"
     assert rows[0]["idempotency_key"] == "autoresearch:F-123"
     assert rows[0]["review_tier"] == "review"
+    assert json.loads(rows[0]["acceptance_criteria"])
+    assert "AC-AR1" in rows[0]["body"]
+    contract = json.loads(rows[0]["scope_contract"])
+    assert contract["source"] == "autoresearch"
+    assert contract["proposal_id"] in {"code-a", "code-b"}
+    assert contract["evidence"] == "raise RuntimeError('grounded example')"
+    assert contract["allowed_paths"] == ["hermes_cli/auth.py"]
     assert _load("code-a")["kanban_task_id"] == rows[0]["id"]
     assert _load("code-b")["kanban_task_id"] == rows[0]["id"]
+
+
+def test_code_finding_missing_grounded_contract_is_held(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "code-invalid",
+        mode="code",
+        finding_id="F-INVALID",
+        target="hermes_cli/auth.py",
+        target_path="hermes_cli/auth.py",
+        evidence="",
+        fix_hint="",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+
+    assert summary["held_invalid_contract"] == 1
+    assert task_count == 0
+    held = _load("code-invalid")
+    assert held["status"] == "proposed"
+    assert held["last_outcome"] == "held_invalid_contract"
+    assert "evidence" in held["result"] and "fix_hint" in held["result"]
 
 
 
@@ -231,6 +257,48 @@ def test_existing_autoresearch_task_gets_missing_review_tier_backfilled(reconcil
     assert summary["new_tasks"] == 0
     assert row["id"] == existing_id
     assert row["review_tier"] == "review"
+
+
+def test_running_autoresearch_task_contract_is_not_changed_mid_run(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        existing_id = kb.create_task(
+            conn,
+            title="Active old Autoresearch finding",
+            body="legacy body",
+            assignee=None,
+            created_by="autoresearch",
+            idempotency_key="autoresearch:F-ACTIVE",
+            kind="code",
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (existing_id,))
+
+    _proposal(
+        "code-active",
+        mode="code",
+        finding_id="F-ACTIVE",
+        target="hermes_cli/auth.py",
+        target_path="hermes_cli/auth.py",
+        title="Active Auth finding",
+        category="bug_risk",
+        theme="silent-except",
+        subsystem="auth",
+        severity="high",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        row = conn.execute(
+            "SELECT body, acceptance_criteria, scope_contract FROM tasks WHERE id = ?",
+            (existing_id,),
+        ).fetchone()
+
+    assert summary["routed_to_kanban"] == 1
+    assert row["body"] == "legacy body"
+    assert row["acceptance_criteria"] is None
+    assert row["scope_contract"] is None
 
 
 def test_low_severity_proposal_routes_with_max_iterations_none(reconcile_env):
@@ -417,7 +485,7 @@ def test_reconcile_persists_last_summary_for_the_tab(reconcile_env, monkeypatch)
     _proposal("s1")  # one skill-doc-with-diff
     monkeypatch.setattr(
         reconcile.proposals, "apply_proposal",
-        lambda pid, **k: {"ok": True, "status": "applied", "id": pid},
+        lambda *_a, **_k: pytest.fail("reconciler must not invoke apply_proposal"),
     )
 
     with kb.connect() as conn:
@@ -425,7 +493,7 @@ def test_reconcile_persists_last_summary_for_the_tab(reconcile_env, monkeypatch)
 
     rec = reconcile.load_last_reconcile()
     assert rec is not None
-    assert rec["summary"]["applied"] == 1
+    assert rec["summary"]["held_judge_required"] == 1
     assert rec["summary"]["seen"] == 1
     assert isinstance(rec.get("generated_at"), str) and rec["generated_at"]
     assert isinstance(rec.get("themes"), list)
@@ -491,7 +559,7 @@ def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
     proposal-status writes. Lets the operator preview the drain before it runs."""
     from hermes_cli import autoresearch_reconcile as reconcile
 
-    _proposal("skill-x")  # skill-doc with diff → would apply
+    _proposal("skill-x")  # skill-doc with diff → would wait for the real judge
     _proposal(
         "code-x", mode="code", finding_id="F-X", target="hermes_cli/a.py",
         target_path="hermes_cli/a.py", category="bug_risk", theme="silent-except",
@@ -514,7 +582,8 @@ def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
     assert task_count == 0        # no kanban tasks / escalations created
     assert summary["dry_run"] is True
     assert summary["seen"] == 3
-    assert summary["applied"] == 1
+    assert summary["applied"] == 0
+    assert summary["held_judge_required"] == 1
     assert summary["routed_to_kanban"] == 1
     assert summary["escalated"] == 1
     # proposals untouched on disk

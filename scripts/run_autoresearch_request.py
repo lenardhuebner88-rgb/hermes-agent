@@ -494,6 +494,7 @@ def write_receipt(summary: dict) -> Path:
         f"- mode: {summary.get('mode')}",
         f"- finished: {_utc_now()}",
         f"- route_status: {summary.get('route_status')}",
+        f"- outcome: {summary.get('outcome') or 'unknown'}",
         f"- iterations: {summary.get('iterations')}",
         f"- kept: {summary.get('kept')} | reverted: {summary.get('reverted')} | proposed: {summary.get('proposed')}",
         f"- skills_researched: {summary.get('skills_researched')} | research_errors: {summary.get('research_errors')} | skills_with_findings: {summary.get('skills_with_findings')} | research_tokens: {summary.get('research_tokens')}",
@@ -762,6 +763,27 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         summary["research_errors"] = int(research_stats.get("research_errors", 0))
         summary["skills_with_findings"] = int(research_stats.get("skills_with_findings", 0))
         summary["research_tokens"] = int(research_stats.get("research_tokens", 0))
+        from hermes_cli.autoresearch_lane_contracts import classify_lane_outcome
+
+        try:
+            lane_outcome = classify_lane_outcome(
+                "skill",
+                scanned=summary["skills_researched"],
+                errors=summary["research_errors"],
+                yielded=summary["skills_with_findings"],
+                ok=bool(summary.get("ok")),
+                reason=str(summary.get("error") or ""),
+            )
+            summary["outcome"] = lane_outcome.outcome
+            fatal_outcome = lane_outcome.fatal
+        except Exception as exc:
+            summary["outcome"] = "invalid_output"
+            summary["error"] = summary.get("error") or f"lane contract invalid: {type(exc).__name__}"
+            fatal_outcome = True
+        if fatal_outcome:
+            summary["ok"] = False
+            summary["errored"] = True
+            summary["error"] = summary.get("error") or f"lane outcome: {summary['outcome']}"
         receipt = write_receipt(summary)
         summary["receipt"] = str(receipt)
         _finish_status(state_dir, route_status, summary, last_receipt=str(receipt))

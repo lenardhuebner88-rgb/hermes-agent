@@ -407,5 +407,31 @@ def test_dry_run_nightly_observability_receipt_shows_research_errors(env, monkey
     req = _make_request(env)
     summary = env["runner"].run(req, apply=False, confirm=False, max_iterations=2)
     assert summary["research_errors"] >= 1
+    assert summary["outcome"] == "infra_failed"
+    assert summary["ok"] is False
     receipt_text = Path(summary["receipt"]).read_text(encoding="utf-8")
     assert "research_errors" in receipt_text
+    assert "outcome: infra_failed" in receipt_text
+
+
+def test_invalid_lane_contract_still_writes_failure_receipt(env, monkeypatch):
+    from hermes_cli import autoresearch_lane_contracts
+
+    monkeypatch.setattr(env["runner"], "discover_capability_candidates", lambda *_a, **_k: [])
+    monkeypatch.setattr(env["runner"], "_ENABLE_SECTION_SCAFFOLD_DISCOVERY", False)
+    monkeypatch.setattr(
+        autoresearch_lane_contracts,
+        "classify_lane_outcome",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            autoresearch_lane_contracts.LaneContractError("invalid test override")
+        ),
+    )
+
+    summary = env["runner"].run(
+        _make_request(env), apply=False, confirm=False, max_iterations=1
+    )
+
+    assert summary["ok"] is False
+    assert summary["outcome"] == "invalid_output"
+    assert Path(summary["receipt"]).exists()
+    assert "outcome: invalid_output" in Path(summary["receipt"]).read_text(encoding="utf-8")

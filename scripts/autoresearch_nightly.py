@@ -31,6 +31,7 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
 import autoresearch_request as arr  # noqa: E402
 import run_autoresearch_request as runner  # noqa: E402
 from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
+from hermes_cli.autoresearch_lane_contracts import FATAL_OUTCOMES, classify_lane_outcome  # noqa: E402
 
 
 def _is_code_night() -> bool:
@@ -57,13 +58,27 @@ def _run_code_night() -> int:
     # Deep caps: the unattended nightly walks far more of the allowlist and keeps
     # more proposals than the snappy interactive default.
     res = generate_code_weakness_proposals(scope="incremental", max_files=40, limit=8)
+    outcome_name = str(res.get("outcome") or "")
+    if not outcome_name:
+        try:
+            outcome_name = classify_lane_outcome(
+                "code",
+                scanned=int(res.get("files_seen") or 0),
+                errors=len(res.get("errors") or []),
+                yielded=int(res.get("findings_seen") or 0),
+                ok=bool(res.get("ok")),
+                reason="; ".join(str(item.get("reason") or "") for item in (res.get("errors") or [])[:3]),
+            ).outcome
+        except Exception:
+            outcome_name = "invalid_output"
     print(json.dumps({
         "lane": "code", "created_count": res.get("created_count"),
         "files_seen": res.get("files_seen"), "skipped_unchanged": res.get("skipped_unchanged"),
         "vetoed": res.get("vetoed"),
+        "errors": len(res.get("errors") or []), "outcome": outcome_name,
         "tokens": res.get("tokens"), "scope": res.get("scope"),
     }, indent=2))
-    return 0
+    return 2 if outcome_name in FATAL_OUTCOMES else 0
 
 
 def _run_reconciler() -> dict:

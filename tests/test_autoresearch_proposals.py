@@ -844,6 +844,51 @@ def test_code_scan_incremental_caps_max_files(tmp_home, tmp_path, monkeypatch):
     assert r["files_seen"] == 2
 
 
+def test_code_scan_all_provider_errors_is_truthful_infra_failure(tmp_home, tmp_path, monkeypatch):
+    files = []
+    for i in range(2):
+        path = tmp_path / f"auth_fail_{i}.py"
+        path.write_text(f"x = {i}\n", encoding="utf-8")
+        files.append(path)
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: files)
+    monkeypatch.setattr(
+        proposals,
+        "_call_code_weakness_finder",
+        lambda *_a, **_k: {"ok": False, "reason": "AuthenticationError: invalid API key", "resp": None},
+    )
+
+    result = proposals.generate_code_weakness_proposals(max_files=2)
+
+    assert result["files_seen"] == 2
+    assert len(result["errors"]) == 2
+    assert result["outcome"] == "infra_failed"
+    assert result["ok"] is False
+
+
+def test_code_scan_invalid_lane_contract_returns_result_instead_of_crashing(
+    tmp_home, tmp_path, monkeypatch
+):
+    from hermes_cli import autoresearch_lane_contracts
+
+    target = tmp_path / "scan_target.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [target])
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _stub_no_finding)
+    monkeypatch.setattr(
+        autoresearch_lane_contracts,
+        "classify_lane_outcome",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            autoresearch_lane_contracts.LaneContractError("invalid test override")
+        ),
+    )
+
+    result = proposals.generate_code_weakness_proposals()
+
+    assert result["ok"] is False
+    assert result["outcome"] == "invalid_output"
+    assert "lane contract invalid" in result["outcome_reason"]
+
+
 # ---------------------------------------------------------------------------
 # Severity rating + precision veto pass (f-autoresearch-quality)
 # ---------------------------------------------------------------------------

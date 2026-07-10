@@ -162,6 +162,26 @@ def test_tautology_test_green_on_mutant_is_rejected(tmp_path, monkeypatch):
     assert "green_head=True, red_mutant=False" in result["survivors"][0]["reason"]
 
 
+def test_all_llm_failures_are_counted_as_infrastructure_errors(tmp_path, monkeypatch):
+    repo, target_rel = _make_fake_repo(tmp_path)
+    _install_fake_isolation(monkeypatch, tmp_path, repo)
+    monkeypatch.setattr(test_foundry, "generate_mutants", lambda _source, **_kwargs: _mutants())
+
+    def llm_call(**_kwargs):
+        raise RuntimeError("AuthenticationError: invalid API key")
+
+    result = test_foundry.run_test_foundry(
+        target_rel,
+        llm_call=llm_call,
+        run_suite=lambda *_a, **_k: True,
+    )
+
+    assert result["mutants_run"] == 2
+    assert result["infra_errors"] == 2
+    assert result["invalid_outputs"] == 0
+    assert all("llm failed" in survivor["reason"] for survivor in result["survivors"])
+
+
 def test_source_inspecting_generated_test_is_rejected(tmp_path, monkeypatch):
     repo, target_rel = _make_fake_repo(tmp_path)
     _install_fake_isolation(monkeypatch, tmp_path, repo)

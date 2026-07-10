@@ -623,7 +623,9 @@ def _empty_result(target: str, *, reason: str) -> dict[str, Any]:
     }
 
 
-def _record_roi(*, tokens: int, tests_kept: int, model: str | None, mutants_run: int) -> None:
+def _record_roi(
+    *, tokens: int, tests_kept: int, model: str | None, mutants_run: int, errors: int
+) -> None:
     try:
         from hermes_cli import autoresearch_runs
 
@@ -633,6 +635,7 @@ def _record_roi(*, tokens: int, tests_kept: int, model: str | None, mutants_run:
             proposed=tests_kept,
             model=model,
             scanned=mutants_run,
+            errors=errors,
         )
     except Exception:
         pass
@@ -655,6 +658,8 @@ def run_test_foundry(
     mutants_run = 0
     proposals: list[str] = []
     survivors: list[dict[str, Any]] = []
+    infra_errors = 0
+    invalid_outputs = 0
 
     def finish(result: dict[str, Any]) -> dict[str, Any]:
         _record_roi(
@@ -662,6 +667,7 @@ def run_test_foundry(
             tests_kept=int(result.get("tests_kept") or tests_kept),
             model=str(result.get("model") or model or "") or None,
             mutants_run=int(result.get("mutants_run") or mutants_run),
+            errors=int(result.get("infra_errors") or 0) + int(result.get("invalid_outputs") or 0),
         )
         return result
 
@@ -714,13 +720,16 @@ def run_test_foundry(
                 tokens += used_tokens
                 model = used_model or model
             except Exception as exc:
+                infra_errors += 1
                 survivor["reason"] = f"llm failed: {exc}"
                 continue
 
             if not test_code.strip():
+                invalid_outputs += 1
                 survivor["reason"] = "llm returned empty test"
                 continue
             if _has_source_inspection(test_code, rel_target):
+                invalid_outputs += 1
                 survivor["reason"] = "generated test inspects source"
                 continue
 
@@ -810,6 +819,8 @@ def run_test_foundry(
             "tokens": tokens,
             "model": model,
             "mutants_run": mutants_run,
+            "infra_errors": infra_errors,
+            "invalid_outputs": invalid_outputs,
             "second_mutation_skipped": second_mutation_skipped,
             "apply_result": apply_result,
             "apply_branch": apply_branch_name,
@@ -817,6 +828,7 @@ def run_test_foundry(
         }
         return finish(result)
     except Exception as exc:
+        infra_errors += 1
         result = {
             "schema": _FOUNDRY_SCHEMA,
             "ok": False,
@@ -828,6 +840,8 @@ def run_test_foundry(
             "tokens": tokens,
             "model": model,
             "mutants_run": mutants_run,
+            "infra_errors": infra_errors,
+            "invalid_outputs": invalid_outputs,
         }
         return finish(result)
     finally:

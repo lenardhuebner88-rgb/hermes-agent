@@ -98,6 +98,29 @@ def test_create_task_rejects_unknown_review_tier(kanban_home):
             kb.create_task(conn, title="bad tier", assignee="coder", review_tier="bogus")
 
 
+def test_create_task_validates_and_persists_acceptance_criteria(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="task with AC",
+            acceptance_criteria="- AC-DIRECT: focused behavior is proven",
+        )
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+
+    assert json.loads(row["acceptance_criteria"]) == [
+        "AC-DIRECT: focused behavior is proven"
+    ]
+
+
+@pytest.mark.parametrize("criteria", ["", "- behavior without stable id"])
+def test_create_task_rejects_invalid_acceptance_criteria(kanban_home, criteria):
+    with kb.connect_closing() as conn:
+        with pytest.raises(ValueError, match="acceptance_criteria"):
+            kb.create_task(conn, title="bad AC", acceptance_criteria=criteria)
+
+
 # --- ui_impact: additive column + accessor + setter (PlanSpec AD-S1) ---
 
 def test_ui_impact_column_exists_and_defaults_null(kanban_home):

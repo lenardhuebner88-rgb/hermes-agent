@@ -1380,6 +1380,23 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         "errors": errors,
         "vetoes": vetoes,
     }
+    from hermes_cli.autoresearch_lane_contracts import classify_lane_outcome
+
+    try:
+        lane_outcome = classify_lane_outcome(
+            "code",
+            scanned=files_seen,
+            errors=len(errors),
+            yielded=findings_seen,
+            ok=True,
+            reason="; ".join(str(item.get("reason") or "") for item in errors[:3]),
+        )
+        result["outcome"] = lane_outcome.outcome
+        result["ok"] = not lane_outcome.fatal
+    except Exception as exc:
+        result["outcome"] = "invalid_output"
+        result["outcome_reason"] = f"lane contract invalid: {type(exc).__name__}"
+        result["ok"] = False
     try:  # P2: best-effort ROI log for the code lane (never sink the scan)
         from hermes_cli import autoresearch_runs
         autoresearch_runs.append_run(lane="code", tokens=tokens, proposed=len(created),
