@@ -5,18 +5,26 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITerminalOptions, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
+// Values mirror the Bronze-auf-Graphit sheet (web/src/control/theme.css):
+// warm graphite grounds instead of the old navy/teal cast, bronze
+// (--color-live #c9884a) as cursor — the terminal cursor IS the live
+// interaction point. Canvas cannot consume CSS variables, so these stay
+// literal; keep them in sync when the sheet palette moves. ChatPage is
+// unaffected (theme-driven, own defaults).
 export const TERMINAL_THEME_STATIC: ITheme = {
   foreground: "#f0e6d2",
-  cursor: "#f0e6d2",
-  cursorAccent: "#0d2626",
-  selectionBackground: "#f0e6d244",
+  cursor: "#c9884a",
+  cursorAccent: "#0e100f",
+  selectionBackground: "#c9884a40",
 };
 
 // Xterm paints to canvas and therefore cannot consume Tailwind utilities.
 // Keep terminal-only background colors in this shared palette instead of
-// scattering raw literals through control-view components.
-export const TERMINAL_PANE_BACKGROUND = "#05080d";
-export const TERMINAL_MAIN_BACKGROUND = "#071b1d";
+// scattering raw literals through control-view components. Pane sits a step
+// below surface-0 (#0e100f) for terminal depth; main is a touch lighter to
+// keep the existing pane/main hierarchy.
+export const TERMINAL_PANE_BACKGROUND = "#0a0c0b";
+export const TERMINAL_MAIN_BACKGROUND = "#101311";
 
 export function terminalTierWidthPx(host: HTMLElement | null): number {
   if (typeof window === "undefined") return 1280;
