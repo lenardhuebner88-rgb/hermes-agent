@@ -192,6 +192,28 @@ function upsertTranscript(session, role, text, partial) {
   }
 }
 
+async function acquireMicrophoneStream() {
+  // Preferred path: hardware echo cancellation / noise suppression. On some Android
+  // WebView builds this forces the mic into communication-mode capture that the OS
+  // refuses to open (surfaces as NotReadableError even with a free mic). If that
+  // happens, retry once with a plain audio request, which avoids that capture mode.
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+  } catch (error) {
+    if (error && (error.name === "NotReadableError" || error.name === "OverconstrainedError")) {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    }
+    throw error;
+  }
+}
+
 function safeErrorMessage(error) {
   if (error && error.name === "NotAllowedError") {
     return "Der Mikrofonzugriff wurde nicht erlaubt. Bitte gib Hermes Voice die Berechtigung.";
@@ -1184,14 +1206,7 @@ async function startSession() {
       await cleanupSession(session);
       return;
     }
-    session.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    });
+    session.stream = await acquireMicrophoneStream();
     if (!isCurrent(session) || session.drainRequested) {
       await cleanupSession(session);
       return;
@@ -1243,7 +1258,8 @@ async function startSession() {
     if (!isCurrent(session)) {
       return;
     }
-    setStatus("error", safeErrorMessage(error));
+    const technical = error && error.name ? ` [${error.name}]` : "";
+    setStatus("error", safeErrorMessage(error) + technical);
     await cleanupSession(session);
     if (isCurrent(session)) {
       activeSession = null;
