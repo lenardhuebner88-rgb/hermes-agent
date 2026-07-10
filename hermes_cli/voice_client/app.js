@@ -7,6 +7,14 @@ const MAX_PLAYBACK_CHUNK_BYTES = OUTPUT_SAMPLE_RATE * 2 * 4;
 const PLAYBACK_DRAIN_TIMEOUT_MS = 30_000;
 const SERVER_DRAIN_TIMEOUT_MS = 180_000;
 
+// Phone WS drops (screen lock, network handover, Gemini's 10 min cap) must
+// not kill the conversation: five attempts with growing backoff before we
+// give up and surface an error.
+const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
+const MAX_RECONNECT_ATTEMPTS = 5;
+const NON_RETRYABLE_CLOSE_CODES = new Set([4401, 4403, 4408]);
+const MIC_GATE_FAILSAFE_MS = 15_000;
+
 // Speech at normal phone distance is typically well above 0.045 RMS. Three
 // consecutive 20 ms chunks reject short clicks while keeping local barge-in
 // detection near 60 ms and comfortably inside the <300 ms reaction target.
@@ -22,14 +30,27 @@ const STATUS_COPY = {
   error: "Fehler",
 };
 
+const MODE_BADGE_COPY = {
+  live: "Live",
+  fallback: "Fallback",
+};
+
 const statusElement = document.querySelector("#voice-status");
 const statusDetailElement = document.querySelector("#status-detail");
 const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
 const emptyTranscriptElement = document.querySelector("#transcript-empty");
+const modeBadgeElement = document.querySelector("#mode-badge");
+const installChipElement = document.querySelector("#install-chip");
+const composerForm = document.querySelector("#composer");
+const composerInput = document.querySelector("#composer-input");
+
+const NO_SESSION_TEXT_HINT =
+  "Starte zuerst eine Sitzung, dann kannst du auch schreiben.";
 
 let activeSession = null;
 let nextSessionId = 0;
+let stashedInstallPrompt = null;
 
 function isCurrent(session) {
   return activeSession === session;
@@ -42,6 +63,27 @@ function setStatus(value, detail) {
   if (detail) {
     statusDetailElement.textContent = detail;
   }
+  if (normalized === "idle") {
+    hideModeBadge();
+  }
+}
+
+function hideModeBadge() {
+  modeBadgeElement.hidden = true;
+  delete modeBadgeElement.dataset.mode;
+}
+
+function renderModeBadge(value) {
+  if (!Object.hasOwn(MODE_BADGE_COPY, value)) {
+    return;
+  }
+  modeBadgeElement.textContent = MODE_BADGE_COPY[value];
+  modeBadgeElement.dataset.mode = value;
+  modeBadgeElement.hidden = false;
+}
+
+function setComposerEnabled(enabled) {
+  composerInput.setAttribute("aria-disabled", enabled ? "false" : "true");
 }
 
 function setButton(mode) {
@@ -49,24 +91,25 @@ function setButton(mode) {
     sessionButton.textContent = "Start";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung starten");
+    setComposerEnabled(false);
     return;
   }
   if (mode === "stop") {
     sessionButton.textContent = "Stop";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung beenden");
+    setComposerEnabled(true);
     return;
   }
   sessionButton.textContent = "Wird beendet …";
   sessionButton.disabled = true;
   sessionButton.setAttribute("aria-label", "Sprachsitzung wird beendet");
+  // After "end" the server accepts only interrupt controls — a typed frame
+  // during the drain would be rejected, so the composer closes with the mic.
+  setComposerEnabled(false);
 }
 
-function appendTranscript(role, text) {
-  if (typeof text !== "string" || text.trim() === "") {
-    return;
-  }
-
+function createTranscriptEntry(role, text) {
   emptyTranscriptElement.hidden = true;
   const entry = document.createElement("article");
   entry.className = `transcript-entry transcript-entry--${role}`;
@@ -80,11 +123,49 @@ function appendTranscript(role, text) {
   content.textContent = text;
 
   entry.append(label, content);
-  transcriptElement.append(entry);
-  while (transcriptElement.children.length > 100) {
-    transcriptElement.firstElementChild.remove();
+  return entry;
+}
+
+function setTranscriptEntryText(entry, text) {
+  const content = entry.querySelector(".transcript-text");
+  if (content) {
+    content.textContent = text;
   }
-  entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// Live captions stream in as fragments (partial: true) and are replaced in
+// place until the turn closes (partial: false). The cascade fallback never
+// sets "partial" at all, which `handleJsonMessage` normalizes to `false`, so
+// those transcripts still create-and-finalize an entry in one call, exactly
+// like the pre-C3 appendTranscript behavior.
+function upsertTranscript(session, role, text, partial) {
+  if (typeof text !== "string") {
+    return;
+  }
+  const key = role === "assistant" ? "assistant" : "user";
+  const pending = session.pendingTranscript[key];
+
+  if (!pending) {
+    if (text.trim() === "") {
+      return;
+    }
+    const entry = createTranscriptEntry(role, text);
+    transcriptElement.append(entry);
+    while (transcriptElement.children.length > 100) {
+      transcriptElement.firstElementChild.remove();
+    }
+    entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (partial) {
+      session.pendingTranscript[key] = entry;
+    }
+    return;
+  }
+
+  setTranscriptEntryText(pending, text);
+  if (!partial) {
+    session.pendingTranscript[key] = null;
+    pending.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 }
 
 function safeErrorMessage(error) {
@@ -163,10 +244,47 @@ async function mintWebSocketTicket(session) {
   return payload.ticket;
 }
 
+let inMemorySessionId = null;
+
+// Per-TAB id (sessionStorage, not localStorage): two tabs must never share a
+// resumption key — they would overwrite each other's Gemini handle and one
+// tab's reconnect could resume the other's conversation. Residual: within ONE
+// tab a later login could resume the previous login's context until the
+// server-side 60-min registry TTL expires — acceptable for this
+// single-operator dashboard.
+function getClientSessionId() {
+  const storageKey = "hermesVoiceSessionId";
+  try {
+    const stored = sessionStorage.getItem(storageKey);
+    if (stored) {
+      return stored;
+    }
+  } catch {
+    // Storage can be blocked (private mode, embedded webview) — fall through.
+  }
+  if (inMemorySessionId) {
+    return inMemorySessionId;
+  }
+  const id =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Array.from(crypto.getRandomValues(new Uint8Array(16)))
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+  inMemorySessionId = id;
+  try {
+    sessionStorage.setItem(storageKey, id);
+  } catch {
+    // Keep the in-memory id for this page's lifetime instead.
+  }
+  return id;
+}
+
 function createWebSocket(ticket) {
   const websocketUrl = new URL("/api/voice/live", window.location.origin);
   websocketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   websocketUrl.searchParams.set("ticket", ticket);
+  websocketUrl.searchParams.set("session", getClientSessionId());
   const websocket = new WebSocket(websocketUrl);
   websocket.binaryType = "arraybuffer";
   return websocket;
@@ -178,6 +296,7 @@ function waitForWebSocket(session) {
     const handleOpen = () => {
       websocket.removeEventListener("error", handleError);
       websocket.removeEventListener("close", handleCloseBeforeOpen);
+      session.everOpen = true;
       resolve();
     };
     const handleError = () => {
@@ -324,9 +443,21 @@ function handleMicFrame(session, message) {
   if (
     message.pcm instanceof ArrayBuffer &&
     hasOpenWebSocket(session) &&
-    !session.drainRequested
+    !session.drainRequested &&
+    // The SDK contract forbids interleaving realtime (mic) input with a
+    // client-content text turn — hold PCM until the server reacts to the
+    // typed turn (state/audio/error all clear the gate; 15 s failsafe).
+    !session.muteMicUntilResponse
   ) {
     session.websocket.send(message.pcm);
+  }
+}
+
+function clearMicGate(session) {
+  session.muteMicUntilResponse = false;
+  if (session.micGateTimer !== null) {
+    window.clearTimeout(session.micGateTimer);
+    session.micGateTimer = null;
   }
 }
 
@@ -334,6 +465,7 @@ function applyServerState(session, value) {
   if (!Object.hasOwn(STATUS_COPY, value) || value === "idle" || value === "error") {
     return;
   }
+  clearMicGate(session);
   session.voiceState = value;
   if (
     (value === "listening" || value === "thinking") &&
@@ -365,13 +497,27 @@ function handleJsonMessage(session, raw) {
     applyServerState(session, message.value);
     return;
   }
+  if (message.type === "mode") {
+    session.mode = message.value;
+    renderModeBadge(message.value);
+    return;
+  }
   if (message.type === "transcript") {
-    appendTranscript(message.role === "assistant" ? "assistant" : "user", message.text);
+    upsertTranscript(
+      session,
+      message.role === "assistant" ? "assistant" : "user",
+      message.text,
+      message.partial === true,
+    );
     return;
   }
   if (message.type === "interrupted") {
     session.suppressIncomingAudio = true;
     stopPlayback(session);
+    // The server already finalized (or never started) the assistant's
+    // transcript before sending this; the entry itself stays as-is, only
+    // the pending ref is cleared client-side as a belt-and-braces guard.
+    session.pendingTranscript.assistant = null;
     statusDetailElement.textContent = "Antwort unterbrochen – Hermes hört weiter zu.";
     return;
   }
@@ -380,7 +526,13 @@ function handleJsonMessage(session, raw) {
       message.error && typeof message.error.message === "string"
         ? message.error.message
         : "Die Sprachverbindung hat einen Fehler gemeldet.";
-    throw new VoiceClientError(text);
+    // Error EVENTS are advisory: the server keeps the socket open after
+    // recoverable rejections (text_busy, invalid frames). Show the message
+    // and keep the session — the websocket close event is the one true
+    // fatal signal and has its own handler.
+    statusDetailElement.textContent = text;
+    clearMicGate(session);
+    return;
   }
 }
 
@@ -416,6 +568,8 @@ async function cleanupSession(session, { closeSocket = true } = {}) {
   session.abortController.abort();
   await stopMicrophone(session);
   stopPlayback(session);
+  clearMicGate(session);
+  session.wakeLock?.release?.().catch(() => {});
   if (
     closeSocket &&
     session.websocket &&
@@ -438,6 +592,8 @@ async function finishSession(
     return;
   }
   session.finishing = true;
+  session.pendingTranscript = { user: null, assistant: null };
+  hideModeBadge();
   if (session.serverDrainTimer !== null) {
     window.clearTimeout(session.serverDrainTimer);
     session.serverDrainTimer = null;
@@ -456,11 +612,103 @@ async function finishSession(
   }
 }
 
-function attachWebSocketHandlers(session) {
-  session.websocket.addEventListener("message", (event) => {
-    if (!isCurrent(session)) {
+function finalizeWebSocketClose(session, event) {
+  if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
+    setStatus("error", "Die Anmeldung ist abgelaufen. Bitte lade die Seite neu.");
+    void finishSession(session, undefined);
+    return;
+  }
+  void finishSession(
+    session,
+    session.drainRequested
+      ? "Sitzung vollständig beendet."
+      : "Verbindung beendet. Du kannst neu starten.",
+    {
+      drainPlayback:
+        session.drainRequested && (event.wasClean || event.code === 1000),
+    },
+  );
+}
+
+function canReconnect(session, event) {
+  return (
+    isCurrent(session) &&
+    !session.drainRequested &&
+    !session.finishing &&
+    session.everOpen &&
+    event.code !== 1000 &&
+    !NON_RETRYABLE_CLOSE_CODES.has(event.code) &&
+    session.reconnectAttempts < MAX_RECONNECT_ATTEMPTS
+  );
+}
+
+async function attemptReconnect(session, event) {
+  if (!canReconnect(session, event)) {
+    finalizeWebSocketClose(session, event);
+    return;
+  }
+
+  session.reconnectAttempts += 1;
+  setStatus(
+    "connecting",
+    `Verbindung unterbrochen – verbindet neu (Versuch ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) …`,
+  );
+  stopPlayback(session);
+  session.suppressIncomingAudio = false;
+  resetBargeIn(session);
+
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, RECONNECT_BACKOFF_MS[session.reconnectAttempts - 1]);
+  });
+  if (!isCurrent(session) || session.drainRequested || session.finishing) {
+    return;
+  }
+
+  let ticket;
+  try {
+    ticket = await mintWebSocketTicket(session);
+  } catch {
+    if (!isCurrent(session) || session.drainRequested || session.finishing) {
       return;
     }
+    // A mint failure creates no socket, so no close event will re-drive the
+    // loop — recurse directly (with the original close event) instead.
+    await attemptReconnect(session, event);
+    return;
+  }
+  if (!isCurrent(session) || session.drainRequested || session.finishing) {
+    return;
+  }
+  // From here the new socket's own events own the outcome: a failed connect
+  // fires "close", which re-enters attemptReconnect exactly once. Never ALSO
+  // await the socket here — a second waiter would double-drive the loop.
+  session.websocket = createWebSocket(ticket);
+  attachWebSocketHandlers(session);
+}
+
+function attachWebSocketHandlers(session) {
+  const socket = session.websocket;
+  socket.addEventListener("open", () => {
+    if (!isCurrent(session) || session.websocket !== socket) {
+      return;
+    }
+    session.everOpen = true;
+    if (session.reconnectAttempts > 0 && !session.drainRequested) {
+      session.voiceState = "listening";
+      setStatus(
+        "listening",
+        "Verbindung wiederhergestellt. Sag einfach, was Hermes tun soll.",
+      );
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (!isCurrent(session) || session.websocket !== socket) {
+      return;
+    }
+    // Only real application traffic proves the connection: a proxy that
+    // accepts the handshake and then drops would otherwise reset the
+    // counter on every "open" and defeat the five-attempt bound.
+    session.reconnectAttempts = 0;
     try {
       if (typeof event.data === "string") {
         handleJsonMessage(session, event.data);
@@ -472,24 +720,16 @@ function attachWebSocketHandlers(session) {
       void finishSession(session, undefined, { closeSocket: true });
     }
   });
-  session.websocket.addEventListener("error", () => {
-    if (isCurrent(session) && !session.drainRequested) {
+  socket.addEventListener("error", () => {
+    if (isCurrent(session) && session.websocket === socket && !session.drainRequested) {
       setStatus("error", "Die Sprachverbindung wurde unterbrochen.");
     }
   });
-  session.websocket.addEventListener("close", (event) => {
-    if (isCurrent(session)) {
-      void finishSession(
-        session,
-        session.drainRequested
-          ? "Sitzung vollständig beendet."
-          : "Verbindung beendet. Du kannst neu starten.",
-        {
-          drainPlayback:
-            session.drainRequested && (event.wasClean || event.code === 1000),
-        },
-      );
+  socket.addEventListener("close", (event) => {
+    if (!isCurrent(session) || session.websocket !== socket) {
+      return;
     }
+    void attemptReconnect(session, event);
   });
 }
 
@@ -529,6 +769,13 @@ async function startSession() {
     serverDrainTimer: null,
     microphoneStopped: false,
     finishing: false,
+    everOpen: false,
+    reconnectAttempts: 0,
+    mode: null,
+    wakeLock: null,
+    muteMicUntilResponse: false,
+    micGateTimer: null,
+    pendingTranscript: { user: null, assistant: null },
   };
   activeSession = session;
   setButton("stop");
@@ -580,6 +827,8 @@ async function startSession() {
     session.workletNode.port.onmessage = (event) => {
       handleMicFrame(session, event.data || {});
     };
+
+    session.wakeLock = await navigator.wakeLock?.request?.("screen").catch(() => null);
 
     const ticket = await mintWebSocketTicket(session);
     if (!isCurrent(session) || session.drainRequested) {
@@ -649,9 +898,98 @@ sessionButton.addEventListener("click", () => {
   }
 });
 
+function submitComposerText() {
+  const text = composerInput.value.trim();
+  if (!text) {
+    return;
+  }
+  if (
+    !activeSession ||
+    !hasOpenWebSocket(activeSession) ||
+    activeSession.drainRequested
+  ) {
+    statusDetailElement.textContent = NO_SESSION_TEXT_HINT;
+    return;
+  }
+  const session = activeSession;
+  session.websocket.send(JSON.stringify({ type: "text", text }));
+  // Hold mic PCM until the server reacts to the typed turn (SDK contract:
+  // realtime input and client-content turns must not interleave).
+  session.muteMicUntilResponse = true;
+  if (session.micGateTimer !== null) {
+    window.clearTimeout(session.micGateTimer);
+  }
+  session.micGateTimer = window.setTimeout(() => {
+    if (isCurrent(session)) {
+      session.muteMicUntilResponse = false;
+      session.micGateTimer = null;
+    }
+  }, MIC_GATE_FAILSAFE_MS);
+  composerInput.value = "";
+}
+
+composerForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitComposerText();
+});
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  stashedInstallPrompt = event;
+  installChipElement.hidden = false;
+});
+
+async function handleInstallChipClick() {
+  if (!stashedInstallPrompt) {
+    return;
+  }
+  const promptEvent = stashedInstallPrompt;
+  stashedInstallPrompt = null;
+  promptEvent.prompt();
+  await promptEvent.userChoice;
+  installChipElement.hidden = true;
+}
+
+installChipElement.addEventListener("click", () => {
+  void handleInstallChipClick();
+});
+
+window.addEventListener("appinstalled", () => {
+  stashedInstallPrompt = null;
+  installChipElement.hidden = true;
+});
+
 window.addEventListener("pagehide", () => {
   if (activeSession) {
     void cleanupSession(activeSession);
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState !== "visible" ||
+    !activeSession ||
+    activeSession.finishing
+  ) {
+    return;
+  }
+  const session = activeSession;
+  if (!session.wakeLock || session.wakeLock.released) {
+    void navigator.wakeLock
+      ?.request?.("screen")
+      .catch(() => null)
+      .then((lock) => {
+        if (isCurrent(session) && !session.finishing) {
+          session.wakeLock = lock;
+        } else {
+          // The session ended while the request was in flight — releasing
+          // here prevents an idle page from keeping the phone awake.
+          void lock?.release?.().catch(() => {});
+        }
+      });
+  }
+  if (session.audioContext?.state === "suspended") {
+    void session.audioContext.resume();
   }
 });
 

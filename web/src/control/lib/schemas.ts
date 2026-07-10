@@ -414,6 +414,14 @@ const WindowedRollupWorkerSchema = ChainCostsLaneSchema.extend({
   model: z.string().nullable().catch(null),
   provider_model_source: z.enum(["run_metadata", "session_log", "lane_current_fallback", "unknown"]).catch("unknown"),
   unknown_run_count: z.coerce.number().catch(0),
+  // Das Backend kodiert „keine Preis-Evidenz" bewusst als null (nicht als
+  // falsche 0) — genau wie die Root-Felder unten. Die geerbten
+  // z.coerce.number()-Felder hätten null still zu 0 gemacht
+  // (Number(null) === 0), sodass „unbekannt" und „bestätigt kostenlos"
+  // ununterscheidbar wurden.
+  cost_usd: nullableNumber,
+  cost_usd_equivalent: nullableNumber,
+  cost_effective_usd: nullableNumber,
 });
 
 const WindowedRollupRunnerSchema = z.object({
@@ -525,7 +533,10 @@ export const BoardTaskSchema = z.object({
   // Slice b: die GERADE laufende Review-Stufe (verifier→reviewer→critic) eines
   // Tasks in `review`-Status — abgeleitet aus dem jüngsten submitted_for_review-
   // Event. Additiv; null wenn nicht in Review oder älterer Server.
-  active_review_stage: z.enum(["verifier", "reviewer", "critic"]).nullable().catch(null),
+  // String statt Enum: die Stufen-Namen kommen aus kanban.verifier_profile/
+  // review_profile/critic_profile in config.yaml — ein umbenanntes Profil
+  // ließ das hartkodierte Enum sonst still auf null fallen (Pill verschwand).
+  active_review_stage: z.string().nullable().catch(null),
   // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
   // Ältere Tasks ohne dieses Feld liefern null.
   idempotency_key: z.string().nullable().catch(null),
@@ -691,6 +702,7 @@ export const KanbanDecisionKindSchema = z
     "sticky_blocked",
     "decompose_failed",
     "stranded_by_stuck_parent",
+    "stranded_decompose_root_branch",
     "operator_escalation",
     "integration_parked",
     "rate_limited_loop",

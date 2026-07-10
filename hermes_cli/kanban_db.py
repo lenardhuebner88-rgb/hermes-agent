@@ -8542,7 +8542,9 @@ def recompute_ready(
                     if failures >= effective_limit:
                         continue
                     conn.execute(
-                        "UPDATE tasks SET status = 'ready' "
+                        "UPDATE tasks SET status = 'ready', "
+                        "claim_lock = NULL, claim_expires = NULL, "
+                        "worker_pid = NULL "
                         "WHERE id = ? AND status = 'blocked'",
                         (task_id,),
                     )
@@ -8971,12 +8973,23 @@ def release_stale_claims(
             )
             continue
         with write_txn(conn):
+            # Review-claimed runs bounce back to the REVIEW column, not
+            # 'ready' (ready-dispatch spawns the original coder, discarding
+            # the pending review stage). Resolve BEFORE _end_run clears
+            # current_run_id.
+            _reclaim_target = (
+                "review"
+                if _run_originated_from_review(
+                    conn, row["id"], _current_run_id(conn, row["id"])
+                )
+                else "ready"
+            )
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
                 "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
                 "AND claim_expires IS NOT NULL AND claim_expires < ?",
-                (row["id"], row["claim_lock"], now),
+                (_reclaim_target, row["id"], row["claim_lock"], now),
             )
             if cur.rowcount != 1:
                 continue
@@ -8989,6 +9002,7 @@ def release_stale_claims(
                 metadata=termination,
             )
             payload = {
+                "reclaim_target": _reclaim_target,
                 "stale_lock": row["claim_lock"],
                 "worker_pid": (
                     int(row["worker_pid"]) if row["worker_pid"] is not None else None
@@ -12970,6 +12984,7 @@ def promote_task(
     with write_txn(conn):
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready', "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
             "block_kind = NULL, block_recurrences = 0 "
             "WHERE id = ? AND status IN ('todo', 'blocked')",
             (task_id,),
@@ -13420,8 +13435,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             (task_id,),
         ).fetchone()
         new_status = "todo" if undone_parents else "ready"
+        # Also clear the claim columns: a task leaving 'blocked' must never
+        # carry a claim. A stranded claim_lock (e.g. a breaker trip racing a
+        # re-claim) otherwise survives the unblock, and both claim_task and
+        # the dispatcher's ready-candidate query require claim_lock IS NULL —
+        # the task would be permanently undispatchable.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
             "consecutive_failures = 0, transient_retry_count = 0, "
             "last_failure_error = NULL, block_kind = NULL, "
             "block_recurrences = 0 "
@@ -15593,13 +15614,24 @@ def enforce_max_runtime(
                     pass
 
         with write_txn(conn):
+            # Review-claimed runs bounce back to the REVIEW column, not
+            # 'ready' (ready-dispatch spawns the original coder, discarding
+            # the pending review stage). Resolve BEFORE _end_run clears
+            # current_run_id.
+            _reclaim_target = (
+                "review"
+                if _run_originated_from_review(
+                    conn, tid, _current_run_id(conn, tid)
+                )
+                else "ready"
+            )
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
-                (tid, pid, row["claim_lock"]),
+                (_reclaim_target, tid, pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
                 payload = {
@@ -15607,6 +15639,7 @@ def enforce_max_runtime(
                     "elapsed_seconds": int(elapsed),
                     "limit_seconds": int(row["max_runtime_seconds"]),
                     "sigkill": killed,
+                    "reclaim_target": _reclaim_target,
                 }
                 run_id = _end_run(
                     conn,
@@ -15731,13 +15764,25 @@ def detect_stale_running(
             continue
 
         with write_txn(conn):
+            # A run claimed via claim_review_task must bounce back to the
+            # REVIEW column, not 'ready': ready-dispatch spawns off
+            # tasks.assignee (the original coder), silently discarding the
+            # pending review stage. Resolve the origin BEFORE _end_run
+            # clears current_run_id.
+            _reclaim_target = (
+                "review"
+                if _run_originated_from_review(
+                    conn, tid, _current_run_id(conn, tid)
+                )
+                else "ready"
+            )
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND claim_lock IS ?",
-                (tid, row["claim_lock"]),
+                (_reclaim_target, tid, row["claim_lock"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -15748,6 +15793,7 @@ def detect_stale_running(
                 "heartbeat_age_seconds": (int(hb_age) if hb_age is not None else None),
                 "timeout_seconds": stale_timeout_seconds,
                 "pid": int(pid) if pid else None,
+                "reclaim_target": _reclaim_target,
             }
             payload.update(termination)
 
@@ -16718,15 +16764,43 @@ def _record_task_failure(
                     (failures, error[:500], task_id),
                 )
             else:
-                # Timeout/crash path: task is already at ``ready``
-                # with claim cleared; just flip to blocked + update
-                # counter fields.
-                conn.execute(
+                # Timeout/crash path: the caller's own txn already released
+                # the claim and put the task back to ``ready`` — enforce
+                # exactly that invariant here. The caller runs this in a
+                # SEPARATE txn, so the dispatcher can legitimately re-claim
+                # the task in between; the old unguarded
+                # ``status IN ('ready','running')`` match then flipped the
+                # re-claimed row to 'blocked' WITHOUT clearing the new
+                # claim, stranding a live claim_lock on a blocked task —
+                # which no recovery path cleared, leaving the task
+                # permanently unclaimable after unblock.
+                # 'review' included: a review-origin run that timed out is
+                # reclaimed back to the review column (see the reclaim
+                # paths' _reclaim_target) — its failures must still count
+                # toward, and eventually trip, the same breaker.
+                cur = conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status IN ('ready', 'running')",
+                    "WHERE id = ? AND status IN ('ready', 'review') "
+                    "AND claim_lock IS NULL",
                     (failures, error[:500], task_id),
                 )
+                if cur.rowcount == 0:
+                    # A fresh claim raced in — the task is running a new
+                    # attempt (or has already moved on entirely). Count the
+                    # failure ONLY while that attempt is still in flight; if
+                    # it already completed, complete_task deliberately reset
+                    # the counters and this stale failure is history — do not
+                    # write it back onto a successful task. Do NOT trip the
+                    # breaker under the new run either way; if the new
+                    # attempt fails too, the breaker trips on its own cycle.
+                    conn.execute(
+                        "UPDATE tasks SET consecutive_failures = ?, "
+                        "last_failure_error = ? "
+                        "WHERE id = ? AND status = 'running'",
+                        (failures, error[:500], task_id),
+                    )
+                    return False
             run_id = None
             if end_run:
                 # Only the spawn path has an open run to close.
@@ -16820,10 +16894,15 @@ def _record_task_failure(
                 )
             else:
                 # Timeout/crash path: task is already at ``ready`` via
-                # its own UPDATE. Just bookkeep the counter + last error.
+                # its own UPDATE. Just bookkeep the counter + last error —
+                # but only while the task is still in a dispatchable/active
+                # state; if a raced re-claim already completed it,
+                # complete_task reset the counters and this failure is
+                # history (same staleness guard as the breaker branch).
                 conn.execute(
                     "UPDATE tasks SET consecutive_failures = ?, "
-                    "last_failure_error = ? WHERE id = ?",
+                    "last_failure_error = ? "
+                    "WHERE id = ? AND status IN ('ready', 'review', 'running')",
                     (failures, error[:500], task_id),
                 )
             if end_run:

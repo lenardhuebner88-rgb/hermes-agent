@@ -519,8 +519,17 @@ class CredentialPool:
         return bool(self._entries)
 
     def has_available(self) -> bool:
-        """True if at least one entry is not currently in exhaustion cooldown."""
-        return bool(self._available_entries())
+        """True if at least one entry is not currently in exhaustion cooldown.
+
+        Locked: ``_available_entries`` is NOT read-only — it resyncs
+        exhausted/dead entries from the auth store (``_replace_entry`` +
+        ``_persist``). The pool is deliberately shared across concurrent
+        delegate-child threads, so an unlocked call here raced the locked
+        mutators (select/acquire_lease/mark_exhausted_and_rotate) and could
+        overwrite their just-persisted state with a stale snapshot.
+        """
+        with self._lock:
+            return bool(self._available_entries())
 
     def entries(self) -> List[PooledCredential]:
         return list(self._entries)
@@ -1510,7 +1519,17 @@ class CredentialPool:
                 continue
             if entry.last_status == STATUS_EXHAUSTED:
                 exhausted_until = _exhausted_until(entry)
-                if exhausted_until is not None and now < exhausted_until:
+                if exhausted_until is None:
+                    # Malformed persisted state: exhausted with no reset
+                    # timestamp at all (partial write / hand-edited store).
+                    # Fail CLOSED for one normal TTL from first observation
+                    # instead of treating the ambiguous cooldown as already
+                    # expired — stamping last_status_at starts the clock and
+                    # self-heals the entry.
+                    self._replace_entry(entry, replace(entry, last_status_at=now))
+                    cleared_any = True
+                    continue
+                if now < exhausted_until:
                     continue
                 if clear_expired:
                     cleared = replace(
@@ -1572,11 +1591,15 @@ class CredentialPool:
         return entry
 
     def peek(self) -> Optional[PooledCredential]:
-        current = self.current()
-        if current is not None:
-            return current
-        available = self._available_entries()
-        return available[0] if available else None
+        # Locked for the same reason as has_available(): _available_entries
+        # mutates (auth-store resync + persist) and the pool is shared
+        # across threads.
+        with self._lock:
+            current = self.current()
+            if current is not None:
+                return current
+            available = self._available_entries()
+            return available[0] if available else None
 
     def mark_exhausted_and_rotate(
         self,

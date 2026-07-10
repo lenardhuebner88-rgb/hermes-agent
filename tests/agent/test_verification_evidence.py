@@ -64,6 +64,45 @@ def test_classifies_python_module_pytest_as_detected_pytest(tmp_path, monkeypatc
     assert evidence.status == "failed"
 
 
+def test_non_executing_flags_are_not_verification_evidence(tmp_path, monkeypatch):
+    """Regression: prefix matching accepted flag variants that never run a
+    single check — 'pytest --collect-only', '--fixtures', '--version' all
+    exit 0 and were recorded as PASSING test evidence, suppressing the
+    verify-on-stop nudge without any test having executed."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    _python_project(tmp_path)
+
+    for cmd in (
+        "pytest --collect-only -q",
+        "pytest --co -q tests/",
+        "pytest --fixtures",
+        "pytest --version",
+        "python -m pytest --collect-only",
+    ):
+        evidence = classify_verification_command(
+            cmd, cwd=tmp_path, session_id="s1", exit_code=0, output="ok"
+        )
+        assert evidence is None, f"non-executing command accepted as evidence: {cmd}"
+
+
+def test_later_segment_still_matches_after_non_executing_one(tmp_path, monkeypatch):
+    """'pytest --version && pytest tests/' — the second segment genuinely
+    runs tests and must still count."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    _python_project(tmp_path)
+
+    evidence = classify_verification_command(
+        "pytest --version && pytest tests/test_calc.py -q",
+        cwd=tmp_path,
+        session_id="s1",
+        exit_code=0,
+        output="1 passed",
+    )
+    assert evidence is not None
+    assert evidence.canonical_command == "pytest"
+    assert evidence.scope == "targeted"
+
+
 def test_records_passed_then_marks_stale_after_edit(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     _node_project(tmp_path)

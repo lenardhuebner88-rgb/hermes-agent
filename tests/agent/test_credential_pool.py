@@ -3441,3 +3441,73 @@ def test_sync_anthropic_entry_clears_all_error_fields(tmp_path, monkeypatch):
     assert synced.last_error_reason is None
     assert synced.last_error_message is None
     assert synced.last_error_reset_at is None
+
+
+def test_exhausted_entry_without_reset_timestamp_fails_closed():
+    """Regression: an EXHAUSTED entry with no reset timestamp at all
+    (malformed persisted state / partial write) used to fall straight
+    through as immediately AVAILABLE. It must fail CLOSED — excluded until
+    a normal TTL elapses from first observation — and self-heal by
+    stamping last_status_at."""
+    from dataclasses import replace as dc_replace
+    from agent.credential_pool import (
+        CredentialPool,
+        PooledCredential,
+        STATUS_EXHAUSTED,
+    )
+
+    entries = [
+        PooledCredential(
+            provider="test", id="a", label="a", auth_type="api_key",
+            source="a", access_token="tok-a", priority=0, request_count=0,
+        ),
+    ]
+    pool = CredentialPool("test", entries)
+    # Exhausted with NO reset timestamp anywhere.
+    broken = dc_replace(
+        entries[0],
+        last_status=STATUS_EXHAUSTED,
+        last_status_at=None,
+        last_error_code=None,
+        last_error_reset_at=None,
+    )
+    pool._replace_entry(entries[0], broken)
+
+    # Not treated as available while the (now-started) cooldown holds.
+    assert pool.has_available() is False
+    # And the entry was healed: last_status_at is now set, so the TTL clock
+    # runs and it will eventually recover instead of being stuck exhausted.
+    healed = next(e for e in pool.entries() if e.id == "a")
+    assert healed.last_status_at is not None
+
+
+def test_has_available_and_peek_hold_the_pool_lock():
+    """has_available()/peek() must acquire the pool lock — _available_entries
+    mutates (auth-store resync + persist) and the pool is shared across
+    concurrent delegate-child threads. A bare re-entrant Lock would also
+    prove non-nesting; here we assert the lock is actually taken."""
+    from agent.credential_pool import CredentialPool, PooledCredential
+
+    entries = [
+        PooledCredential(
+            provider="test", id="a", label="a", auth_type="api_key",
+            source="a", access_token="tok-a", priority=0, request_count=0,
+        ),
+    ]
+    pool = CredentialPool("test", entries)
+
+    calls = {"acquired": 0}
+    real_lock = pool._lock
+
+    class _CountingLock:
+        def __enter__(self):
+            calls["acquired"] += 1
+            return real_lock.__enter__()
+
+        def __exit__(self, *a):
+            return real_lock.__exit__(*a)
+
+    pool._lock = _CountingLock()
+    pool.has_available()
+    pool.peek()
+    assert calls["acquired"] >= 2, "has_available/peek must lock the pool"

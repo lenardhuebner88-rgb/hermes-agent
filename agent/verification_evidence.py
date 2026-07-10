@@ -195,8 +195,46 @@ def _equivalent_needles(needle: list[str]) -> list[list[str]]:
     return candidates
 
 
+# Flags that make a matched verify command NOT actually execute the checks:
+# collection/listing/help/version modes exit 0 without running anything, so
+# accepting them as evidence lets a "pytest --collect-only" pass for a green
+# suite.  Cross-tool: pytest (--collect-only/--co/--fixtures/--markers/
+# --setup-plan), generic (--version/--help/-h/--dry-run), cargo/vitest-style
+# listers (--list/--list-tests/--listTests), tsc (--showConfig).
+_NON_EXECUTING_FLAGS = frozenset(
+    {
+        "--collect-only",
+        "--collectonly",
+        "--co",
+        "--fixtures",
+        "--markers",
+        "--setup-plan",
+        "--version",
+        "--help",
+        "-h",
+        "--dry-run",
+        "--dryrun",
+        "--list",
+        "--list-tests",
+        "--listtests",
+        "--showconfig",
+    }
+)
+
+
+def _has_non_executing_flag(args: list[str]) -> bool:
+    return any(_clean_token(a).lower() in _NON_EXECUTING_FLAGS for a in args)
+
+
 def _find_canonical_match(command: str, canonical_commands: list[str]) -> Optional[tuple[str, list[str]]]:
-    """Return ``(canonical, trailing_args)`` for the first detected command."""
+    """Return ``(canonical, trailing_args)`` for the first detected command.
+
+    A segment whose trailing args contain a non-executing flag is skipped —
+    it ran the tool, but not the checks (e.g. ``pytest --collect-only``
+    exits 0 without executing a single test and must not count as passing
+    verification evidence).  Other segments of the same command line can
+    still match (``pytest --version && pytest tests/``).
+    """
 
     segments = _split_segment_tokens(command)
     for canonical in canonical_commands:
@@ -207,7 +245,10 @@ def _find_canonical_match(command: str, canonical_commands: list[str]) -> Option
             candidate_tokens = _strip_command_prefix(tokens)
             for candidate in _equivalent_needles(needle):
                 if candidate_tokens[:len(candidate)] == candidate:
-                    return canonical, candidate_tokens[len(candidate):]
+                    trailing = candidate_tokens[len(candidate):]
+                    if _has_non_executing_flag(trailing):
+                        break  # this segment didn't execute the checks
+                    return canonical, trailing
     return None
 
 

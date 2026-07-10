@@ -483,6 +483,81 @@ def test_send_failure_recovers_on_a_later_tick_once_discord_is_back(kanban_home)
         assert len(send.calls) == 2
 
 
+def _insert_failed_run(conn, tid, error="Explosion im Schritt 2"):
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, error, "
+            "started_at, ended_at) VALUES (?, 'premium', 'failed', ?, ?, ?)",
+            (tid, error, NOW - 60, NOW - 1),
+        )
+
+
+def test_run_failed_send_failure_defers_cursor_and_bypasses_cooldown(kanban_home):
+    """Regression: run_failed advanced its monotonic run-id cursor BEFORE the
+    send — one failed Discord delivery lost those run failures forever.  The
+    rule is now send-gated, and a deferred batch bypasses the cooldown (which
+    was stamped on the failed attempt) so the retry isn't swallowed either."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Nachtjob")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []  # prime
+        cursor_before = state["last_seen_run_id"]
+        _insert_failed_run(conn, tid)
+        send = _ScriptedSend(always_fail=True)
+
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert alerts == []  # deferred
+        assert len(send.calls) == 1
+        assert state["last_seen_run_id"] == cursor_before
+
+        # Retry on the very next tick — INSIDE the cooldown window that the
+        # failed attempt stamped. Pre-bypass this fell into the suppression
+        # branch and eagerly committed the cursor (losing the batch).
+        again = evaluate_alerts(conn, _acfg(), state, now=NOW + 2, send_fn=send)
+        assert again == []
+        assert len(send.calls) == 2
+        assert state["last_seen_run_id"] == cursor_before
+
+
+def test_run_failed_send_success_advances_cursor_no_double_send(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Nachtjob")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
+        cursor_before = state["last_seen_run_id"]
+        _insert_failed_run(conn, tid)
+        send = _ScriptedSend()
+
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert [a["rule"] for a in alerts] == ["run_failed"]
+        assert len(send.calls) == 1
+        assert state["last_seen_run_id"] > cursor_before
+
+        # Same failures never re-sent.
+        again = evaluate_alerts(conn, _acfg(), state, now=NOW + 2, send_fn=send)
+        assert again == []
+        assert len(send.calls) == 1
+
+
+def test_run_failed_recovers_after_transient_send_failure(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Nachtjob")
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
+        cursor_before = state["last_seen_run_id"]
+        _insert_failed_run(conn, tid)
+        send = _ScriptedSend(fail_times=1)  # fails once, then succeeds
+
+        first = evaluate_alerts(conn, _acfg(), state, now=NOW + 1, send_fn=send)
+        assert first == []
+        assert state["last_seen_run_id"] == cursor_before
+
+        second = evaluate_alerts(conn, _acfg(), state, now=NOW + 2, send_fn=send)
+        assert [a["rule"] for a in second] == ["run_failed"]
+        assert state["last_seen_run_id"] > cursor_before
+        assert len(send.calls) == 2
+
+
 def test_backstop_after_max_send_attempts_writes_log_and_advances_cursor(
     kanban_home,
 ):
@@ -662,11 +737,19 @@ def test_load_alerts_config_defaults_off_and_falls_back_to_reporting_channel():
 
 
 class RecordingAdapter:
+    """Mirrors the REAL DiscordAdapter contract: ``send`` returns
+    ``SendResult(success=True)`` on delivery.  ``run_failed`` is send-gated
+    (2026-07-10), so a bare ``None`` return would read as "delivery
+    unconfirmed" and trigger the retry path instead of a single send."""
+
     def __init__(self):
         self.sent = []
 
     async def send(self, chat_id, text, reply_to=None, metadata=None):
+        from gateway.platforms.base import SendResult
+
         self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata})
+        return SendResult(success=True)
 
 
 def test_alerts_watcher_sends_via_discord_adapter(kanban_home, monkeypatch):

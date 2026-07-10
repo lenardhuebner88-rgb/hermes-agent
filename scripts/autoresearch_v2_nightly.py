@@ -68,6 +68,77 @@ def _env_float(name: str, default: float = 0.0) -> float:
         return default
 
 
+# Watchdog fires at this multiple of the soft wall-clock budget: the budget
+# itself is enforced cooperatively between lane steps; the watchdog only
+# catches a lane that is stuck INSIDE a blocking call.
+_WATCHDOG_BUDGET_FACTOR = 1.5
+_WATCHDOG_POLL_SECONDS = 30.0
+_WATCHDOG_EXIT_CODE = 70  # EX_SOFTWARE — distinguishable from lane failures
+
+
+def _install_hang_forensics(
+    started: float,
+    budget_seconds: float,
+    *,
+    _exit=os._exit,
+    poll_seconds: float = _WATCHDOG_POLL_SECONDS,
+) -> None:
+    """Make an in-lane hang observable and bounded.
+
+    8 of 17 nights the sweep was killed by the unit's start timeout with
+    ZERO journal output: a blocking call inside a lane (the wall-clock
+    budget is only checked BETWEEN steps) while stdout was still
+    block-buffered, so even pre-hang prints died with the SIGKILL.
+
+    * line-buffer stdout/stderr so every checkpoint reaches journald when
+      printed, not at process exit;
+    * dump all thread stacks on SIGTERM (the unit's kill signal) so the
+      journal shows exactly WHERE the sweep hung;
+    * when a soft budget is configured, a daemon watchdog thread hard-aborts
+      (with a full traceback dump) at 1.5x that budget — a bounded,
+      self-diagnosing failure instead of 40 silent minutes.
+    """
+    import faulthandler
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+
+    try:
+        import signal as _signal
+
+        faulthandler.register(_signal.SIGTERM, chain=True)
+    except Exception:
+        pass
+
+    if budget_seconds and budget_seconds > 0:
+        import threading
+
+        deadline = budget_seconds * _WATCHDOG_BUDGET_FACTOR
+
+        def _watch() -> None:
+            while True:
+                time.sleep(poll_seconds)
+                elapsed = time.monotonic() - started
+                if elapsed > deadline:
+                    print(
+                        f"[autoresearch-v2-nightly] WATCHDOG: {elapsed:.0f}s "
+                        f"elapsed > {deadline:.0f}s (1.5x budget) — a lane is "
+                        "stuck inside a blocking call; dumping stacks and "
+                        "aborting.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    faulthandler.dump_traceback(file=sys.stderr)
+                    _exit(_WATCHDOG_EXIT_CODE)
+
+        threading.Thread(
+            target=_watch, name="ar-v2-watchdog", daemon=True
+        ).start()
+
+
 def _budget_exhausted(started: float, budget_seconds: float) -> bool:
     return budget_seconds > 0 and (time.monotonic() - started) >= budget_seconds
 
@@ -283,6 +354,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     budget_seconds = args.wall_clock_budget_seconds
     if budget_seconds is None:
         budget_seconds = _env_float("AR_V2_WALL_CLOCK_BUDGET_SECONDS", 0.0)
+
+    # Install hang forensics BEFORE any lane runs: line-buffer stdout/stderr,
+    # register the SIGTERM stack dumper, and start the watchdog. Without this
+    # the 8/17-nights silent-hang-to-unit-timeout failure recurs.
+    _install_hang_forensics(started, budget_seconds)
+    print(
+        f"[autoresearch-v2-nightly] start: lanes={sorted(lanes)} day={day} "
+        f"budget={budget_seconds:.0f}s",
+        flush=True,
+    )
+
     circuit_failures = 0
 
     da_summary: dict[str, Any] | None = None

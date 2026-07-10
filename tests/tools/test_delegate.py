@@ -389,6 +389,101 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "error")
         self.assertIn("Something broke", result["results"][0]["error"])
 
+    @patch("tools.delegate_tool._run_single_child")
+    def test_interrupted_batch_with_wedged_child_does_not_hang(self, mock_run):
+        """Regression: the batch executor used a `with` block, whose
+        __exit__ calls shutdown(wait=True) — joining every worker,
+        including the wedged child the interrupt-abandon loop just gave
+        up on. The parent's turn hung right there (daemon threads only
+        help at interpreter exit). The executor must be shut down with
+        wait=False on every exit path."""
+        wedge = threading.Event()  # never set — child stays stuck
+
+        def _wedged_child(*, task_index, goal, child, parent_agent):
+            wedge.wait(timeout=30)  # bounded so a regression can't hang CI
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "late",
+                "error": None,
+                "api_calls": 0,
+                "duration_seconds": 30,
+            }
+
+        mock_run.side_effect = _wedged_child
+        parent = _make_mock_parent()
+        # Interrupt already requested: the abandon loop fabricates
+        # 'interrupted' results immediately; only the executor join could
+        # block after that.
+        parent._interrupt_requested = True
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            start = time.monotonic()
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}],
+                    parent_agent=parent,
+                )
+            )
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"batch delegation blocked for {elapsed:.1f}s on a wedged child "
+            "after interrupt — executor joined instead of abandoning"
+        )
+        statuses = {r["status"] for r in result["results"]}
+        assert "interrupted" in statuses
+        wedge.set()  # release the daemon worker before test exit
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_capacity_reject_keeps_children_attached_for_interrupt(self, mock_run):
+        """Regression (b316b3454 coverage gap): when the async pool is at
+        capacity, the batch falls back to a SYNCHRONOUS run. parent.interrupt()
+        fans out only via _active_children, so the fallback children must
+        still be attached at execution time — detaching before the dispatch
+        decision (the pre-fix bug) left them unstoppable mid-turn."""
+        observed = {}
+
+        def _fake_child(*, task_index, goal, child, parent_agent):
+            # Snapshot how many of the batch's children are still attached to
+            # the parent at the moment the synchronous fallback runs them.
+            observed[task_index] = len(parent_agent._active_children)
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "ok",
+                "error": None,
+                "api_calls": 0,
+                "duration_seconds": 0,
+            }
+
+        mock_run.side_effect = _fake_child
+        parent = _make_mock_parent()
+
+        with (
+            patch("run_agent.AIAgent") as MockAgent,
+            patch(
+                "tools.async_delegation.dispatch_async_delegation_batch",
+                return_value={"status": "rejected", "error": "at capacity"},
+            ),
+        ):
+            MockAgent.return_value = MagicMock()
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}],
+                    background=True,
+                    parent_agent=parent,
+                )
+            )
+
+        # Both children ran synchronously (capacity fallback, not dispatched).
+        assert result.get("mode") != "background"
+        assert len(observed) == 2
+        # Children were STILL attached during the synchronous run — the
+        # interrupt fan-out could reach them. (Pre-fix: detached → 0.)
+        assert all(count >= 1 for count in observed.values()), observed
+
     def test_depth_increments(self):
         """Verify child gets parent's depth + 1."""
         parent = _make_mock_parent(depth=0)

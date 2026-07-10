@@ -240,7 +240,10 @@ export type ReviewTier = "standard" | "review" | "critical";
 // Live-Stage-Pill: the review profile currently running for a task in `review`
 // status (the staged gate's verifier→reviewer→critic). Distinct from the
 // CONFIGURED `ReviewTier` — this is the stage actually executing right now.
-export type ActiveReviewStage = "verifier" | "reviewer" | "critic";
+// The names come from kanban.verifier_profile/review_profile/critic_profile
+// in config.yaml, so custom lane names are legal — `string & {}` keeps
+// autocomplete for the defaults while accepting any configured profile.
+export type ActiveReviewStage = "verifier" | "reviewer" | "critic" | (string & {});
 
 export interface FlowReleaseOptions {
   assignee_overrides?: Record<string, string | null>;

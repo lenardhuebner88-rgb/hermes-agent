@@ -2025,3 +2025,85 @@ def test_read_all_ledger_stats_maps_pack_name_to_stats(tmp_path):
 
 def test_read_all_ledger_stats_missing_root_returns_empty(tmp_path):
     assert read_all_ledger_stats(tmp_path / "nicht-da") == {}
+
+# ── Nacht-Basis-Refresh (stale Worktree-Base) ───────────────────────────────
+# 2026-07-10: der dashboard-experience-Worktree stand auf einem alten
+# main-Stand, dessen Ratchet-Regression längst auf main gefixt war — der
+# Build erbte den Defekt, klassifizierte ihn als "vorbestand" und stoppte
+# mit Fail-Streak. cmd_night rebased seither VOR der Nacht auf main (gleiche
+# Schienen wie beim Landen: nur clean, Anker-Tag, Konflikt → alte Basis).
+
+
+def _night_refresh_setup(tmp_path, fake_engine, name, overrides_text=None):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", name, "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", name)
+    state = tmp_path / "state" / name
+    state.mkdir(parents=True)
+    if overrides_text:
+        (state / "overrides.env").write_text(overrides_text, encoding="utf-8")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()  # Worktree entsteht auf dem AKTUELLEN main …
+    # … dann läuft main weiter (der "Fix", den die Nacht erben muss).
+    (repo / "fix_auf_main.py").write_text("fixed = True\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "fix auf main nach worktree-erstellung")
+
+    seen = {}
+
+    def build_phase(kv, cwd):
+        seen["fix_in_worktree"] = (Path(cwd) / "fix_auf_main.py").is_file()
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    (runner.queue / "00-planned").mkdir(parents=True, exist_ok=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    return repo, runner, seen
+
+
+def test_night_refreshes_stale_worktree_base(tmp_path, fake_engine):
+    repo, runner, seen = _night_refresh_setup(tmp_path, fake_engine, "refresh")
+
+    runner.cmd_night(skip_plan=True)
+
+    assert seen.get("fix_in_worktree") is True, (
+        "Build lief auf der stalen Basis — main-Fix fehlte im Worktree"
+    )
+    assert g(repo, "tag", "-l", "loop-rebase/*").stdout.strip(), "Rebase-Anker fehlt"
+    assert "BASE-REFRESH" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_night_base_refresh_override_skips(tmp_path, fake_engine):
+    repo, runner, seen = _night_refresh_setup(
+        tmp_path, fake_engine, "keinrefresh",
+        overrides_text="SKIP_BASE_REFRESH=1\n",
+    )
+
+    runner.cmd_night(skip_plan=True)
+
+    assert seen.get("fix_in_worktree") is False, (
+        "Override gesetzt, aber es wurde trotzdem rebased"
+    )
+    assert g(repo, "tag", "-l", "loop-rebase/*").stdout.strip() == ""
+
+
+def test_night_base_refresh_skips_dirty_worktree_but_runs(tmp_path, fake_engine):
+    repo, runner, seen = _night_refresh_setup(tmp_path, fake_engine, "dirtyref")
+    (runner.wt / "unfertig.txt").write_text("dirty\n", encoding="utf-8")
+
+    runner.cmd_night(skip_plan=True)
+
+    # Kein Rebase auf dirty Worktree — aber die Nacht läuft trotzdem.
+    assert seen.get("fix_in_worktree") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "BASE-REFRESH übersprungen" in ledger
+    assert "dirty" in ledger

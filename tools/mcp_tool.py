@@ -395,6 +395,47 @@ def _sanitize_error(text: str) -> str:
     return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
 
 
+def _redact_mcp_result_text(text: str) -> str:
+    """Redact secrets from a successful MCP tool result before it is
+    persisted / returned to the model.
+
+    Prefer the shared ``agent.redact`` pipeline (vendor key prefixes, JWTs,
+    etc.); fall back to the local credential pattern if it is unavailable so
+    the success path is never LESS redacted than the error path.
+    """
+    if not text:
+        return text
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(text, file_read=True)
+    except Exception:
+        return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+
+
+def _redact_mcp_structured(structured):
+    """Redact secrets from an MCP structuredContent payload.
+
+    Round-trips through JSON: redact the serialized form, then reparse. If the
+    redacted text no longer parses (a redaction placeholder landed on a
+    structural character — extremely unlikely, placeholders are alnum), keep
+    the original object rather than dropping machine-readable data.
+    """
+    if structured is None:
+        return None
+    try:
+        serialized = json.dumps(structured, ensure_ascii=False)
+    except Exception:
+        return structured
+    redacted = _redact_mcp_result_text(serialized)
+    if redacted == serialized:
+        return structured
+    try:
+        return json.loads(redacted)
+    except Exception:
+        return structured
+
+
 def _exc_str(exc: BaseException) -> str:
     """Return a non-empty human-readable string for *exc*.
 
@@ -3425,11 +3466,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     parts.append(image_tag)
             text_result = "\n".join(parts) if parts else ""
 
+            # Redact secrets from the SUCCESS path too. A third-party or
+            # compromised MCP server can echo an auth header / session token /
+            # env dump in a normal tool result; without this, that secret
+            # flowed unredacted into agent.messages and got durably persisted
+            # (session JSON + SQLite, and the trajectory JSONL if enabled) and
+            # could be replayed into a later reply. The error path already
+            # redacts via _sanitize_error; the success path did not.
+            text_result = _redact_mcp_result_text(text_result)
+
             # Combine content + structuredContent when both are present.
             # MCP spec: content is model-oriented (text), structuredContent
             # is machine-oriented (JSON metadata).  For an AI agent, content
             # is the primary payload; structuredContent supplements it.
-            structured = getattr(result, "structuredContent", None)
+            structured = _redact_mcp_structured(getattr(result, "structuredContent", None))
             if structured is not None:
                 if text_result:
                     return json.dumps({

@@ -2283,6 +2283,12 @@ class TestExecuteToolCalls:
         assert messages[-1]["tool_call_id"] == "mem-1"
 
     def test_keyboard_interrupt_emits_cancelled_post_tool_hook(self, agent, monkeypatch):
+        """KeyboardInterrupt mid-tool emits the cancelled post_tool_call hook
+        AND is contained: it must NOT re-raise (the assistant tool_calls
+        block is already flushed to the session DB before execution — a
+        re-raise persisted an orphaned tool_calls tail no repair pass
+        fixes), and the interrupted call must still get a cancelled tool
+        result appended."""
         tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
         messages = []
@@ -2301,8 +2307,8 @@ class TestExecuteToolCalls:
         with (
             patch("run_agent.handle_function_call", side_effect=KeyboardInterrupt),
             patch("run_agent._set_interrupt"),
-            pytest.raises(KeyboardInterrupt),
         ):
+            # Contained: no KeyboardInterrupt escapes the executor.
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
 
         post_calls = [kwargs for name, kwargs in hook_calls if name == "post_tool_call"]
@@ -2315,6 +2321,13 @@ class TestExecuteToolCalls:
         assert post_calls[0]["status"] == "cancelled"
         assert post_calls[0]["error_type"] == "keyboard_interrupt"
         assert json.loads(post_calls[0]["result"])["status"] == "cancelled"
+
+        # The interrupted call got a proper cancelled tool result.
+        assert len(messages) == 1
+        assert messages[0]["role"] == "tool"
+        assert messages[0]["tool_call_id"] == "c1"
+        # The turn is flagged interrupted so the loop ends cleanly.
+        assert agent._interrupt_requested is True
 
     def test_interrupt_skips_remaining(self, agent):
         tc1 = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

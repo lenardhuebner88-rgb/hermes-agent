@@ -337,12 +337,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tool_call in tool_calls:
         function_name = tool_call.function.name
 
-        # Reset nudge counters
-        if function_name == "memory":
-            agent._turns_since_memory = 0
-        elif function_name == "skill_manage":
-            agent._iters_since_skill = 0
-
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError:
@@ -484,6 +478,17 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         )
                 except Exception:
                     pass
+
+        # Reset nudge counters only for calls that will actually execute —
+        # mirrors the sequential path's _execution_blocked guard.  A memory /
+        # skill_manage call rejected by scope, plugin, or guardrail must not
+        # silence the corresponding nudge.  (Post-unwrap name on purpose: a
+        # memory call routed through the tool_call bridge counts as memory use.)
+        if block_result is None:
+            if function_name == "memory":
+                agent._turns_since_memory = 0
+            elif function_name == "skill_manage":
+                agent._iters_since_skill = 0
 
         parsed_calls.append((tool_call, function_name, function_args, middleware_trace, block_result, blocked_by_guardrail))
 
@@ -1418,6 +1423,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
                 _spinner_result = function_result
             except KeyboardInterrupt:
+                # Do NOT re-raise: the assistant(tool_calls) block was already
+                # flushed to the session DB before execution began, so letting
+                # the interrupt unwind here would persist a transcript whose
+                # tail has tool_calls with zero tool results — a shape no
+                # repair pass fixes and strict providers reject on the next
+                # turn.  Instead fall through so the cancelled result is
+                # appended like any other; the top-of-loop interrupt check
+                # then cancels the remaining calls in the batch (mirrors the
+                # concurrent path's _run_tool handling).
                 function_result = _emit_cancelled_terminal_post_tool_call(
                     agent,
                     function_name=function_name,
@@ -1432,7 +1446,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     agent.interrupt("keyboard interrupt")
                 except Exception:
                     pass
-                raise
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
@@ -1459,7 +1472,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     tool_request_middleware_trace=list(middleware_trace),
                 )
             except KeyboardInterrupt:
-                _emit_cancelled_terminal_post_tool_call(
+                # Same containment as the quiet-mode branch above: append a
+                # cancelled tool result instead of re-raising, so the already
+                # persisted assistant(tool_calls) block never orphans.
+                function_result = _emit_cancelled_terminal_post_tool_call(
                     agent,
                     function_name=function_name,
                     function_args=function_args,
@@ -1472,7 +1488,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     agent.interrupt("keyboard interrupt")
                 except Exception:
                     pass
-                raise
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)

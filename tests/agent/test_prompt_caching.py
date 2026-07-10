@@ -120,6 +120,61 @@ class TestApplyAnthropicCacheControl:
         assert isinstance(sys_content, list)
         assert sys_content[0]["cache_control"]["ttl"] == "1h"
 
+    def test_openrouter_tool_tail_does_not_waste_breakpoints(self):
+        """Envelope layout (native_anthropic=False): role:'tool' messages
+        are no-ops for _apply_cache_marker, so the last-3 selection must
+        skip them.  With parallel tool calls the tail is commonly
+        assistant(tool_calls) → tool, tool, tool — pre-fix all 3 message
+        breakpoints landed on tool messages and only the system prompt
+        stayed cached."""
+        msgs = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "do things"},
+            {"role": "assistant", "content": "working on it"},
+            {"role": "user", "content": "continue"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "a", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+            {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+            {"role": "tool", "tool_call_id": "c3", "content": "r3"},
+        ]
+        result = apply_anthropic_cache_control(msgs, native_anthropic=False)
+
+        # No tool message may carry a marker (invalid on this layout).
+        for m in result:
+            if m.get("role") == "tool":
+                assert "cache_control" not in m
+
+        # The 3 message breakpoints land on the last 3 markable messages:
+        # assistant@2, user@3, assistant(tool_calls)@4 (envelope marker,
+        # content is None).
+        def _has_marker(m):
+            if "cache_control" in m:
+                return True
+            c = m.get("content")
+            return isinstance(c, list) and any(
+                isinstance(p, dict) and "cache_control" in p for p in c
+            )
+
+        assert not _has_marker(result[1])
+        assert _has_marker(result[2])
+        assert _has_marker(result[3])
+        assert _has_marker(result[4])
+
+    def test_native_anthropic_tool_tail_still_marked(self):
+        """Native Anthropic path unchanged: tool messages CAN carry the
+        marker (the adapter moves it inside tool_result) and remain the
+        last-3 selection."""
+        msgs = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "do things"},
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+            {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+            {"role": "tool", "tool_call_id": "c3", "content": "r3"},
+        ]
+        result = apply_anthropic_cache_control(msgs, native_anthropic=True)
+        assert all("cache_control" in m for m in result if m.get("role") == "tool")
+
     def test_max_4_breakpoints(self):
         msgs = [
             {"role": "system", "content": "System"},

@@ -1823,7 +1823,7 @@ class GatewayKanbanWatchersMixin:
                 )
 
                 def _send_gated_alert(alert: dict) -> bool:
-                    """``send_fn`` for the two event-cursor rules (A1).
+                    """``send_fn`` for the send-gated cursor rules (A1).
 
                     Runs SYNCHRONOUSLY inside ``_tick()``'s worker thread.
                     Returns True ONLY once ``adapter.send`` has actually
@@ -2571,13 +2571,16 @@ class GatewayKanbanWatchersMixin:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin this board for the duration of the call — same
-                # pattern as the dashboard specify endpoint. The
-                # decomposer module connects with no board kwarg and
-                # relies on the env var.
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                # Pin this board for the duration of the call via the
+                # contextvar override (get_current_board checks it before
+                # the env var).  The old os.environ mutation was
+                # process-GLOBAL: while this thread was mid-decompose for
+                # board B (an aux LLM call, seconds long), any other
+                # thread/task connecting without an explicit board — e.g.
+                # the alerts watcher's bare _kb.connect() — transiently
+                # resolved to board B and evaluated its persistent alert
+                # cursors against the wrong board's row-id space.
+                with _kb.scoped_current_board(slug):
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -2628,11 +2631,6 @@ class GatewayKanbanWatchersMixin:
                                 "kanban auto-decompose [%s]: %s skipped: %s",
                                 slug, tid, outcome.reason,
                             )
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
             return successes
 
         logger.info(
