@@ -18,9 +18,9 @@ interface Props {
 }
 
 const toneClass: Record<HealthTone, string> = {
-  emerald: "border-emerald-500/25 bg-emerald-500/10 text-emerald-200",
-  amber: "border-amber-500/25 bg-amber-500/10 text-amber-200",
-  red: "border-red-500/25 bg-red-500/10 text-red-200",
+  emerald: "border-status-ok/25 bg-status-ok/10 text-emerald-200",
+  amber: "border-status-warn/25 bg-status-warn/10 text-amber-200",
+  red: "border-status-alert/25 bg-status-alert/10 text-red-200",
   zinc: "border-zinc-600/25 bg-zinc-600/10 text-zinc-200",
 };
 
@@ -97,7 +97,7 @@ function MetricsTile({ metrics }: { metrics: MetricsLiteResponse | null }) {
         {de.systemHealth.errorRate}: <span className="hc-mono">{(errorRate * 100).toFixed(1)}%</span>
       </span>
       <span>{de.systemHealth.p95}: <span className="hc-mono text-white">{Math.round(worstP95)}ms</span></span>
-      {hot ? <span className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-red-200">{de.systemHealth.metricsErrorBadge}</span> : null}
+      {hot ? <span className="rounded-full border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 text-red-200">{de.systemHealth.metricsErrorBadge}</span> : null}
     </div>
   );
 }

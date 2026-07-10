@@ -596,7 +596,7 @@ export function LesesaalBody() {
           ariaLabel={`${t.modeLesesaal}: ${reading.title}`}
           closeLabel={t.back}
           onClose={closeItem}
-          widthClassName="sm:w-[min(900px,calc(100vw-2rem))]"
+          widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
         >
           <ReadingView item={reading} neighbors={neighbors} onNavigate={openItem} onBack={closeItem} />
         </DrawerShell>

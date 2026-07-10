@@ -229,7 +229,7 @@ function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: Con
         gateway={{ status: gateway, stale, title }}
       >
         <NotificationBridge inbox={inbox} />
-        <StatusDots health={health} />
+        <StatusDots health={health} demoted={Boolean(pulse)} />
         <CommandButton onOpen={onOpenCommand} />
       </PulsLeiste>
     </div>
@@ -254,7 +254,15 @@ function Rail({ active, openProposals, inboxTotal, inboxTone, libraryUnread, str
   return (
     <nav
       aria-label="Hauptnavigation"
-      className="hidden tab:flex sticky top-0 h-dvh w-[5.5rem] shrink-0 flex-col items-center justify-between border-r border-line bg-surface-1 px-2 py-4"
+      // -mt-*: die App-Hülle trägt oberhalb von .hc-page ein responsives
+      // pt-2/pt-4/pt-6, .hc-page selbst kompensiert nur pauschal -0.5rem
+      // (margin-top) — ab `sm` bleibt ein Rest von 0.5rem, ab `lg` von 1rem,
+      // der die volle `h-dvh`-Rail vorm ersten Scroll unten kappt (ihr
+      // py-4-Boden mit Gateway-LED/„Mehr" lag 0.5–1rem unterm Fold). Die
+      // Rail hier exakt um den Rest hochziehen bringt sie flush an den
+      // echten Viewport-Rand, ohne die verifizierte volle Sticky-Höhe
+      // anzutasten — Masthead/Main bleiben unverändert (kein Redesign).
+      className="hidden tab:flex sticky top-0 h-dvh w-[5.5rem] shrink-0 flex-col items-center justify-between border-r border-line bg-surface-1 px-2 py-4 sm:-mt-2 lg:-mt-4"
     >
       <div className="flex w-full flex-col items-center gap-1">
         <div className="mb-2 grid h-11 w-11 place-items-center rounded-card border border-live bg-live/10 text-live">
@@ -484,11 +492,14 @@ function useGatewayHealth(health: Props["health"]): { gateway: HealthStatus | "u
   return { gateway, stale, title };
 }
 
-function StatusDots({ health }: { health: Props["health"] }) {
+/** `demoted`: die Puls-Leiste trägt ihr eigenes Gateway-Instrument (ab `tab`) —
+ *  wenn `pulse` (also echte Instrument-Werte) vorliegt, ist diese Legacy-Pille
+ *  darunter redundant und zeigt erst ab `lg`, statt schon ab `md` zu doppeln. */
+function StatusDots({ health, demoted }: { health: Props["health"]; demoted?: boolean }) {
   const { gateway, stale, title } = useGatewayHealth(health);
   const dashboard = health.data?.overall ?? (health.error ? "offline" : "unknown");
   return (
-    <div title={title} className="hidden items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2 md:flex">
+    <div data-testid="status-dots" title={title} className={cn("hidden items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2", demoted ? "lg:flex" : "md:flex")}>
       <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />Hermes<span className="font-data">:9119</span><span className="font-data text-ink-3">{healthLabel(gateway, stale)}</span>
       <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(dashboard, stale))} />Dashboard<span className="font-data text-ink-3">{healthLabel(dashboard, stale)}</span>
     </div>

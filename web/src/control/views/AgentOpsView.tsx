@@ -36,13 +36,13 @@ import { SystemHealthStrip } from "../components/SystemHealthStrip";
 
 function toneBorder(tone: ToneName): string {
   return {
-    emerald: "border-emerald-500/25 bg-emerald-500/10",
-    cyan: "border-cyan-500/25 bg-cyan-500/10",
+    emerald: "border-status-ok/25 bg-status-ok/10",
+    cyan: "border-live/25 bg-live/10",
     sky: "border-sky-500/25 bg-sky-500/10",
     indigo: "border-indigo-400/25 bg-indigo-400/10",
-    amber: "border-amber-500/25 bg-amber-500/10",
+    amber: "border-status-warn/25 bg-status-warn/10",
     rose: "border-rose-500/25 bg-rose-500/10",
-    red: "border-red-500/25 bg-red-500/10",
+    red: "border-status-alert/25 bg-status-alert/10",
     zinc: "border-zinc-600/25 bg-zinc-600/10",
     violet: "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
   }[tone];

@@ -1,15 +1,18 @@
-import { useEffect, type ComponentType, type ReactNode } from "react";
+import { useEffect, useRef, type ComponentType, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Eyebrow } from "../primitives";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 /**
  * DrawerShell — the shared frame every Leitstand detail drawer sits in: a
- * body-portalled bottom-sheet (mobile) / right drawer (sm+), with a backdrop,
- * Escape-to-close and scroll-lock, a header (optional icon + eyebrow + title +
- * close button, plus a free `headerExtra` slot) and a scrollable body with an
- * optional sticky footer.
+ * body-portalled bottom-sheet (Compact, <600px) / right side-sheet (from
+ * `tab`, 600px, SHELL-SPEC.md W2-c), with a backdrop, Escape-to-close,
+ * scroll-lock, a focus trap (first focusable on open, Tab stays inside,
+ * focus restores to whatever had it on close), a header (optional icon +
+ * eyebrow + title + close button, plus a free `headerExtra` slot) and a
+ * scrollable body with an optional sticky footer.
  *
  * Derived from PlanSpecDetailDrawer + NodeDetailDrawer so detail views share one
  * shell (DESIGN.md rule 9: a card expands into a drawer). Portalled to
@@ -28,7 +31,7 @@ export function DrawerShell({
   headerExtra,
   footer,
   children,
-  widthClassName = "sm:w-[min(760px,calc(100vw-2rem))]",
+  widthClassName = "tab:w-[min(420px,60vw)]",
 }: {
   eyebrow?: ReactNode;
   title: ReactNode;
@@ -43,6 +46,9 @@ export function DrawerShell({
   children: ReactNode;
   widthClassName?: string;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -57,15 +63,17 @@ export function DrawerShell({
   }, [onClose]);
 
   const content = (
-    // Mobile: bottom-sheet (items-end); desktop (sm+): right drawer (justify-end).
+    // Mobile (<tab): bottom-sheet (items-end). From `tab` (600px): flush right
+    // side-sheet (items-stretch, no gap/rounding — border-l is the only seam).
     <div
-      className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm sm:items-stretch sm:p-3"
+      className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm tab:items-stretch"
       role="presentation"
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         className={cn(
-          "hc-surface-card flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl sm:h-full sm:max-h-full sm:rounded-2xl",
+          "hc-surface-card hc-side-sheet-in flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl tab:h-full tab:max-h-full tab:rounded-none tab:border-l tab:border-line tab:shadow-none",
           widthClassName,
         )}
         role="dialog"

@@ -83,6 +83,19 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(rail.className).toContain("tab:flex");
   });
 
+  it("pulls the rail up by the residual App-wrapper top padding so its sticky h-dvh bottom cluster isn't clipped pre-scroll (W2-c)", () => {
+    renderShell("backlog");
+    const rail = screen.getByRole("navigation", { name: "Hauptnavigation" });
+    // App.tsx wraps [data-control] in pt-2 sm:pt-4 lg:pt-6; .hc-page only
+    // cancels a flat -0.5rem — the rail cancels the rest itself so its
+    // h-dvh box starts flush at the true viewport top instead of 0.5-1rem
+    // below it (residual = sm:pt-4(1rem) - 0.5rem = 0.5rem, lg:pt-6(1.5rem)
+    // - 0.5rem = 1rem).
+    expect(rail.className).toContain("sm:-mt-2");
+    expect(rail.className).toContain("lg:-mt-4");
+    expect(rail.className).toContain("h-dvh");
+  });
+
   it("keeps the rail 'Mehr' flyout panel scrollable and viewport-clamped", () => {
     renderShell("backlog");
     const panel = screen.getByTestId("rail-more-flyout");
@@ -164,6 +177,20 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     // specifically via its label's sibling value.
     const gatewayValue = within(masthead).getByText("Gateway").nextElementSibling;
     expect(gatewayValue?.textContent).toBe("gesund");
+  });
+
+  it("demotes the legacy StatusDots pill to lg: once the Puls-Leiste carries real instruments, since its Gateway LED already covers it (W2-c)", () => {
+    renderShell("crons", { pulse: { workers: 3, fragen: 0, kostenUsd: 4.1 } });
+    const statusDots = screen.getByTestId("status-dots");
+    expect(statusDots.className).toContain("lg:flex");
+    expect(statusDots.className).not.toContain("md:flex");
+  });
+
+  it("keeps the legacy StatusDots pill at md: when no `pulse` is given", () => {
+    renderShell("crons");
+    const statusDots = screen.getByTestId("status-dots");
+    expect(statusDots.className).toContain("md:flex");
+    expect(statusDots.className).not.toContain("lg:flex");
   });
 
   it("shows the masthead on /control/issues even though the tab economy pins it to statistik (P3 fix)", () => {

@@ -346,7 +346,7 @@ function GuideDrawer({ family, onClose }: { family: string; onClose: () => void 
       ariaLabel={`${t.subtabPrompting}: ${family}`}
       closeLabel={t.guideBack}
       onClose={onClose}
-      widthClassName="sm:w-[min(900px,calc(100vw-2rem))]"
+      widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
     >
       {error ? (
         <ToneCallout tone="red">{t.guideLoadError}<br />{error}</ToneCallout>

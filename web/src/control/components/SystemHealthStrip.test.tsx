@@ -35,7 +35,7 @@ describe("SystemHealthStrip", () => {
         }}
       />,
     );
-    expect(html).toContain("border-amber-500/25");
+    expect(html).toContain("border-status-warn/25");
     expect(html).toContain("Beeinträchtigt");
   });
 
@@ -49,7 +49,7 @@ describe("SystemHealthStrip", () => {
         }}
       />,
     );
-    expect(html).toContain("border-red-500/25");
+    expect(html).toContain("border-status-alert/25");
     expect(html).toContain("connection refused");
   });
 

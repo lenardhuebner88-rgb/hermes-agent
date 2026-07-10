@@ -427,7 +427,7 @@ export function ErgebnisseShelf({ onOpenLesesaalItem }: { onOpenLesesaalItem: (i
           ariaLabel={`${t.eyebrow}: ${reading?.title ?? ""}`}
           closeLabel={t.back}
           onClose={closeDetail}
-          widthClassName="sm:w-[min(900px,calc(100vw-2rem))]"
+          widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
           footer={reading ? <CopyButton text={composeAgentCopyText(reading)} label={t.copyForAgent} copiedLabel={t.copied} /> : undefined}
         >
           {readingError ? (

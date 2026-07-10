@@ -167,14 +167,26 @@ body:has([data-control]) header[role="banner"] { display: none; }
   opacity: .04;
   mix-blend-mode: screen;
 }
-/* A quiet static bronze mist in the corner — no ambient motion (Bronze auf
-   Graphit kills the drift animation entirely; content stays static and
-   screenshot-safe, motion-safe by construction). */
-.hc-page::after {
-  content: ""; position: absolute; z-index: -1; pointer-events: none;
-  left: -10%; top: -8%; width: 50%; height: 60%;
-  background: radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--color-live) 8%, transparent), transparent 62%);
-  filter: blur(40px);
+/* The former hc-drift mist blob (.hc-page::after) is removed (W2-c): the
+   instrument doctrine (DESIGN.md "No ambient animation") covers the static
+   remnant too, not just the old looping keyframe — a machined instrument
+   carries no ambient corner glow, static or not. */
+
+/* Side-sheet slide-in (Overlay/DrawerShell `tab:` tier, SHELL-SPEC.md W2-c):
+   140ms ease-out translate from the right edge. Below `tab` (600px) this
+   class is inert — the bottom-sheet presentation stays exactly as before.
+   prefers-reduced-motion: reduce collapses it to no animation outright
+   (Bronze auf Graphit motion doctrine: every animation ships a reduced-
+   motion counterpart that removes motion, not just slows it). */
+@keyframes hc-side-sheet-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@media (min-width: 37.5rem) {
+  .hc-side-sheet-in { animation: hc-side-sheet-in 140ms ease-out; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hc-side-sheet-in { animation: none; }
 }
 
 /* ── Surface-depth ladder ─────────────────────────────────────────────────

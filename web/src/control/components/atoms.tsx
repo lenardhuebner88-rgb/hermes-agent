@@ -60,7 +60,7 @@ export function ModeBadge({ mode }: { mode: "skill" | "code" }) {
 
 export function MeterBar({ label, value, max, tone = "cyan" }: { label: string; value: number; max: number; tone?: "cyan" | "amber" | "red" }) {
   const pct = Math.max(0, Math.min(100, max > 0 ? (value / max) * 100 : 0));
-  const color = tone === "red" ? "bg-red-400" : tone === "amber" ? "bg-amber-400" : "bg-cyan-300";
+  const color = tone === "red" ? "bg-status-alert" : tone === "amber" ? "bg-status-warn" : "bg-live";
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-micro hc-soft"><span>{label}</span><span className="hc-mono">{Math.round(pct)}%</span></div>
@@ -85,8 +85,8 @@ export function DiffView({ lines, showLineNumbers, collapsible = true, defaultCo
       </div>
       <pre className={cn("max-h-72 max-w-full overflow-auto p-0 text-micro leading-5 hc-mono", collapsed && "hidden md:block")}>
         {numbered.map((line, idx) => (
-          <div key={`${idx}-${line.text}`} className={cn("grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-3 px-3", line.type === "add" && "bg-emerald-500/10 text-emerald-100", line.type === "del" && "bg-red-500/10 text-red-100", line.type === "ctx" && "text-zinc-300")}>
-            <span className="select-none text-right text-zinc-600">{showLineNumbers ? (line.ln ?? "-") : line.type === "add" ? "+" : line.type === "del" ? "-" : " "}</span>
+          <div key={`${idx}-${line.text}`} className={cn("grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-3 px-3", line.type === "add" && "bg-status-ok/10 text-ink", line.type === "del" && "bg-status-alert/10 text-ink", line.type === "ctx" && "text-ink-2")}>
+            <span className="select-none text-right text-ink-3">{showLineNumbers ? (line.ln ?? "-") : line.type === "add" ? "+" : line.type === "del" ? "-" : " "}</span>
             <code className="whitespace-pre-wrap break-words">{line.text || " "}</code>
           </div>
         ))}

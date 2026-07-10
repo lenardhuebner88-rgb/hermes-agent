@@ -1,18 +1,21 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// Live-Smoke gegen das echte Dashboard (:9119, keine Mocks): die vier
-// Primär-Tabs laden ohne console.error/4xx, die Bottom-Nav (Mobile) bzw.
-// Tab-Leiste (Desktop) navigiert, und der Flow-Tab hat seine Kern-Bedienung
-// (Aktualisieren-Button). Bewusst datentolerant — das Board ist live.
+// Control-Shell Smoke (W2-c rewrite): die vorherige Fassung prüfte den
+// gelöschten Legacy-Shell ("Hermes Control"-Header, /^Flow/-Button,
+// eigenständige Pressure-/Ops-Routen) und war deshalb bereits auf HEAD rot —
+// Wave 2 tauschte Shell + Nav-Ökonomie komplett aus (S1-Fusion legte
+// Pressure/Ops in /control/system zusammen, Flow/Ketten leben jetzt in
+// Fleet). Hier ersetzt gegen die AKTUELLE Rail/Bottombar/Puls-Leiste-
+// Kontraktfläche (SHELL-SPEC.md W2-a/W2-b/W2-c) — bewusst als Smoke-Schicht:
+// tiefe Pro-View-Assertions (Statistik-Ledger, Ops-Radar-Hebel, Agent-
+// Terminals-Terminate …) haben ihre eigene Komponenten-Abdeckung
+// (StatistikView.test.tsx, OpsRadarContent.test.tsx,
+// AgentTerminalsView.render.test.tsx) und werden hier nicht dupliziert.
 
 type PageWatch = {
   consoleErrors: string[];
   failedRequests: string[];
   assertClean: () => void;
-};
-
-type MockControlApiStats = {
-  agentTerminalWindowsRequests: number;
 };
 
 function watchPage(page: Page): PageWatch {
@@ -49,536 +52,57 @@ function watchPage(page: Page): PageWatch {
   };
 }
 
-async function mockControlApis(page: Page): Promise<MockControlApiStats> {
-  const stats: MockControlApiStats = { agentTerminalWindowsRequests: 0 };
-  await page.addInitScript(() => {
-    const NativeWebSocket = window.WebSocket;
-    class MockKanbanEventsSocket extends EventTarget {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      static readonly CLOSING = 2;
-      static readonly CLOSED = 3;
-      readonly CONNECTING = 0;
-      readonly OPEN = 1;
-      readonly CLOSING = 2;
-      readonly CLOSED = 3;
-      readonly binaryType = "blob";
-      readonly bufferedAmount = 0;
-      readonly extensions = "";
-      readonly protocol = "";
-      readonly url: string;
-      readyState = MockKanbanEventsSocket.CONNECTING;
-      onopen: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onclose: ((event: CloseEvent) => void) | null = null;
+// Die 5 Primaries sind identisch auf Rail (>=tab) und Bottom-Bar (<tab) —
+// muskelgedächtnis-gleiche Nav-Ökonomie, s. ControlShell.tsx `tabs`.
+const PRIMARIES = ["Fleet", "Start", "Terminals", "Statistik", "Bibliothek"];
 
-      constructor(url: string | URL) {
-        super();
-        this.url = String(url);
-        window.setTimeout(() => {
-          this.readyState = MockKanbanEventsSocket.OPEN;
-          const event = new Event("open");
-          this.onopen?.(event);
-          this.dispatchEvent(event);
-          const message = new MessageEvent("message", { data: JSON.stringify({ cursor: 0, events: [] }) });
-          this.onmessage?.(message);
-          this.dispatchEvent(message);
-        }, 0);
-      }
-      close() {
-        if (this.readyState === MockKanbanEventsSocket.CLOSED) return;
-        this.readyState = MockKanbanEventsSocket.CLOSED;
-        const event = new CloseEvent("close");
-        this.onclose?.(event);
-        this.dispatchEvent(event);
-      }
-      send() {}
-    }
-    window.WebSocket = new Proxy(NativeWebSocket, {
-      construct(target, args) {
-        const [url] = args;
-        if (String(url).includes("/api/plugins/kanban/events") || String(url).includes("/api/agent-terminals/attach")) {
-          return new MockKanbanEventsSocket(url as string | URL);
-        }
-        return Reflect.construct(target, args);
-      },
-    });
-  });
-  await page.route("**/*.{woff,woff2}", async (route) => {
-    await route.fulfill({ status: 200, contentType: "font/woff2", body: "" });
-  });
-  await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path.startsWith("/api/agent-terminals")) {
-      if (path === "/api/agent-terminals/windows") {
-        stats.agentTerminalWindowsRequests += 1;
-      }
-      const agentWindow = {
-        session: "work",
-        window: "codex",
-        active: true,
-        pane_id: "%7",
-        pid: 4242,
-        command: "codex",
-        cwd: "/home/piet/project",
-        dead: false,
-        title: "codex",
-      };
-      const body = path === "/api/agent-terminals/capabilities" ? {
-        tmux_available: true,
-        hermes_tui_available: true,
-        hermes_binary: "hermes",
-        reason: null,
-        agents: { codex: { available: true, binary: "codex", reason: null } },
-        workdirs: [{ key: "home", label: "Zuhause (~)", path: "~" }],
-      } : path === "/api/agent-terminals/sessions" ? {
-        sessions: ["work"],
-      } : path === "/api/agent-terminals/windows" ? {
-        windows: [agentWindow],
-      } : path === "/api/agent-terminals/overview" ? {
-        now: Math.floor(Date.now() / 1000),
-        windows: [{ ...agentWindow, state: "laeuft", state_source: "heuristic", tail: "running", question: null, last_activity: Math.floor(Date.now() / 1000) }],
-      } : path === "/api/agent-terminals/capture" ? {
-        content: "running",
-      } : path === "/api/agent-terminals/show" ? {
-        window: agentWindow,
-      } : path === "/api/agent-terminals/attach-metadata" ? {
-        metadata: { target: "work:codex", attach_argv: ["tmux", "attach-session", "-t", "work:codex"] },
-      } : path === "/api/agent-terminals/handoff-draft" ? {
-        draft: { target: "work:codex", content: "# handoff" },
-      } : path === "/api/agent-terminals/terminate" ? {
-        ok: true,
-      } : { ok: true };
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
-      return;
-    }
-    const body = path === "/api/dashboard/plugins" || path === "/api/dashboard/plugins/" ? [] : path === "/api/skills" ? [
-      { name: "code-review", description: "Review", category: "dev", enabled: true },
-      { name: "firecrawl-search", description: "Search", category: "web", enabled: true },
-    ] : path === "/api/tools/toolsets" ? [
-      { name: "terminal", description: "Terminal", enabled: true, tools: ["terminal"] },
-    ] : path === "/api/account-usage" ? {
-      cache_ttl_seconds: 60,
-      providers: [
-        {
-          provider: "anthropic",
-          available: true,
-          source: "oauth",
-          fetched_at: "2026-01-01T00:00:00+00:00",
-          title: "Account limits",
-          plan: "Max",
-          cached: false,
-          unavailable_reason: null,
-          windows: [
-            { label: "5h", used_percent: 82, reset_at: null, detail: "Reset rollierend" },
-            { label: "Weekly", used_percent: null, reset_at: null, detail: "Limit unbekannt" },
-          ],
-          details: ["Details sichtbar"],
-        },
-      ],
-    } : path === "/api/health-status" ? {
-      overall: "healthy",
-      subsystems: {
-        gateway: { status: "healthy" },
-        autoresearch: { status: "healthy" },
-        kanban_db: { status: "healthy" },
-      },
-    } : path.includes("/workers/active") ? {
-      workers: [],
-      count: 0,
-      checked_at: Math.floor(Date.now() / 1000),
-    } : path.includes("/kanban/board") ? {
-      columns: [],
-      now: Math.floor(Date.now() / 1000),
-    } : path.includes("/runs/windowed-rollup") ? {
-      schema: "kanban-windowed-rollup-v1",
-      since_hours: 168,
-      now: 1782230000,
-      completed_roots: 1,
-      roots: [{
-        id: "t_mother",
-        title: "Stats Mother Ledger",
-        status: "done",
-        assignee: "coder",
-        created_at: 1782220000,
-        started_at: 1782220100,
-        completed_at: 1782220900,
-        ended_at: 1782220900,
-        providers: ["openrouter", "anthropic"],
-        cost_usd: 0.03760227,
-        cost_usd_equivalent: 0.953664,
-        cost_effective_usd: 0.99126627,
-        billing_mode: "metered+subscription_included",
-        neuralwatt: null,
-        runtime_seconds: 800,
-        workers: [{
-          profile: "coder",
-          input_tokens: 81750,
-          output_tokens: 2226,
-          cost_usd: 0.03760227,
-          actual_cost_usd: 0.03760227,
-          cost_usd_equivalent: 0,
-          api_equivalent_usd: 0.03760227,
-          cost_effective_usd: 0.03760227,
-          billing_neuralwatt_kwh: 0,
-          billing_neuralwatt_cost_usd: 0,
-          run_count: 1,
-          provider: "openrouter",
-          model: "deepseek-v4-pro",
-        }, {
-          profile: "verifier",
-          input_tokens: 131747,
-          output_tokens: 4793,
-          cost_usd: 0,
-          actual_cost_usd: 0,
-          cost_usd_equivalent: 0.953664,
-          api_equivalent_usd: 0.953664,
-          cost_effective_usd: 0.953664,
-          billing_neuralwatt_kwh: 0,
-          billing_neuralwatt_cost_usd: 0,
-          run_count: 1,
-          provider: "anthropic",
-          model: "claude-opus-4-8",
-        }],
-        runners: [{
-          id: 837,
-          task_id: "t_mother",
-          profile: "coder",
-          provider: "openrouter",
-          model: "deepseek-v4-pro",
-          input_tokens: 81750,
-          output_tokens: 2226,
-          cost_usd: 0.03760227,
-          cost_usd_equivalent: 0,
-          cost_effective_usd: 0.03760227,
-          billing_mode: "metered",
-          neuralwatt: null,
-          started_at: 1782220100,
-          ended_at: 1782220400,
-          runtime_seconds: 300,
-        }, {
-          id: 4828,
-          task_id: "t_mother",
-          profile: "verifier",
-          provider: "anthropic",
-          model: "claude-opus-4-8",
-          input_tokens: 131747,
-          output_tokens: 4793,
-          cost_usd: 0,
-          cost_usd_equivalent: 0.953664,
-          cost_effective_usd: 0.953664,
-          billing_mode: "subscription_included",
-          neuralwatt: null,
-          started_at: 1782220500,
-          ended_at: 1782220900,
-          runtime_seconds: 400,
-        }],
-      }],
-    } : path.includes("/runs/today-digest") ? {
-      count: 0,
-      items: [],
-    } : path.includes("/runs/daily") ? {
-      series: [],
-    } : path.includes("/autoresearch/proposals") ? {
-      proposals: [],
-      count: 0,
-    } : path.includes("/strategist/") ? {
-      // deckt /strategist/proposals (Liste+count), /last-runs, /run-status ab —
-      // die View liest defensiv, leere Antwort = sauberer Empty-State.
-      proposals: [],
-      count: 0,
-      harvest: null,
-      propose: null,
-      running: false,
-      status: "idle",
-    } : path.includes("/family-organizer/backlog") ? {
-      items: [],
-    } : path.includes("/orchestration/backlog") ? {
-      items: [],
-    } : path.includes("/metrics-lite") ? {
-      schema: "hermes-metrics-lite-v1",
-      checked_at: Math.floor(Date.now() / 1000),
-      uptime_seconds: 60,
-      groups: {},
-    } : path === "/api/pressure-status" ? {
-      schema: "hermes-pressure-v1",
-      checked_at: Math.floor(Date.now() / 1000),
-      overall: "busy",
-      cause: "Ungedrosselte Testprozesse laufen im gleichen Sitzungsbereich",
-      recommendation: { label: "Tests laufen", detail: "2 Testprozesse aktiv.", tone: "amber" },
-      host: { cpu_percent: 36, load_avg: [5.4, 4.8, 3.1], cpu_count: 12, memory_percent: 62 },
-      dashboard: { pid: 4242, rss_mb: 188, cpu_percent: 5, cpu_weight: 100, cpu_quota: "max", tasks_current: 24 },
-      pressure_sources: [{ kind: "test", label: "pytest", count: 2, cpu_percent: 190, rss_mb: 810, scope: "user-session", throttled: false }],
-      access: { tailnet: "direct", api_latency_ms: 128, detail: "tailnet direct" },
-      token_pressure: { class: "unknown", pct: null, updated_at: null },
-      errors: [],
-    } : path === "/api/operator-inventory" ? {
-      schema: "hermes-operator-inventory-v1",
-      checked_at: Math.floor(Date.now() / 1000),
-      summary: { worktrees_total: 86, worktrees_locked: 60, worktrees_dirty: 2, worktrees_prunable: 0, worktrees_orphaned: 1, worktrees_status_unknown: 0, actors_total: 4, actors_canonical: 1 },
-      next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
-      levers: [
-        { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
-      ],
-      worktrees: [
-        { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "def456", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
-      ],
-      actors: [
-        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: 0, rss_mb: 0, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
-        { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 120, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
-      ],
-      errors: [],
-    } : {};
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
-  });
-  return stats;
-}
-
-// probe = Hero-Eyebrow des Tabs; filter({ visible: true }) ist nötig, weil
-// dieselben Wörter auch in versteckten Nav-/Overflow-Links vorkommen.
-const TABS: Array<{ path: string; probe: string }> = [
-  { path: "/control", probe: "Hermes Control" },
-  { path: "/control/flow", probe: "Flow Command Board" },
-  { path: "/control/statistik", probe: "Statistik" },
-  { path: "/control/bibliothek", probe: "Bibliothek" },
-  { path: "/control/pressure", probe: "Pressure" },
-  { path: "/control/ops", probe: "Ops Radar" },
-];
-
-test.describe("Control Smoke (live)", () => {
-  for (const tab of TABS) {
-    test(`lädt ${tab.path} ohne Konsolen-/Netzwerkfehler`, async ({ page }) => {
-      const watch = watchPage(page);
-      await page.goto(tab.path);
-      await expect(page.getByText(tab.probe).filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      // Polls kurz arbeiten lassen, damit kaputte Endpoints auffallen würden.
-      await page.waitForTimeout(2_000);
-      watch.assertClean();
-    });
-  }
-
-  test("Navigation: alle Primär-Tabs sind erreichbar und führen zum Ziel", async ({ page, isMobile }) => {
-    test.skip(isMobile, "Mobile overflow navigation is covered by the Mehr-sheet regression test.");
+test.describe("Control Shell Smoke", () => {
+  test("Rail: Hauptnavigation-Landmark trägt die 5 Primaries ab 600px", async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 1180 });
     const watch = watchPage(page);
-    await page.goto("/control");
-    await expect(page.getByText("Hermes Control").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+    await page.goto("/control/crons");
 
-    // Die Primär-Tabs sind BUTTONS (onNavigate), keine Links — Mobile
-    // (Bottom-Nav, mobileLabel) und Desktop (Tab-Leiste, label) tragen
-    // teils unterschiedliche Beschriftungen; der visible-Filter hält
-    // versteckte Varianten der jeweils anderen Breakpoints fern.
-    const nav = [
-      { name: /^Flow/, url: /\/control\/flow$/ },
-      { name: /^(Statistik|Stats)/, url: /\/control\/statistik$/ },
-      { name: /^Bibliothek/, url: /\/control\/bibliothek$/ },
-      { name: /^Start/, url: /\/control$/ },
-    ];
-
-    for (const target of nav) {
-      await page.getByRole("button", { name: target.name }).filter({ visible: true }).first().click();
-      await expect(page).toHaveURL(target.url);
+    const rail = page.getByRole("navigation", { name: "Hauptnavigation" });
+    await expect(rail).toBeVisible({ timeout: 15_000 });
+    for (const label of PRIMARIES) {
+      await expect(rail.getByRole("button", { name: label })).toBeVisible();
     }
     watch.assertClean();
   });
 
-  test("Mobile: Stratege ist über das 'Mehr'-Sheet erreichbar, Bibliothek direkt in der Bottom-Bar", async ({ page }) => {
-    // Regression-Gate: Bibliothek zog per Cockpit-Slice "Bibliothek-Lesesaal
-    // + Shell-Upgrade" in die primäre mobile Bottom-Bar (vorher wie Stratege
-    // nur per Mehr-Sheet/Direkt-URL erreichbar) — Stratege bleibt im Overflow.
+  test("Bottom-Bar trägt die 5 Primaries bei 390px (Compact)", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await mockControlApis(page);
     const watch = watchPage(page);
-
     await page.goto("/control");
-    await expect(page.getByText("Hermes Control").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
 
-    // Bibliothek ist jetzt direkt in der Bottom-Bar erreichbar (Button, kein Link).
-    await expect(page.getByRole("button", { name: "Bibliothek" }).filter({ visible: true }).first()).toBeVisible();
-
-    // Vor dem Öffnen: Stratege ist nirgends sichtbar (nicht in der Bottom-Bar,
-    // Desktop-Nav ist unter lg ausgeblendet) — exakt der Zustand des Bugs.
-    await expect(page.getByRole("link", { name: "Stratege" })).toHaveCount(0);
-
-    // 'Mehr'-Bottom-Sheet öffnen (aria-label="Mehr").
-    await page.getByRole("button", { name: "Mehr" }).click();
-
-    // Fix: der Overflow-Primärtab erscheint jetzt als Link im Sheet.
-    const stratege = page.getByRole("link", { name: "Stratege" }).filter({ visible: true }).first();
-    await expect(stratege).toBeVisible();
+    const bottomBar = page.getByRole("navigation", { name: "Navigation" });
+    await expect(bottomBar).toBeVisible({ timeout: 15_000 });
+    for (const label of PRIMARIES) {
+      await expect(bottomBar.getByRole("button", { name: label })).toBeVisible();
+    }
     watch.assertClean();
-
-    // ...und der Klick landet wirklich auf dem Stratege-Tab, der dort rendert.
-    await stratege.click();
-    await expect(page).toHaveURL(/\/control\/stratege$/);
-    await expect(page.getByText("Vorschläge des Strategen").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
   });
 
-  test("Flow-Tab: Aktualisieren-Button ist vorhanden und klickbar", async ({ page }) => {
+  test("Masthead zeigt das Routen-Label für eine View ohne eigenes Masthead (Crons)", async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 1180 });
     const watch = watchPage(page);
-    await page.goto("/control/flow");
-    const refresh = page.getByRole("button", { name: "Aktualisieren" });
-    await expect(refresh).toBeVisible({ timeout: 15_000 });
-    await refresh.click();
-    await page.waitForTimeout(1_000);
+    await page.goto("/control/crons");
+
+    const masthead = page.getByTestId("control-masthead");
+    await expect(masthead).toBeVisible({ timeout: 15_000 });
+    await expect(masthead.getByText("Crons")).toBeVisible();
     watch.assertClean();
   });
 
-  for (const viewport of [
-    { name: "Desktop", size: { width: 1440, height: 1000 } },
-    { name: "Tablet", size: { width: 820, height: 1180 } },
-  ]) {
-    test(`Abo-Limits Tile rendert Gauges und unbekannte Limits (${viewport.name})`, async ({ page }) => {
-      await page.setViewportSize(viewport.size);
-      await mockControlApis(page);
+  test("Rail-'Mehr'-Flyout öffnet und listet Loops", async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 1180 });
+    const watch = watchPage(page);
+    await page.goto("/control/crons");
 
-      await page.goto("/control");
-
-      await expect(page.getByText("Abo-Limits").filter({ visible: true })).toBeVisible({ timeout: 15_000 });
-      // Bekanntes Fenster: Gauge ist ein role="meter" mit Prozent im Accessible Name.
-      await expect(page.getByRole("meter", { name: /5h: 82\s*% genutzt/ })).toBeVisible();
-      // Unbekanntes Limit: das Wochen-Fenster ohne Prozentwert meldet "unbekannt".
-      await expect(page.getByRole("meter", { name: /Weekly: unbekannt/ })).toBeVisible();
-      // Nebendetails liegen im aufklappbaren Collapse — öffnen, dann ist der Inhalt sichtbar.
-      await page.getByText("Details", { exact: true }).first().click();
-      await expect(page.getByText("Details sichtbar").filter({ visible: true })).toBeVisible();
-    });
-  }
-
-  for (const viewport of [
-    { name: "Desktop", size: { width: 1440, height: 1000 } },
-    { name: "Tablet", size: { width: 820, height: 1180 } },
-    { name: "Mobile", size: { width: 390, height: 844 } },
-  ]) {
-    test(`Statistik MotherLedger rendert responsive ohne Secret-Leak (${viewport.name})`, async ({ page }) => {
-      await page.setViewportSize(viewport.size);
-      await mockControlApis(page);
-      const watch = watchPage(page);
-
-      await page.goto("/control/statistik");
-
-      await expect(page.getByText("Statistik").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText("Kettenkosten — pro Worker").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Abo-Wert verbraucht").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Stats Mother Ledger").filter({ visible: true }).first()).toBeVisible();
-
-      await expect(page.locator(".sb-ledger")).toHaveAttribute(
-        "data-ledger-viewport",
-        viewport.size.width <= 760 ? "mobile" : "desktop",
-      );
-
-      await page.getByRole("button", { name: /Stats Mother Ledger/ }).filter({ visible: true }).first().click();
-      await expect(page.getByRole("table", { name: "Worker-Aufschlüsselung" })).toBeVisible();
-
-      const coderWorker = page.getByRole("button", { name: /Coder/i }).filter({ visible: true }).first();
-      await expect(coderWorker).toBeVisible();
-      await coderWorker.click();
-      await expect(page.getByText("#837").filter({ visible: true })).toBeVisible();
-      await expect(page.getByText(/metered · 5m · Neuralwatt = Runtime/).filter({ visible: true })).toBeVisible();
-
-      const overflow = await page.evaluate(() => ({
-        documentWidth: document.documentElement.scrollWidth,
-        viewportWidth: window.innerWidth,
-      }));
-      expect(overflow.documentWidth).toBeLessThanOrEqual(overflow.viewportWidth);
-
-      await page.screenshot({
-        path: test.info().outputPath(`statistik-${viewport.name.toLowerCase()}.png`),
-        fullPage: true,
-      });
-
-      for (const secretMarker of [/\/home\//, /\.env\b/, /OPENAI_API_KEY/, /ANTHROPIC_API_KEY/, /sk-[A-Za-z0-9]/, /\.worktrees\//, /cmdline/]) {
-        await expect(page.getByText(secretMarker)).toHaveCount(0);
-      }
-      watch.assertClean();
-    });
-
-    test(`Pressure-Tab zeigt kompakte Lesefakten ohne Rohpfade (${viewport.name})`, async ({ page }) => {
-      await page.setViewportSize(viewport.size);
-      await mockControlApis(page);
-
-      await page.goto("/control/pressure");
-
-      await expect(page.getByText("Pressure").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText("Busy").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Last").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("CPU").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("RAM").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Tailnet").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Nächster Hebel").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Tests laufen").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("pytest").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("/home/")).toHaveCount(0);
-      await expect(page.getByText("run_tests_parallel.py")).toHaveCount(0);
-    });
-  }
-
-  for (const viewport of [
-    { name: "Desktop", size: { width: 1440, height: 1000 } },
-    { name: "Mobile", size: { width: 390, height: 844 } },
-  ]) {
-    test(`Ops-Radar zeigt echte Hebel und keine Rohdaten (${viewport.name})`, async ({ page }) => {
-      await page.setViewportSize(viewport.size);
-      await mockControlApis(page);
-
-      await page.goto("/control/ops");
-
-      await expect(page.getByText("Ops Radar").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText("86 total").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("60 locked").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Top-Hebel").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Dirty Worktrees").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Worktree-Ledger").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Actor Map").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("Kanban Worker").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("read-only").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText("/home/")).toHaveCount(0);
-      await expect(page.getByText("cmdline")).toHaveCount(0);
-      await expect(page.getByText(".worktrees/")).toHaveCount(0);
-      await expect(page.getByText(/\b(stop|kill|update)\b/i)).toHaveCount(0);
-    });
-  }
-  for (const viewport of [
-    { name: "Desktop", size: { width: 1440, height: 1000 } },
-    { name: "Mobile", size: { width: 390, height: 844 } },
-  ]) {
-    test(`Agent-Terminals Terminate-Button bestätigt und refresht (${viewport.name})`, async ({ page }) => {
-      await page.setViewportSize(viewport.size);
-      const stats = await mockControlApis(page);
-      const watch = watchPage(page);
-
-      await page.goto("/control/agent-terminals");
-      await expect(page.getByText("Terminals").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-      await page.waitForTimeout(250);
-      if (await page.getByText("Ansicht abgestürzt").isVisible()) {
-        throw new Error(`Agent-Terminals view crashed: ${watch.consoleErrors.join("\n") || "no pageerror captured"}`);
-      }
-      if (viewport.name === "Mobile") {
-        await page.getByText("codex").filter({ visible: true }).first().click();
-      }
-      const terminate = viewport.name === "Desktop"
-        ? page.locator('button[title="Laufende Session beenden"]').first()
-        : page.getByRole("button", { name: "Session beenden" }).filter({ visible: true }).first();
-      await expect(terminate).toBeVisible({ timeout: 15_000 });
-      const windowsRequestsBeforeTerminate = stats.agentTerminalWindowsRequests;
-
-      page.once("dialog", async (dialog) => {
-        expect(dialog.message()).toContain("Session work:codex wirklich beenden?");
-        await dialog.accept();
-      });
-      const requestPromise = page.waitForRequest((request) =>
-        request.method() === "POST" && request.url().endsWith("/api/agent-terminals/terminate"),
-      );
-      await terminate.click();
-      await requestPromise;
-      await expect.poll(() => stats.agentTerminalWindowsRequests).toBeGreaterThan(windowsRequestsBeforeTerminate);
-      if (viewport.name === "Desktop") {
-        await expect(terminate).toBeVisible();
-      } else {
-        await expect(page.getByRole("button", { name: "codex" }).filter({ visible: true }).first()).toBeVisible();
-      }
-      watch.assertClean();
-    });
-  }
-
+    await page.getByRole("button", { name: "Mehr" }).click();
+    const flyout = page.getByTestId("rail-more-flyout");
+    await expect(flyout).toBeVisible();
+    await expect(flyout.getByRole("link", { name: "Loops" })).toBeVisible();
+    watch.assertClean();
+  });
 });

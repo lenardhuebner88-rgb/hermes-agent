@@ -211,7 +211,7 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
   return (
     <div className={cn("rounded-lg border px-3 py-2", tone ? toneClasses(tone) : "border-white/10 bg-white/[.03]", className)}>
       <p className="hc-type-label hc-dim">{label}</p>
-      <p className="font-data tabular-nums truncate text-sec font-semibold text-white">{value}</p>
+      <p className="font-data tabular-nums truncate text-sec font-semibold text-ink">{value}</p>
       {hint ? <p className="mt-0.5 hc-type-label hc-soft">{hint}</p> : null}
     </div>
   );

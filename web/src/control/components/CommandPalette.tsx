@@ -23,6 +23,15 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
   const [snapshotTick, setSnapshotTick] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  // Wer immer den Fokus trug, als die Palette aufging — nicht zwingend der
+  // Rail-Button (commandButtonRef/triggerRef): auf Phones öffnet sie über den
+  // Masthead-CommandButton, der keinen Ref trägt, `triggerRef` zeigte danach
+  // auf einen `hidden`(display:none)-Rail-Button und der Fokus-Restore lief
+  // ins Leere (Bug). Generisch statt Ref-spezifisch: einfach zurückgeben, wer
+  // vorher fokussiert war — funktioniert für Rail-Button UND Masthead-Button
+  // gleichermaßen, `triggerRef` bleibt als Prop nutzbar (Rail-Fall trägt sich
+  // von selbst, da document.activeElement dort ohnehin der Rail-Button ist).
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   // Sofort-Bump beim Öffnen als Render-Phase-Anpassung (React-Doku
   // "adjusting state when props change") — setState synchron im Effect-Body
@@ -66,10 +75,22 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
     return filterCommandPaletteItems(items, query);
   }, [items, query]);
 
+  // Fokus-Restore, generisch statt ref-spezifisch: wer immer den Fokus trug,
+  // bevor die Palette aufging, bekommt ihn beim Schließen zurück — deckt
+  // Escape, Backdrop-Klick und Item-Auswahl gleichermaßen ab (vorher restorte
+  // nur der Escape-Pfad, und nur auf `triggerRef`, der auf Phones der
+  // unsichtbare Rail-Button war). `triggerRef` bleibt als Fallback, falls beim
+  // Öffnen kein activeElement einfangbar war.
   useEffect(() => {
     if (!open) return;
+    previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const fallbackTrigger = triggerRef?.current ?? null;
     window.setTimeout(() => inputRef.current?.focus(), 0);
-  }, [open]);
+    return () => {
+      const toRestore = previouslyFocusedRef.current ?? fallbackTrigger;
+      if (toRestore && document.contains(toRestore)) toRestore.focus();
+    };
+  }, [open, triggerRef]);
 
   useEffect(() => {
     if (!open) return;
@@ -77,7 +98,6 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
       if (KEYMAP.palette.close.includes(event.key as "Escape")) {
         event.preventDefault();
         onClose();
-        triggerRef?.current?.focus();
         return;
       }
       if (KEYMAP.palette.next.includes(event.key as "ArrowDown")) {
@@ -104,7 +124,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, filtered, onClose, open, triggerRef]);
+  }, [active, filtered, onClose, open]);
 
   if (!open) return null;
   let lastGroup = "";

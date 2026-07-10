@@ -53,8 +53,10 @@ describe("OpsRadarContent", () => {
     expect(html.toLowerCase()).not.toContain("cmdline");
     // Stat's plain value moved from the old hc-mono/text-sm classes onto the
     // new type-scale (font-data + text-sec) — W1-B typography rollout.
-    expect(html).toContain("CPU</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-white\">-</p>");
-    expect(html).toContain("RAM</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-white\">-</p>");
+    // text-white -> text-ink (W2-c shared color hygiene: Stat's plain-branch
+    // value uses the ink token instead of a raw Tailwind color).
+    expect(html).toContain("CPU</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-ink\">-</p>");
+    expect(html).toContain("RAM</p><p class=\"font-data tabular-nums truncate text-sec font-semibold text-ink\">-</p>");
     expect(html.toLowerCase()).not.toContain("stop");
     expect(html.toLowerCase()).not.toContain("kill");
     expect(html.toLowerCase()).not.toContain("update");

@@ -10,12 +10,15 @@
  * `createPortal(document.body)` löst das strukturell für jedes Overlay.
  *
  * Außerdem zentral hier: Escape-zu-Schließen, Body-Scroll-Lock solange offen,
- * Backdrop-Dismiss, und auf Mobile ein bottom-sheet mit `max-h`/innerem Scroll
- * + safe-area-Padding, damit Inhalt nie hinter Tastatur/Nav verschwindet.
+ * Backdrop-Dismiss, ein Fokus-Trap (erster fokussierbarer Eintrag beim Öffnen,
+ * Tab bleibt im Dialog, Fokus-Restore beim Schließen), und die Tier-Präsenz:
+ * unterhalb `tab` (600px) ein bottom-sheet mit `max-h`/innerem Scroll +
+ * safe-area-Padding, ab `tab` ein rechtes side-sheet (SHELL-SPEC.md W2-c).
  */
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export function Overlay({
   onClose,
@@ -30,6 +33,9 @@ export function Overlay({
   closeDisabled?: boolean;
   maxWidthClassName?: string;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeDisabled) onClose(); };
     window.addEventListener("keydown", onKey);
@@ -50,14 +56,16 @@ export function Overlay({
     // display:contents, weil [data-control] selbst min-height/background setzt
     // und als echte Box das Layout kaputt machen würde; so vererbt es nur.
     <div data-control className="contents">
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={() => { if (!closeDisabled) onClose(); }} role="presentation">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 tab:items-stretch tab:justify-end" onClick={() => { if (!closeDisabled) onClose(); }} role="presentation">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={ariaLabel}
         onClick={(e) => e.stopPropagation()}
         className={cn(
-          "hc-surface-card max-h-[85dvh] w-full overflow-y-auto overscroll-contain rounded-b-none rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] sm:rounded-2xl sm:pb-4",
+          "hc-surface-card hc-side-sheet-in max-h-[85dvh] w-full overflow-y-auto overscroll-contain rounded-b-none rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))]",
+          "tab:h-dvh tab:max-h-dvh tab:w-[min(420px,60vw)] tab:max-w-none tab:rounded-none tab:border-l tab:border-line tab:pb-4",
           maxWidthClassName,
         )}
       >
