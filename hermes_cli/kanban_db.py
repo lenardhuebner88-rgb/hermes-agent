@@ -8542,7 +8542,9 @@ def recompute_ready(
                     if failures >= effective_limit:
                         continue
                     conn.execute(
-                        "UPDATE tasks SET status = 'ready' "
+                        "UPDATE tasks SET status = 'ready', "
+                        "claim_lock = NULL, claim_expires = NULL, "
+                        "worker_pid = NULL "
                         "WHERE id = ? AND status = 'blocked'",
                         (task_id,),
                     )
@@ -12970,6 +12972,7 @@ def promote_task(
     with write_txn(conn):
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready', "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
             "block_kind = NULL, block_recurrences = 0 "
             "WHERE id = ? AND status IN ('todo', 'blocked')",
             (task_id,),
@@ -13420,8 +13423,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             (task_id,),
         ).fetchone()
         new_status = "todo" if undone_parents else "ready"
+        # Also clear the claim columns: a task leaving 'blocked' must never
+        # carry a claim. A stranded claim_lock (e.g. a breaker trip racing a
+        # re-claim) otherwise survives the unblock, and both claim_task and
+        # the dispatcher's ready-candidate query require claim_lock IS NULL —
+        # the task would be permanently undispatchable.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
             "consecutive_failures = 0, transient_retry_count = 0, "
             "last_failure_error = NULL, block_kind = NULL, "
             "block_recurrences = 0 "
@@ -16718,15 +16727,38 @@ def _record_task_failure(
                     (failures, error[:500], task_id),
                 )
             else:
-                # Timeout/crash path: task is already at ``ready``
-                # with claim cleared; just flip to blocked + update
-                # counter fields.
-                conn.execute(
+                # Timeout/crash path: the caller's own txn already released
+                # the claim and put the task back to ``ready`` — enforce
+                # exactly that invariant here. The caller runs this in a
+                # SEPARATE txn, so the dispatcher can legitimately re-claim
+                # the task in between; the old unguarded
+                # ``status IN ('ready','running')`` match then flipped the
+                # re-claimed row to 'blocked' WITHOUT clearing the new
+                # claim, stranding a live claim_lock on a blocked task —
+                # which no recovery path cleared, leaving the task
+                # permanently unclaimable after unblock.
+                cur = conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status IN ('ready', 'running')",
+                    "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
                     (failures, error[:500], task_id),
                 )
+                if cur.rowcount == 0:
+                    # A fresh claim raced in — the task is running a new
+                    # attempt (or has already moved on entirely). Count the
+                    # failure ONLY while that attempt is still in flight; if
+                    # it already completed, complete_task deliberately reset
+                    # the counters and this stale failure is history — do not
+                    # write it back onto a successful task. Do NOT trip the
+                    # breaker under the new run either way; if the new
+                    # attempt fails too, the breaker trips on its own cycle.
+                    conn.execute(
+                        "UPDATE tasks SET consecutive_failures = ?, "
+                        "last_failure_error = ? "
+                        "WHERE id = ? AND status = 'running'",
+                        (failures, error[:500], task_id),
+                    )
+                    return False
             run_id = None
             if end_run:
                 # Only the spawn path has an open run to close.
@@ -16820,10 +16852,15 @@ def _record_task_failure(
                 )
             else:
                 # Timeout/crash path: task is already at ``ready`` via
-                # its own UPDATE. Just bookkeep the counter + last error.
+                # its own UPDATE. Just bookkeep the counter + last error —
+                # but only while the task is still in a dispatchable/active
+                # state; if a raced re-claim already completed it,
+                # complete_task reset the counters and this failure is
+                # history (same staleness guard as the breaker branch).
                 conn.execute(
                     "UPDATE tasks SET consecutive_failures = ?, "
-                    "last_failure_error = ? WHERE id = ?",
+                    "last_failure_error = ? "
+                    "WHERE id = ? AND status IN ('ready', 'running')",
                     (failures, error[:500], task_id),
                 )
             if end_run:
