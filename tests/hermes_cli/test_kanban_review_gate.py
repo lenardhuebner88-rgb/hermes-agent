@@ -2248,3 +2248,102 @@ def test_scout_recon_body_empty_targets_is_warning_only():
     body = kb._scout_recon_body([None])
     assert "Source of Truth" in body
     assert "## Ziel-Task" not in body  # no per-target block rendered
+
+
+# ---------------------------------------------------------------------------
+# Reclaim routing: a stalled/expired REVIEWER run must bounce back to the
+# review column, not to 'ready' — ready-dispatch spawns off tasks.assignee
+# (the original coder), silently discarding the pending review stage.
+# ---------------------------------------------------------------------------
+
+
+def _review_claimed_task(conn, *, title="review me"):
+    """Task claimed via claim_review_task (review → running)."""
+    tid = kb.create_task(
+        conn,
+        title=title,
+        body="database migration",
+        assignee="coder",
+        review_tier="critical",
+    )
+    kb.claim_task(conn, tid)
+    assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
+    assert kb.get_task(conn, tid).status == "review"
+    claimed = kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+    assert claimed is not None
+    assert kb.get_task(conn, tid).status == "running"
+    return tid
+
+
+def test_expired_reviewer_claim_reclaims_to_review(
+    kanban_home, gate_on, monkeypatch
+):
+    import time as _time
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    with kb.connect() as conn:
+        tid = _review_claimed_task(conn)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET claim_expires = ?, worker_pid = 94211 "
+                "WHERE id = ?",
+                (int(_time.time()) - 60, tid),
+            )
+
+        assert kb.release_stale_claims(conn) == 1
+        task = kb.get_task(conn, tid)
+        # Pre-fix: bounced to 'ready' → coder re-dispatch, review stage lost.
+        assert task.status == "review"
+        assert task.claim_lock is None
+        # The review column can re-claim it for the correct stage profile.
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+
+
+def test_expired_coder_claim_still_reclaims_to_ready(
+    kanban_home, gate_on, monkeypatch
+):
+    import time as _time
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="normal build", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET claim_expires = ?, worker_pid = 94212 "
+                "WHERE id = ?",
+                (int(_time.time()) - 60, tid),
+            )
+
+        assert kb.release_stale_claims(conn) == 1
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+
+
+def test_max_runtime_reviewer_run_reclaims_to_review(
+    kanban_home, gate_on, monkeypatch
+):
+    import time as _time
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    with kb.connect() as conn:
+        tid = _review_claimed_task(conn, title="slow review")
+        host = kb._claimer_id().split(":", 1)[0]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET max_runtime_seconds = 10, worker_pid = 94213, "
+                "started_at = ?, claim_lock = ? WHERE id = ?",
+                (int(_time.time()) - 3600, f"{host}:w-rev", tid),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE task_id = ? AND ended_at IS NULL",
+                (int(_time.time()) - 3600, tid),
+            )
+
+        timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda *_a: None)
+        assert timed_out == [tid]
+        task = kb.get_task(conn, tid)
+        assert task.status == "review"
+        assert task.claim_lock is None
