@@ -28,7 +28,7 @@ class AccessibilityNodeCommitter(private val context: Context) {
         val result = TextSplicer.splice(fieldText, selStart, selEnd, segment)
 
         if (setTextDirect(node, result)) return true
-        return commitViaClipboard(node, segment)
+        return commitViaClipboard(node, result.formattedSegment)
     }
 
     private fun setTextDirect(node: AccessibilityNodeInfo, result: TextSplicer.Result): Boolean {
@@ -58,16 +58,19 @@ class AccessibilityNodeCommitter(private val context: Context) {
      * restrictions don't apply here — the accessibility service acts in response to a user
      * interaction, which counts as a foreground/interactive context for clipboard access.
      */
-    private fun commitViaClipboard(node: AccessibilityNodeInfo, segment: String): Boolean {
+    private fun commitViaClipboard(node: AccessibilityNodeInfo, formatted: String): Boolean {
         if (!node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE }) return false
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: return false
-        val before = node.text?.toString() ?: ""
-        val formatted = CommitFormatter.format(before, segment)
         val previousClip = clipboard.primaryClip
         clipboard.setPrimaryClip(ClipData.newPlainText("hermes_dictate", formatted))
         val pasted = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        if (previousClip != null) clipboard.setPrimaryClip(previousClip)
+        // Never leave dictated text on the clipboard: restore what was there, or clear it.
+        if (previousClip != null) {
+            clipboard.setPrimaryClip(previousClip)
+        } else {
+            runCatching { clipboard.clearPrimaryClip() }
+        }
         return pasted
     }
 }

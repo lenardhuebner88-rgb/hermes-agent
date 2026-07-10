@@ -101,6 +101,13 @@ class DictateOverlayService :
         val nowEditable = node != null && node.isEditable
         if (nowEditable) {
             mainHandler.removeCallbacks(focusLossRunnable)
+            // IME contract parity: a dictation started in field A must never keep writing into
+            // field B. A DIFFERENT editable node taking focus mid-session hard-stops it.
+            if (controller.phase != DictationController.Phase.IDLE &&
+                focusedNode != null && node != focusedNode
+            ) {
+                run(controller.hidden())
+            }
             focusedNode = node
             updateBubbleVisibility()
         } else {
@@ -180,7 +187,11 @@ class DictateOverlayService :
                     val dx = event.rawX - startRawX
                     if (kotlin.math.abs(dx) > DRAG_SLOP || kotlin.math.abs(dy) > DRAG_SLOP) moved = true
                     if (moved) {
-                        params.y = (startY + dy).coerceAtLeast(0)
+                        // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted Y the
+                        // bubble could otherwise be parked off-screen permanently.
+                        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getMetrics(it) }
+                        val maxY = (metrics.heightPixels - v.height).coerceAtLeast(0)
+                        params.y = (startY + dy).coerceIn(0, maxY)
                         runCatching { windowManager.updateViewLayout(v, params) }
                     }
                     true
@@ -191,6 +202,7 @@ class DictateOverlayService :
                         prefs.overlayBubbleY = params.y
                     } else if (event.actionMasked == MotionEvent.ACTION_UP) {
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        v.performClick()
                         onMicTapped()
                     }
                     true
@@ -389,8 +401,14 @@ class DictateOverlayService :
         // The cached node can be stale (recycled) by commit time — re-query live focus first.
         val live = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?.takeIf { it.isEditable }
-        val node = live ?: focusedNode
-        if (node == null || !committer.commit(node, text)) {
+        // Only ever commit into the field the dictation started in. Live focus on a DIFFERENT
+        // node means the user moved on — fail visibly rather than write into the wrong field.
+        val target = when {
+            live != null && (focusedNode == null || live == focusedNode) -> live
+            live == null -> focusedNode
+            else -> null
+        }
+        if (target == null || !committer.commit(target, text)) {
             // Dictated text would be silently lost — surface it in the pill instead.
             applyStatus(UiStatus.Failed(ErrorKind.INSERT_FAILED))
         }

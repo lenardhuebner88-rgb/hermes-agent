@@ -8,8 +8,12 @@ package net.hermes.dictate
  */
 object TextSplicer {
 
-    /** Result of splicing [segment] into [fieldText] at the current selection. */
-    data class Result(val newText: String, val newCursor: Int)
+    /**
+     * Result of splicing [segment] into [fieldText] at the current selection.
+     * [formattedSegment] is the segment after [CommitFormatter] ran against the splice point —
+     * the clipboard fallback pastes exactly this, so both paths share one formatting basis.
+     */
+    data class Result(val newText: String, val newCursor: Int, val formattedSegment: String)
 
     /**
      * @param fieldText the full text currently in the field (never null from the caller; an
@@ -33,6 +37,6 @@ object TextSplicer {
 
         val newText = before + formatted + after
         val newCursor = before.length + formatted.length
-        return Result(newText, newCursor)
+        return Result(newText, newCursor, formatted)
     }
 }
