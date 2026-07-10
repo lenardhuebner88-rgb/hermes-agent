@@ -22,9 +22,29 @@ vi.mock("@/lib/api", async () => {
 
 import { BibliothekView } from "./BibliothekView";
 
+const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+
+function mockExpandedViewport(expanded: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: expanded,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+  else delete (window as { matchMedia?: unknown }).matchMedia;
 });
 
 // Felder exakt wie `_Item.as_dict(with_body=False)` in hermes_cli/library_view.py.
@@ -188,6 +208,56 @@ describe("BibliothekView: Deep-Link stellt Modus + Dokument aus der URL wieder h
     expect(fetchJSONMock).toHaveBeenCalledWith(
       expect.stringContaining(`/api/library/item?id=${encodeURIComponent(ITEM.id)}`),
     );
+  });
+});
+
+describe("Lesesaal: TwoPane ab 1024 px", () => {
+  it("behält den Shelf neben dem Reader und gibt Fokus an den Auslöser zurück", async () => {
+    mockExpandedViewport(true);
+    mockLibraryFetch((url) => {
+      if (url.startsWith("/api/library/item?id=")) return { ...ITEM, body_md: "# Ausgabe\n\nLesetext." };
+      return undefined;
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+
+    const title = await lesesaalPanel().findByText(ITEM.title);
+    const trigger = title.closest('[role="button"]') as HTMLElement | null;
+    expect(trigger).not.toBeNull();
+    trigger?.focus();
+    fireEvent.click(trigger as HTMLElement);
+
+    expect(await screen.findByRole("region", { name: `Lesesaal: ${ITEM.title}` })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(trigger?.isConnected).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Detail schließen" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: `Lesesaal: ${ITEM.title}` })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  it("fokussiert nach einem Briefings-Cross-Mode-Open den sichtbaren Lesesaal-Tab", async () => {
+    mockExpandedViewport(true);
+    mockLibraryFetch((url) => {
+      if (url.startsWith("/api/library/item?id=")) return { ...ITEM, body_md: "Kurzer Lesetext." };
+      return undefined;
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
+
+    const titles = await briefingsPanel().findAllByText(ITEM.title);
+    const trigger = titles.map((title) => title.closest('[role="button"]')).find(Boolean) as HTMLElement | null;
+    expect(trigger).not.toBeNull();
+    trigger?.focus();
+    fireEvent.click(trigger as HTMLElement);
+
+    expect(await screen.findByRole("region", { name: `Lesesaal: ${ITEM.title}` })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Detail schließen" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: `Lesesaal: ${ITEM.title}` })).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole("tab", { name: /Lesesaal/ }));
+    });
   });
 });
 

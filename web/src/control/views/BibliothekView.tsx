@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ListTree } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
@@ -11,6 +11,7 @@ import {
   SignalChip,
   SignalLabel,
   SubtabChips,
+  TwoPane,
 } from "../components/leitstand";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
@@ -33,11 +34,9 @@ import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 import { BriefingsShelf } from "./briefings/BriefingsShelf";
 import { ModelleShelf } from "./models/ModelleShelf";
 import { ErgebnisseShelf } from "./results/ErgebnisseShelf";
-// TocNav ist im Nachschlagewerk (KnowledgeReader) implementiert und exportiert
-// — read-only importiert (KEINE Edits an views/knowledge/, paralleler
-// Builder arbeitet dort), damit der Lesesaal dieselbe Inhaltsverzeichnis-UI
-// nutzt statt sie zu duplizieren.
 import { TocNav } from "./knowledge/KnowledgeReader";
+import { useExpandedLibraryPane } from "./knowledge/useExpandedLibraryPane";
+import "./BibliothekView.css";
 
 // Bibliothek = zwei klar getrennte Bereiche (Programm 3, Next-Level):
 //   • Nachschlagewerk (Wissen/Kanon) — kuratiertes, thema-geordnetes Referenz-
@@ -168,7 +167,12 @@ interface LibrarySavedSearchesResponse {
 const LAST_VISIT_KEY = "hc-bibliothek-last-visit";
 
 
-export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unreadSince: number; onOpen: (item: LibraryItem) => void }) {
+export function ItemRow({ item, unreadSince, onOpen, selected = false }: {
+  item: LibraryItem;
+  unreadSince: number;
+  onOpen: (item: LibraryItem) => void;
+  selected?: boolean;
+}) {
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -180,6 +184,7 @@ export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unre
       <div
         role="button"
         tabIndex={0}
+        aria-expanded={selected}
         onClick={() => onOpen(item)}
         onKeyDown={handleKeyDown}
         className="cursor-pointer"
@@ -188,7 +193,7 @@ export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unre
           title={item.title}
           meta={fmtClock(item.ts)}
           trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
-          className="hover:bg-surface-3"
+          className={selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:bg-surface-3"}
         >
           {CATEGORY_LABEL[item.category] ?? item.category} · {item.series}
         </ListRow>
@@ -226,10 +231,12 @@ export function TopicFollowCard({ topic, onToggle, pending }: { topic: LibraryTo
 export function TopicFollowSection({ topics, onToggle, pendingTopicId }: { topics: LibraryTopic[]; onToggle: (topic: LibraryTopic) => void; pendingTopicId: string | null }) {
   return (
     <FleetPanel eyebrow={t.topicsTitle} meta={t.topicsMeta}>
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-        {topics.map((topic) => (
-          <TopicFollowCard key={topic.id} topic={topic} onToggle={onToggle} pending={pendingTopicId === topic.id} />
-        ))}
+      <div className="bibliothek-grid-host">
+        <div className="bibliothek-card-grid bibliothek-card-grid--four gap-2">
+          {topics.map((topic) => (
+            <TopicFollowCard key={topic.id} topic={topic} onToggle={onToggle} pending={pendingTopicId === topic.id} />
+          ))}
+        </div>
       </div>
     </FleetPanel>
   );
@@ -241,34 +248,36 @@ export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySaved
       {searches.length === 0 ? (
         <p className="text-sec text-ink-3">{t.savedEmpty}</p>
       ) : (
-        <ul className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-          {searches.map((search) => (
-            <li key={search.id} className="rounded-card border border-line bg-surface-2 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h3 className="truncate text-sec font-semibold text-ink">{search.title || search.name}</h3>
-                  <p className="mt-1 line-clamp-2 text-sec text-ink-2">{search.query}</p>
-                  {[...search.topic_tags, ...search.person_tags].length ? (
-                    <p className="mt-2 flex flex-wrap gap-1">
-                      {[...search.topic_tags, ...search.person_tags].map((tag) => (
-                        <span key={tag} className="rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{tag}</span>
-                      ))}
-                    </p>
-                  ) : null}
+        <div className="bibliothek-grid-host">
+          <ul className="bibliothek-card-grid bibliothek-card-grid--three gap-2">
+            {searches.map((search) => (
+              <li key={search.id} className="rounded-card border border-line bg-surface-2 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sec font-semibold text-ink">{search.title || search.name}</h3>
+                    <p className="mt-1 line-clamp-2 text-sec text-ink-2">{search.query}</p>
+                    {[...search.topic_tags, ...search.person_tags].length ? (
+                      <p className="mt-2 flex flex-wrap gap-1">
+                        {[...search.topic_tags, ...search.person_tags].map((tag) => (
+                          <span key={tag} className="rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{tag}</span>
+                        ))}
+                      </p>
+                    ) : null}
+                  </div>
+                  <button type="button" onClick={() => onApply(search)} className="inline-flex min-h-12 shrink-0 items-center rounded-card border border-line px-3 text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3">
+                    {t.savedApply}
+                  </button>
                 </div>
-                <button type="button" onClick={() => onApply(search)} className="inline-flex min-h-12 shrink-0 items-center rounded-card border border-line px-3 text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3">
-                  {t.savedApply}
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </FleetPanel>
   );
 }
 
-export function ReadingView({ item, neighbors, onNavigate, onBack }: {
+export function ReadingContent({ item, neighbors, onNavigate, onBack }: {
   item: LibraryItem;
   neighbors: { prev: LibraryItem | null; next: LibraryItem | null };
   onNavigate: (item: LibraryItem) => void;
@@ -336,6 +345,8 @@ export function ReadingView({ item, neighbors, onNavigate, onBack }: {
   );
 }
 
+export const ReadingView = ReadingContent;
+
 // Lesesaal (Ausgaben) — der bisherige Bibliothek-Inhalt, unverändert in Logik.
 // Der Hero lebt jetzt im Eltern-`BibliothekView`; die Filter (Kategorie-Chips +
 // Suche) sitzen darum in einer eigenen Filterleiste statt im Hero.
@@ -356,6 +367,8 @@ export function LesesaalBody() {
   const [pendingTopicId, setPendingTopicId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState<LibraryItem | null>(null);
+  const isExpanded = useExpandedLibraryPane();
+  const readingTriggerRef = useRef<HTMLElement | null>(null);
   // Ungelesen v1: Zeitstempel des letzten Besuchs aus localStorage; beim
   // Mount einfrieren (Lazy-Initializer), das Fortschreiben passiert im
   // Mount-Effekt (localStorage-Write + Date.now sind impure → nicht im Render).
@@ -370,7 +383,7 @@ export function LesesaalBody() {
   // Deep-Links (S2): geöffnetes Dokument als `item`-Search-Param — öffnen ist
   // ein push (Back-Button schließt das Dokument), schließen/Filterwechsel ist
   // ein replace (kein Verlauf-Wachstum für reine Zustands-Aufräumarbeit).
-  const openItem = useCallback((next: LibraryItem) => {
+  const navigateToItem = useCallback((next: LibraryItem) => {
     setReading(next);
     setSearchParams((prev) => {
       const p = new URLSearchParams(prev);
@@ -378,6 +391,12 @@ export function LesesaalBody() {
       return p;
     });
   }, [setSearchParams]);
+
+  const openItem = useCallback((next: LibraryItem) => {
+    const active = document.activeElement;
+    readingTriggerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    navigateToItem(next);
+  }, [navigateToItem]);
 
   const closeItem = useCallback(() => {
     setReading(null);
@@ -399,6 +418,16 @@ export function LesesaalBody() {
       }
     }, 0);
   }, [setSearchParams]);
+
+  const closePaneItem = useCallback(() => {
+    const trigger = readingTriggerRef.current;
+    readingTriggerRef.current = null;
+    closeItem();
+    window.setTimeout(() => {
+      if (trigger?.isConnected && !trigger.closest("[hidden]")) trigger.focus();
+      else document.getElementById("bibliothek-tab-lesesaal")?.focus();
+    }, 0);
+  }, [closeItem]);
 
   const fetchPage = useCallback(async (offset: number) => {
     const params = new URLSearchParams();
@@ -496,16 +525,24 @@ export function LesesaalBody() {
     const id = searchParams.get("item");
     if (!id) return;
     if (reading && reading.id === id) return;
+    const active = document.activeElement;
+    const trigger = active instanceof HTMLElement && active !== document.body ? active : null;
     const found = items.find((i) => i.id === id);
     if (found) {
-      const handle = window.setTimeout(() => setReading(found), 0);
+      const handle = window.setTimeout(() => {
+        readingTriggerRef.current = trigger;
+        setReading(found);
+      }, 0);
       return () => window.clearTimeout(handle);
     }
     let cancelled = false;
     void (async () => {
       try {
         const d = await fetchJSON<LibraryDetail>(`/api/library/item?id=${encodeURIComponent(id)}`);
-        if (!cancelled) setReading(d);
+        if (!cancelled) {
+          readingTriggerRef.current = trigger;
+          setReading(d);
+        }
       } catch {
         // Deep-Link zeigt auf ein verschwundenes/ungültiges Item — Liste bleibt sichtbar.
       }
@@ -526,7 +563,7 @@ export function LesesaalBody() {
   ], [data?.categories, counts]);
   const hasMore = data?.has_more ?? false;
 
-  return (
+  const shelf = (
     <div className="space-y-4">
       <div className="rounded-card border border-line bg-surface-1 p-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -564,26 +601,39 @@ export function LesesaalBody() {
         <FleetPanel eyebrow={t.sortListEyebrow} meta={t.issues(sortedItems.length)}>
           <ul className="space-y-1.5">
             {sortedItems.map((item) => (
-              <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} />
+              <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} selected={reading?.id === item.id} />
             ))}
           </ul>
         </FleetPanel>
       ) : isFrontpage ? (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {frontpage.map((item) => (
-            <div key={item.id} role="button" tabIndex={0} onClick={() => openItem(item)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openItem(item); } }} className="cursor-pointer">
-              <ListRow
-                title={item.title}
-                meta={fmtClock(item.ts)}
-                leading={<Eyebrow>{CATEGORY_LABEL[item.category] ?? item.category}</Eyebrow>}
-                trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
-                className="h-full hover:bg-surface-3"
-              >
-                <span className="line-clamp-3">{item.preview}</span>
-                <span className="mt-2 block font-data text-micro text-ink-3">{item.series}</span>
-              </ListRow>
-            </div>
-          ))}
+        <div className="bibliothek-grid-host">
+          <div className="bibliothek-card-grid bibliothek-card-grid--three gap-3">
+            {frontpage.map((item) => {
+              const selected = reading?.id === item.id;
+              return (
+                <div
+                  key={item.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={selected}
+                  onClick={() => openItem(item)}
+                  onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openItem(item); } }}
+                  className="cursor-pointer"
+                >
+                  <ListRow
+                    title={item.title}
+                    meta={fmtClock(item.ts)}
+                    leading={<Eyebrow>{CATEGORY_LABEL[item.category] ?? item.category}</Eyebrow>}
+                    trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
+                    className={selected ? "h-full shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "h-full hover:bg-surface-3"}
+                  >
+                    <span className="line-clamp-3">{item.preview}</span>
+                    <span className="mt-2 block font-data text-micro text-ink-3">{item.series}</span>
+                  </ListRow>
+                </div>
+              );
+            })}
+          </div>
         </div>
       ) : (
         <div className="space-y-3">
@@ -591,26 +641,13 @@ export function LesesaalBody() {
             <FleetPanel key={shelf.seriesId} eyebrow={shelf.series} meta={`${shelf.meta ? `${shelf.meta} · ` : ""}${t.issues(shelf.items.length)} · zuletzt ${fmtClock(shelf.items[0]?.ts ?? 0)}`}>
               <ul className="space-y-1.5">
                 {shelf.items.map((item) => (
-                  <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} />
+                  <ItemRow key={item.id} item={item} unreadSince={unreadSince} onOpen={openItem} selected={reading?.id === item.id} />
                 ))}
               </ul>
             </FleetPanel>
           ))}
         </div>
       )}
-
-      {reading ? (
-        <DrawerShell
-          eyebrow={CATEGORY_LABEL[reading.category] ?? reading.category}
-          title={reading.title}
-          ariaLabel={`${t.modeLesesaal}: ${reading.title}`}
-          closeLabel={t.back}
-          onClose={closeItem}
-          widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
-        >
-          <ReadingView item={reading} neighbors={neighbors} onNavigate={openItem} onBack={closeItem} />
-        </DrawerShell>
-      ) : null}
 
       {hasMore ? (
         <div className="flex justify-center pt-1">
@@ -625,6 +662,32 @@ export function LesesaalBody() {
         </div>
       ) : null}
     </div>
+  );
+
+  return (
+    <>
+      <TwoPane
+        list={shelf}
+        detail={isExpanded && reading ? (
+          <ReadingContent item={reading} neighbors={neighbors} onNavigate={navigateToItem} onBack={closePaneItem} />
+        ) : undefined}
+        detailLabel={reading ? `${t.modeLesesaal}: ${reading.title}` : t.modeLesesaal}
+        onCloseDetail={isExpanded && reading ? closePaneItem : undefined}
+      />
+
+      {!isExpanded && reading ? (
+        <DrawerShell
+          eyebrow={CATEGORY_LABEL[reading.category] ?? reading.category}
+          title={reading.title}
+          ariaLabel={`${t.modeLesesaal}: ${reading.title}`}
+          closeLabel={t.back}
+          onClose={closeItem}
+          widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
+        >
+          <ReadingContent item={reading} neighbors={neighbors} onNavigate={navigateToItem} onBack={closeItem} />
+        </DrawerShell>
+      ) : null}
+    </>
   );
 }
 

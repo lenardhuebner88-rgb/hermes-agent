@@ -8,6 +8,7 @@ import { fmtClock } from "../../lib/derive";
 import { extractToc, type TocEntry } from "../../lib/slug";
 import type { KnowledgeDoc, KnowledgeDocDetail } from "./knowledge.helpers";
 import { knowledgeType, knowledgeTypeLabel, resolveWikiLinks, sectionsLabel } from "./knowledge.helpers";
+import "./knowledge.css";
 
 /** llm-wiki-Docs sind an ihrer Id erkennbar (S2: Wikilinks nur hier auflösen). */
 function isLlmWikiDoc(id: string): boolean {
@@ -151,21 +152,23 @@ export function KnowledgeReader({ doc, collectionTitle, onBack }: {
       {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
       {detail ? (
-        <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
-          <aside className="hidden xl:block">
-            <div className="sticky top-4 rounded-card border border-line bg-surface-2 p-3">
-              <div className="mb-2 flex items-center gap-1.5">
-                <ListTree className="h-3.5 w-3.5" />
-                <Eyebrow>{t.toc}</Eyebrow>
+        <div className="knowledge-reader-layout-host">
+          <div className="knowledge-reader-layout">
+            <aside className="knowledge-reader-toc">
+              <div className="sticky top-4 rounded-card border border-line bg-surface-2 p-3">
+                <div className="mb-2 flex items-center gap-1.5">
+                  <ListTree className="h-3.5 w-3.5" />
+                  <Eyebrow>{t.toc}</Eyebrow>
+                </div>
+                <TocNav entries={toc} onJump={jump} />
               </div>
-              <TocNav entries={toc} onJump={jump} />
-            </div>
-          </aside>
-          <article className="min-w-0 rounded-card border border-line bg-surface-2 p-4 sm:p-5">
-            <ProseMarkdown slugHeadings wrapTables onInternalLink={isLlmWiki ? setOpenId : undefined}>
-              {renderedBody}
-            </ProseMarkdown>
-          </article>
+            </aside>
+            <article className="min-w-0 rounded-card border border-line bg-surface-2 p-4 sm:p-5">
+              <ProseMarkdown slugHeadings wrapTables onInternalLink={isLlmWiki ? setOpenId : undefined}>
+                {renderedBody}
+              </ProseMarkdown>
+            </article>
+          </div>
         </div>
       ) : error ? null : (
         <p className="text-sec text-ink-3">{t.loading}</p>

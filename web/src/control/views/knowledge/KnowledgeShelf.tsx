@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { FleetEmptyState, SignalLabel } from "../../components/leitstand";
+import { FleetEmptyState, SignalLabel, TwoPane } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";
 import { fmtAge, nowSec } from "../../lib/derive";
 import { useKnowledgeCatalog } from "../../hooks/useControlData";
@@ -19,6 +19,8 @@ import {
   type KnowledgeTypeCount,
 } from "./knowledge.helpers";
 import { KnowledgeReader } from "./KnowledgeReader";
+import { useExpandedLibraryPane } from "./useExpandedLibraryPane";
+import "./knowledge.css";
 
 /** Sammlungs-Icon als statisches JSX (Backend liefert nur den Namen). Bewusst
  *  ein Switch statt dynamischer Komponenten-Auflösung → react-hooks/static-
@@ -156,13 +158,20 @@ function CatalogFilters({
 }
 
 /** Eine Doc-Karte im Regal. Exportiert für Unit-Tests. */
-export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: KnowledgeDoc) => void }) {
+export function DocCard({ doc, onOpen, selected = false }: {
+  doc: KnowledgeDoc;
+  onOpen: (doc: KnowledgeDoc) => void;
+  selected?: boolean;
+}) {
   const typeLabel = knowledgeTypeLabel(knowledgeType(doc));
   return (
     <button
       type="button"
       onClick={() => onOpen(doc)}
-      className="flex h-full min-h-[11rem] flex-col gap-2 rounded-card border border-line bg-surface-2 p-4 text-left transition-colors hover:bg-surface-3"
+      aria-expanded={selected}
+      className={`flex h-full min-h-[11rem] flex-col gap-2 rounded-card border border-line bg-surface-2 p-4 text-left transition-colors ${
+        selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:bg-surface-3"
+      }`}
     >
       <Eyebrow>{typeLabel}</Eyebrow>
       <h4 className="text-body font-semibold leading-snug text-ink">{doc.title}</h4>
@@ -202,11 +211,12 @@ function PulseStrip({ pulse }: { pulse: NonNullable<KnowledgeCollection["pulse"]
 
 /** Eine Sammlung (ein Regal): Akzent-Icon, Titel, Beschreibung, Doc-Raster.
  *  Exportiert für Unit-Tests. */
-export function CollectionSection({ collection, now, onOpen }: {
+export function CollectionSection({ collection, now, onOpen, selectedId = null }: {
   collection: KnowledgeCollection;
   /** epoch-Sekunden "jetzt" (aus `catalog.now`) für den "aktualisiert vor X"-Chip. */
   now: number;
   onOpen: (doc: KnowledgeDoc) => void;
+  selectedId?: string | null;
 }) {
   return (
     <section className="space-y-3">
@@ -226,10 +236,12 @@ export function CollectionSection({ collection, now, onOpen }: {
           {collection.pulse && collection.pulse.length > 0 ? <PulseStrip pulse={collection.pulse} /> : null}
         </div>
       </header>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {collection.docs.map((doc) => (
-          <DocCard key={doc.id} doc={doc} onOpen={onOpen} />
-        ))}
+      <div className="knowledge-grid-host">
+        <div className="knowledge-card-grid">
+          {collection.docs.map((doc) => (
+            <DocCard key={doc.id} doc={doc} onOpen={onOpen} selected={selectedId === doc.id} />
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -247,6 +259,25 @@ export function KnowledgeShelf() {
   const [activeCollection, setActiveCollection] = useState<string | null>(null);
   const [activeType, setActiveType] = useState<string | null>(null);
   const [reading, setReading] = useState<KnowledgeDoc | null>(null);
+  const isExpanded = useExpandedLibraryPane();
+  const shelfRef = useRef<HTMLDivElement>(null);
+  const readingTriggerRef = useRef<HTMLElement | null>(null);
+
+  const openDoc = useCallback((doc: KnowledgeDoc) => {
+    const active = document.activeElement;
+    readingTriggerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    setReading(doc);
+  }, []);
+
+  const closeReading = useCallback(() => {
+    const trigger = readingTriggerRef.current;
+    readingTriggerRef.current = null;
+    setReading(null);
+    window.setTimeout(() => {
+      if (trigger?.isConnected && !trigger.closest("[hidden]")) trigger.focus();
+      else shelfRef.current?.focus();
+    }, 0);
+  }, []);
 
   // Deep-Link aus der Bibliothek-Schnellauswahl (BriefingsShelf-Kacheln
   // setzen `?collection=<id>`): jede neue Collection-Id preselektiert das
@@ -293,17 +324,18 @@ export function KnowledgeShelf() {
     [activeCollection, activeType, catalog],
   );
 
-  if (reading) {
-    const collectionTitle =
-      catalog?.collections.find((c) => c.id === reading.collection)?.title ?? "";
-    return <KnowledgeReader doc={reading} collectionTitle={collectionTitle} onBack={() => setReading(null)} />;
-  }
-
   const collections = visibleCatalog?.collections ?? [];
   const nowTs = visibleCatalog?.now ?? nowSec();
+  const collectionTitle = reading
+    ? catalog?.collections.find((collection) => collection.id === reading.collection)?.title ?? ""
+    : "";
 
-  return (
-    <div className="space-y-4">
+  if (reading && !isExpanded) {
+    return <KnowledgeReader doc={reading} collectionTitle={collectionTitle} onBack={closeReading} />;
+  }
+
+  const shelf = (
+    <div ref={shelfRef} className="space-y-4" tabIndex={-1}>
       <div className="relative">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
         <input
@@ -339,10 +371,25 @@ export function KnowledgeShelf() {
       ) : (
         <div className="space-y-4">
           {collections.map((collection) => (
-            <CollectionSection key={collection.id} collection={collection} now={nowTs} onOpen={setReading} />
+            <CollectionSection
+              key={collection.id}
+              collection={collection}
+              now={nowTs}
+              onOpen={openDoc}
+              selectedId={reading?.id}
+            />
           ))}
         </div>
       )}
     </div>
+  );
+
+  return (
+    <TwoPane
+      list={shelf}
+      detail={reading ? <KnowledgeReader doc={reading} collectionTitle={collectionTitle} onBack={closeReading} /> : undefined}
+      detailLabel={reading ? `${collectionTitle}: ${reading.title}` : "Wissensdokument"}
+      onCloseDetail={reading ? closeReading : undefined}
+    />
   );
 }

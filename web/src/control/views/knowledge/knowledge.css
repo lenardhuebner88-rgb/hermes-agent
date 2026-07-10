@@ -1,0 +1,45 @@
+.knowledge-grid-host {
+  container: knowledge-grid / inline-size;
+}
+
+.knowledge-card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.knowledge-reader-layout-host {
+  container: knowledge-reader / inline-size;
+}
+
+.knowledge-reader-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.knowledge-reader-toc {
+  display: none;
+}
+
+@container knowledge-grid (min-width: 680px) {
+  .knowledge-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container knowledge-grid (min-width: 1080px) {
+  .knowledge-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container knowledge-reader (min-width: 720px) {
+  .knowledge-reader-layout {
+    grid-template-columns: 16rem minmax(0, 1fr);
+  }
+
+  .knowledge-reader-toc {
+    display: block;
+  }
+}

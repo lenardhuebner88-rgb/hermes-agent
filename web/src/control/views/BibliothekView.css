@@ -1,0 +1,26 @@
+.bibliothek-grid-host {
+  container: bibliothek-grid / inline-size;
+}
+
+.bibliothek-card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container bibliothek-grid (min-width: 680px) {
+  .bibliothek-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container bibliothek-grid (min-width: 1080px) {
+  .bibliothek-card-grid--three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container bibliothek-grid (min-width: 1320px) {
+  .bibliothek-card-grid--four {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}

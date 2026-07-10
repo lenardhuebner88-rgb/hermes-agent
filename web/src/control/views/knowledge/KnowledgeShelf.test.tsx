@@ -5,7 +5,7 @@
 // Dateiende gebraucht (echter Fetch-Mock + Router-Kontext).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
@@ -29,9 +29,29 @@ import {
   type KnowledgeDoc,
 } from "./knowledge.helpers";
 
+const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+
+function mockExpandedViewport(expanded: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: expanded,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+  else delete (window as { matchMedia?: unknown }).matchMedia;
 });
 
 const doc = (over: Partial<KnowledgeDoc>): KnowledgeDoc => ({
@@ -338,5 +358,49 @@ describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
     expect(screen.queryByText("Canon-Index")).toBeNull();
     expect(screen.getByRole("button", { name: /Kanon/ }).getAttribute("aria-pressed")).toBe("false");
     expect(screen.getByRole("button", { name: /LLM-Wiki/ }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("behält das Regal ab 1024 px neben dem Reader und gibt Fokus an die DocCard zurück", async () => {
+    mockExpandedViewport(true);
+    const overview = KNOWLEDGE_CATALOG.collections[1].docs[0];
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/knowledge/doc")) {
+        return { ...overview, body_md: "# Overview\n\n## Modelle\n\nInhalt." };
+      }
+      if (url.startsWith("/api/library/knowledge")) return KNOWLEDGE_CATALOG;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=wissen"]}><KnowledgeShelf /></MemoryRouter>);
+
+    const trigger = await screen.findByRole("button", { name: /Overview/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    expect(await screen.findByRole("region", { name: /LLM-Wiki: Overview/ })).toBeTruthy();
+    expect(screen.getByText("Canon-Index")).toBeTruthy();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Alle Regale" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: /LLM-Wiki: Overview/ })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  it("behält unter 1024 px das Full-Replace-Muster", async () => {
+    mockExpandedViewport(false);
+    const overview = KNOWLEDGE_CATALOG.collections[1].docs[0];
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/knowledge/doc")) return { ...overview, body_md: "# Overview\n\nInhalt." };
+      if (url.startsWith("/api/library/knowledge")) return KNOWLEDGE_CATALOG;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=wissen"]}><KnowledgeShelf /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Overview/ }));
+
+    expect(await screen.findByRole("button", { name: "Alle Regale" })).toBeTruthy();
+    expect(screen.queryByLabelText("Im Nachschlagewerk suchen")).toBeNull();
+    expect(screen.queryByRole("region", { name: /LLM-Wiki: Overview/ })).toBeNull();
   });
 });
