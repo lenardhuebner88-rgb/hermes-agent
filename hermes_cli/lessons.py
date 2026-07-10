@@ -485,15 +485,20 @@ def run_harvest(
     output_path: Optional[Path] = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     now_ts: Optional[int] = None,
+    board: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run the deterministic lessons harvest and write the JSON artefact.
 
     Returns a summary dict with ``output_path``, ``source_counts``, and
     ``candidate_count``. Does not make LLM calls. Idempotent.
+
+    ``board`` resolves the kanban DB the same way :func:`run_promote` resolves
+    it — only consulted when ``kanban_db_path`` is not given explicitly, so
+    a caller pinning both (mismatched) is never silently overridden.
     """
     from hermes_cli.kanban_db import kanban_db_path as resolve_db_path
 
-    db_path = kanban_db_path if kanban_db_path is not None else resolve_db_path()
+    db_path = kanban_db_path if kanban_db_path is not None else resolve_db_path(board=board)
     out_path = output_path if output_path is not None else default_output_path()
     loops_dir = loops_root if loops_root is not None else (get_hermes_home() / "loops")
 
@@ -813,6 +818,7 @@ def run_lessons_cycle(
         output_path=output_path,
         window_days=window_days,
         now_ts=now_ts,
+        board=board,
     )
     promote_result: Optional[dict[str, Any]] = None
     if harvest_result.get("candidate_count", 0) > 0:

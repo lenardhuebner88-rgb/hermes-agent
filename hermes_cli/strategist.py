@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -604,13 +605,19 @@ LOOP_HEALTH_MIN_FAILS = 3
 
 def _loop_health_lever(pack: str, fail_kind: str, fails: int, verified: int) -> Lever:
     return Lever(
-        key=f"LOOP-HEALTH-{_cost_lane_token(pack)}",
+        key=f"LOOP-HEALTH-{_cost_lane_token(pack) or 'UNKNOWN'}",
         title=f"Loop-Pack '{pack}' Fehlerquote senken (dominant: {fail_kind})",
         lane="premium",
         target_metric=(
             f"Fails im Loop-Pack '{pack}' (ledger.jsonl, dominant fail_kind "
-            f"'{fail_kind}') von aktuell {fails} auf unter {verified or 0} "
-            "verifizierte Runden senken"
+            f"'{fail_kind}') von aktuell {fails} auf 0 senken und wieder "
+            "verifizierte Runden erreichen"
+            if verified == 0
+            else (
+                f"Fails im Loop-Pack '{pack}' (ledger.jsonl, dominant fail_kind "
+                f"'{fail_kind}') von aktuell {fails} auf unter {verified} "
+                "verifizierte Runden senken"
+            )
         ),
         roi=(
             f"mittel-hoch: das Pack '{pack}' hat mehr Fails ({fails}) als "
@@ -635,8 +642,9 @@ def _loop_health_lever(pack: str, fail_kind: str, fails: int, verified: int) -> 
 
 
 def _loop_health_levers(loop_stats: Any, suppressed: set[str]) -> list[Lever]:
-    """LOOP-HEALTH-S1: one lever per unhealthy pack (fails >= threshold and
-    fails > verified, excluding usage_limit fails from the count)."""
+    """LOOP-HEALTH-S1: one lever per unhealthy pack (fails+blocked >= threshold
+    and fails+blocked > verified, excluding usage_limit from both counts —
+    usage_limit is an external throttle, not a pack health signal)."""
     if not isinstance(loop_stats, dict):
         return []
     levers: list[Lever] = []
@@ -646,18 +654,27 @@ def _loop_health_levers(loop_stats: Any, suppressed: set[str]) -> list[Lever]:
         fails_by_kind = stats.get("fails_by_kind") or {}
         if not isinstance(fails_by_kind, dict):
             continue
+        blocked_by_kind = stats.get("blocked_by_kind") or {}
+        if not isinstance(blocked_by_kind, dict):
+            blocked_by_kind = {}
         counted = {k: v for k, v in fails_by_kind.items() if k != "usage_limit"}
+        counted_blocked = {k: v for k, v in blocked_by_kind.items() if k != "usage_limit"}
         total_fails = sum(int(v or 0) for v in counted.values())
-        if total_fails < LOOP_HEALTH_MIN_FAILS:
+        total_blocked = sum(int(v or 0) for v in counted_blocked.values())
+        total = total_fails + total_blocked
+        if total < LOOP_HEALTH_MIN_FAILS:
             continue
         verified = int(stats.get("verified") or 0)
-        if total_fails <= verified:
+        if total <= verified:
             continue
-        dominant_kind = max(counted.items(), key=lambda kv: kv[1])[0] if counted else "unknown"
-        key = f"LOOP-HEALTH-{_cost_lane_token(pack)}"
+        combined = dict(counted)
+        for k, v in counted_blocked.items():
+            combined[k] = combined.get(k, 0) + v
+        dominant_kind = max(combined.items(), key=lambda kv: kv[1])[0] if combined else "unknown"
+        key = f"LOOP-HEALTH-{_cost_lane_token(pack) or 'UNKNOWN'}"
         if key in suppressed:
             continue
-        levers.append(_loop_health_lever(pack, dominant_kind, total_fails, verified))
+        levers.append(_loop_health_lever(pack, dominant_kind, total, verified))
     return levers
 
 
@@ -810,6 +827,8 @@ def _lever_class_of_key(lever_key: str) -> str:
     here so repeated fix/triage levers of the same gate accumulate outcomes
     under one class instead of each starting at n=0 forever.
     """
+    if not (lever_key.startswith("GATE-FIX-") or lever_key.startswith("GATE-TRIAGE-")):
+        return lever_key
     prefix, _, suffix = lever_key.rpartition("-")
     if prefix and len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix.lower()):
         return prefix
@@ -829,7 +848,13 @@ def _apply_calibration(lever: Lever, calibration: dict[str, Any]) -> Lever:
         return lever
     factor = entry.get("factor")
     n = entry.get("n")
-    if not isinstance(factor, (int, float)) or not isinstance(n, (int, float)):
+    if isinstance(factor, bool) or not isinstance(factor, (int, float)):
+        return lever
+    if not math.isfinite(factor) or not (_CALIBRATION_CLAMP[0] <= factor <= _CALIBRATION_CLAMP[1]):
+        return lever
+    if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n):
+        return lever
+    if int(n) < _CALIBRATION_MIN_N:
         return lever
     stamp = f"x{factor:.2f} (n={int(n)})"
     return Lever(
@@ -970,16 +995,15 @@ def _grounding_known_tokens() -> set[str]:
 
 
 def _grounding_path_exists(token: str) -> bool:
-    """True iff *token* looks like a path (contains ``/`` or ``.``) AND resolves
-    to an existing FILE, absolute or repo-relative.
+    """True iff *token* resolves to an existing FILE, absolute or repo-relative.
 
     ``os.path.exists`` alone also matches directories, so bare prose tokens
     like "tests" or "docs" (which happen to be top-level repo directories)
-    would otherwise pass as a "verifiable path" — this requires both a
-    path-shaped token and an actual file to reject that false positive.
+    would otherwise pass as a "verifiable path" — ``os.path.isfile`` already
+    excludes directories, so relying on it alone rejects that false positive
+    without also rejecting real extensionless files (``Dockerfile``,
+    ``LICENSE``) that a "/ or ." shape precheck would wrongly reject.
     """
-    if "/" not in token and "." not in token:
-        return False
     try:
         if os.path.isfile(token):
             return True
@@ -1348,8 +1372,9 @@ def propose(
         else:
             gated_out.append({"key": lever.key, "title": lever.title, "reason": verdict.reason})
 
-    # Rank by ROI score (desc), stable on key, then CAP.
-    survivors.sort(key=lambda lv: (-lv.roi_score, lv.key))
+    # Rank by rank_score (value density, desc) to keep derive_levers' ordering
+    # intact after self_gate filtering, stable on key, then CAP.
+    survivors.sort(key=lambda lv: (-lv.rank_score, lv.key))
     capped = survivors[: max(0, cap)]
 
     ingested: list[dict[str, Any]] = []

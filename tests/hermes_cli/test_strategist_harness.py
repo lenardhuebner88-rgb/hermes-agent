@@ -169,6 +169,47 @@ def test_cap_limits_to_five(board_home, monkeypatch):
         assert len(strategist_surface.held_operator_proposals(conn)) == 5
 
 
+def test_cap_keeps_higher_rank_score_not_higher_roi_score(board_home, monkeypatch):
+    """STRATEGIST-RANKING-S1: propose()'s CAP step must preserve derive_levers'
+    rank_score (value-density) order — not re-sort survivors by raw roi_score,
+    which would override it. Lever A has a bigger raw roi_score (higher cost,
+    higher signal) but a lower rank_score than lever B (cheap, high density)."""
+    _patch_budget(monkeypatch, 30.0)
+    drafts = [
+        {
+            "key": "DRAFT-HIGH-ROI-LOW-RANK",
+            "title": "High raw ROI, expensive",
+            "lane": "coder-claude",
+            "target_metric": "metric A up",
+            "roi": "positive",
+            "counter_metric": "guardrail A held",
+            "grounding": "git log und grep in hermes_cli/strategist.py belegen Luecke A",
+            "counter_risk": 0.1,
+            "gain_weight": 1.0,
+            "cost": 2.0,
+            "signal_strength": 10.0,  # roi_score = 10*1 - 2 = 8, rank_score = 8/2 = 4
+        },
+        {
+            "key": "DRAFT-LOW-ROI-HIGH-RANK",
+            "title": "Lower raw ROI, cheap and value-dense",
+            "lane": "coder-claude",
+            "target_metric": "metric B up",
+            "roi": "positive",
+            "counter_metric": "guardrail B held",
+            "grounding": "git log und grep in hermes_cli/strategist.py belegen Luecke B",
+            "counter_risk": 0.1,
+            "gain_weight": 1.0,
+            "cost": 0.3,
+            "signal_strength": 3.0,  # roi_score = 3*1 - 0.3 = 2.7, rank_score = 2.7/0.3 = 9
+        },
+    ]
+    out_dir = board_home / "specs"
+    result = strategist.propose(board=None, out_dir=out_dir, drafts=drafts, cap=1)
+    assert result["survivors"] == 2
+    assert len(result["ingested"]) == 1
+    assert result["ingested"][0]["key"] == "DRAFT-LOW-ROI-HIGH-RANK"
+
+
 # --------------------------------------------------------------------------- #
 # 4. Self-gate drops a counter-metric loser
 # --------------------------------------------------------------------------- #

@@ -1951,9 +1951,59 @@ def test_read_ledger_stats_tolerates_malformed_lines(tmp_path):
 def test_read_ledger_stats_missing_file_returns_zeroed(tmp_path):
     stats = read_ledger_stats(tmp_path / "nicht-vorhanden")
     assert stats == {
-        "rounds": 0, "verified": 0, "fails_by_kind": {}, "bounced": 0,
-        "avg_build_secs": None, "avg_verify_secs": None, "last_ts": None,
+        "rounds": 0, "verified": 0, "fails_by_kind": {}, "blocked_by_kind": {},
+        "bounced": 0, "avg_build_secs": None, "avg_verify_secs": None, "last_ts": None,
     }
+
+
+def test_read_ledger_stats_counts_blocked_by_kind(tmp_path):
+    state_dir = tmp_path / "blocked-pack"
+    _write_jsonl(state_dir, [
+        {"round": 1, "phase": "sweep", "verdict": "blocked", "fail_kind": "usage_limit"},
+        {"round": 1, "phase": "sweep", "verdict": "blocked", "fail_kind": "usage_limit"},
+        {"round": 2, "phase": "verify", "verdict": "blocked", "fail_kind": "build_fail"},
+        {"round": 3, "phase": "sweep", "verdict": "blocked"},  # kein fail_kind -> "unknown"
+    ])
+
+    stats = read_ledger_stats(state_dir)
+    assert stats["blocked_by_kind"] == {"usage_limit": 2, "build_fail": 1, "unknown": 1}
+    # blocked events must not be counted as fails or outcome rounds
+    assert stats["fails_by_kind"] == {}
+    assert stats["rounds"] == 0
+
+
+def test_read_ledger_stats_rounds_is_outcome_event_count_not_distinct_round(tmp_path):
+    # Append-only runs restart round numbering at R1 each invocation — a
+    # distinct-round-number set collapses across runs. "rounds" must count
+    # outcome events instead.
+    state_dir = tmp_path / "restarting-pack"
+    _write_jsonl(state_dir, [
+        {"round": 1, "phase": "verify", "verdict": "ok"},
+        {"round": 2, "phase": "verify", "verdict": "ok"},
+        # second run restarts at round 1
+        {"round": 1, "phase": "verify", "verdict": "ok"},
+    ])
+
+    stats = read_ledger_stats(state_dir)
+    assert stats["rounds"] == 3
+    assert stats["verified"] == 3
+
+
+def test_read_ledger_stats_skips_wrong_typed_fields_without_discarding_all(tmp_path):
+    state_dir = tmp_path / "poisoned-pack"
+    state_dir.mkdir(parents=True)
+    path = state_dir / "ledger.jsonl"
+    path.write_text(
+        json.dumps({"round": [], "phase": "build", "verdict": "fail", "fail_kind": ["x"]}) + "\n"
+        + json.dumps({"round": 1, "phase": "verify", "verdict": "ok"}) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = read_ledger_stats(state_dir)
+    # the poisoned line must not raise and must not wipe the good line's stats
+    assert stats["verified"] == 1
+    assert stats["rounds"] == 2
+    assert stats["fails_by_kind"] == {"unknown": 1}
 
 
 def test_read_all_ledger_stats_maps_pack_name_to_stats(tmp_path):

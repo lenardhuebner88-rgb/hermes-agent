@@ -111,6 +111,15 @@ def test_calibration_ignores_unmeasurable_and_confounded():
     assert calib == {}
 
 
+def test_lever_class_of_key_only_strips_known_dynamic_prefixes():
+    """Only GATE-FIX-/GATE-TRIAGE- keys carry a stripped trailing 8-hex digest;
+    any other key ending in an 8-hex-looking segment (e.g. a pack literally
+    named '...-deadbeef') must be its own class untouched."""
+    assert strategist._lever_class_of_key("LOOP-HEALTH-FOO-DEADBEEF") == "LOOP-HEALTH-FOO-DEADBEEF"
+    assert strategist._lever_class_of_key("GATE-FIX-X-1a2b3c4d") == "GATE-FIX-X"
+    assert strategist._lever_class_of_key("GATE-TRIAGE-Y-cafebabe") == "GATE-TRIAGE-Y"
+
+
 def test_static_key_has_no_hash_suffix_stripped():
     """Static keys (no trailing 8-hex digest) are their own class untouched."""
     records = [
@@ -172,6 +181,30 @@ def test_derive_levers_unchanged_when_no_calibration_entry():
         "ledger": {"by_class": {kb.HEILER_CLASS_TRANSIENT: 3}, "total": 3, "entries": []},
         "suppressed": set(),
         "lever_calibration": {"SOME-OTHER-CLASS": {"factor": 1.4, "n": 5, "updated_at": "x"}},
+    }
+    levers = strategist.derive_levers(context)
+    assert levers[0].gain_weight == pytest.approx(1.0)
+    assert levers[0].calibration is None
+
+
+@pytest.mark.parametrize(
+    "poisoned_entry",
+    [
+        {"factor": float("inf"), "n": 4, "updated_at": "x"},
+        {"factor": float("nan"), "n": 4, "updated_at": "x"},
+        {"factor": 9.0, "n": 4, "updated_at": "x"},  # outside [0.5, 1.5]
+        {"factor": 1.2, "n": 1, "updated_at": "x"},  # below _CALIBRATION_MIN_N
+        {"factor": 1.2, "n": "x", "updated_at": "x"},  # non-numeric n
+    ],
+)
+def test_derive_levers_ignores_poisoned_calibration_entry(poisoned_entry):
+    """A hand-edited/corrupt calibration file entry must be a no-op, not a crash
+    or an unbounded gain_weight multiplier."""
+    context = {
+        "metrics": None,
+        "ledger": {"by_class": {kb.HEILER_CLASS_TRANSIENT: 3}, "total": 3, "entries": []},
+        "suppressed": set(),
+        "lever_calibration": {"HEILER-TRANSIENT": poisoned_entry},
     }
     levers = strategist.derive_levers(context)
     assert levers[0].gain_weight == pytest.approx(1.0)
@@ -276,6 +309,23 @@ def test_derive_levers_emits_loop_health_for_unhealthy_pack():
     assert gate.passed is True
 
 
+def test_loop_health_lever_wording_when_verified_is_zero():
+    """target_metric must not read 'auf unter 0 senken' when verified==0 — that
+    is a nonsensical target (0 is already the floor for a count)."""
+    context = {
+        "metrics": None,
+        "ledger": {"by_class": {}, "total": 0, "entries": []},
+        "suppressed": set(),
+        "loop_stats": {
+            "docs-pack": _loop_stats({"build_fail": 3}, verified=0),
+        },
+    }
+    levers = strategist.derive_levers(context)
+    lever = next(lv for lv in levers if lv.key == "LOOP-HEALTH-DOCS-PACK")
+    assert "auf unter 0" not in lever.target_metric
+    assert "auf 0 senken" in lever.target_metric
+
+
 def test_derive_levers_no_lever_for_healthy_pack():
     context = {
         "metrics": None,
@@ -287,6 +337,53 @@ def test_derive_levers_no_lever_for_healthy_pack():
     }
     levers = strategist.derive_levers(context)
     assert not [lv for lv in levers if lv.key.startswith("LOOP-HEALTH-")]
+
+
+def test_loop_health_lever_key_falls_back_to_unknown_for_odd_pack_name():
+    """A pack name that slugs to an empty token (e.g. all-punctuation) must not
+    collide on the bare 'LOOP-HEALTH-' key — fall back to UNKNOWN like the
+    other _cost_lane_token call sites."""
+    context = {
+        "metrics": None,
+        "ledger": {"by_class": {}, "total": 0, "entries": []},
+        "suppressed": set(),
+        "loop_stats": {
+            "***": _loop_stats({"build_fail": 3}, verified=1),
+        },
+    }
+    levers = strategist.derive_levers(context)
+    keys = [lv.key for lv in levers]
+    assert "LOOP-HEALTH-UNKNOWN" in keys
+    assert "LOOP-HEALTH-" not in keys
+
+
+def test_loop_health_lever_counts_blocked_towards_unhealthy():
+    """Non-usage_limit ``blocked`` events must count towards the pack's
+    unhealthy total alongside ``fails_by_kind`` — a pack with only 1 fail but
+    2 non-throttle blocked events is unhealthy too."""
+    context = {
+        "metrics": None,
+        "ledger": {"by_class": {}, "total": 0, "entries": []},
+        "suppressed": set(),
+        "loop_stats": {
+            "docs-pack": {
+                "rounds": 0,
+                "verified": 1,
+                "fails_by_kind": {"build_fail": 1},
+                "blocked_by_kind": {"build_fail": 2, "usage_limit": 5},
+                "bounced": 0,
+                "avg_build_secs": None,
+                "avg_verify_secs": None,
+                "last_ts": None,
+            },
+        },
+    }
+    levers = strategist.derive_levers(context)
+    keys = [lv.key for lv in levers]
+    assert "LOOP-HEALTH-DOCS-PACK" in keys
+    lever = next(lv for lv in levers if lv.key == "LOOP-HEALTH-DOCS-PACK")
+    # total = 1 fail + 2 non-usage_limit blocked = 3 >= MIN_FAILS and > verified(1)
+    assert "3" in lever.title or "3" in lever.target_metric or lever.signal_strength == 3.0
 
 
 def test_derive_levers_no_lever_for_usage_limit_only_fails():
@@ -310,6 +407,16 @@ def test_derive_levers_missing_loop_stats_unchanged():
     }
     levers = strategist.derive_levers(context)
     assert levers == []
+
+
+def test_grounding_gate_accepts_extensionless_real_file():
+    """A real repo-relative file with no '.'/'/' shape (e.g. an extensionless
+    entrypoint script) must not be rejected by a path-shape precheck —
+    os.path.isfile already excludes directories, so relying on it alone is
+    both necessary and sufficient."""
+    lever = _lever_with_grounding("siehe hermes fuer Details")
+    result = strategist.grounding_gate(lever)
+    assert result.passed is True
 
 
 def test_grounding_gate_rejects_bare_directory_name_prose():

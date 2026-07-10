@@ -366,6 +366,7 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
         "rounds": 0,
         "verified": 0,
         "fails_by_kind": {},
+        "blocked_by_kind": {},
         "bounced": 0,
         "avg_build_secs": None,
         "avg_verify_secs": None,
@@ -378,7 +379,7 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return stats
-    rounds: set = set()
+    outcome_rounds = 0
     build_secs: list[float] = []
     verify_secs: list[float] = []
     last_ts: str | None = None
@@ -392,27 +393,39 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
             continue
         if not isinstance(event, dict):
             continue
-        rnd = event.get("round")
-        if rnd is not None:
-            rounds.add(rnd)
-        verdict = event.get("verdict")
-        if verdict == "ok":
-            stats["verified"] += 1
-        elif verdict == "fail":
-            kind = event.get("fail_kind") or "unknown"
-            stats["fails_by_kind"][kind] = stats["fails_by_kind"].get(kind, 0) + 1
-        elif verdict == "bounced":
-            stats["bounced"] += 1
-        bsecs = event.get("build_secs")
-        if isinstance(bsecs, (int, float)) and not isinstance(bsecs, bool):
-            build_secs.append(bsecs)
-        vsecs = event.get("verify_secs")
-        if isinstance(vsecs, (int, float)) and not isinstance(vsecs, bool):
-            verify_secs.append(vsecs)
-        ts = event.get("ts")
-        if isinstance(ts, str) and (last_ts is None or ts > last_ts):
-            last_ts = ts
-    stats["rounds"] = len(rounds)
+        try:
+            verdict = event.get("verdict")
+            if verdict == "ok":
+                stats["verified"] += 1
+                outcome_rounds += 1
+            elif verdict == "fail":
+                kind = event.get("fail_kind") or "unknown"
+                if not isinstance(kind, str):
+                    kind = "unknown"
+                stats["fails_by_kind"][kind] = stats["fails_by_kind"].get(kind, 0) + 1
+                outcome_rounds += 1
+            elif verdict == "bounced":
+                stats["bounced"] += 1
+                outcome_rounds += 1
+            elif verdict == "blocked":
+                kind = event.get("fail_kind") or "unknown"
+                if not isinstance(kind, str):
+                    kind = "unknown"
+                stats["blocked_by_kind"][kind] = stats["blocked_by_kind"].get(kind, 0) + 1
+            bsecs = event.get("build_secs")
+            if isinstance(bsecs, (int, float)) and not isinstance(bsecs, bool):
+                build_secs.append(bsecs)
+            vsecs = event.get("verify_secs")
+            if isinstance(vsecs, (int, float)) and not isinstance(vsecs, bool):
+                verify_secs.append(vsecs)
+            ts = event.get("ts")
+            if isinstance(ts, str) and (last_ts is None or ts > last_ts):
+                last_ts = ts
+        except (TypeError, ValueError, AttributeError):
+            # A single line with wrong-typed fields (e.g. list-valued fail_kind)
+            # must not discard the entire pack's stats.
+            continue
+    stats["rounds"] = outcome_rounds
     stats["avg_build_secs"] = sum(build_secs) / len(build_secs) if build_secs else None
     stats["avg_verify_secs"] = sum(verify_secs) / len(verify_secs) if verify_secs else None
     stats["last_ts"] = last_ts

@@ -111,6 +111,63 @@ def test_cycle_harvests_and_promotes_end_to_end(kanban_home, loops_root, repo_di
     assert all(status == "blocked" for _title, status in rows)
 
 
+def test_cycle_harvests_from_the_same_board_promote_targets(kanban_home, loops_root, repo_dir):
+    """run_lessons_cycle(board=...) must resolve harvest's kanban DB from the
+    same ``board`` promote uses — not silently fall back to the default board.
+    Regression: harvest ignored ``board`` while promote honoured it, so a
+    non-default-board cycle harvested nothing (default board's disposition
+    items) while promote correctly targeted the other board."""
+    now = int(time.time())
+    other_db_path = kb.kanban_db_path(board="other-board")
+    kb._INITIALIZED_PATHS.discard(str(other_db_path.resolve()))
+    kb.init_db(board="other-board")
+
+    with kb.connect_closing(board="other-board") as conn:
+        tid1 = _create_task(conn, title="Artifact issue on other board")
+        _insert_disposition_item(
+            conn,
+            source_task_id=tid1,
+            evidence="ARTIFACT_POLICY_MISSING — no preserve prefix",
+            next_action="add preserve prefix",
+            status="open",
+        )
+        tid2 = _create_task(conn, title="Second artifact issue on other board")
+        _insert_disposition_item(
+            conn,
+            source_task_id=tid2,
+            evidence="artifact policy missing for screenshot output",
+            next_action="fix preserve prefix",
+            status="accepted",
+        )
+
+    result = lessons.run_lessons_cycle(
+        loops_root=loops_root,
+        window_days=30,
+        now_ts=now,
+        repo_dir=repo_dir,
+        cap=5,
+        board="other-board",
+    )
+
+    harvest = result["harvest"]
+    promote = result["promote"]
+    assert harvest["candidate_count"] >= 1
+    assert promote is not None
+    assert promote["promoted"] >= 1
+
+    with kb.connect_closing(board="other-board") as conn:
+        rows = conn.execute(
+            "SELECT title FROM tasks WHERE assignee='coder' AND created_by='lessons-promote'"
+        ).fetchall()
+    assert rows, "expected the promoted task on the SAME board harvest read from"
+
+    with kb.connect_closing(board=None) as conn:
+        default_rows = conn.execute(
+            "SELECT title FROM tasks WHERE assignee='coder' AND created_by='lessons-promote'"
+        ).fetchall()
+    assert not default_rows, "promote must not land on the default board when board='other-board'"
+
+
 def test_cycle_skips_promote_when_no_candidates(kanban_home, loops_root, repo_dir):
     """An empty harvest (no disposition/blocked/ledger signal) skips promote."""
     result = lessons.run_lessons_cycle(
