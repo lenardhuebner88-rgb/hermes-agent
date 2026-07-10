@@ -405,13 +405,15 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
                 stats["fails_by_kind"][kind] = stats["fails_by_kind"].get(kind, 0) + 1
                 outcome_rounds += 1
             elif verdict == "bounced":
+                # A bounce always follows a fail event for the same round —
+                # counting it again would double-count that round.
                 stats["bounced"] += 1
-                outcome_rounds += 1
             elif verdict == "blocked":
                 kind = event.get("fail_kind") or "unknown"
                 if not isinstance(kind, str):
                     kind = "unknown"
                 stats["blocked_by_kind"][kind] = stats["blocked_by_kind"].get(kind, 0) + 1
+                outcome_rounds += 1
             bsecs = event.get("build_secs")
             if isinstance(bsecs, (int, float)) and not isinstance(bsecs, bool):
                 build_secs.append(bsecs)
@@ -426,8 +428,13 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
             # must not discard the entire pack's stats.
             continue
     stats["rounds"] = outcome_rounds
-    stats["avg_build_secs"] = sum(build_secs) / len(build_secs) if build_secs else None
-    stats["avg_verify_secs"] = sum(verify_secs) / len(verify_secs) if verify_secs else None
+    try:
+        stats["avg_build_secs"] = sum(build_secs) / len(build_secs) if build_secs else None
+        stats["avg_verify_secs"] = sum(verify_secs) / len(verify_secs) if verify_secs else None
+    except OverflowError:
+        # Absurd integer durations from a corrupted line must not raise.
+        stats["avg_build_secs"] = None
+        stats["avg_verify_secs"] = None
     stats["last_ts"] = last_ts
     return stats
 

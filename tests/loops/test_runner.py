@@ -1920,7 +1920,8 @@ def test_read_ledger_stats_aggregates_realistic_fixture(tmp_path):
     ])
 
     stats = read_ledger_stats(state_dir)
-    assert stats["rounds"] == 3
+    # bounced follows the fail event for the same round -> not double-counted
+    assert stats["rounds"] == 2
     assert stats["verified"] == 1
     assert stats["bounced"] == 1
     assert stats["fails_by_kind"] == {"build_fail": 1}
@@ -1967,9 +1968,9 @@ def test_read_ledger_stats_counts_blocked_by_kind(tmp_path):
 
     stats = read_ledger_stats(state_dir)
     assert stats["blocked_by_kind"] == {"usage_limit": 2, "build_fail": 1, "unknown": 1}
-    # blocked events must not be counted as fails or outcome rounds
+    # blocked events are rounds that produced an outcome, but not fails
     assert stats["fails_by_kind"] == {}
-    assert stats["rounds"] == 0
+    assert stats["rounds"] == 4
 
 
 def test_read_ledger_stats_rounds_is_outcome_event_count_not_distinct_round(tmp_path):
@@ -1995,14 +1996,18 @@ def test_read_ledger_stats_skips_wrong_typed_fields_without_discarding_all(tmp_p
     path = state_dir / "ledger.jsonl"
     path.write_text(
         json.dumps({"round": [], "phase": "build", "verdict": "fail", "fail_kind": ["x"]}) + "\n"
-        + json.dumps({"round": 1, "phase": "verify", "verdict": "ok"}) + "\n",
+        + json.dumps({"round": 1, "phase": "verify", "verdict": "ok"}) + "\n"
+        # absurd int duration: float conversion during averaging would overflow
+        + json.dumps({"round": 2, "phase": "verify", "verdict": "ok", "build_secs": 10**400}) + "\n",
         encoding="utf-8",
     )
 
     stats = read_ledger_stats(state_dir)
-    # the poisoned line must not raise and must not wipe the good line's stats
-    assert stats["verified"] == 1
-    assert stats["rounds"] == 2
+    # the poisoned lines must not raise and must not wipe the good line's stats
+    assert stats["verified"] == 2
+    assert stats["avg_build_secs"] is None
+    # the coerced fail line counts as an outcome round too (2 ok + 1 fail)
+    assert stats["rounds"] == 3
     assert stats["fails_by_kind"] == {"unknown": 1}
 
 

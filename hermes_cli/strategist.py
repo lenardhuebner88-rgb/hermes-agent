@@ -603,9 +603,18 @@ def _cost_efficiency_lever(lane: str, burn: float, key: str) -> Lever:
 LOOP_HEALTH_MIN_FAILS = 3
 
 
+def _loop_health_pack_token(pack: str) -> str:
+    """Stable key token for a pack name; punctuation-only names must not
+    collide on a shared fallback, so they get a per-name digest suffix."""
+    token = _cost_lane_token(pack)
+    if token:
+        return token
+    return f"UNKNOWN-{hashlib.sha1(pack.encode('utf-8')).hexdigest()[:8].upper()}"
+
+
 def _loop_health_lever(pack: str, fail_kind: str, fails: int, verified: int) -> Lever:
     return Lever(
-        key=f"LOOP-HEALTH-{_cost_lane_token(pack) or 'UNKNOWN'}",
+        key=f"LOOP-HEALTH-{_loop_health_pack_token(pack)}",
         title=f"Loop-Pack '{pack}' Fehlerquote senken (dominant: {fail_kind})",
         lane="premium",
         target_metric=(
@@ -671,7 +680,7 @@ def _loop_health_levers(loop_stats: Any, suppressed: set[str]) -> list[Lever]:
         for k, v in counted_blocked.items():
             combined[k] = combined.get(k, 0) + v
         dominant_kind = max(combined.items(), key=lambda kv: kv[1])[0] if combined else "unknown"
-        key = f"LOOP-HEALTH-{_cost_lane_token(pack) or 'UNKNOWN'}"
+        key = f"LOOP-HEALTH-{_loop_health_pack_token(pack)}"
         if key in suppressed:
             continue
         levers.append(_loop_health_lever(pack, dominant_kind, total, verified))
@@ -850,11 +859,18 @@ def _apply_calibration(lever: Lever, calibration: dict[str, Any]) -> Lever:
     n = entry.get("n")
     if isinstance(factor, bool) or not isinstance(factor, (int, float)):
         return lever
-    if not math.isfinite(factor) or not (_CALIBRATION_CLAMP[0] <= factor <= _CALIBRATION_CLAMP[1]):
-        return lever
-    if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n):
-        return lever
-    if int(n) < _CALIBRATION_MIN_N:
+    try:
+        if not math.isfinite(factor) or not (
+            _CALIBRATION_CLAMP[0] <= factor <= _CALIBRATION_CLAMP[1]
+        ):
+            return lever
+        if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n):
+            return lever
+        if int(n) < _CALIBRATION_MIN_N:
+            return lever
+    except OverflowError:
+        # math.isfinite(huge int) overflows on the int->float conversion —
+        # a poisoned calibration entry must degrade to a no-op, never raise.
         return lever
     stamp = f"x{factor:.2f} (n={int(n)})"
     return Lever(

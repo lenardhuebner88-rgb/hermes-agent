@@ -195,6 +195,8 @@ def test_derive_levers_unchanged_when_no_calibration_entry():
         {"factor": 9.0, "n": 4, "updated_at": "x"},  # outside [0.5, 1.5]
         {"factor": 1.2, "n": 1, "updated_at": "x"},  # below _CALIBRATION_MIN_N
         {"factor": 1.2, "n": "x", "updated_at": "x"},  # non-numeric n
+        {"factor": 10**400, "n": 4, "updated_at": "x"},  # int->float overflow
+        {"factor": 1.2, "n": 10**400, "updated_at": "x"},  # huge n overflow
     ],
 )
 def test_derive_levers_ignores_poisoned_calibration_entry(poisoned_entry):
@@ -340,21 +342,22 @@ def test_derive_levers_no_lever_for_healthy_pack():
 
 
 def test_loop_health_lever_key_falls_back_to_unknown_for_odd_pack_name():
-    """A pack name that slugs to an empty token (e.g. all-punctuation) must not
-    collide on the bare 'LOOP-HEALTH-' key — fall back to UNKNOWN like the
-    other _cost_lane_token call sites."""
+    """Pack names that slug to an empty token (e.g. all-punctuation) must not
+    collide on a shared fallback key — each gets a per-name digest suffix."""
     context = {
         "metrics": None,
         "ledger": {"by_class": {}, "total": 0, "entries": []},
         "suppressed": set(),
         "loop_stats": {
             "***": _loop_stats({"build_fail": 3}, verified=1),
+            "___": _loop_stats({"build_fail": 4}, verified=1),
         },
     }
     levers = strategist.derive_levers(context)
-    keys = [lv.key for lv in levers]
-    assert "LOOP-HEALTH-UNKNOWN" in keys
-    assert "LOOP-HEALTH-" not in keys
+    keys = [lv.key for lv in levers if lv.key.startswith("LOOP-HEALTH-UNKNOWN-")]
+    assert len(keys) == 2
+    assert len(set(keys)) == 2  # distinct despite both slugging to empty
+    assert "LOOP-HEALTH-" not in [lv.key for lv in levers]
 
 
 def test_loop_health_lever_counts_blocked_towards_unhealthy():
