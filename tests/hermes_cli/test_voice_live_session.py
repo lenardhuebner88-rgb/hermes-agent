@@ -474,6 +474,9 @@ def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
     assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
     assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
     assert config.tools == []
+    # look_closely is a static persona fragment, unconditional (unlike
+    # google_search, it is always declared in FUNCTION_DECLARATIONS).
+    assert "look_closely" in config.system_instruction
 
 
 def test_connect_config_google_search_enabled_keeps_tool_and_persona_sentence() -> None:
@@ -1148,9 +1151,12 @@ async def test_mode_live_event_emitted_once_across_go_away_reconnect(
     while not events_out.empty():
         emitted.append(events_out.get_nowait())
     mode_live_events = [
-        event for event in emitted if event == {"type": "mode", "value": "live"}
+        event
+        for event in emitted
+        if event.get("type") == "mode" and event.get("value") == "live"
     ]
     assert len(mode_live_events) == 1
+    assert mode_live_events[0]["video_mode"] == "on_demand"
 
 
 @pytest.mark.asyncio
@@ -1620,17 +1626,20 @@ async def test_run_without_text_in_never_calls_send_client_content(
 async def test_run_with_video_in_offers_frame_and_speech_onset_flushes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Offering a frame alone never sends it upstream (relay-on-activity, see
-    ``_VideoFrameRelay``): only a user-activity burst — here loud speech —
-    flushes the held frame, landing before the audio frame that triggered it
-    and surfacing a ``video_frame_sent`` observability event."""
+    """video_mode="stream" regression: offering a frame alone never sends it
+    upstream (relay-on-activity, see ``_VideoFrameRelay``): only a
+    user-activity burst — here loud speech — flushes the held frame, landing
+    before the audio frame that triggered it and surfacing a
+    ``video_frame_sent`` observability event. Explicit ``video_mode="stream"``
+    since the default is "on_demand" (see the on_demand companion test
+    below), which never forwards stills into the Live session at all."""
 
     from hermes_cli.voice_live_session import GeminiLiveSession
 
     sdk_session = _FakeSDKSession()
     live = _FakeLive([sdk_session])
     _install_fake_client(monkeypatch, live)
-    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret", video_mode="stream")
     video_in: asyncio.Queue[bytes] = asyncio.Queue()
     audio_in: asyncio.Queue[bytes] = asyncio.Queue()
     events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -1663,6 +1672,52 @@ async def test_run_with_video_in_offers_frame_and_speech_onset_flushes_it(
     while not events_out.empty():
         emitted.append(events_out.get_nowait())
     assert {"type": "video_frame_sent"} in emitted
+
+
+@pytest.mark.asyncio
+async def test_run_with_video_in_on_demand_mode_never_flushes_to_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """video_mode="on_demand" (the default): loud speech never flushes a
+    still into the Live session — that's the whole point of the mode, only
+    look_closely may spend Live prompt budget on an image. peek() (the
+    delegate_to_hermes still-frame path) keeps working regardless."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")  # default: on_demand
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    frame = FIXTURE_VIDEO.read_bytes()
+
+    task = asyncio.create_task(
+        wrapper.run(audio_in, events_out, _FakeToolExecutor(), video_in=video_in)
+    )
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    await video_in.put(frame)
+    await _wait_until(lambda: video_in.empty())
+    assert wrapper._video_relay.peek() == frame
+
+    await audio_in.put(_loud_pcm_frame())
+    await asyncio.wait_for(sdk_session.expected_audio_sent.wait(), timeout=1)
+    relay = wrapper._video_relay
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sdk_session.video_inputs == []
+    # peek() (delegate_to_hermes' still-frame path) is unaffected by the
+    # send-suppression above — it never went through flush()/take_for_turn().
+    assert relay.peek() == frame
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    assert {"type": "video_frame_sent"} not in emitted
 
 
 @pytest.mark.asyncio
@@ -1731,7 +1786,8 @@ async def test_video_offered_but_unflushed_frame_is_not_replayed_after_go_away_r
     relay (see ``_VideoFrameRelay.clear``) at the start of every (re)connect
     iteration, so it must never reach the second session. A fresh frame
     offered and flushed after the reconnect must still reach the new session
-    normally."""
+    normally. Explicit ``video_mode="stream"`` — the default "on_demand"
+    never flushes to Live at all (see the dedicated on_demand test)."""
 
     from hermes_cli import voice_live_session
     from hermes_cli.voice_live_session import GeminiLiveSession
@@ -1767,7 +1823,7 @@ async def test_video_offered_but_unflushed_frame_is_not_replayed_after_go_away_r
         0.01,
         raising=False,
     )
-    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret", video_mode="stream")
     video_in: asyncio.Queue[bytes] = asyncio.Queue()
     audio_in: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -2953,6 +3009,55 @@ async def test_guardrail_tick_incomplete_estimate_never_hard_stops() -> None:
 
 
 @pytest.mark.asyncio
+async def test_guardrail_tick_hard_budget_fires_on_combined_live_and_look_closely_cost() -> (
+    None
+):
+    """Live usage alone stays under hard_budget_usd, but Live + look_closely
+    together cross it — the guard must use the combined estimate (see
+    ``_combined_estimate``), not just the Live half."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=0.2,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic()
+    wrapper._usage_meter.record(
+        _usage_metadata(
+            prompt_total=100_000,
+            response_total=0,
+            prompt_details=[(types.MediaModality.TEXT, 100_000)],
+            response_details=[],
+        )
+    )
+    live_only_cost = wrapper._usage_meter.estimated_usd()
+    assert live_only_cost < 0.2  # under budget on its own
+
+    wrapper.record_look_closely_usage(1_000_000, 0)
+    combined_cost, incomplete = wrapper._combined_estimate()
+    assert incomplete is False
+    assert combined_cost >= 0.2  # only over budget combined
+
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await wrapper._guardrail_tick(events_out)
+    assert exc_info.value.reason == "hard_budget"
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    assert {"type": "session_ended", "reason": "hard_budget"} in emitted
+
+
+@pytest.mark.asyncio
 async def test_guardrail_tick_hard_budget_none_never_stops() -> None:
     from hermes_cli.voice_live_session import GeminiLiveSession
 
@@ -3105,3 +3210,214 @@ async def test_watch_config_plumbs_custom_cooldown_and_max_into_relay(
     assert result["watching"] is True
     assert result["cooldown_seconds"] == 5.0
     assert result["max_notifications"] == 1
+
+
+# =============================================================================
+# look_closely additive usage accounting (record_look_closely_usage)
+# =============================================================================
+
+_LOOK_PRICING_TABLE = {
+    **_PRICING_TABLE,
+    "gemini-3.1-flash-lite": {
+        "as_of": "2026-07-10",
+        "input_per_1m": 0.25,
+        "output_per_1m": 1.50,
+    },
+}
+
+
+def test_record_look_closely_usage_prices_from_flat_look_model_rate() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+    )
+
+    wrapper.record_look_closely_usage(1_000_000, 200_000)
+
+    cost, incomplete = wrapper._look_closely_cost()
+    assert incomplete is False
+    assert cost == pytest.approx(0.25 + 0.30)
+    assert wrapper._extra_usage.calls == 1
+    assert wrapper._extra_usage.input_tokens == 1_000_000
+    assert wrapper._extra_usage.output_tokens == 200_000
+
+
+def test_look_closely_cost_zero_calls_never_flags_incomplete() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview", "de-DE", [], "secret", pricing={}
+    )
+    cost, incomplete = wrapper._look_closely_cost()
+    assert cost == 0.0
+    assert incomplete is False
+
+
+def test_look_closely_cost_missing_pricing_entry_flags_incomplete() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing={},
+    )
+    wrapper.record_look_closely_usage(1000, 100)
+
+    cost, incomplete = wrapper._look_closely_cost()
+    assert cost == 0.0
+    assert incomplete is True
+
+
+@pytest.mark.parametrize("bad_rate", [float("nan"), float("inf"), -1.0])
+def test_look_closely_cost_nonfinite_or_negative_rate_flags_incomplete(bad_rate) -> None:
+    """A NaN/inf/negative rate in the pricing table must never be treated as
+    a usable price (which would silently under/over-report cost) — same
+    strictness _UsageMeter already applies to Live pricing rows."""
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing={
+            "gemini-3.1-flash-lite": {
+                "as_of": "2026-07-10",
+                "input_per_1m": bad_rate,
+                "output_per_1m": 1.50,
+            }
+        },
+    )
+    wrapper.record_look_closely_usage(1000, 100)
+
+    cost, incomplete = wrapper._look_closely_cost()
+    assert cost == 0.0
+    assert incomplete is True
+
+
+def test_record_look_closely_usage_negative_tokens_are_clamped() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+    )
+
+    wrapper.record_look_closely_usage(-50, -10)
+
+    assert wrapper._extra_usage.input_tokens == 0
+    assert wrapper._extra_usage.output_tokens == 0
+
+
+def test_record_look_closely_usage_folds_into_usage_update_estimated_usd() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "unknown-model",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+    )
+    # No pricing entry for "unknown-model": the Live half of estimated_usd is
+    # None, but a look_closely call must still surface its own additive cost
+    # rather than the whole event collapsing to "no cost at all".
+    wrapper.record_look_closely_usage(1_000_000, 0)
+
+    event = wrapper._usage_update_event(None)
+
+    assert event["look_closely"] == {"calls": 1, "estimated_usd": pytest.approx(0.25)}
+    assert event["estimated_usd"] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_record_look_closely_usage_emits_immediate_usage_update_during_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A look_closely call's cost must reach the client right away — not only
+    on the next Live usage_metadata arrival, which may never come."""
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), events_out, _FakeToolExecutor())
+    )
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+
+    wrapper.record_look_closely_usage(1_000_000, 0)
+    # _put_guardrail_event_best_effort uses put_nowait: synchronous, so the
+    # event is already queued by the time record_look_closely_usage returns.
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    usage_events = [event for event in emitted if event["type"] == "usage_update"]
+    assert usage_events
+    assert usage_events[-1]["look_closely"]["calls"] == 1
+
+
+def test_record_look_closely_usage_before_run_never_raises() -> None:
+    """Before ``run()`` sets ``self._events_out``, recording usage must be a
+    safe no-op for the event emission (never an AttributeError)."""
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", look_model="gemini-3.1-flash-lite"
+    )
+    wrapper.record_look_closely_usage(100, 10)
+    assert wrapper._extra_usage.calls == 1
+
+
+def test_record_look_closely_usage_incomplete_flags_usage_update_event() -> None:
+    """``complete=False`` (missing/partial usage_metadata upstream, see
+    tools.voice_live_tools.VoiceToolExecutor) must still count the call and
+    the tokens it does have, but flag the combined estimate incomplete —
+    never silently report it as a precise number."""
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        look_model="gemini-3.1-flash-lite",
+        pricing=_LOOK_PRICING_TABLE,
+    )
+
+    wrapper.record_look_closely_usage(0, 0, complete=False)
+
+    assert wrapper._extra_usage.calls == 1
+    assert wrapper._extra_usage.incomplete is True
+    event = wrapper._usage_update_event(None)
+    assert event["estimate_incomplete"] is True

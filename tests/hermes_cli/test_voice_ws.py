@@ -289,6 +289,36 @@ def test_voice_web_config_valid_watch_is_passed_through():
     assert cfg.watch_max_notifications == 1
 
 
+def test_voice_web_config_video_mode_defaults_to_on_demand():
+    cfg = voice_web_config({})
+    assert cfg.video_mode == "on_demand"
+    assert DEFAULT_CONFIG["voice_web"]["video_mode"] == "on_demand"
+    assert DEFAULT_CONFIG["voice_web"]["look_model"] == "gemini-3.1-flash-lite"
+    assert "gemini-3.1-flash-lite" in DEFAULT_CONFIG["voice_web"]["pricing"]
+
+
+def test_voice_web_config_video_mode_accepts_stream():
+    cfg = voice_web_config({"voice_web": {"video_mode": "stream"}})
+    assert cfg.video_mode == "stream"
+
+
+@pytest.mark.parametrize("value", ["invalid", "", 1, None, ["stream"]])
+def test_voice_web_config_video_mode_invalid_falls_back_to_on_demand(value):
+    cfg = voice_web_config({"voice_web": {"video_mode": value}})
+    assert cfg.video_mode == "on_demand"
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 42, False, []])
+def test_voice_web_config_look_model_falls_back_when_invalid(value):
+    cfg = voice_web_config({"voice_web": {"look_model": value}})
+    assert cfg.look_model == "gemini-3.1-flash-lite"
+
+
+def test_voice_web_config_look_model_accepts_override():
+    cfg = voice_web_config({"voice_web": {"look_model": "gemini-custom-lite"}})
+    assert cfg.look_model == "gemini-custom-lite"
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -687,7 +717,11 @@ def test_live_failure_falls_back_on_same_websocket(monkeypatch):
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(fixture)
         ws.send_json({"type": "end"})
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         assert ws.receive_json() == {"type": "state", "value": "thinking"}
         transcript = ws.receive_json()
         assert ws.receive_json() == {
@@ -733,7 +767,11 @@ def test_missing_gemini_key_uses_fallback_without_constructing_live(
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x00\x00")
         ws.send_json({"type": "end"})
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         assert ws.receive_json() == {"type": "state", "value": "thinking"}
         assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
         assert ws.receive_json() == {
@@ -756,7 +794,11 @@ def test_odd_sized_pcm_frame_returns_structured_error(monkeypatch):
 
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x00")
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         payload = ws.receive_json()
 
     assert payload["type"] == "error"
@@ -974,7 +1016,12 @@ class _FakeVoiceInput:
         return next(self._messages)
 
 
-async def _read_test_voice_frames(websocket, fallback_mode):
+async def _read_test_voice_frames(
+    websocket, fallback_mode, *, video_mode="stream", frame_cache=None
+):
+    """Defaults to ``video_mode="stream"`` so every pre-existing caller keeps
+    exercising today's video_in-relay behavior unchanged (see
+    ``test_video_frame_on_demand_*`` for the on_demand cache path)."""
     from hermes_cli import voice_ws
 
     audio_in = asyncio.Queue(maxsize=32)
@@ -983,8 +1030,10 @@ async def _read_test_voice_frames(websocket, fallback_mode):
     disconnected = asyncio.Event()
     text_in = asyncio.Queue(maxsize=8)
     video_in = asyncio.Queue(maxsize=voice_ws._VIDEO_QUEUE_MAXSIZE)
-    config = voice_ws.VoiceWebConfig()
+    config = voice_ws.VoiceWebConfig(video_mode=video_mode)
     text_turn = voice_ws._FallbackTextTurn()
+    if frame_cache is None:
+        frame_cache = voice_ws.VideoFrameCache()
     result = await voice_ws._read_voice_frames(
         websocket,
         audio_in,
@@ -996,6 +1045,7 @@ async def _read_test_voice_frames(websocket, fallback_mode):
         video_in,
         config,
         text_turn,
+        frame_cache,
     )
     return result, fallback_pcm, events_out, video_in
 
@@ -1802,7 +1852,11 @@ def test_post_end_interrupt_cancels_and_reaps_blocked_delegate(monkeypatch):
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x01\x00")
         ws.send_json({"type": "end"})
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         assert process.started.wait(timeout=2)
         ws.send_json({"type": "interrupt"})
         assert ws.receive_json() == {"type": "state", "value": "thinking"}
@@ -1864,7 +1918,11 @@ def test_post_end_interrupt_drops_queued_short_tts_response(monkeypatch):
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x01\x00")
         ws.send_json({"type": "end"})
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         assert ws.receive_json() == {"type": "state", "value": "thinking"}
         assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
         assert ws.receive_json() == {
@@ -1915,7 +1973,11 @@ def test_delegate_stderr_never_reaches_websocket(monkeypatch, caplog):
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
         ws.send_bytes(b"\x01\x00")
         ws.send_json({"type": "end"})
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         assert ws.receive_json() == {"type": "state", "value": "thinking"}
         assert ws.receive_json() == {"type": "transcript", "text": "hallo"}
         payload = ws.receive_json()
@@ -2040,6 +2102,7 @@ async def test_run_live_bridge_delegate_uses_the_live_timeout(monkeypatch):
             delegate_with_image,
             watch_view,
             stop_watching,
+            **_extra,
         ):
             captured_executor["delegate"] = delegate
             captured_executor["delegate_with_image"] = delegate_with_image
@@ -2146,7 +2209,11 @@ def test_fallback_text_frame_runs_full_cascade_to_audio_and_listening(monkeypatc
     monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
 
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         ws.send_json({"type": "text", "text": "Wie spät ist es?"})
         assert ws.receive_json() == {
             "type": "transcript",
@@ -2191,7 +2258,11 @@ def test_fallback_second_text_frame_while_first_turn_running_gets_text_busy(
 
     try:
         with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
-            assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+            assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
             ws.send_json({"type": "text", "text": "erste Nachricht"})
             assert ws.receive_json() == {
                 "type": "transcript",
@@ -2248,7 +2319,11 @@ def test_interrupt_stops_running_text_turn_before_audio(monkeypatch):
     monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", hanging_synthesize)
 
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
         ws.send_json({"type": "text", "text": "spiel etwas ab"})
         assert ws.receive_json() == {
             "type": "transcript",
@@ -2286,7 +2361,11 @@ def test_invalid_text_frames_return_structured_error_and_session_keeps_working(
     monkeypatch.setattr(voice_ws, "fallback_synthesize_pcm", fake_synthesize)
 
     with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
-        assert ws.receive_json() == {"type": "mode", "value": "fallback"}
+        assert ws.receive_json() == {
+            "type": "mode",
+            "value": "fallback",
+            "video_mode": "on_demand",
+        }
 
         for invalid_text in ("", "   ", "x" * 4001, 12345):
             ws.send_json({"type": "text", "text": invalid_text})
@@ -2315,7 +2394,9 @@ def test_live_route_video_frame_reaches_session_video_in_byte_exact(monkeypatch)
     """Real client wire format: ``{"type":"video_frame","data":"<base64-
     jpeg>","source":"camera"}`` must arrive byte-exact in the Live bridge's
     ``video_in`` queue, decoded from a real JPEG fixture (live-verified
-    against the Gemini API)."""
+    against the Gemini API). Regression pin for ``video_mode: stream`` —
+    today's default is ``on_demand`` (see the on_demand cache tests below),
+    so this test opts explicitly into the pre-2026-07-10 relay behavior."""
     from hermes_cli import voice_ws
 
     fixture_bytes = FIXTURE_VIDEO.read_bytes()
@@ -2336,7 +2417,8 @@ def test_live_route_video_frame_reaches_session_video_in_byte_exact(monkeypatch)
     monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
     monkeypatch.setattr(voice_ws, "_LIVE_END_GRACE_SECONDS", 0.01)
 
-    with TestClient(_voice_app()).websocket_connect("/api/voice/live") as ws:
+    app = _voice_app(extra_voice_web={"video_mode": "stream"})
+    with TestClient(app).websocket_connect("/api/voice/live") as ws:
         assert constructed.wait(timeout=2)
         ws.send_json(
             {
@@ -2512,6 +2594,196 @@ def test_enqueue_sharing_stopped_drops_stale_frames_and_routes_sentinel():
 
     assert video_in.get_nowait() is None
     assert video_in.empty()
+
+
+@pytest.mark.asyncio
+async def test_video_frame_on_demand_mode_caches_and_still_enqueues_to_video_in():
+    """Real client wire format through ``_read_voice_frames``: enqueueing
+    into ``video_in`` is unconditional on video_mode (see
+    ``_read_voice_frames``'s docstring comment) — gating whether on_demand
+    actually forwards a still into the upstream Live connection happens
+    downstream at ``_VideoFrameRelay.forward_to_live``, not here. The real
+    JPEG fixture lands byte-exact in both the queue and the frame cache."""
+    from hermes_cli import voice_ws
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+    frame_cache = voice_ws.VideoFrameCache()
+    messages = [
+        _video_frame_message(real_jpeg),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        asyncio.Event(),
+        video_mode="on_demand",
+        frame_cache=frame_cache,
+    )
+
+    assert result == "end"
+    assert events_out.empty()
+    assert video_in.get_nowait() == real_jpeg
+    assert frame_cache.peek() == real_jpeg
+
+
+@pytest.mark.asyncio
+async def test_video_frame_stream_mode_still_relays_to_video_in_regression():
+    """Regression: video_mode="stream" reproduces pre-2026-07-10 behavior —
+    the frame lands in video_in exactly as before."""
+    from hermes_cli import voice_ws
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+    frame_cache = voice_ws.VideoFrameCache()
+    messages = [
+        _video_frame_message(real_jpeg),
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    result, _fallback_pcm, events_out, video_in = await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        asyncio.Event(),
+        video_mode="stream",
+        frame_cache=frame_cache,
+    )
+
+    assert result == "end"
+    assert events_out.empty()
+    assert video_in.get_nowait() == real_jpeg
+    # Stream mode also caches, so look_closely keeps working regardless of mode.
+    assert frame_cache.peek() == real_jpeg
+
+
+@pytest.mark.asyncio
+async def test_video_frame_sharing_stopped_clears_the_frame_cache():
+    from hermes_cli import voice_ws
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+    frame_cache = voice_ws.VideoFrameCache()
+    messages = [
+        _video_frame_message(real_jpeg),
+        {"text": json.dumps({"type": "sharing_stopped"})},
+        {"text": json.dumps({"type": "end"})},
+    ]
+
+    await _read_test_voice_frames(
+        _FakeVoiceInput(messages),
+        asyncio.Event(),
+        video_mode="on_demand",
+        frame_cache=frame_cache,
+    )
+
+    assert frame_cache.peek() is None
+
+
+@pytest.mark.asyncio
+async def test_video_frame_cache_wait_for_update_returns_fresh_frame():
+    from hermes_cli import voice_ws
+
+    cache = voice_ws.VideoFrameCache()
+
+    async def store_soon():
+        await asyncio.sleep(0.01)
+        cache.store(b"\xff\xd8fresh\xff\xd9")
+
+    task = asyncio.create_task(store_soon())
+    result = await cache.wait_for_update(timeout=1.0)
+    await task
+
+    assert result == b"\xff\xd8fresh\xff\xd9"
+
+
+@pytest.mark.asyncio
+async def test_video_frame_cache_wait_for_update_falls_back_to_stale_cache_on_timeout():
+    from hermes_cli import voice_ws
+
+    cache = voice_ws.VideoFrameCache()
+    cache.store(b"\xff\xd8stale\xff\xd9")
+
+    result = await cache.wait_for_update(timeout=0.01)
+
+    assert result == b"\xff\xd8stale\xff\xd9"
+
+
+@pytest.mark.asyncio
+async def test_video_frame_cache_wait_for_update_returns_none_when_never_offered():
+    from hermes_cli import voice_ws
+
+    cache = voice_ws.VideoFrameCache()
+
+    result = await cache.wait_for_update(timeout=0.01)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_run_live_bridge_wires_look_closely_request_frame_and_usage(
+    monkeypatch,
+):
+    """request_frame is served directly from frame_cache — no client
+    round-trip event — since ``_read_voice_frames`` always populates the
+    cache regardless of video_mode."""
+    from hermes_cli import voice_ws
+    from tools.voice_live_tools import VoiceToolExecutor
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+    captured_executor_kwargs = {}
+
+    class RecordingGeminiLiveSession:
+        def __init__(self, *args, **kwargs):
+            self.usage_reports = []
+
+        def record_look_closely_usage(self, input_tokens, output_tokens, complete=True):
+            self.usage_reports.append((input_tokens, output_tokens, complete))
+
+        async def run(
+            self, audio_in, events_out, tool_executor, text_in=None, video_in=None
+        ):
+            await asyncio.Event().wait()
+
+    def spy_executor(**kwargs):
+        captured_executor_kwargs.update(kwargs)
+        return VoiceToolExecutor(**kwargs)
+
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", RecordingGeminiLiveSession)
+    monkeypatch.setattr(voice_ws, "VoiceToolExecutor", spy_executor)
+
+    audio_in = asyncio.Queue()
+    events_out = asyncio.Queue(maxsize=8)
+    disconnected = asyncio.Event()
+    frame_cache = voice_ws.VideoFrameCache()
+    frame_cache.store(real_jpeg)
+    config = voice_ws.VoiceWebConfig(video_mode="on_demand")
+
+    bridge_task = asyncio.create_task(
+        voice_ws._run_live_bridge(
+            config,
+            "server-key",
+            audio_in,
+            events_out,
+            asyncio.Event(),
+            disconnected,
+            None,
+            None,
+            None,
+            None,
+            frame_cache,
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    request_frame = captured_executor_kwargs["request_frame"]
+    frame = await request_frame()
+    assert frame == real_jpeg
+    # No client round-trip: request_frame() reads the cache directly, so no
+    # "request_frame" (or any other) event is enqueued.
+    assert events_out.empty()
+
+    captured_executor_kwargs["report_look_usage"](120, 14, True)
+    assert captured_executor_kwargs["gemini_api_key"] == "server-key"
+    assert captured_executor_kwargs["look_model"] == config.look_model
+
+    bridge_task.cancel()
+    await asyncio.gather(bridge_task, return_exceptions=True)
 
 
 def test_voice_client_composer_form_present_with_max_length():

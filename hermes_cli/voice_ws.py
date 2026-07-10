@@ -142,6 +142,10 @@ _DEFAULT_SESSION_MAX_MINUTES = 15.0
 _DEFAULT_SESSION_SOFT_BUDGET_USD = 0.35
 _DEFAULT_WATCH_COOLDOWN_SECONDS = 30.0
 _DEFAULT_WATCH_MAX_NOTIFICATIONS = 3
+_DEFAULT_VIDEO_MODE = "on_demand"
+_VALID_VIDEO_MODES = {"stream", "on_demand"}
+_DEFAULT_LOOK_MODEL = "gemini-3.1-flash-lite"
+_LOOK_CLOSELY_FRAME_WAIT_SECONDS = 3.0
 
 
 @dataclass
@@ -160,6 +164,8 @@ class VoiceWebConfig:
     google_search_enabled: bool = False
     watch_cooldown_seconds: float = _DEFAULT_WATCH_COOLDOWN_SECONDS
     watch_max_notifications: int = _DEFAULT_WATCH_MAX_NOTIFICATIONS
+    video_mode: str = _DEFAULT_VIDEO_MODE
+    look_model: str = _DEFAULT_LOOK_MODEL
     pricing: dict = field(default_factory=dict)
 
 
@@ -315,6 +321,20 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
                 _DEFAULT_WATCH_MAX_NOTIFICATIONS,
             )
 
+    video_mode = section.get("video_mode")
+    if not isinstance(video_mode, str) or video_mode not in _VALID_VIDEO_MODES:
+        if "video_mode" in section:
+            _log.warning(
+                "voice_web.video_mode invalid (%r); using %r",
+                section.get("video_mode"),
+                _DEFAULT_VIDEO_MODE,
+            )
+        video_mode = _DEFAULT_VIDEO_MODE
+
+    look_model = section.get("look_model")
+    if not isinstance(look_model, str) or not look_model.strip():
+        look_model = _DEFAULT_LOOK_MODEL
+
     pricing = section.get("pricing")
     if not isinstance(pricing, dict):
         pricing = {}
@@ -334,6 +354,8 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
         google_search_enabled=google_search_enabled,
         watch_cooldown_seconds=watch_cooldown_seconds,
         watch_max_notifications=watch_max_notifications,
+        video_mode=video_mode,
+        look_model=look_model,
         pricing=pricing,
     )
 
@@ -1206,6 +1228,43 @@ def _enqueue_sharing_stopped(video_in: asyncio.Queue[bytes | None]) -> None:
     video_in.put_nowait(None)
 
 
+class VideoFrameCache:
+    """Holds the freshest offered video still without relaying it anywhere.
+
+    Used by ``video_mode: on_demand``: incoming ``video_frame`` control
+    messages are cached here instead of entering the Live session's
+    ``video_in`` queue (which would inflate the per-turn Gemini prompt with
+    a continuous 1fps stream). The ``look_closely`` tool requests a fresh
+    capture via :meth:`wait_for_update`, falling back to whatever is
+    cached (possibly ``None``) if no fresher frame arrives before the
+    deadline.
+    """
+
+    def __init__(self) -> None:
+        self._frame: bytes | None = None
+        self._updated = asyncio.Event()
+
+    def store(self, frame: bytes) -> None:
+        self._frame = frame
+        self._updated.set()
+
+    def peek(self) -> bytes | None:
+        return self._frame
+
+    def clear(self) -> None:
+        self._frame = None
+
+    async def wait_for_update(self, timeout: float) -> bytes | None:
+        """Wait for the next :meth:`store`, else return whatever is cached."""
+
+        self._updated.clear()
+        try:
+            await asyncio.wait_for(self._updated.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+        return self._frame
+
+
 async def _try_start_fallback_text_turn(
     text: str,
     config: VoiceWebConfig,
@@ -1261,6 +1320,7 @@ async def _read_voice_frames(
     video_in: asyncio.Queue[bytes | None],
     config: VoiceWebConfig,
     text_turn: _FallbackTextTurn,
+    frame_cache: VideoFrameCache,
 ) -> str:
     video_frame_times: deque[float] = deque()
     try:
@@ -1441,10 +1501,18 @@ async def _read_voice_frames(
                         disconnected,
                     )
                     continue
+                # Always cache the freshest still for look_closely AND enqueue
+                # it into the Live session's video_in queue (today's
+                # behavior, unconditional on video_mode) — gating whether
+                # on_demand actually forwards a still into the upstream Live
+                # connection happens downstream at the relay
+                # (_VideoFrameRelay.forward_to_live), not here.
+                frame_cache.store(decoded_frame)
                 _enqueue_video_frame(video_in, decoded_frame)
                 continue
             if control_type == "sharing_stopped":
                 _enqueue_sharing_stopped(video_in)
+                frame_cache.clear()
                 continue
             await _put_event(
                 events_out,
@@ -1635,6 +1703,7 @@ async def _run_live_bridge(
     text_in: asyncio.Queue[str] | None = None,
     video_in: asyncio.Queue[bytes | None] | None = None,
     forced_end: asyncio.Event | None = None,
+    frame_cache: VideoFrameCache | None = None,
 ) -> bool:
     live_kwargs: dict[str, Any] = {
         "voice": config.voice,
@@ -1648,6 +1717,8 @@ async def _run_live_bridge(
         "session_max_minutes": config.session_max_minutes,
         "session_soft_budget_usd": config.session_soft_budget_usd,
         "session_hard_budget_usd": config.session_hard_budget_usd,
+        "look_model": config.look_model,
+        "video_mode": config.video_mode,
         "pricing": config.pricing,
     }
     if session_id:
@@ -1662,6 +1733,23 @@ async def _run_live_bridge(
         api_key,
         **live_kwargs,
     )
+
+    async def _request_fresh_frame() -> bytes | None:
+        """Serve look_closely the freshest cached still, waiting briefly if none yet.
+
+        No client round-trip: with sharing active the next 1fps tick lands
+        within ~1s regardless of video_mode (see ``_read_voice_frames``,
+        which always stores into ``frame_cache``), so a short local wait is
+        enough — no separate "request_frame" protocol message needed.
+        """
+
+        if frame_cache is None:
+            return None
+        cached = frame_cache.peek()
+        if cached is not None:
+            return cached
+        return await frame_cache.wait_for_update(_LOOK_CLOSELY_FRAME_WAIT_SECONDS)
+
     executor = VoiceToolExecutor(
         delegate=lambda prompt: delegate_to_hermes(
             prompt, timeout_seconds=_DELEGATE_LIVE_TIMEOUT_SECONDS
@@ -1673,6 +1761,10 @@ async def _run_live_bridge(
         ),
         watch_view=getattr(session, "watch_view", None),
         stop_watching=getattr(session, "stop_watching", None),
+        request_frame=_request_fresh_frame,
+        look_model=config.look_model,
+        gemini_api_key=api_key,
+        report_look_usage=getattr(session, "record_look_closely_usage", None),
     )
     try:
         await session.run(
@@ -1682,7 +1774,7 @@ async def _run_live_bridge(
         fallback_mode.set()
         await _put_event(
             events_out,
-            {"type": "mode", "value": "fallback"},
+            {"type": "mode", "value": "fallback", "video_mode": config.video_mode},
             disconnected,
         )
         return True
@@ -1809,6 +1901,7 @@ def create_voice_router(
         fallback_mode = asyncio.Event()
         disconnected = asyncio.Event()
         text_turn = _FallbackTextTurn()
+        frame_cache = VideoFrameCache()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
@@ -1824,6 +1917,7 @@ def create_voice_router(
                 video_in,
                 config,
                 text_turn,
+                frame_cache,
             )
         )
         raw_session_id = websocket.query_params.get("session")
@@ -1849,13 +1943,14 @@ def create_voice_router(
                     text_in,
                     video_in,
                     forced_end,
+                    frame_cache,
                 )
             )
         else:
             fallback_mode.set()
             await _put_event(
                 events_out,
-                {"type": "mode", "value": "fallback"},
+                {"type": "mode", "value": "fallback", "video_mode": config.video_mode},
                 disconnected,
             )
 

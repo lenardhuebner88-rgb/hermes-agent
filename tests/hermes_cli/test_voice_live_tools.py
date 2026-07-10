@@ -1,8 +1,9 @@
+import asyncio
 import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,6 +13,8 @@ from tools.voice_live_tools import (
     VOICE_FRAME_ARG,
     VoiceToolExecutor,
 )
+
+FIXTURE_VIDEO = Path(__file__).parent / "fixtures" / "vision_marker.jpg"
 
 
 def _proc(stdout: str, rc: int = 0, stderr: str = ""):
@@ -194,6 +197,215 @@ async def test_watch_view_rejects_missing_instruction_and_unavailable_callback()
     assert unavailable["error"]["code"] == "watch_unavailable"
 
 
+def _fake_generate_content_response(
+    text, *, prompt_tokens=120, candidate_tokens=14, thoughts_tokens=None
+):
+    usage = MagicMock()
+    usage.prompt_token_count = prompt_tokens
+    usage.candidates_token_count = candidate_tokens
+    usage.thoughts_token_count = thoughts_tokens
+    response = MagicMock()
+    response.text = text
+    response.usage_metadata = usage
+    return response
+
+
+@pytest.mark.asyncio
+async def test_look_closely_sends_real_jpeg_bytes_and_reports_usage():
+    """Pflicht-Test gegen das echte Datenformat: ein reales JPEG-Fixture
+    (nicht "abc123") muss byte-exakt + mit korrektem mime_type bei
+    generate_content ankommen, und die Nutzung wird gemeldet."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+    assert real_jpeg.startswith(b"\xff\xd8")  # a real JPEG, not a synthetic string
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    generate_content = AsyncMock(
+        return_value=_fake_generate_content_response("Ich sehe ein Testbild.")
+    )
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        look_model="gemini-3.1-flash-lite",
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with patch(
+        "tools.voice_live_tools.genai.Client", return_value=fake_client
+    ) as client_ctor:
+        result = await executor.execute(
+            "look_closely", {"question": "Was steht auf dem Bild?"}
+        )
+
+    assert result == {"answer": "Ich sehe ein Testbild."}
+    client_ctor.assert_called_once_with(api_key="test-key")
+    generate_content.assert_awaited_once()
+    call_kwargs = generate_content.await_args.kwargs
+    assert call_kwargs["model"] == "gemini-3.1-flash-lite"
+    parts = call_kwargs["contents"].parts
+    assert parts[0].inline_data.data == real_jpeg
+    assert parts[0].inline_data.mime_type == "image/jpeg"
+    assert parts[1].text == "Was steht auf dem Bild?"
+    # Anti-injection: visible text/instructions inside the image must never
+    # be followed — the system_instruction says so explicitly.
+    assert (
+        "UNVERTRAUENSWÜRDIGE"
+        in call_kwargs["config"].system_instruction
+    )
+    assert reported == {"input": 120, "output": 14, "complete": True}
+
+
+@pytest.mark.asyncio
+async def test_look_closely_folds_thoughts_tokens_into_output_tokens():
+    """flash-lite can think; thinking tokens are billed as output, same as
+    candidates tokens — losing them would under-report cost."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    generate_content = AsyncMock(
+        return_value=_fake_generate_content_response(
+            "Antwort.", prompt_tokens=100, candidate_tokens=20, thoughts_tokens=35
+        )
+    )
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with patch("tools.voice_live_tools.genai.Client", return_value=fake_client):
+        await executor.execute("look_closely", {"question": "Was ist das?"})
+
+    assert reported == {"input": 100, "output": 55, "complete": True}
+
+
+@pytest.mark.asyncio
+async def test_look_closely_missing_usage_metadata_reports_incomplete():
+    """No usage_metadata at all must still count the call, but flagged
+    incomplete rather than silently reporting 0 tokens as if that were the
+    real (and free) cost."""
+
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    response = MagicMock()
+    response.text = "Antwort."
+    response.usage_metadata = None
+    generate_content = AsyncMock(return_value=response)
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+        report_look_usage=report_usage,
+    )
+
+    with patch("tools.voice_live_tools.genai.Client", return_value=fake_client):
+        await executor.execute("look_closely", {"question": "Was ist das?"})
+
+    assert reported == {"input": 0, "output": 0, "complete": False}
+
+
+@pytest.mark.asyncio
+async def test_look_closely_missing_question_is_invalid_arguments():
+    executor = VoiceToolExecutor(delegate=None, request_frame=None)
+    result = await executor.execute("look_closely", {"question": "   "})
+    assert result["error"]["code"] == "invalid_arguments"
+
+
+@pytest.mark.asyncio
+async def test_look_closely_unavailable_without_callback_or_key():
+    executor = VoiceToolExecutor(delegate=None)
+    result = await executor.execute(
+        "look_closely", {"question": "Was ist das?"}
+    )
+    assert result["error"]["code"] == "look_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_look_closely_no_frame_returns_structured_error():
+    async def fake_request_frame():
+        return None
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+    )
+    result = await executor.execute(
+        "look_closely", {"question": "Was ist das?"}
+    )
+    assert result["error"]["code"] == "no_frame"
+
+
+@pytest.mark.asyncio
+async def test_look_closely_timeout_returns_structured_error():
+    real_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    async def fake_request_frame():
+        return real_jpeg
+
+    async def hang_forever(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = hang_forever
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="test-key",
+    )
+
+    with (
+        patch("tools.voice_live_tools.genai.Client", return_value=fake_client),
+        patch("tools.voice_live_tools._LOOK_CLOSELY_TIMEOUT_SECONDS", 0.01),
+    ):
+        result = await executor.execute(
+            "look_closely", {"question": "Was ist das?"}
+        )
+
+    assert result["error"]["code"] == "look_timeout"
+
+
 def test_function_declarations_cover_all_tools():
     names = {declaration["name"] for declaration in FUNCTION_DECLARATIONS}
     assert names == {
@@ -203,6 +415,7 @@ def test_function_declarations_cover_all_tools():
         "delegate_to_hermes",
         "watch_view",
         "stop_watching",
+        "look_closely",
         "send_discord_message",
         "create_kanban_task",
         "hermes_status",
@@ -253,6 +466,7 @@ def test_is_non_blocking_flags_only_delegate_to_hermes():
         "schedule_reminder",
         "watch_view",
         "stop_watching",
+        "look_closely",
     ):
         assert executor.is_non_blocking(name) is False
 

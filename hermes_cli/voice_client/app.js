@@ -873,6 +873,13 @@ function handleJsonMessage(session, raw) {
   }
   if (message.type === "mode") {
     session.mode = message.value;
+    if (typeof message.video_mode === "string") {
+      // Told once, on the same event that already announces live/fallback:
+      // informational only (e.g. for a future UI indicator) — capture
+      // itself always runs at a fixed 1fps regardless of mode; gating
+      // on_demand vs. stream happens server-side at the relay.
+      session.videoMode = message.video_mode;
+    }
     renderModeBadge(message.value);
     if (message.value === "fallback") {
       // The capture tick gates on mode !== "fallback", so after this event
@@ -1187,6 +1194,7 @@ async function startSession() {
     everOpen: false,
     reconnectAttempts: 0,
     mode: null,
+    videoMode: null,
     wakeLock: null,
     muteMicUntilResponse: false,
     micGateTimer: null,

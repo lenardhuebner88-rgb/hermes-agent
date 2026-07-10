@@ -944,6 +944,15 @@ DEFAULT_CONFIG = {
         # "Google-Suche" sentence so tool list and persona stay consistent.
         "google_search_enabled": False,
         "watch": {"cooldown_seconds": 30, "max_notifications": 3},
+        # "on_demand" (default): incoming video_frame stills are cached
+        # server-side only, never relayed into the Live session's prompt
+        # context; look_closely requests a fresh still on demand instead.
+        # "stream": pre-2026-07-10 behavior, every video_frame is relayed
+        # into the Live session at up to 1fps (rollback path).
+        "video_mode": "on_demand",
+        # Model used by the look_closely tool's on-demand image analysis
+        # (a plain generate_content call, never a Live session).
+        "look_model": "gemini-3.1-flash-lite",
         # Verified 2026-07-10 from ai.google.dev/gemini-api/docs/pricing.
         # Used server-side only, to estimate session cost from
         # usage_metadata; absent/unknown models simply skip cost estimation.
@@ -952,6 +961,13 @@ DEFAULT_CONFIG = {
                 "as_of": "2026-07-10",
                 "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
                 "output_per_1m": {"text": 4.50, "audio": 12.00},
+            },
+            # look_closely pricing: flat in/out rate (image tokens count as
+            # input), not the Live per-modality shape above.
+            "gemini-3.1-flash-lite": {
+                "as_of": "2026-07-10",
+                "input_per_1m": 0.25,
+                "output_per_1m": 1.50,
             },
         },
     },
