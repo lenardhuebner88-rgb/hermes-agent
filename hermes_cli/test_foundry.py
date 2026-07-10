@@ -405,7 +405,7 @@ def _call_hardening_llm(
     mutant: Mutant,
     diff: str,
     affected_tests: list[str],
-) -> tuple[str, int, str | None]:
+) -> tuple[str, int, str | None, str]:
     from hermes_cli.autoresearch_budget import guarded_llm_call
 
     caller = llm_call or _default_llm_call
@@ -426,8 +426,9 @@ def _call_hardening_llm(
     text, tokens, model = _response_text_tokens_model(response)
     # Response-reported usage wins; a silent provider leaves the ledger's
     # conservative reservation as the honest figure.
+    usage_source = "measured" if tokens else str(ledger_entry.get("usage_source") or "unknown")
     tokens = tokens or int(ledger_entry.get("total_tokens") or 0)
-    return _extract_test_code(text), tokens, model
+    return _extract_test_code(text), tokens, model, usage_source
 
 
 def _proposal_id(target_module: str, mutant: Mutant, test_code: str) -> str:
@@ -625,13 +626,16 @@ def _empty_result(target: str, *, reason: str) -> dict[str, Any]:
         "proposals": [],
         "reason": reason,
         "tokens": 0,
+        "usage_source": "measured",
+        "llm_calls": 0,
         "model": None,
         "mutants_run": 0,
     }
 
 
 def _record_roi(
-    *, tokens: int, tests_kept: int, model: str | None, mutants_run: int, errors: int
+    *, tokens: int, tests_kept: int, model: str | None, mutants_run: int, errors: int,
+    usage_source: str = "measured",
 ) -> None:
     try:
         from hermes_cli import autoresearch_runs
@@ -643,6 +647,7 @@ def _record_roi(
             model=model,
             scanned=mutants_run,
             errors=errors,
+            usage_source=usage_source,
         )
     except Exception:
         pass
@@ -668,6 +673,8 @@ def run_test_foundry(
     infra_errors = 0
     invalid_outputs = 0
     budget_stop: str | None = None
+    llm_calls = 0
+    usage_estimated = False
 
     def finish(result: dict[str, Any]) -> dict[str, Any]:
         _record_roi(
@@ -676,6 +683,7 @@ def run_test_foundry(
             model=str(result.get("model") or model or "") or None,
             mutants_run=int(result.get("mutants_run") or mutants_run),
             errors=int(result.get("infra_errors") or 0) + int(result.get("invalid_outputs") or 0),
+            usage_source=str(result.get("usage_source") or "measured"),
         )
         return result
 
@@ -717,7 +725,7 @@ def run_test_foundry(
             survivor = _mutant_summary(mutant, idx)
             survivors.append(survivor)
             try:
-                test_code, used_tokens, used_model = _call_hardening_llm(
+                test_code, used_tokens, used_model, used_source = _call_hardening_llm(
                     llm_call,
                     target_module=rel_target,
                     source=source,
@@ -726,6 +734,9 @@ def run_test_foundry(
                     affected_tests=affected,
                 )
                 tokens += used_tokens
+                llm_calls += 1
+                if used_source == "estimated":
+                    usage_estimated = True
                 model = used_model or model
             except Exception as exc:
                 from hermes_cli.autoresearch_budget import BudgetExhausted
@@ -833,6 +844,8 @@ def run_test_foundry(
             "proposals": proposals,
             "reason": "" if ok else (budget_stop or "no validated mutation tests kept"),
             "tokens": tokens,
+            "usage_source": "estimated" if usage_estimated else "measured",
+            "llm_calls": llm_calls,
             "model": model,
             "mutants_run": mutants_run,
             "infra_errors": infra_errors,
@@ -854,6 +867,8 @@ def run_test_foundry(
             "proposals": proposals,
             "reason": str(exc),
             "tokens": tokens,
+            "usage_source": "estimated" if usage_estimated else "measured",
+            "llm_calls": llm_calls,
             "model": model,
             "mutants_run": mutants_run,
             "infra_errors": infra_errors,

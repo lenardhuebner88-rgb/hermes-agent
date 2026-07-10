@@ -95,7 +95,21 @@ _SKIP_TAGS = (
     ("not found", "skip:missing"),
     ("no files resolved", "skip:no-files"),
     ("baseline tests failed", "skip:red-baseline"),
+    ("quota skip", "skip:quota"),
+    ("cooldown active", "skip:cooldown"),
+    ("budget exhausted", "skip:budget"),
 )
+
+
+def _expected_skip_error(error: str | None) -> str | None:
+    """Expected guard decisions (quota/cooldown) routed through ``tf_error``
+    must not render as FEHLER in the Discord report."""
+    text = (error or "").lower()
+    if text.startswith("quota skip"):
+        return "quota_skipped"
+    if "cooldown active" in text:
+        return "skipped_expected"
+    return None
 
 
 def _env_float(name: str, default: float = 0.0) -> float:
@@ -243,6 +257,9 @@ def run_deep_audit_lane(subsystem: str, *, max_files: int) -> dict[str, Any]:
         "ok": bool(result.get("ok")),
         "findings": len(findings),
         "tokens": int(result.get("tokens") or 0),
+        "usage_source": str(result.get("usage_source") or "measured"),
+        # Deep audit's model calls == tool-loop iterations.
+        "llm_calls": int(result.get("iterations") or 0),
         "model": result.get("model"),
         "reason": result.get("reason") or "",
         "scanned": scanned,
@@ -278,6 +295,7 @@ def run_test_foundry_lane(
                 "tests_kept": 0,
                 "survivors": 0,
                 "tokens": 0,
+                "llm_calls": 0,
                 "model": None,
                 "reason": "skipped: wall-clock budget exhausted",
             })
@@ -290,6 +308,10 @@ def run_test_foundry_lane(
             "tests_kept": int(result.get("tests_kept") or 0),
             "survivors": len(result.get("survivors") or []),
             "tokens": int(result.get("tokens") or 0),
+            "usage_source": str(result.get("usage_source") or "measured"),
+            # Only surviving mutants trigger an LLM call — killed mutants must
+            # never count as healthy model calls for the cooldown.
+            "llm_calls": int(result.get("llm_calls") or 0),
             "model": result.get("model"),
             "reason": result.get("reason") or "",
             "scanned": int(result.get("mutants_run") or 0),
@@ -345,6 +367,9 @@ def _da_line(da: dict[str, Any] | None) -> str:
 
 def _tf_line(tf: list[dict[str, Any]] | None, error: str | None = None) -> str:
     if error:
+        skip_outcome = _expected_skip_error(error)
+        if skip_outcome:
+            return f"🧪 Test-Foundry · übersprungen: {error} [{skip_outcome}]"
         return f"🧪 Test-Foundry · FEHLER: {error}"
     if not tf:
         return "🧪 Test-Foundry · (übersprungen)"
@@ -370,7 +395,12 @@ def _run_reconciler() -> dict:
 def _record_lane_cooldown(lane: str, outcome: LaneOutcome, summary: dict[str, Any]) -> None:
     """Best-effort zero-yield streak bookkeeping (never sinks the report)."""
     try:
-        healthy_calls = max(0, int(summary.get("scanned") or 0) - int(summary.get("errors") or 0))
+        if summary.get("llm_calls") is not None:
+            # Real model calls only — e.g. Test Foundry mutants that were
+            # killed without an LLM call must not look like healthy calls.
+            healthy_calls = max(0, int(summary.get("llm_calls") or 0) - int(summary.get("errors") or 0))
+        else:
+            healthy_calls = max(0, int(summary.get("scanned") or 0) - int(summary.get("errors") or 0))
         arb.record_lane_run_for_cooldown(
             lane,
             outcome=outcome.outcome,

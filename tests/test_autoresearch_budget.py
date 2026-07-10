@@ -425,3 +425,123 @@ def test_guarded_llm_call_estimates_when_usage_missing(tmp_path):
     assert entry["usage_source"] == "estimated"
     assert entry["total_tokens"] > 0
     assert led.tokens_today() == entry["total_tokens"]
+
+
+# --------------------------------------------- review fixes (Codex 2026-07-10)
+
+
+def test_corrupt_ledger_fails_closed(tmp_path):
+    """An unreadable/garbage ledger must never silently reset the daily
+    budget — that would re-open 30 calls/100k tokens (review blocker #3)."""
+    path = tmp_path / "ledger.json"
+    path.write_text("{ not json", encoding="utf-8")
+    led = budget.DailyLedger(path, config=budget.load_budget_config({}))
+    with pytest.raises(budget.BudgetExhausted):
+        led.check_call(10)
+    with pytest.raises(budget.BudgetExhausted):
+        led.record_call(lane="skill", model="gpt-5.4-mini", estimated_tokens=10)
+    # wrong top-level type is just as corrupt
+    path.write_text('["not", "an", "object"]', encoding="utf-8")
+    with pytest.raises(budget.BudgetExhausted):
+        led.check_call(10)
+
+
+def test_reservation_is_atomic_and_survives_call_crash(tmp_path):
+    """reserve → crash → the conservative reservation stands as estimated
+    spend (provider-side cost is never lost; review blocker #1)."""
+    led = budget.DailyLedger(tmp_path / "ledger.json", config=budget.load_budget_config({}))
+
+    def _boom(**_k):
+        raise RuntimeError("provider exploded mid-call")
+
+    with pytest.raises(RuntimeError):
+        budget.guarded_llm_call(
+            lane="skill", call=_boom,
+            messages=[{"role": "user", "content": "x" * 300}],
+            max_tokens=100, ledger=led,
+        )
+    assert led.calls_today() == 1
+    entry = led.entries_today()[0]
+    assert entry["usage_source"] == "estimated"
+    assert entry["total_tokens"] >= 100
+
+
+def test_reserve_call_blocks_at_limit_under_lock(tmp_path):
+    led = budget.DailyLedger(tmp_path / "ledger.json", config=budget.load_budget_config({}))
+    for _ in range(30):
+        led.reserve_call(lane="skill", model="m", estimated_tokens=1)
+    with pytest.raises(budget.BudgetExhausted):
+        led.reserve_call(lane="skill", model="m", estimated_tokens=1)
+
+
+def test_estimate_includes_tool_schemas():
+    messages = [{"role": "user", "content": "hi"}]
+    tools = [{"type": "function", "function": {"name": "t", "description": "d" * 3000,
+                                               "parameters": {"type": "object"}}}]
+    with_tools = budget.estimate_call_tokens(messages, 10, tools=tools)
+    without = budget.estimate_call_tokens(messages, 10)
+    assert with_tools > without + 500  # schemas reserve real budget
+
+
+def test_unknown_lane_model_fails_closed_when_expensive_blocked():
+    cfg = budget.load_budget_config({})
+    restricted = budget.evaluate_quota(_snapshot(session=10, weekly=55), cfg)
+    assert budget.quota_block_reason(restricted, "") is not None  # fail-closed
+    open_decision = budget.evaluate_quota(_snapshot(session=10, weekly=5), cfg)
+    assert budget.quota_block_reason(open_decision, "") is None  # nothing restricted
+
+
+def test_verifier_budget_stop_never_saves_ungated_proposal(monkeypatch, tmp_path):
+    """Finder succeeds, then the ledger runs out before the importance
+    verifier: the finding must NOT be saved fail-open (review major #4)."""
+    import hermes_cli.autoresearch_proposals as proposals
+
+    monkeypatch.setenv("HERMES_AUTORESEARCH_VERIFY", "1")
+    # Grounded findings only validate for allowlisted in-repo targets.
+    monkeypatch.setattr(proposals, "_REPO", tmp_path)
+    (tmp_path / "hermes_cli").mkdir()
+    target = tmp_path / "hermes_cli" / "probe.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [target])
+
+    finding = {
+        "category": "bug_risk", "severity": "high", "severity_reason": "r",
+        "title": "t", "problem": "p", "evidence_quote": "x = 1",
+        "old_snippet": "x = 1", "new_snippet": "x = 2", "fix_hint": "f",
+    }
+    monkeypatch.setattr(
+        proposals, "_call_code_weakness_finder",
+        lambda *a, **k: {"ok": True, "raw": {"finding": finding}, "reason": None,
+                         "resp": None, "ledger_entry": {"total_tokens": 5, "usage_source": "measured"}},
+    )
+    from hermes_cli.autoresearch_budget import BudgetExhausted
+
+    def _exhausted_verify(**_k):
+        raise BudgetExhausted("30 model calls today >= limit 30")
+
+    monkeypatch.setattr(proposals, "_writer_call_llm", _exhausted_verify)
+    saved = {"n": 0}
+    monkeypatch.setattr(proposals, "save_proposal",
+                        lambda *_a, **_k: saved.__setitem__("n", saved["n"] + 1))
+    res = proposals.generate_code_weakness_proposals(max_files=1, limit=1)
+    assert saved["n"] == 0
+    assert res.get("budget_stop")
+    assert res["outcome"] == "budget_exhausted"
+
+
+def test_code_lane_records_cooldown_runs(monkeypatch, tmp_path):
+    """AR3's code lane feeds the zero-yield cooldown state (review major #5)."""
+    import hermes_cli.autoresearch_proposals as proposals
+
+    target = tmp_path / "probe.py"
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [target])
+    monkeypatch.setattr(
+        proposals, "_call_code_weakness_finder",
+        lambda *a, **k: {"ok": True, "raw": None, "reason": None, "resp": None,
+                         "ledger_entry": {"total_tokens": 5, "usage_source": "measured"}},
+    )
+    for i in range(3):
+        target.write_text(f"x = {i}\n", encoding="utf-8")
+        res = proposals.generate_code_weakness_proposals(max_files=1, limit=1)
+        assert res["outcome"] == "clean"
+    assert budget.lane_cooldown_until("code") is not None

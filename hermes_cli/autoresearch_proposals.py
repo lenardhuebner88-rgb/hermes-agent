@@ -1151,7 +1151,7 @@ def _verify_code_finding_importance(
     from hermes_cli.autoresearch_budget import BudgetExhausted, guarded_llm_call
 
     try:
-        resp, _entry = guarded_llm_call(
+        resp, ledger_entry = guarded_llm_call(
             lane="code",
             call=_writer_call_llm,
             task="skills_hub",
@@ -1163,17 +1163,31 @@ def _verify_code_finding_importance(
             temperature=0.1,
             timeout=timeout,
         )
-        tokens = _llm_total_tokens(resp)
+        tokens = int(ledger_entry.get("total_tokens") or 0) or _llm_total_tokens(resp)
+        usage_source = str(ledger_entry.get("usage_source") or "unknown")
         raw = _loads_llm_json(_extract_llm_content(resp))
         if not isinstance(raw, dict) or "real" not in raw:
-            return {"real": True, "reason": "verify_error: unparseable verdict", "tokens": tokens}
+            return {"real": True, "reason": "verify_error: unparseable verdict",
+                    "tokens": tokens, "usage_source": usage_source}
         return {
             "real": bool(raw.get("real")),
             "reason": str(raw.get("reason") or "")[:300],
             "tokens": tokens,
+            "usage_source": usage_source,
+        }
+    except BudgetExhausted as exc:
+        # Fail CLOSED: without the mandatory importance gate no proposal may
+        # be saved — the caller stops the scan and re-scans the file later.
+        return {
+            "real": False,
+            "reason": f"budget exhausted: {exc}",
+            "tokens": 0,
+            "usage_source": "measured",
+            "budget_exhausted": True,
         }
     except Exception as exc:
-        return {"real": True, "reason": f"verify_error: {type(exc).__name__}", "tokens": 0}
+        return {"real": True, "reason": f"verify_error: {type(exc).__name__}", "tokens": 0,
+                "usage_source": "measured"}
 
 
 def _proposal_id_for_code_finding(path: Path, finding: dict[str, Any]) -> str:
@@ -1373,6 +1387,15 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             if verify_enabled:
                 verdict = _verify_code_finding_importance(path, valid, before, timeout=timeout)
                 tokens += int(verdict.get("tokens") or 0)
+                if str(verdict.get("usage_source") or "") == "estimated":
+                    estimated_any = True
+                if verdict.get("budget_exhausted"):
+                    # Importance gate could not run: stop the scan, drop the
+                    # file from the scanned state so the next run redoes it,
+                    # and never save an ungated proposal.
+                    state.pop(rel, None)
+                    budget_stop = str(verdict.get("reason") or "budget exhausted")
+                    break
                 if not verdict.get("real"):
                     vetoed += 1
                     vetoes.append({"target": rel, "reason": str(verdict.get("reason") or "not important")})
@@ -1388,6 +1411,8 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
                 break
             save_proposal(proposal)
             created.append(proposal["id"])
+            break
+        if budget_stop:
             break
     _write_code_scan_state(state)
     result = {
@@ -1434,6 +1459,16 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
                                      errors=len(errors), vetoed=vetoed, scanned=files_seen,
                                      model=model_label or None,
                                      usage_source=result["usage_source"])
+    except Exception:
+        pass
+    try:  # zero-yield cooldown bookkeeping (best-effort, never sinks the scan)
+        from hermes_cli.autoresearch_budget import record_lane_run_for_cooldown
+        record_lane_run_for_cooldown(
+            "code",
+            outcome=str(result.get("outcome") or ""),
+            yielded=findings_seen,
+            healthy_calls=max(0, files_seen - len(errors)),
+        )
     except Exception:
         pass
     return result

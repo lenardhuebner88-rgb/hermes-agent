@@ -403,6 +403,10 @@ def discover_capability_candidates(
         stats["research_errors"] = int(stats.get("research_errors", 0)) + int(report.get("errors", 0) or 0)
         stats["skills_with_findings"] = int(stats.get("skills_with_findings", 0)) + int(report.get("skills_with_findings", 0) or 0)
         stats["research_tokens"] = int(stats.get("research_tokens", 0)) + int(report.get("tokens", 0) or 0)
+        if str(report.get("usage_source") or "") == "estimated":
+            stats["usage_source"] = "estimated"
+        if str(report.get("reason") or "").startswith("budget exhausted"):
+            stats["budget_stop"] = str(report.get("reason"))
     cands: list[dict] = []
     for finding in report.get("findings") or []:
         key = _capability_finding_key(finding)
@@ -763,6 +767,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         summary["research_errors"] = int(research_stats.get("research_errors", 0))
         summary["skills_with_findings"] = int(research_stats.get("skills_with_findings", 0))
         summary["research_tokens"] = int(research_stats.get("research_tokens", 0))
+        summary["usage_source"] = str(research_stats.get("usage_source") or "measured")
         from hermes_cli.autoresearch_lane_contracts import classify_lane_outcome
 
         try:
@@ -772,7 +777,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                 errors=summary["research_errors"],
                 yielded=summary["skills_with_findings"],
                 ok=bool(summary.get("ok")),
-                reason=str(summary.get("error") or ""),
+                reason=str(summary.get("error") or research_stats.get("budget_stop") or ""),
             )
             summary["outcome"] = lane_outcome.outcome
             fatal_outcome = lane_outcome.fatal
@@ -793,6 +798,21 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                 lane="skill", request_id=summary.get("request_id"),
                 tokens=summary.get("research_tokens", 0), proposed=summary.get("proposed", 0),
                 errors=summary.get("research_errors", 0), scanned=summary.get("skills_researched", 0),
+                usage_source=str(summary.get("usage_source") or "measured"),
+            )
+        except Exception:
+            pass
+        try:  # zero-yield cooldown bookkeeping (best-effort, never sinks the run)
+            from hermes_cli.autoresearch_budget import record_lane_run_for_cooldown
+            record_lane_run_for_cooldown(
+                "skill",
+                outcome=str(summary.get("outcome") or ""),
+                yielded=int(summary.get("skills_with_findings") or 0),
+                healthy_calls=max(
+                    0,
+                    int(summary.get("skills_researched") or 0)
+                    - int(summary.get("research_errors") or 0),
+                ),
             )
         except Exception:
             pass
