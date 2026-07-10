@@ -70,12 +70,25 @@ def test_voice_web_config_defaults_off():
     assert cfg.voice == "Puck"
     assert cfg.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
 
-    assert DEFAULT_CONFIG["voice_web"] == {
-        "enabled": False,
-        "model": "gemini-2.5-flash-native-audio-preview-12-2025",
-        "language": "de-DE",
-        "voice": "Puck",
+    voice_web_defaults = DEFAULT_CONFIG["voice_web"]
+    assert voice_web_defaults["enabled"] is False
+    assert voice_web_defaults["model"] == "gemini-2.5-flash-native-audio-preview-12-2025"
+    assert voice_web_defaults["language"] == "de-DE"
+    assert voice_web_defaults["voice"] == "Puck"
+    assert voice_web_defaults["context_compression"] == {
+        "trigger_tokens": 25000,
+        "target_tokens": 10000,
     }
+    assert voice_web_defaults["session_soft_minutes"] == 10
+    assert voice_web_defaults["session_max_minutes"] == 15
+    assert voice_web_defaults["session_soft_budget_usd"] == 0.35
+    assert voice_web_defaults["session_hard_budget_usd"] is None
+    assert voice_web_defaults["google_search_enabled"] is False
+    assert voice_web_defaults["watch"] == {
+        "cooldown_seconds": 30,
+        "max_notifications": 3,
+    }
+    assert "gemini-3.1-flash-live-preview" in voice_web_defaults["pricing"]
 
 
 @pytest.mark.parametrize("section", ["false", True, ["enabled"], 1])
@@ -134,6 +147,162 @@ def test_voice_web_config_accepts_voice_and_system_instruction_overrides():
     })
     assert cfg.voice == " Charon "
     assert cfg.system_instruction == "Custom persona text."
+
+
+@pytest.mark.parametrize(
+    "compression",
+    [
+        {"trigger_tokens": 10000, "target_tokens": 10000},  # target must be < trigger
+        {"trigger_tokens": 10000, "target_tokens": 20000},  # target > trigger
+        {"trigger_tokens": 0, "target_tokens": 100},  # zero fails _positive_int
+        {"trigger_tokens": "25000", "target_tokens": "10000"},  # strings
+        {"trigger_tokens": 25000},  # missing target
+        {},
+        "not-a-dict",
+    ],
+)
+def test_voice_web_config_invalid_compression_falls_back_to_defaults(compression):
+    cfg = voice_web_config({"voice_web": {"context_compression": compression}})
+    assert cfg.context_trigger_tokens == 25000
+    assert cfg.context_target_tokens == 10000
+
+
+def test_voice_web_config_valid_compression_is_passed_through():
+    cfg = voice_web_config(
+        {
+            "voice_web": {
+                "context_compression": {"trigger_tokens": 40000, "target_tokens": 5000}
+            }
+        }
+    )
+    assert cfg.context_trigger_tokens == 40000
+    assert cfg.context_target_tokens == 5000
+
+
+def test_voice_web_config_compression_trigger_above_100k_falls_back_to_defaults():
+    """A huge trigger makes mandatory compression unreachable -> reject it."""
+    cfg = voice_web_config(
+        {
+            "voice_web": {
+                "context_compression": {
+                    "trigger_tokens": 10**9,
+                    "target_tokens": 10000,
+                }
+            }
+        }
+    )
+    assert cfg.context_trigger_tokens == 25000
+    assert cfg.context_target_tokens == 10000
+
+
+def test_voice_web_config_compression_trigger_at_100k_is_accepted():
+    cfg = voice_web_config(
+        {
+            "voice_web": {
+                "context_compression": {
+                    "trigger_tokens": 100_000,
+                    "target_tokens": 10000,
+                }
+            }
+        }
+    )
+    assert cfg.context_trigger_tokens == 100_000
+    assert cfg.context_target_tokens == 10000
+
+
+def test_voice_web_config_compression_trigger_above_100k_by_one_falls_back():
+    cfg = voice_web_config(
+        {
+            "voice_web": {
+                "context_compression": {
+                    "trigger_tokens": 100_001,
+                    "target_tokens": 10000,
+                }
+            }
+        }
+    )
+    assert cfg.context_trigger_tokens == 25000
+    assert cfg.context_target_tokens == 10000
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("session_soft_budget_usd", 1.5, 1.5),
+        ("session_soft_budget_usd", None, None),
+        ("session_hard_budget_usd", 2, 2.0),
+        ("session_hard_budget_usd", None, None),
+    ],
+)
+def test_voice_web_config_budget_accepts_float_or_none(key, value, expected):
+    cfg = voice_web_config({"voice_web": {key: value}})
+    assert getattr(cfg, key) == expected
+
+
+@pytest.mark.parametrize("key", ["session_soft_budget_usd", "session_hard_budget_usd"])
+@pytest.mark.parametrize("value", ["1.5", True, [1.5], "not-a-number"])
+def test_voice_web_config_budget_invalid_shape_falls_back_to_default(key, value):
+    default = 0.35 if key == "session_soft_budget_usd" else None
+    cfg = voice_web_config({"voice_web": {key: value}})
+    assert getattr(cfg, key) == default
+
+
+@pytest.mark.parametrize("key", ["session_soft_budget_usd", "session_hard_budget_usd"])
+@pytest.mark.parametrize("value", [float("nan"), -1, float("inf"), 0])
+def test_voice_web_config_budget_nonfinite_or_nonpositive_falls_back_to_default(
+    key, value
+):
+    """NaN never fires the hard-budget stop silently; negative/zero/inf ends
+    a session immediately or never — all fail safe to the default instead."""
+    default = 0.35 if key == "session_soft_budget_usd" else None
+    cfg = voice_web_config({"voice_web": {key: value}})
+    assert getattr(cfg, key) == default
+
+
+@pytest.mark.parametrize("key", ["session_soft_budget_usd", "session_hard_budget_usd"])
+def test_voice_web_config_budget_positive_fraction_is_accepted(key):
+    cfg = voice_web_config({"voice_web": {key: 0.5}})
+    assert getattr(cfg, key) == 0.5
+
+
+@pytest.mark.parametrize(
+    "watch",
+    [
+        {"cooldown_seconds": -1, "max_notifications": 3},
+        {"cooldown_seconds": 30, "max_notifications": -1},
+        {"cooldown_seconds": "30", "max_notifications": 3},
+        {},
+        "not-a-dict",
+    ],
+)
+def test_voice_web_config_invalid_watch_falls_back_to_defaults(watch):
+    cfg = voice_web_config({"voice_web": {"watch": watch}})
+    assert cfg.watch_cooldown_seconds == 30.0
+    assert cfg.watch_max_notifications == 3
+
+
+def test_voice_web_config_valid_watch_is_passed_through():
+    cfg = voice_web_config(
+        {"voice_web": {"watch": {"cooldown_seconds": 5, "max_notifications": 1}}}
+    )
+    assert cfg.watch_cooldown_seconds == 5.0
+    assert cfg.watch_max_notifications == 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("true", False),  # only `is True` counts; truthy strings don't
+        (1, False),
+        (None, False),
+        ([True], False),
+    ],
+)
+def test_voice_web_config_google_search_enabled_only_literal_true(value, expected):
+    cfg = voice_web_config({"voice_web": {"google_search_enabled": value}})
+    assert cfg.google_search_enabled is expected
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,10 @@ import binascii
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -32,6 +33,7 @@ from hermes_cli.voice_live_session import (
     DEFAULT_SYSTEM_INSTRUCTION,
     GeminiLiveSession,
     LiveFallbackRequired,
+    LiveSessionEnded,
 )
 from hermes_constants import get_hermes_home
 from tools.transcription_tools import transcribe_audio
@@ -128,6 +130,20 @@ class ResumptionRegistry:
 _RESUMPTION_REGISTRY = ResumptionRegistry()
 
 
+_DEFAULT_CONTEXT_TRIGGER_TOKENS = 25_000
+_DEFAULT_CONTEXT_TARGET_TOKENS = 10_000
+# The documented pre-sprint value (module-level, unconfigurable back then) —
+# an operator override may not exceed it, or mandatory compression (the only
+# thing keeping a Live session from Google's ~2-minute cap) becomes
+# unreachable.
+_MAX_CONTEXT_TRIGGER_TOKENS = 100_000
+_DEFAULT_SESSION_SOFT_MINUTES = 10.0
+_DEFAULT_SESSION_MAX_MINUTES = 15.0
+_DEFAULT_SESSION_SOFT_BUDGET_USD = 0.35
+_DEFAULT_WATCH_COOLDOWN_SECONDS = 30.0
+_DEFAULT_WATCH_MAX_NOTIFICATIONS = 3
+
+
 @dataclass
 class VoiceWebConfig:
     enabled: bool = False
@@ -135,6 +151,16 @@ class VoiceWebConfig:
     language: str = "de-DE"
     voice: str = "Puck"
     system_instruction: str = DEFAULT_SYSTEM_INSTRUCTION
+    context_trigger_tokens: int = _DEFAULT_CONTEXT_TRIGGER_TOKENS
+    context_target_tokens: int = _DEFAULT_CONTEXT_TARGET_TOKENS
+    session_soft_minutes: float = _DEFAULT_SESSION_SOFT_MINUTES
+    session_max_minutes: float = _DEFAULT_SESSION_MAX_MINUTES
+    session_soft_budget_usd: float | None = _DEFAULT_SESSION_SOFT_BUDGET_USD
+    session_hard_budget_usd: float | None = None
+    google_search_enabled: bool = False
+    watch_cooldown_seconds: float = _DEFAULT_WATCH_COOLDOWN_SECONDS
+    watch_max_notifications: int = _DEFAULT_WATCH_MAX_NOTIFICATIONS
+    pricing: dict = field(default_factory=dict)
 
 
 class VoiceRuntimeError(RuntimeError):
@@ -144,6 +170,47 @@ class VoiceRuntimeError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
+
+
+def _validated_budget(section: dict, key: str, default: float | None) -> float | None:
+    """A budget is a finite, positive float or None; anything else fails safe.
+
+    NaN never fires the hard-budget stop (comparisons against NaN are always
+    False); a non-positive or infinite value would end sessions immediately
+    or never — both fail safe to ``default`` rather than degrade silently.
+    """
+    if key not in section:
+        return default
+    value = section[key]
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        _log.warning("voice_web.%s is invalid (%r); using %r", key, value, default)
+        return default
+    return float(value)
 
 
 def voice_web_config(raw: dict) -> VoiceWebConfig:
@@ -172,12 +239,102 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
         if not system_instruction:
             system_instruction = DEFAULT_SYSTEM_INSTRUCTION
 
+    # Context window compression can never be disabled (without it Google
+    # caps audio+video Live sessions at ~2 minutes), so an absent/invalid
+    # section always yields a usable trigger/target pair.
+    context_trigger_tokens = _DEFAULT_CONTEXT_TRIGGER_TOKENS
+    context_target_tokens = _DEFAULT_CONTEXT_TARGET_TOKENS
+    compression = section.get("context_compression")
+    if isinstance(compression, dict) and compression:
+        trigger = _positive_int(compression.get("trigger_tokens"))
+        target = _positive_int(compression.get("target_tokens"))
+        if (
+            trigger is not None
+            and target is not None
+            and target < trigger
+            and trigger <= _MAX_CONTEXT_TRIGGER_TOKENS
+        ):
+            context_trigger_tokens = trigger
+            context_target_tokens = target
+        else:
+            _log.warning(
+                "voice_web.context_compression invalid (trigger=%r target=%r); "
+                "using %d/%d",
+                compression.get("trigger_tokens"),
+                compression.get("target_tokens"),
+                _DEFAULT_CONTEXT_TRIGGER_TOKENS,
+                _DEFAULT_CONTEXT_TARGET_TOKENS,
+            )
+
+    session_soft_minutes = _DEFAULT_SESSION_SOFT_MINUTES
+    session_max_minutes = _DEFAULT_SESSION_MAX_MINUTES
+    soft_minutes = _positive_number(section.get("session_soft_minutes"))
+    max_minutes = _positive_number(section.get("session_max_minutes"))
+    if (
+        soft_minutes is not None
+        and max_minutes is not None
+        and soft_minutes <= max_minutes
+    ):
+        session_soft_minutes = soft_minutes
+        session_max_minutes = max_minutes
+    elif "session_soft_minutes" in section or "session_max_minutes" in section:
+        _log.warning(
+            "voice_web session duration limits invalid (soft=%r max=%r); "
+            "using %s/%s minutes",
+            section.get("session_soft_minutes"),
+            section.get("session_max_minutes"),
+            _DEFAULT_SESSION_SOFT_MINUTES,
+            _DEFAULT_SESSION_MAX_MINUTES,
+        )
+
+    session_soft_budget_usd = _validated_budget(
+        section, "session_soft_budget_usd", _DEFAULT_SESSION_SOFT_BUDGET_USD
+    )
+    session_hard_budget_usd = _validated_budget(
+        section, "session_hard_budget_usd", None
+    )
+
+    google_search_enabled = section.get("google_search_enabled") is True
+
+    watch_cooldown_seconds = _DEFAULT_WATCH_COOLDOWN_SECONDS
+    watch_max_notifications = _DEFAULT_WATCH_MAX_NOTIFICATIONS
+    watch = section.get("watch")
+    if isinstance(watch, dict) and watch:
+        cooldown = _nonnegative_int(watch.get("cooldown_seconds"))
+        max_notifications = _nonnegative_int(watch.get("max_notifications"))
+        if cooldown is not None and max_notifications is not None:
+            watch_cooldown_seconds = float(cooldown)
+            watch_max_notifications = max_notifications
+        else:
+            _log.warning(
+                "voice_web.watch invalid (cooldown_seconds=%r max_notifications=%r); "
+                "using %s/%s",
+                watch.get("cooldown_seconds"),
+                watch.get("max_notifications"),
+                _DEFAULT_WATCH_COOLDOWN_SECONDS,
+                _DEFAULT_WATCH_MAX_NOTIFICATIONS,
+            )
+
+    pricing = section.get("pricing")
+    if not isinstance(pricing, dict):
+        pricing = {}
+
     return VoiceWebConfig(
         enabled=section.get("enabled") is True,
         model=model,
         language=language,
         voice=voice,
         system_instruction=system_instruction,
+        context_trigger_tokens=context_trigger_tokens,
+        context_target_tokens=context_target_tokens,
+        session_soft_minutes=session_soft_minutes,
+        session_max_minutes=session_max_minutes,
+        session_soft_budget_usd=session_soft_budget_usd,
+        session_hard_budget_usd=session_hard_budget_usd,
+        google_search_enabled=google_search_enabled,
+        watch_cooldown_seconds=watch_cooldown_seconds,
+        watch_max_notifications=watch_max_notifications,
+        pricing=pricing,
     )
 
 
@@ -1477,29 +1634,34 @@ async def _run_live_bridge(
     session_id: str | None,
     text_in: asyncio.Queue[str] | None = None,
     video_in: asyncio.Queue[bytes | None] | None = None,
+    forced_end: asyncio.Event | None = None,
 ) -> bool:
+    live_kwargs: dict[str, Any] = {
+        "voice": config.voice,
+        "system_instruction": config.system_instruction,
+        "context_trigger_tokens": config.context_trigger_tokens,
+        "context_target_tokens": config.context_target_tokens,
+        "google_search_enabled": config.google_search_enabled,
+        "watch_cooldown_seconds": config.watch_cooldown_seconds,
+        "watch_max_notifications": config.watch_max_notifications,
+        "session_soft_minutes": config.session_soft_minutes,
+        "session_max_minutes": config.session_max_minutes,
+        "session_soft_budget_usd": config.session_soft_budget_usd,
+        "session_hard_budget_usd": config.session_hard_budget_usd,
+        "pricing": config.pricing,
+    }
     if session_id:
-        session = GeminiLiveSession(
-            config.model,
-            config.language,
-            FUNCTION_DECLARATIONS,
-            api_key,
-            voice=config.voice,
-            system_instruction=config.system_instruction,
-            initial_handle=_RESUMPTION_REGISTRY.get(session_id),
-            on_handle_update=lambda handle: _RESUMPTION_REGISTRY.store(
-                session_id, handle
-            ),
+        live_kwargs["initial_handle"] = _RESUMPTION_REGISTRY.get(session_id)
+        live_kwargs["on_handle_update"] = lambda handle: _RESUMPTION_REGISTRY.store(
+            session_id, handle
         )
-    else:
-        session = GeminiLiveSession(
-            config.model,
-            config.language,
-            FUNCTION_DECLARATIONS,
-            api_key,
-            voice=config.voice,
-            system_instruction=config.system_instruction,
-        )
+    session = GeminiLiveSession(
+        config.model,
+        config.language,
+        FUNCTION_DECLARATIONS,
+        api_key,
+        **live_kwargs,
+    )
     executor = VoiceToolExecutor(
         delegate=lambda prompt: delegate_to_hermes(
             prompt, timeout_seconds=_DELEGATE_LIVE_TIMEOUT_SECONDS
@@ -1524,6 +1686,14 @@ async def _run_live_bridge(
             disconnected,
         )
         return True
+    except LiveSessionEnded:
+        # Server-initiated graceful stop (max duration/hard budget): the
+        # session already put its own "session_ended" event on the queue.
+        # No fallback, and the caller must close the client socket without
+        # waiting out the usual client-initiated "end" handshake.
+        if forced_end is not None:
+            forced_end.set()
+        return False
     except asyncio.CancelledError:
         raise
     raise RuntimeError("Gemini Live bridge exited without a fallback signal")
@@ -1665,6 +1835,7 @@ def create_voice_router(
         )
         api_key = resolve_gemini_api_key()
         live_task: asyncio.Task[bool] | None = None
+        forced_end = asyncio.Event()
         if api_key:
             live_task = asyncio.create_task(
                 _run_live_bridge(
@@ -1677,6 +1848,7 @@ def create_voice_router(
                     session_id,
                     text_in,
                     video_in,
+                    forced_end,
                 )
             )
         else:
@@ -1699,7 +1871,13 @@ def create_voice_router(
                 )
                 if live_task in done:
                     run_fallback = live_task.result()
-                    if not reader_task.done():
+                    if forced_end.is_set():
+                        # Server-initiated stop (max duration/hard budget):
+                        # close now, don't wait out the client's own "end".
+                        if not reader_task.done():
+                            reader_task.cancel()
+                        reader_result = "server_closed"
+                    elif not reader_task.done():
                         try:
                             reader_result = await asyncio.wait_for(
                                 asyncio.shield(reader_task),

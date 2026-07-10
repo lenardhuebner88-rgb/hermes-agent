@@ -248,6 +248,21 @@ async def collect_turn(reader: EventReader, timeout: float) -> TurnResult:
                     result.transcript = (result.transcript + " " + text).strip()
         elif event_type == "video_frame_sent":
             result.video_frame_sent = True
+        elif event_type == "usage_update":
+            # Cost observability (numbers only, never transcript/image data).
+            # The per-turn input total is the real post-compression context
+            # window size — the forced-compression proof reads it off here.
+            tokens = event.get("tokens") or {}
+            input_tokens = tokens.get("input") or {}
+            output_tokens = tokens.get("output") or {}
+            print(
+                "E2E usage_update: "
+                f"turn={event.get('turns')} "
+                f"input={sum(v for v in input_tokens.values() if isinstance(v, int))} "
+                f"output={sum(v for v in output_tokens.values() if isinstance(v, int))} "
+                f"est_usd={event.get('estimated_usd')} "
+                f"incomplete={event.get('estimate_incomplete')}"
+            )
         elif event_type == "watch_notification_sent":
             result.watch_notification_sent = True
         elif event_type == "mode" and event.get("value") == "fallback":

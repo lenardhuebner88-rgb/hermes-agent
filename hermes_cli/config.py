@@ -922,6 +922,38 @@ DEFAULT_CONFIG = {
         # Prebuilt Gemini Live voice name; voice_web.system_instruction (str)
         # additionally overrides the built-in German assistant persona.
         "voice": "Puck",
+        # Context window compression is mandatory upstream (Google caps
+        # audio+video Live sessions at ~2 minutes without it) — these
+        # thresholds tune it, they can never disable it. See
+        # voice_ws.voice_web_config() for validation/fallback rules.
+        "context_compression": {"trigger_tokens": 25000, "target_tokens": 10000},
+        # Session duration cost brakes (minutes). soft = one-time warning
+        # event to the client; max = server ends the Live session cleanly
+        # and closes the client websocket (code 1000, non-reconnectable).
+        "session_soft_minutes": 10,
+        "session_max_minutes": 15,
+        # Estimated-cost cost brakes (USD). soft = advisory flag on the
+        # usage_update event only. hard = same graceful-end path as
+        # session_max_minutes, but only fires on a *complete* estimate
+        # (never on an incomplete/best-effort one). None disables the hard
+        # stop.
+        "session_soft_budget_usd": 0.35,
+        "session_hard_budget_usd": None,
+        # Google Search grounding tool; off by default (extra upstream cost
+        # + latency). When False the default system persona also drops its
+        # "Google-Suche" sentence so tool list and persona stay consistent.
+        "google_search_enabled": False,
+        "watch": {"cooldown_seconds": 30, "max_notifications": 3},
+        # Verified 2026-07-10 from ai.google.dev/gemini-api/docs/pricing.
+        # Used server-side only, to estimate session cost from
+        # usage_metadata; absent/unknown models simply skip cost estimation.
+        "pricing": {
+            "gemini-3.1-flash-live-preview": {
+                "as_of": "2026-07-10",
+                "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
+                "output_per_1m": {"text": 4.50, "audio": 12.00},
+            },
+        },
     },
     "agent": {
         "max_turns": 90,

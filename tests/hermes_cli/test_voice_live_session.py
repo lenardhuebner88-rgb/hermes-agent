@@ -7,6 +7,7 @@ import asyncio
 from io import BytesIO
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -419,8 +420,8 @@ async def test_run_streams_pcm_executes_tools_and_reenters_receive(
     assert config.tools[0].function_declarations[0].name == "list_terminals"
     assert config.session_resumption.handle is None
     assert config.session_resumption.transparent is None
-    assert config.context_window_compression.trigger_tokens == 100_000
-    assert config.context_window_compression.sliding_window.target_tokens == 50_000
+    assert config.context_window_compression.trigger_tokens == 25_000
+    assert config.context_window_compression.sliding_window.target_tokens == 10_000
 
 
 @pytest.mark.asyncio
@@ -456,7 +457,7 @@ async def test_connect_config_serializes_through_real_developer_api_connector(
 
 def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
     from hermes_cli.voice_live_session import (
-        DEFAULT_SYSTEM_INSTRUCTION,
+        _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH,
         GeminiLiveSession,
     )
 
@@ -466,10 +467,25 @@ def test_connect_config_defaults_carry_default_voice_and_persona() -> None:
     assert (
         config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
     )
-    assert config.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+    # google_search_enabled defaults False: no search tool, and the default
+    # persona must not promise a capability it doesn't have.
+    assert config.system_instruction == _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
+    assert "Google-Suche" not in config.system_instruction
     assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
     assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
-    # No function declarations were supplied, so the only tool is search.
+    assert config.tools == []
+
+
+def test_connect_config_google_search_enabled_keeps_tool_and_persona_sentence() -> None:
+    from hermes_cli.voice_live_session import DEFAULT_SYSTEM_INSTRUCTION, GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model", "de-DE", [], "secret", google_search_enabled=True
+    )
+    config = wrapper._connect_config()
+
+    assert config.system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+    assert "Google-Suche" in config.system_instruction
     assert len(config.tools) == 1
     assert config.tools[0].google_search is not None
 
@@ -484,6 +500,7 @@ def test_connect_config_carries_configured_voice_persona_and_both_tools() -> Non
         "secret",
         voice="Charon",
         system_instruction="Custom persona text.",
+        google_search_enabled=True,
     )
     config = wrapper._connect_config()
 
@@ -491,12 +508,31 @@ def test_connect_config_carries_configured_voice_persona_and_both_tools() -> Non
         config.speech_config.voice_config.prebuilt_voice_config.voice_name
         == "Charon"
     )
+    # Custom system_instruction is the caller's own wording and is never
+    # rewritten, even when google_search_enabled changes the tool list.
     assert config.system_instruction == "Custom persona text."
     assert isinstance(config.input_audio_transcription, types.AudioTranscriptionConfig)
     assert isinstance(config.output_audio_transcription, types.AudioTranscriptionConfig)
     assert len(config.tools) == 2
     assert config.tools[0].function_declarations[0].name == "list_terminals"
     assert config.tools[1].google_search is not None
+
+
+def test_connect_config_custom_system_instruction_never_rewritten_without_search() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        system_instruction="Custom persona text mentions Google-Suche too.",
+        google_search_enabled=False,
+    )
+    config = wrapper._connect_config()
+
+    assert config.system_instruction == "Custom persona text mentions Google-Suche too."
+    assert config.tools == []
 
 
 @pytest.mark.asyncio
@@ -2419,3 +2455,653 @@ async def test_interrupted_resets_relay_once_per_turn_latch() -> None:
 
     relay.offer(FIXTURE_VIDEO.read_bytes())
     assert await relay.flush(sdk_session) is True  # latch reopened
+
+
+# =============================================================================
+# Usage metering, cost-guardrail, and watch-config-plumbing tests
+# =============================================================================
+
+_PRICING_TABLE = {
+    "gemini-3.1-flash-live-preview": {
+        "as_of": "2026-07-10",
+        "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
+        "output_per_1m": {"text": 4.50, "audio": 12.00},
+    },
+}
+
+
+def _modality_count(modality: types.MediaModality, count: int) -> types.ModalityTokenCount:
+    return types.ModalityTokenCount(modality=modality, token_count=count)
+
+
+def _usage_metadata(
+    *,
+    prompt_total: int,
+    response_total: int,
+    prompt_details: list[tuple[types.MediaModality, int]],
+    response_details: list[tuple[types.MediaModality, int]],
+) -> types.UsageMetadata:
+    return types.UsageMetadata(
+        prompt_token_count=prompt_total,
+        response_token_count=response_total,
+        prompt_tokens_details=[_modality_count(m, c) for m, c in prompt_details],
+        response_tokens_details=[_modality_count(m, c) for m, c in response_details],
+    )
+
+
+# Live-probed on gemini-3.1-flash-live-preview 2026-07-10 (three turns of one
+# real session; see builder brief). Per-modality detail lists undercount the
+# prompt totals — the shortfall is real upstream behavior, not a fixture bug.
+PROBE_TURNS = [
+    _usage_metadata(
+        prompt_total=144,
+        response_total=19,
+        prompt_details=[(types.MediaModality.TEXT, 126)],
+        response_details=[(types.MediaModality.AUDIO, 19)],
+    ),
+    _usage_metadata(
+        prompt_total=180,
+        response_total=20,
+        prompt_details=[
+            (types.MediaModality.TEXT, 131),
+            (types.MediaModality.AUDIO, 19),
+        ],
+        response_details=[(types.MediaModality.AUDIO, 20)],
+    ),
+    _usage_metadata(
+        prompt_total=217,
+        response_total=23,
+        prompt_details=[
+            (types.MediaModality.TEXT, 136),
+            (types.MediaModality.AUDIO, 39),
+        ],
+        response_details=[(types.MediaModality.AUDIO, 23)],
+    ),
+]
+
+
+def test_usage_meter_probe_fixture_sums_tokens_and_flags_incomplete_estimate() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    for usage in PROBE_TURNS:
+        meter.record(usage)
+
+    assert meter.usage_messages == 3
+    assert meter.input.total() == 541
+    assert meter.output.total() == 62
+    assert meter.input.as_dict() == {
+        "text": 393,
+        "audio": 58,
+        "image": 0,
+        "unattributed": 90,
+    }
+    assert meter.output.as_dict() == {
+        "text": 0,
+        "audio": 62,
+        "image": 0,
+        "unattributed": 0,
+    }
+    # Prompt details undercount every turn's total -> honestly flagged.
+    assert meter.estimate_incomplete is True
+    assert meter.estimated_usd() == pytest.approx(0.00128025)
+    assert meter.pricing_as_of == "2026-07-10"
+
+
+def test_usage_meter_exact_detail_coverage_marks_estimate_complete() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        _usage_metadata(
+            prompt_total=100,
+            response_total=50,
+            prompt_details=[(types.MediaModality.TEXT, 100)],
+            response_details=[(types.MediaModality.AUDIO, 50)],
+        )
+    )
+
+    assert meter.estimate_incomplete is False
+    expected = 100 / 1_000_000 * 0.75 + 50 / 1_000_000 * 12.00
+    assert meter.estimated_usd() == pytest.approx(expected)
+
+
+def test_usage_meter_unknown_model_has_no_estimate_and_stays_incomplete() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("unknown-model", _PRICING_TABLE)
+    meter.record(PROBE_TURNS[0])
+
+    assert meter.estimated_usd() is None
+    assert meter.estimate_incomplete is True
+
+
+def test_usage_meter_none_counts_do_not_crash() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        types.UsageMetadata(
+            prompt_token_count=None,
+            response_token_count=None,
+            prompt_tokens_details=None,
+            response_tokens_details=None,
+        )
+    )
+
+    assert meter.usage_messages == 1
+    assert meter.input.total() == 0
+    assert meter.output.total() == 0
+    assert meter.estimated_usd() == 0.0
+
+
+def test_usage_meter_missing_total_flags_incomplete_estimate() -> None:
+    """A usage message whose totals are all ``None`` must not look complete."""
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        types.UsageMetadata(
+            prompt_token_count=None,
+            response_token_count=None,
+            prompt_tokens_details=[(types.ModalityTokenCount(
+                modality=types.MediaModality.TEXT, token_count=5
+            ))],
+            response_tokens_details=None,
+        )
+    )
+
+    assert meter.estimate_incomplete is True
+
+
+def test_usage_meter_attributed_exceeds_total_flags_incomplete_and_never_subtracts() -> None:
+    """Detail lists summing to MORE than the total must not be ignored."""
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        _usage_metadata(
+            prompt_total=10,
+            response_total=0,
+            prompt_details=[
+                (types.MediaModality.TEXT, 6),
+                (types.MediaModality.AUDIO, 8),
+            ],
+            response_details=[],
+        )
+    )
+
+    assert meter.estimate_incomplete is True
+    # attributed (14) > total (10): both modality counts are kept as-recorded
+    # and nothing negative is ever subtracted from unattributed.
+    assert meter.input.text == 6
+    assert meter.input.audio == 8
+    assert meter.input.unattributed == 0
+
+
+def test_usage_meter_negative_token_counts_are_clamped_and_flag_incomplete() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        types.UsageMetadata(
+            prompt_token_count=-5,
+            response_token_count=-1,
+            prompt_tokens_details=[
+                types.ModalityTokenCount(
+                    modality=types.MediaModality.TEXT, token_count=-3
+                )
+            ],
+            response_tokens_details=None,
+        )
+    )
+
+    assert meter.estimate_incomplete is True
+    assert meter.input.text == 0
+    assert meter.input.total() == 0
+    assert meter.output.total() == 0
+
+
+@pytest.mark.parametrize(
+    "pricing_entry",
+    [
+        # Missing output audio rate.
+        {
+            "as_of": "2026-07-10",
+            "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
+            "output_per_1m": {"text": 4.50},
+        },
+        # Non-numeric rate.
+        {
+            "as_of": "2026-07-10",
+            "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
+            "output_per_1m": {"text": 4.50, "audio": "12.00"},
+        },
+        # Negative rate.
+        {
+            "as_of": "2026-07-10",
+            "input_per_1m": {"text": 0.75, "audio": -3.00, "image": 1.00},
+            "output_per_1m": {"text": 4.50, "audio": 12.00},
+        },
+        # NaN rate.
+        {
+            "as_of": "2026-07-10",
+            "input_per_1m": {"text": 0.75, "audio": 3.00, "image": 1.00},
+            "output_per_1m": {"text": 4.50, "audio": float("nan")},
+        },
+    ],
+)
+def test_usage_meter_invalid_pricing_schema_is_treated_as_unpriced(pricing_entry) -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    pricing = {"gemini-3.1-flash-live-preview": pricing_entry}
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", pricing)
+    meter.record(PROBE_TURNS[0])
+
+    assert meter.estimated_usd() is None
+    assert meter.estimate_incomplete is True
+    assert meter.pricing_as_of is None
+
+
+def test_usage_meter_complete_valid_pricing_entry_still_prices() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(
+        _usage_metadata(
+            prompt_total=100,
+            response_total=50,
+            prompt_details=[(types.MediaModality.TEXT, 100)],
+            response_details=[(types.MediaModality.AUDIO, 50)],
+        )
+    )
+
+    assert meter.estimated_usd() is not None
+    assert meter.pricing_as_of == "2026-07-10"
+
+
+def test_usage_meter_multiple_messages_are_summed_never_deduped() -> None:
+    from hermes_cli.voice_live_session import _UsageMeter
+
+    meter = _UsageMeter("gemini-3.1-flash-live-preview", _PRICING_TABLE)
+    meter.record(PROBE_TURNS[0])
+    meter.record(PROBE_TURNS[0])
+
+    assert meter.usage_messages == 2
+    assert meter.input.total() == 144 * 2
+    assert meter.output.total() == 19 * 2
+
+
+@pytest.mark.asyncio
+async def test_usage_metadata_message_records_and_emits_usage_update_event() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_budget_usd=0.35,
+    )
+    wrapper._session_started_at = time.monotonic() - 5.0
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    sdk_session = _FakeSDKSession()
+
+    message = types.LiveServerMessage(usage_metadata=PROBE_TURNS[0])
+    handled = await wrapper._handle_message(
+        sdk_session, message, events_out, _FakeToolExecutor(), None
+    )
+    assert handled is False
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    usage_events = [event for event in emitted if event["type"] == "usage_update"]
+    assert len(usage_events) == 1
+    event = usage_events[0]
+
+    assert event["turns"] == 0
+    assert event["usage_messages"] == 1
+    assert event["tokens"]["input"] == {
+        "text": 126,
+        "audio": 0,
+        "image": 0,
+        "unattributed": 18,
+    }
+    assert event["tokens"]["output"] == {
+        "text": 0,
+        "audio": 19,
+        "image": 0,
+        "unattributed": 0,
+    }
+    assert event["images_sent"] == 0
+    assert event["watch"] == {"candidates": 0, "injections": 0}
+    assert event["estimate_incomplete"] is True
+    assert isinstance(event["estimated_usd"], float)
+    assert event["model"] == "gemini-3.1-flash-live-preview"
+    assert event["pricing_as_of"] == "2026-07-10"
+    assert event["soft_budget_usd"] == 0.35
+    assert event["soft_budget_exceeded"] is False
+    assert event["session_seconds"] >= 5.0
+    # Never leak transcript text, tool args, or image data onto this event.
+    assert "text" not in event
+    assert "data" not in event
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_increments_completed_turns_counter() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    sdk_session = _FakeSDKSession()
+
+    assert wrapper._completed_turns == 0
+    await wrapper._handle_message(
+        sdk_session, _turn_complete_message(), events_out, _FakeToolExecutor(), None
+    )
+    assert wrapper._completed_turns == 1
+    await wrapper._handle_message(
+        sdk_session, _turn_complete_message(), events_out, _FakeToolExecutor(), None
+    )
+    assert wrapper._completed_turns == 2
+
+
+@pytest.mark.asyncio
+async def test_run_sets_session_started_at_to_monotonic_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    assert wrapper._session_started_at == 0.0
+
+    before = time.monotonic()
+    task = asyncio.create_task(
+        wrapper.run(asyncio.Queue(), asyncio.Queue(), _FakeToolExecutor())
+    )
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    after = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert before <= wrapper._session_started_at <= after
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_emits_soft_warning_exactly_once() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        session_soft_minutes=10.0,
+        session_max_minutes=15.0,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # Rewind the session start instead of mocking time.monotonic() itself —
+    # patching the real clock would also derail asyncio's own scheduling.
+    wrapper._session_started_at = time.monotonic() - 10.0 * 60
+
+    await wrapper._guardrail_tick(events_out)
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    warnings = [event for event in emitted if event["type"] == "usage_warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["reason"] == "soft_minutes"
+    assert warnings[0]["minutes"] == pytest.approx(10.0, abs=0.05)
+
+    await wrapper._guardrail_tick(events_out)
+    assert events_out.empty()  # not re-warned
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_ends_session_at_max_duration() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        session_soft_minutes=10.0,
+        session_max_minutes=15.0,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic() - 15.0 * 60
+
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await wrapper._guardrail_tick(events_out)
+    assert exc_info.value.reason == "max_duration"
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    assert {"type": "session_ended", "reason": "max_duration"} in emitted
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_hard_budget_fires_only_when_estimate_complete() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=0.0001,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic()
+    wrapper._usage_meter.record(
+        _usage_metadata(
+            prompt_total=1_000_000,
+            response_total=0,
+            prompt_details=[(types.MediaModality.TEXT, 1_000_000)],
+            response_details=[],
+        )
+    )
+    assert wrapper._usage_meter.estimate_incomplete is False
+
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await wrapper._guardrail_tick(events_out)
+    assert exc_info.value.reason == "hard_budget"
+
+    emitted = []
+    while not events_out.empty():
+        emitted.append(events_out.get_nowait())
+    assert {"type": "session_ended", "reason": "hard_budget"} in emitted
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_incomplete_estimate_never_hard_stops() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=0.0001,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic()
+    # No per-modality detail list at all -> fully unattributed, incomplete.
+    wrapper._usage_meter.record(
+        types.UsageMetadata(prompt_token_count=1_000_000, response_token_count=0)
+    )
+    assert wrapper._usage_meter.estimate_incomplete is True
+
+    await wrapper._guardrail_tick(events_out)  # must not raise
+
+    assert events_out.empty()
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_hard_budget_none_never_stops() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=None,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic()
+    wrapper._usage_meter.record(
+        _usage_metadata(
+            prompt_total=1_000_000,
+            response_total=0,
+            prompt_details=[(types.MediaModality.TEXT, 1_000_000)],
+            response_details=[],
+        )
+    )
+
+    await wrapper._guardrail_tick(events_out)  # must not raise
+
+    assert events_out.empty()
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_soft_warning_is_best_effort_when_events_out_is_full() -> None:
+    """The soft usage_warning must also never block the guardrail tick."""
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        session_soft_minutes=10.0,
+        session_max_minutes=15.0,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    events_out.put_nowait({"type": "already_there"})
+    wrapper._session_started_at = time.monotonic() - 10.0 * 60
+
+    await asyncio.wait_for(wrapper._guardrail_tick(events_out), timeout=1.0)
+
+    assert events_out.qsize() == 1
+    assert events_out.get_nowait() == {"type": "already_there"}
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_max_duration_raises_even_when_events_out_is_full() -> None:
+    """A full/stalled events_out must never block the max-duration stop.
+
+    The terminal event delivery is best-effort only — the raise itself is the
+    guarantee.
+    """
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        session_soft_minutes=10.0,
+        session_max_minutes=15.0,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    events_out.put_nowait({"type": "already_there"})  # fill the bounded queue
+    wrapper._session_started_at = time.monotonic() - 15.0 * 60
+
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await asyncio.wait_for(wrapper._guardrail_tick(events_out), timeout=1.0)
+    assert exc_info.value.reason == "max_duration"
+    # The pre-existing item is still there; the session_ended event was
+    # best-effort-dropped rather than blocking (or erroring).
+    assert events_out.qsize() == 1
+    assert events_out.get_nowait() == {"type": "already_there"}
+
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_hard_budget_raises_even_when_events_out_is_full() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=0.0001,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    events_out.put_nowait({"type": "already_there"})
+    wrapper._session_started_at = time.monotonic()
+    wrapper._usage_meter.record(
+        _usage_metadata(
+            prompt_total=1_000_000,
+            response_total=0,
+            prompt_details=[(types.MediaModality.TEXT, 1_000_000)],
+            response_details=[],
+        )
+    )
+
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await asyncio.wait_for(wrapper._guardrail_tick(events_out), timeout=1.0)
+    assert exc_info.value.reason == "hard_budget"
+    assert events_out.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_watch_config_plumbs_custom_cooldown_and_max_into_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    sdk_session = _FakeSDKSession()
+    live = _FakeLive([sdk_session])
+    _install_fake_client(monkeypatch, live)
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        watch_cooldown_seconds=5.0,
+        watch_max_notifications=1,
+    )
+    video_in: asyncio.Queue[bytes] = asyncio.Queue()
+    audio_in: asyncio.Queue[bytes] = asyncio.Queue()
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    frame = FIXTURE_VIDEO.read_bytes()
+
+    task = asyncio.create_task(
+        wrapper.run(audio_in, events_out, _FakeToolExecutor(), video_in=video_in)
+    )
+    await asyncio.wait_for(live.connect_called.wait(), timeout=1)
+    await video_in.put(frame)
+    await _wait_until(lambda: video_in.empty())
+
+    result = wrapper.watch_view("Prüfe den Build")
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert result["watching"] is True
+    assert result["cooldown_seconds"] == 5.0
+    assert result["max_notifications"] == 1

@@ -20,8 +20,19 @@ from tools.voice_live_tools import VOICE_FRAME_ARG
 from websockets.exceptions import WebSocketException
 
 _INPUT_MIME_TYPE = "audio/pcm;rate=16000"
-_CONTEXT_TRIGGER_TOKENS = 100_000
-_CONTEXT_TARGET_TOKENS = 50_000
+# Rollback reference only: pre-2026-07-10 context-compression defaults were
+# trigger=100_000 / target=50_000 (module-level, unconfigurable). Superseded
+# by voice_web.context_compression (hermes_cli/config.py) flowing through
+# GeminiLiveSession's constructor; the defaults below are its fallback.
+_DEFAULT_CONTEXT_TRIGGER_TOKENS = 25_000
+_DEFAULT_CONTEXT_TARGET_TOKENS = 10_000
+_DEFAULT_SESSION_SOFT_MINUTES = 10.0
+_DEFAULT_SESSION_MAX_MINUTES = 15.0
+_DEFAULT_SESSION_SOFT_BUDGET_USD = 0.35
+# How often the session-duration/budget guardrail re-checks the monotonic
+# clock and current usage estimate. Independent of the Gemini receive loop
+# so a stalled stream can never block the max-duration stop.
+_GUARDRAIL_POLL_SECONDS = 1.0
 _MAX_TOOL_ERROR_CHARS = 500
 _SENDER_HANDOFF_SECONDS = 1.0
 _SPEECH_RMS_THRESHOLD = 500
@@ -68,6 +79,17 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Aktionen knapp."
 )
 
+# The default persona promises Google Search as one tool among several in
+# one sentence; when google_search_enabled is False that tool is not in the
+# Live config's tool list, so the promise is dropped here too — tool list
+# and persona must never disagree. Custom system_instruction overrides
+# (voice_web.system_instruction) are the caller's own wording and are left
+# untouched regardless of the flag.
+_GOOGLE_SEARCH_SENTENCE_FRAGMENT = "Google-Suche für aktuelle Fakten, "
+_DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH = DEFAULT_SYSTEM_INSTRUCTION.replace(
+    _GOOGLE_SEARCH_SENTENCE_FRAGMENT, ""
+)
+
 _FALLBACK_ERRORS = (
     errors.APIError,
     WebSocketException,
@@ -81,6 +103,19 @@ _log = logging.getLogger(__name__)
 
 class LiveFallbackRequired(RuntimeError):
     """Signal that the caller should switch this voice session to cascade mode."""
+
+
+class LiveSessionEnded(RuntimeError):
+    """Signal a clean, server-initiated stop (duration or budget guardrail).
+
+    Unlike :class:`LiveFallbackRequired`, the caller must NOT fall back to
+    the cascade path here — the session already put a ``session_ended``
+    event on ``events_out`` and simply needs its websocket closed.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _ToolExecutor(Protocol):
@@ -148,7 +183,10 @@ def _jpeg_frame_changed(previous: bytes, current: bytes) -> bool:
 class _ViewWatch:
     instruction: str
     signature: bytes
+    cooldown_seconds: float = _WATCH_COOLDOWN_SECONDS
+    max_notifications: int = _WATCH_MAX_NOTIFICATIONS
     notifications: int = 0
+    candidate_count: int = 0
     last_notification_at: float | None = None
     pending_change: bool = False
     notification_in_flight: bool = False
@@ -165,15 +203,17 @@ class _ViewWatch:
         ) / len(current)
         self.signature = current
         if mean_difference >= _WATCH_CHANGE_THRESHOLD:
+            if not self.pending_change:
+                self.candidate_count += 1
             self.pending_change = True
         if not self.pending_change or self.notification_in_flight:
             return False
-        if self.notifications >= _WATCH_MAX_NOTIFICATIONS:
+        if self.notifications >= self.max_notifications:
             self.pending_change = False
             return False
         if (
             self.last_notification_at is not None
-            and now - self.last_notification_at < _WATCH_COOLDOWN_SECONDS
+            and now - self.last_notification_at < self.cooldown_seconds
         ):
             return False
         self.pending_change = False
@@ -202,7 +242,13 @@ class _VideoFrameRelay:
     session then only ever sees occasional single stills.
     """
 
-    def __init__(self, events_out: asyncio.Queue[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        events_out: asyncio.Queue[dict[str, Any]],
+        *,
+        watch_cooldown_seconds: float = _WATCH_COOLDOWN_SECONDS,
+        watch_max_notifications: int = _WATCH_MAX_NOTIFICATIONS,
+    ) -> None:
         self._events_out = events_out
         self._frame: bytes | None = None
         self._latest_frame: bytes | None = None
@@ -210,6 +256,10 @@ class _VideoFrameRelay:
         self._lock = asyncio.Lock()
         self._sharing_active = False
         self._watch: _ViewWatch | None = None
+        self._watch_cooldown_seconds = watch_cooldown_seconds
+        self._watch_max_notifications = watch_max_notifications
+        # Usage-metering counters (server-side cost visibility only).
+        self.images_sent = 0
 
     def offer(self, frame: bytes, *, now: float | None = None) -> _WatchNotification | None:
         self._frame = frame
@@ -248,6 +298,7 @@ class _VideoFrameRelay:
             if self._frame is frame:
                 self._frame = None
             self._flushed_since_turn = True
+            self.images_sent += 1
             try:
                 self._events_out.put_nowait({"type": "video_frame_sent"})
             except asyncio.QueueFull:
@@ -269,6 +320,7 @@ class _VideoFrameRelay:
             frame = self._frame
             self._frame = None
             self._flushed_since_turn = True
+            self.images_sent += 1
             try:
                 self._events_out.put_nowait({"type": "video_frame_sent"})
             except asyncio.QueueFull:
@@ -302,18 +354,42 @@ class _VideoFrameRelay:
                     "message": "Das aktuelle geteilte Bild ist nicht lesbar.",
                 }
             }
-        self._watch = _ViewWatch(instruction=instruction, signature=signature)
+        self._watch = _ViewWatch(
+            instruction=instruction,
+            signature=signature,
+            cooldown_seconds=self._watch_cooldown_seconds,
+            max_notifications=self._watch_max_notifications,
+        )
         return {
             "watching": True,
             "instruction": instruction,
-            "cooldown_seconds": _WATCH_COOLDOWN_SECONDS,
-            "max_notifications": _WATCH_MAX_NOTIFICATIONS,
+            "cooldown_seconds": self._watch_cooldown_seconds,
+            "max_notifications": self._watch_max_notifications,
         }
 
     def stop_watching(self) -> dict[str, Any]:
         was_watching = self._watch is not None
         self._watch = None
         return {"watching": False, "was_watching": was_watching}
+
+    def watch_stats(self) -> dict[str, int]:
+        """Cost-observability counters for the active/last watch, if any."""
+
+        if self._watch is None:
+            return {"candidates": 0, "injections": 0}
+        return {
+            "candidates": self._watch.candidate_count,
+            "injections": self._watch.notifications,
+        }
+
+    def note_image_sent(self) -> None:
+        """Record a still sent to Gemini outside :meth:`flush`/:meth:`take_for_turn`.
+
+        Used by the watch's own direct realtime-input send in
+        :meth:`GeminiLiveSession._send_video`.
+        """
+
+        self.images_sent += 1
 
     def mark_watch_notification_sent(
         self,
@@ -363,6 +439,196 @@ class _PendingAudio:
     source_ack_owed: bool = True
 
 
+@dataclass(slots=True)
+class _ModalityTokens:
+    """Billed tokens for one direction (input/output), by modality.
+
+    ``unattributed`` holds tokens the SDK's per-modality detail lists never
+    accounted for — live-probed on gemini-3.1-flash-live-preview,
+    ``prompt_tokens_details`` routinely undercounts ``prompt_token_count``
+    (see module docstring context in the builder brief). Never subtracted,
+    only ever added to as messages arrive.
+    """
+
+    text: int = 0
+    audio: int = 0
+    image: int = 0
+    unattributed: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "text": self.text,
+            "audio": self.audio,
+            "image": self.image,
+            "unattributed": self.unattributed,
+        }
+
+    def total(self) -> int:
+        return self.text + self.audio + self.image + self.unattributed
+
+
+class _UsageMeter:
+    """Accumulate Gemini Live ``usage_metadata`` into billed tokens + cost.
+
+    Every ``usage_metadata`` message is an independent billing record (never
+    session-cumulative, never deduplicated, never assumed to be exactly one
+    per turn — live-probed behavior). ``estimate_incomplete`` is set True
+    whenever the estimate is anything less than fully precise: no pricing
+    entry for the model, or any message whose per-modality detail list did
+    not fully cover its token total (the shortfall is priced at the
+    cheapest available rate for that direction so cost is never
+    under-reported, but the flag says so honestly).
+    """
+
+    _INPUT_RATE_KEYS = ("text", "audio", "image")
+    _OUTPUT_RATE_KEYS = ("text", "audio")
+
+    def __init__(self, model: str, pricing: dict[str, Any] | None) -> None:
+        self._model = model
+        pricing_table = pricing if isinstance(pricing, dict) else {}
+        entry = pricing_table.get(model)
+        self._pricing: dict[str, Any] | None = (
+            entry if self._valid_pricing_entry(entry) else None
+        )
+        self.usage_messages = 0
+        self.input = _ModalityTokens()
+        self.output = _ModalityTokens()
+        self.estimate_incomplete = self._pricing is None
+
+    @staticmethod
+    def _valid_rate(value: Any) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    @classmethod
+    def _valid_pricing_entry(cls, entry: Any) -> bool:
+        """Reject any entry with a missing/malformed rate rather than price it at 0.0.
+
+        A partial pricing override (e.g. no output audio rate) would otherwise
+        understate cost while still reporting ``estimate_incomplete=False`` —
+        exactly the shape that could let a hard-budget stop be silently
+        skipped. Anything invalid here means: no pricing at all.
+        """
+
+        if not isinstance(entry, dict):
+            return False
+        input_rates = entry.get("input_per_1m")
+        output_rates = entry.get("output_per_1m")
+        if not isinstance(input_rates, dict) or not isinstance(output_rates, dict):
+            return False
+        if not all(cls._valid_rate(input_rates.get(key)) for key in cls._INPUT_RATE_KEYS):
+            return False
+        if not all(cls._valid_rate(output_rates.get(key)) for key in cls._OUTPUT_RATE_KEYS):
+            return False
+        return True
+
+    def record(self, usage: types.UsageMetadata) -> None:
+        self.usage_messages += 1
+        self._accumulate(
+            self.input, usage.prompt_token_count, usage.prompt_tokens_details
+        )
+        self._accumulate(
+            self.output, usage.response_token_count, usage.response_tokens_details
+        )
+
+    def _accumulate(
+        self,
+        bucket: _ModalityTokens,
+        total: int | None,
+        details: list[types.ModalityTokenCount] | None,
+    ) -> None:
+        if total is None:
+            # A missing total is itself a metering gap, independent of
+            # whether a (necessarily empty) detail list is present.
+            self.estimate_incomplete = True
+            total = 0
+        elif total < 0:
+            self.estimate_incomplete = True
+            total = 0
+        if not details:
+            if total:
+                bucket.unattributed += total
+                self.estimate_incomplete = True
+            return
+        attributed = 0
+        for detail in details:
+            count = detail.token_count
+            if count is None:
+                count = 0
+            elif count < 0:
+                self.estimate_incomplete = True
+                count = 0
+            attributed += count
+            modality = detail.modality.name.lower() if detail.modality else ""
+            if modality == "text":
+                bucket.text += count
+            elif modality == "audio":
+                bucket.audio += count
+            elif modality == "image":
+                bucket.image += count
+            else:
+                bucket.unattributed += count
+                self.estimate_incomplete = True
+        remainder = total - attributed
+        if remainder != 0:
+            # Either direction is a metering gap: attributed < total leaves a
+            # shortfall (priced conservatively below), attributed > total
+            # means the SDK's own detail list disagrees with its total — both
+            # are dishonest to report as a complete estimate. Only ever add
+            # the positive remainder to unattributed; never subtract.
+            self.estimate_incomplete = True
+        if remainder > 0:
+            bucket.unattributed += remainder
+
+    @staticmethod
+    def _cheapest_rate(rates: dict[str, Any]) -> float:
+        numeric = [value for value in rates.values() if isinstance(value, (int, float))]
+        return min(numeric) if numeric else 0.0
+
+    def estimated_usd(self) -> float | None:
+        """Best-effort cost, or ``None`` if the model has no pricing entry."""
+
+        if self._pricing is None:
+            return None
+        input_rates = self._pricing.get("input_per_1m")
+        input_rates = input_rates if isinstance(input_rates, dict) else {}
+        output_rates = self._pricing.get("output_per_1m")
+        output_rates = output_rates if isinstance(output_rates, dict) else {}
+
+        def _rate(rates: dict[str, Any], key: str) -> float:
+            value = rates.get(key, 0.0)
+            return float(value) if isinstance(value, (int, float)) else 0.0
+
+        cost = 0.0
+        cost += self.input.text / 1_000_000 * _rate(input_rates, "text")
+        cost += self.input.audio / 1_000_000 * _rate(input_rates, "audio")
+        cost += self.input.image / 1_000_000 * _rate(input_rates, "image")
+        if self.input.unattributed:
+            cost += (
+                self.input.unattributed / 1_000_000 * self._cheapest_rate(input_rates)
+            )
+        cost += self.output.text / 1_000_000 * _rate(output_rates, "text")
+        cost += self.output.audio / 1_000_000 * _rate(output_rates, "audio")
+        if self.output.unattributed:
+            cost += (
+                self.output.unattributed
+                / 1_000_000
+                * self._cheapest_rate(output_rates)
+            )
+        return cost
+
+    @property
+    def pricing_as_of(self) -> str | None:
+        if self._pricing is None:
+            return None
+        value = self._pricing.get("as_of")
+        return value if isinstance(value, str) else None
+
+
 class GeminiLiveSession:
     """Relay PCM and tools with at-least-once, no-local-drop audio resumption."""
 
@@ -377,6 +643,16 @@ class GeminiLiveSession:
         system_instruction: str = DEFAULT_SYSTEM_INSTRUCTION,
         initial_handle: str | None = None,
         on_handle_update: Callable[[str | None], None] | None = None,
+        context_trigger_tokens: int = _DEFAULT_CONTEXT_TRIGGER_TOKENS,
+        context_target_tokens: int = _DEFAULT_CONTEXT_TARGET_TOKENS,
+        google_search_enabled: bool = False,
+        watch_cooldown_seconds: float = _WATCH_COOLDOWN_SECONDS,
+        watch_max_notifications: int = _WATCH_MAX_NOTIFICATIONS,
+        session_soft_minutes: float = _DEFAULT_SESSION_SOFT_MINUTES,
+        session_max_minutes: float = _DEFAULT_SESSION_MAX_MINUTES,
+        session_soft_budget_usd: float | None = _DEFAULT_SESSION_SOFT_BUDGET_USD,
+        session_hard_budget_usd: float | None = None,
+        pricing: dict[str, Any] | None = None,
     ) -> None:
         self._model = model
         self._language = language
@@ -386,6 +662,16 @@ class GeminiLiveSession:
         self._system_instruction = system_instruction
         self._resumption_handle: str | None = initial_handle
         self._on_handle_update = on_handle_update
+        self._context_trigger_tokens = context_trigger_tokens
+        self._context_target_tokens = context_target_tokens
+        self._google_search_enabled = google_search_enabled
+        self._watch_cooldown_seconds = watch_cooldown_seconds
+        self._watch_max_notifications = watch_max_notifications
+        self._session_soft_minutes = session_soft_minutes
+        self._session_max_minutes = session_max_minutes
+        self._session_soft_budget_usd = session_soft_budget_usd
+        self._session_hard_budget_usd = session_hard_budget_usd
+        self._pricing = pricing if isinstance(pricing, dict) else {}
         self._replay_audio: deque[_PendingAudio] = deque()
         self._input_transcript_parts: list[str] = []
         self._output_transcript_parts: list[str] = []
@@ -397,6 +683,10 @@ class GeminiLiveSession:
         self._video_relay: _VideoFrameRelay | None = None
         self._realtime_input_lock = asyncio.Lock()
         self._last_loud_audio_at = float("-inf")
+        self._session_started_at = 0.0
+        self._completed_turns = 0
+        self._soft_budget_warned = False
+        self._usage_meter = _UsageMeter(model, self._pricing)
 
     def watch_view(self, instruction: str) -> dict[str, Any]:
         """Activate a local, cost-bounded watch against the current shared view."""
@@ -439,10 +729,19 @@ class GeminiLiveSession:
         tools = []
         if self._tool_declarations:
             tools.append(types.Tool(function_declarations=self._tool_declarations))
-        tools.append(types.Tool(google_search=types.GoogleSearch()))
+        if self._google_search_enabled:
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
+        system_instruction = self._system_instruction
+        if (
+            not self._google_search_enabled
+            and system_instruction == DEFAULT_SYSTEM_INSTRUCTION
+        ):
+            # Tool list and persona must agree: without the tool, drop the
+            # default persona's search-capability sentence too.
+            system_instruction = _DEFAULT_SYSTEM_INSTRUCTION_NO_SEARCH
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
-            system_instruction=self._system_instruction,
+            system_instruction=system_instruction,
             speech_config=types.SpeechConfig(
                 language_code=self._language,
                 voice_config=types.VoiceConfig(
@@ -458,10 +757,13 @@ class GeminiLiveSession:
             session_resumption=types.SessionResumptionConfig(
                 handle=self._resumption_handle,
             ),
+            # Mandatory: without this Google caps audio+video Live sessions
+            # at ~2 minutes. Trigger/target are config-driven (see
+            # voice_web.context_compression), never disableable.
             context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=_CONTEXT_TRIGGER_TOKENS,
+                trigger_tokens=self._context_trigger_tokens,
                 sliding_window=types.SlidingWindow(
-                    target_tokens=_CONTEXT_TARGET_TOKENS
+                    target_tokens=self._context_target_tokens
                 ),
             ),
         )
@@ -677,6 +979,7 @@ class GeminiLiveSession:
                                 mime_type="image/jpeg",
                             )
                         )
+                        relay.note_image_sent()
                         await asyncio.sleep(_WATCH_IMAGE_SETTLE_SECONDS)
                         if stop_event.is_set() or self._active_session is not session:
                             relay.defer_watch_notification(notification)
@@ -890,6 +1193,107 @@ class GeminiLiveSession:
         except Exception:
             _log.exception("Gemini Live resumption handle callback failed")
 
+    def _usage_update_event(self, relay: _VideoFrameRelay | None) -> dict[str, Any]:
+        """Build the cost-observability event for one ``usage_metadata`` arrival.
+
+        Never includes transcript text, tool args, or image data — server-side
+        counters and a best-effort cost estimate only.
+        """
+
+        estimated_usd = self._usage_meter.estimated_usd()
+        soft_budget = self._session_soft_budget_usd
+        soft_budget_exceeded = (
+            soft_budget is not None
+            and estimated_usd is not None
+            and estimated_usd >= soft_budget
+        )
+        return {
+            "type": "usage_update",
+            "session_seconds": time.monotonic() - self._session_started_at,
+            "turns": self._completed_turns,
+            "usage_messages": self._usage_meter.usage_messages,
+            "tokens": {
+                "input": self._usage_meter.input.as_dict(),
+                "output": self._usage_meter.output.as_dict(),
+            },
+            "images_sent": relay.images_sent if relay is not None else 0,
+            "watch": relay.watch_stats() if relay is not None else {
+                "candidates": 0,
+                "injections": 0,
+            },
+            "estimated_usd": estimated_usd,
+            "estimate_incomplete": self._usage_meter.estimate_incomplete,
+            "model": self._model,
+            "pricing_as_of": self._usage_meter.pricing_as_of,
+            "soft_budget_usd": soft_budget,
+            "soft_budget_exceeded": soft_budget_exceeded,
+        }
+
+    @staticmethod
+    def _put_guardrail_event_best_effort(
+        events_out: asyncio.Queue[dict[str, Any]], event: dict[str, Any]
+    ) -> None:
+        """Enqueue a guardrail event without ever blocking the guardrail itself.
+
+        A full or stalled ``events_out`` (e.g. a dead client that never drains
+        it) must never prevent the max-duration/hard-budget stop from firing —
+        the stop (raising :class:`LiveSessionEnded`) is the guarantee, event
+        delivery is best-effort only.
+        """
+
+        try:
+            events_out.put_nowait(event)
+        except asyncio.QueueFull:
+            _log.warning(
+                "guardrail event dropped, events_out full: %s", event.get("type")
+            )
+
+    async def _guardrail_tick(self, events_out: asyncio.Queue[dict[str, Any]]) -> None:
+        """One session-duration/budget check; raises :class:`LiveSessionEnded` to stop.
+
+        Called by :meth:`_run_guardrail` on a fixed poll interval, and callable
+        directly by tests with a patched monotonic clock.
+        """
+
+        elapsed_minutes = (time.monotonic() - self._session_started_at) / 60.0
+        if not self._soft_budget_warned and elapsed_minutes >= self._session_soft_minutes:
+            self._soft_budget_warned = True
+            self._put_guardrail_event_best_effort(
+                events_out,
+                {
+                    "type": "usage_warning",
+                    "reason": "soft_minutes",
+                    "minutes": elapsed_minutes,
+                    "estimated_usd": self._usage_meter.estimated_usd(),
+                    "estimate_incomplete": self._usage_meter.estimate_incomplete,
+                },
+            )
+        if elapsed_minutes >= self._session_max_minutes:
+            self._put_guardrail_event_best_effort(
+                events_out, {"type": "session_ended", "reason": "max_duration"}
+            )
+            raise LiveSessionEnded("max_duration")
+        hard_budget = self._session_hard_budget_usd
+        if hard_budget is not None and not self._usage_meter.estimate_incomplete:
+            estimated_usd = self._usage_meter.estimated_usd()
+            if estimated_usd is not None and estimated_usd >= hard_budget:
+                self._put_guardrail_event_best_effort(
+                    events_out, {"type": "session_ended", "reason": "hard_budget"}
+                )
+                raise LiveSessionEnded("hard_budget")
+
+    async def _run_guardrail(self, events_out: asyncio.Queue[dict[str, Any]]) -> None:
+        """Poll session duration/budget independently of the Gemini receive loop.
+
+        Runs as its own task (raced against the connection loop in :meth:`run`)
+        so a stalled upstream stream can never block the max-duration/hard-
+        budget stop.
+        """
+
+        while True:
+            await asyncio.sleep(_GUARDRAIL_POLL_SECONDS)
+            await self._guardrail_tick(events_out)
+
     @staticmethod
     async def _emit_transcript_fragment(
         events_out: asyncio.Queue[dict[str, Any]],
@@ -945,6 +1349,13 @@ class GeminiLiveSession:
             elif update.resumable and update.new_handle:
                 self._resumption_handle = update.new_handle
                 self._notify_handle_update()
+
+        usage = message.usage_metadata
+        if usage is not None:
+            # Never dedup/subtract: every usage_metadata message is its own
+            # billing record (live-probed on gemini-3.1-flash-live-preview).
+            self._usage_meter.record(usage)
+            await events_out.put(self._usage_update_event(relay))
 
         data = message.data
         if data:
@@ -1013,6 +1424,7 @@ class GeminiLiveSession:
             if relay is not None:
                 relay.mark_turn_complete()
         if content and content.turn_complete:
+            self._completed_turns += 1
             await events_out.put({"type": "state", "value": "listening"})
 
         if message.go_away:
@@ -1143,30 +1555,18 @@ class GeminiLiveSession:
             except asyncio.QueueEmpty:
                 return
 
-    async def run(
+    async def _run_connect_loop(
         self,
         audio_in: asyncio.Queue[bytes],
         events_out: asyncio.Queue[dict[str, Any]],
         tool_executor: _ToolExecutor,
-        text_in: asyncio.Queue[str] | None = None,
-        video_in: asyncio.Queue[bytes | None] | None = None,
+        text_in: asyncio.Queue[str] | None,
+        video_in: asyncio.Queue[bytes | None] | None,
+        relay: _VideoFrameRelay | None,
     ) -> None:
-        """Run until cancelled, or request cascade fallback on a Live API failure.
+        """(Re)connect to Gemini Live until cancelled or a fallback is required."""
 
-        ``text_in`` is optional so a caller that never offers typed input
-        keeps today's behavior byte-identical: with it ``None`` (the
-        default), no text-drain task is ever created and
-        ``send_client_content`` is never called. ``video_in`` is optional the
-        same way, and additionally has its queue drained (see
-        :meth:`_drain_video_queue`) at the start of every connect attempt.
-        """
-
-        self._input_transcript_parts = []
-        self._output_transcript_parts = []
-        self._model_turn_active = False
         announced_live = False
-        relay = _VideoFrameRelay(events_out) if video_in is not None else None
-        self._video_relay = relay
         try:
             client = genai.Client(api_key=self._api_key)
             while True:
@@ -1203,7 +1603,72 @@ class GeminiLiveSession:
             raise
         except _FALLBACK_ERRORS as exc:
             raise LiveFallbackRequired("Gemini Live is unavailable") from exc
+
+    async def run(
+        self,
+        audio_in: asyncio.Queue[bytes],
+        events_out: asyncio.Queue[dict[str, Any]],
+        tool_executor: _ToolExecutor,
+        text_in: asyncio.Queue[str] | None = None,
+        video_in: asyncio.Queue[bytes | None] | None = None,
+    ) -> None:
+        """Run until cancelled, or request cascade fallback on a Live API failure.
+
+        ``text_in`` is optional so a caller that never offers typed input
+        keeps today's behavior byte-identical: with it ``None`` (the
+        default), no text-drain task is ever created and
+        ``send_client_content`` is never called. ``video_in`` is optional the
+        same way, and additionally has its queue drained (see
+        :meth:`_drain_video_queue`) at the start of every connect attempt.
+
+        A guardrail task races the connection loop for the whole call: it
+        polls the monotonic clock/usage estimate independently of the Gemini
+        receive loop, so a stalled upstream stream can never block the
+        session-duration/budget stop (see :meth:`_run_guardrail`). It raises
+        :class:`LiveSessionEnded` — the caller must close the client
+        websocket without falling back to cascade mode.
+        """
+
+        self._input_transcript_parts = []
+        self._output_transcript_parts = []
+        self._model_turn_active = False
+        self._session_started_at = time.monotonic()
+        self._completed_turns = 0
+        self._soft_budget_warned = False
+        relay = (
+            _VideoFrameRelay(
+                events_out,
+                watch_cooldown_seconds=self._watch_cooldown_seconds,
+                watch_max_notifications=self._watch_max_notifications,
+            )
+            if video_in is not None
+            else None
+        )
+        self._video_relay = relay
+        connection_task = asyncio.create_task(
+            self._run_connect_loop(
+                audio_in, events_out, tool_executor, text_in, video_in, relay
+            )
+        )
+        guardrail_task = asyncio.create_task(self._run_guardrail(events_out))
+        try:
+            done, _ = await asyncio.wait(
+                {connection_task, guardrail_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if guardrail_task in done:
+                error = guardrail_task.exception()
+                if error is not None:
+                    raise error
+            if connection_task in done:
+                error = connection_task.exception()
+                if error is not None:
+                    raise error
         finally:
+            for task in (connection_task, guardrail_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(connection_task, guardrail_task, return_exceptions=True)
             if relay is not None:
                 relay.stop_watching()
             self._video_relay = None
