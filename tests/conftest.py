@@ -371,6 +371,13 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # 3b. The autoresearch audit dir (budget ledger, cooldowns, run records)
+    #     is REPO-relative, not HERMES_HOME-relative — without this override a
+    #     test exercising a ledger-guarded model call would spend the LIVE
+    #     shared daily budget (seen 2026-07-10: a gate run leaked an
+    #     'estimated' reservation into .hermes/skill-audit's real ledger).
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(fake_hermes_home / "skill-audit"))
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
