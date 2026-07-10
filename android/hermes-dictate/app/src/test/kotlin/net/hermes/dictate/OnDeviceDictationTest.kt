@@ -153,6 +153,39 @@ class OnDeviceDictationTest {
     }
 
     @Test
+    fun `a stale terminal callback cannot clear the pending gate of the newer session`() {
+        // Real S24 race: segment starts -> recognizer reports BUSY -> controller recreate()s ->
+        // a fresh segment is listening (pending) -> the OLD recognizer only now delivers its
+        // delayed onResults. If that stale terminal leaked through it would flip pendingSegment
+        // false and let an overlapping start corrupt the live session. It must be dropped, and the
+        // new session's pending gate must stay intact.
+        val first = mock<SpeechRecognizer>()
+        val second = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(first, second), callbacks, intentFactory)
+
+        dictation.startSegment("de-DE")
+        val staleListener = listenerOf(first)
+        staleListener.onError(SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
+        verify(callbacks).onError(eq(RecognizerFailure.BUSY))
+
+        dictation.recreate()
+        assertTrue(dictation.startSegment("de-DE")) // binds `second`, pending again
+
+        // Late terminal from the destroyed first recognizer arrives now.
+        staleListener.onResults(resultsBundle("verspaetet"))
+
+        // It neither committed nor corrupted the new session: no extra onFinal, and the pending
+        // gate is still closed so an overlapping start is still rejected.
+        verify(callbacks, never()).onFinal(any())
+        assertFalse(dictation.startSegment("de-DE"))
+        verify(second, times(1)).startListening(any())
+
+        // The live session still terminates on its own real result.
+        listenerOf(second).onResults(resultsBundle("aktuell"))
+        verify(callbacks).onFinal(eq("aktuell"))
+    }
+
+    @Test
     fun `a late callback after destroy is dropped`() {
         val r = mock<SpeechRecognizer>()
         val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
