@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowDown, ArrowUp, Check, ClipboardCheck, Lock, Plus, ShieldCheck, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Check, ClipboardCheck, Lock, Plus, ShieldCheck, Trash2, TriangleAlert, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
-import { Led, StatusPill, ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { FleetEmptyState, FleetPanel, SignalChip, SignalLabel, signalToneFromLegacy } from "../components/leitstand";
+import { Eyebrow } from "../components/primitives";
 import type { Density } from "../hooks/useDensity";
 import type { DotKind } from "../lib/tones";
 import {
@@ -166,7 +166,7 @@ const ROLE_HINTS: Record<string, string> = {
 };
 
 const CONTROL_CLASS =
-  "min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:text-sm";
+  "min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink focus:border-live";
 
 function groupedModelOptions(models: LaneModelOption[]) {
   const groups = new Map<string, LaneModelOption[]>();
@@ -199,12 +199,7 @@ function rowUsesOpenRouter(row: EditorRow): boolean {
  *  Credits statt Abo-Kontingent, das soll auf einen Blick auffallen. */
 function MeteredBadge() {
   return (
-    <span
-      title={t.meteredHint}
-      className="inline-flex max-w-full items-center truncate rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-amber-200"
-    >
-      {t.meteredBadge}
-    </span>
+    <span title={t.meteredHint}><SignalChip tone="warn" label={t.meteredBadge} className="max-w-full" /></span>
   );
 }
 
@@ -769,7 +764,7 @@ export function LanesEditor({
 
   return (
     <div className="space-y-4">
-      <p className="text-sm hc-soft">{t.intro}</p>
+      <p className="text-sec text-ink-2">{t.intro}</p>
 
       {/* Kopf: Preset wählen + EIN Klick übernehmen. */}
       <FleetPanel eyebrow={t.presetLabel} meta={dirty ? t.dirtyHint : null}>
@@ -779,7 +774,7 @@ export function LanesEditor({
             aria-label={t.presetLabel}
             disabled={busy}
             onChange={(e) => actions.onSelect(e.target.value)}
-            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:w-64 sm:text-sm"
+            className="min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink  sm:w-64"
           >
             {data.lanes.map((l) => (
               <option key={l.id} value={l.id}>
@@ -790,7 +785,7 @@ export function LanesEditor({
           <div className="flex flex-col gap-2 sm:ml-auto sm:flex-row sm:items-center">
             <Button
               size="sm"
-              className="hc-hit"
+              className="min-h-12"
               disabled={applyDisabled}
               onClick={() => actions.onApply(lane, rows, dirty)}
             >
@@ -801,7 +796,7 @@ export function LanesEditor({
               <button
                 type="button"
                 onClick={() => setWarningsExpanded((v) => !v)}
-                className="text-xs hc-dim hover:text-white"
+                className="min-h-12 rounded-card px-2 text-sec text-live hover:bg-live/10 hover:text-bronze-hi"
                 aria-expanded={warningsExpanded}
                 aria-label={warningsExpanded ? t.warningsCollapse : t.warningsExpand}
               >
@@ -811,11 +806,9 @@ export function LanesEditor({
           </div>
         </div>
         {hasWarnings && warningsExpanded ? (
-          <div className="mt-3 space-y-1 border-t border-[var(--hc-border)] pt-3">
+          <div className="mt-3 space-y-1 border-t border-line pt-3">
             {warningEntries.map(({ profile, text }) => (
-              <ToneCallout key={`${profile}:${text}`} tone="amber">
-                <span className="font-medium">{profile}:</span> {text}
-              </ToneCallout>
+              <div key={`${profile}:${text}`} className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span><strong>{profile}:</strong> {text}</span></div>
             ))}
           </div>
         ) : null}
@@ -823,27 +816,23 @@ export function LanesEditor({
 
       <section
         aria-label={t.laneStatus}
-        className="rounded-md border border-[var(--hc-border)] bg-black/15 px-3 py-2"
+        className="rounded-card border border-line bg-surface-1 px-3 py-2"
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="hc-eyebrow">{t.laneStatus}</p>
-            <p className="mt-0.5 truncate text-sm font-medium text-white" title={lane.name}>
+            <Eyebrow>{t.laneStatus}</Eyebrow>
+            <p className="mt-0.5 truncate text-sec font-medium text-ink" title={lane.name}>
               {lane.name} · {lane.active ? t.activePreset : t.selectedPreset}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <StatusPill
-              tone={dirty ? "amber" : lane.active ? "emerald" : "zinc"}
+            <SignalChip
+              tone={signalToneFromLegacy(dirty ? "amber" : lane.active ? "emerald" : "zinc")}
               label={dirty ? t.unsaved : lane.active ? t.active : t.selectedPreset}
             />
-            <span className="rounded-full border border-[var(--hc-border)] px-2.5 py-1 text-xs hc-soft">
-              {t.overrideSummary(overrideCount)}
-            </span>
+            <SignalLabel tone="neutral" label={t.overrideSummary(overrideCount)} />
             {readinessKnown ? (
-              <span className="rounded-full border border-[var(--hc-border)] px-2.5 py-1 text-xs hc-soft">
-                {t.readySummary(readyCount, rows.length)}
-              </span>
+              <SignalLabel tone={readyCount === rows.length ? "ok" : "warn"} label={t.readySummary(readyCount, rows.length)} />
             ) : null}
           </div>
         </div>
@@ -851,12 +840,12 @@ export function LanesEditor({
 
       {/* Standardansicht: ein Dropdown pro Rolle. */}
       <FleetPanel eyebrow={t.modelsTitle} meta={profilesMeta}>
-        <div className="mb-3 space-y-2 border-b border-[var(--hc-border)] pb-3">
+        <div className="mb-3 space-y-2 border-b border-line pb-3">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <Button
               size="sm"
               ghost
-              className="hc-hit justify-center"
+              className="min-h-12 justify-center"
               disabled={isAuthSmokeDisabled}
               onClick={() => void runAuthSmoke()}
             >
@@ -864,29 +853,29 @@ export function LanesEditor({
               {authSmokeButtonLabel(dirty, authSmokeRunning)}
             </Button>
             {authSmokeSummary ? (
-              <span className="text-xs hc-dim">
+              <span className="text-micro text-ink-3">
                 {authSmokeSummaryParts(authSmokeSummary)}
               </span>
             ) : authSmokeVisibleResults.length > 0 ? (
-              <span className="text-xs hc-dim">
+              <span className="text-micro text-ink-3">
                 {t.authCheckSummary(authSmokeVisibleResults.filter((result) => result.status === "ok").length, authSmokeVisibleResults.length)}
               </span>
             ) : null}
           </div>
-          {authSmokeError ? <ToneCallout tone="red">{authSmokeError}</ToneCallout> : null}
+          {authSmokeError ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{authSmokeError}</div> : null}
           {authSmokeSummary ? (
-            <ToneCallout tone={authSmokeDecisionTone(authSmokeSummary)}>
-              <span className="block font-medium">{authSmokeDecisionLabel(authSmokeSummary)}</span>
-              <span className="block text-xs hc-soft">{authSmokeSummary.recommended_next_action}</span>
-              <span className="block text-xs hc-dim">
+            <div className="rounded-card border border-line bg-surface-2 px-3 py-2">
+              <SignalChip tone={signalToneFromLegacy(authSmokeDecisionTone(authSmokeSummary))} label={authSmokeDecisionLabel(authSmokeSummary)} />
+              <span className="mt-1 block text-sec text-ink-2">{authSmokeSummary.recommended_next_action}</span>
+              <span className="block text-micro text-ink-3">
                 {authSmokeScope
                   ? t.authScopeSummary(authSmokeScope.checked_role_count, authSmokeScope.total_role_count)
                   : t.authScopeSummary(authSmokeSummary.checked_role_count, authSmokeSummary.total_role_count)}
               </span>
-            </ToneCallout>
+            </div>
           ) : null}
           {authSmokeVisibleResults.length > 0 ? (
-            <ul className="divide-y divide-[var(--hc-border)] border-y border-[var(--hc-border)] text-xs">
+            <ul className="divide-y divide-line border-y border-line text-micro">
               {authSmokeSortedResults.map((result) => {
                 const observed = `${result.observed_provider ?? "-"}/${result.observed_model ?? "-"}`;
                 const exactLabel = authSmokeExactLabel(result);
@@ -895,19 +884,19 @@ export function LanesEditor({
                     key={`${result.role}:${result.requested_provider}:${result.requested_model}`}
                     className="grid gap-2 py-2 sm:grid-cols-[minmax(0,110px)_auto_minmax(0,1fr)] sm:items-start"
                   >
-                    <span className="min-w-0 break-words font-medium text-white">{result.role}</span>
+                    <span className="min-w-0 break-words font-medium text-ink">{result.role}</span>
                     <span className="flex flex-wrap gap-1">
-                      <StatusPill tone={laneAuthSmokeTone(result.status)} label={laneAuthSmokeLabel(result)} size="sm" />
+                      <SignalChip tone={signalToneFromLegacy(laneAuthSmokeTone(result.status))} label={laneAuthSmokeLabel(result)} />
                       {result.fallback_activated ? (
-                        <StatusPill tone="amber" label={t.authFallbackActive} size="sm" />
+                        <SignalChip tone="warn" label={t.authFallbackActive} />
                       ) : null}
                     </span>
-                    <span className="min-w-0 space-y-0.5 break-words hc-soft">
+                    <span className="min-w-0 space-y-0.5 break-words text-ink-2">
                       <span className="block">
                         {result.requested_provider || "-"}/{result.requested_model || "-"} -&gt; {observed}
                       </span>
                       {exactLabel ? <span className="block">{exactLabel}</span> : null}
-                      <span className="block hc-dim">{laneAuthSmokeReason(result)}</span>
+                      <span className="block text-ink-3">{laneAuthSmokeReason(result)}</span>
                     </span>
                   </li>
                 );
@@ -923,38 +912,24 @@ export function LanesEditor({
             return (
               <li
                 key={row.profile}
-                className="rounded-md border border-[var(--hc-border)] bg-black/15 p-3"
+                className="rounded-card border border-line bg-surface-1 p-3"
               >
                 <div className="flex min-w-0 flex-col gap-2">
                   <div className="flex min-w-0 items-start gap-2">
-                    <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
-                      <Led kind={ready.kind} size={8} />
-                    </span>
+                    <SignalLabel tone={ready.kind === "ready" || ready.kind === "live" ? "ok" : ready.kind === "warn" ? "warn" : ready.kind === "error" ? "alert" : "neutral"} label={t.readinessTitle(ready.label)} className="mt-1.5 shrink-0" />
                     <div className="min-w-0">
                       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="truncate text-sm font-medium text-white" title={row.description}>
+                        <span className="truncate text-sec font-medium text-ink" title={row.description}>
                           {row.profile}
                         </span>
-                        {override ? (
-                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
-                            {t.laneOverride}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
-                            {t.profileDefault}
-                          </span>
-                        )}
-                        {rowUsesClaudeCli(row) ? (
-                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-violet-100">
-                            {t.cloudMaxBadge}
-                          </span>
-                        ) : null}
+                        {override ? <SignalLabel tone="neutral" label={t.laneOverride} /> : <SignalLabel tone="neutral" label={t.profileDefault} />}
+                        {rowUsesClaudeCli(row) ? <SignalChip tone="neutral" label={t.cloudMaxBadge} /> : null}
                         {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
                       </div>
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-micro text-ink-3">
                         {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
                         {ready.known && !ready.ready ? (
-                          <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
+                          <span className={ready.kind === "ready" ? "text-ink-2" : "text-status-warn"}>
                             {t.readinessTitle(ready.label)}
                           </span>
                         ) : null}
@@ -988,7 +963,7 @@ export function LanesEditor({
                       }
                     }}
                   />
-                  <div className="space-y-0.5 text-xs hc-dim">
+                  <div className="space-y-0.5 text-micro text-ink-3">
                     {(() => {
                       const profile = data.profiles.find((p) => p.name === row.profile);
                       const profileModel = profile?.default_model;
@@ -1012,7 +987,7 @@ export function LanesEditor({
                       const differs = activeModel && profileModel && activeModel !== profileModel;
                       return (
                         <>
-                          <div className={differs ? "text-amber-300/90" : undefined}>
+                          <div className={differs ? "text-status-warn" : undefined}>
                             {t.activeLaneConfig(activeLabel)}
                           </div>
                           <div>{t.permanentModel(permanentLabel)}</div>
@@ -1025,10 +1000,10 @@ export function LanesEditor({
             );
           })}
         </ul>
-        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-[var(--hc-border)] bg-[var(--hc-bg)]/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
+        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-line bg-surface-1/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
           <Button
             size="sm"
-            className="hc-hit w-full justify-center sm:w-auto"
+            className="min-h-12 w-full justify-center sm:w-auto"
             disabled={applyDisabled}
             onClick={() => actions.onPersist(rows)}
           >
@@ -1039,7 +1014,7 @@ export function LanesEditor({
             <button
               type="button"
               onClick={() => setWarningsExpanded((v) => !v)}
-              className="inline-flex min-h-11 items-center text-xs hc-dim hover:text-white sm:min-h-0"
+              className="inline-flex min-h-12 items-center rounded-card px-2 text-sec text-live hover:bg-live/10 hover:text-bronze-hi"
               aria-expanded={warningsExpanded}
               aria-label={warningsExpanded ? t.warningsCollapse : t.warningsExpand}
             >
@@ -1051,16 +1026,16 @@ export function LanesEditor({
 
       {/* Erweitert: Provider, Fallbacks, Presets, OpenRouter-Import */}
       <details className="group">
-        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between rounded-md border border-[var(--hc-border)] bg-black/15 p-3 text-sm hc-soft sm:min-h-9">
+        <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between rounded-card border border-line bg-surface-1 p-3 text-sec text-ink-2 ">
           <span>{t.advanced}</span>
           <span className="group-open:hidden">▸</span>
           <span className="hidden group-open:inline">▾</span>
         </summary>
         <div className="mt-3">
           <FleetPanel eyebrow={t.profilesPanel} meta={profilesMeta}>
-        <div className="mb-3 space-y-2 border-b border-[var(--hc-border)] pb-3">
+        <div className="mb-3 space-y-2 border-b border-line pb-3">
           <label className="block min-w-0">
-            <span className="hc-type-label">{t.openRouterImport}</span>
+            <span className="text-micro">{t.openRouterImport}</span>
             <textarea
               value={openRouterPaste}
               aria-label={t.openRouterImport}
@@ -1071,14 +1046,14 @@ export function LanesEditor({
                 setOpenRouterPaste(e.target.value);
                 setOpenRouterImportResult(null);
               }}
-              className="mt-1 min-h-20 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white placeholder:text-zinc-500 sm:min-h-24 sm:text-sm"
+              className="mt-1 min-h-20 w-full resize-y rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink placeholder:text-ink-3 sm:min-h-24"
             />
           </label>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <Button
               size="sm"
               ghost
-              className="hc-hit justify-center"
+              className="min-h-12 justify-center"
               disabled={busy || openRouterImporting || openRouterPaste.trim() === ""}
               onClick={() => void runOpenRouterImport()}
             >
@@ -1086,7 +1061,7 @@ export function LanesEditor({
               {openRouterImporting ? t.openRouterImportRunning : t.openRouterImportRun}
             </Button>
             {openRouterImportResult ? (
-              <span className="text-xs hc-dim">{t.openRouterImported(openRouterImportResult.admitted.length)}</span>
+              <span className="text-micro text-ink-3">{t.openRouterImported(openRouterImportResult.admitted.length)}</span>
             ) : null}
           </div>
           {openRouterImportResult ? (
@@ -1094,8 +1069,8 @@ export function LanesEditor({
               {openRouterImportResult.results.map((row) => (
                 <li key={`${row.id}:${row.status}`} className="min-w-0 max-w-full">
                   <span title={row.reason} className="inline-flex max-w-full items-center gap-2">
-                    <StatusPill tone={importStatusTone(row.status)} label={importStatusLabel(row.status)} size="sm" />
-                    <span className="min-w-0 break-words text-xs text-zinc-200">{row.id}</span>
+                    <SignalChip tone={signalToneFromLegacy(importStatusTone(row.status))} label={importStatusLabel(row.status)} />
+                    <span className="min-w-0 break-words text-micro text-ink">{row.id}</span>
                   </span>
                 </li>
               ))}
@@ -1114,58 +1089,48 @@ export function LanesEditor({
             return (
             <li
               key={row.profile}
-              className="rounded-md border border-[var(--hc-border)] bg-black/15 p-3"
+              className="rounded-card border border-line bg-surface-1 p-3"
             >
               <div className="flex min-w-0 flex-col gap-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-2">
-                    <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
-                      <Led kind={ready.kind} size={8} />
-                    </span>
+                    <SignalLabel tone={ready.kind === "ready" || ready.kind === "live" ? "ok" : ready.kind === "warn" ? "warn" : ready.kind === "error" ? "alert" : "neutral"} label={t.readinessTitle(ready.label)} className="mt-1.5 shrink-0" />
                     <div className="min-w-0">
                       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="truncate text-sm font-medium text-white" title={row.description}>
+                        <span className="truncate text-sec font-medium text-ink" title={row.description}>
                           {row.profile}
                         </span>
                         {row.locked ? (
-                          <StatusPill tone="zinc" label={t.lockBadge} size="sm" />
-                        ) : override ? (
-                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
-                            {t.laneOverride}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
-                            {t.profileDefault}
-                          </span>
-                        )}
-                        {activeRuntimeLabel ? <StatusPill tone="zinc" label={activeRuntimeLabel} size="sm" /> : null}
+                          <SignalChip tone="neutral" label={t.lockBadge} />
+                        ) : override ? <SignalLabel tone="neutral" label={t.laneOverride} /> : <SignalLabel tone="neutral" label={t.profileDefault} />}
+                        {activeRuntimeLabel ? <SignalChip tone="neutral" label={activeRuntimeLabel} /> : null}
                         {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
-                        {!rowChecks[row.profile] ? <StatusPill tone="zinc" label={t.smokePending} size="sm" /> : null}
+                        {!rowChecks[row.profile] ? <SignalChip tone="neutral" label={t.smokePending} /> : null}
                       </div>
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-micro text-ink-3">
                         {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
                         {ready.known && !ready.ready ? (
-                          <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
+                          <span className={ready.kind === "ready" ? "text-ink-2" : "text-status-warn"}>
                             {t.readinessTitle(ready.label)}
                           </span>
                         ) : null}
                       </div>
                     </div>
                   </div>
-                  {row.locked ? <Lock className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" /> : null}
+                  {row.locked ? <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" /> : null}
                 </div>
 
-                <div className="grid gap-2 text-xs hc-soft sm:grid-cols-2">
+                <div className="grid gap-2 text-micro text-ink-2 sm:grid-cols-2">
                   <div>
-                    <div className="hc-type-label">{t.profileDefault}</div>
-                    <div className="mt-1 break-words text-white">
+                    <div className="text-micro">{t.profileDefault}</div>
+                    <div className="mt-1 break-words text-ink">
                       {row.defaultProvider ? `${providerLabel(row.defaultProvider, models)} / ` : ""}
                       {row.defaultLabel}
                     </div>
                   </div>
                   <div>
-                    <div className="hc-type-label">{t.laneOverride}</div>
-                    <div className="mt-1 break-words text-white">
+                    <div className="text-micro">{t.laneOverride}</div>
+                    <div className="mt-1 break-words text-ink">
                       {activeRuntimeLabel ? `${activeRuntimeLabel} / ` : ""}
                       {activeProvider ? `${providerLabel(activeProvider, models)} / ` : ""}
                       {activeModelLabel}
@@ -1175,7 +1140,7 @@ export function LanesEditor({
 
                 <div className="grid gap-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto] sm:items-end">
                   <label className="min-w-0">
-                    <span className="hc-type-label">{t.primaryLabel}</span>
+                    <span className="text-micro">{t.primaryLabel}</span>
                     <ProviderSelect
                       value={row.provider}
                       models={models}
@@ -1192,7 +1157,7 @@ export function LanesEditor({
                     />
                   </label>
                   <label className="min-w-0">
-                    <span className="hc-type-label">Model</span>
+                    <span className="text-micro">Model</span>
                     {rowUsesClaudeCli(row) ? (
                       <SimpleModelSelect
                         value={row.choice}
@@ -1231,7 +1196,7 @@ export function LanesEditor({
                   <Button
                     size="sm"
                     ghost
-                    className="hc-hit justify-center"
+                    className="min-h-12 justify-center"
                     disabled={busy || rowChecks[row.profile]?.status === "checking"}
                     onClick={() => void runRowCheck(row)}
                   >
@@ -1242,12 +1207,12 @@ export function LanesEditor({
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="hc-type-label">{t.fallbackLabel}</span>
+                    <span className="text-micro">{t.fallbackLabel}</span>
                     {!row.locked && !rowUsesClaudeCli(row) ? (
                       <Button
                         size="sm"
                         ghost
-                        className="hc-hit"
+                        className="min-h-12"
                         disabled={busy}
                         onClick={() => addFallback(row)}
                       >
@@ -1257,13 +1222,13 @@ export function LanesEditor({
                     ) : null}
                   </div>
                   {row.fallbackProviders.length === 0 && !rowUsesClaudeCli(row) ? (
-                    <div className="text-xs hc-dim">{t.fallbackMissing}</div>
+                    <div className="text-micro text-ink-3">{t.fallbackMissing}</div>
                   ) : (
                     <ul className="space-y-2">
                       {row.fallbackProviders.map((fallback, idx) => (
                         <li
                           key={`${row.profile}-fallback-${idx}`}
-                          className="grid gap-2 rounded-md border border-[var(--hc-border)] bg-black/20 p-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto]"
+                          className="grid gap-2 rounded-card border border-line bg-surface-2 p-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto]"
                         >
                           <ProviderSelect
                             value={fallback.provider}
@@ -1292,7 +1257,7 @@ export function LanesEditor({
                               aria-label={`Fallback ${idx + 1} nach oben`}
                               disabled={busy || row.locked || rowUsesClaudeCli(row) || idx === 0}
                               onClick={() => moveFallback(row.profile, idx, -1)}
-                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                              className="inline-flex size-12 items-center justify-center rounded-card border border-line text-micro text-ink-3 disabled:opacity-40"
                             >
                               <ArrowUp className="h-3.5 w-3.5" />
                             </button>
@@ -1301,7 +1266,7 @@ export function LanesEditor({
                               aria-label={`Fallback ${idx + 1} nach unten`}
                               disabled={busy || row.locked || rowUsesClaudeCli(row) || idx === row.fallbackProviders.length - 1}
                               onClick={() => moveFallback(row.profile, idx, 1)}
-                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                              className="inline-flex size-12 items-center justify-center rounded-card border border-line text-micro text-ink-3 disabled:opacity-40"
                             >
                               <ArrowDown className="h-3.5 w-3.5" />
                             </button>
@@ -1310,7 +1275,7 @@ export function LanesEditor({
                               aria-label={`Fallback ${idx + 1} entfernen`}
                               disabled={busy || row.locked || rowUsesClaudeCli(row)}
                               onClick={() => removeFallback(row.profile, idx)}
-                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                              className="inline-flex size-12 items-center justify-center rounded-card border border-line text-micro text-ink-3 disabled:opacity-40"
                             >
                               <X className="h-3.5 w-3.5" />
                             </button>
@@ -1324,16 +1289,15 @@ export function LanesEditor({
                 {warnings.length > 0 ? (
                   <div className="space-y-1">
                     {warnings.map((warning) => (
-                      <ToneCallout key={warning} tone="amber">{warning}</ToneCallout>
+                      <div key={warning} className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{warning}</div>
                     ))}
                   </div>
                 ) : null}
                 {rowChecks[row.profile] ? (
-                  <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 text-xs hc-soft">
-                    <StatusPill
-                      tone={rowSmokeTone(rowChecks[row.profile].status)}
+                  <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 text-micro text-ink-2">
+                    <SignalChip
+                      tone={signalToneFromLegacy(rowSmokeTone(rowChecks[row.profile].status))}
                       label={rowSmokeLabel(rowChecks[row.profile])}
-                      size="sm"
                     />
                     <span className="min-w-0 max-w-full break-words">
                       {rowChecks[row.profile].reason}
@@ -1341,11 +1305,11 @@ export function LanesEditor({
                   </div>
                 ) : null}
                 {preview ? (
-                  <div className="rounded-md border border-[var(--hc-border)] bg-black/25 p-2">
-                    <div className="mb-1 text-xs hc-soft">
+                  <div className="rounded-card border border-line bg-surface-2 p-2">
+                    <div className="mb-1 text-micro text-ink-2">
                       Preview · {t.wouldChange}
                     </div>
-                    <pre className="whitespace-pre-wrap break-words text-xs text-zinc-200">{preview}</pre>
+                    <pre className="whitespace-pre-wrap break-words text-micro text-ink">{preview}</pre>
                   </div>
                 ) : null}
               </div>
@@ -1353,17 +1317,17 @@ export function LanesEditor({
             );
           })}
         </ul>
-        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-[var(--hc-border)] bg-[var(--hc-bg)]/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
+        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-line bg-surface-1/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
           <Button
             size="sm"
-            className="hc-hit justify-center"
+            className="min-h-12 justify-center"
             disabled={applyDisabled}
             onClick={() => actions.onApply(lane, rows, dirty)}
           >
             <Check className="h-4 w-4" />
             {t.saveLane}
           </Button>
-          <Button size="sm" ghost className="hc-hit justify-center" disabled>
+          <Button size="sm" ghost className="min-h-12 justify-center" disabled>
             {t.configPreview}
           </Button>
         </div>
@@ -1373,15 +1337,15 @@ export function LanesEditor({
 
       {/* Presets: anlegen + aufräumen. Auswahl passiert oben. */}
       <FleetPanel eyebrow={t.presetsPanel}>
-        <ul className="divide-y divide-[var(--hc-border)]">
+        <ul className="divide-y divide-line">
           {data.lanes.map((l) => (
             <li key={l.id} className="flex flex-wrap items-center gap-2 py-2 first:pt-0 last:pb-0">
-              <span className="min-w-0 break-words text-sm text-white">{l.name}</span>
-              {l.active ? <StatusPill tone="emerald" label={t.active} size="sm" /> : null}
+              <span className="min-w-0 break-words text-sec text-ink">{l.name}</span>
+              {l.active ? <SignalChip tone="ok" label={t.active} /> : null}
               {l.builtin ? (
-                <span className="rounded bg-white/5 px-1.5 py-0.5 text-xs hc-dim">{t.builtin}</span>
+                <SignalLabel tone="neutral" label={t.builtin} />
               ) : null}
-              <span className="text-xs hc-dim">
+              <span className="text-micro text-ink-3">
                 {Object.keys(l.profiles).length > 0
                   ? t.overrideSummary(Object.keys(l.profiles).length)
                   : t.defaultChip}
@@ -1389,7 +1353,7 @@ export function LanesEditor({
               {!l.active ? (
                 pendingDelete === l.id ? (
                   <span className="ml-auto inline-flex min-w-0 flex-wrap items-center justify-end gap-2">
-                    <span className="hc-type-label hc-soft min-w-0 break-words">{t.confirmDelete(l.name)}</span>
+                    <span className="text-micro text-ink-2 min-w-0 break-words">{t.confirmDelete(l.name)}</span>
                     <button
                       type="button"
                       disabled={busy}
@@ -1397,7 +1361,7 @@ export function LanesEditor({
                         actions.onDelete(l);
                         setPendingDelete(null);
                       }}
-                      className="inline-flex min-h-11 items-center rounded-full border border-red-400/40 bg-red-400/10 px-2.5 text-xs text-red-200 disabled:opacity-40 sm:min-h-7"
+                      className="inline-flex min-h-12 items-center rounded-card border border-live/40 bg-live/10 px-2.5 text-micro text-bronze-hi disabled:opacity-40"
                     >
                       {busy ? "…" : t.confirmYes}
                     </button>
@@ -1405,7 +1369,7 @@ export function LanesEditor({
                       type="button"
                       disabled={busy}
                       onClick={() => setPendingDelete(null)}
-                      className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft sm:min-h-7"
+                      className="inline-flex min-h-12 items-center rounded-card border border-line px-2.5 text-micro text-ink-2"
                     >
                       {t.confirmNo}
                     </button>
@@ -1416,7 +1380,7 @@ export function LanesEditor({
                     aria-label={`${t.remove} ${l.name}`}
                     disabled={busy}
                     onClick={() => setPendingDelete(l.id)}
-                    className="hc-hit ml-auto inline-flex w-11 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim hover:text-white"
+                    className="ml-auto inline-flex size-12 items-center justify-center rounded-card border border-line text-micro text-ink-3 hover:border-live hover:text-live"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -1425,19 +1389,19 @@ export function LanesEditor({
             </li>
           ))}
         </ul>
-        <div className="mt-3 flex flex-col gap-2 border-t border-[var(--hc-border)] pt-3 sm:flex-row sm:items-center">
+        <div className="mt-3 flex flex-col gap-2 border-t border-line pt-3 sm:flex-row sm:items-center">
           <input
             type="text"
             value={newName}
             aria-label={t.newPresetPlaceholder}
             placeholder={t.newPresetPlaceholder}
             onChange={(e) => setNewName(e.target.value)}
-            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:w-64 sm:text-sm"
+            className="min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink  sm:w-64"
           />
           <Button
             size="sm"
             ghost
-            className="hc-hit"
+            className="min-h-12"
             disabled={busy || newName.trim() === ""}
             onClick={() => {
               actions.onCreate(newName.trim(), rows);
@@ -1568,19 +1532,17 @@ export function LanesView(_props: { density?: Density }) {
 
   return (
     <section aria-label={t.title} className="space-y-4">
-      <h2 className="text-lg font-semibold text-white">{t.title}</h2>
+      <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
       {error ? (
-        <ToneCallout tone="red">
-          <span className="flex items-center justify-between gap-3">
-            <span>{error}</span>
-            <Button size="sm" ghost className="hc-hit" onClick={() => void reload()} disabled={busy}>
+        <div className="flex items-center justify-between gap-3 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
+          <span className="flex min-w-0 items-start gap-2"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span>{error}</span></span>
+            <Button size="sm" ghost className="min-h-12" onClick={() => void reload()} disabled={busy}>
               {t.retry}
             </Button>
-          </span>
-        </ToneCallout>
+        </div>
       ) : null}
       {data === null ? (
-        <p className="text-sm hc-dim">{t.loading}</p>
+        <p className="text-sec text-ink-3">{t.loading}</p>
       ) : lane === null ? (
         <FleetEmptyState title={t.emptyTitle} desc={t.emptyDesc} />
       ) : (

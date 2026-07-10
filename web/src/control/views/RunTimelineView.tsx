@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { StatusPill, ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { FleetEmptyState, FleetPanel, SignalChip, signalToneFromLegacy } from "../components/leitstand";
 import { fmtClock, fmtDur } from "../lib/derive";
 import type { ToneName } from "../lib/types";
 import type { Density } from "../hooks/useDensity";
@@ -78,17 +78,17 @@ function TimelineRow({ item, maxDelta }: { item: TimelineItem; maxDelta: number 
   const pct = maxDelta > 0 ? Math.max(2, Math.round((item.delta_seconds / maxDelta) * 100)) : 2;
   return (
     <li className="flex items-start gap-3 py-1.5">
-      <span className="hc-mono w-20 shrink-0 text-right text-xs hc-dim">{fmtOffset(item.offset_seconds)}</span>
+      <span className="w-20 shrink-0 text-right font-data text-sec tabular-nums text-ink-3">{fmtOffset(item.offset_seconds)}</span>
       <span className="w-24 shrink-0">
         <span
-          className="block h-1.5 rounded bg-white/15"
+          className="block h-1.5 rounded bg-line"
           style={{ width: `${pct}%` }}
           aria-hidden="true"
         />
-        <span className="hc-mono hc-type-label hc-dim">{item.delta_seconds > 0 ? fmtDur(item.delta_seconds) : ""}</span>
+        <span className="font-data text-micro tabular-nums text-ink-3">{item.delta_seconds > 0 ? fmtDur(item.delta_seconds) : ""}</span>
       </span>
-      <StatusPill tone={tone} label={item.kind} size="sm" />
-      {snippet ? <span className="min-w-0 truncate text-xs hc-soft">{snippet}</span> : null}
+      <SignalChip tone={signalToneFromLegacy(tone)} label={item.kind} />
+      {snippet ? <span className="min-w-0 truncate text-sec text-ink-2">{snippet}</span> : null}
     </li>
   );
 }
@@ -107,12 +107,12 @@ export function RunTimelinePanel({ data }: { data: RunTimelineResponse }) {
       <FleetPanel
         eyebrow={
           <span className="inline-flex min-w-0 items-center gap-2">
-            <span className="truncate normal-case tracking-normal text-white">Run #{run.id}</span>
-            <StatusPill tone={headerTone} label={run.outcome || run.status || "running"} size="sm" />
+            <span className="truncate normal-case tracking-normal text-ink">Run #{run.id}</span>
+            <SignalChip tone={signalToneFromLegacy(headerTone)} label={run.outcome || run.status || "running"} />
           </span>
         }
         meta={
-          <span className="inline-flex items-center gap-3 hc-mono text-xs">
+          <span className="inline-flex items-center gap-3 font-data text-sec tabular-nums">
             <span>{t.task}: {run.task_id}</span>
             {run.profile ? <span>{t.profile}: {run.profile}</span> : null}
             {run.started_at != null ? <span>{fmtClock(run.started_at)}</span> : null}
@@ -120,12 +120,12 @@ export function RunTimelinePanel({ data }: { data: RunTimelineResponse }) {
           </span>
         }
       >
-        {run.error ? <ToneCallout tone="red">{run.error}</ToneCallout> : null}
-        {data.truncated ? <p className="mt-2 text-xs text-amber-200">{t.truncated}</p> : null}
+        {run.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{run.error}</div> : null}
+        {data.truncated ? <div className="mt-2 flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.truncated}</div> : null}
         {data.items.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
         ) : (
-          <ol className="mt-2 divide-y divide-white/5">
+          <ol className="mt-2 divide-y divide-line-soft">
             {data.items.map((item, i) => (
               <TimelineRow key={i} item={item} maxDelta={maxDelta} />
             ))}
@@ -164,16 +164,16 @@ export function RunTimelineView(_props: { density?: Density }) {
   return (
     <section aria-label={t.title} className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">{t.title}</h2>
+        <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
         <a
           href="/control/workstreams"
-          className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5"
+          className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1.5 text-sec text-live hover:border-live hover:bg-live/10"
         >
           {t.back}
         </a>
       </div>
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {data === null && !error ? <p className="text-sm hc-dim">{t.loading}</p> : null}
+      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      {data === null && !error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
       {data !== null ? <RunTimelinePanel data={data} /> : null}
     </section>
   );

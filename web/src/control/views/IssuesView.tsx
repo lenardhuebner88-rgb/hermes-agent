@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { ToneCallout } from "../components/atoms";
-import { FleetEmptyState, FleetPanel, FleetPod } from "../components/fleet/atoms";
+import { FleetEmptyState, FleetPanel, KpiTile, SignalLabel, type SignalTone } from "../components/leitstand";
 import { fmtClock } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";
@@ -46,51 +46,51 @@ export interface RunsIssuesResponse {
   issues: IssueGroup[];
 }
 
-const outcomeTone: Record<string, string> = {
-  blocked: "text-zinc-300",
-  crashed: "text-red-300",
-  timed_out: "text-red-300",
-  spawn_failed: "text-red-300",
-  gave_up: "text-amber-300",
-  iteration_budget_exhausted: "text-amber-300",
+const outcomeTone: Record<string, SignalTone> = {
+  blocked: "neutral",
+  crashed: "alert",
+  timed_out: "alert",
+  spawn_failed: "alert",
+  gave_up: "warn",
+  iteration_budget_exhausted: "warn",
 };
 
 export function IssueRow({ issue }: { issue: IssueGroup }) {
   const [open, setOpen] = useState(false);
   return (
-    <li className="rounded-md border border-[var(--hc-border)] px-3 py-2.5">
+    <li className="rounded-card border border-line px-3 py-2.5">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full flex-wrap items-center gap-2 text-left"
+        className="flex min-h-12 w-full flex-wrap items-center gap-2 text-left"
         aria-expanded={open}
       >
-        <span className="hc-mono shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.72rem] text-white">
+        <span className="shrink-0 rounded-card border border-line px-2 py-0.5 font-data text-micro tabular-nums text-ink">
           {t.count(issue.count)}
         </span>
-        <span className="min-w-0 flex-1 basis-64 truncate text-[0.85rem] font-medium text-white">
+        <span className="min-w-0 flex-1 basis-64 truncate text-sec font-medium text-ink">
           {issue.signature}
         </span>
-        <span className="hc-mono shrink-0 text-[0.72rem] hc-soft">
+        <span className="shrink-0 text-micro text-ink-2">
           {profileLabel[issue.profile] ?? issue.profile}
         </span>
-        <span className="shrink-0 space-x-1.5 text-[0.72rem]">
+        <span className="flex shrink-0 flex-wrap gap-1.5 text-micro">
           {Object.entries(issue.outcomes).map(([k, n]) => (
-            <span key={k} className={`hc-mono ${outcomeTone[k] ?? "hc-dim"}`}>{k}·{n}</span>
+            <SignalLabel key={k} tone={outcomeTone[k] ?? "neutral"} label={`${k}·${n}`} className="font-data tabular-nums" />
           ))}
         </span>
-        <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">
+        <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">
           {t.lastSeen} {fmtClock(issue.last_seen)}
         </span>
       </button>
       {open ? (
-        <div className="mt-2 space-y-2 border-t border-[var(--hc-border)] pt-2">
-          <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[0.74rem] leading-relaxed hc-soft">
+        <div className="mt-2 space-y-2 border-t border-line pt-2">
+          <pre className="overflow-x-auto whitespace-pre-wrap break-words font-data text-sec leading-relaxed text-ink-2">
             {issue.example_text || "—"}
           </pre>
           <a
             href={`/control/runs/${issue.example_run_id}`}
-            className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5"
+            className="inline-flex min-h-12 items-center rounded-card border border-line px-2.5 py-1 text-sec text-live hover:border-live hover:bg-live/10"
           >
             {t.exampleRun}
           </a>
@@ -107,10 +107,10 @@ export function IssuesPanel({ data }: { data: RunsIssuesResponse }) {
       meta={t.subtitle}
     >
       <div className="grid grid-cols-2 gap-2 sm:max-w-xs">
-        <FleetPod label={t.podGroups} value={data.group_count} />
-        <FleetPod label={t.podRuns} value={data.total_failed_runs} />
+        <KpiTile label={t.podGroups} value={data.group_count} />
+        <KpiTile label={t.podRuns} value={data.total_failed_runs} />
       </div>
-      {data.truncated ? <p className="mt-2 text-xs text-amber-200">{t.truncated}</p> : null}
+      {data.truncated ? <div className="mt-2 flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.truncated}</div> : null}
       {data.issues.length === 0 ? (
         <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
       ) : (
@@ -159,16 +159,16 @@ export function IssuesView(_props: { density?: Density }) {
   return (
     <section aria-label={t.title} className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">{t.title}</h2>
+        <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
         <a
           href="/control/statistik"
-          className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5"
+          className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1.5 text-sec text-live hover:border-live hover:bg-live/10"
         >
           {t.back}
         </a>
       </div>
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {data === null && !error ? <p className="text-sm hc-dim">{t.loading}</p> : null}
+      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      {data === null && !error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
       {data !== null ? <IssuesPanel data={data} /> : null}
     </section>
   );

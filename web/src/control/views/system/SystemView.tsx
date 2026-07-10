@@ -1,10 +1,9 @@
 import { Activity, Bot, Cpu, Gauge, GitBranch, Network } from "lucide-react";
-import { StaleBadge, StatusPill } from "../../components/atoms";
-import { Card, Text } from "../../components/primitives";
-import { SectionHeader, StatusChip } from "../../components/leitstand";
+import { StaleBadge } from "../../components/atoms";
+import { Card, Eyebrow } from "../../components/primitives";
+import { KpiTile, SectionHeader, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { useOperatorInventory, usePressureStatus } from "../../hooks/useControlData";
 import { usePulseData } from "../../hooks/usePulseData";
-import type { DotKind } from "../../lib/tones";
 import type { PressureOverall, Proposal, TailnetPressureState, ToneName } from "../../lib/types";
 import { PressureContent } from "./PressureContent";
 import { OpsRadarContent } from "./OpsRadarContent";
@@ -29,25 +28,11 @@ const overallLabel: Record<PressureOverall, string> = {
   unknown: "Unklar",
 };
 
-const overallDot: Record<PressureOverall, DotKind> = {
-  ok: "live",
-  busy: "warn",
-  saturated: "error",
-  unknown: "idle",
-};
-
 const tailnetLabel: Record<TailnetPressureState, string> = {
   direct: "Direkt",
   relay: "Relay",
   inactive: "Fehlt",
   unknown: "Unklar",
-};
-
-const tailnetTone: Record<TailnetPressureState, ToneName> = {
-  direct: "emerald",
-  relay: "amber",
-  inactive: "red",
-  unknown: "zinc",
 };
 
 function fmtDecimal(value: number | null | undefined, digits = 1): string {
@@ -109,33 +94,27 @@ export function SystemView({ proposals, proposalsLastUpdated }: Props) {
     ? summary.worktrees_dirty + summary.worktrees_orphaned + summary.worktrees_status_unknown
     : 0;
 
-  // Kopf-Ton: Sättigung dominiert (rot), sonst Busy oder ein Mismatch → amber,
-  // sonst ruhig (grün) — der eine Ampelwert für die ganze Ansicht.
-  const headTone: ToneName =
-    overall === "saturated" ? "red" : overall === "busy" || mismatchCount > 0 ? "amber" : "emerald";
-
   const opsMeta = summary
     ? `${summary.worktrees_total} Worktrees · ${summary.actors_total} Akteure`
     : undefined;
 
   return (
     <div className="space-y-5">
-      <Card surface="raised" tone={headTone} className="overflow-hidden p-0" ariaLabel="System-Status">
-        <div className="flex flex-col gap-3 border-b border-[var(--hc-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <Card surface="raised" className="overflow-hidden border border-line p-0" ariaLabel="System-Status">
+        <div className="flex flex-col gap-3 border-b border-line px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="hc-eyebrow">System</p>
+            <Eyebrow>System</Eyebrow>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-              <StatusPill tone={overallTone[overall]} label={`Druck: ${overallLabel[overall]}`} dot={overallDot[overall]} size="md" />
+              <SignalChip tone={signalToneFromLegacy(overallTone[overall])} label={`Druck: ${overallLabel[overall]}`} />
               {inv ? (
-                <StatusPill
-                  tone={mismatchCount > 0 ? "rose" : "emerald"}
+                <SignalChip
+                  tone={signalToneFromLegacy(mismatchCount > 0 ? "rose" : "emerald")}
                   label={mismatchCount > 0 ? `${mismatchCount} Mismatch` : "Sync"}
-                  dot={mismatchCount > 0 ? "error" : "ready"}
                 />
               ) : (
-                <StatusPill tone="zinc" label="Ops unklar" dot="idle" />
+                <SignalChip tone="neutral" label="Ops unklar" />
               )}
-              <Text as="h2" variant="subtitle" className="truncate text-white">Puls des Homeservers</Text>
+              <h2 className="truncate font-display text-emph font-semibold text-ink">Puls des Homeservers</h2>
             </div>
           </div>
           <div className="flex flex-wrap justify-end gap-1.5">
@@ -146,16 +125,16 @@ export function SystemView({ proposals, proposalsLastUpdated }: Props) {
 
         {/* Chips: die kombinierte Metrik-Zeile über beide Datenquellen. */}
         <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 lg:grid-cols-6">
-          <StatusChip icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} hint={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} tone={loadTone(load1, cores)} />
-          <StatusChip icon={Cpu} label="CPU" value={fmtNumber(p?.host.cpu_percent, "%")} hint="Host" tone={overall === "saturated" ? "red" : overall === "busy" ? "amber" : "zinc"} />
-          <StatusChip icon={Activity} label="API" value={fmtMs(apiLatency)} hint="p95" tone={apiTone(apiLatency)} />
-          <StatusChip icon={Network} label="Tailnet" value={tailnetLabel[tailnet]} hint={p?.access.detail ?? undefined} tone={tailnetTone[tailnet]} />
-          <StatusChip icon={GitBranch} label="Worktrees" value={summary ? `${summary.worktrees_total} total` : "-"} hint={summary ? `${summary.worktrees_locked} locked · ${summary.worktrees_dirty} dirty` : undefined} tone={summary && (summary.worktrees_dirty || summary.worktrees_orphaned) ? "amber" : "zinc"} />
-          <StatusChip icon={Bot} label="Akteure" value={summary ? String(summary.actors_total) : "-"} hint={summary ? `${summary.actors_canonical} kanonisch` : undefined} tone={summary && summary.actors_total ? "cyan" : "zinc"} />
+          <KpiTile icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} delta={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} dot={loadTone(load1, cores) === "red" ? "error" : loadTone(load1, cores) === "amber" ? "warn" : "idle"} />
+          <KpiTile icon={Cpu} label="CPU" value={fmtNumber(p?.host.cpu_percent, "%")} delta="Host" dot={overall === "saturated" ? "error" : overall === "busy" ? "warn" : "idle"} />
+          <KpiTile icon={Activity} label="API" value={fmtMs(apiLatency)} delta="p95" dot={apiTone(apiLatency) === "red" ? "error" : apiTone(apiLatency) === "amber" ? "warn" : apiTone(apiLatency) === "emerald" ? "ready" : "idle"} />
+          <KpiTile icon={Network} label="Tailnet" value={tailnetLabel[tailnet]} delta={p?.access.detail ?? undefined} dot={tailnet === "direct" ? "ready" : tailnet === "relay" ? "warn" : tailnet === "inactive" ? "error" : "idle"} />
+          <KpiTile icon={GitBranch} label="Worktrees" value={summary ? `${summary.worktrees_total} total` : "-"} delta={summary ? `${summary.worktrees_locked} locked · ${summary.worktrees_dirty} dirty` : undefined} dot={summary && (summary.worktrees_dirty || summary.worktrees_orphaned) ? "warn" : "idle"} />
+          <KpiTile icon={Bot} label="Akteure" value={summary ? String(summary.actors_total) : "-"} delta={summary ? `${summary.actors_canonical} kanonisch` : undefined} dot={summary && summary.actors_total ? "ready" : "idle"} />
         </div>
 
         {/* Kacheln: die 48h-Bilanz des Puls (dritte Datenquelle im Kopf). */}
-        <div className="border-t border-[var(--hc-border)] px-4 py-3">
+        <div className="border-t border-line px-4 py-3">
           <PulseTally summary={pulse.summary} />
         </div>
       </Card>

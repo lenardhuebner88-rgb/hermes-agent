@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { SectionHeader, FleetPanel, FleetEmptyState } from "@/control/components/leitstand";
+import { SectionHeader, FleetPanel, FleetEmptyState, SignalLabel } from "@/control/components/leitstand";
+import { Eyebrow } from "@/control/components/primitives";
 import { de } from "@/control/i18n/de";
-import { statusBadge } from "./designboard/status";
+import { statusLabel } from "./designboard/status";
 
 type CardSummary = {
   id: string;
@@ -18,6 +20,12 @@ type CardSummary = {
 };
 
 const KINDS = ["bug", "wish", "mockup", "reference"] as const;
+
+function designStatusTone(status: string): "ok" | "warn" | "neutral" {
+  if (status === "addressed") return "ok";
+  if (status === "in_progress") return "warn";
+  return "neutral";
+}
 
 export function DesignBoardView(_props: { density?: string } = {}) {
   const [cards, setCards] = useState<CardSummary[]>([]);
@@ -60,7 +68,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
         <SectionHeader label="Design Board" meta={`${cards.length} Karten`} className="flex-1" />
         <button
           onClick={() => setShowForm((v) => !v)}
-          className="shrink-0 rounded-card border border-line px-3 py-1 text-sm text-live"
+          className="min-h-12 shrink-0 rounded-card border border-line px-3 py-1 text-sec text-live hover:border-live hover:bg-live/10"
         >
           {showForm ? "Abbrechen" : "＋ Neue Karte"}
         </button>
@@ -68,19 +76,19 @@ export function DesignBoardView(_props: { density?: string } = {}) {
 
       {showForm && (
         <div className="mt-3 rounded-panel border border-line bg-surface-2 p-3">
-          <div className="hc-type-label text-ink-3">Neue Karte</div>
+          <Eyebrow>Neue Karte</Eyebrow>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Titel — z. B. Header überlappt auf Tablet"
-            className="mt-2 w-full rounded-card border border-line bg-surface-3 p-2 text-sm text-ink placeholder:text-ink-3"
+            className="mt-2 min-h-12 w-full rounded-card border border-line bg-surface-2 p-2 text-body text-ink placeholder:text-ink-3 focus:border-live"
           />
           <div className="mt-2 flex flex-wrap gap-2">
             {KINDS.map((k) => (
               <button
                 key={k}
                 onClick={() => setKind(k)}
-                className={`rounded-card border border-line px-2 py-1 hc-type-label ${
+                className={`min-h-12 rounded-card border border-line px-2 py-1 text-micro ${
                   kind === k ? "text-live" : "text-ink-3"
                 }`}
               >
@@ -92,12 +100,12 @@ export function DesignBoardView(_props: { density?: string } = {}) {
             value={targetView}
             onChange={(e) => setTargetView(e.target.value)}
             placeholder="Ziel-View (optional) — z. B. FleetView"
-            className="mt-2 w-full rounded-card border border-line bg-surface-3 p-2 text-sm text-ink placeholder:text-ink-3"
+            className="mt-2 min-h-12 w-full rounded-card border border-line bg-surface-2 p-2 text-body text-ink placeholder:text-ink-3 focus:border-live"
           />
           <button
             onClick={createCard}
             disabled={busy || !title.trim()}
-            className="mt-2 rounded-card border border-live px-3 py-1 text-sm text-live disabled:opacity-45"
+            className="mt-2 min-h-12 rounded-card border border-live px-3 py-1 text-sec text-live hover:bg-live/10 disabled:opacity-45"
           >
             Karte anlegen & Screenshot hinzufügen
           </button>
@@ -105,14 +113,15 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       )}
 
       {!error && cards.some((c) => c.kanban_ok === false) && (
-        <div className="mt-3 rounded-card border border-status-warn/20 bg-status-warn/10 p-2 text-xs text-status-warn">
-          {de.designBoard.kanbanUnavailable}
+        <div className="mt-3 flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.designBoard.kanbanUnavailable}
         </div>
       )}
 
       {error && (
-        <div className="mt-4">
-          <FleetEmptyState title="Laden fehlgeschlagen" desc={error} />
+        <div role="alert" className="mt-4 flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <span><strong>Laden fehlgeschlagen</strong><br />{error}</span>
         </div>
       )}
       {!error && cards.length === 0 && (
@@ -123,13 +132,13 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((c) => (
           <Link key={c.id} to={`/control/design-board/${c.id}`} className="block">
-            <FleetPanel eyebrow={c.kind} meta={statusBadge(c.derived_status ?? c.status)}>
-              <div className="hc-mono text-sm font-semibold text-white">{c.title}</div>
+            <FleetPanel eyebrow={c.kind} meta={<SignalLabel tone={designStatusTone(c.derived_status ?? c.status)} label={statusLabel(c.derived_status ?? c.status)} />}>
+              <div className="text-sec font-semibold text-ink">{c.title}</div>
               {c.target?.view && (
-                <div className="mt-1 hc-type-label hc-dim">→ {c.target.view}</div>
+                <div className="mt-1 font-data text-micro text-ink-3">→ {c.target.view}</div>
               )}
               {c.linked_tasks.length > 0 && (
-                <div className="mt-1 hc-type-label hc-soft">{c.linked_tasks.length} verknüpfte Aufgabe(n)</div>
+                <div className="mt-1 text-micro text-ink-2"><span className="font-data tabular-nums">{c.linked_tasks.length}</span> verknüpfte Aufgabe(n)</div>
               )}
             </FleetPanel>
           </Link>

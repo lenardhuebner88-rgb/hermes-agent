@@ -1,7 +1,7 @@
-import { Activity, Cpu, Gauge, MemoryStick, Network, ShieldCheck, Wrench } from "lucide-react";
-import { Led, MeterBar, StaleBadge, StatusPill, ToneCallout } from "../../components/atoms";
-import { Card, Panel, SkeletonCard, Stat, Text } from "../../components/primitives";
-import { StatusChip } from "../../components/StatusChip";
+import { Activity, Cpu, Gauge, MemoryStick, Network, ShieldCheck, TriangleAlert, Wrench } from "lucide-react";
+import { MeterBar, StaleBadge } from "../../components/atoms";
+import { Card, Eyebrow, Panel, SkeletonCard } from "../../components/primitives";
+import { KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../../components/leitstand";
 import type { PressureOverall, PressureSource, PressureStatusResponse, TailnetPressureState, ToneName } from "../../lib/types";
 
 // PressureContent lebt seit dem Abriss (S5) hier unter views/system/, weil die
@@ -29,13 +29,6 @@ const tailnetLabel: Record<TailnetPressureState, string> = {
   unknown: "Unklar",
 };
 
-const tailnetTone: Record<TailnetPressureState, ToneName> = {
-  direct: "emerald",
-  relay: "amber",
-  inactive: "red",
-  unknown: "zinc",
-};
-
 function fmtNumber(value: number | null | undefined, suffix = ""): string {
   if (value == null || Number.isNaN(value)) return "-";
   return `${Math.round(value)}${suffix}`;
@@ -56,26 +49,12 @@ function fmtMb(value: number | null | undefined): string {
   return value >= 1024 ? `${(value / 1024).toFixed(1)}GB` : `${Math.round(value)}MB`;
 }
 
-function dotFor(overall: PressureOverall) {
-  if (overall === "ok") return "live";
-  if (overall === "busy") return "warn";
-  if (overall === "saturated") return "error";
-  return "idle";
-}
-
 function sourceLabel(source: PressureSource): string {
   if (source.kind === "test") return "Tests";
   if (source.kind === "browser_test") return "Browser-Tests";
   if (source.kind === "agent") return "Agents";
   if (source.kind === "hermes_service") return "Hermes-Dienste";
   return "Quelle";
-}
-
-function recommendationDot(tone: ToneName) {
-  if (tone === "red" || tone === "rose") return "error";
-  if (tone === "amber") return "warn";
-  if (tone === "emerald") return "live";
-  return "idle";
 }
 
 function loadTone(data: PressureStatusResponse): "cyan" | "amber" | "red" {
@@ -105,7 +84,7 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
   if (!data) {
     return (
       <div className="space-y-4">
-        {error ? <ToneCallout tone="amber">Pressure konnte nicht geladen werden: {error}</ToneCallout> : null}
+        {error ? <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />Pressure konnte nicht geladen werden: {error}</div> : null}
         <SkeletonCard rows={6} />
       </div>
     );
@@ -130,42 +109,42 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
   return (
     <div className="space-y-4">
       {embedded ? null : (
-      <Card surface="raised" tone={tone} className="overflow-hidden p-0" ariaLabel="Pressure Status">
-        <div className="flex flex-col gap-3 border-b border-[var(--hc-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <Card surface="raised" className="overflow-hidden border border-line p-0" ariaLabel="Pressure Status">
+        <div className="flex flex-col gap-3 border-b border-line px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="hc-eyebrow">Pressure</p>
+            <Eyebrow>Pressure</Eyebrow>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-              <StatusPill tone={tone} label={overallLabel[data.overall]} dot={dotFor(data.overall)} size="md" />
-              <Text as="h2" variant="subtitle" className="truncate text-white">Homeserver-Druck</Text>
+              <SignalChip tone={signalToneFromLegacy(tone)} label={overallLabel[data.overall]} />
+              <h2 className="truncate font-display text-emph font-semibold text-ink">Homeserver-Druck</h2>
             </div>
           </div>
           <StaleBadge isStale={isStale} lastUpdated={lastUpdated} />
         </div>
 
         <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-5">
-          <StatusChip icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} hint={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} tone={loadTone(data) === "red" ? "red" : loadTone(data) === "amber" ? "amber" : "zinc"} />
-          <StatusChip icon={Cpu} label="CPU" value={cpuValue} hint={cpuHint} tone={cpuTone} />
-          <StatusChip icon={MemoryStick} label="RAM" value={fmtMb(data.dashboard.rss_mb)} hint="Dashboard" />
-          <StatusChip icon={Activity} label="API" value={fmtMs(apiLatency)} hint="p95" tone={apiTone(apiLatency)} />
-          <StatusChip icon={Network} label="Tailnet" value={tailnetLabel[data.access.tailnet]} hint={data.access.detail ?? undefined} tone={tailnetTone[data.access.tailnet]} />
+          <KpiTile icon={Gauge} label="Last" value={`${fmtDecimal(load1)} / ${cores}`} delta={load5 != null ? `5m ${fmtDecimal(load5)}` : "Load"} dot={loadTone(data) === "red" ? "error" : loadTone(data) === "amber" ? "warn" : "idle"} />
+          <KpiTile icon={Cpu} label="CPU" value={cpuValue} delta={cpuHint} dot={cpuTone === "red" ? "error" : cpuTone === "amber" ? "warn" : "idle"} />
+          <KpiTile icon={MemoryStick} label="RAM" value={fmtMb(data.dashboard.rss_mb)} delta="Dashboard" />
+          <KpiTile icon={Activity} label="API" value={fmtMs(apiLatency)} delta="p95" dot={apiTone(apiLatency) === "red" ? "error" : apiTone(apiLatency) === "amber" ? "warn" : apiTone(apiLatency) === "emerald" ? "ready" : "idle"} />
+          <KpiTile icon={Network} label="Tailnet" value={tailnetLabel[data.access.tailnet]} delta={data.access.detail ?? undefined} dot={data.access.tailnet === "direct" ? "ready" : data.access.tailnet === "relay" ? "warn" : data.access.tailnet === "inactive" ? "error" : "idle"} />
         </div>
 
-        <div className="border-t border-[var(--hc-border)] px-4 py-3">
+        <div className="border-t border-line px-4 py-3">
           <div className="flex min-w-0 items-start gap-2">
-            <Wrench className="mt-0.5 h-4 w-4 shrink-0 hc-dim" aria-hidden />
+            <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" aria-hidden />
             <div className="min-w-0 flex-1">
-              <p className="hc-eyebrow">Nächster Hebel</p>
+              <Eyebrow>Nächster Hebel</Eyebrow>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-                <StatusPill tone={recommendation.tone} label={recommendation.label} dot={recommendationDot(recommendation.tone)} />
-                <p className="min-w-0 flex-1 line-clamp-2 text-sm text-white">{recommendation.detail}</p>
+                <SignalChip tone={signalToneFromLegacy(recommendation.tone)} label={recommendation.label} />
+                <p className="min-w-0 flex-1 line-clamp-2 text-sec text-ink">{recommendation.detail}</p>
               </div>
             </div>
           </div>
         </div>
 
-        <div className="border-t border-[var(--hc-border)] px-4 py-3">
-          <p className="line-clamp-2 text-sm text-white"><span className="hc-soft">Grund: </span>{data.cause}</p>
-          {data.errors.length > 0 ? <p className="mt-1 truncate hc-type-label text-amber-200">{data.errors.length} Teilwert unklar</p> : null}
+        <div className="border-t border-line px-4 py-3">
+          <p className="line-clamp-2 text-sec text-ink"><span className="text-ink-2">Grund: </span>{data.cause}</p>
+          {data.errors.length > 0 ? <SignalLabel tone="warn" label={`${data.errors.length} Teilwert unklar`} className="mt-1" /> : null}
         </div>
       </Card>
       )}
@@ -173,10 +152,10 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
       <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
         <Panel title="System" eyebrow="Host">
           <div className="grid gap-2 sm:grid-cols-2">
-            <Stat label="Load 1m" value={`${fmtDecimal(load1)} / ${cores}`} hint={`${cores}-Core-Schwelle`} />
-            <Stat label="Host CPU" value={fmtNumber(data.host.cpu_percent, "%")} hint="Momentaufnahme" />
-            <Stat label="Host RAM" value={fmtNumber(data.host.memory_percent, "%")} hint="System" />
-            <Stat label="Dashboard" value={fmtMb(data.dashboard.rss_mb)} hint={`CPU ${fmtNumber(data.dashboard.cpu_percent, "%")}`} />
+            <KpiTile label="Load 1m" value={`${fmtDecimal(load1)} / ${cores}`} delta={`${cores}-Core-Schwelle`} />
+            <KpiTile label="Host CPU" value={fmtNumber(data.host.cpu_percent, "%")} delta="Momentaufnahme" />
+            <KpiTile label="Host RAM" value={fmtNumber(data.host.memory_percent, "%")} delta="System" />
+            <KpiTile label="Dashboard" value={fmtMb(data.dashboard.rss_mb)} delta={`CPU ${fmtNumber(data.dashboard.cpu_percent, "%")}`} />
           </div>
           <div className="mt-3">
             <MeterBar label="Load-Auslastung" value={load1 ?? 0} max={cores} tone={loadTone(data)} />
@@ -185,38 +164,38 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
 
         <Panel title="Zugang" eyebrow="Tailscale + API">
           <div className="grid gap-2 sm:grid-cols-2">
-            <Stat label="Tailnet" value={tailnetLabel[data.access.tailnet]} hint={data.access.detail ?? "Status"} tone={tailnetTone[data.access.tailnet]} />
-            <Stat label="API" value={fmtMs(apiLatency)} hint="p95 aus Selbstmetriken" tone={apiTone(apiLatency)} />
-            <Stat label="CPUWeight" value={data.dashboard.cpu_weight ?? "-"} hint="Dashboard" />
-            <Stat label="CPUQuota" value={data.dashboard.cpu_quota || "-"} hint="Dashboard" />
+            <KpiTile label="Tailnet" value={tailnetLabel[data.access.tailnet]} delta={data.access.detail ?? "Status"} dot={data.access.tailnet === "direct" ? "ready" : data.access.tailnet === "relay" ? "warn" : data.access.tailnet === "inactive" ? "error" : "idle"} />
+            <KpiTile label="API" value={fmtMs(apiLatency)} delta="p95 aus Selbstmetriken" dot={apiTone(apiLatency) === "red" ? "error" : apiTone(apiLatency) === "amber" ? "warn" : apiTone(apiLatency) === "emerald" ? "ready" : "idle"} />
+            <KpiTile label="CPUWeight" value={data.dashboard.cpu_weight ?? "-"} delta="Dashboard" />
+            <KpiTile label="CPUQuota" value={data.dashboard.cpu_quota || "-"} delta="Dashboard" />
           </div>
         </Panel>
       </div>
 
       <Panel title="Aktive Druckquellen" eyebrow="Rollen statt Cmdlines">
         {data.pressure_sources.length === 0 ? (
-          <div className="flex min-h-20 items-center gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-3">
-            <ShieldCheck className="h-5 w-5 text-emerald-300" />
+          <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
+            <ShieldCheck className="h-5 w-5 text-status-ok" />
             <div>
-              <p className="text-sm font-medium text-white">Keine auffaellige Quelle</p>
-              <p className="text-xs hc-soft">Keine Tests, Browser oder Agenten als Druckquelle erkannt.</p>
+              <p className="text-sec font-medium text-ink">Keine auffaellige Quelle</p>
+              <p className="text-sec text-ink-2">Keine Tests, Browser oder Agenten als Druckquelle erkannt.</p>
             </div>
           </div>
         ) : (
           <div className="grid gap-2">
             {data.pressure_sources.map((source) => (
-              <div key={`${source.kind}-${source.label}-${source.scope}`} className="grid min-w-0 gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+              <div key={`${source.kind}-${source.label}-${source.scope}`} className="grid min-w-0 gap-2 rounded-card border border-line bg-surface-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
-                    <Led kind={source.throttled ? "live" : source.kind === "test" || source.kind === "browser_test" ? "warn" : "idle"} />
-                    <p className="truncate text-sm font-medium text-white">{sourceLabel(source)}: {source.label}</p>
+                    <SignalLabel tone={source.throttled ? "ok" : source.kind === "test" || source.kind === "browser_test" ? "warn" : "neutral"} label={source.throttled ? "gedrosselt" : "aktiv"} />
+                    <p className="truncate text-sec font-medium text-ink">{sourceLabel(source)}: {source.label}</p>
                   </div>
-                  <p className="mt-0.5 truncate text-xs hc-soft">{source.scope} - {source.throttled ? "gedrosselt" : "ohne harte Kappe"}</p>
+                  <p className="mt-0.5 truncate text-sec text-ink-2">{source.scope} - {source.throttled ? "gedrosselt" : "ohne harte Kappe"}</p>
                 </div>
                 <div className="grid grid-cols-3 gap-2 sm:w-64">
-                  <Stat label="Anzahl" value={source.count} />
-                  <Stat label="CPU" value={fmtNumber(source.cpu_percent, "%")} />
-                  <Stat label="RAM" value={fmtMb(source.rss_mb)} />
+                  <KpiTile label="Anzahl" value={source.count} />
+                  <KpiTile label="CPU" value={fmtNumber(source.cpu_percent, "%")} />
+                  <KpiTile label="RAM" value={fmtMb(source.rss_mb)} />
                 </div>
               </div>
             ))}
@@ -225,9 +204,7 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
       </Panel>
 
       {data.errors.length > 0 ? (
-        <ToneCallout tone="amber">
-          Einige Pressure-Werte konnten nicht gelesen werden. Die Anzeige bleibt absichtlich vorsichtig und zeigt keine Rohpfade oder Cmdlines.
-        </ToneCallout>
+        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />Einige Pressure-Werte konnten nicht gelesen werden. Die Anzeige bleibt absichtlich vorsichtig und zeigt keine Rohpfade oder Cmdlines.</div>
       ) : null}
     </div>
   );

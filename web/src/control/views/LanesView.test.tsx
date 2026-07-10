@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { LanesEditor } from "./LanesView";
 import {
   authSmokeButtonLabel,
@@ -370,9 +371,9 @@ describe("LanesEditor (routing cards)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
-    // coder healthy → grüner Dot; premium unhealthy → Warn-Dot + Hinweis
-    expect(html).toContain("hc-led-live");
-    expect(html).toContain("hc-led-warn");
+    // coder healthy → gemeinsames OK-Signal; premium unhealthy → Warn-Signal + Hinweis
+    expect(html).toContain("bg-status-ok");
+    expect(html).toContain("bg-status-warn");
     expect(html).toContain("Spawn-Bereitschaft: bereit");
     expect(html).toContain("Spawn-Bereitschaft: gestört");
   });
@@ -467,10 +468,10 @@ describe("LanesEditor (routing cards)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={crowded} lane={crowded.lanes[0]} busy={false} actions={noopActions} />,
     );
-    // LEDs render in both the simple view and the advanced collapse.
-    expect((html.match(/hc-led-live/g) ?? []).length).toBe(8);
-    expect((html.match(/hc-led-warn/g) ?? []).length).toBe(8);
-    expect((html.match(/hc-led-idle/g) ?? []).length).toBe(8);
+    // Shared status signals render in both the simple view and the advanced collapse.
+    expect((html.match(/bg-status-ok/g) ?? []).length).toBeGreaterThanOrEqual(8);
+    expect((html.match(/bg-status-warn/g) ?? []).length).toBeGreaterThanOrEqual(8);
+    expect((html.match(/bg-ink-3/g) ?? []).length).toBeGreaterThanOrEqual(8);
     expect(html).toContain("4/12 bereit · 0 Overrides");
   });
 
@@ -502,5 +503,42 @@ describe("LanesEditor (routing cards)", () => {
     expect(armed).toContain("wirklich löschen?");
     expect(armed).toContain("Bestätigen");
     expect(armed).toContain("Abbrechen");
+  });
+
+  it.each([
+    { name: "aktive Lane mit Standard-, Override-, Metered- und Fallback-Zweigen", lane: fixture.lanes[0], pendingDelete: null },
+    { name: "inaktive Lane mit Claude-Lock und Lösch-Bestätigung", lane: fixture.lanes[1], pendingDelete: "lane_2" },
+  ])("rendert $name ohne Legacy-Vokabular oder untergroße Ziele", ({ lane, pendingDelete }) => {
+    const html = renderToStaticMarkup(
+      <LanesEditor
+        data={fixture}
+        lane={lane}
+        busy={false}
+        actions={noopActions}
+        initialPendingDelete={pendingDelete}
+      />,
+    );
+
+    for (const legacy of [
+      "cyan-", "emerald-", "sky-", "teal-", "zinc-", "slate-", "indigo-",
+      "amber-", "red-", "rose-", "violet-", "white/", "black/", "StatusPill", "ToneCallout",
+    ]) {
+      expect(html).not.toContain(legacy);
+    }
+    expect(html).not.toContain("min-h-11");
+    expect(html).not.toContain("sm:min-h-0");
+    expect(html).not.toContain("sm:min-h-9");
+    expect(html).toContain("min-h-12");
+  });
+
+  it("hält die Lanes-Quelle frei von lokaler Legacy- und Status-Komponenten-Vokabel", () => {
+    const source = readFileSync(new URL("./LanesView.tsx", import.meta.url), "utf8");
+    for (const legacy of [
+      "hc-", "cyan-", "emerald-", "sky-", "teal-", "zinc-", "slate-", "indigo-",
+      "amber-", "red-", "rose-", "violet-", "white/", "black/", "StatusPill", "ToneCallout", "toneClasses",
+    ]) {
+      expect(source).not.toContain(legacy);
+    }
+    expect(source).toContain("size-12");
   });
 });
