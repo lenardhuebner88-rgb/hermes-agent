@@ -62,4 +62,20 @@ class DictatePrefs(context: Context) {
     var overlayBubbleOnRight: Boolean
         get() = prefs.getBoolean("overlay_bubble_on_right", true)
         set(value) = prefs.edit().putBoolean("overlay_bubble_on_right", value).apply()
+
+    /**
+     * "Flow-Polish": server-side dictation cleanup (punctuation, filler words, self-corrections)
+     * on cloud transcriptions. Applies only to the cloud path — on-device text never leaves the
+     * phone. Default ON: the polish is the point of opting into cloud quality.
+     */
+    var flowPolish: Boolean
+        get() = prefs.getBoolean("flow_polish", true)
+        set(value) = prefs.edit().putBoolean("flow_polish", value).apply()
+
+    /**
+     * ISO-639-1 hint for the server ("de-DE" → "de"). Falls back to "de" — the same default
+     * locale the on-device path uses — so cloud whisper never wastes quality on misdetection.
+     */
+    val languageHint: String
+        get() = (languageTag ?: "de-DE").substringBefore('-').lowercase()
 }

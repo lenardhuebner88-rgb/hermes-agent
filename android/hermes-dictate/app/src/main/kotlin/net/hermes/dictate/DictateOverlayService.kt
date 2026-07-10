@@ -99,8 +99,23 @@ class DictateOverlayService :
     private fun refreshFocus() {
         val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         val nowEditable = node != null && node.isEditable
+        if (nowEditable) {
+            mainHandler.removeCallbacks(focusLossRunnable)
+            focusedNode = node
+            updateBubbleVisibility()
+        } else {
+            // Our own pill/bubble window swaps fire TYPE_WINDOWS_CHANGED, during which focus can
+            // transiently read as lost — killing the dictation we just started. Only hard-stop
+            // (like the IME's onFinishInput) once the loss survives a short confirmation delay.
+            mainHandler.removeCallbacks(focusLossRunnable)
+            mainHandler.postDelayed(focusLossRunnable, FOCUS_LOSS_CONFIRM_MS)
+        }
+    }
+
+    private val focusLossRunnable = Runnable {
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val nowEditable = node != null && node.isEditable
         if (!nowEditable && controller.phase != DictationController.Phase.IDLE) {
-            // Field closed / focus moved mid-dictation — hard-stop like the IME's onFinishInput.
             run(controller.hidden())
         }
         focusedNode = if (nowEditable) node else null
@@ -323,7 +338,12 @@ class DictateOverlayService :
             return
         }
         uploadExecutor.execute {
-            val outcome = transcriber.transcribe(audio, "audio/mp4")
+            val outcome = transcriber.transcribe(
+                audio,
+                "audio/mp4",
+                language = prefs.languageHint,
+                polish = prefs.flowPolish,
+            )
             mainHandler.post { run(controller.uploadFinished(token, outcome)) }
         }
     }
@@ -366,8 +386,14 @@ class DictateOverlayService :
     }
 
     private fun commitSegment(text: String) {
-        val node = focusedNode ?: return
-        committer.commit(node, text)
+        // The cached node can be stale (recycled) by commit time — re-query live focus first.
+        val live = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?.takeIf { it.isEditable }
+        val node = live ?: focusedNode
+        if (node == null || !committer.commit(node, text)) {
+            // Dictated text would be silently lost — surface it in the pill instead.
+            applyStatus(UiStatus.Failed(ErrorKind.INSERT_FAILED))
+        }
     }
 
     // --- Panel state ---
@@ -404,10 +430,12 @@ class DictateOverlayService :
         ErrorKind.CLOUD_SERVER -> R.string.err_cloud_server
         ErrorKind.CLOUD_TOO_LARGE -> R.string.err_cloud_too_large
         ErrorKind.CLOUD_EMPTY -> R.string.err_cloud_empty
+        ErrorKind.INSERT_FAILED -> R.string.err_insert_failed
     }
 
     companion object {
         private const val DRAG_SLOP = 12
         private const val LOGIN_PROBE_INTERVAL_MS = 60_000L
+        private const val FOCUS_LOSS_CONFIRM_MS = 300L
     }
 }

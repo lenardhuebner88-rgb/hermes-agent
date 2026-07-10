@@ -38,6 +38,7 @@
     <string name="err_cloud_server">Cloud-Transkription fehlgeschlagen – wieder On-Device</string>
     <string name="err_cloud_too_large">Aufnahme zu groß für die Cloud</string>
     <string name="err_cloud_empty">Cloud hat nichts erkannt</string>
+    <string name="err_insert_failed">Text konnte nicht eingefügt werden</string>
 
     <!-- Settings -->
     <string name="settings_subtitle">Systemweite Diktier-Tastatur – Push-to-Talk, On-Device zuerst</string>
@@ -58,6 +59,7 @@
     <string name="btn_overlay_enable">Aktivieren</string>
     <string name="overlay_hint">Zeigt eine Diktier-Blase über jeder App – kein Tastaturwechsel nötig. Aktivierung erfolgt in den Android-Bedienungshilfen.</string>
     <string name="cloud_preferred_switch">Blase bevorzugt Cloud (statt On-Device)</string>
+    <string name="flow_polish_switch">Flow-Polish: Cloud-Text serverseitig glätten (Füllwörter, Satzzeichen)</string>
 
     <string name="section_language">Diktiersprache</string>
     <string name="lang_system">Systemsprache</string>

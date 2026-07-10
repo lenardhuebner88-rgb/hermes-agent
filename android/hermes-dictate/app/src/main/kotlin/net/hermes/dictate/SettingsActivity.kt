@@ -53,6 +53,11 @@ class SettingsActivity : ComponentActivity() {
         cloudPreferredSwitch.isChecked = prefs.cloudPreferred
         cloudPreferredSwitch.setOnCheckedChangeListener { _, checked -> prefs.cloudPreferred = checked }
 
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        val flowPolishSwitch = findViewById<Switch>(R.id.flow_polish_switch)
+        flowPolishSwitch.isChecked = prefs.flowPolish
+        flowPolishSwitch.setOnCheckedChangeListener { _, checked -> prefs.flowPolish = checked }
+
         val radioGroup = findViewById<RadioGroup>(R.id.language_group)
         radioGroup.check(
             when (prefs.languageTag) {

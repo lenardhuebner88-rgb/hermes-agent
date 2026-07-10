@@ -39,13 +39,24 @@ class CloudTranscriber(
     private val cookies: SessionCookieStore,
     private val transport: HttpTransport,
 ) {
-    fun transcribe(audio: ByteArray, mimeType: String): CloudOutcome {
+    fun transcribe(
+        audio: ByteArray,
+        mimeType: String,
+        language: String? = null,
+        polish: Boolean = false,
+    ): CloudOutcome {
         if (audio.isEmpty()) return CloudOutcome.Server("Empty recording")
         if (audio.size > MAX_AUDIO_BYTES) return CloudOutcome.TooLarge
 
         val payload = JSONObject()
             .put("mime_type", mimeType)
             .put("data_url", "data:$mimeType;base64," + Base64.getEncoder().encodeToString(audio))
+            .apply {
+                // Server contract (feat/stt language+polish): optional ISO-639-1 hint plus an
+                // opt-in dictation polish pass; both default off server-side for compatibility.
+                language?.takeIf { it.isNotBlank() }?.let { put("language", it) }
+                if (polish) put("polish", true)
+            }
             .toString()
             .toByteArray(Charsets.UTF_8)
 

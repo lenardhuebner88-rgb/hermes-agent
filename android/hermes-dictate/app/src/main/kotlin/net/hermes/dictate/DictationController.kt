@@ -59,6 +59,9 @@ enum class ErrorKind {
     CLOUD_SERVER,
     CLOUD_TOO_LARGE,
     CLOUD_EMPTY,
+
+    /** Overlay only: the recognized text could not be inserted into the focused field. */
+    INSERT_FAILED,
 }
 
 /** Semantic view of SpeechRecognizer error codes; the service does the int mapping. */

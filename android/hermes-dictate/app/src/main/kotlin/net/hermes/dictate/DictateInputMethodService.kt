@@ -239,7 +239,12 @@ class DictateInputMethodService :
             return
         }
         uploadExecutor.execute {
-            val outcome = transcriber.transcribe(audio, "audio/mp4")
+            val outcome = transcriber.transcribe(
+                audio,
+                "audio/mp4",
+                language = prefs.languageHint,
+                polish = prefs.flowPolish,
+            )
             mainHandler.post { run(controller.uploadFinished(token, outcome)) }
         }
     }
@@ -409,6 +414,9 @@ class DictateInputMethodService :
         ErrorKind.CLOUD_SERVER -> R.string.err_cloud_server
         ErrorKind.CLOUD_TOO_LARGE -> R.string.err_cloud_too_large
         ErrorKind.CLOUD_EMPTY -> R.string.err_cloud_empty
+        // Not reachable from the IME path (InputConnection commits directly), but the when
+        // must stay exhaustive.
+        ErrorKind.INSERT_FAILED -> R.string.err_insert_failed
     }
 
     private fun showStatus(text: String, error: Boolean) {

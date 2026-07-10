@@ -191,6 +191,17 @@
             android:textColor="@color/text_primary"
             android:textSize="15sp" />
 
+        <!-- Suppress lint: plain Switch matches the rest of this screen -->
+        <Switch
+            android:id="@+id/flow_polish_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:minHeight="48dp"
+            android:text="@string/flow_polish_switch"
+            android:textColor="@color/text_primary"
+            android:textSize="15sp" />
+
         <!-- Language -->
         <TextView
             android:layout_width="wrap_content"
