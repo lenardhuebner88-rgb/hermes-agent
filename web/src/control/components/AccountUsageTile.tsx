@@ -11,8 +11,8 @@ import type {
   AccountUsageProvider,
   AccountUsageResponse,
   AccountUsageWindow,
-  ToneName,
 } from "../lib/types";
+import { TriangleAlert } from "lucide-react";
 import {
   classifyWindow,
   formatReset,
@@ -23,7 +23,7 @@ import {
 } from "../lib/accountUsage";
 import { fmtTokens, nowSec } from "../lib/derive";
 import { DEFAULT_STATS_CONFIG, isProviderVisible, providerLabel as configuredProviderLabel, providerOrder, type StatsFieldConfig } from "../lib/statsFields";
-import { StatusPill, ToneCallout } from "./atoms";
+import { SignalChip, SignalLabel, type SignalTone } from "./leitstand";
 import { Eyebrow } from "./primitives";
 import { RateBar } from "./charts/charts";
 
@@ -98,13 +98,13 @@ function AccountProviderCard({
   const primary = [session, weekly].filter((w): w is AccountUsageWindow => Boolean(w));
   const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
   const unavailable = !provider.available;
-  const tone: ToneName = unavailable
-    ? "zinc"
+  const tone: SignalTone = unavailable
+    ? "neutral"
     : provider.windows.some((w) => (w.used_percent ?? 0) >= 90)
-      ? "red"
+      ? "alert"
       : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
-        ? "amber"
-        : "emerald";
+        ? "warn"
+        : "ok";
   const hasExtras = others.length > 0 || provider.details.length > 0;
   return (
     <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
@@ -114,10 +114,9 @@ function AccountProviderCard({
           {provider.plan ? <p className="text-xs hc-dim">{provider.plan}</p> : null}
         </div>
         <div className="justify-self-end">
-          <StatusPill
+          <SignalChip
             tone={tone}
             label={unavailable ? "offline" : provider.cached ? "Cache" : "Live"}
-            dot={unavailable ? "idle" : "live"}
           />
         </div>
       </div>
@@ -197,34 +196,32 @@ export function AccountUsageTile({
   const cockpit = providers.filter((p) => isAbo(p));
   const footer = providers.filter((p) => !cockpit.includes(p));
   // Engpass-Ton: rot ab 90 %, gelb ab 75 %, sonst neutral (kein ⚠) — §3.
-  const bnTone: ToneName =
+  const bnTone: SignalTone =
     bottleneck == null
-      ? "zinc"
+      ? "neutral"
       : bottleneck.usedPercent >= 90
-        ? "red"
+        ? "alert"
         : bottleneck.usedPercent >= 75
-          ? "amber"
-          : "zinc";
+          ? "warn"
+          : "neutral";
   const bnReset = bottleneck ? formatReset(bottleneck.resetAt, nowMs) : "";
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Eyebrow>Abo-Limits</Eyebrow>
-          <StatusPill
-            tone={error ? "amber" : providers.length === 0 ? "zinc" : available === providers.length ? "emerald" : "amber"}
+          <SignalChip
+            tone={error ? "warn" : providers.length === 0 ? "neutral" : available === providers.length ? "ok" : "warn"}
             label={loading ? "lädt…" : error ? "teilweise unbekannt" : providers.length === 0 ? "Limit unbekannt" : `${available}/${providers.length} live`}
-            dot={error ? "warn" : providers.length === 0 ? "idle" : "live"}
           />
         </div>
         {usage ? <span className="text-xs hc-dim">TTL {usage.cache_ttl_seconds}s</span> : null}
       </div>
       {bottleneck ? (
-        <ToneCallout tone={bnTone}>
-          {bnTone === "zinc" ? "Höchste Auslastung" : "⚠ Engpass"}: {configuredProviderLabel(config, bottleneck.providerId) || fallbackProviderLabel(bottleneck.providerId)}-
-          {bottleneck.windowLabel} {Math.round(bottleneck.usedPercent)} %
-          {bnReset ? ` — Reset ${bnReset}` : ""}
-        </ToneCallout>
+        <div role={bnTone === "neutral" ? undefined : "alert"} className={`flex items-start gap-2 rounded-card border px-3 py-2 text-sec ${bnTone === "alert" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" : bnTone === "warn" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" : "border-line bg-surface-2 text-ink-2"}`}>
+          {bnTone === "neutral" ? <SignalLabel tone="neutral" label="Höchste Auslastung" className="mt-0.5 shrink-0" /> : <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />}
+          <span>{bnTone === "neutral" ? "" : "Engpass: "}{configuredProviderLabel(config, bottleneck.providerId) || fallbackProviderLabel(bottleneck.providerId)}-{bottleneck.windowLabel} {Math.round(bottleneck.usedPercent)} %{bnReset ? ` — Reset ${bnReset}` : ""}</span>
+        </div>
       ) : null}
       {loading ? (
         <div className="hc-skeleton h-28 w-full rounded-xl" />

@@ -1,28 +1,36 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const scopedFiles = [
-  "views/backlog/BacklogSections.tsx",
-  "views/backlog/FoBacklogQueueTable.tsx",
-  "components/BacklogCard.tsx",
-  "components/FoBacklogCard.tsx",
-  "views/backlog/FoDetailDrawer.tsx",
-  "views/orchestrator/OrchestratorSections.tsx",
-  "views/orchestrator/OrchestratorQueueTable.tsx",
-  "views/OrchestratorBacklogView.tsx",
-  "components/BacklogDetailDrawer.tsx",
-  "views/orchestrator/shared.ts",
-  "components/fleet/CommissionButton.tsx",
-  "views/orchestrator/ControlsBar.tsx",
-] as const;
+const documentedExceptions = new Map([
+  // Parked orphan; W5 owns deletion/migration. It is not reachable from the app graph.
+  ["components/FunnelFreigaben.tsx", /ToneCallout/g],
+  // Compatibility export required only by the parked orphan above; W5 removes both.
+  ["components/atoms.tsx", /ToneCallout/g],
+]);
+
+function productionSources(directory: "views" | "components"): string[] {
+  const paths: string[] = [];
+  const walk = (relativeDirectory: string) => {
+    for (const entry of readdirSync(new URL(`${relativeDirectory}/`, import.meta.url), { withFileTypes: true })) {
+      const path = `${relativeDirectory}/${entry.name}`;
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(?:ts|tsx)$/.test(entry.name) && !/\.(?:test|stories)\./.test(entry.name)) paths.push(path);
+    }
+  };
+  walk(directory);
+  return paths.sort();
+}
+
+const productionFiles = [...productionSources("views"), ...productionSources("components")];
 
 function source(path: string) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
 describe("W4 canonical status vocabulary source guards", () => {
-  it.each(scopedFiles)("%s has no retired status primitives", (path) => {
-    expect(source(path)).not.toMatch(/StatusPill|ToneCallout|toneClasses/);
+  it.each(productionFiles)("%s has no retired status primitives", (path) => {
+    const contents = source(path).replace(documentedExceptions.get(path) ?? /$^/, "");
+    expect(contents).not.toMatch(/StatusPill|ToneCallout|toneClasses/);
   });
 
   it.each([

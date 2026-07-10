@@ -21,7 +21,7 @@ import { profileLabel, taskStatusLabel } from "../lib/tones";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { Worker, WorkerHealth } from "../lib/types";
-import { StatusPill, ToneCallout } from "./atoms";
+import { SignalChip, signalToneFromLegacy } from "./leitstand";
 import { Stat, Text } from "./primitives";
 import { useWorkerActivity } from "../hooks/useControlData";
 
@@ -72,6 +72,15 @@ const LOG_TAIL_BYTES = 16384;
 const LOG_POLL_MS = 4000;
 const LOG_MAX_LINES = 100;
 
+const WORKER_CALLOUT_CLASS: Record<"warn" | "alert", string> = {
+  warn: "border-status-warn/30 bg-status-warn/10 text-status-warn",
+  alert: "border-status-alert/30 bg-status-alert/10 text-status-alert",
+};
+
+function WorkerCallout({ tone, children }: { tone: "warn" | "alert"; children: React.ReactNode }) {
+  return <div role="alert" className={cn("flex items-start gap-2 rounded-card border px-3 py-2 text-sec", WORKER_CALLOUT_CLASS[tone])}><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span className="min-w-0">{children}</span></div>;
+}
+
 // A3: Live-Log-Tail über den existierenden GET /tasks/{id}/log — gepollt NUR
 // solange das Panel offen ist, letzte ~100 Zeilen, monospace.
 export function WorkerLogTail({ taskId }: { taskId: string }) {
@@ -95,7 +104,7 @@ export function WorkerLogTail({ taskId }: { taskId: string }) {
     return () => { cancelled = true; window.clearInterval(id); };
   }, [taskId]);
 
-  if (error) return <ToneCallout tone="red">{error}</ToneCallout>;
+  if (error) return <WorkerCallout tone="alert">{error}</WorkerCallout>;
   if (log === null) return <Text variant="label" className="hc-dim">…</Text>;
   if (!log.exists || !log.content.trim()) {
     return <Text variant="label" className="hc-dim">{de.worker.logEmpty}</Text>;
@@ -325,7 +334,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
             <span className="rounded-full border border-line bg-white/5 px-2 py-0.5 text-xs text-ink-2">{profileLabel[worker.profile] ?? worker.profile}</span>
             {runawayBadge}
             <span className="ml-auto inline-flex items-center gap-1.5">
-              <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
+              <SignalChip tone={signalToneFromLegacy(health.tone)} label={health.label} />
               {expanded ? <ChevronDown className="h-3.5 w-3.5 hc-soft" /> : <ChevronRight className="h-3.5 w-3.5 hc-soft" />}
             </span>
           </div>
@@ -361,7 +370,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
             </Text>
           ) : null}
         </div>
-        <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
+        <SignalChip tone={signalToneFromLegacy(health.tone)} label={health.label} />
       </div>
       )}
 
@@ -380,8 +389,8 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       ) : null}
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
         <Stat label={de.worker.runtime} value={fmtDur(runtime)} />
-        <Stat label={de.worker.heartbeat} value={hasHeartbeat ? fmtDur(heartbeatAge) : "—"} tone={hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S ? "amber" : undefined} />
-        <Stat label={de.worker.remaining} value={remaining <= 0 ? "0s" : fmtDur(remaining)} tone={remaining <= 0 ? "amber" : undefined} />
+        <Stat label={de.worker.heartbeat} value={hasHeartbeat ? fmtDur(heartbeatAge) : "—"} tone={hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S ? "warn" : undefined} />
+        <Stat label={de.worker.remaining} value={remaining <= 0 ? "0s" : fmtDur(remaining)} tone={remaining <= 0 ? "warn" : undefined} />
         <Stat label="PID" value={worker.worker_pid ? String(worker.worker_pid) : "—"} />
       </div>
 
@@ -472,12 +481,8 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         )
       ) : null}
 
-      {runaway.level !== "none" ? (
-        <ToneCallout tone={runaway.level === "critical" ? "red" : "amber"}>
-          <AlertTriangle className="mr-2 inline h-4 w-4" />{runaway.reasons.join(" · ")}
-        </ToneCallout>
-      ) : null}
-      {problemText ? <ToneCallout tone={health.tone}><AlertTriangle className="mr-2 inline h-4 w-4" />{problemText}</ToneCallout> : null}
+      {runaway.level !== "none" ? <WorkerCallout tone={runaway.level === "critical" ? "alert" : "warn"}>{runaway.reasons.join(" · ")}</WorkerCallout> : null}
+      {problemText ? <WorkerCallout tone={signalToneFromLegacy(health.tone) === "alert" ? "alert" : "warn"}>{problemText}</WorkerCallout> : null}
 
       {/* F2: Burn-Wächter-Chip — nur aus echten Zahlen. Ohne Live-Tokens (Normalfall
           für laufende Worker) wird KEIN leerer Chip gezeigt — der Token-Hinweis oben

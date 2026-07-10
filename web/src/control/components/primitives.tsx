@@ -17,8 +17,7 @@ import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ToneName } from "../lib/types";
-import { toneClasses } from "../lib/tones";
+import type { SignalTone } from "./leitstand";
 import {
   cardHover,
   cardTap,
@@ -66,7 +65,7 @@ export function Eyebrow({ className, children }: { className?: string; children:
 }
 
 /* ── Card ──────────────────────────────────────────────────────────────────
-   The composable surface. `surface` picks the depth tier, `tone` tints it,
+   The composable surface. `surface` picks the depth tier;
    `interactive` adds the lift/press feel (reduced-motion-safe). */
 type SurfaceTier = "panel" | "panel2" | "card" | "raised";
 const SURFACE_CLASS: Record<SurfaceTier, string> = {
@@ -77,7 +76,6 @@ const SURFACE_CLASS: Record<SurfaceTier, string> = {
 };
 
 export type CardProps = {
-  tone?: ToneName;
   surface?: SurfaceTier;
   interactive?: boolean;
   className?: string;
@@ -91,11 +89,10 @@ export type CardProps = {
   children: ReactNode;
 };
 
-export function Card({ tone, surface = "card", interactive, className, onClick, role, tabIndex, onKeyDown, ariaLabel, children }: CardProps) {
+export function Card({ surface = "card", interactive, className, onClick, role, tabIndex, onKeyDown, ariaLabel, children }: CardProps) {
   const reduce = useReducedMotion();
   const classes = cn(
     SURFACE_CLASS[surface],
-    tone ? cn("border", toneClasses(tone)) : null,
     interactive && "cursor-pointer",
     className,
   );
@@ -194,7 +191,7 @@ export type StatProps = {
   value: ReactNode;
   hint?: ReactNode;
   accent?: boolean;
-  tone?: ToneName;
+  tone?: SignalTone;
   className?: string;
 };
 
@@ -208,11 +205,18 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
       </div>
     );
   }
+  const toneClass = tone === "ok"
+    ? "border-status-ok/30 bg-status-ok/10"
+    : tone === "warn"
+      ? "border-status-warn/30 bg-status-warn/10"
+      : tone === "alert"
+        ? "border-status-alert/30 bg-status-alert/10"
+        : "border-line bg-surface-2";
   return (
-    <div className={cn("rounded-lg border px-3 py-2", tone ? toneClasses(tone) : "border-white/10 bg-white/[.03]", className)}>
-      <p className="hc-type-label hc-dim">{label}</p>
+    <div className={cn("rounded-card border px-3 py-2", toneClass, className)}>
+      <Eyebrow>{label}</Eyebrow>
       <p className="font-data tabular-nums truncate text-sec font-semibold text-ink">{value}</p>
-      {hint ? <p className="mt-0.5 hc-type-label hc-soft">{hint}</p> : null}
+      {hint ? <p className="mt-0.5 text-sec text-ink-2">{hint}</p> : null}
     </div>
   );
 }

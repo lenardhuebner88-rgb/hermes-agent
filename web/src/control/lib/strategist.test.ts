@@ -7,7 +7,6 @@ import {
   outcomeDeltaValue,
   outcomeStatusLabel,
   outcomeVerdictLabel,
-  outcomeVerdictToneClass,
   partitionProposals,
   proposalSource,
   runSummaryText,
@@ -233,7 +232,7 @@ describe("outcomeStatusLabel", () => {
   });
 });
 
-describe("outcomeVerdictLabel / outcomeVerdictToneClass", () => {
+describe("outcomeVerdictLabel", () => {
   it("labels all emitted verdicts", () => {
     expect(outcomeVerdictLabel("improved")).toBe("verbessert");
     expect(outcomeVerdictLabel("worsened")).toBe("verschlechtert");
@@ -247,29 +246,6 @@ describe("outcomeVerdictLabel / outcomeVerdictToneClass", () => {
     expect(outcomeVerdictLabel(null)).toBe("unbekannt");
     expect(outcomeVerdictLabel(undefined)).toBe("unbekannt");
     expect(outcomeVerdictLabel("weird")).toBe("unbekannt");
-  });
-
-  it("tones improved green, worsened red, neutral/unchanged zinc and unmeasurable amber", () => {
-    const improved = outcomeVerdictToneClass("improved");
-    const worsened = outcomeVerdictToneClass("worsened");
-    const neutral = outcomeVerdictToneClass("neutral");
-    const unchanged = outcomeVerdictToneClass("unchanged");
-    const unmeasurable = outcomeVerdictToneClass("unmeasurable");
-    expect(improved).toContain("emerald");
-    expect(worsened).toContain("red");
-    expect(neutral).toContain("zinc");
-    expect(unchanged).toContain("zinc");
-    expect(unmeasurable).toContain("amber");
-    expect(neutral).toBe(unchanged);
-    expect(new Set([improved, worsened, neutral, unmeasurable]).size).toBe(4);
-  });
-
-  it("dims null/unknown verdicts without tinting emerald/red/zinc", () => {
-    const unknown = outcomeVerdictToneClass("unknown");
-    const nullish = outcomeVerdictToneClass(null);
-    expect(unknown).toContain("hc-dim");
-    expect(unknown).not.toMatch(/emerald|red|zinc/);
-    expect(nullish).toBe(unknown);
   });
 });
 

@@ -132,8 +132,10 @@ One persistent instrument strip at the top of **every** route:
 
 - **Left:** the route masthead in Archivo expanded caps.
 - **Right:** the same four live micro-instruments on every route, in this
-  order — **Worker · Fragen · Kosten heute · Gateway** — giving every route
-  identical muscle-memory geometry. Kosten heute renders in **USD** (`$`,
+  order — **Worker · Inbox · Kosten heute · Gateway** — giving every route
+  identical muscle-memory geometry. (W4-6/Grill: the instrument counts the
+  GLOBAL decision inbox and is labeled **Inbox**; the CommandHome hero chip
+  keeps its local label *Fragen* — it counts orchestrator questions only.) Kosten heute renders in **USD** (`$`,
   de-comma — `fleetHub.fmtUsd`), not `€` (the werkbank mockup's `€4,12` is
   illustrative only); currency follows backend field `actual_cost_usd`
   (falls back to the marked-equivalent `cost_usd_equivalent` when the actual

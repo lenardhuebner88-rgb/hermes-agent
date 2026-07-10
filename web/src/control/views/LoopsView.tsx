@@ -31,7 +31,7 @@ import {
   useLoops,
 } from "../hooks/useControlData";
 import { de } from "../i18n/de";
-import { ToneCallout } from "../components/atoms";
+import { SignalLabel, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";
 import {
   isLoopPackError,
@@ -98,6 +98,25 @@ const displayFont: React.CSSProperties = { fontFamily: "var(--ln-font-display)" 
  *  mit — hier explizit auf --ln-sodium überschrieben). */
 const NIGHT_FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ln-sodium)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ln-void)]";
+
+const NIGHT_CALLOUT_LABEL: Record<SignalTone, string> = {
+  ok: "Erledigt",
+  warn: "Hinweis",
+  alert: "Fehler",
+  neutral: "Status",
+};
+
+function NightCallout({ tone, children }: { tone: SignalTone; children: ReactNode }) {
+  return (
+    <div
+      className="flex items-start gap-2 rounded-card border px-3 py-2 text-sec"
+      style={{ borderColor: "var(--ln-line)", background: "var(--ln-raised)", color: "var(--ln-ink-soft)" }}
+    >
+      <SignalLabel tone={tone} label={NIGHT_CALLOUT_LABEL[tone]} className="mt-0.5 shrink-0" />
+      <span className="min-w-0">{children}</span>
+    </div>
+  );
+}
 // @nous Button setzt mono immer intern. Leitstand-Aktionen sind Chrome, keine
 // Daten: der wichtige Display-Override gewinnt gezielt über diesen Dependency-
 // Default; Datenfelder und Datei-/Zeitwerte behalten font-data.
@@ -792,7 +811,7 @@ function LoopWorkstationFileEditor({
   const [draft, setDraft] = useState(file.content);
   return (
     <div className="space-y-2">
-      {!file.editable ? <ToneCallout tone="amber">{t.workshopReadOnly}</ToneCallout> : null}
+      {!file.editable ? <NightCallout tone="warn">{t.workshopReadOnly}</NightCallout> : null}
       <textarea
         value={draft}
         disabled={!file.editable || saveBusy}
@@ -814,7 +833,7 @@ function LoopWorkstationFileEditor({
           >
             {saveBusy ? "…" : t.workshopSave}
           </Button>
-          {saveError ? <ToneCallout tone="red">{t.workshopSaveFailed}: {saveError}</ToneCallout> : null}
+          {saveError ? <NightCallout tone="alert">{t.workshopSaveFailed}: {saveError}</NightCallout> : null}
         </div>
       ) : null}
     </div>
@@ -851,7 +870,7 @@ function LoopWorkstationPanel({
   const [dupName, setDupName] = useState("");
 
   if (loading) return <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.loading}</p>;
-  if (error) return <ToneCallout tone="red">{t.workshopError}: {error}</ToneCallout>;
+  if (error) return <NightCallout tone="alert">{t.workshopError}: {error}</NightCallout>;
   if (!files || fileList.length === 0) return <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.workshopEmpty}</p>;
 
   return (
@@ -905,7 +924,7 @@ function LoopWorkstationPanel({
             {duplicateBusy ? "…" : t.workshopDuplicateSubmit}
           </Button>
         </div>
-        {duplicateError ? <div className="mt-2"><ToneCallout tone="red">{t.workshopDuplicateFailed}: {duplicateError}</ToneCallout></div> : null}
+        {duplicateError ? <div className="mt-2"><NightCallout tone="alert">{t.workshopDuplicateFailed}: {duplicateError}</NightCallout></div> : null}
       </div>
     </div>
   );
@@ -924,7 +943,7 @@ function LoopErrorCard({ pack }: { pack: LoopPackError }) {
         </span>
         <NightPill tone="warn"><XCircle aria-hidden className="h-3.5 w-3.5" />{t.manifestError}</NightPill>
       </div>
-      <div className="mt-3"><ToneCallout tone="red">{pack.error}</ToneCallout></div>
+      <div className="mt-3"><NightCallout tone="alert">{pack.error}</NightCallout></div>
     </section>
   );
 }
@@ -1169,8 +1188,8 @@ function LoopCard({
         </div>
       </div>
 
-      {actionError ? <div className="mt-2"><ToneCallout tone="red">{actionError}</ToneCallout></div> : null}
-      {landNote ? <div className="mt-2"><ToneCallout tone="emerald">{landNote}</ToneCallout></div> : null}
+      {actionError ? <div className="mt-2"><NightCallout tone="alert">{actionError}</NightCallout></div> : null}
+      {landNote ? <div className="mt-2"><NightCallout tone="ok">{landNote}</NightCallout></div> : null}
 
       {startOpen ? (
         <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>
@@ -1210,7 +1229,7 @@ function LoopCard({
           summary={<span className="inline-flex min-h-12 items-center text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.actions.detail}</span>}
         >
           {detailLoading ? <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.loading}</p> : null}
-          {detailError ? <ToneCallout tone="red">{t.detailError}</ToneCallout> : null}
+          {detailError ? <NightCallout tone="alert">{t.detailError}</NightCallout> : null}
           {detail ? <LoopDetailPanel detail={detail} /> : null}
         </Disclosure>
       </div>
@@ -1650,7 +1669,7 @@ export function LoopsView() {
         </div>
       </header>
 
-      {loops.error ? <ToneCallout tone="amber">{t.error}</ToneCallout> : null}
+      {loops.error ? <NightCallout tone="warn">{t.error}</NightCallout> : null}
 
       <div className="flex items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.packCount(packs.length)}</div>
 

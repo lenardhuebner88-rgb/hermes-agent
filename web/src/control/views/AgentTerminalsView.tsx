@@ -341,7 +341,7 @@ function useIsCompactTerminalLayout(): boolean {
   return useMediaQuery("(max-width: 1023px)");
 }
 
-function StatusPill({ state }: { state: TerminalUiState }) {
+function TerminalStatusChip({ state }: { state: TerminalUiState }) {
   const tone =
     state === "attached"
       ? "border-status-ok/40 bg-status-ok/10 text-status-ok"
@@ -393,7 +393,7 @@ function TerminalIdentityBar({
         <span className="text-ink-3">·</span>
         <span className="min-w-0 max-w-[8rem] truncate font-mono text-ink-2" title={process}>{process}</span>
         <span className="text-ink-3">·</span>
-        <StatusPill state={state} />
+        <TerminalStatusChip state={state} />
       </div>
     </div>
   );
@@ -1838,7 +1838,7 @@ export function AgentTerminalsView() {
       </div>
       <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
         <div className="flex justify-between"><span>Target</span><span className="text-ink">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "—"}</span></div>
-        <div className="flex justify-between"><span>Attach</span><StatusPill state={state} /></div>
+        <div className="flex justify-between"><span>Attach</span><TerminalStatusChip state={state} /></div>
         <div className="flex justify-between"><span>Input</span><span className="text-ink-2">nur User-Tasten, kein Auto-Send</span></div>
         <div className="flex justify-between"><span>Mobile</span><span className="text-ink-2">reattach an dasselbe tmux-Fenster</span></div>
       </div>
@@ -2091,7 +2091,7 @@ export function AgentTerminalsView() {
       <div className="mt-3 grid gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
         <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-ink-2">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-ink-2">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
-        <div className="flex items-center justify-between gap-2"><span>Status</span><StatusPill state={state} /></div>
+        <div className="flex items-center justify-between gap-2"><span>Status</span><TerminalStatusChip state={state} /></div>
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
         <button type="button" onClick={() => { if (activePane > 0) extraPaneRefs[activePane - 1]?.current?.reconnect(); else setAttachNonce((n) => n + 1); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
@@ -2427,7 +2427,7 @@ export function AgentTerminalsView() {
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-card border border-line bg-surface-1/90 p-2 shadow-2xl sm:rounded-panel sm:p-3">
           <div className="min-w-0">
             <Eyebrow>Agent Terminals</Eyebrow>
-            <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-2"><TerminalStatusChip state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button

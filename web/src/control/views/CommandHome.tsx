@@ -19,7 +19,7 @@
  * NotificationBridge-Glocke (schließt denselben P2 "Glocke unsichtbar", den
  * Fleet in W3-1a schon hatte). Die alte Brand-Zeile ("Hermes Start") war reine
  * Dopplung des Shell-Labels; ihr LIVE/SYNC-Punkt dopplte die Aufmerksamkeits-
- * Hero-StatusPill direkt darunter (settling/calm/Achtung) — beides ersatzlos
+ * Hero-Statussignal direkt darunter (settling/calm/Achtung) — beides ersatzlos
  * entfernt statt verschoben, es gab keinen eigenständigen Signalwert.
  */
 import { useMemo, useState, type ReactNode } from "react";
@@ -45,18 +45,18 @@ import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
-import { StaleBadge, StatusPill } from "../components/atoms";
-import { KpiTile, RoleChip } from "../components/leitstand";
+import { StaleBadge } from "../components/atoms";
+import { KpiTile, RoleChip, SignalChip, type SignalTone } from "../components/leitstand";
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 import "./command-home.css";
 
-const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
-  autoresearch: { label: "Autoresearch", tone: "cyan" },
-  family: { label: "Family", tone: "violet" },
-  orchestrator: { label: "Orchestrator", tone: "sky" },
-  kanban: { label: "Kanban", tone: "amber" },
+const SURFACE: Record<InboxSurface, { label: string; tone: SignalTone }> = {
+  autoresearch: { label: "Autoresearch", tone: "neutral" },
+  family: { label: "Family", tone: "neutral" },
+  orchestrator: { label: "Orchestrator", tone: "neutral" },
+  kanban: { label: "Kanban", tone: "warn" },
 };
 
 function surfaceFromParam(value: string | null): InboxSurface | null {
@@ -139,10 +139,9 @@ export function CommandHome({ density }: { density: Density }) {
         <div className="min-w-0">
           <div className="flex items-center gap-3">
             <Eyebrow>Attention Inbox</Eyebrow>
-            <StatusPill
-              tone={calm ? "emerald" : heroTone === "red" || heroTone === "rose" ? "red" : "amber"}
+            <SignalChip
+              tone={calm ? "ok" : heroTone === "red" || heroTone === "rose" ? "alert" : "warn"}
               label={settling ? "lädt…" : calm ? "Alles ruhig" : "Aufmerksamkeit"}
-              dot={settling ? "idle" : calm ? "live" : heroTone === "red" || heroTone === "rose" ? "error" : "warn"}
             />
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
@@ -320,7 +319,7 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
     >
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
-          <StatusPill tone={surface.tone} label={surface.label} />
+          <SignalChip tone={surface.tone} label={surface.label} />
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">Als Erstes</span>
           {item.ageSeconds != null ? (
             <span className="hc-mono text-[10px] tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
@@ -455,7 +454,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
   running: number; inReview: number; blocked: number; shippedToday: number; now: number;
 }) {
   const overall = health.data?.overall ?? "offline";
-  const healthTone = !health.data ? "zinc" : overall === "healthy" ? "emerald" : overall === "degraded" ? "amber" : "red";
+  const healthTone: SignalTone = !health.data ? "neutral" : overall === "healthy" ? "ok" : overall === "degraded" ? "warn" : "alert";
   const subs = health.data?.subsystems;
   const sysLabel: Array<[string, "healthy" | "degraded" | "offline" | undefined]> = [
     ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
@@ -471,7 +470,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
       <div className="border-t border-line pt-3">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">System</span>
-          <StatusPill tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} dot={!health.data ? "idle" : overall === "healthy" ? "live" : overall === "degraded" ? "warn" : "error"} />
+          <SignalChip tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} />
         </div>
         <div className="mb-2 flex flex-wrap gap-1.5">
           <StaleBadge isStale={health.isStale} lastUpdated={health.lastUpdated} errorObj={health.errorObj} error={health.error} now={now} />
@@ -544,7 +543,7 @@ function DecisionRow({ item, onOpen, fix, repair, veto }: { item: InboxItem; onO
     <div className={cn("ch-decision flex w-full items-center gap-3 px-3.5 py-3 text-left", severitySpine[item.tone])}>
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
-          <StatusPill tone={surface.tone} label={surface.label} />
+          <SignalChip tone={surface.tone} label={surface.label} />
           <span className="truncate text-sm font-semibold text-ink">{item.title}</span>
         </div>
         <p className="mt-1 line-clamp-1 text-xs text-ink-2">{item.ageSeconds != null ? <span className="hc-mono tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-ink">{item.nextAction}</span></p>

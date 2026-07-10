@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ShieldAlert, X } from "lucide-react";
+import { Check, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
@@ -11,7 +11,9 @@ import { getProposalOperatorBrief, type ProposalOperatorBrief } from "../lib/aut
 import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Density } from "../hooks/useDensity";
 import type { Proposal, ProposalSeverity, ToneName } from "../lib/types";
-import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
+import { DiffView, ModeBadge } from "./atoms";
+import { SignalChip, SignalLabel, signalToneFromLegacy, type SignalTone } from "./leitstand";
+import { Eyebrow } from "./primitives";
 
 const SEVERITY_LABEL: Record<ProposalSeverity, string> = {
   critical: de.autoresearch.severityCritical,
@@ -51,6 +53,22 @@ interface ActionOutcome {
   label: string;
   value: string;
   tone: ToneName;
+}
+
+const PROPOSAL_CALLOUT_CLASS: Record<SignalTone, string> = {
+  ok: "border-status-ok/30 bg-status-ok/10 text-status-ok",
+  warn: "border-status-warn/30 bg-status-warn/10 text-status-warn",
+  alert: "border-status-alert/30 bg-status-alert/10 text-status-alert",
+  neutral: "border-line bg-surface-2 text-ink-2",
+};
+
+function ProposalCallout({ tone, label, children }: { tone: SignalTone; label: string; children: React.ReactNode }) {
+  return (
+    <div role={tone === "alert" ? "alert" : undefined} className={cn("flex items-start gap-2 rounded-card border px-3 py-2 text-sec", PROPOSAL_CALLOUT_CLASS[tone])}>
+      {tone === "alert" ? <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /> : <SignalLabel tone={tone} label={label} className="mt-0.5 shrink-0" />}
+      <span className="min-w-0">{children}</span>
+    </div>
+  );
 }
 
 function decisionGuide(proposal: Proposal, severity: ProposalSeverity): DecisionGuide {
@@ -164,51 +182,49 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const requiresReviewConfirmation = opensDiffByDefault && !isReverted;
   const applyDisabled = !!busy || (requiresReviewConfirmation && !reviewConfirmed);
   return (
-    <article id={`autoresearch-proposal-${proposal.id}`} className={cn("hc-card scroll-mt-6 space-y-4 p-4", density === "compact" && "p-3")}>
+    <article id={`autoresearch-proposal-${proposal.id}`} className={cn("scroll-mt-6 space-y-4 rounded-card border border-line bg-surface-2 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             {isTestHardening ? <Badge tone="success">Test-Härtung</Badge> : <ModeBadge mode={proposal.mode === "code" ? "code" : "skill"} />}
-            <StatusPill tone={severityTone(severity)} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
-            {category ? <StatusPill tone="cyan" label={`${de.autoresearch.category}: ${category.label}`} /> : null}
-            {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}
-            {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]"><Spinner />{de.autoresearch.batchPending}</span> : null}
-            {batchStatus?.status === "ok" ? <StatusPill tone="emerald" label={de.autoresearch.batchOk} /> : null}
-            {batchStatus?.status === "fail" ? <StatusPill tone="red" label={de.autoresearch.batchFail} /> : null}
-            {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"><Spinner />{de.autoresearch.testing}</span> : null}
-            {isReverted ? <span className="rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2 py-0.5 text-xs text-zinc-200">Zurückgerollt</span> : null}
-            {ageDays !== null ? <span className={cn("rounded-full border px-2 py-0.5 text-xs", ageDays > 7 ? "border-amber-500/20 bg-amber-500/10 text-amber-200" : "border-zinc-500/20 bg-zinc-500/10 text-zinc-200")}>{de.autoresearch.ageDays(ageDays)}</span> : null}
-            {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
+            <SignalChip tone={signalToneFromLegacy(severityTone(severity))} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
+            {category ? <SignalChip tone="neutral" label={`${de.autoresearch.category}: ${category.label}`} /> : null}
+            {priorityGroup ? <SignalChip tone={signalToneFromLegacy(priorityGroup.tone)} label={priorityGroup.label} /> : null}
+            {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-1 px-2.5 py-1 text-micro font-medium text-ink-2"><Spinner />{de.autoresearch.batchPending}</span> : null}
+            {batchStatus?.status === "ok" ? <SignalChip tone="ok" label={de.autoresearch.batchOk} /> : null}
+            {batchStatus?.status === "fail" ? <SignalChip tone="alert" label={de.autoresearch.batchFail} /> : null}
+            {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-status-warn/30 bg-status-warn/10 px-2.5 py-1 text-micro font-medium text-status-warn"><Spinner />{de.autoresearch.testing}</span> : null}
+            {isReverted ? <SignalChip tone="neutral" label="Zurückgerollt" /> : null}
+            {ageDays !== null ? <SignalChip tone={ageDays > 7 ? "warn" : "neutral"} label={de.autoresearch.ageDays(ageDays)} className="font-data tabular-nums" /> : null}
+            {isDone ? <SignalChip tone={proposal.status === "applied" ? "ok" : "neutral"} label={proposal.status === "applied" ? "Erledigt" : "Übersprungen"} /> : null}
           </div>
-          <h3 className="break-words text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
+          <h3 className="break-words text-emph font-semibold leading-snug text-ink">{proposalTitle(proposal)}</h3>
           {category?.help ? (
-            <p className="max-w-3xl text-xs leading-5 hc-dim">
-              <span className="font-semibold text-zinc-300">{category.label}:</span> {category.help}
+            <p className="max-w-3xl text-sec leading-5 text-ink-3">
+              <span className="font-semibold text-ink-2">{category.label}:</span> {category.help}
             </p>
           ) : null}
           <ActionOutcomeStrip outcomes={outcomes} />
           <ProposalBriefPanel brief={brief} />
           <div className="space-y-1">
-            <p className="hc-eyebrow">{de.autoresearch.why}</p>
-            <p className="text-sm leading-6 hc-soft">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>
+            <Eyebrow>{de.autoresearch.why}</Eyebrow>
+            <p className="text-sec leading-6 text-ink-2">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>
           </div>
         </div>
         {selectable ? (
           batchSelectable ? (
-            <label className="flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white">
+            <label className="flex min-h-12 shrink-0 cursor-pointer items-center gap-2 rounded-card border border-line bg-surface-1 px-3 py-2 text-sec text-ink">
               <input
                 type="checkbox"
                 checked={!!selected}
                 onChange={(event) => onSelectedChange?.(proposal, event.target.checked)}
-                className="h-4 w-4 accent-[var(--hc-accent)]"
+                className="size-12 shrink-0 accent-live"
                 aria-label={de.autoresearch.selectProposal}
               />
               <span>{de.autoresearch.select}</span>
             </label>
           ) : (
-            <span className="flex shrink-0 items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" title="Diese Karte wird direkt mit Übernehmen oder Überspringen entschieden.">
-              Einzelreview
-            </span>
+            <SignalChip tone="warn" label="Einzelreview" title="Diese Karte wird direkt mit Übernehmen oder Überspringen entschieden." />
           )
         ) : null}
       </div>
@@ -217,61 +233,61 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
 
       {evidence ? (
         <div className="space-y-1">
-          <p className="hc-eyebrow">{de.autoresearch.evidence}</p>
-          <blockquote className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-100">
+          <Eyebrow>{de.autoresearch.evidence}</Eyebrow>
+          <blockquote className="whitespace-pre-wrap rounded-card border border-line bg-surface-1 px-3 py-2 text-sec leading-6 text-ink">
             {evidence}
           </blockquote>
         </div>
       ) : null}
 
       {isCode && !isDone ? (
-        <ToneCallout tone="amber">
+        <ProposalCallout tone="warn" label="Code-Gate">
           {isTesting ? <Spinner /> : <ShieldAlert className="mr-2 inline h-4 w-4" />}
           {isTesting ? de.autoresearch.codeGateTesting : de.autoresearch.codeGate}
-        </ToneCallout>
+        </ProposalCallout>
       ) : null}
 
       <div className="space-y-2">
-        <p className="hc-eyebrow">{de.autoresearch.fixDiff}</p>
-        {opensDiffByDefault ? <p className="text-xs leading-5 hc-dim">Einzelreview: Diese Änderung ist geöffnet, damit du sie vor Übernehmen oder Überspringen direkt prüfen kannst.</p> : null}
+        <Eyebrow>{de.autoresearch.fixDiff}</Eyebrow>
+        {opensDiffByDefault ? <p className="text-sec leading-5 text-ink-3">Einzelreview: Diese Änderung ist geöffnet, damit du sie vor Übernehmen oder Überspringen direkt prüfen kannst.</p> : null}
         <DiffView lines={lines} showLineNumbers={density === "compact"} collapsible defaultCollapsed={!opensDiffByDefault} />
       </div>
 
-      {batchStatus?.status === "fail" && batchStatus.detail ? <ToneCallout tone="red">{batchStatus.detail}</ToneCallout> : null}
+      {batchStatus?.status === "fail" && batchStatus.detail ? <ProposalCallout tone="alert" label="Fehler">{batchStatus.detail}</ProposalCallout> : null}
 
       {isDone ? (
-        <ToneCallout tone={proposal.status === "applied" ? "emerald" : "amber"}>{proposal.result || (proposal.status === "applied" ? de.autoresearch.applied : de.autoresearch.skipped)}</ToneCallout>
+        <ProposalCallout tone={proposal.status === "applied" ? "ok" : "warn"} label={proposal.status === "applied" ? "Erledigt" : "Übersprungen"}>{proposal.result || (proposal.status === "applied" ? de.autoresearch.applied : de.autoresearch.skipped)}</ProposalCallout>
       ) : isTesting ? (
-        <ToneCallout tone="violet"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ToneCallout>
+        <ProposalCallout tone="neutral" label="Gate läuft"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ProposalCallout>
       ) : isActionable ? (
         <div className="space-y-3">
-          <ToneCallout tone={guide.tone}>
+          <ProposalCallout tone={signalToneFromLegacy(guide.tone)} label="Entscheidung">
             <span className="font-semibold">Entscheidung:</span> {guide.consequence}
-          </ToneCallout>
+          </ProposalCallout>
           {requiresReviewConfirmation ? (
-            <p className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">
+            <p className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec leading-5 text-status-warn">
               {de.autoresearch.batchManualReviewHint}
             </p>
           ) : null}
           {requiresReviewConfirmation ? (
-            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+            <label className="flex min-h-12 cursor-pointer items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 p-3 text-sec text-status-warn">
               <input
                 type="checkbox"
                 checked={reviewConfirmed}
                 onChange={(event) => setReviewConfirmed(event.target.checked)}
-                className="mt-0.5 h-4 w-4 accent-[var(--hc-accent)]"
+                className="size-12 shrink-0 accent-live"
               />
               <span>
                 <span className="block font-medium">Diff geprüft</span>
-                <span className="block text-xs leading-5 text-amber-100/80">Ich habe Änderung und Risiko gelesen; Übernehmen startet danach die beschriebene Aktion.</span>
+                <span className="block text-sec leading-5 text-status-warn">Ich habe Änderung und Risiko gelesen; Übernehmen startet danach die beschriebene Aktion.</span>
               </span>
             </label>
           ) : null}
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-            <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
+            <Button outlined className="min-h-12" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
               {isReverted ? "Archivieren" : de.autoresearch.skip}
             </Button>
-            <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={applyDisabled} title={requiresReviewConfirmation && !reviewConfirmed ? "Erst Diff geprüft bestätigen." : undefined} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
+            <Button className="min-h-12" onClick={() => onApply(proposal)} disabled={applyDisabled} title={requiresReviewConfirmation && !reviewConfirmed ? "Erst Diff geprüft bestätigen." : undefined} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
               {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
             </Button>
           </div>
@@ -283,16 +299,16 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
 
 function ActionOutcomeStrip({ outcomes }: { outcomes: ActionOutcome[] }) {
   return (
-    <section className="rounded-lg border border-white/10 bg-black/20 p-3" aria-label="Klick-Folgen">
+    <section className="rounded-card border border-line bg-surface-1 p-3" aria-label="Klick-Folgen">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="hc-eyebrow">Was passiert beim Klick?</p>
-        <span className="text-xs leading-5 hc-dim">Kurz vor Diff und Details</span>
+        <Eyebrow>Was passiert beim Klick?</Eyebrow>
+        <span className="text-sec leading-5 text-ink-3">Kurz vor Diff und Details</span>
       </div>
       <div className="mt-3 grid gap-2 md:grid-cols-3">
         {outcomes.map((outcome) => (
-          <div key={outcome.label} className={cn("min-w-0 rounded-md border px-3 py-2", briefFactToneClass(outcome.tone))}>
-            <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{outcome.label}</p>
-            <p className="mt-1 text-sm leading-5 hc-soft">{outcome.value}</p>
+          <div key={outcome.label} className={cn("min-w-0 rounded-card border px-3 py-2", briefFactToneClass(outcome.tone))}>
+            <Eyebrow>{outcome.label}</Eyebrow>
+            <p className="mt-1 text-sec leading-5 text-ink-2">{outcome.value}</p>
           </div>
         ))}
       </div>
@@ -302,22 +318,22 @@ function ActionOutcomeStrip({ outcomes }: { outcomes: ActionOutcome[] }) {
 
 function ProposalBriefPanel({ brief }: { brief: ProposalOperatorBrief }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[.025] p-3">
+    <div className="rounded-card border border-line bg-surface-1 p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="hc-eyebrow">Kurzbriefing</p>
-            <StatusPill tone={brief.tone} label={brief.label} />
+            <Eyebrow>Kurzbriefing</Eyebrow>
+            <SignalChip tone={signalToneFromLegacy(brief.tone)} label={brief.label} />
           </div>
-          <h4 className="mt-2 text-sm font-semibold text-white">{brief.title}</h4>
-          <p className="mt-1 text-sm leading-6 hc-soft">{brief.summary}</p>
+          <h4 className="mt-2 text-sec font-semibold text-ink">{brief.title}</h4>
+          <p className="mt-1 text-sec leading-6 text-ink-2">{brief.summary}</p>
         </div>
       </div>
       <div className="mt-3 grid gap-2 lg:grid-cols-3">
         {brief.facts.map((fact) => (
-          <div key={fact.label} className={cn("min-w-0 rounded-md border px-3 py-2", briefFactToneClass(fact.tone))}>
-            <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
-            <p className="mt-1 text-sm leading-5 hc-soft">{fact.value}</p>
+          <div key={fact.label} className={cn("min-w-0 rounded-card border px-3 py-2", briefFactToneClass(fact.tone))}>
+            <Eyebrow>{fact.label}</Eyebrow>
+            <p className="mt-1 text-sec leading-5 text-ink-2">{fact.value}</p>
           </div>
         ))}
       </div>
@@ -328,26 +344,23 @@ function ProposalBriefPanel({ brief }: { brief: ProposalOperatorBrief }) {
 function briefFactToneClass(tone: ToneName): string {
   switch (tone) {
     case "emerald":
-      return "border-emerald-500/20 bg-emerald-500/10";
-    case "cyan":
-      return "border-cyan-500/20 bg-cyan-500/10";
+      return "border-status-ok/30 bg-status-ok/10";
     case "amber":
-      return "border-amber-500/20 bg-amber-500/10";
-    case "violet":
-      return "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]";
+      return "border-status-warn/30 bg-status-warn/10";
     case "red":
-      return "border-red-500/20 bg-red-500/10";
+    case "rose":
+      return "border-status-alert/30 bg-status-alert/10";
     default:
-      return "border-white/10 bg-black/20";
+      return "border-line bg-surface-2";
   }
 }
 
 function DecisionGuidePanel({ guide }: { guide: DecisionGuide }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[.025] p-3">
+    <div className="rounded-card border border-line bg-surface-1 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="hc-eyebrow">Entscheidungshilfe</p>
-        <StatusPill tone={guide.tone} label={guide.label} />
+        <Eyebrow>Entscheidungshilfe</Eyebrow>
+        <SignalChip tone={signalToneFromLegacy(guide.tone)} label={guide.label} />
       </div>
       <div className="mt-3 grid gap-2 md:grid-cols-3">
         <DecisionFact label="Nutzen" value={guide.benefit} />
@@ -360,9 +373,9 @@ function DecisionGuidePanel({ guide }: { guide: DecisionGuide }) {
 
 function DecisionFact({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-white/10 bg-black/20 px-3 py-2">
-      <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{label}</p>
-      <p className="mt-1 text-sm leading-5 hc-soft">{value}</p>
+    <div className="min-w-0 rounded-card border border-line bg-surface-2 px-3 py-2">
+      <Eyebrow>{label}</Eyebrow>
+      <p className="mt-1 text-sec leading-5 text-ink-2">{value}</p>
     </div>
   );
 }

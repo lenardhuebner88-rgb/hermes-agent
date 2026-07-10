@@ -6,14 +6,14 @@
  * quotes inline — compact face, full proof on demand. Real data only.
  */
 import { useState } from "react";
-import { ChevronRight, ExternalLink, FileText, Quote } from "lucide-react";
+import { ChevronRight, ExternalLink, FileText, Quote, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtAge, fmtDur } from "../../lib/derive";
 import { roleChip } from "../../lib/fleet";
 import { de } from "../../i18n/de";
 import type { KanbanResult } from "../../lib/types";
-import { StatusPill, ToneCallout } from "../atoms";
 import { RoleChip } from "./atoms";
+import { SignalChip } from "../leitstand";
 
 function receiptLabel(result: KanbanResult): string {
   const hasReceipt = (result.artifacts ?? []).some((a) => a.toLowerCase().includes("receipt")) || (result.deliverables ?? []).length > 0;
@@ -39,13 +39,13 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
   return (
     <article className="hc-surface-card p-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusPill tone="emerald" label="Abgeschlossen" dot="ready" />
+        <SignalChip tone="ok" label="Abgeschlossen" />
         <RoleChip role={role} />
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="ml-auto inline-flex min-h-8 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft transition hover:bg-white/5"
+          className="ml-auto inline-flex min-h-12 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft transition hover:bg-white/5"
         >
           {de.fleet.details}
           <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
@@ -102,7 +102,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
               {result.followups.map((item) => <li key={item} className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-300" /><span>{item}</span></li>)}
             </ul>
           ) : null}
-          {result.residual_risk ? <ToneCallout tone="amber"><span className="font-medium">{de.hermes.residualRisk}:</span> {result.residual_risk}</ToneCallout> : null}
+          {result.residual_risk ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span><span className="font-medium">{de.hermes.residualRisk}:</span> {result.residual_risk}</span></div> : null}
         </div>
       ) : null}
     </article>

@@ -1,37 +1,10 @@
-/**
- * Ton-System — die Signatur des Designs: Hairline-Border + transluzente Wäsche.
- * Jeder Status-Ton rendert als  border-<tone>/20  bg-<tone>/10  text-<tone>-200|300.
- *
- * Diese Klassen funktionieren mit den Status-Farben aus tokens.css / theme.css.
- * `toneClasses(tone)` ist der einzige Ort, der dieses Muster kodiert — nutze es
- * für Pills, Callouts und getönte Flächen, statt die Klassen überall zu wiederholen.
- */
 import type { ToneName } from './types';
 
-/** Tailwind-Klassen für eine getönte Fläche (Pill/Callout/Chip). */
-export const toneClasses = (tone: ToneName): string => TONE_CLASS[tone];
-
-const TONE_CLASS: Record<ToneName, string> = {
-  emerald: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200',
-  cyan:    'border-cyan-500/20 bg-cyan-500/10 text-cyan-200',
-  sky:     'border-sky-500/20 bg-sky-500/10 text-sky-200',
-  indigo:  'border-indigo-400/20 bg-indigo-400/10 text-indigo-200',
-  amber:   'border-amber-500/20 bg-amber-500/10 text-amber-200',
-  rose:    'border-rose-500/20 bg-rose-500/10 text-rose-200',
-  red:     'border-red-500/20 bg-red-500/10 text-red-200',
-  // Neutral: nur der Rahmen wird kräftiger (zinc-600/20 verschwand auf dem
-  // dunklen Leitstand-Grund → "Geister"-Callout). Die Textfarbe (zinc-200)
-  // bleibt, weil dieser geteilte Ton auch auf den noch HELLEN Broadsheet-Tabs
-  // (Orchestrator/Backlog-Leerzustände) rendert — reine Border/Bg-Deckung ist
-  // auf beiden Gründen sicher. amber/red bleiben semantisch unverändert.
-  zinc:    'border-zinc-500/30 bg-zinc-500/10 text-zinc-200',
-  // Violett = Marke. Nur für Akzent/Interaktion, nie als Status-Warnung.
-  // Fix: vorher nicht-präfixierte --accent-* Vars (existieren nicht → unsichtbar);
-  // jetzt die kanonischen --hc-accent-* aus control-tokens.css.
-  violet:  'border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]',
-};
-
-/** Roher Hex-Wert eines Tons (für inline-Style, LED-Glow, Border-Akzent). */
+/**
+ * Legacy-Datenton → Rohfarbe. Bleibt vorerst ausschließlich für die zwei
+ * SVG/Data-Viz-Pfade RoleChip und FleetPipeline erhalten; UI-Statusflächen
+ * verwenden SignalChip/SignalLabel und die Sheet-A-Status-Tokens.
+ */
 export const TONE_HEX: Record<ToneName, string> = {
   emerald: '#0a8a60', cyan: '#0a87a8', sky: '#0369a1', indigo: '#4338ca',
   amber: '#b3590a', rose: '#be123c', red: '#d23b4e', zinc: '#79808f', violet: '#2e45d4',

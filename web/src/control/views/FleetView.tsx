@@ -33,7 +33,6 @@ import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips } from "../components/leitstand";
 import { Led } from "../components/atoms";
-import { toneClasses } from "../lib/tones";
 import "./fleet/fleet.css";
 
 // ─── Viewport-Hook ───────────────────────────────────────────────────────────
@@ -307,7 +306,7 @@ export function FleetView() {
 // ─── "Wartet auf dich"-Zeile ────────────────────────────────────────────────
 // Reshaped W3-1a: vormals ein full-bleed amber Glow-Band (zwei Varianten —
 // Desktop-Banner + mobile sticky-bottom-Leiste). Jetzt ein einziger kompakter
-// warn-Callout (Design-Vokabular: Led + Text + Pfeil, toneClasses("amber"))
+// warn-Callout (Design-Vokabular: Led + Text + Pfeil, explizite Status-Tokens)
 // am Kopf des Inhaltsbereichs, für jeden Subtab gleich sichtbar — die
 // FUNKTION (auf wartende Freigaben/Operator-Halts hinweisen, Klick navigiert
 // zum passenden Subtab) bleibt unverändert.
@@ -335,7 +334,7 @@ function PendingBar({ items, onNavigate }: PendingBarProps) {
   return (
     <button
       type="button"
-      className={`mb-2 flex min-h-11 w-full items-center gap-2.5 rounded-card border px-3 py-2 text-left ${toneClasses("amber")}`}
+      className="mb-2 flex min-h-12 w-full items-center gap-2.5 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-left text-status-warn"
       onClick={handleClick}
       aria-label={text}
     >

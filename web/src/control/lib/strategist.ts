@@ -6,7 +6,6 @@
 // helpers are pure so they can be unit-tested without the polling/render path.
 
 import type { LeverOutcome } from "./schemas";
-import { toneClasses } from "./tones";
 
 /** One held strategist proposal (a `freigabe:operator` root awaiting triage). */
 export interface StrategistProposal {
@@ -222,20 +221,6 @@ const OUTCOME_VERDICT_LABELS: Record<string, string> = {
 /** Human label for a lever-outcome's `verdict` — `null`/unrecognised → "unbekannt". */
 export function outcomeVerdictLabel(verdict: string | null | undefined): string {
   return OUTCOME_VERDICT_LABELS[verdict ?? ""] ?? OUTCOME_VERDICT_LABELS.unknown;
-}
-
-/** Tone classes for the verdict chip: improved emerald / worsened red /
- *  neutral/unchanged zinc / unmeasurable amber / unknown (incl. `null`, not
- *  measured yet) dim — no tint. */
-export function outcomeVerdictToneClass(verdict: string | null | undefined): string {
-  switch (verdict) {
-    case "improved": return toneClasses("emerald");
-    case "worsened": return toneClasses("red");
-    case "unmeasurable": return toneClasses("amber");
-    case "neutral":
-    case "unchanged": return toneClasses("zinc");
-    default: return "border-white/10 bg-white/[.03] hc-dim";
-  }
 }
 
 /** Return the scalar signed `delta` written by the backend — `null` when

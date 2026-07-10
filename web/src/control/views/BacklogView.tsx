@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { AnimatePresence } from "motion/react";
+import { TriangleAlert } from "lucide-react";
 
 import { de } from "../i18n/de";
 import { useBacklog, useBacklogDetail, useCommissionToFleet, useDispatchFoTask, useFoBoardStatus, type CommissionPayload } from "../hooks/useControlData";
-import { StaleBadge, ToneCallout } from "../components/atoms";
+import { StaleBadge } from "../components/atoms";
 import {
   buildFoAuditPrompt,
   buildFoCommissionPrompt,
@@ -283,9 +284,9 @@ export function BacklogView({ density }: { density: Density }) {
         onViewMode={setViewMode}
       />
 
-      {backlog.error ? <ToneCallout tone="red">{de.backlog.error}</ToneCallout> : null}
+      {backlog.error ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.backlog.error}</div> : null}
       <StaleBadge isStale={backlog.isStale} lastUpdated={backlog.lastUpdated} errorObj={backlog.errorObj} error={backlog.error} now={nowSec} />
-      {data?.error ? <ToneCallout tone="amber">{de.backlog.sourceMissing}</ToneCallout> : null}
+      {data?.error ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.backlog.sourceMissing}</div> : null}
 
       <FoHealthStrip items={allItems} contractHealth={data?.contract_health} />
 

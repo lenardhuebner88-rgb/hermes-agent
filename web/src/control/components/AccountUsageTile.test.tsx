@@ -61,7 +61,8 @@ describe("AccountUsageTile", () => {
 
     // Header + Engpass (knappstes echtes Fenster = ChatGPT-Woche 96 %, rot → ⚠)
     expect(html).toContain("Abo-Limits");
-    expect(html).toContain("⚠ Engpass");
+    expect(html).toContain("Engpass:");
+    expect(html).toContain("lucide-triangle-alert");
     expect(html).toContain("ChatGPT / Codex");
     expect(html).toContain("96 %");
 

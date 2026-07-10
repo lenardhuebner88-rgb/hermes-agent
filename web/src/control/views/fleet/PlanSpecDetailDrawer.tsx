@@ -1,10 +1,9 @@
-import { Copy, FileText } from "lucide-react";
+import { Copy, FileText, TriangleAlert } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "../../lib/types";
-import { StatusPill, ToneCallout } from "../../components/atoms";
 import { Eyebrow, SkeletonCard } from "../../components/primitives";
-import { DrawerShell } from "../../components/leitstand";
+import { DrawerShell, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { planSpecKanbanTone, planSpecKanbanLabel } from "./planSpecKanban";
 
 function middleEllipsis(value: string, edge = 32): string {
@@ -44,7 +43,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
       }
     >
       <div className="flex flex-wrap gap-1.5">
-        <StatusPill tone={planSpecKanbanTone(item.kanban_state)} label={planSpecKanbanLabel(item)} />
+        <SignalChip tone={signalToneFromLegacy(planSpecKanbanTone(item.kanban_state))} label={planSpecKanbanLabel(item)} />
         <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
         <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
         {item.kanban_root_task_id ? (
@@ -54,7 +53,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
         ) : null}
       </div>
       {loading ? <SkeletonCard rows={4} /> : null}
-      {error ? <ToneCallout tone="amber">{error}</ToneCallout> : null}
+      {error ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
       {detail ? (
         <div className="mt-4 grid gap-4">
           <section className="rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-3">
