@@ -389,6 +389,53 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "error")
         self.assertIn("Something broke", result["results"][0]["error"])
 
+    @patch("tools.delegate_tool._run_single_child")
+    def test_interrupted_batch_with_wedged_child_does_not_hang(self, mock_run):
+        """Regression: the batch executor used a `with` block, whose
+        __exit__ calls shutdown(wait=True) — joining every worker,
+        including the wedged child the interrupt-abandon loop just gave
+        up on. The parent's turn hung right there (daemon threads only
+        help at interpreter exit). The executor must be shut down with
+        wait=False on every exit path."""
+        wedge = threading.Event()  # never set — child stays stuck
+
+        def _wedged_child(*, task_index, goal, child, parent_agent):
+            wedge.wait(timeout=30)  # bounded so a regression can't hang CI
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "late",
+                "error": None,
+                "api_calls": 0,
+                "duration_seconds": 30,
+            }
+
+        mock_run.side_effect = _wedged_child
+        parent = _make_mock_parent()
+        # Interrupt already requested: the abandon loop fabricates
+        # 'interrupted' results immediately; only the executor join could
+        # block after that.
+        parent._interrupt_requested = True
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            start = time.monotonic()
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}],
+                    parent_agent=parent,
+                )
+            )
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"batch delegation blocked for {elapsed:.1f}s on a wedged child "
+            "after interrupt — executor joined instead of abandoning"
+        )
+        statuses = {r["status"] for r in result["results"]}
+        assert "interrupted" in statuses
+        wedge.set()  # release the daemon worker before test exit
+
     def test_depth_increments(self):
         """Verify child gets parent's depth + 1."""
         parent = _make_mock_parent(depth=0)

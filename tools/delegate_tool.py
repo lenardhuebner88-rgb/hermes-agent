@@ -2550,11 +2550,16 @@ def delegate_task(
             completed_count = 0
             spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
 
-            # Daemon workers (tools.daemon_pool): the `with` block still joins
-            # normally, but if the parent is interrupted while a child is
-            # wedged, the abandoned worker must not block interpreter exit.
+            # Daemon workers (tools.daemon_pool) so abandoned workers never
+            # block interpreter exit.  NO `with` block: Executor.__exit__
+            # calls shutdown(wait=True), which joins every worker — including
+            # a wedged child the interrupt-abandon loop below just gave up
+            # on, hanging the parent's turn right here (daemon threads only
+            # help at process exit, not mid-session).  Mirror of the
+            # single-child path's explicit shutdown(wait=False).
             from tools.daemon_pool import DaemonThreadPoolExecutor
-            with DaemonThreadPoolExecutor(max_workers=max_children) as executor:
+            executor = DaemonThreadPoolExecutor(max_workers=max_children)
+            try:
                 futures = {}
                 for i, t, child in children:
                     future = executor.submit(
@@ -2664,6 +2669,12 @@ def delegate_task(
                                 )
                             except Exception as e:
                                 logger.debug("Spinner update_text failed: %s", e)
+            finally:
+                # Never join workers here — a wedged child would hang the
+                # parent despite the interrupt-abandon above.  cancel_futures
+                # stops queued-but-unstarted children (batch larger than the
+                # worker pool) from launching after an interrupt abandon.
+                executor.shutdown(wait=False, cancel_futures=True)
 
             # Sort by task_index so results match input order
             results.sort(key=lambda r: r["task_index"])
