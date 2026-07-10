@@ -4064,7 +4064,18 @@ def run_conversation(
                                 pass
                 wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                 _backoff_policy = None
-                if is_rate_limited and not _retry_after:
+                # Fire on ANY retry-with-backoff path (not just is_rate_limited):
+                # the Z.AI Coding overload 429 classifies as
+                # FailoverReason.overloaded, which is_rate_limited deliberately
+                # excludes — so gating this on is_rate_limited left the adaptive
+                # long-backoff subsystem unreachable from its only call site
+                # (dead code with passing unit tests but no integration path).
+                # adaptive_rate_limit_backoff self-guards — it returns
+                # (default_wait, None) for any error that is not the exact ZAI
+                # overload shape — so broadening the gate changes the wait only
+                # for that shape (single-key ZAI users with no fallback chain,
+                # the documented target scenario).
+                if not _retry_after:
                     wait_time, _backoff_policy = adaptive_rate_limit_backoff(
                         retry_count,
                         base_url=str(_base),
@@ -4072,13 +4083,17 @@ def run_conversation(
                         error=api_error,
                         default_wait=wait_time,
                     )
-                if is_rate_limited:
+                if is_rate_limited or _backoff_policy is not None:
                     _policy_note = ""
                     if _backoff_policy == "zai_coding_overload_long":
                         _policy_note = " (Z.AI Coding overload adaptive long backoff)"
                     elif _backoff_policy == "zai_coding_overload_short":
                         _policy_note = " (Z.AI Coding overload short retry)"
-                    _rate_limit_status = f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}){_policy_note}..."
+                    # A ZAI overload 429 is not is_rate_limited (it's
+                    # ``overloaded``), so label it honestly when the policy
+                    # fired on that path.
+                    _wait_label = "Rate limited" if is_rate_limited else "Provider overloaded"
+                    _rate_limit_status = f"⏱️ {_wait_label}. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}){_policy_note}..."
                     # Normal retries are buffered to avoid noisy transient chatter. Long
                     # Z.AI Coding waits are different: they can last minutes, so surface
                     # progress immediately instead of making the TUI look frozen.
