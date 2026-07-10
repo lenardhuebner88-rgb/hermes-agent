@@ -95,7 +95,6 @@ export const de = {
     issuesLink: "Issues — wiederkehrende Fehler →",
     // ST4: Masthead-Broadsheet — Akzeptanz-Headline, Stütz-KPIs, Verlässlich-
     // keits-Leaderboard, Fehler-Taxonomie. Bewusst wenig Text, saubere Copy.
-    mastKicker: "Hermes · Statistik",
     mastLabel: "Akzeptanzrate",
     mastWindow: "7 Tage",
     mastStale: "veraltet",

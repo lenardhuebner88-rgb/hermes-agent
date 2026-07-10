@@ -32,13 +32,12 @@ const baseProps = {
   onOpenCommand: vi.fn(),
 };
 
-// Mirrors ControlPage's `tabPath` for the tabs these tests use — the
-// masthead's `hasOwnMasthead` fork is pathname-driven (P3 fix), not
-// active-tab-driven, so `path` must default to the real route ControlPage
-// would put that tab at for the existing per-tab assertions below to keep
-// exercising the exact same fork the live app hits. Tests that need to prove
-// the fork independently of the active tab (e.g. the /control/issues P3 case)
-// override `path` explicitly.
+// Mirrors ControlPage's `tabPath` for the tabs these tests use — several
+// assertions below (aria-current wiring, the rail pin) key off the exact
+// route a tab renders at in the live app, so `path` defaults here instead of
+// an arbitrary placeholder. (Pre-W3-3 this also drove the now-retired
+// `hasOwnMasthead` pathname fork; that mechanism is gone — every route
+// renders the same shared masthead, see ControlShell.tsx.)
 const TEST_TAB_PATH: Partial<Record<ControlTab, string>> = {
   fleet: "/control/fleet",
   inbox: "/control",
@@ -168,22 +167,16 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(masthead.textContent).toContain("Start");
   });
 
-  it("mounts NotificationBridge exactly once for a view with its own masthead", () => {
-    renderShell("statistik");
-    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
-  });
-
   it("mounts NotificationBridge exactly once for a view with the generic masthead", () => {
     renderShell("crons");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the NotificationBridge bell reachable on /control/fleet now that it shares the generic masthead (W3-1b, Codex follow-up)", () => {
-    // Fleet dropped its own masthead in W3-1a — it now takes the same
-    // generic-masthead branch as e.g. "crons" (ControlShell.tsx:193), which
-    // mounts the VISIBLE bell (ControlShell.tsx:234), not the `hidden`
-    // side-effect-only mount (ControlShell.tsx:191) reserved for routes with
-    // their own masthead (Statistik).
+    // Fleet dropped its own masthead in W3-1a — it now takes the same shared
+    // masthead branch as every other route (the old `hidden` side-effect-only
+    // mount reserved for routes with their own masthead is gone entirely
+    // since W3-3, see ControlShell.tsx).
     renderShell("fleet");
     const masthead = screen.getByTestId("control-masthead");
     within(masthead).getByTestId("notification-bridge-mock");
@@ -201,6 +194,24 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
 
   it("keeps the NotificationBridge bell reachable on /control/inbox too (W3-2)", () => {
     renderShell("inbox", { path: "/control/inbox" });
+    const masthead = screen.getByTestId("control-masthead");
+    within(masthead).getByTestId("notification-bridge-mock");
+    expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the shared masthead for Statistik now that it joins the Puls-Leiste (W3-3)", () => {
+    renderShell("statistik");
+    const masthead = screen.getByTestId("control-masthead");
+    expect(masthead.textContent).toContain("Statistik");
+  });
+
+  it("keeps the NotificationBridge bell reachable on /control/statistik now that Statistik shares the generic masthead (W3-3)", () => {
+    // Statistik dropped its own masthead (.st-masthead brand/LIVE-dot band) in
+    // W3-3, same fork as Fleet in W3-1a and Start in W3-2 — closes the
+    // analogous "Glocke auf Statistik unsichtbar" P2. Statistik was the last
+    // route on the old `hasOwnMasthead` list; the hidden side-effect-only
+    // mount branch it exercised is now gone entirely.
+    renderShell("statistik");
     const masthead = screen.getByTestId("control-masthead");
     within(masthead).getByTestId("notification-bridge-mock");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
@@ -249,21 +260,13 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(statusDots.className).not.toContain("lg:flex");
   });
 
-  it("shows the masthead on /control/issues even though the tab economy pins it to statistik (P3 fix)", () => {
-    // ControlPage.activeFromPath maps /control/issues -> active="statistik" (same
-    // tab), but IssuesView has no own masthead — the old active-only check
-    // suppressed it there too. The fork must key off the real pathname.
+  it("shows the masthead on /control/issues (same route family as statistik, no route branching left at all)", () => {
     renderShell("statistik", { path: "/control/issues" });
     expect(screen.getByTestId("control-masthead")).toBeTruthy();
   });
 
-  it("still suppresses the masthead for the real Statistik route (P3 regression guard)", () => {
-    renderShell("statistik", { path: "/control/statistik" });
-    expect(screen.queryByTestId("control-masthead")).toBeNull();
-  });
-
-  it("suppresses the masthead for /control/statistik/ with a trailing slash (B1 fix)", () => {
+  it("shows the masthead for /control/statistik/ with a trailing slash too (no pathname special-casing left to normalize)", () => {
     renderShell("statistik", { path: "/control/statistik/" });
-    expect(screen.queryByTestId("control-masthead")).toBeNull();
+    expect(screen.getByTestId("control-masthead")).toBeTruthy();
   });
 });

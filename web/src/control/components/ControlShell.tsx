@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -154,30 +154,16 @@ interface NavBadgeArgs {
 export function ControlShell(props: Props) {
   const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, pulse, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
   const [moreOpen, setMoreOpen] = useState(false);
-  const location = useLocation();
-  // Statistik bringt ihr eigenes dunkles Masthead mit ([data-statistik]
-  // .st-masthead) — die generische Leitstand-Masthead würde dort doppelt
-  // stehen, daher unterdrückt (vormals fleetBleed/mobileBleed). Fleet
-  // (W3-1a) und Start/Inbox (W3-2, 2026-07-10) sind aus dieser Liste raus:
-  // per-view Mastheads sind das Legacy-Muster, die geteilte Puls-Leiste
-  // bedient jetzt jede Route — Start schließt damit denselben bekannten P2
-  // "Glocke unsichtbar", den Fleet schon in W3-1a hatte.
-  // Fix (reviewer P3): frühere Version prüfte den `active`-Tab statt der Route —
-  // /control/issues mappt auf active="statistik" (gleiche Tab-Ökonomie, s.
-  // ControlPage.activeFromPath), hat aber KEIN eigenes Masthead und verlor
-  // dadurch jedes Masthead. Exakter Pfad-Match statt Tab-Vergleich.
-  // Fix (B1): normalisiert Trailing-Slash-Cousins (/control/statistik/); die
-  // damalige Sonderbehandlung der Legacy-Route /control/inbox (eigenes
-  // Masthead) ist seit W3-2 hinfällig — /control und /control/inbox sind
-  // Pfad-Aliase derselben CommandHome-View und werden jetzt identisch
-  // behandelt (keine eigene Masthead mehr), sonst würde ein Fix ohne den
-  // anderen die Doppel-Masthead-Regression wieder aufreißen.
-  const path = location.pathname.replace(/\/+$/, "") || "/";
-  const hasOwnMasthead = path === "/control/statistik";
+  // One-masthead contract (W3-3, 2026-07-10): every route renders the shared
+  // Puls-Leiste below — label + instruments + the NotificationBridge bell.
+  // Fleet (W3-1a), Start/Inbox (W3-2) and Statistik (W3-3) were the last
+  // per-view mastheads; that legacy mechanism (route-keyed `hasOwnMasthead`,
+  // the hidden side-effect-only NotificationBridge mount, the padding fork)
+  // is retired along with them — no route branching left here at all.
   const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
 
   return (
-    <div data-density={density} className={cn("hc-page flex min-h-0", hasOwnMasthead && "fleet-bleed")}>
+    <div data-density={density} className="hc-page flex min-h-0">
       <Rail
         active={active}
         {...badgeArgs}
@@ -188,20 +174,8 @@ export function ControlShell(props: Props) {
         health={health}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        {hasOwnMasthead ? (
-          // NotificationBridge trägt Side-Effects (Titel-Badge, Permission-
-          // Tracking) unabhängig von der sichtbaren Masthead — bleibt gemountet,
-          // nur unsichtbar, statt doppelt zu rendern (kein zweiter Mount-Punkt).
-          <div className="hidden"><NotificationBridge inbox={inbox} /></div>
-        ) : (
-          <Masthead active={active} inbox={inbox} health={health} pulse={pulse} onOpenCommand={onOpenCommand} />
-        )}
-        <main
-          className={cn(
-            "mx-auto w-full flex-1 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] tab:pb-6 min-[1920px]:max-w-[1520px]",
-            hasOwnMasthead ? "px-0 pt-0 lg:px-8 lg:pt-4" : "px-4 pt-4 sm:px-6 lg:px-8",
-          )}
-        >
+        <Masthead active={active} inbox={inbox} health={health} pulse={pulse} onOpenCommand={onOpenCommand} />
+        <main className="mx-auto w-full flex-1 px-4 pt-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] sm:px-6 tab:pb-6 lg:px-8 min-[1920px]:max-w-[1520px]">
           {children}
         </main>
       </div>
@@ -218,10 +192,10 @@ export function ControlShell(props: Props) {
   );
 }
 
-/** Generische Puls-Leiste für jede View OHNE eigene Masthead (Fleet/Start/
- *  Statistik haben ihre eigene, s.o.) — DESIGN.md "Puls-Leiste contract" /
- *  SHELL-SPEC.md W2-b. Rechts die geteilten Utilities — ⌘K nur unterhalb von
- *  `tab:` (die Rail trägt ihr eigenes ab `tab:`). */
+/** Die eine geteilte Puls-Leiste für jede Route (W3-3: keine Ausnahmen mehr) —
+ *  DESIGN.md "Puls-Leiste contract" / SHELL-SPEC.md W2-b. Rechts die geteilten
+ *  Utilities — ⌘K nur unterhalb von `tab:` (die Rail trägt ihr eigenes ab
+ *  `tab:`). */
 function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; pulse: Props["pulse"]; onOpenCommand: () => void }) {
   const { gateway, stale, title } = useGatewayHealth(health);
   return (

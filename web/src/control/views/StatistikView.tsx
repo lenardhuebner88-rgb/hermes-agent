@@ -1,17 +1,28 @@
 /**
  * StatistikView (/control/statistik) — Leitstand-Reskin (Rule 11+12): dieselbe
  * dunkle Statistik wie Fleet/Start statt des Broadsheet-Vorgängers (ST3/ST4/
- * ST5). Skin via [data-statistik] + statistik.css (Full-Bleed-Regeln analog
- * `.ch-*`/`.fleet-bleed`); Flächen aus den Leitstand-Tokens (surface-0/1/2,
- * ink/ink-2/ink-3, line, live, status-trio). IA/Funktion + alle Sektionen
- * bleiben unverändert gegenüber dem Broadsheet-Vorgänger — nur die Präsentation
- * wechselt von einer bedruckten Papier-Spalte auf Leitstand-Karten/KPI-Pods.
+ * ST5). Skin via [data-statistik] + statistik.css (Full-Bleed-Regeln über
+ * `.hc-page:has([data-statistik])`, selbst-genügsam statt von einer
+ * ControlShell-Route-Klasse abzuhängen — Pattern-Parität mit Fleet/Start);
+ * Flächen aus den Leitstand-Tokens (surface-0/1/2, ink/ink-2/ink-3, line,
+ * live, status-trio). IA/Funktion + alle Sektionen bleiben unverändert
+ * gegenüber dem Broadsheet-Vorgänger — nur die Präsentation wechselt von einer
+ * bedruckten Papier-Spalte auf Leitstand-Karten/KPI-Pods.
+ *
+ * Masthead: seit W3-3 (2026-07-10) rendert Statistik KEIN eigenes Masthead
+ * mehr — die Shell-Puls-Leiste (ControlShell) trägt Label "Statistik" +
+ * Instrumente + die NotificationBridge-Glocke (schließt denselben P2 "Glocke
+ * unsichtbar", den Fleet in W3-1a und Start in W3-2 schon hatten). Die alte
+ * Brand-Zeile ("Hermes"/"Statistik") + der LIVE/SYNC-Punkt dopplten nur das
+ * Shell-Label bzw. trugen kein eigenständiges Signal — ersatzlos entfernt
+ * statt verschoben. Die "Akzeptanzrate"-Kachel (`StatsMasthead` unten) bleibt
+ * unverändert: das ist echter Inhalt (die Kern-KPI der View), kein Chrome.
  *
  * Mobil-first: die Spalte liest sich bei 390px top-to-bottom ohne horizontales
  * Scrollen.
  */
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, TriangleAlert } from "lucide-react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
@@ -42,6 +53,7 @@ import type {
   WindowedRollupWorker,
 } from "../lib/schemas";
 import { AccountUsageTile } from "../components/AccountUsageTile";
+import { Eyebrow } from "../components/primitives";
 import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
 import { DrawerShell, KpiTile, SectionHeader, FleetEmptyState } from "../components/leitstand";
 import { cn } from "@/lib/utils";
@@ -251,8 +263,9 @@ export function StatsMasthead({
     <div className="space-y-3">
       <div className="st-mast-head">
         <div>
-          <p className="st-eyebrow">{de.stats.mastKicker}</p>
-          <p className="st-mast-label">{de.stats.mastLabel}</p>
+          {/* Kicker "Hermes · Statistik" entfernt (W3-3): reines Brand-Echo unter
+              der Shell-Puls-Leiste, die bereits STATISTIK trägt (Ein-Masthead-Doktrin). */}
+          <Eyebrow className="text-brand">{de.stats.mastLabel}</Eyebrow>
         </div>
         <span className="st-mast-meta">{meta}</span>
       </div>
@@ -368,7 +381,7 @@ export function ErrorTaxonomySection({ issues }: { issues: IssueGroup[] }) {
         </>
       ) : null}
       {verdict}
-      <a href="/control/issues" className="st-eyebrow st-link mt-2 inline-block min-h-9 text-live">
+      <a href="/control/issues" className="st-link mt-2 inline-flex min-h-12 items-center text-xs text-live hover:brightness-110">
         {de.stats.issuesLink}
       </a>
     </section>
@@ -617,7 +630,7 @@ export function WorkerEfficiencySection({
         </div>
         <div className="st-we-title">
           <div>
-            <p className="st-eyebrow">Worker Efficiency Map</p>
+            <Eyebrow>Worker Efficiency Map</Eyebrow>
             <h2>Worker vergleichen</h2>
             <p><b>Token</b><span>Geld</span><b>Rework</b></p>
           </div>
@@ -831,9 +844,12 @@ function CostTrendSection({
           {!hasDrilldown ? (
             <FleetEmptyState title={de.stats.modelDrilldownEmpty} desc={de.stats.modelDrilldownEmpty} ok />
           ) : (
+            /* Host-Wrapper traegt den Query-Container: ein Element ist per Spec
+               nie sein eigener @container (css-contain-3) — Reviewer-P1 W3-3. */
+            <div className="st-drilldown-host">
             <div className="st-drilldown-grid">
               <div>
-                <p className="st-eyebrow">Profile / Modelle</p>
+                <Eyebrow>Profile / Modelle</Eyebrow>
                 {profiles.map((row) => (
                   <div key={`${row.profile}:${row.subscription ?? "api"}`} className="st-drilldown-row">
                     <span>{profileLabel[row.profile] ?? row.profile} · {row.subscription ?? "api"}</span>
@@ -843,7 +859,7 @@ function CostTrendSection({
                 ))}
               </div>
               <div>
-                <p className="st-eyebrow">Lanes</p>
+                <Eyebrow>Lanes</Eyebrow>
                 {laneRows.map((row) => (
                   <div key={`${row.subscription}:${row.profile}`} className="st-drilldown-row">
                     <span>{row.subscription} · {profileLabel[row.profile] ?? row.profile}</span>
@@ -852,6 +868,7 @@ function CostTrendSection({
                   </div>
                 ))}
               </div>
+            </div>
             </div>
           )}
         </DrawerShell>
@@ -884,13 +901,13 @@ export function SubscriptionBurnSection({
       ) : (
         <div className="st-panel st-subburn space-y-3 p-3" data-testid="subscription-burn-breakdown">
           <div className="st-subburn-hero">
-            <span className="st-eyebrow">{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</span>
+            <Eyebrow>{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</Eyebrow>
             <strong className="st-subburn-disp">{fmtTokens(detail.totals.total_tokens)}</strong>
             <span className="st-note">{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
           </div>
           <div className="st-subburn-grid">
             <div>
-              <p className="st-eyebrow">{de.stats.subscriptionBurnTop}</p>
+              <Eyebrow>{de.stats.subscriptionBurnTop}</Eyebrow>
               {detail.topLanes.map((row) => (
                 <div key={`${row.subscription}:${row.profile}`} className="st-subburn-row" style={laneStyle(row.profile)}>
                   <span aria-label={`${row.profile} · ${row.subscription}`}><LaneLabel profile={row.profile} /> · {row.subscription}</span>
@@ -901,7 +918,7 @@ export function SubscriptionBurnSection({
               ))}
             </div>
             <div>
-              <p className="st-eyebrow">{de.stats.subscriptionBurnClasses}</p>
+              <Eyebrow>{de.stats.subscriptionBurnClasses}</Eyebrow>
               {detail.classes.map((row) => (
                 <div key={`${row.subscription}:${row.value_class}`} className="st-subburn-row">
                   <span>{row.value_class} · {row.subscription}</span>
@@ -922,7 +939,7 @@ export function SubscriptionBurnSection({
           </div>
           {detail.trend.length > 0 && (
             <div data-testid="subscription-burn-trend">
-              <p className="st-eyebrow">{de.stats.subscriptionBurnTrend}</p>
+              <Eyebrow>{de.stats.subscriptionBurnTrend}</Eyebrow>
               {detail.trend.map((row) => (
                 <div key={row.date} className="st-subburn-trend-row">
                   <span className="st-mono text-ink-3" style={{ fontSize: "11px" }}>{row.date}</span>
@@ -1060,13 +1077,13 @@ export function MotherLedgerSection() {
       <SectionHeader label={de.stats.motherLedgerTitle} meta={metaText} />
       <div className="st-ledger-controls" aria-label="MotherLedger Controls">
         <div className="st-chipset" aria-label="Fenster">
-          <button type="button" className={windowHours === 168 ? "is-active" : ""} onClick={() => setWindowHours(168)}>7T</button>
-          <button type="button" className={windowHours === 24 ? "is-active" : ""} onClick={() => setWindowHours(24)}>24Std</button>
+          <button type="button" className={cn("inline-flex min-h-12 items-center justify-center", windowHours === 168 && "is-active")} onClick={() => setWindowHours(168)}>7T</button>
+          <button type="button" className={cn("inline-flex min-h-12 items-center justify-center", windowHours === 24 && "is-active")} onClick={() => setWindowHours(24)}>24Std</button>
         </div>
         <div className="st-chipset" aria-label="Sortierung">
-          <button type="button" className={sortKey === "usd" ? "is-active" : ""} onClick={() => setSortKey("usd")}>{de.stats.motherLedgerSortAbo}</button>
-          <button type="button" className={sortKey === "tokens" ? "is-active" : ""} onClick={() => setSortKey("tokens")}>Tokens</button>
-          <button type="button" className={sortKey === "runs" ? "is-active" : ""} onClick={() => setSortKey("runs")}>Runs</button>
+          <button type="button" className={cn("inline-flex min-h-12 items-center justify-center", sortKey === "usd" && "is-active")} onClick={() => setSortKey("usd")}>{de.stats.motherLedgerSortAbo}</button>
+          <button type="button" className={cn("inline-flex min-h-12 items-center justify-center", sortKey === "tokens" && "is-active")} onClick={() => setSortKey("tokens")}>Tokens</button>
+          <button type="button" className={cn("inline-flex min-h-12 items-center justify-center", sortKey === "runs" && "is-active")} onClick={() => setSortKey("runs")}>Runs</button>
         </div>
       </div>
       {rollup.loading && !rollup.data ? (
@@ -1090,7 +1107,8 @@ export function MotherLedgerSection() {
           </div>
           <p className="st-note">{ratioText}</p>
           {showStaleNotice ? (
-            <div className="st-eyebrow" role="status" title={rollup.error ?? undefined}>
+            <div className="st-note flex items-center gap-1.5 text-status-warn" role="status" title={rollup.error ?? undefined}>
+              <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
               {de.stats.motherLedgerStaleNotice}
             </div>
           ) : null}
@@ -1171,22 +1189,9 @@ export function StatistikView() {
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
-  const settling = !reliability.data && reliability.loading;
 
   return (
     <div data-statistik className="space-y-5">
-      {/* ── MASTHEAD (Fleet/Start-Idiom) ────────────────────────────────────── */}
-      <div className={cn("st-masthead", settling && "st-live-idle")}>
-        <div className="st-brand">
-          <span className="st-brand-h">Hermes</span>
-          <span className="st-brand-f">Statistik</span>
-        </div>
-        <div className="st-live">
-          <span className="st-live-dot" />
-          {settling ? "SYNC" : "LIVE"}
-        </div>
-      </div>
-
       {/* A7: AccountUsageTile bleibt der primäre Live-Cockpit-Block. */}
       <AccountUsageTile
         usage={accountUsage.data}
@@ -1226,7 +1231,7 @@ export function StatistikView() {
       {/* ST5: Budget-Ledger bleibt unter Details — AccountUsageTile oben ist die
           primäre Ansicht; das Ledger-Format bleibt für den ausführlichen Blick. */}
       <details className="st-details">
-        <summary className="st-eyebrow text-live">
+        <summary className="min-h-12 text-xs font-medium tracking-wide text-live hover:brightness-110">
           {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
         </summary>
         <BudgetLedgerSection providers={providers} />

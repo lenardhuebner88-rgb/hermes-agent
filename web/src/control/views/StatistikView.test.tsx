@@ -977,3 +977,38 @@ describe("EffizienzSection (ST5)", () => {
     expect(html).not.toContain("je Item");
   });
 });
+
+describe("StatistikView (W3-3 masthead removal)", () => {
+  it("no longer renders its own masthead — the shell Puls-Leiste carries the route label since W3-3", () => {
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+    controlDataMock.reliability = controlState({
+      now: 1_780_000_000,
+      profiles: [profile({ profile: "coder", judged: 3, approved: 2, rejected: 1 })],
+      baseline: [],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).not.toContain("st-masthead");
+    expect(html).not.toContain("st-brand");
+    expect(html).not.toContain("st-live-dot");
+    // The Akzeptanzrate hero (StatsMasthead) is real content, not chrome —
+    // it stays, unlike the removed brand/LIVE-dot band.
+    expect(html).toContain("Akzeptanzrate");
+  });
+
+  it("gives the MotherLedger window/sort chipset a >=44px hit-area (W3-3 touch target, 5 controls baseline-flagged <24px)", () => {
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    // h-12/min-h-12 = 3rem = 45px am 15px-Root (die visual-verify-Heuristik
+    // flaggt nur <24px und kann die 44px-AC daher nicht beweisen — das
+    // müssen die Klassen selbst tun).
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>7T/);
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>24Std/);
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Abo-Wert/);
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Tokens/);
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Runs/);
+  });
+});

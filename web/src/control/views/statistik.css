@@ -29,7 +29,7 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
 /* Shell-Header-H1 über dem dunklen Grund lesbar halten. Soft/Eyebrow brauchen
    KEIN Header-Pflaster mehr — die globalen .hc-soft/.hc-dim/.hc-eyebrow ziehen
    jetzt die Leitstand-ink-Böden (control-tokens.css). */
-.hc-page:has([data-statistik]) header h1 { color: #e8ecf4; }
+.hc-page:has([data-statistik]) header h1 { color: var(--color-ink); }
 
 [data-statistik] { color: var(--color-ink); }
 
@@ -40,56 +40,9 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
    "zinc" bekommt seinen kräftigeren Rahmen in lib/tones.ts. Die früheren
    [data-statistik]-Element-Pflaster sind damit redundant und entfernt. */
 
-/* ── Masthead (Fleet/Start-Idiom) ─────────────────────────────────────────── */
-.st-masthead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 2px 8px;
-  border-bottom: 1px solid var(--color-line);
-}
-.st-brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.st-brand-h { font: 600 13px/1 var(--hc-font-sans); color: var(--color-ink); white-space: nowrap; }
-.st-brand-f {
-  font: italic 500 14px/1 var(--hc-font-display);
-  color: var(--color-ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.st-live {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font: 500 11px/1 var(--hc-font-mono);
-  color: var(--color-ink-2);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.st-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-live);
-  box-shadow: 0 0 8px var(--color-live);
-  animation: st-pulse 2.2s infinite;
-}
-.st-live-idle .st-live-dot { background: var(--color-ink-3); box-shadow: none; animation: none; }
-@keyframes st-pulse { 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) { .st-live-dot { animation: none; } }
-
 /* ── Eyebrow (uppercase-mono Micro-Label, DESIGN.md Regel 5) ────────────────── */
-.st-eyebrow {
-  display: inline-block;
-  font: 600 10px/1.3 var(--hc-font-mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--color-ink-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
+/* .st-eyebrow entfernt (W3-3): letzte Konsumenten auf das geteilte Eyebrow-Primitive
+   bzw. Status-/Link-Formen gehoben (DESIGN.md: mono = data only). */
 .st-link { cursor: pointer; }
 
 /* ── Flächen-Idiome (panel = surface-1, card = surface-2) ───────────────────── */
@@ -375,7 +328,6 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
 
 /* ── Masthead-Kachel (Akzeptanzrate) ─────────────────────────────────────────── */
 .st-mast-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.st-mast-label { font: 600 10px/1.3 var(--hc-font-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-brand); margin-top: 4px; }
 .st-mast-meta { font: 500 11px/1.4 var(--hc-font-mono); color: var(--color-ink-3); text-align: right; white-space: nowrap; }
 .st-mast {
   font: 700 46px/1 var(--hc-font-mono);
@@ -389,7 +341,10 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
 .st-mast-delta { font: 600 11px/1.3 var(--hc-font-mono); white-space: nowrap; }
 
 /* ── Verdikt-/Note-Zeile ──────────────────────────────────────────────────── */
-.st-note { font-size: 0.8rem; line-height: 1.4; color: var(--color-ink-2); }
+/* @layer components: unlayerte Regeln schlagen Tailwind-Utilities IMMER —
+   dadurch waren text-status-warn/-alert auf st-note (StNote-Toene, Stale-
+   Notice) tote Klassen. Im components-Layer gewinnen Utilities wieder. */
+@layer components { .st-note { font-size: 0.8rem; line-height: 1.4; color: var(--color-ink-2); } }
 
 /* ── Engpass-Callout (nie stumm) ──────────────────────────────────────────── */
 .st-lead {
@@ -499,8 +454,23 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
   letter-spacing: 0.06em;
 }
 .st-linkbutton:hover { filter: brightness(1.1); }
-.st-drilldown-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
-@media (min-width: 640px) { .st-drilldown-grid { grid-template-columns: 1fr 1fr; } }
+/* Container-based (not viewport): this grid renders inside DrawerShell, which
+   sits at very different widths depending on where it's opened from — a
+   mobile bottom-sheet (near full device width) vs. a `tab:`+ side-sheet
+   capped at min(420px, 60vw) (DrawerShell.tsx). A `@media` breakpoint here
+   judged the wrong box and force-squeezed two columns into a ~390px desktop
+   side-sheet (routed from the W2-c review) while never reacting to a wide
+   mobile bottom-sheet. `@container` queries the drawer panel's own measured
+   width instead, so the same rule is correct in every pane it's opened in. */
+.st-drilldown-host { container: st-drilldown / inline-size; }
+.st-drilldown-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1fr;
+}
+@container st-drilldown (min-width: 380px) {
+  .st-drilldown-grid { grid-template-columns: 1fr 1fr; }
+}
 .st-drilldown-row { display: flex; justify-content: space-between; gap: 8px; font-size: 0.75rem; padding: 4px 0; border-top: 1px solid var(--color-line-soft); color: var(--color-ink-2); }
 .st-drilldown-row:first-child { border-top: none; }
 
@@ -542,7 +512,7 @@ body:has([data-statistik]) [data-control] { background: var(--color-surface-0); 
   border-radius: 999px;
   color: var(--color-ink-3);
 }
-.st-chipset button.is-active { background: var(--color-live); color: #02131c; }
+.st-chipset button.is-active { background: var(--color-live); color: var(--color-surface-0); }
 .st-ledger-hero { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
 .st-ledger-hero-primary, .st-ledger-hero-real { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; color: var(--color-ink-2); }
 .st-ledger-hero-primary b, .st-ledger-hero-real b { font-size: 1.3rem; color: var(--color-ink); }

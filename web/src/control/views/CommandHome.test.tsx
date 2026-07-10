@@ -215,4 +215,49 @@ describe("CommandHome", () => {
 
     expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Flow öffnen/);
   });
+
+  it("gives the 'Statistik öffnen' bridge control a >=44px hit-area (W3-3 rider, same min-h-12 pattern as Flow öffnen)", () => {
+    installCommandHomeFixtures();
+    // StatsPulse only renders once it has a non-empty daily series (real
+    // RunsDailyPoint shape, lib/schemas.ts RunsDailyPointSchema) — the
+    // fixture default is an empty series.
+    hooks.useHermesRunsDaily.mockReturnValue(hooks.poll({
+      days: 14,
+      series: [{
+        date: "2026-07-04",
+        done_roots: 3,
+        done_roots_by_class: { nutzer: 3, haertung: 0, meta: 0 },
+        done_tasks: 5,
+        cost_usd: 1.2,
+        input_tokens: 4000,
+        output_tokens: 1200,
+        runs_completed: 5,
+        runs_failed: 0,
+        cycle_time_p50_seconds: 300,
+      }],
+    }));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Statistik öffnen/);
+  });
+
+  it("gives the 'Stratege öffnen' bridge control a >=44px hit-area (W3-3 rider, same min-h-12 pattern as Flow öffnen)", () => {
+    installCommandHomeFixtures();
+    // StrategistSignalTile only renders when count > 0 (real
+    // StrategistCountSchema shape) — the fixture default is 0.
+    hooks.useStrategistCount.mockReturnValue(hooks.poll({ count: 2 }));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Stratege öffnen/);
+  });
 });
