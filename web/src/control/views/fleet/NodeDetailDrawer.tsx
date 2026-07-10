@@ -1,5 +1,5 @@
 /**
- * Karten-Detail-Drawer (Overlay) + seine Tabs (Übersicht/Aktivität/Log/Ergebnis).
+ * Karten-Detail-Inhalt + mobiler Drawer mit Tabs (Übersicht/Aktivität/Log/Ergebnis).
  *
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
@@ -17,7 +17,7 @@ import {
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
-import { Overlay } from "../../components/Overlay";
+import { DrawerShell } from "../../components/leitstand";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -42,6 +42,27 @@ interface NodeDetailDrawerProps {
 }
 
 export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }: NodeDetailDrawerProps) {
+  return (
+    <DrawerShell
+      eyebrow="Fleet"
+      title={`Task ${taskId}`}
+      onClose={onClose}
+      ariaLabel={`Task ${taskId} Details`}
+      closeLabel={de.fleet.detailSchliessen}
+      widthClassName="tab:w-[min(560px,calc(100vw-2rem))]"
+    >
+      <NodeDetailContent
+        taskId={taskId}
+        chainNodes={chainNodes}
+        now={now}
+        onClose={onClose}
+        onChanged={onChanged}
+      />
+    </DrawerShell>
+  );
+}
+
+export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged }: NodeDetailDrawerProps) {
   const [tab, setTab] = useState<DetailTab>("uebersicht");
   const [copied, setCopied] = useState(false);
 
@@ -87,11 +108,7 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
   ];
 
   return (
-    <Overlay onClose={onClose} ariaLabel={`Task ${taskId} Details`} maxWidthClassName="max-w-lg">
       <div data-fleet-theme className="fleet-drawer-inner">
-        {/* Grab */}
-        <div className="fleet-grab" />
-
         {/* Kopf */}
         <div className="fleet-dr-head">
           <div
@@ -115,14 +132,6 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
               </button>
             </span>
           </div>
-          <button
-            type="button"
-            className="fleet-btn min-h-[auto] flex-none px-2.5 py-1.5"
-            onClick={onClose}
-            aria-label={de.fleet.detailSchliessen}
-          >
-            ✕
-          </button>
         </div>
 
         {/* Tab-Leiste */}
@@ -188,7 +197,6 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
           </div>
         ) : null}
       </div>
-    </Overlay>
   );
 }
 

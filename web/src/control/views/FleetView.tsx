@@ -27,11 +27,11 @@ import { HeuteTab } from "./fleet/HeuteTab";
 import { WorkerTab } from "./fleet/WorkerTab";
 import { KettenTab } from "./fleet/KettenTab";
 import { BoardTab } from "./fleet/BoardTab";
-import { NodeDetailDrawer } from "./fleet/NodeDetailDrawer";
-import { PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
+import { NodeDetailContent, NodeDetailDrawer } from "./fleet/NodeDetailDrawer";
+import { PlanSpecDetailContent, PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
 import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
-import { SubtabChips } from "../components/leitstand";
+import { SubtabChips, TwoPane } from "../components/leitstand";
 import { Led } from "../components/atoms";
 import "./fleet/fleet.css";
 
@@ -142,6 +142,77 @@ export function FleetView() {
   }));
   const kettenChipsForAside = buildChainChips(allBoardTasksForKetten);
 
+  function closeNodeDetail() {
+    setNodeDetailId(null);
+    setNodeDetailChainNodes([]);
+  }
+
+  function openNodeDetail(id: string, chainNodes: ChainGraphResponse["nodes"] = []) {
+    setPlanspecDrawerItem(null);
+    setNodeDetailId(id);
+    setNodeDetailChainNodes(chainNodes);
+  }
+
+  function closePlanSpecDetail() {
+    setPlanspecDrawerItem(null);
+  }
+
+  function openPlanSpecDetail(item: PlanSpecRecord) {
+    closeNodeDetail();
+    setPlanspecDrawerItem(item);
+  }
+
+  const desktopDetail = isLg
+    ? nodeDetailId
+      ? (
+          <div id="fleet-detail-pane">
+            <NodeDetailContent
+              taskId={nodeDetailId}
+              chainNodes={nodeDetailChainNodes}
+              now={now}
+              onClose={closeNodeDetail}
+              onChanged={board.reload}
+            />
+          </div>
+        )
+      : planspecDrawerItem
+        ? (
+            <div id="fleet-detail-pane">
+              <PlanSpecDetailContent
+                item={planspecDrawerItem}
+                detail={planspecDetail.data}
+                loading={planspecDetail.loading}
+                error={planspecDetail.error}
+              />
+            </div>
+          )
+        : undefined
+    : undefined;
+
+  const desktopDetailLabel = nodeDetailId
+    ? "Task-Details"
+    : planspecDrawerItem
+      ? "PlanSpec-Details"
+      : "Aktive Kette";
+
+  const desktopIdleDetail = isLg
+    && desktopDetail === undefined
+    && kettenChipsForAside.length > 0
+    && subtab !== "ketten"
+    ? (
+        <div id="fleet-detail-pane">
+          <KettenTab
+            board={board.data}
+            initialRootId={kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
+            now={now}
+            selectedNodeId={nodeDetailId}
+            detailControlsId="fleet-detail-pane"
+            onOpenNodeDetail={openNodeDetail}
+          />
+        </div>
+      )
+    : undefined;
+
   return (
     <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
       {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes.
@@ -161,31 +232,33 @@ export function FleetView() {
         <PendingBar items={pendingItems} onNavigate={(target) => setSubtab(target)} />
       ) : null}
 
-      {/* Karten-Detail-Drawer (Overlay, rendert außerhalb des Scrollbereichs) */}
-      {nodeDetailId ? (
+      {/* Unter lg bleibt das bestehende Drawer-Verhalten erhalten. */}
+      {!isLg && nodeDetailId ? (
         <NodeDetailDrawer
           taskId={nodeDetailId}
           chainNodes={nodeDetailChainNodes}
           now={now}
-          onClose={() => { setNodeDetailId(null); setNodeDetailChainNodes([]); }}
+          onClose={closeNodeDetail}
           onChanged={board.reload}
         />
       ) : null}
 
-      {/* PlanSpec-Detail-Drawer (Volltext, Fleet-Besitz) */}
-      {planspecDrawerItem ? (
+      {!isLg && planspecDrawerItem ? (
         <PlanSpecDetailDrawer
           item={planspecDrawerItem}
           detail={planspecDetail.data}
           loading={planspecDetail.loading}
           error={planspecDetail.error}
-          onClose={() => { setPlanspecDrawerItem(null); }}
+          onClose={closePlanSpecDetail}
         />
       ) : null}
 
-      {/* Tablet-Layout: ab lg zweispaltig */}
-      <div className="fleet-tablet-layout">
-        {/* Linke/Haupt-Spalte */}
+      <TwoPane
+        detail={desktopDetail}
+        detailLabel={desktopDetailLabel}
+        onCloseDetail={nodeDetailId ? closeNodeDetail : planspecDrawerItem ? closePlanSpecDetail : undefined}
+        idleDetail={desktopIdleDetail}
+        list={(
         <div className="fleet-tablet-main">
           {/* Scrollbarer Inhalt */}
           <div className="fleet-tablet-main-scroll">
@@ -203,7 +276,7 @@ export function FleetView() {
                   setDrawerWorker(w);
                   setSubtab("worker");
                 }}
-                onPlanSpecClick={(ps) => setPlanspecDrawerItem(ps)}
+                onPlanSpecClick={openPlanSpecDetail}
               />
             )}
             {subtab === "worker" && (
@@ -227,10 +300,9 @@ export function FleetView() {
                 board={board.data}
                 initialRootId={kettenRootId}
                 now={now}
-                onOpenNodeDetail={(id, chainNodes) => {
-                  setNodeDetailId(id);
-                  setNodeDetailChainNodes(chainNodes ?? []);
-                }}
+                selectedNodeId={nodeDetailId}
+                detailControlsId={isLg ? "fleet-detail-pane" : undefined}
+                onOpenNodeDetail={openNodeDetail}
               />
             )}
             {subtab === "plan" && (
@@ -243,16 +315,15 @@ export function FleetView() {
                   // Refetch planspecs nach Freigabe
                   void planspecs.reload();
                 }}
-                onShowDetail={(ps) => setPlanspecDrawerItem(ps)}
+                onShowDetail={openPlanSpecDetail}
               />
             )}
             {subtab === "board" && (
               <BoardTab
                 board={board.data}
-                onOpenNodeDetail={(id, chainNodes) => {
-                  setNodeDetailId(id);
-                  setNodeDetailChainNodes(chainNodes ?? []);
-                }}
+                selectedNodeId={nodeDetailId}
+                detailControlsId={isLg ? "fleet-detail-pane" : undefined}
+                onOpenNodeDetail={openNodeDetail}
               />
             )}
             {subtab === "risiko" && (
@@ -272,33 +343,8 @@ export function FleetView() {
             )}
           </div>
         </div>
-
-        {/* Rechte Spalte: persistente Kette — nur rendern wenn (a) Viewport ≥ lg
-            UND (b) Ketten-Subtab nicht aktiv ist. Verhindert unsichtbares Polling
-            auf Mobil und Doppel-Poll wenn Ketten-Subtab bereits KettenTab hält. */}
-        {isLg && subtab !== "ketten" ? (
-          <aside className="fleet-tablet-aside" aria-label="Aktive Kette">
-            {kettenChipsForAside.length > 0 ? (
-              <>
-                <div className="fleet-aside-head">Aktive Kette</div>
-                <KettenTab
-                  board={board.data}
-                  initialRootId={kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
-                  now={now}
-                  onOpenNodeDetail={(id, chainNodes) => {
-                    setNodeDetailId(id);
-                    setNodeDetailChainNodes(chainNodes ?? []);
-                  }}
-                />
-              </>
-            ) : (
-              <div className="fleet-aside-head" style={{ color: "var(--fleet-t3)", fontStyle: "italic" }}>
-                Keine aktiven Ketten
-              </div>
-            )}
-          </aside>
-        ) : null}
-      </div>
+        )}
+      />
     </div>
   );
 }

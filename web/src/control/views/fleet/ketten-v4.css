@@ -365,6 +365,12 @@
   background: radial-gradient(circle, color-mix(in oklab, var(--kt-live) 15%, transparent), transparent 70%);
   opacity: 0.5; pointer-events: none; border-radius: 50%;
 }
+.ketten-v4 .detail.detail-selected,
+.ketten-v4 .uitem.uitem-selected,
+.ketten-v4 .done-item.done-item-selected {
+  background: var(--color-surface-3);
+  box-shadow: inset 3px 0 var(--color-bronze);
+}
 
 .ketten-v4 .detail-header { display: flex; align-items: center; gap: 10px; position: relative; }
 .ketten-v4 .detail-avatar {

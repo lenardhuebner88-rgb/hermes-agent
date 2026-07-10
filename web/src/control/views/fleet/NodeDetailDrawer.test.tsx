@@ -153,6 +153,23 @@ describe("NodeDetailDrawer Reassign", () => {
     );
   }
 
+  it("nutzt DrawerShell mit Dialog-Semantik und schließt per Escape", () => {
+    const onClose = vi.fn();
+    render(
+      <NodeDetailDrawer
+        taskId="t_reassign"
+        chainNodes={[{ id: "t_reassign", level: 0 } as never]}
+        now={1782508100}
+        onClose={onClose}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Task t_reassign Details" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("armt Reassign und POSTet das echte Payload-Format", async () => {
     const onChanged = vi.fn();
     fetchJSONMock.mockResolvedValueOnce({ ok: true, task_id: "t_reassign", assignee: "verifier" });

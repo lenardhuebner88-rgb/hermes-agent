@@ -31,6 +31,18 @@ vi.mock("@/lib/api", () => api);
 
 const reload = vi.fn();
 
+function setLgViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  });
+}
+
 const planSpec = {
   path: "/home/piet/vault/03-Agents/Hermes/plans/alpha.md",
   agent: "Hermes",
@@ -115,15 +127,7 @@ describe("FleetView PlanSpec detail drawer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.fetchJSON.mockResolvedValue({ ok: true });
-    Object.defineProperty(window, "matchMedia", {
-      writable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: false,
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    });
+    setLgViewport(false);
     setHookDefaults();
   });
 
@@ -146,6 +150,28 @@ describe("FleetView PlanSpec detail drawer", () => {
     const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
+  });
+
+  it("mounts PlanSpec detail beside the list without an overlay at lg", () => {
+    setLgViewport(true);
+    const { container } = renderFleetView();
+
+    const heutePlanCard = container.querySelector<HTMLButtonElement>("button.fleet-ps");
+    expect(heutePlanCard).toBeTruthy();
+    fireEvent.click(heutePlanCard!);
+
+    expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
+    const detail = screen.getByRole("region", { name: "PlanSpec-Details" });
+    expect(within(detail).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=.")).toBeTruthy();
+  });
+
+  it("collapses the idle detail pane at lg when no chain exists", () => {
+    setLgViewport(true);
+    const { container } = renderFleetView();
+
+    expect(container.querySelector('[data-layout="single"]')).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Aktive Kette" })).toBeNull();
+    expect(screen.queryByText("Keine aktiven Ketten")).toBeNull();
   });
 
   it("opens the PlanSpec full-text drawer from Plan tab approval cards", () => {

@@ -1,0 +1,23 @@
+.leitstand-two-pane {
+  --two-pane-columns: 1fr;
+
+  display: grid;
+  flex: 1;
+  grid-template-columns: var(--two-pane-columns);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.leitstand-two-pane > [role="region"] {
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 1024px) {
+  .leitstand-two-pane--split {
+    --two-pane-columns: minmax(340px, 2fr) minmax(420px, 3fr);
+
+    gap: 1rem;
+  }
+}

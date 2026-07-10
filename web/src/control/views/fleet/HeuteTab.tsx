@@ -240,9 +240,9 @@ function CostProfileTable({ profiles }: { profiles: CostProfileRow[] }) {
             <tr key={`${profile.profile}:${profile.subscription ?? "none"}`}>
               <td>{profile.profile}</td>
               <td><span className="fleet-cost-subscription">{formatSubscription(profile.subscription)}</span></td>
-              <td>{profile.runs}</td>
-              <td>{fmtUsd(profile.actual_cost_usd)}</td>
-              <td>{fmtUsd(profile.api_equivalent_usd)}</td>
+              <td className="font-data tabular-nums">{profile.runs}</td>
+              <td className="font-data tabular-nums">{fmtUsd(profile.actual_cost_usd)}</td>
+              <td className="font-data tabular-nums">{fmtUsd(profile.api_equivalent_usd)}</td>
             </tr>
           ))}
         </tbody>

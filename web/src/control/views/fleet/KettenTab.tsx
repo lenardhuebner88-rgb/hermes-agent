@@ -45,9 +45,11 @@ interface KettenTabProps {
   initialRootId: string | null;
   now: number;
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
+  selectedNodeId?: string | null;
+  detailControlsId?: string;
 }
 
-export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: KettenTabProps) {
+export function KettenTab({ board, initialRootId, now, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
 
   const chips = buildChainChips(
@@ -182,6 +184,8 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail }: Kette
           chainCosts={chainCosts.data}
           chainCostsLoading={chainCosts.loading}
           onOpenNodeDetail={onOpenNodeDetail}
+          selectedNodeId={selectedNodeId}
+          detailControlsId={detailControlsId}
         />
       ) : selectedRootId ? (
         <div className="kt-empty">
@@ -242,6 +246,8 @@ interface KettenGraphV4Props {
   chainCosts?: ChainCostsResponse | null;
   chainCostsLoading?: boolean;
   onOpenNodeDetail: (taskId: string, chainNodes: ChainNode[]) => void;
+  selectedNodeId: string | null;
+  detailControlsId?: string;
 }
 
 function KettenGraphV4({
@@ -253,6 +259,8 @@ function KettenGraphV4({
   chainCosts,
   chainCostsLoading,
   onOpenNodeDetail,
+  selectedNodeId,
+  detailControlsId,
 }: KettenGraphV4Props) {
   const { pct, done, total } = chainProgress(nodes);
   const focusNode = pickFocusNode(nodes);
@@ -424,9 +432,11 @@ function KettenGraphV4({
       {focusNode ? (
         <button
           type="button"
-          className="detail"
+          className={`detail${selectedNodeId === focusNode.id ? " detail-selected" : ""}`}
           onClick={() => onOpenNodeDetail(focusNode.id, nodes)}
           aria-label={`Node ${focusNode.title} öffnen`}
+          aria-expanded={selectedNodeId === focusNode.id}
+          aria-controls={detailControlsId}
         >
           <div className="detail-header">
             <div
@@ -515,9 +525,11 @@ function KettenGraphV4({
               <button
                 key={n.id}
                 type="button"
-                className={`uitem${n.status === "blocked" ? " uitem-blocked" : ""}`}
+                className={`uitem${n.status === "blocked" ? " uitem-blocked" : ""}${selectedNodeId === n.id ? " uitem-selected" : ""}`}
                 onClick={() => onOpenNodeDetail(n.id, nodes)}
                 aria-label={`Node ${n.title} öffnen`}
+                aria-expanded={selectedNodeId === n.id}
+                aria-controls={detailControlsId}
               >
                 <div className={`uavatar ${avatarClass(n.assignee)}`} {...premiumLaneMarker(n.assignee)}>
                   {profileInitial(n.assignee ?? "?")}
@@ -560,9 +572,11 @@ function KettenGraphV4({
             <button
               key={n.id}
               type="button"
-              className="done-item"
+              className={`done-item${selectedNodeId === n.id ? " done-item-selected" : ""}`}
               onClick={() => onOpenNodeDetail(n.id, nodes)}
               aria-label={`Node ${n.title} öffnen`}
+              aria-expanded={selectedNodeId === n.id}
+              aria-controls={detailControlsId}
             >
               <span className="davatar">✓</span>
               <div className="dcontent">

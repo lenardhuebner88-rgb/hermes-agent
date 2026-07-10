@@ -17,6 +17,8 @@ interface BoardTabProps {
   board: BoardResponse | null;
   /** Callback: öffnet den Karten-Detail-Drawer. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
+  selectedNodeId?: string | null;
+  detailControlsId?: string;
 }
 
 // Reihenfolge der Status-Spalten für die Gruppierung (wie das Board).
@@ -25,7 +27,7 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
-export function BoardTab({ board, onOpenNodeDetail }: BoardTabProps) {
+export function BoardTab({ board, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: BoardTabProps) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
@@ -123,8 +125,10 @@ export function BoardTab({ board, onOpenNodeDetail }: BoardTabProps) {
             {tasks.map((t) => (
               <button
                 key={t.id}
-                className="fleet-boardtab-row"
+                className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
                 onClick={() => onOpenNodeDetail(t.id)}
+                aria-expanded={selectedNodeId === t.id}
+                aria-controls={detailControlsId}
               >
                 <span
                   className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}
