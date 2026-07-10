@@ -2,16 +2,22 @@
  * FleetView — Operator-Lagezentrum: Hermes-Flotte auf einen Blick.
  *
  * Subtabs: Heute · Worker · Ketten · Plan · Risiko
- * Diese Datei ist nur noch die Shell (State + Subtab-Switch + "Wartet auf dich"-Leiste).
- * Die Subtabs leben als eigene Dateien unter ./fleet/ — reine Zerlegung, kein
- * Verhalten geändert:
+ * Diese Datei ist nur noch die Shell (State + Subtab-Switch + "Wartet auf dich"-
+ * Zeile). Die Subtabs leben als eigene Dateien unter ./fleet/ — reine
+ * Zerlegung, kein Verhalten geändert:
  *   HeuteTab · WorkerTab (+ WorkerDrawer) · KettenTab · NodeDetailDrawer · PlanTab · RisikoTab.
  * Pure Logik bleibt in lib/fleetHub.ts; geteilte Typen/Formatter in ./fleet/shared.ts.
+ *
+ * Masthead: seit W3-1a (2026-07-10) rendert Fleet KEIN eigenes Masthead mehr —
+ * die Shell-Puls-Leiste (ControlShell) trägt Label "Fleet" + Instrumente +
+ * die NotificationBridge-Glocke (schließt den bekannten P2 "Glocke auf Fleet
+ * unsichtbar"). [data-fleet-theme] bleibt als dunkler Content-Scope bestehen.
  *
  * Design: dunkles Marineblau-Theme NUR im Fleet-Tab-Scope ([data-fleet-theme]).
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
 import { useState, useMemo, useEffect } from "react";
+import { ArrowRight } from "lucide-react";
 import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
@@ -26,6 +32,8 @@ import { PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
 import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips } from "../components/leitstand";
+import { Led } from "../components/atoms";
+import { toneClasses } from "../lib/tones";
 import "./fleet/fleet.css";
 
 // ─── Viewport-Hook ───────────────────────────────────────────────────────────
@@ -137,28 +145,8 @@ export function FleetView() {
 
   return (
     <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
-      {/* Fleet-Header */}
-      <div className="fleet-header">
-        <div className="fleet-brand">
-          <span className="fleet-brand-h">Hermes</span>
-          <span className="fleet-brand-f">Flotte</span>
-        </div>
-        <div className="fleet-live">
-          <span className="fleet-live-dot" />
-          LIVE
-        </div>
-      </div>
-
-      {/* "Wartet auf dich"-Banner (Desktop: oberhalb der Chips, als schmale Zeile) */}
-      {pendingItems.length > 0 ? (
-        <PendingBar
-          items={pendingItems}
-          onNavigate={(target) => setSubtab(target)}
-          variant="desktop"
-        />
-      ) : null}
-
-      {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes. */}
+      {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes.
+          Erste Inhaltszeile direkt unter der Shell-Masthead (W3-1a). */}
       <SubtabChips
         items={subtabDefs}
         active={subtab}
@@ -167,6 +155,12 @@ export function FleetView() {
         className="py-2.5"
         classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
       />
+
+      {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs,
+          über allen Subtabs gleich sichtbar (kein full-bleed Glow-Band mehr). */}
+      {pendingItems.length > 0 ? (
+        <PendingBar items={pendingItems} onNavigate={(target) => setSubtab(target)} />
+      ) : null}
 
       {/* Karten-Detail-Drawer (Overlay, rendert außerhalb des Scrollbereichs) */}
       {nodeDetailId ? (
@@ -278,15 +272,6 @@ export function FleetView() {
               />
             )}
           </div>
-
-          {/* "Wartet auf dich"-Leiste (Mobile: sticky bottom) */}
-          {pendingItems.length > 0 ? (
-            <PendingBar
-              items={pendingItems}
-              onNavigate={(target) => setSubtab(target)}
-              variant="mobile"
-            />
-          ) : null}
         </div>
 
         {/* Rechte Spalte: persistente Kette — nur rendern wenn (a) Viewport ≥ lg
@@ -319,19 +304,20 @@ export function FleetView() {
   );
 }
 
-// ─── "Wartet auf dich"-Leiste ─────────────────────────────────────────────────
+// ─── "Wartet auf dich"-Zeile ────────────────────────────────────────────────
+// Reshaped W3-1a: vormals ein full-bleed amber Glow-Band (zwei Varianten —
+// Desktop-Banner + mobile sticky-bottom-Leiste). Jetzt ein einziger kompakter
+// warn-Callout (Design-Vokabular: Led + Text + Pfeil, toneClasses("amber"))
+// am Kopf des Inhaltsbereichs, für jeden Subtab gleich sichtbar — die
+// FUNKTION (auf wartende Freigaben/Operator-Halts hinweisen, Klick navigiert
+// zum passenden Subtab) bleibt unverändert.
 
 interface PendingBarProps {
   items: PendingItem[];
   onNavigate: (target: "plan" | "risiko") => void;
-  /**
-   * "desktop" → nur auf lg+ sichtbar, oberhalb der Chips als Banner.
-   * "mobile"  → sticky bottom, nur auf < lg sichtbar (über Safe-Area).
-   */
-  variant: "desktop" | "mobile";
 }
 
-function PendingBar({ items, onNavigate, variant }: PendingBarProps) {
+function PendingBar({ items, onNavigate }: PendingBarProps) {
   const first = items[0];
   if (!first) return null;
 
@@ -346,20 +332,16 @@ function PendingBar({ items, onNavigate, variant }: PendingBarProps) {
     onNavigate(target);
   }
 
-  // CSS-Variante: desktop-Banner oder mobile sticky bottom
-  const extraClass = variant === "desktop" ? " fleet-pending-bar-desktop" : " fleet-pending-bar-mobile";
-
   return (
     <button
       type="button"
-      className={`fleet-pending-bar${extraClass}`}
+      className={`mb-2 flex min-h-11 w-full items-center gap-2.5 rounded-card border px-3 py-2 text-left ${toneClasses("amber")}`}
       onClick={handleClick}
       aria-label={text}
-      aria-live="polite"
     >
-      <span className="fleet-pending-bar-dot" aria-hidden="true" />
-      <span className="fleet-pending-bar-text">{text}</span>
-      <span className="fleet-pending-bar-arrow" aria-hidden="true">→</span>
+      <Led kind="warn" />
+      <span className="flex-1 truncate text-sec font-medium">{text}</span>
+      <ArrowRight className="h-4 w-4 shrink-0 opacity-70" aria-hidden="true" />
     </button>
   );
 }

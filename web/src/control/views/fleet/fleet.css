@@ -29,12 +29,16 @@
 /* ── Full-Bleed-Shell (Fleet-Tab) ─────────────────────────────────────────────
  * Der ShellAiry/ShellCompact-Wrapper (.hc-page) ist seit der Voll-Dark-
  * Migration (b7919f2ae, 2026-07-05) selbst dunkel (--hc-bg = --color-surface-0)
- * — ControlShell setzt `.fleet-bleed` trotzdem nur, solange der Fleet-Tab aktiv
- * ist, weil Fleet sein eigenes Radial-Gradient-Grün statt der flachen
- * hc-page-Fläche will. Custom Properties aus [data-fleet-theme] vererben sich
- * nicht nach oben an .hc-page (Vorfahr, kein Nachfahre) — deshalb hier
- * dieselben Werte wie [data-fleet-theme] literal wiederholt statt referenziert. */
-.hc-page.fleet-bleed {
+ * — Fleet will trotzdem sein eigenes Radial-Gradient-Grün statt der flachen
+ * hc-page-Fläche. Seit W3-1a (2026-07-10) trägt Fleet die geteilte Shell-
+ * Masthead statt einer eigenen (ControlShell setzt `.fleet-bleed` also nicht
+ * mehr für die Fleet-Route) — hier daher auf `:has([data-fleet-theme])`
+ * umgestellt, exakt analog zu command-home.css/statistik.css: Fleet ist damit
+ * selbst-genügsam statt von ControlShells Route-Klasse abzuhängen. Custom
+ * Properties aus [data-fleet-theme] vererben sich nicht nach oben an .hc-page
+ * (Vorfahr, kein Nachfahre) — deshalb hier dieselben Werte literal wiederholt
+ * statt referenziert. */
+.hc-page:has([data-fleet-theme]) {
   background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--color-surface-0) 55%);
   /* [data-control] reserviert calc(100dvh - 5rem), .hc-page nur -7rem (s.u.) —
    * 2rem Slack, den vorher nur die body:has()-Patches darunter dunkel
@@ -42,7 +46,7 @@
    * zum Ausfüllen hat statt in eine kürzere Box zu wachsen. */
   min-height: calc(100dvh - 5rem);
 }
-.hc-page.fleet-bleed::before {
+.hc-page:has([data-fleet-theme])::before {
   opacity: 0;
 }
 /* Diese drei body(-Vorfahren)-Patches bleiben auch nach der Voll-Dark-
@@ -59,33 +63,24 @@
  * erzeugte. Über var() referenziert statt dupliziert: Tailwind-v4 `@theme`
  * emittiert die Custom Properties auf :root, sichtbar auch außerhalb von
  * [data-fleet-theme]. */
-body:has(.hc-page.fleet-bleed) {
+body:has([data-fleet-theme]) {
   background: var(--color-surface-0);
 }
-body:has(.hc-page.fleet-bleed) [data-layout-variant] {
+body:has([data-fleet-theme]) [data-layout-variant] {
   background: var(--color-surface-0);
 }
-body:has(.hc-page.fleet-bleed) [data-control] {
+body:has([data-fleet-theme]) [data-control] {
   background: var(--color-surface-0);
-}
-/* Der Shell-Header (Navigation) bleibt über dem dunklen Fleet-Grund stehen —
- * Airy ab lg, Compact immer (dort liegt er in der zweiten Grid-Spalte). Die
- * .text-white-Tinte ist via [data-control] auf var(--hc-text) (dunkel) gemappt,
- * daher h1 explizit hell. Soft/Eyebrow brauchen kein Header-Pflaster mehr —
- * die globalen .hc-soft/.hc-eyebrow ziehen jetzt die Leitstand-ink-Böden
- * (--color-ink-2/-3, control-tokens.css). */
-.hc-page.fleet-bleed header h1 {
-  color: #e8ecf4;
 }
 
 /* fleet-root (FleetView.tsx) soll .hc-page wirklich bis unten füllen statt,
  * wie vorher per inline `minHeight:"100%"`, gegen einen Auto-Height-Vorfahren
  * zu laufen (löst dort nichts auf — .fleet-root endete sichtbar vor dem
- * hc-page-Boden). ControlShell.tsx bleibt unangetastet (Anti-Scope): <main>
- * dort ist zwar Flex-Item von .hc-page (Klasse `flex-1`), aber selbst KEIN
- * Flex-Container — deshalb hier per Fleet-scoped Selektor nachgerüstet
- * (an .fleet-bleed gebunden, kein Effekt auf andere Tabs). */
-.hc-page.fleet-bleed main {
+ * hc-page-Boden). Seit W3-1a lebt Fleet im geteilten, gepolsterten <main>
+ * (px-4/sm:px-6/lg:px-8 statt full-bleed px-0) — <main> selbst ist aber KEIN
+ * Flex-Container, deshalb hier per Fleet-scoped `:has()`-Selektor nachgerüstet
+ * (kein Effekt auf andere Tabs). */
+.hc-page:has([data-fleet-theme]) main {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1319,45 +1314,6 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   flex-shrink: 0;
 }
 
-/* ── Live-Header ─────────────────────────────────────────────────────────── */
-.fleet-header {
-  height: 46px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 4px;
-  border-bottom: 1px solid var(--fleet-linie);
-  flex-shrink: 0;
-}
-.fleet-brand {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.fleet-brand-h {
-  font: 600 13px/1 var(--hc-font-sans);
-  color: var(--fleet-t1);
-}
-.fleet-brand-f {
-  font: italic 500 14px/1 var(--hc-font-display);
-  color: var(--fleet-t2);
-}
-.fleet-live {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font: 500 11px/1 var(--hc-font-mono);
-  color: var(--fleet-t2);
-}
-.fleet-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--fleet-puls);
-  box-shadow: 0 0 8px var(--fleet-puls);
-  animation: fleet-pulse 2.2s infinite;
-}
-
 /* ── Plan-Cockpit ─────────────────────────────────────────────────────────── */
 
 /* Freigabe-Klasse für den btn */
@@ -1749,85 +1705,9 @@ body:has(.hc-page.fleet-bleed) [data-control] {
   margin-top: 5px;
 }
 
-/* ── "Wartet auf dich"-Leiste ──────────────────────────────────────────────── */
-
-/* Basis-Stil für beide Varianten */
-.fleet-pending-bar {
-  background: rgba(245, 168, 60, 0.14);
-  border: 1px solid rgba(245, 168, 60, 0.45);
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px; /* touch target */
-  cursor: pointer;
-  /* Dezenter amber Puls */
-  animation: fleet-pending-glow 2.5s ease-in-out infinite;
-  border-radius: 11px;
-  width: 100%;
-  text-align: left;
-}
-
-@keyframes fleet-pending-glow {
-  0%, 100% { border-color: rgba(245, 168, 60, 0.3); }
-  50%       { border-color: rgba(245, 168, 60, 0.6); }
-}
-
-/* Mobile-Variante: sticky bottom (außerhalb Scroll, direkt über Safe-Area) */
-.fleet-pending-bar-mobile {
-  position: sticky;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  border-radius: 0;
-  border-left: none;
-  border-right: none;
-  border-bottom: none;
-  z-index: 20;
-}
-
-/* Desktop-Variante: statt sticky — Banner über den Chips (schmale Zeile) */
-.fleet-pending-bar-desktop {
-  position: static;
-  border-radius: 11px;
-  margin-bottom: 4px;
-  padding: 8px 16px;
-  min-height: 38px;
-}
-
-/* Mobile-Variante auf lg+ ausblenden, Desktop-Variante auf < lg ausblenden */
-@media (min-width: 1024px) {
-  .fleet-pending-bar-mobile { display: none; }
-}
-@media (max-width: 1023px) {
-  .fleet-pending-bar-desktop { display: none; }
-}
-
-.fleet-pending-bar-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fleet-signal);
-  box-shadow: 0 0 6px var(--fleet-signal);
-  flex-shrink: 0;
-  animation: fleet-pulse 2.2s infinite;
-}
-
-.fleet-pending-bar-text {
-  font: 500 12px/1.3 var(--hc-font-sans);
-  color: var(--fleet-signal);
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.fleet-pending-bar-arrow {
-  font: 500 11px/1 var(--hc-font-mono);
-  color: var(--fleet-signal);
-  opacity: 0.7;
-  flex-shrink: 0;
-}
+/* "Wartet auf dich"-Zeile (W3-1a): reshaped auf Design-Vokabular — Led +
+ * Text + Pfeil über toneClasses("amber") + Tailwind-Utilities direkt in
+ * FleetView.tsx, kein eigenes Glow-Band/Custom-CSS mehr. */
 
 /* ── Tablet/Desktop-Layout (lg: zweispaltig) ────────────────────────────────── */
 
@@ -2067,19 +1947,12 @@ body:has(.hc-page.fleet-bleed) [data-control] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fleet-led-dot,
-  .fleet-live-dot,
-  .fleet-pending-bar-dot {
-    animation: none;
-  }
-
-  .fleet-pending-bar {
+  .fleet-led-dot {
     animation: none;
   }
 
   /* Puls-Animationen aus */
   @keyframes fleet-pulse { }
-  @keyframes fleet-pending-glow { }
 }
 
 

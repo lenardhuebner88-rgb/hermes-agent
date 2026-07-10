@@ -147,13 +147,14 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(masthead.textContent).toContain("Crons");
   });
 
-  it("suppresses the masthead for a view with its own masthead (fleet)", () => {
+  it("shows the shared masthead for fleet now that it joins the Puls-Leiste (W3-1a)", () => {
     renderShell("fleet");
-    expect(screen.queryByTestId("control-masthead")).toBeNull();
+    const masthead = screen.getByTestId("control-masthead");
+    expect(masthead.textContent).toContain("Fleet");
   });
 
   it("mounts NotificationBridge exactly once for a view with its own masthead", () => {
-    renderShell("fleet");
+    renderShell("statistik");
     expect(notificationBridgeSpy).toHaveBeenCalledTimes(1);
   });
 

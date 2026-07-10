@@ -155,10 +155,13 @@ export function ControlShell(props: Props) {
   const { active, density, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, pulse, onNavigate, onPrefetch, commandButtonRef, onOpenCommand } = props;
   const [moreOpen, setMoreOpen] = useState(false);
   const location = useLocation();
-  // Fleet/Start/Statistik bringen ihr eigenes dunkles Masthead mit
-  // ([data-fleet-theme] .fleet-header, [data-command-home] .ch-masthead,
-  // [data-statistik] .st-masthead) — die generische Leitstand-Masthead würde
-  // dort doppelt stehen, daher unterdrückt (vormals fleetBleed/mobileBleed).
+  // Start/Statistik bringen ihr eigenes dunkles Masthead mit
+  // ([data-command-home] .ch-masthead, [data-statistik] .st-masthead) — die
+  // generische Leitstand-Masthead würde dort doppelt stehen, daher
+  // unterdrückt (vormals fleetBleed/mobileBleed). Fleet ist seit W3-1a
+  // (2026-07-10) aus dieser Liste raus: per-view Mastheads sind das Legacy-
+  // Muster, die geteilte Puls-Leiste bedient jetzt jede Route — Fleet ist der
+  // erste Adopter (schließt den bekannten P2 "Glocke auf Fleet unsichtbar").
   // Fix (reviewer P3): frühere Version prüfte den `active`-Tab statt der Route —
   // /control/issues mappt auf active="statistik" (gleiche Tab-Ökonomie, s.
   // ControlPage.activeFromPath), hat aber KEIN eigenes Masthead und verlor
@@ -166,7 +169,7 @@ export function ControlShell(props: Props) {
   // Fix (B1): normalisiert Trailing-Slash-Cousins (/control/statistik/) und
   // deckt die Legacy-Route /control/inbox (eigenes Masthead) mit ab.
   const path = location.pathname.replace(/\/+$/, "") || "/";
-  const hasOwnMasthead = path === "/control" || path === "/control/inbox" || path === "/control/fleet" || path === "/control/statistik";
+  const hasOwnMasthead = path === "/control" || path === "/control/inbox" || path === "/control/statistik";
   const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
 
   return (
