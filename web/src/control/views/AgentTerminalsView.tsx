@@ -71,6 +71,7 @@ import {
 import { de } from "../i18n/de";
 import { Eyebrow } from "../components/primitives";
 import { Sparkline } from "../components/fleet/Sparkline";
+import { KpiTile, SignalChip, type SignalTone } from "../components/leitstand";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
 import { TerminalUsageDock } from "./agent-terminals/TerminalUsageDock";
@@ -344,13 +345,13 @@ function useIsCompactTerminalLayout(): boolean {
 function TerminalStatusChip({ state }: { state: TerminalUiState }) {
   const tone =
     state === "attached"
-      ? "border-status-ok/40 bg-status-ok/10 text-status-ok"
+      ? "ok"
       : state === "window running"
-        ? "border-status-ok/40 bg-status-ok/10 text-status-ok"
+        ? "ok"
         : state === "Tailscale/mobile reconnect"
-          ? "border-status-warn/40 bg-status-warn/10 text-status-warn"
-          : "border-status-alert/35 bg-status-alert/10 text-status-alert";
-  return <span className={cn("rounded-full border px-2 py-0.5 text-[11px] font-medium", tone)}>{state}</span>;
+          ? "warn"
+          : "alert";
+  return <SignalChip tone={tone} label={state} className="shrink-0" />;
 }
 
 function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabilityState | null; agent: (typeof AGENTS)[number] }) {
@@ -426,32 +427,32 @@ function TerminalControlButton({
   );
 }
 
-function fleetStateMeta(state: AgentTerminalOverviewWindow["state"]): { label: string; className: string } {
+function fleetStateMeta(state: AgentTerminalOverviewWindow["state"]): { label: string; tone: SignalTone } {
   switch (state) {
     case "frage":
-      return { label: "Braucht dich", className: "animate-pulse border-status-alert/50 bg-status-alert/15 text-status-alert" };
+      return { label: "Braucht dich", tone: "alert" };
     case "laeuft":
-      return { label: "Läuft", className: "border-brand/40 bg-brand/10 text-brand" };
+      return { label: "Läuft", tone: "ok" };
     case "wartet":
-      return { label: "Fertig/wartet", className: "border-status-ok/40 bg-status-ok/10 text-status-ok" };
+      return { label: "Fertig/wartet", tone: "ok" };
     case "dead":
-      return { label: "Tot", className: "border-status-alert/35 bg-status-alert/10 text-status-alert" };
+      return { label: "Tot", tone: "alert" };
     default:
-      return { label: "Idle", className: "border-line bg-surface-2 text-ink-3" };
+      return { label: "Idle", tone: "neutral" };
   }
 }
 
 // Persistent fleet strip's status-chip vocabulary — deliberately distinct
-// from fleetStateMeta() above (used by the full-screen "Flotte" overlay,
-// left byte-identical). Follows DESIGN.md rule 2 literally: läuft/ok = green,
+// from fleetStateMeta() above (used by the full-screen "Flotte" overlay).
+// Follows DESIGN.md rule 2 literally: läuft/ok = green,
 // frage/degraded = warn, tot/failed = alert, idle = neutral ink-3. "wartet"
 // (fertig, wartet auf Weiteres) reads as ok — same bucket as läuft's calm end.
-const STRIP_STATE_META: Record<AgentTerminalOverviewState, { label: string; chipClass: string }> = {
-  laeuft: { label: "läuft", chipClass: "border-status-ok/40 bg-status-ok/10 text-status-ok" },
-  frage: { label: "frage", chipClass: "border-status-warn/40 bg-status-warn/10 text-status-warn" },
-  wartet: { label: "wartet", chipClass: "border-status-ok/35 bg-status-ok/10 text-status-ok" },
-  idle: { label: "idle", chipClass: "border-line text-ink-3" },
-  dead: { label: "tot", chipClass: "border-status-alert/40 bg-status-alert/10 text-status-alert" },
+const STRIP_STATE_META: Record<AgentTerminalOverviewState, { label: string; tone: SignalTone }> = {
+  laeuft: { label: "läuft", tone: "ok" },
+  frage: { label: "frage", tone: "warn" },
+  wartet: { label: "wartet", tone: "ok" },
+  idle: { label: "idle", tone: "neutral" },
+  dead: { label: "tot", tone: "alert" },
 };
 
 function StatTile({
@@ -463,12 +464,13 @@ function StatTile({
   value: string | number;
   tone?: "neutral" | "ok" | "warn";
 }) {
-  const numberClass = tone === "ok" ? "text-status-ok" : tone === "warn" ? "text-status-warn" : "text-ink";
   return (
-    <div className="min-w-0 rounded-card border border-line-soft bg-surface-2 p-2.5">
-      <div className={cn("truncate font-mono text-lg font-bold leading-none", numberClass)}>{value}</div>
-      <div className="mt-1.5 truncate text-[9px] font-semibold uppercase tracking-[0.12em] text-ink-3">{label}</div>
-    </div>
+    <KpiTile
+      label={label}
+      value={value}
+      dot={tone === "ok" ? "ready" : tone === "warn" ? "warn" : "idle"}
+      className="border-line-soft"
+    />
   );
 }
 
@@ -494,14 +496,14 @@ function FleetStripCard({
       type="button"
       onClick={onSelect}
       className={cn(
-        "min-w-0 rounded-card border p-2.5 text-left transition",
+        "min-w-0 rounded-card border bg-surface-2 px-3 py-2.5 text-left transition hover:bg-surface-3",
         win.state === "frage" ? "border-status-alert/50" : "border-line-soft",
-        isCurrent ? "bg-surface-3" : "bg-surface-2 hover:border-line",
+        isCurrent ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:border-line",
       )}
     >
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span className={cn("min-w-0 truncate font-mono text-xs font-semibold", isCurrent ? "text-live" : "text-ink")}>{chipLabel(win)}</span>
-        <span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-medium", meta.chipClass)}>{meta.label}</span>
+        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[9px]" />
       </div>
       <div className="mt-1.5 truncate text-[10px] text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
     </button>
@@ -544,8 +546,8 @@ function FleetCard({
         else onOpen();
       }}
       className={cn(
-        "relative grid cursor-pointer gap-2 rounded-card border p-2.5 text-left transition",
-        selected ? "border-live/60 bg-live/10" : "border-line bg-surface-2 hover:border-line",
+        "relative grid cursor-pointer gap-2 rounded-card border bg-surface-2 p-3 text-left transition hover:bg-surface-3",
+        selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "border-line hover:border-line",
       )}
     >
       {selectable && (
@@ -560,7 +562,7 @@ function FleetCard({
         </span>
       )}
       <div className="flex min-w-0 items-center gap-1.5 pr-5">
-        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium", meta.className)}>{meta.label}</span>
+        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[10px]" />
         <span className="min-w-0 truncate font-mono text-xs text-ink-2">{chipLabel(win)}</span>
       </div>
       <div className="text-[10px] text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
@@ -1633,43 +1635,46 @@ export function AgentTerminalsView() {
 
   const sessionList = (
     <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between border-b border-line-soft pb-3">
         <div>
           <Eyebrow>tmux</Eyebrow>
           <h2 className="text-sm font-semibold text-ink">Sessions / Windows</h2>
         </div>
-        <button type="button" onClick={() => void refresh()} aria-label="Refresh agent terminals" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><RefreshCw className="h-4 w-4" /></button>
+        <button type="button" onClick={() => void refresh()} aria-label="Refresh agent terminals" className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 hover:border-live/40 hover:bg-surface-3 hover:text-live"><RefreshCw className="h-4 w-4" /></button>
       </div>
       <div className="grid gap-2">
         {sessions.length === 0 && <div className="rounded-card border border-line p-3 text-xs text-ink-3">Keine tmux-Session gefunden.</div>}
         {sessions.map((session) => (
-          <div key={session} className="rounded-card border border-line bg-surface-2 p-2">
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-ink-2"><Server className="h-3.5 w-3.5" />{session}</div>
-            <div className="grid gap-1">
+          <div key={session} className="overflow-hidden rounded-card border border-line bg-surface-2">
+            <div className="flex min-h-10 items-center gap-2 border-b border-line-soft px-3 text-xs font-medium text-ink-2"><Server className="h-3.5 w-3.5" />{session}</div>
+            <div className="grid divide-y divide-line-soft">
               {windows.filter((w) => w.session === session).map((win) => {
                 const active = activeTarget?.session === win.session && activeTarget.window === win.window;
                 const dead = isDeadWindow(win);
                 const laneOverview = overviewByKey.get(`${win.session}:${win.window}`);
                 const laneState: AgentTerminalOverviewState = laneOverview?.state ?? (dead ? "dead" : "idle");
                 return (
-                  <div key={`${win.session}:${win.window}`} className="flex items-stretch gap-1">
-                    <button type="button" onClick={() => selectPaneTarget(activePane, targetFromWindow(win))} className={cn("min-w-0 flex-1 rounded-card border px-2 py-2 text-left text-xs transition", active ? "border-live/60 bg-live/10 text-live" : "border-transparent text-ink-2 hover:border-line hover:bg-surface-3")}>
+                  <div key={`${win.session}:${win.window}`} className={cn("flex min-h-12 items-stretch border-l-2", active ? "border-l-live bg-surface-3" : "border-l-transparent")}>
+                    <button type="button" onClick={() => selectPaneTarget(activePane, targetFromWindow(win))} className={cn("min-w-0 flex-1 px-2.5 py-2 text-left text-xs transition", active ? "text-live" : "text-ink-2 hover:bg-surface-3")}>
                       <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
                       <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
                       <Sparkline state={laneState} className="mt-1" />
                     </button>
                     {dead && (
                       <>
-                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-live/40 hover:text-live">
+                        {/* WCAG 2.5.8 Desktop-Pointer-Ausnahme: 32×45 px bleibt hier nötig,
+                            damit zwei redundante Row-Aktionen im 260-px-Rail nicht die
+                            Zielzeile verdrängen; 24×24 px Mindestfläche bleibt erfüllt. */}
+                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live">
                           <RotateCcw className="h-3.5 w-3.5" />
                         </button>
-                        <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-status-alert/40 hover:text-status-alert">
+                        <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-status-alert">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </>
                     )}
                     {!dead && (
-                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center rounded-card border border-status-alert/20 text-status-alert/70 hover:border-status-alert/50 hover:text-status-alert">
+                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-status-alert/70 hover:bg-status-alert/10 hover:text-status-alert">
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}
@@ -2424,7 +2429,7 @@ export function AgentTerminalsView() {
   return (
     <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-ink sm:gap-3">
       {!compactLayout && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-card border border-line bg-surface-1/90 p-2 shadow-2xl sm:rounded-panel sm:p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-panel border border-line bg-surface-1 p-3">
           <div className="min-w-0">
             <Eyebrow>Agent Terminals</Eyebrow>
             <div className="mt-1 flex flex-wrap items-center gap-2"><TerminalStatusChip state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
@@ -2435,7 +2440,7 @@ export function AgentTerminalsView() {
               onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
               aria-pressed={view === "flotte"}
               className={cn(
-                "inline-flex items-center gap-1.5 rounded-card border px-3 py-2 text-xs font-medium transition",
+                "inline-flex min-h-12 items-center gap-1.5 rounded-card border px-3 text-xs font-medium transition",
                 view === "flotte" ? "border-live/60 bg-live/15 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
               )}
             >
@@ -2445,7 +2450,7 @@ export function AgentTerminalsView() {
             <button
               type="button"
               onClick={() => setCreateSheetOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs font-medium text-live hover:bg-live/20"
+              className="inline-flex min-h-12 items-center gap-1.5 rounded-card border border-live/50 bg-live/10 px-3 text-xs font-medium text-live hover:bg-live/20"
             >
               <Plus className="h-3.5 w-3.5" />
               Neue Session
@@ -2455,34 +2460,40 @@ export function AgentTerminalsView() {
       )}
 
       {!compactLayout && orderedOverview.length > 0 && (
-        <div className="hidden grid-cols-2 gap-2 lg:grid xl:grid-cols-4">
-          {orderedOverview.map((win) => (
-            <FleetStripCard
-              key={`${win.session}:${win.window}`}
-              win={win}
-              now={overviewNow}
-              isCurrent={activeTarget?.session === win.session && activeTarget.window === win.window}
-              onSelect={() => selectPaneTarget(activePane, targetFromWindow(win))}
-            />
-          ))}
-        </div>
+        <section className="hidden rounded-panel border border-line bg-surface-1 p-3 lg:block" aria-label="Terminal-Flotte">
+          <div className="mb-2 flex items-baseline justify-between gap-3 border-b border-line-soft pb-2">
+            <Eyebrow>Fleet</Eyebrow>
+            <span className="font-data text-micro tabular-nums text-ink-3">{orderedOverview.length} Fenster</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+            {orderedOverview.map((win) => (
+              <FleetStripCard
+                key={`${win.session}:${win.window}`}
+                win={win}
+                now={overviewNow}
+                isCurrent={activeTarget?.session === win.session && activeTarget.window === win.window}
+                onSelect={() => selectPaneTarget(activePane, targetFromWindow(win))}
+              />
+            ))}
+          </div>
+        </section>
       )}
 
       <div className={cn(
         "relative grid flex-1 gap-2 sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)]",
         rightRail ? "xl:grid-cols-[260px_minmax(0,1fr)_300px]" : "xl:grid-cols-[260px_minmax(0,1fr)]",
       )}>
-        <aside className="hidden min-h-[540px] rounded-panel border border-line bg-surface-2 p-3 lg:block">{sessionList}</aside>
+        <aside className="hidden min-h-[540px] overflow-y-auto rounded-panel border border-line bg-surface-1 p-3 lg:block">{sessionList}</aside>
         <section
           style={immersive && immersiveHeight ? { height: `${immersiveHeight}px` } : undefined}
           className={cn(
-            "relative overflow-hidden border-line bg-surface-0",
+            "relative overflow-hidden border-line bg-surface-1",
             immersive ? "fixed inset-0 z-[45] flex flex-col" : "rounded-panel border md:min-h-[640px] lg:min-h-[540px]",
           )}
         >
           {compactLayout && chipStrip}
           {!compactLayout && view === "terminal" && (
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2 text-xs text-ink-2">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-soft bg-surface-1 px-3 py-2 text-xs text-ink-2">
               <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "missing window"}</span></div>
               <div className="flex shrink-0 items-center gap-1">
                 {([1, 2, 4] as DesktopTerminalLayout[]).map((layout) => (
@@ -2493,7 +2504,7 @@ export function AgentTerminalsView() {
                     aria-label={`${layout} Terminal${layout > 1 ? "s" : ""} anzeigen`}
                     title={`${layout}× Terminal`}
                     onClick={() => chooseDesktopLayout(layout)}
-                    className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", desktopLayout === layout ? "border-live/50 bg-live/10 text-live" : "border-line")}
+                    className={cn("grid h-12 w-12 place-items-center rounded-card border text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live", desktopLayout === layout ? "border-live/50 bg-live/10 text-live" : "border-line bg-surface-2")}
                   >
                     {layout === 1 ? <TerminalSquare className="h-3.5 w-3.5" /> : layout === 2 ? <Columns2 className="h-3.5 w-3.5" /> : <Grid2X2 className="h-3.5 w-3.5" />}
                   </button>
@@ -2503,7 +2514,7 @@ export function AgentTerminalsView() {
                   aria-label="Usage Window umschalten"
                   title="ChatGPT / Claude / Kimi Usage"
                   onClick={() => setRightRail((current) => current === "usage" ? null : "usage")}
-                  className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", rightRail === "usage" ? "border-live/50 bg-live/10 text-live" : "border-line")}
+                  className={cn("grid h-12 w-12 place-items-center rounded-card border text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live", rightRail === "usage" ? "border-live/50 bg-live/10 text-live" : "border-line bg-surface-2")}
                 >
                   <Gauge className="h-3.5 w-3.5" />
                 </button>
@@ -2512,13 +2523,13 @@ export function AgentTerminalsView() {
                   aria-label="Werkzeuge umschalten"
                   title="Werkzeuge"
                   onClick={() => setRightRail((current) => current === "tools" ? null : "tools")}
-                  className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", rightRail === "tools" ? "border-live/50 bg-live/10 text-live" : "border-line")}
+                  className={cn("grid h-12 w-12 place-items-center rounded-card border text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live", rightRail === "tools" ? "border-live/50 bg-live/10 text-live" : "border-line bg-surface-2")}
                 >
                   <PanelRightOpen className="h-3.5 w-3.5" />
                 </button>
-                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A−</button>
-                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-9 w-9 place-items-center rounded-card border border-line font-mono text-[11px] text-ink-2 hover:bg-surface-3">A+</button>
-                <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-9 w-9 place-items-center rounded-card border border-line text-ink-2 hover:bg-surface-3">
+                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A−</button>
+                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A+</button>
+                <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">
                   {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
                 </button>
               </div>
@@ -2569,7 +2580,7 @@ export function AgentTerminalsView() {
         </section>
         <TerminalUsageDock open={!compactLayout && rightRail === "usage"} onClose={() => setRightRail(null)} />
         {!compactLayout && rightRail === "tools" ? (
-          <aside className="absolute inset-y-0 right-0 z-30 min-h-[540px] w-[min(300px,calc(100%-1rem))] min-w-0 overflow-hidden rounded-panel border border-line bg-surface-2 p-3 shadow-[-24px_0_55px_rgba(0,0,0,.38)] xl:relative xl:w-auto xl:shadow-none">
+          <aside className="absolute inset-y-0 right-0 z-30 min-h-[540px] w-[min(300px,calc(100%-1rem))] min-w-0 overflow-hidden rounded-panel border border-line bg-surface-1 p-3 shadow-[-24px_0_55px_rgba(0,0,0,.38)] xl:relative xl:w-auto xl:shadow-none">
             {toolsDrawer}
           </aside>
         ) : null}

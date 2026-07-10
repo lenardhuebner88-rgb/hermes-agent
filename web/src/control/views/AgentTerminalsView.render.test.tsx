@@ -258,6 +258,35 @@ afterEach(() => {
 });
 
 describe("AgentTerminalsView desktop rendering", () => {
+  it("uses Leitstand panels and 45px targets for every rendered desktop toolbar control", async () => {
+    await renderView();
+
+    const fleetPanel = await screen.findByRole("region", { name: "Terminal-Flotte" });
+    expect(fleetPanel.className).toContain("rounded-panel");
+    expect(fleetPanel.className).toContain("bg-surface-1");
+
+    const toolbarLabels = [
+      "1 Terminal anzeigen",
+      "2 Terminals anzeigen",
+      "4 Terminals anzeigen",
+      "Usage Window umschalten",
+      "Werkzeuge umschalten",
+      "Schrift kleiner",
+      "Schrift größer",
+      "Vollbild",
+    ];
+    const toolbarButtons = toolbarLabels.map((name) => screen.getByRole("button", { name }));
+    expect(toolbarButtons).toHaveLength(8);
+    for (const button of toolbarButtons) {
+      expect(button.className).toContain("h-12");
+      expect(button.className).toContain("w-12");
+    }
+
+    const usageDock = screen.getByTestId("terminal-usage-dock");
+    expect(usageDock.className).toContain("rounded-panel");
+    expect(usageDock.className).toContain("bg-surface-1/95");
+  });
+
   it("renders the desktop three-column terminal shell and switches sessions", async () => {
     await renderView();
 

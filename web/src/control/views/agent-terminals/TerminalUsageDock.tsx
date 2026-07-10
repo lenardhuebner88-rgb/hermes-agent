@@ -68,7 +68,7 @@ export function TerminalUsageDock({ open, onClose }: { open: boolean; onClose: (
     <aside
       data-testid="terminal-usage-dock"
       aria-hidden={!open}
-      className={`absolute inset-y-0 right-0 z-30 flex w-[min(310px,calc(100%-1rem))] flex-col border-l border-line bg-surface-0/95 shadow-[-24px_0_55px_rgba(0,0,0,.38)] backdrop-blur-xl transition-transform duration-200 xl:relative xl:z-0 xl:w-[300px] xl:shrink-0 xl:shadow-none ${open ? "translate-x-0" : "translate-x-full xl:hidden"}`}
+      className={`absolute inset-y-0 right-0 z-30 flex w-[min(310px,calc(100%-1rem))] flex-col overflow-hidden rounded-panel border border-line bg-surface-1/95 shadow-[-24px_0_55px_rgba(0,0,0,.38)] backdrop-blur-xl transition-transform duration-200 xl:relative xl:z-0 xl:w-[300px] xl:shrink-0 xl:shadow-none ${open ? "translate-x-0" : "translate-x-full xl:hidden"}`}
     >
       <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
         <div>
@@ -79,7 +79,7 @@ export function TerminalUsageDock({ open, onClose }: { open: boolean; onClose: (
           <span className="rounded-card p-2 text-ink-3" aria-label={usage.loading ? "Usage wird aktualisiert" : "Usage wird jede Minute aktualisiert"}>
             <RefreshCw className={`size-3.5 ${usage.loading ? "animate-spin" : ""}`} />
           </span>
-          <button type="button" onClick={onClose} className="rounded-card p-2 text-ink-3 hover:bg-surface-3 hover:text-ink" aria-label="Usage schließen">
+          <button type="button" onClick={onClose} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-3 hover:border-live/40 hover:bg-surface-3 hover:text-ink" aria-label="Usage schließen">
             <X className="size-3.5" />
           </button>
         </div>
