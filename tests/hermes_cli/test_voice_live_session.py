@@ -1773,3 +1773,81 @@ async def test_non_blocking_response_retries_on_a_swapped_session(
     assert delivered.id == "delegate-9"
     assert delivered.response == {"result": "spät fertig"}
     assert delivered.scheduling == types.FunctionResponseScheduling.INTERRUPT
+
+
+@pytest.mark.asyncio
+async def test_flush_preserves_frame_offered_during_send() -> None:
+    """A fresher frame offered while flush's send awaits must survive.
+
+    offer() runs lock-free from the video-sender task; flush must only clear
+    the slot if it still holds the frame it just sent (reviewer finding
+    2026-07-10), so the next turn flushes the newer still instead of nothing.
+    """
+    from hermes_cli.voice_live_session import _VideoFrameRelay
+
+    class _BlockingSession:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.sent: list[types.Blob] = []
+
+        async def send_realtime_input(
+            self,
+            *,
+            audio: types.Blob | None = None,
+            video: types.Blob | None = None,
+        ) -> None:
+            if video is not None:
+                self.sent.append(video)
+            await self.release.wait()
+
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
+    stale = b"\xff\xd8stale"
+    fresh = b"\xff\xd8fresh"
+    relay.offer(stale)
+
+    blocking = _BlockingSession()
+    flush_task = asyncio.create_task(relay.flush(blocking))
+    for _ in range(5):  # let flush reach the blocked send
+        await asyncio.sleep(0)
+    relay.offer(fresh)
+    blocking.release.set()
+    assert await flush_task is True
+    assert blocking.sent[0].data == stale
+
+    relay.mark_turn_complete()
+    second = _BlockingSession()
+    second.release.set()
+    assert await relay.flush(second) is True
+    assert second.sent[0].data == fresh
+
+
+@pytest.mark.asyncio
+async def test_interrupted_resets_relay_once_per_turn_latch() -> None:
+    """A turn ending via interrupted (no turn_complete) frees the next still.
+
+    Barge-in ends turns with only ``interrupted`` set; without the reset the
+    following speech burst would flush no frame until some later
+    turn_complete arrives (reviewer finding 2026-07-10).
+    """
+    from hermes_cli.voice_live_session import GeminiLiveSession, _VideoFrameRelay
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret")
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    relay = _VideoFrameRelay(events_out)
+    relay.offer(FIXTURE_VIDEO.read_bytes())
+    sdk_session = _FakeSDKSession()
+    assert await relay.flush(sdk_session) is True
+    assert await relay.flush(sdk_session) is False  # latch closed
+
+    handled = await wrapper._handle_message(
+        sdk_session,
+        _interrupted_message(),
+        events_out,
+        _FakeToolExecutor(),
+        relay,
+    )
+    assert handled is False
+
+    relay.offer(FIXTURE_VIDEO.read_bytes())
+    assert await relay.flush(sdk_session) is True  # latch reopened

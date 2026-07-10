@@ -121,7 +121,10 @@ class _VideoFrameRelay:
             await session.send_realtime_input(
                 video=types.Blob(data=frame, mime_type="image/jpeg")
             )
-            self._frame = None
+            # offer() runs lock-free from the video-sender task: a fresher
+            # frame offered while the send awaited must survive this flush.
+            if self._frame is frame:
+                self._frame = None
             self._flushed_since_turn = True
             try:
                 self._events_out.put_nowait({"type": "video_frame_sent"})
@@ -651,10 +654,14 @@ class GeminiLiveSession:
         if content and content.interrupted:
             await events_out.put({"type": "interrupted"})
             await events_out.put({"type": "state", "value": "listening"})
-        if content and content.turn_complete:
-            await events_out.put({"type": "state", "value": "listening"})
+        if content and (content.interrupted or content.turn_complete):
+            # interrupted can end a turn without turn_complete ever arriving
+            # (see transcript flush above); the barge-in speech that caused it
+            # deserves a fresh still, so reset the once-per-turn latch here too.
             if relay is not None:
                 relay.mark_turn_complete()
+        if content and content.turn_complete:
+            await events_out.put({"type": "state", "value": "listening"})
 
         if message.go_away:
             if self._resumption_handle is None:

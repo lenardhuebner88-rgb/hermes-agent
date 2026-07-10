@@ -1110,6 +1110,24 @@ async def _read_voice_frames(
                         disconnected,
                     )
                     continue
+                # Rate limit FIRST: the base64 decode below is the expensive
+                # step, so an over-rate sender must not get to run it (every
+                # video_frame message consumes a rate slot, valid or not).
+                if not _video_frame_rate_allowed(video_frame_times):
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_rate_limited",
+                                "message": (
+                                    "Zu viele Video-Frames. Bitte langsamer senden."
+                                ),
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
                 decoded_frame = _decode_video_frame(control)
                 if decoded_frame is None:
                     await _put_event(
@@ -1133,21 +1151,6 @@ async def _read_voice_frames(
                                 "code": "video_frame_too_large",
                                 "message": (
                                     "Das Video-Frame überschreitet das Größenlimit."
-                                ),
-                            },
-                        },
-                        disconnected,
-                    )
-                    continue
-                if not _video_frame_rate_allowed(video_frame_times):
-                    await _put_event(
-                        events_out,
-                        {
-                            "type": "error",
-                            "error": {
-                                "code": "video_rate_limited",
-                                "message": (
-                                    "Zu viele Video-Frames. Bitte langsamer senden."
                                 ),
                             },
                         },

@@ -64,6 +64,7 @@ let stashedInstallPrompt = null;
 let sharingSource = null;
 let sharingStream = null;
 let sharingIntervalId = null;
+let sharingStartGeneration = 0;
 let sharingCanvasElement = null;
 let sharingCanvasContext = null;
 
@@ -484,6 +485,10 @@ async function captureAndSendFrame() {
 }
 
 function stopSharing() {
+  // Invalidate any in-flight startSharing: a getUserMedia/getDisplayMedia
+  // await that resolves after this point must not resurrect a share (its
+  // late stream gets stopped in startSharing's generation check).
+  sharingStartGeneration += 1;
   if (sharingIntervalId !== null) {
     window.clearInterval(sharingIntervalId);
     sharingIntervalId = null;
@@ -508,6 +513,7 @@ function stopSharing() {
 async function startSharing(source) {
   // Mutually exclusive: activating one source stops the other first.
   stopSharing();
+  const generation = ++sharingStartGeneration;
   try {
     const stream =
       source === "camera"
@@ -515,6 +521,15 @@ async function startSharing(source) {
             video: { facingMode: "environment" },
           })
         : await navigator.mediaDevices.getDisplayMedia({ video: true });
+    if (generation !== sharingStartGeneration) {
+      // A newer start/stop superseded this one while the permission prompt
+      // was open (double-click, cross-click): a stray live stream here would
+      // keep the camera on with the UI showing "off" — stop it immediately.
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      return;
+    }
     sharingStream = stream;
     sharingSource = source;
     sharingPreviewElement.srcObject = stream;
@@ -537,7 +552,9 @@ async function startSharing(source) {
       void captureAndSendFrame();
     }, 1000);
   } catch {
-    stopSharing();
+    if (generation === sharingStartGeneration) {
+      stopSharing();
+    }
   }
 }
 
@@ -660,6 +677,13 @@ function handleJsonMessage(session, raw) {
   if (message.type === "mode") {
     session.mode = message.value;
     renderModeBadge(message.value);
+    if (message.value === "fallback") {
+      // The capture tick gates on mode !== "fallback", so after this event
+      // no frame ever reaches the server and its video_unavailable_fallback
+      // advisory (our other auto-stop) can never fire — stop here instead of
+      // leaving the camera on with a pulsing "teilt" that sends nothing.
+      stopSharing();
+    }
     return;
   }
   if (message.type === "transcript") {

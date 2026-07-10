@@ -2254,6 +2254,14 @@ def test_voice_client_video_sharing_autostop_and_indicator_tripwires():
         'message.error.code === "video_unavailable_fallback"' in script
     )
 
+    # Review fixes 2026-07-10: a superseded in-flight start must stop its
+    # late stream (double-click camera-leak blocker), and a live->fallback
+    # mode event must stop sharing directly (the capture tick's own fallback
+    # gate prevents the server advisory from ever firing).
+    assert "sharingStartGeneration" in script
+    assert "generation !== sharingStartGeneration" in script
+    assert 'message.value === "fallback"' in script
+
     # Visible sharing state: red pulsing "teilt" indicator + mini preview,
     # both hidden by default and toggled by stopSharing()/startSharing().
     assert 'id="sharing-indicator" class="sharing-indicator" hidden' in document
