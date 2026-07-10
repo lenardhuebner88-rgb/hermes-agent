@@ -237,6 +237,7 @@ Do not write change-detector tests for expected-to-change data (model lists, con
 - Squash-merging stale branches can silently revert unrelated fixes; inspect merge diffs for unexpected deletions.
 - An auto-release rollback (`scripts/rollback_dashboard.sh`, kill-switch `release.autonomous`) leaves this LIVE checkout DETACHED on the anchor by design — if `git status` shows detached HEAD, triage the rollback first, then `git checkout main`. Never build on the detached state.
 - Uncommitted/untracked files in this live checkout leak into integration gates (`tsc -b` picks up stray test files) and can park foreign kanban chains — keep WIP on short leashes; long-running builds belong in worktrees.
+- Vitest `waitFor`-heavy UI tests can flake under host/full-suite load; because Testing Library configuration is per test file under Vitest isolation, use a bounded per-file `asyncUtilTimeout` only on affected files and verify with the relevant loaded/full-suite gate rather than treating an isolated pass as proof.
 
 ## Source Code Reference
 
