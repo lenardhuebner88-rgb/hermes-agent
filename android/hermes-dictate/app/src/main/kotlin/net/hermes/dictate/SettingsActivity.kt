@@ -44,6 +44,14 @@ class SettingsActivity : ComponentActivity() {
         findViewById<Button>(R.id.login_button).setOnClickListener {
             startActivity(Intent(this, LoginActivity::class.java))
         }
+        findViewById<Button>(R.id.overlay_button).setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        val cloudPreferredSwitch = findViewById<Switch>(R.id.cloud_preferred_switch)
+        cloudPreferredSwitch.isChecked = prefs.cloudPreferred
+        cloudPreferredSwitch.setOnCheckedChangeListener { _, checked -> prefs.cloudPreferred = checked }
 
         val radioGroup = findViewById<RadioGroup>(R.id.language_group)
         radioGroup.check(
@@ -113,7 +121,17 @@ class SettingsActivity : ComponentActivity() {
         setRowState(R.id.mic_state, R.id.mic_button, micGranted(), R.string.state_granted)
         setRowState(R.id.enable_state, R.id.enable_button, imeEnabled(), R.string.state_enabled)
         setRowState(R.id.select_state, R.id.select_button, imeSelected(), R.string.state_selected)
+        setRowState(R.id.overlay_state, R.id.overlay_button, overlayEnabled(), R.string.state_active)
         refreshCloudRows()
+    }
+
+    private fun overlayEnabled(): Boolean {
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        val component = "$packageName/${DictateOverlayService::class.java.name}"
+        return enabledServices.split(':').any { it.equals(component, ignoreCase = true) }
     }
 
     private fun setRowState(stateId: Int, buttonId: Int, done: Boolean, doneText: Int) {

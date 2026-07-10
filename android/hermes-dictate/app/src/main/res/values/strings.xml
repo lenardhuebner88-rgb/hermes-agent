@@ -18,6 +18,13 @@
     <string name="key_enter_desc">Eingabe</string>
     <string name="key_switch_desc">Tastatur wechseln</string>
 
+    <!-- Overlay bubble (Wispr-Flow style, works in any app) -->
+    <string name="overlay_service_label">Hermes Diktat – Blase</string>
+    <string name="overlay_service_description">Zeigt eine schwebende Diktier-Blase über anderen Apps: liest, ob ein Textfeld fokussiert ist (um die Blase ein-/auszublenden), und fügt diktierten Text in dieses Feld ein. Es wird kein Bildschirminhalt protokolliert oder übertragen.</string>
+    <string name="overlay_bubble_desc">Diktat starten</string>
+    <string name="overlay_cancel_desc">Diktat abbrechen</string>
+    <string name="overlay_confirm_desc">Diktat übernehmen</string>
+
     <!-- Errors (always visible, never silent) -->
     <string name="err_no_speech">Nichts gehört – Diktat gestoppt</string>
     <string name="err_language_unavailable">Offline-Sprachpaket fehlt – in den Android-Einstellungen laden</string>
@@ -45,6 +52,13 @@
     <string name="btn_grant">Erteilen</string>
     <string name="btn_enable">Aktivieren</string>
     <string name="btn_select">Auswählen</string>
+    <string name="section_overlay">Schwebende Diktat-Blase</string>
+    <string name="row_overlay">Blase über anderen Apps</string>
+    <string name="state_active">aktiv ✓</string>
+    <string name="btn_overlay_enable">Aktivieren</string>
+    <string name="overlay_hint">Zeigt eine Diktier-Blase über jeder App – kein Tastaturwechsel nötig. Aktivierung erfolgt in den Android-Bedienungshilfen.</string>
+    <string name="cloud_preferred_switch">Blase bevorzugt Cloud (statt On-Device)</string>
+
     <string name="section_language">Diktiersprache</string>
     <string name="lang_system">Systemsprache</string>
     <string name="lang_de">Deutsch</string>

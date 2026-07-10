@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares the overlay bubble's Accessibility service. Purpose is limited to reading which
+     field has focus (to show/hide the bubble) and writing the dictated text into it — no
+     gestures, no window content logging. See string overlay_service_description. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewFocused|typeWindowsChanged|typeViewTextSelectionChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/overlay_service_description"
+    android:notificationTimeout="80"
+    android:settingsActivity="net.hermes.dictate.SettingsActivity" />

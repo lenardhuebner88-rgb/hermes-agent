@@ -43,4 +43,23 @@ class DictatePrefs(context: Context) {
     var languageTag: String?
         get() = prefs.getString("language_tag", null)?.takeIf { it.isNotBlank() }
         set(value) = prefs.edit().putString("language_tag", value ?: "").apply()
+
+    /**
+     * Overlay bubble: prefer cloud transcription over on-device for every tap. Still gated by
+     * [cloudEnabled] and an active login — the controller's per-use reset to ON_DEVICE after
+     * each upload is unchanged; the overlay service re-arms cloud mode before the NEXT tap.
+     */
+    var cloudPreferred: Boolean
+        get() = prefs.getBoolean("cloud_preferred", false)
+        set(value) = prefs.edit().putBoolean("cloud_preferred", value).apply()
+
+    /** Remembered vertical bubble position (px, top-left origin) so it survives restarts. */
+    var overlayBubbleY: Int
+        get() = prefs.getInt("overlay_bubble_y", -1)
+        set(value) = prefs.edit().putInt("overlay_bubble_y", value).apply()
+
+    /** Which screen edge the bubble last snapped to. */
+    var overlayBubbleOnRight: Boolean
+        get() = prefs.getBoolean("overlay_bubble_on_right", true)
+        set(value) = prefs.edit().putBoolean("overlay_bubble_on_right", value).apply()
 }

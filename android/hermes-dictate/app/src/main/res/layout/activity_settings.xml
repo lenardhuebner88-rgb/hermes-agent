@@ -131,6 +131,66 @@
                 android:text="@string/btn_select" />
         </LinearLayout>
 
+        <!-- Overlay bubble -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/section_overlay"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:minHeight="48dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/row_overlay"
+                android:textColor="@color/text_primary"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/overlay_state"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:text="@string/state_pending"
+                android:textColor="@color/text_dim"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/overlay_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_overlay_enable" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/overlay_hint"
+            android:textColor="@color/text_dim"
+            android:textSize="13sp" />
+
+        <Switch
+            android:id="@+id/cloud_preferred_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:minHeight="48dp"
+            android:text="@string/cloud_preferred_switch"
+            android:textColor="@color/text_primary"
+            android:textSize="15sp" />
+
         <!-- Language -->
         <TextView
             android:layout_width="wrap_content"

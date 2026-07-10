@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Idle state: a small draggable mic bubble. Same visuals as the IME's mic key so the two
+     entry points feel like one product. -->
+<ImageButton
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/bubble_mic"
+    android:layout_width="48dp"
+    android:layout_height="48dp"
+    android:background="@drawable/bg_mic"
+    android:backgroundTint="@color/accent"
+    android:src="@drawable/ic_mic"
+    android:padding="12dp"
+    android:contentDescription="@string/overlay_bubble_desc"
+    android:elevation="8dp" />
