@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, ClipboardList, FileText, Play, X } from "l
 
 import { api, fetchJSON } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { Eyebrow } from "../components/primitives";
 import {
   buildPlanSpecDraft,
   defaultSlug,
@@ -202,11 +203,11 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
   const hasText = mode === "planspec" ? draft.trim().length > 0 : taskBody.trim().length > 0;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-surface-0/60 p-0 sm:items-center sm:p-4">{/* TOKEN-REVIEW: was bg-black/60 */}
+    <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-surface-0/60 p-0 sm:items-center sm:p-4">
       <div className="flex h-full w-full max-w-3xl flex-col overflow-hidden rounded-none border border-line bg-surface-1 shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-panel">
         <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
           <div>
-            <p className="hc-eyebrow">Terminal → Handoff</p>
+            <Eyebrow>Terminal → Handoff</Eyebrow>
             <h2 className="text-sm font-semibold text-ink">Auswahl in PlanSpec oder Kanban überführen</h2>
           </div>
           <button

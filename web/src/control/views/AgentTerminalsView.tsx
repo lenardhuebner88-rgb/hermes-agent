@@ -69,6 +69,7 @@ import {
   touchScrollSteps,
 } from "@/lib/xtermSurface";
 import { de } from "../i18n/de";
+import { Eyebrow } from "../components/primitives";
 import { Sparkline } from "../components/fleet/Sparkline";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
@@ -382,7 +383,7 @@ function TerminalIdentityBar({
   const cwd = window?.cwd?.trim() || "cwd unbekannt";
   const process = terminalProcessLabel(window, kind);
   return (
-    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">{/* TOKEN-REVIEW: was border-cyan-300/15 */}
+    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="shrink-0 font-semibold text-ink">{label}</span>
         <span className="text-ink-3">·</span>
@@ -600,7 +601,7 @@ function FleetCard({
             }}
             className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/30 px-2 py-1.5 text-[11px] text-status-alert hover:border-status-alert/60 hover:bg-status-alert/10"
             aria-label={`Session beenden ${win.session}:${win.window}`}
-          >{/* TOKEN-REVIEW: was hover:bg-red-950/20 */}
+          >
             <Trash2 className="h-3 w-3" />Session beenden
           </button>
         </div>
@@ -1634,7 +1635,7 @@ export function AgentTerminalsView() {
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between">
         <div>
-          <p className="hc-eyebrow">tmux</p>
+          <Eyebrow>tmux</Eyebrow>
           <h2 className="text-sm font-semibold text-ink">Sessions / Windows</h2>
         </div>
         <button type="button" onClick={() => void refresh()} aria-label="Refresh agent terminals" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><RefreshCw className="h-4 w-4" /></button>
@@ -1832,7 +1833,7 @@ export function AgentTerminalsView() {
   const toolsDrawer = (
     <div className="grid min-w-0 gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
-        <div><p className="hc-eyebrow">Tools / Handoff</p><h2 className="font-semibold text-ink">Terminal-Kontext</h2></div>
+        <div><Eyebrow>Tools / Handoff</Eyebrow><h2 className="font-semibold text-ink">Terminal-Kontext</h2></div>
         {compactLayout && <button type="button" onClick={() => setToolsOpen(false)} className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>}
       </div>
       <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
@@ -2059,11 +2060,11 @@ export function AgentTerminalsView() {
   );
 
   const sessionSheet = compactLayout && sessionSheetOpen && selectedWindow && (
-    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">{/* TOKEN-REVIEW: was rounded-t-3xl */}
-      <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}
+    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+      <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="hc-eyebrow">{AGENT_LABELS[sessionSheetKind] ?? sessionSheetKind}</p>
+          <Eyebrow>{AGENT_LABELS[sessionSheetKind] ?? sessionSheetKind}</Eyebrow>
           <h2 className="truncate font-mono text-sm font-semibold text-ink">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
         </div>
         <button type="button" onClick={() => setSessionSheetOpen(false)} aria-label="Sitzung schließen" className="shrink-0 rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
@@ -2180,20 +2181,20 @@ export function AgentTerminalsView() {
 
   const createSheetHeader = (
     <div className="mb-3 flex items-center justify-between gap-2">
-      <div><p className="hc-eyebrow">Neue Session</p><h2 className="text-sm font-semibold text-ink">Agent wählen</h2></div>
+      <div><Eyebrow>Neue Session</Eyebrow><h2 className="text-sm font-semibold text-ink">Agent wählen</h2></div>
       <button type="button" onClick={() => setCreateSheetOpen(false)} aria-label="Schließen" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
     </div>
   );
 
   const createSheet = createSheetOpen && (
     compactLayout ? (
-      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">{/* TOKEN-REVIEW: was rounded-t-3xl */}
-        <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}
+      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+        <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />
         {createSheetHeader}
         {createSessionForm}
       </div>
     ) : (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-surface-0/60 p-4">{/* TOKEN-REVIEW: was bg-black/60 */}
+      <div className="fixed inset-0 z-50 grid place-items-center bg-surface-0/60 p-4">
         <div className="w-full max-w-sm rounded-panel border border-line bg-surface-1 p-4 shadow-2xl">
           {createSheetHeader}
           {createSessionForm}
@@ -2206,7 +2207,7 @@ export function AgentTerminalsView() {
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="hc-eyebrow">Flotte</p>
+          <Eyebrow>Flotte</Eyebrow>
           <h2 className="text-sm font-semibold text-ink">
             {orderedOverview.length} Fenster · {orderedOverview.filter((win) => win.state !== "dead").length} aktiv
           </h2>
@@ -2325,13 +2326,16 @@ export function AgentTerminalsView() {
         .map(paneTargetKey),
     );
     return (
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.07] bg-surface-1 px-2">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-surface-1 px-2">
         <button
           type="button"
-          className={cn("size-2 rounded-full", connection.ready ? "bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,.55)]" : connection.connecting ? "animate-pulse bg-amber-300" : "bg-red-400")}
-          aria-label={`Pane ${paneIndex + 1} aktivieren`}
+          className="inline-flex min-h-6 shrink-0 items-center gap-1.5 rounded-card px-1 text-[10px] text-ink-2 hover:bg-surface-3"
+          aria-label={`Pane ${paneIndex + 1} aktivieren (${connection.ready ? "verbunden" : connection.connecting ? "verbindet…" : "getrennt"})`}
           onClick={() => setActivePane(paneIndex)}
-        />
+        >
+          <span aria-hidden className={cn("hc-led size-2 rounded-full", connection.ready ? "hc-led-live" : connection.connecting ? "hc-led-warn" : "hc-led-error")} />
+          {connection.ready ? "verbunden" : connection.connecting ? "verbindet…" : "getrennt"}
+        </button>
         <select
           aria-label={`Terminal ${paneIndex + 1}`}
           value={paneTarget ? paneTargetKey(paneTarget) : ""}
@@ -2390,8 +2394,8 @@ export function AgentTerminalsView() {
           data-testid={`terminal-pane-card-${paneIndex}`}
           className={cn(
             "flex h-full min-h-0 min-w-0 w-full shrink-0 flex-col overflow-hidden",
-            visiblePaneCount > 1 && "rounded-[14px] border bg-surface-0 shadow-[0_12px_30px_rgba(0,0,0,.22)]",
-            visiblePaneCount > 1 && (activePane === paneIndex ? "border-cyan-300/55 ring-1 ring-cyan-300/15" : "border-white/[0.08]"),
+            visiblePaneCount > 1 && "rounded-panel border bg-surface-0 shadow-[0_12px_30px_rgba(0,0,0,.22)]",
+            visiblePaneCount > 1 && (activePane === paneIndex ? "border-live/55 ring-1 ring-live/15" : "border-line"),
           )}
           onMouseDown={() => setActivePane(paneIndex)}
         >
@@ -2422,7 +2426,7 @@ export function AgentTerminalsView() {
       {!compactLayout && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-card border border-line bg-surface-1/90 p-2 shadow-2xl sm:rounded-panel sm:p-3">
           <div className="min-w-0">
-            <p className="hc-eyebrow">Agent Terminals</p>
+            <Eyebrow>Agent Terminals</Eyebrow>
             <div className="mt-1 flex flex-wrap items-center gap-2"><StatusPill state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -2489,7 +2493,7 @@ export function AgentTerminalsView() {
                     aria-label={`${layout} Terminal${layout > 1 ? "s" : ""} anzeigen`}
                     title={`${layout}× Terminal`}
                     onClick={() => chooseDesktopLayout(layout)}
-                    className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", desktopLayout === layout ? "border-cyan-300/50 bg-cyan-300/10 text-cyan-100" : "border-line")}
+                    className={cn("grid h-9 w-9 place-items-center rounded-card border text-ink-2 hover:bg-surface-3", desktopLayout === layout ? "border-live/50 bg-live/10 text-live" : "border-line")}
                   >
                     {layout === 1 ? <TerminalSquare className="h-3.5 w-3.5" /> : layout === 2 ? <Columns2 className="h-3.5 w-3.5" /> : <Grid2X2 className="h-3.5 w-3.5" />}
                   </button>
@@ -2573,7 +2577,7 @@ export function AgentTerminalsView() {
 
       {sessionSheet}
       {createSheet}
-      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" /> {/* TOKEN-REVIEW: was bg-white/20 */}{toolsDrawer}</div>}
+      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />{toolsDrawer}</div>}
 
       {handoffOpen && (
         <TerminalHandoffPanel
