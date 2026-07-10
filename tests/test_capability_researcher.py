@@ -17,6 +17,15 @@ if str(_REPO) not in sys.path:
 
 from hermes_cli import capability_researcher as cr  # noqa: E402
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_budget_ledger(tmp_path, monkeypatch):
+    """The researcher's calls are ledger-guarded now — keep every test's
+    ledger writes inside tmp instead of the repo's real skill-audit dir."""
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "skill-audit"))
+
 
 class _Msg:
     def __init__(self, content: str):

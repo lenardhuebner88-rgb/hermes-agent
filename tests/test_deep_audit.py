@@ -9,9 +9,18 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import pytest
+
 from hermes_cli import deep_audit
 
 _REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_budget_ledger(tmp_path, monkeypatch):
+    """Deep-audit tool-loop calls are ledger-guarded now — keep ledger writes
+    inside tmp instead of the repo's real skill-audit dir."""
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "skill-audit"))
 
 
 def _response(*, content: str = "", tool_calls=None, model: str = "unit-model", tokens: int = 11):
@@ -200,10 +209,15 @@ def test_max_iter_without_finish_sets_reason(monkeypatch):
 
     result = deep_audit.run_deep_audit(subsystem="unit", llm_call=fake_llm)
     assert result["ok"] is True
-    assert result["iterations"] == deep_audit._MAX_ITERATIONS
+    # The default round cap now comes from the validated lane contract
+    # (autoresearch.lanes.deep-audit.budget.max_iterations, default 4), bounded
+    # by the hard module ceiling.
+    expected_cap = deep_audit._default_max_iterations()
+    assert expected_cap == 4
+    assert result["iterations"] == expected_cap
     assert result["reason"] == "max iterations reached before finish_audit"
     # De-dup is not required, but every recorded finding is grounded and kept.
-    assert len(result["findings"]) == deep_audit._MAX_ITERATIONS
+    assert len(result["findings"]) == expected_cap
 
 
 def test_run_request_file_persists_detection_only_proposal(tmp_path, monkeypatch):

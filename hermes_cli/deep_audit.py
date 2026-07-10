@@ -656,11 +656,24 @@ def _normalise_findings(raw: Any, allowed_files: Iterable[Path], model_label: st
     return out
 
 
+def _default_max_iterations() -> int:
+    """Tool-loop round cap from the validated lane contract (config.yaml
+    overridable), bounded by the hard module ceiling."""
+    try:
+        from hermes_cli.autoresearch_lane_contracts import load_lane_specs
+
+        value = int(load_lane_specs()["deep-audit"].budget.get("max_iterations") or 0)
+    except Exception:
+        value = 0
+    return min(_MAX_ITERATIONS, value) if value > 0 else _MAX_ITERATIONS
+
+
 def run_deep_audit(
     *,
     subsystem: str,
     focus: str | None = None,
     max_files: int = 12,
+    max_iterations: int | None = None,
     llm_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Run the read-only tool loop and return structured findings.
@@ -713,18 +726,21 @@ def run_deep_audit(
         iterations = 0
         raw_findings: list[dict[str, Any]] = []
         finished = False
+        budget_stop: str | None = None
+        usage_estimated = False
         files_read: set[str] = set()
         # Once the model has read enough of the subsystem (or used up most of its
         # budget), push it into a reporting phase: MiniMax tends to browse far
         # longer than needed and only dumps findings when told to stop. We keep
         # re-pushing every turn it browses instead of reporting/finishing so a
         # whole run can't end with findings still unreported.
+        iteration_cap = max(1, min(_MAX_ITERATIONS, int(max_iterations or 0) or _default_max_iterations()))
         read_enough_at = max(2, len(rel_files))
-        wrap_at = max(read_enough_at, _MAX_ITERATIONS - 6)
-        for iterations in range(1, _MAX_ITERATIONS + 1):
+        wrap_at = max(2, min(read_enough_at, iteration_cap - 1))
+        for iterations in range(1, iteration_cap + 1):
             in_report_phase = (iterations >= wrap_at) or (len(files_read) >= read_enough_at and iterations >= 3)
             if in_report_phase and not finished:
-                last_turn = iterations >= _MAX_ITERATIONS - 1
+                last_turn = iterations >= iteration_cap - 1
                 messages.append({
                     "role": "user",
                     "content": (
@@ -735,8 +751,19 @@ def run_deep_audit(
                            "Dies ist dein LETZTER Schritt: melde Funde und rufe finish_audit. Keine read_file/grep mehr.")
                     ),
                 })
-            resp = llm_call(task="code_audit", tools=tool_schemas(), messages=messages, temperature=0, max_tokens=4000)
-            tokens += _usage_tokens(resp)
+            from hermes_cli.autoresearch_budget import BudgetExhausted, guarded_llm_call
+
+            try:
+                resp, ledger_entry = guarded_llm_call(
+                    lane="deep-audit", call=llm_call, task="code_audit",
+                    tools=tool_schemas(), messages=messages, temperature=0, max_tokens=4000,
+                )
+            except BudgetExhausted as exc:
+                budget_stop = f"budget exhausted: {exc}"
+                break
+            tokens += int(ledger_entry.get("total_tokens") or 0) or _usage_tokens(resp)
+            if str(ledger_entry.get("usage_source") or "") == "estimated":
+                usage_estimated = True
             model_label = _model_label(resp) or model_label
             cost_usd += _per_turn_cost(resp, model_label)
             message = _message_from_response(resp)
@@ -781,7 +808,9 @@ def run_deep_audit(
                 break
         findings = _normalise_findings(raw_findings, files, model_label)
         reason = ""
-        if not finished:
+        if budget_stop:
+            reason = budget_stop
+        elif not finished:
             reason = "max iterations reached before finish_audit"
         return {
             "ok": True,
@@ -789,6 +818,7 @@ def run_deep_audit(
             "subsystem": subsystem,
             "model": model_label,
             "tokens": tokens,
+            "usage_source": "estimated" if usage_estimated else "measured",
             "cost": {
                 "request_cost_usd": round(cost_usd, 6),
                 "cost_status": "estimated" if cost_usd > 0 else "unknown",
@@ -983,6 +1013,7 @@ def run_request_file(path: Path) -> dict[str, Any]:
                 errors=0 if result.get("ok") else 1,
                 scanned=len(result.get("files") or []),
                 model=result.get("model") or None,
+                usage_source=str(result.get("usage_source") or "measured"),
             )
         except Exception:
             errors = 1

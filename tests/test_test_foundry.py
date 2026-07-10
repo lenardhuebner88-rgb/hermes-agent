@@ -13,6 +13,13 @@ from hermes_cli import test_foundry
 from hermes_cli._ast_mutator import Mutant
 
 
+@pytest.fixture(autouse=True)
+def _isolate_budget_ledger(tmp_path, monkeypatch):
+    """Hardening-LLM calls are ledger-guarded now — keep ledger writes inside
+    tmp instead of the repo's real skill-audit dir."""
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "skill-audit"))
+
+
 def test_affected_tests_derivation_finds_top_level_and_subdir(tmp_path):
     (tmp_path / "tests" / "unit").mkdir(parents=True)
     (tmp_path / "tests" / "test_kanban_db.py").write_text("", encoding="utf-8")

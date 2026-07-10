@@ -1093,8 +1093,12 @@ def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict
         f"{text}\n"
         "```"
     )
+    from hermes_cli.autoresearch_budget import BudgetExhausted, guarded_llm_call
+
     try:
-        resp = _writer_call_llm(
+        resp, _entry = guarded_llm_call(
+            lane="code",
+            call=_writer_call_llm,
             task="skills_hub",
             messages=[
                 {"role": "system", "content": system},
@@ -1104,7 +1108,12 @@ def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict
             temperature=0.2,
             timeout=timeout,
         )
-        return {"ok": True, "raw": _loads_llm_json(_extract_llm_content(resp)), "reason": None, "resp": resp}
+        return {
+            "ok": True, "raw": _loads_llm_json(_extract_llm_content(resp)),
+            "reason": None, "resp": resp, "ledger_entry": _entry,
+        }
+    except BudgetExhausted as exc:
+        return {"ok": False, "raw": None, "reason": f"budget exhausted: {exc}", "resp": None}
     except Exception as exc:
         return {"ok": False, "raw": None, "reason": f"model call failed: {type(exc).__name__}", "resp": None}
 
@@ -1139,8 +1148,12 @@ def _verify_code_finding_importance(
         f"{finding.get('old_snippet')}\n"
         "```"
     )
+    from hermes_cli.autoresearch_budget import BudgetExhausted, guarded_llm_call
+
     try:
-        resp = _writer_call_llm(
+        resp, _entry = guarded_llm_call(
+            lane="code",
+            call=_writer_call_llm,
             task="skills_hub",
             messages=[
                 {"role": "system", "content": system},
@@ -1306,6 +1319,8 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
     findings_seen = 0
     tokens = 0
     model_label = ""
+    budget_stop: str | None = None
+    estimated_any = False
     cap = max(1, int(max_files))
     allowlist_paths = _iter_code_allowlist_paths()
     for path in allowlist_paths:
@@ -1330,9 +1345,20 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             continue
         model_res = _call_code_weakness_finder(path, before, timeout=timeout)
         model_label = _model_label_from_response(model_res.get("resp"))
-        tokens += _llm_total_tokens(model_res.get("resp"))
+        ledger_entry = model_res.get("ledger_entry") or {}
+        tokens += int(ledger_entry.get("total_tokens") or 0) or _llm_total_tokens(model_res.get("resp"))
+        if str(ledger_entry.get("usage_source") or "") == "estimated":
+            estimated_any = True
         if not model_res.get("ok"):
-            errors.append({"target": rel, "reason": str(model_res.get("reason") or "model failed")})
+            reason = str(model_res.get("reason") or "model failed")
+            if reason.startswith("budget exhausted"):
+                # Shared daily ledger spent: stop scanning; the file was not
+                # researched, so let the next run pick it up again.
+                state.pop(rel, None)
+                files_seen -= 1
+                budget_stop = reason
+                break
+            errors.append({"target": rel, "reason": reason})
             continue
         raw_finding = _normalise_code_finding(model_res.get("raw"))
         if raw_finding is None:
@@ -1375,13 +1401,18 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         "files_seen": files_seen,
         "findings_seen": findings_seen,
         "tokens": tokens,
+        "usage_source": "estimated" if estimated_any else "measured",
         "scope": "incremental" if incremental else "full",
         "allowlist": sorted(_repo_relative_name(p) for p in allowlist_paths),
         "errors": errors,
         "vetoes": vetoes,
+        "budget_stop": budget_stop,
     }
     from hermes_cli.autoresearch_lane_contracts import classify_lane_outcome
 
+    reason_text = "; ".join(str(item.get("reason") or "") for item in errors[:3])
+    if budget_stop:
+        reason_text = budget_stop if not reason_text else f"{budget_stop}; {reason_text}"
     try:
         lane_outcome = classify_lane_outcome(
             "code",
@@ -1389,7 +1420,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             errors=len(errors),
             yielded=findings_seen,
             ok=True,
-            reason="; ".join(str(item.get("reason") or "") for item in errors[:3]),
+            reason=reason_text,
         )
         result["outcome"] = lane_outcome.outcome
         result["ok"] = not lane_outcome.fatal
@@ -1401,7 +1432,8 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         from hermes_cli import autoresearch_runs
         autoresearch_runs.append_run(lane="code", tokens=tokens, proposed=len(created),
                                      errors=len(errors), vetoed=vetoed, scanned=files_seen,
-                                     model=model_label or None)
+                                     model=model_label or None,
+                                     usage_source=result["usage_source"])
     except Exception:
         pass
     return result

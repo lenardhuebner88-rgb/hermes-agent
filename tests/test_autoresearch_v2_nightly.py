@@ -34,6 +34,13 @@ def _isolate_live_state(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_AUTORESEARCH_DIGEST_PATH", str(tmp_path / "digest.json"))
     monkeypatch.setenv("HERMES_AUTORESEARCH_RECONCILE_SUMMARY_PATH", str(tmp_path / "last-reconcile.json"))
     monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", str(tmp_path / "vetoed_levers.json"))
+    # Keep every test off the live subscription usage API: default to a
+    # healthy quota; quota-specific tests override this stub themselves.
+    import hermes_cli.autoresearch_budget as _arb
+    monkeypatch.setattr(
+        _arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=5, weekly=5),
+    )
 
 
 # ---------------------------------------------------------------- rotation
@@ -366,3 +373,123 @@ def test_main_circuit_breaker_skips_remaining_lanes_but_keeps_hygiene(monkeypatc
         "--circuit-breaker-threshold", "1",
     ]) == 2  # no lane completed: the nightly must surface a red/nonzero result
     assert order == ["deep-audit", "prune", "reconcile", "summary"]
+
+
+# ---------------------------------------------------- budget guard wiring
+
+
+def _usage_snapshot(*, session: float, weekly: float):
+    from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+    return AccountUsageSnapshot(
+        provider="openai-codex", source="usage_api",
+        fetched_at=_dt.datetime.now(_dt.timezone.utc), plan="Pro",
+        windows=(
+            AccountUsageWindow(label="Session", used_percent=session, reset_at=None, window_key="session"),
+            AccountUsageWindow(label="Weekly", used_percent=weekly, reset_at=None, window_key="weekly"),
+        ),
+    )
+
+
+def _healthy_quota(monkeypatch):
+    import hermes_cli.autoresearch_budget as arb
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=5, weekly=5),
+    )
+
+
+def test_v2_caps_default_from_validated_lane_contracts(monkeypatch):
+    """Without CLI overrides the V2 lanes run the reduced config caps
+    (deep audit 6 files, foundry 1 target x 6 mutants, 600s wall-clock each),
+    not the historical 12/2/15/env constants."""
+    _healthy_quota(monkeypatch)
+    captured = {}
+
+    def fake_da(subsystem, *, max_files, **kwargs):
+        captured["da_max_files"] = max_files
+        captured["da_kwargs"] = kwargs
+        return _da(findings=0, tokens=100, reason="")
+
+    def fake_tf(targets, *, max_mutants, **kwargs):
+        captured["tf_targets"] = list(targets)
+        captured["tf_max_mutants"] = max_mutants
+        captured["tf_kwargs"] = kwargs
+        return [_tf(t, tests_kept=0, tokens=100) for t in targets]
+
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", fake_da)
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", fake_tf)
+
+    assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
+    assert captured["da_max_files"] == 6
+    assert len(captured["tf_targets"]) == 1
+    assert captured["tf_max_mutants"] == 6
+
+
+def test_v2_wall_clock_budget_comes_from_config_without_env(monkeypatch):
+    """The 600s per-lane wall-clock ceiling lives in the validated config,
+    with the legacy env var only as a backwards-compatible override."""
+    monkeypatch.delenv("AR_V2_WALL_CLOCK_BUDGET_SECONDS", raising=False)
+    _healthy_quota(monkeypatch)
+    captured = {}
+
+    monkeypatch.setattr(nightly, "run_deep_audit_lane",
+                        lambda subsystem, **k: _da(findings=0, tokens=1, reason=""))
+
+    def fake_tf(targets, *, max_mutants, budget_seconds=0.0, **kwargs):
+        captured["tf_budget_seconds"] = budget_seconds
+        return [_tf(t) for t in targets]
+
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", fake_tf)
+    assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
+    assert captured["tf_budget_seconds"] == 600
+
+
+def test_v2_weekly_quota_gate_skips_expensive_lanes(monkeypatch, capsys):
+    """Weekly >= 50%: Luna/Terra lanes are quota-skipped (expected outcome,
+    exit 0) and make no model call."""
+    import hermes_cli.autoresearch_budget as arb
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=5, weekly=55),
+    )
+    monkeypatch.setattr(
+        nightly, "_lane_model",
+        lambda lane: "gpt-5.6-luna" if lane == "deep-audit" else "gpt-5.4-mini",
+        raising=False,
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("expensive lane must not run at weekly >= 50%")
+
+    ran = {"tf": 0}
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", boom)
+    monkeypatch.setattr(
+        nightly, "run_test_foundry_lane",
+        lambda targets, **_k: ran.__setitem__("tf", ran["tf"] + 1) or [_tf(t) for t in targets],
+    )
+    assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
+    assert ran["tf"] == 1  # mini lane may still run, bounded by the ledger
+    assert "quota" in capsys.readouterr().out.lower()
+
+
+def test_v2_session_stop_blocks_next_lane_in_same_window(monkeypatch, capsys):
+    """Session >= 60% after the first lane: the second lane of the same night
+    window is stopped (quota_skipped), not started."""
+    import hermes_cli.autoresearch_budget as arb
+    snapshots = iter([
+        _usage_snapshot(session=30, weekly=10),   # before deep-audit
+        _usage_snapshot(session=65, weekly=12),   # refreshed before test-foundry
+    ])
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": next(snapshots),
+    )
+    monkeypatch.setattr(nightly, "run_deep_audit_lane",
+                        lambda subsystem, **k: _da(findings=0, tokens=500, reason=""))
+
+    def boom_tf(*_a, **_k):
+        raise AssertionError("session >= 60% must stop the next lane")
+
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", boom_tf)
+    assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
+    assert "quota" in capsys.readouterr().out.lower()

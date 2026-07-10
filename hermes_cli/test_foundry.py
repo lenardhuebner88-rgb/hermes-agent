@@ -406,8 +406,12 @@ def _call_hardening_llm(
     diff: str,
     affected_tests: list[str],
 ) -> tuple[str, int, str | None]:
+    from hermes_cli.autoresearch_budget import guarded_llm_call
+
     caller = llm_call or _default_llm_call
-    response = caller(
+    response, ledger_entry = guarded_llm_call(
+        lane="test-foundry",
+        call=caller,
         task="test_hardening",
         messages=_test_prompt(
             target_module=target_module,
@@ -420,6 +424,9 @@ def _call_hardening_llm(
         max_tokens=3000,
     )
     text, tokens, model = _response_text_tokens_model(response)
+    # Response-reported usage wins; a silent provider leaves the ledger's
+    # conservative reservation as the honest figure.
+    tokens = tokens or int(ledger_entry.get("total_tokens") or 0)
     return _extract_test_code(text), tokens, model
 
 
@@ -660,6 +667,7 @@ def run_test_foundry(
     survivors: list[dict[str, Any]] = []
     infra_errors = 0
     invalid_outputs = 0
+    budget_stop: str | None = None
 
     def finish(result: dict[str, Any]) -> dict[str, Any]:
         _record_roi(
@@ -720,6 +728,14 @@ def run_test_foundry(
                 tokens += used_tokens
                 model = used_model or model
             except Exception as exc:
+                from hermes_cli.autoresearch_budget import BudgetExhausted
+
+                if isinstance(exc, BudgetExhausted):
+                    # Shared daily ledger spent: an expected stop, not an infra
+                    # failure — remaining mutants are skipped, partial results kept.
+                    survivor["reason"] = f"budget exhausted: {exc}"
+                    budget_stop = f"budget exhausted: {exc}"
+                    break
                 infra_errors += 1
                 survivor["reason"] = f"llm failed: {exc}"
                 continue
@@ -815,7 +831,7 @@ def run_test_foundry(
             "survivors": survivors,
             "tests_kept": tests_kept,
             "proposals": proposals,
-            "reason": "" if ok else "no validated mutation tests kept",
+            "reason": "" if ok else (budget_stop or "no validated mutation tests kept"),
             "tokens": tokens,
             "model": model,
             "mutants_run": mutants_run,

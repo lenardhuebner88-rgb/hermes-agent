@@ -24,6 +24,62 @@ def test_default_lane_specs_make_safety_contracts_explicit():
     assert "zero grounded findings is clean" in specs["deep-audit"].failure_semantics
 
 
+def test_code_lane_contract_names_the_task_it_actually_calls(monkeypatch, tmp_path):
+    """The code scanner really calls the ``skills_hub`` aux slot (mini). The
+    contract must say so honestly instead of advertising ``code_audit``."""
+    specs = load_lane_specs(config={})
+    assert specs["code"].aux_task == "skills_hub"
+
+    import hermes_cli.autoresearch_proposals as proposals
+
+    seen: dict[str, str] = {}
+
+    def _capture(**kwargs):
+        seen["task"] = kwargs.get("task")
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(proposals, "_writer_call_llm", _capture)
+    target = tmp_path / "probe.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    proposals._call_code_weakness_finder(target, "x = 1\n", timeout=5)
+    assert seen["task"] == specs["code"].aux_task
+
+
+def test_default_lane_budgets_match_reduced_nightly_caps():
+    """Caps live in the validated contract (config-overridable), not in
+    scattered constants: mini lanes 12/12, deep audit 6 files/4 rounds,
+    test foundry 1 target/6 mutants, both V2 lanes 600s wall-clock."""
+    specs = load_lane_specs(config={})
+    assert specs["skill"].budget.get("max_iterations") == 12
+    assert specs["code"].budget.get("max_files") == 12
+    assert specs["code"].budget.get("max_proposals") == 4
+    assert specs["deep-audit"].budget.get("max_files") == 6
+    assert specs["deep-audit"].budget.get("max_iterations") == 4
+    assert specs["deep-audit"].budget.get("wall_clock_seconds") == 600
+    assert specs["test-foundry"].budget.get("targets") == 1
+    assert specs["test-foundry"].budget.get("max_mutants") == 6
+    assert specs["test-foundry"].budget.get("wall_clock_seconds") == 600
+
+
+def test_quota_skip_is_its_own_expected_outcome():
+    skipped = classify_lane_outcome(
+        "skill", scanned=0, errors=0, yielded=0, ok=True,
+        reason="quota skip: weekly usage 72% >= 70%",
+    )
+    assert skipped.outcome == "quota_skipped"
+    assert skipped.fatal is False
+    assert nightly_exit_code([skipped, skipped]) == 0
+
+
+def test_cooldown_skip_is_expected_not_fatal():
+    skipped = classify_lane_outcome(
+        "skill", scanned=0, errors=0, yielded=0, ok=True,
+        reason="cooldown active until 2026-07-17 (3 healthy zero-yield runs)",
+    )
+    assert skipped.outcome == "skipped_expected"
+    assert skipped.fatal is False
+
+
 def test_lane_spec_overrides_are_validated():
     with pytest.raises(LaneContractError, match="mutation_policy"):
         load_lane_specs(config={"autoresearch": {"lanes": {"code": {"mutation_policy": "write-live"}}}})

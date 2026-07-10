@@ -20,6 +20,7 @@ OUTCOMES = {
     "degraded",
     "skipped_expected",
     "budget_exhausted",
+    "quota_skipped",
     "infra_failed",
     "invalid_output",
 }
@@ -89,14 +90,17 @@ _DEFAULT_SPECS: dict[str, dict[str, Any]] = {
         "output_schema": "autoresearch-proposal-v1",
         "route": "proposal queue -> judge -> batch confirm",
         "schedule": "rotating nightly",
-        "budget": {"max_iterations_source": "AR_NIGHTLY_ITERATIONS"},
+        "budget": {"max_iterations": 12},
         "required_evidence": ["target_path", "evidence", "fix_hint"],
         "failure_semantics": "100% research errors or provider/auth failure is infra_failed",
         "fail_on_all_errors": True,
         "allow_empty_success": True,
     },
     "code": {
-        "aux_task": "code_audit",
+        # Honest contract: the code triage finder AND its importance verifier
+        # really run on the skills_hub aux slot (gpt-5.4-mini) — declaring
+        # code_audit here silently ignored the operator's model pick.
+        "aux_task": "skills_hub",
         "model_role": "grounded code weakness auditor",
         "scopes": ["hermes_cli allowlist", "incremental content hashes"],
         "forbidden_paths": ["outside code allowlist", ".env", "auth.json", "config.yaml", "*.db"],
@@ -107,7 +111,7 @@ _DEFAULT_SPECS: dict[str, dict[str, Any]] = {
         "output_schema": "autoresearch-proposal-v1",
         "route": "grounded contract -> deduped Kanban code task",
         "schedule": "rotating nightly",
-        "budget": {"max_files": 40, "max_proposals": 8},
+        "budget": {"max_files": 12, "max_proposals": 4},
         "required_evidence": ["target_path", "evidence", "fix_hint"],
         "failure_semantics": "100% file errors or provider/auth failure is infra_failed",
         "fail_on_all_errors": True,
@@ -125,7 +129,7 @@ _DEFAULT_SPECS: dict[str, dict[str, Any]] = {
         "output_schema": "deep-audit-v1",
         "route": "grounded contract -> deduped Kanban code task",
         "schedule": "nightly subsystem rotation",
-        "budget": {"max_files": 12, "wall_clock_source": "AR_V2_WALL_CLOCK_BUDGET_SECONDS"},
+        "budget": {"max_files": 6, "max_iterations": 4, "wall_clock_seconds": 600},
         "required_evidence": ["fileline", "evidence", "fix_hint"],
         "failure_semantics": "provider/auth/tool-loop failure is infra_failed; zero grounded findings is clean",
         "fail_on_all_errors": True,
@@ -143,7 +147,7 @@ _DEFAULT_SPECS: dict[str, dict[str, Any]] = {
         "output_schema": "test-foundry-v1",
         "route": "validated test proposal -> deduped Kanban code task",
         "schedule": "nightly target rotation",
-        "budget": {"max_mutants": 15, "targets": 2, "wall_clock_source": "AR_V2_WALL_CLOCK_BUDGET_SECONDS"},
+        "budget": {"max_mutants": 6, "targets": 1, "wall_clock_seconds": 600},
         "required_evidence": ["target_path", "mutation", "affected_tests", "fix_hint"],
         "failure_semantics": "all survivor generations failing is infra_failed; zero validated tests with healthy calls is clean",
         "fail_on_all_errors": True,
@@ -253,7 +257,9 @@ _EXPECTED_SKIP_MARKERS = (
     "no files resolved",
     "baseline tests failed",
     "skipped: wall-clock budget exhausted",
+    "cooldown active",
 )
+_QUOTA_SKIP_MARKERS = ("quota skip",)
 _INVALID_OUTPUT_MARKERS = (
     "invalid finding",
     "invalid output",
@@ -282,7 +288,9 @@ def classify_lane_outcome(
     text = str(reason or "").strip()
     lower = text.lower()
 
-    if "budget exhausted" in lower:
+    if any(marker in lower for marker in _QUOTA_SKIP_MARKERS):
+        outcome = "quota_skipped"
+    elif "budget exhausted" in lower:
         outcome = "budget_exhausted"
     elif any(marker in lower for marker in _INFRA_MARKERS):
         outcome = "infra_failed"

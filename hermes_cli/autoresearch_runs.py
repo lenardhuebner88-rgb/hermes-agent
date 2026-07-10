@@ -82,15 +82,22 @@ def read_runs(limit: int = _MAX_RUNS) -> list[dict[str, Any]]:
 def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
                proposed: int = 0, errors: int = 0, scanned: int = 0,
                vetoed: int = 0, model: str | None = None,
-               at: str | None = None) -> None:
+               at: str | None = None, usage_source: str = "measured") -> None:
     """Prepend one run record (newest first), capped to the last _MAX_RUNS.
-    Best-effort: never raises — history is observability, not a source of truth."""
+    Best-effort: never raises — history is observability, not a source of truth.
+
+    ``usage_source`` says how ``tokens`` was obtained: ``measured`` (provider
+    usage; also the honest value for a zero-call run), ``estimated``
+    (conservative reservation kept because the provider reported no usage) or
+    ``unknown``. Estimated figures must never masquerade as measured zeros."""
     try:
+        source = usage_source if usage_source in ("measured", "estimated", "unknown") else "unknown"
         record = {
             "at": at or _utc_now(),
             "lane": lane if lane in _VALID_LANES else "skill",
             "request_id": request_id,
             "tokens": int(tokens or 0),
+            "usage_source": source,
             "proposed": int(proposed or 0),
             "errors": int(errors or 0),
             "vetoed": int(vetoed or 0),

@@ -1496,6 +1496,45 @@ DEFAULT_CONFIG = {
     #           - id: pareto-router
     #             min_coding_score: 0.5
     #
+    # Autoresearch nightly budgets (plan 2026-07-10): the shared daily ledger,
+    # subscription-quota thresholds and reduced per-lane caps. Lane execution
+    # contracts (scopes/gates/tools) are validated separately in
+    # hermes_cli/autoresearch_lane_contracts.py; the values here are the
+    # operator-tunable, non-secret operating levers. Deep-merge only — no
+    # config version bump needed for these keys.
+    "autoresearch": {
+        "budget": {
+            "timezone": "Europe/Berlin",
+            "daily_token_limit": 100000,
+            "daily_model_call_limit": 30,
+            "weekly_expensive_skip_percent": 50,
+            "weekly_all_skip_percent": 70,
+            "session_stop_percent": 60,
+            "unknown_usage_policy": "mini_only",
+        },
+        "roi": {
+            "zero_yield_runs_before_cooldown": 3,
+            "cooldown_days": 7,
+        },
+        "lanes": {
+            "skill": {
+                "aux_task": "skills_hub",
+                "budget": {"max_iterations": 12},
+            },
+            "code": {
+                "aux_task": "skills_hub",
+                "budget": {"max_files": 12, "max_proposals": 4},
+            },
+            "deep-audit": {
+                "aux_task": "code_audit",
+                "budget": {"max_files": 6, "max_iterations": 4, "wall_clock_seconds": 600},
+            },
+            "test-foundry": {
+                "aux_task": "test_hardening",
+                "budget": {"max_mutants": 6, "targets": 1, "wall_clock_seconds": 600},
+            },
+        },
+    },
     # Each aux task is independent — main-agent provider_routing and
     # openrouter.min_coding_score do NOT propagate to aux calls by design.
     "auxiliary": {

@@ -213,8 +213,12 @@ def research_skill(
         f"{skill_text}\n\n"
         "Liefere das findings-JSON."
     )
+    from hermes_cli.autoresearch_budget import BudgetExhausted, guarded_llm_call
+
     try:
-        resp = caller(
+        resp, ledger_entry = guarded_llm_call(
+            lane="skill",
+            call=caller,
             task="skills_hub",
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -224,7 +228,17 @@ def research_skill(
             temperature=0.2,
             timeout=timeout,
         )
-        tokens = _extract_tokens(resp)
+        tokens = int(ledger_entry.get("total_tokens") or 0) or _extract_tokens(resp)
+        usage_source = str(ledger_entry.get("usage_source") or "unknown")
+    except BudgetExhausted as exc:
+        return {
+            "ok": False,
+            "findings": [],
+            "reason": f"budget exhausted: {exc}",
+            "dropped": 0,
+            "tokens": 0,
+            "usage_source": "measured",
+        }
     except Exception as exc:  # offline / provider error → caller falls back gracefully
         return {
             "ok": False,
@@ -232,6 +246,7 @@ def research_skill(
             "reason": f"model call failed: {type(exc).__name__}",
             "dropped": 0,
             "tokens": 0,
+            "usage_source": "measured",
         }
 
     raw_findings = _parse_findings_json(_extract_content(resp))
@@ -271,7 +286,10 @@ def research_skill(
         })
         if len(kept) >= max(1, int(max_findings)):
             break
-    return {"ok": True, "findings": kept, "reason": None, "dropped": dropped, "tokens": tokens}
+    return {
+        "ok": True, "findings": kept, "reason": None, "dropped": dropped,
+        "tokens": tokens, "usage_source": usage_source,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +396,8 @@ def research_skills(
     dropped = 0
     errors = 0
     tokens_total = 0
+    estimated_any = False
+    budget_reason: str | None = None
     for skill_name, skill_text in skills:
         skills_seen += 1
         if on_skill is not None:
@@ -387,7 +407,16 @@ def research_skills(
                 pass
         res = research_skill(skill_name, skill_text, call_llm=call_llm, max_findings=max_per_skill)
         tokens_total += int(res.get("tokens") or 0)
+        if str(res.get("usage_source") or "") == "estimated":
+            estimated_any = True
         if not res.get("ok"):
+            reason = str(res.get("reason") or "")
+            if reason.startswith("budget exhausted"):
+                # The shared daily ledger is spent: stop the sweep instead of
+                # burning an "error" per remaining skill.
+                budget_reason = reason
+                skills_seen -= 1  # this skill was never actually researched
+                break
             errors += 1
             continue
         dropped += int(res.get("dropped") or 0)
@@ -404,4 +433,6 @@ def research_skills(
         "dropped": dropped,
         "errors": errors,
         "tokens": tokens_total,
+        "usage_source": "estimated" if estimated_any else "measured",
+        "reason": budget_reason,
     }

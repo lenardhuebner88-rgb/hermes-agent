@@ -38,20 +38,55 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from hermes_cli import autoresearch_budget as arb  # noqa: E402
 from hermes_cli import autoresearch_proposals as _proposals  # noqa: E402
 from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
 from hermes_cli import deep_audit, test_foundry  # noqa: E402
 from hermes_cli.autoresearch_lane_contracts import (  # noqa: E402
     LaneOutcome,
     classify_lane_outcome,
+    load_lane_specs,
     nightly_exit_code,
 )
 
 # Operator-assigned report channel (override with --channel-id / env at the unit).
 DEFAULT_CHANNEL_ID = "1495737862522405088"
-DEFAULT_TF_MUTANTS = 15
-DEFAULT_TF_TARGETS = 2
-DEFAULT_DA_MAX_FILES = 12
+
+
+def _lane_specs():
+    try:
+        return load_lane_specs()
+    except Exception:
+        return load_lane_specs(config={})
+
+
+def _lane_model(lane: str) -> str:
+    """Effective model behind the lane's aux task (best-effort)."""
+    try:
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        aux_task = _lane_specs()[lane].aux_task
+        _provider, model, _base, _key, _mode = _resolve_task_provider_model(aux_task)
+        return str(model or "")
+    except Exception:
+        return ""
+
+
+def _quota_gate(lane: str) -> str | None:
+    """Fresh subscription-quota decision for this lane. Returns the skip
+    reason (quota_skipped) or None. Records the percent snapshot in the
+    shared ledger for observability."""
+    budget_cfg = arb.load_budget_config()
+    decision = arb.evaluate_quota(arb.fetch_quota_snapshot(), budget_cfg)
+    try:
+        arb.DailyLedger(config=budget_cfg).record_quota_snapshot(
+            f"pre-{lane}",
+            session_percent=decision.session_percent,
+            weekly_percent=decision.weekly_percent,
+        )
+    except Exception:
+        pass
+    return arb.quota_block_reason(decision, _lane_model(lane))
 
 # Short tags for the common non-yield reasons, so the Discord line stays compact.
 _SKIP_TAGS = (
@@ -332,6 +367,20 @@ def _run_reconciler() -> dict:
     return summary
 
 
+def _record_lane_cooldown(lane: str, outcome: LaneOutcome, summary: dict[str, Any]) -> None:
+    """Best-effort zero-yield streak bookkeeping (never sinks the report)."""
+    try:
+        healthy_calls = max(0, int(summary.get("scanned") or 0) - int(summary.get("errors") or 0))
+        arb.record_lane_run_for_cooldown(
+            lane,
+            outcome=outcome.outcome,
+            yielded=outcome.yielded,
+            healthy_calls=healthy_calls,
+        )
+    except Exception:
+        pass
+
+
 def build_summary(
     when: date_cls,
     da: dict[str, Any] | None,
@@ -386,10 +435,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--channel-id", default=DEFAULT_CHANNEL_ID)
     parser.add_argument("--date", help="Override rotation date (YYYY-MM-DD), for testing.")
     parser.add_argument("--lanes", default="deep-audit,test-foundry", help="Comma list of lanes to run.")
-    parser.add_argument("--tf-targets", type=int, default=DEFAULT_TF_TARGETS)
-    parser.add_argument("--tf-mutants", type=int, default=DEFAULT_TF_MUTANTS)
-    parser.add_argument("--da-max-files", type=int, default=DEFAULT_DA_MAX_FILES)
+    parser.add_argument("--tf-targets", type=int, default=None,
+                        help="Default: autoresearch.lanes.test-foundry.budget.targets (config.yaml)")
+    parser.add_argument("--tf-mutants", type=int, default=None,
+                        help="Default: autoresearch.lanes.test-foundry.budget.max_mutants (config.yaml)")
+    parser.add_argument("--da-max-files", type=int, default=None,
+                        help="Default: autoresearch.lanes.deep-audit.budget.max_files (config.yaml)")
     parser.add_argument("--wall-clock-budget-seconds", type=float, default=None)
+    parser.add_argument("--ignore-cooldown", action="store_true",
+                        help="operator override: run lanes despite an active zero-yield cooldown")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2)
     args = parser.parse_args(argv)
 
@@ -397,17 +451,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     day = day_of_year(when)
     lanes = {lane.strip() for lane in args.lanes.split(",") if lane.strip()}
     started = time.monotonic()
-    budget_seconds = args.wall_clock_budget_seconds
-    if budget_seconds is None:
-        budget_seconds = _env_float("AR_V2_WALL_CLOCK_BUDGET_SECONDS", 0.0)
+    specs = _lane_specs()
+    da_max_files = args.da_max_files if args.da_max_files is not None else int(
+        specs["deep-audit"].budget.get("max_files") or 6)
+    tf_targets_n = args.tf_targets if args.tf_targets is not None else int(
+        specs["test-foundry"].budget.get("targets") or 1)
+    tf_mutants = args.tf_mutants if args.tf_mutants is not None else int(
+        specs["test-foundry"].budget.get("max_mutants") or 6)
+
+    # Per-lane wall-clock: CLI > legacy env override > validated lane contract.
+    override = args.wall_clock_budget_seconds
+    if override is None:
+        env_budget = _env_float("AR_V2_WALL_CLOCK_BUDGET_SECONDS", 0.0)
+        override = env_budget if env_budget > 0 else None
+    da_budget = float(override) if override is not None else float(
+        specs["deep-audit"].budget.get("wall_clock_seconds") or 600)
+    tf_budget = float(override) if override is not None else float(
+        specs["test-foundry"].budget.get("wall_clock_seconds") or 600)
+    total_budget = da_budget + tf_budget
 
     # Install hang forensics BEFORE any lane runs: line-buffer stdout/stderr,
     # register the SIGTERM stack dumper, and start the watchdog. Without this
     # the 8/17-nights silent-hang-to-unit-timeout failure recurs.
-    _install_hang_forensics(started, budget_seconds)
+    _install_hang_forensics(started, total_budget)
     print(
         f"[autoresearch-v2-nightly] start: lanes={sorted(lanes)} day={day} "
-        f"budget={budget_seconds:.0f}s",
+        f"budget(da/tf)={da_budget:.0f}s/{tf_budget:.0f}s",
         flush=True,
     )
 
@@ -417,13 +486,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     tf_summary: list[dict[str, Any]] | None = None
     tf_error: str | None = None
 
+    def _cooldown_gate(lane: str) -> str | None:
+        until = arb.lane_cooldown_until(lane)
+        if until and not args.ignore_cooldown:
+            return f"cooldown active until {until} (healthy zero-yield runs)"
+        if until:
+            print(f"[autoresearch-v2-nightly] operator override: --ignore-cooldown ({lane} until {until})",
+                  file=sys.stderr)
+        return None
+
     if "deep-audit" in lanes:
         subsystem = select_subsystem(list(deep_audit.SUBSYSTEM_GLOBS.keys()), day)
-        if _budget_exhausted(started, budget_seconds):
+        if _budget_exhausted(started, total_budget):
             da_summary = {"subsystem": subsystem, "error": "Wall-clock budget exhausted before Deep-Audit"}
+        elif (skip := _quota_gate("deep-audit") or _cooldown_gate("deep-audit")):
+            da_summary = {
+                "subsystem": subsystem, "ok": True, "findings": 0, "tokens": 0,
+                "model": None, "reason": skip, "scanned": 0, "errors": 0,
+            }
+            da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
+            print(f"[autoresearch-v2-nightly] deep-audit skipped: {skip}", flush=True)
         else:
             try:
-                da_summary = run_deep_audit_lane(subsystem, max_files=args.da_max_files)
+                da_summary = run_deep_audit_lane(subsystem, max_files=da_max_files)
             except Exception as exc:  # one lane must never kill the other / the report
                 traceback.print_exc()
                 circuit_failures += 1
@@ -432,25 +517,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "findings": 0, "tokens": 0, "scanned": 0, "errors": 1,
                 }
                 da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
+            _record_lane_cooldown("deep-audit", _classify_deep_audit(da_summary), da_summary)
 
     if "test-foundry" in lanes:
         if _circuit_open(circuit_failures, args.circuit_breaker_threshold):
             tf_error = "Circuit breaker open before Test-Foundry"
-        elif _budget_exhausted(started, budget_seconds):
+        elif _budget_exhausted(started, total_budget):
             tf_error = "Wall-clock budget exhausted before Test-Foundry"
+        # A fresh quota decision between lanes: session >= 60% stops the next
+        # lane of the same night window.
+        elif (skip := _quota_gate("test-foundry") or _cooldown_gate("test-foundry")):
+            tf_error = skip
+            print(f"[autoresearch-v2-nightly] test-foundry skipped: {skip}", flush=True)
         else:
-            targets = select_targets(test_foundry.curated_targets(), day, args.tf_targets)
+            targets = select_targets(test_foundry.curated_targets(), day, tf_targets_n)
+            tf_started = time.monotonic()
             try:
                 tf_summary = run_test_foundry_lane(
                     targets,
-                    max_mutants=args.tf_mutants,
-                    started=started,
-                    budget_seconds=budget_seconds,
+                    max_mutants=tf_mutants,
+                    started=tf_started,
+                    budget_seconds=tf_budget,
                 )
             except Exception as exc:
                 traceback.print_exc()
                 circuit_failures += 1
                 tf_error = _lane_error(exc)
+            for item in tf_summary or []:
+                _record_lane_cooldown("test-foundry", _classify_test_foundry(item), item)
 
     # Quellen-Hygiene: alte reverted/crashed proposed auto-skippen + done/skipped
     # archivieren. Laeuft nightly mit, damit gate.phase-Zombies und alte proposed

@@ -55,6 +55,17 @@ def test_history_capped_to_30(audit):
     assert runs[-1]["request_id"] == "r5"  # oldest within the cap
 
 
+def test_append_run_records_usage_source(audit):
+    """Run records carry how the token figure was obtained — estimated
+    figures must never masquerade as measured zeros."""
+    autoresearch_runs.append_run(lane="skill", request_id="r1", tokens=1200,
+                                 usage_source="estimated")
+    autoresearch_runs.append_run(lane="code", request_id="r2", tokens=0)
+    runs = autoresearch_runs.read_runs()
+    assert runs[1]["usage_source"] == "estimated"
+    assert runs[0]["usage_source"] == "measured"  # default: real zero stays real
+
+
 def test_read_tolerates_garbage(audit):
     (audit / "autoresearch-runs.json").write_text("{ not json", encoding="utf-8")
     assert autoresearch_runs.read_runs() == []
@@ -101,15 +112,112 @@ def test_nightly_lane_parity(monkeypatch):
     assert mod._is_code_night() is False
 
 
-def test_nightly_code_night_uses_deep_caps(monkeypatch):
-    """The unattended code lane raises max_files/limit beyond the interactive default."""
+def test_nightly_code_night_reads_caps_from_validated_config(monkeypatch):
+    """AR3 code caps come from the validated lane contract (config.yaml
+    overridable), not from constants drifting apart in the script."""
     mod = _load_nightly()
     captured = {}
     import hermes_cli.autoresearch_proposals as arp
     monkeypatch.setattr(arp, "generate_code_weakness_proposals",
                         lambda **k: captured.update(k) or {"created_count": 0, "files_seen": 0})
     assert mod._run_code_night() == 0
-    assert captured["max_files"] == 40 and captured["limit"] == 8
+    assert captured["max_files"] == 12 and captured["limit"] == 4
+
+
+def test_nightly_code_night_honors_config_override(monkeypatch):
+    mod = _load_nightly()
+    captured = {}
+    import hermes_cli.autoresearch_proposals as arp
+    from hermes_cli.autoresearch_lane_contracts import load_lane_specs
+    override = {"autoresearch": {"lanes": {"code": {"budget": {"max_files": 5, "max_proposals": 2}}}}}
+    monkeypatch.setattr(mod, "_lane_specs", lambda: load_lane_specs(config=override))
+    monkeypatch.setattr(arp, "generate_code_weakness_proposals",
+                        lambda **k: captured.update(k) or {"created_count": 0, "files_seen": 0})
+    assert mod._run_code_night() == 0
+    assert captured["max_files"] == 5 and captured["limit"] == 2
+
+
+def test_nightly_skill_night_cap_comes_from_config_not_unit_env(monkeypatch):
+    """Without the legacy env override the skill lane runs the reduced
+    config cap (12), not the historical 50."""
+    mod = _load_nightly()
+    monkeypatch.delenv("AR_NIGHTLY_ITERATIONS", raising=False)
+    captured = {}
+
+    def _fake_create_request(**kwargs):
+        captured.update(kwargs)
+        return "req.json"
+
+    import autoresearch_request as arr
+    monkeypatch.setattr(mod.arr, "create_request", _fake_create_request, raising=False)
+    monkeypatch.setattr(mod.runner, "main", lambda argv: 0, raising=False)
+    assert mod._run_skill_night() == 0
+    assert captured["max_iterations"] == 12
+    # legacy env override stays honored (backwards-compatible, unit-removable)
+    monkeypatch.setenv("AR_NIGHTLY_ITERATIONS", "7")
+    assert mod._run_skill_night() == 0
+    assert captured["max_iterations"] == 7
+
+
+def test_nightly_quota_gate_skips_lane_as_expected_outcome(monkeypatch, capsys):
+    """Weekly >= 70%: no lane call is made and the night reports
+    quota_skipped as an expected, zero-exit outcome."""
+    mod = _load_nightly()
+    import hermes_cli.autoresearch_budget as arb
+    import hermes_cli.autoresearch_proposals as arp
+
+    def _boom(**_k):
+        raise AssertionError("lane must not run when the weekly quota gate is closed")
+
+    monkeypatch.setattr(arp, "generate_code_weakness_proposals", _boom)
+    monkeypatch.setattr(mod, "_is_code_night", lambda: True)
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=10, weekly=75),
+    )
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert "quota_skipped" in out
+
+
+def test_nightly_cooldown_skips_lane_until_operator_override(monkeypatch, capsys, tmp_path):
+    """Three healthy zero-yield runs park the lane for 7 days; the operator
+    can override explicitly with --ignore-cooldown."""
+    mod = _load_nightly()
+    import hermes_cli.autoresearch_budget as arb
+    import hermes_cli.autoresearch_proposals as arp
+
+    monkeypatch.setattr(mod, "_is_code_night", lambda: True)
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=5, weekly=5),
+    )
+    for _ in range(3):
+        arb.record_lane_run_for_cooldown("code", outcome="clean", yielded=0, healthy_calls=4)
+
+    ran = {"n": 0}
+    monkeypatch.setattr(
+        arp, "generate_code_weakness_proposals",
+        lambda **_k: ran.__setitem__("n", ran["n"] + 1) or {"created_count": 0, "files_seen": 1},
+    )
+    assert mod.main([]) == 0
+    assert ran["n"] == 0
+    assert "cooldown" in capsys.readouterr().out.lower()
+
+    assert mod.main(["--ignore-cooldown"]) == 0
+    assert ran["n"] == 1
+
+
+def _usage_snapshot(*, session: float, weekly: float):
+    from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+    return AccountUsageSnapshot(
+        provider="openai-codex", source="usage_api",
+        fetched_at=_dt.datetime.now(_dt.timezone.utc), plan="Pro",
+        windows=(
+            AccountUsageWindow(label="Session", used_percent=session, reset_at=None, window_key="session"),
+            AccountUsageWindow(label="Weekly", used_percent=weekly, reset_at=None, window_key="weekly"),
+        ),
+    )
 
 
 def test_nightly_code_night_returns_nonzero_on_total_provider_failure(monkeypatch):
@@ -134,11 +242,21 @@ def test_nightly_code_night_returns_nonzero_on_total_provider_failure(monkeypatc
     assert mod._run_code_night() == 2
 
 
+def _open_quota(monkeypatch):
+    """Keep main()-flow tests off the live usage API: healthy quota, no gate."""
+    import hermes_cli.autoresearch_budget as arb
+    monkeypatch.setattr(
+        arb, "fetch_quota_snapshot",
+        lambda provider="openai-codex": _usage_snapshot(session=5, weekly=5),
+    )
+
+
 def test_nightly_main_routes_by_lane(monkeypatch):
     mod = _load_nightly()
+    _open_quota(monkeypatch)
     called = {}
-    monkeypatch.setattr(mod, "_run_code_night", lambda: (called.__setitem__("lane", "code"), 0)[1])
-    monkeypatch.setattr(mod, "_run_skill_night", lambda: (called.__setitem__("lane", "skill"), 0)[1])
+    monkeypatch.setattr(mod, "_run_code_night", lambda *a, **k: (called.__setitem__("lane", "code"), 0)[1])
+    monkeypatch.setattr(mod, "_run_skill_night", lambda *a, **k: (called.__setitem__("lane", "skill"), 0)[1])
     monkeypatch.setattr(mod, "_is_code_night", lambda: True)
     assert mod.main() == 0 and called["lane"] == "code"
     monkeypatch.setattr(mod, "_is_code_night", lambda: False)
@@ -147,9 +265,10 @@ def test_nightly_main_routes_by_lane(monkeypatch):
 
 def test_nightly_main_runs_reconciler_after_lane(monkeypatch):
     mod = _load_nightly()
+    _open_quota(monkeypatch)
     order = []
     monkeypatch.setattr(mod, "_is_code_night", lambda: True)
-    monkeypatch.setattr(mod, "_run_code_night", lambda: order.append("code") or 0)
+    monkeypatch.setattr(mod, "_run_code_night", lambda *a, **k: order.append("code") or 0)
     monkeypatch.setattr(mod, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
 
     assert mod.main() == 0
