@@ -3,7 +3,11 @@ package net.hermes.dictate
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -16,7 +20,6 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
-import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -25,147 +28,252 @@ import org.robolectric.annotation.Config
 class OnDeviceDictationTest {
 
     @Mock
-    private lateinit var recognizer: SpeechRecognizer
-
-    @Mock
     private lateinit var callbacks: OnDeviceDictation.Callbacks
 
     private lateinit var intentFactory: RecognizeIntentFactory
-    private lateinit var intent: Intent
-    private lateinit var dictation: OnDeviceDictation
-    private lateinit var listener: RecognitionListener
+    private val intent = Intent()
+
+    /** Hands out the supplied recognizers in order; a segment that outlives them gets null. */
+    private class QueueFactory(private vararg val instances: SpeechRecognizer?) : RecognizerFactory {
+        var createCount = 0
+            private set
+
+        override fun create(): SpeechRecognizer? = instances.getOrNull(createCount).also { createCount += 1 }
+    }
 
     @Before
     fun setUp() {
         MockitoAnnotations.openMocks(this)
-        intent = Intent()
         intentFactory = mock { on { create(any()) }.thenReturn(intent) }
-        dictation = OnDeviceDictation(recognizer, callbacks, intentFactory)
+    }
 
+    private fun resultsBundle(text: String): Bundle =
+        Bundle().apply { putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, arrayListOf(text)) }
+
+    /** The listener the wrapper bound onto [r] (its only setRecognitionListener call). */
+    private fun listenerOf(r: SpeechRecognizer): RecognitionListener {
         val captor = argumentCaptor<RecognitionListener>()
-        verify(recognizer).setRecognitionListener(captor.capture())
-        listener = captor.firstValue
+        verify(r).setRecognitionListener(captor.capture())
+        return captor.lastValue
     }
 
-    private fun resultsBundle(text: String): Bundle {
-        val bundle = Bundle()
-        bundle.putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, arrayListOf(text))
-        return bundle
-    }
+    // --- Lifecycle / repeated dictation (AC-LIFECYCLE-1) ---
 
-    private fun partialBundle(text: String): Bundle {
-        val bundle = Bundle()
-        bundle.putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, arrayListOf(text))
-        return bundle
+    @Test
+    fun `two consecutive segments each commit through the current recognizer`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        val listener = run { dictation.startSegment("de-DE"); listenerOf(r) }
+        verify(r).startListening(eq(intent))
+
+        listener.onResults(resultsBundle("erster teil"))
+        verify(callbacks).onFinal(eq("erster teil"))
+
+        // The terminal result cleared the pending flag, so the next segment starts on the SAME
+        // reused instance without recreating the app or keyboard.
+        assertTrue(dictation.startSegment("de-DE"))
+        verify(r, times(2)).startListening(eq(intent))
+        listener.onResults(resultsBundle("zweiter teil"))
+        verify(callbacks).onFinal(eq("zweiter teil"))
     }
 
     @Test
-    fun `startSegment returns false when already pending`() {
-        whenever(intentFactory.create(any())).thenReturn(intent)
-        dictation.startSegment("de-DE")
-        verify(recognizer).startListening(eq(intent))
-
-        val second = dictation.startSegment("de-DE")
-        assert(!second)
-        verify(recognizer, times(1)).startListening(any())
-    }
-
-    @Test
-    fun `startSegment uses default language when blank`() {
-        dictation.startSegment("")
+    fun `startSegment uses the German default when the language is blank`() {
+        val r = mock<SpeechRecognizer>()
+        OnDeviceDictation(QueueFactory(r), callbacks, intentFactory).startSegment("")
         verify(intentFactory).create(eq("de-DE"))
     }
 
     @Test
-    fun `startSegment passes provided language to factory`() {
-        dictation.startSegment("en-US")
+    fun `startSegment passes the provided language through`() {
+        val r = mock<SpeechRecognizer>()
+        OnDeviceDictation(QueueFactory(r), callbacks, intentFactory).startSegment("en-US")
         verify(intentFactory).create(eq("en-US"))
     }
 
     @Test
-    fun `onResults emits final text`() {
-        dictation.startSegment("de-DE")
-        listener.onResults(resultsBundle("Hallo Welt"))
-        verify(callbacks).onFinal(eq("Hallo Welt"))
+    fun `a second overlapping segment is rejected while one is pending`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        assertTrue(dictation.startSegment("de-DE"))
+        assertFalse(dictation.startSegment("de-DE"))
+        verify(r, times(1)).startListening(any())
     }
 
-    @Test
-    fun `onResults with blank text emits no speech error`() {
-        dictation.startSegment("de-DE")
-        listener.onResults(resultsBundle("   "))
-        verify(callbacks).onError(eq(RecognizerFailure.NO_SPEECH))
-    }
+    // --- BUSY recovery: recreate() must DESTROY and REBIND (verifier's core finding) ---
 
     @Test
-    fun `onResults with missing results emits no speech error`() {
-        dictation.startSegment("de-DE")
-        listener.onResults(Bundle())
-        verify(callbacks).onError(eq(RecognizerFailure.NO_SPEECH))
-    }
+    fun `recreate destroys the wedged recognizer and binds a genuinely fresh instance`() {
+        val first = mock<SpeechRecognizer>()
+        val second = mock<SpeechRecognizer>()
+        val factory = QueueFactory(first, second)
+        val dictation = OnDeviceDictation(factory, callbacks, intentFactory)
 
-    @Test
-    fun `onPartialResults emits partial text`() {
-        dictation.startSegment("de-DE")
-        listener.onPartialResults(partialBundle("teil"))
-        verify(callbacks).onPartial(eq("teil"))
-    }
+        assertTrue(dictation.startSegment("de-DE"))
+        verify(first).startListening(any())
 
-    @Test
-    fun `onPartialResults ignores blank`() {
-        dictation.startSegment("de-DE")
-        listener.onPartialResults(partialBundle("   "))
-        verify(callbacks, never()).onPartial(any())
-    }
-
-    @Test
-    fun `onError maps BUSY to busy and marks unavailable`() {
-        dictation.startSegment("de-DE")
-        listener.onError(SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
-        verify(callbacks).onError(eq(RecognizerFailure.BUSY))
-        assert(!dictation.isAvailable)
-    }
-
-    @Test
-    fun `onError maps NO_MATCH to no speech`() {
-        dictation.startSegment("de-DE")
-        listener.onError(SpeechRecognizer.ERROR_NO_MATCH)
-        verify(callbacks).onError(eq(RecognizerFailure.NO_SPEECH))
-    }
-
-    @Test
-    fun `stopSegment only stops when pending`() {
-        dictation.stopSegment()
-        verify(recognizer, never()).stopListening()
-
-        dictation.startSegment("de-DE")
-        dictation.stopSegment()
-        verify(recognizer).stopListening()
-    }
-
-    @Test
-    fun `recreate resets pending segment and listener`() {
-        dictation.startSegment("de-DE")
         dictation.recreate()
+        // The real recognizer is torn down — not merely a flag reset / listener swap.
+        verify(first).destroy()
 
-        val captor = argumentCaptor<RecognitionListener>()
-        verify(recognizer, times(2)).setRecognitionListener(captor.capture())
-        val newListener = captor.lastValue
+        assertTrue(dictation.startSegment("de-DE"))
+        // A brand-new recognizer was created and used, not the wedged first one.
+        assertEquals(2, factory.createCount)
+        verify(second).startListening(any())
+        verify(first, times(1)).startListening(any())
+        listenerOf(second).onResults(resultsBundle("frisch"))
+        verify(callbacks).onFinal(eq("frisch"))
+    }
 
-        // After recreate a new segment should be accepted again.
-        whenever(intentFactory.create(any())).thenReturn(intent)
-        val started = dictation.startSegment("de-DE")
-        assert(started)
-        verify(recognizer, times(2)).startListening(any())
+    // --- Stale / late callbacks cannot cross session boundaries (AC-LIFECYCLE-2) ---
 
-        newListener.onResults(resultsBundle("neu"))
+    @Test
+    fun `a late callback from a recreated recognizer cannot touch the new session`() {
+        val first = mock<SpeechRecognizer>()
+        val second = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(first, second), callbacks, intentFactory)
+
+        dictation.startSegment("de-DE")
+        val staleListener = listenerOf(first)
+
+        dictation.recreate()
+        assertTrue(dictation.startSegment("de-DE")) // binds `second`
+
+        // Delayed results/errors from the destroyed first recognizer must be dropped entirely.
+        staleListener.onResults(resultsBundle("alt"))
+        staleListener.onPartialResults(resultsBundle("alt partial"))
+        staleListener.onError(SpeechRecognizer.ERROR_NO_MATCH)
+        verify(callbacks, never()).onFinal(any())
+        verify(callbacks, never()).onPartial(any())
+        verify(callbacks, never()).onError(any())
+
+        // The current session is unaffected and still delivers its own result.
+        listenerOf(second).onResults(resultsBundle("neu"))
         verify(callbacks).onFinal(eq("neu"))
     }
 
     @Test
-    fun `destroy prevents further starts`() {
+    fun `a late callback after destroy is dropped`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        val listener = listenerOf(r)
+
         dictation.destroy()
-        val started = dictation.startSegment("de-DE")
-        assert(!started)
-        verify(recognizer, never()).startListening(any())
+        verify(r).destroy()
+        listener.onResults(resultsBundle("zu spaet"))
+        listener.onError(SpeechRecognizer.ERROR_NO_MATCH)
+        verify(callbacks, never()).onFinal(any())
+        verify(callbacks, never()).onError(any())
+    }
+
+    // --- No-text insertion path stays recoverable (AC-LIFECYCLE-2) ---
+
+    @Test
+    fun `a blank result surfaces no-speech and the field stays recoverable for another dictation`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        val listener = listenerOf(r)
+
+        listener.onResults(resultsBundle("   "))
+        verify(callbacks).onError(eq(RecognizerFailure.NO_SPEECH))
+
+        // The pending flag was cleared by the terminal (empty) result, so a fresh segment can start
+        // without recreating anything — the "no text inserted, then stops working" field bug.
+        assertTrue(dictation.startSegment("de-DE"))
+        verify(r, times(2)).startListening(any())
+    }
+
+    @Test
+    fun `missing results emit no-speech`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        listenerOf(r).onResults(Bundle())
+        verify(callbacks).onError(eq(RecognizerFailure.NO_SPEECH))
+    }
+
+    // --- Availability / privacy contract (AC-QUALITY-1) ---
+
+    @Test
+    fun `startSegment returns false when on-device recognition is unavailable`() {
+        val dictation = OnDeviceDictation(RecognizerFactory { null }, callbacks, intentFactory)
+        assertFalse(dictation.startSegment("de-DE"))
+        verify(callbacks, never()).onError(any())
+    }
+
+    @Test
+    fun `destroy prevents further starts and reports unavailable`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.destroy()
+        assertFalse(dictation.isAvailable)
+        assertFalse(dictation.startSegment("de-DE"))
+    }
+
+    // --- Error / stop mapping ---
+
+    @Test
+    fun `onError maps BUSY`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        listenerOf(r).onError(SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
+        verify(callbacks).onError(eq(RecognizerFailure.BUSY))
+    }
+
+    @Test
+    fun `onError maps language unavailable`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        listenerOf(r).onError(SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE)
+        verify(callbacks).onError(eq(RecognizerFailure.LANGUAGE_UNAVAILABLE))
+    }
+
+    @Test
+    fun `onPartialResults emits partial text and ignores blanks`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.startSegment("de-DE")
+        val listener = listenerOf(r)
+        listener.onPartialResults(resultsBundle("teil"))
+        verify(callbacks).onPartial(eq("teil"))
+        listener.onPartialResults(resultsBundle("   "))
+        verify(callbacks, times(1)).onPartial(any())
+    }
+
+    @Test
+    fun `stopSegment only stops a pending segment`() {
+        val r = mock<SpeechRecognizer>()
+        val dictation = OnDeviceDictation(QueueFactory(r), callbacks, intentFactory)
+        dictation.stopSegment()
+        verify(r, never()).stopListening()
+        dictation.startSegment("de-DE")
+        dictation.stopSegment()
+        verify(r).stopListening()
+    }
+
+    // --- German quality defaults, feature-detected (AC-QUALITY-1) ---
+
+    @Test
+    fun `default intent factory selects German and enables formatting on API 33+`() {
+        val built = DefaultRecognizeIntentFactory(sdkInt = 34, callingPackage = "net.hermes.dictate")
+            .create("de-DE")
+        assertEquals("de-DE", built.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE))
+        assertTrue(built.getBooleanExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false))
+        assertEquals(
+            RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY,
+            built.getStringExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING),
+        )
+    }
+
+    @Test
+    fun `default intent factory omits the formatting extra below API 33`() {
+        val built = DefaultRecognizeIntentFactory(sdkInt = 30).create("de-DE")
+        assertFalse(built.hasExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING))
+        assertEquals("de-DE", built.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE))
+        assertTrue(built.getBooleanExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false))
     }
 }

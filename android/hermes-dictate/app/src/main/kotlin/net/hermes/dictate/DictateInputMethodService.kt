@@ -9,7 +9,6 @@ import android.content.res.ColorStateList
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
-import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -196,9 +195,22 @@ class DictateInputMethodService :
         // Snapshot the field BEFORE composing text appears; every preview/commit of this
         // segment formats against it. Chained segments re-snapshot after the previous commit.
         segmentBefore = currentInputConnection?.getTextBeforeCursor(64, 0)?.toString() ?: ""
-        val d = dictation ?: OnDeviceDictation(SpeechRecognizer.createSpeechRecognizer(this), this).also { dictation = it }
+        val d = dictation ?: run {
+            // On-device only: if the dedicated recognizer is unavailable, surface it visibly
+            // rather than silently falling back to the networked recognizer (privacy contract).
+            if (!OnDeviceRecognizerFactory.isAvailable(this)) {
+                mainHandler.post { run(controller.recognizerError(RecognizerFailure.UNAVAILABLE)) }
+                return
+            }
+            OnDeviceDictation(
+                OnDeviceRecognizerFactory(this),
+                this,
+                DefaultRecognizeIntentFactory(callingPackage = packageName),
+            ).also { dictation = it }
+        }
         if (!d.startSegment(prefs.languageTag ?: "")) {
-            // If the recognizer rejected the segment, it is likely wedged. Recreate and retry once.
+            // If the recognizer rejected the segment, it is likely wedged. Destroy the instance,
+            // rebind a fresh one, and retry once.
             d.recreate()
             if (!d.startSegment(prefs.languageTag ?: "")) {
                 mainHandler.post { run(controller.recognizerError(RecognizerFailure.BUSY)) }
