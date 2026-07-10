@@ -3,3 +3,5 @@
 build/
 local.properties
 *.keystore
+# Staged debug APK for durable auth-download delivery (reports/by-task artifact, not a tracked binary)
+*.apk
