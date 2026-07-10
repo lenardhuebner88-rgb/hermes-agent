@@ -1,20 +1,30 @@
-/* Hermes Leitstand — one dark instrument-panel control room.
-   Deep navy surfaces, cyan live-signal, bright ink text — the same Leitstand
-   palette across all of /control (see ../theme.css / DESIGN.md).
-   Space Grotesk (UI/body/display) + JetBrains Mono (data) — the mockup's
-   geometric-sans voice, no editorial serif. */
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+/* Hermes Leitstand — DEPRECATED compat layer ("Bronze auf Graphit" era).
+   This file binds the legacy --hc-* / raw-utility vocabulary onto the
+   current token sheet in ../theme.css (the ONE source of truth — see
+   DESIGN.md). New code reaches for theme.css Tailwind utilities directly
+   (bg-surface-1, text-live, border-line, …); this compat layer exists only
+   so the ~600 pre-existing call-sites written against the old
+   --hc-* / navy-cyan vocabulary keep compiling while views migrate
+   per-route (Waves 3/4). Fonts are self-hosted @fontsource — never remote:
+   IBM Plex Sans (UI/body) + Archivo Variable (display) + IBM Plex Mono
+   (data). */
+@import "@fontsource-variable/archivo";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
 
 /* The upstream app body is dark teal; on the control route the light page must
    own the whole viewport (overscroll, uncovered strips). Scoped via :has so it
    only fires while /control is mounted — zero effect on the rest of the app. */
-body:has([data-control]) { background: #050b14; }
+body:has([data-control]) { background: var(--color-surface-0); }
 /* The upstream shell paints two more dark chrome pieces that the dark theme
    used to swallow: the root wrapper's bg-black and the desktop breadcrumb
    banner ("Control"). /control owns its full shell, so while it is mounted we
    neutralise both from here — fork-cold, no App.tsx touch (control renders no
    role="banner" of its own). */
-body:has([data-control]) [data-layout-variant] { background: #050b14; }
+body:has([data-control]) [data-layout-variant] { background: var(--color-surface-0); }
 body:has([data-control]) header[role="banner"] { display: none; }
 
 [data-control] {
@@ -22,51 +32,52 @@ body:has([data-control]) header[role="banner"] { display: none; }
      A warm bone-white field — NOT clinical #fff. The faint warm cast is what
      separates "printed instrument sheet" from generic SaaS white; cards sit
      near-white ON the paper so elevation reads as porcelain, not borders. */
-  --hc-bg:           #050b14;
-  --hc-bg-2:         #081322;
-  --hc-rail:         #081322;
-  --hc-panel:        #081322;
-  --hc-panel-2:      #0c1b2e;
-  --hc-panel-active: #102438;
-  --hc-panel-card:   #0c1b2e;
-  --hc-border:       #1b3049;
-  --hc-border-strong:#24405c;
-  --hc-text:         #e9f2f7;
+  --hc-bg:           var(--color-surface-0);
+  --hc-bg-2:         var(--color-surface-1);
+  --hc-rail:         var(--color-surface-1);
+  --hc-panel:        var(--color-surface-1);
+  --hc-panel-2:      var(--color-surface-2);
+  --hc-panel-active: var(--color-surface-3);
+  --hc-panel-card:   var(--color-surface-2);
+  --hc-border:       var(--color-line);
+  --hc-border-strong: color-mix(in srgb, var(--color-line) 55%, var(--color-ink-3) 45%);
+  --hc-text:         var(--color-ink);
   /* Leitstand ink hierarchy — now the ONE canvas, no more per-view dark
      override needed (formerly [data-statistik]/[data-command-home]/
      [data-fleet-theme] rebound these at their theme root). */
-  --hc-text-soft:    #9db4c4;
-  --hc-text-dim:     #64809a;
-  /* ── Live-cyan signal identity ─────────────────────────────────────────
-     Leitstand's interactive/live cyan carries interaction and identity on
-     the dark canvas. Names callers use (--hc-accent / -text / -wash /
-     -border) keep working. Accent = interaction only — never a status warn.
+  --hc-text-soft:    var(--color-ink-2);
+  --hc-text-dim:     var(--color-ink-3);
+  /* ── Bronze signal identity ─────────────────────────────────────────────
+     Leitstand's interactive/live accent is bronze — the one calibrated
+     channel on the warm-graphite canvas (see DESIGN.md, "Bronze auf
+     Graphit"). Names callers use (--hc-accent / -text / -wash / -border)
+     keep working. Accent = interaction only — never a status warn.
      (--hc-aurora keeps its name as the signal gradient.) */
-  --hc-accent:        #4fd8eb;
-  --hc-accent-strong: #7fe6f2;
-  --hc-accent-text:   #4fd8eb;
-  --hc-accent-wash:   rgba(79,216,235,.10);
-  --hc-accent-border: rgba(79,216,235,.32);
-  --hc-accent-glow:   0 0 0 1px rgba(79,216,235,.30), 0 6px 18px -8px rgba(79,216,235,.30);
-  --hc-accent-2:      #6f8fb8;
-  --hc-aurora:      linear-gradient(118deg,#4fd8eb 0%,#7fe6f2 48%,#6f8fb8 100%);
-  --hc-aurora-soft: linear-gradient(118deg,rgba(79,216,235,.10),rgba(127,230,242,.07) 45%,rgba(111,143,184,.07));
-  --hc-page-bloom:  radial-gradient(120% 90% at 0% -10%, rgba(79,216,235,.07) 0%, transparent 55%);
+  --hc-accent:        var(--color-live);
+  --hc-accent-strong: var(--color-bronze-hi);
+  --hc-accent-text:   var(--color-live);
+  --hc-accent-wash:   color-mix(in srgb, var(--color-live) 10%, transparent);
+  --hc-accent-border: color-mix(in srgb, var(--color-live) 32%, transparent);
+  --hc-accent-glow:   0 0 0 1px color-mix(in srgb, var(--color-live) 30%, transparent), 0 6px 18px -8px color-mix(in srgb, var(--color-live) 30%, transparent);
+  --hc-accent-2:      var(--color-brand);
+  --hc-aurora:      linear-gradient(118deg, var(--color-live) 0%, var(--color-bronze-hi) 48%, var(--color-brand) 100%);
+  --hc-aurora-soft: linear-gradient(118deg, color-mix(in srgb, var(--color-live) 10%, transparent), color-mix(in srgb, var(--color-bronze-hi) 7%, transparent) 45%, color-mix(in srgb, var(--color-brand) 7%, transparent));
+  --hc-page-bloom:  radial-gradient(120% 90% at 0% -10%, color-mix(in srgb, var(--color-live) 7%, transparent) 0%, transparent 55%);
   /* Status hues — bright enough to carry as text/dot/badge fill on dark. */
-  --hc-emerald: #3ddc97;
-  --hc-cyan:    #4fd8eb;
-  --hc-amber:   #f2b84b;
-  --hc-red:     #ff6b6b;
-  --hc-zinc:    #64809a;
-  --hc-font-sans: "Space Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --hc-font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --hc-emerald: var(--color-status-ok);
+  --hc-cyan:    var(--color-live);
+  --hc-amber:   var(--color-status-warn);
+  --hc-red:     var(--color-status-alert);
+  --hc-zinc:    var(--color-ink-3);
+  --hc-font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --hc-font-display: 'Archivo Variable', 'Arial Narrow', sans-serif;
   --agent-atlas: #0f766e;
   --agent-forge: #c2410c;
   --agent-pixel: #a21caf;
   --agent-lens: #a16207;
   --agent-spark: #be185d;
   --agent-james: #047857;
-  --hc-font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --hc-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
   --hc-radius: .625rem;
   /* Paper grain — one tiny inline-SVG noise tile, multiplied softly over the
      light surfaces so they read as paper stock, not flat digital white. */
@@ -119,12 +130,12 @@ body:has([data-control]) header[role="banner"] { display: none; }
   isolation: isolate;
   min-height: calc(100dvh - 7rem);
   margin: -0.5rem -0.75rem 0;
-  /* The Leitstand canvas: a faint cyan mist pooling from the top corners
-     over deep navy — atmosphere without losing instrument contrast. */
+  /* The Leitstand canvas: a faint bronze mist pooling from the top corners
+     over warm graphite — atmosphere without losing instrument contrast. */
   background:
-    radial-gradient(115% 78% at 6% -12%, rgba(79,216,235,.05), transparent 50%),
-    radial-gradient(85% 62% at 100% -6%, rgba(79,216,235,.04), transparent 48%),
-    linear-gradient(180deg, #081322 0%, #050b14 100%);
+    radial-gradient(115% 78% at 6% -12%, color-mix(in srgb, var(--color-live) 5%, transparent), transparent 50%),
+    radial-gradient(85% 62% at 100% -6%, color-mix(in srgb, var(--color-live) 4%, transparent), transparent 48%),
+    linear-gradient(180deg, var(--color-surface-1) 0%, var(--color-surface-0) 100%);
 }
 /* Grain — sits behind the content (z-index:-1, contained by isolation),
    never intercepts clicks, lifts the flat navy into instrument texture. */
@@ -135,20 +146,14 @@ body:has([data-control]) header[role="banner"] { display: none; }
   opacity: .04;
   mix-blend-mode: screen;
 }
-/* A single slow-drifting cyan mist — the only ambient motion; the room
-   breathes. Motion-safe, and content stays static (screenshot-safe). */
+/* A quiet static bronze mist in the corner — no ambient motion (Bronze auf
+   Graphit kills the drift animation entirely; content stays static and
+   screenshot-safe, motion-safe by construction). */
 .hc-page::after {
   content: ""; position: absolute; z-index: -1; pointer-events: none;
   left: -10%; top: -8%; width: 50%; height: 60%;
-  background: radial-gradient(circle at 30% 30%, rgba(79,216,235,.08), transparent 62%);
+  background: radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--color-live) 8%, transparent), transparent 62%);
   filter: blur(40px);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .hc-page::after { animation: hc-drift 26s ease-in-out infinite alternate; }
-}
-@keyframes hc-drift {
-  from { transform: translate3d(0, 0, 0) scale(1); opacity: .9; }
-  to   { transform: translate3d(8%, 6%, 0) scale(1.15); opacity: 1; }
 }
 
 /* ── Surface-depth ladder ─────────────────────────────────────────────────
@@ -201,9 +206,8 @@ body:has([data-control]) header[role="banner"] { display: none; }
    Six named steps. Components render a step via .hc-type-* (see <Text>),
    never ad-hoc font-size. ONE breakpoint bumps display+title at ≥1024px —
    no per-component responsive sizing anywhere downstream. */
-/* Display rides the editorial serif (Fraunces) with optical sizing — the
-   signature voice on hero numbers + statements. opsz makes it more dramatic
-   (higher contrast) as it scales up. */
+/* Display rides Archivo Variable (wdth+wght axes) with optical sizing — the
+   machined-plate voice on hero numbers + statements, semi-expanded caps. */
 .hc-type-display  { font-family: var(--hc-font-display); font-optical-sizing: auto; font-size: var(--hc-type-display);  font-weight: var(--hc-type-display-w);  letter-spacing: var(--hc-type-display-ls);  line-height: 1.0; }
 /* Mobile-tight step of the display voice — same properties as .hc-type-display,
    just smaller below sm (Hero's `tight` prop, Cockpit S5b: Flow-Header lief
@@ -368,8 +372,8 @@ body:has([data-control]) header[role="banner"] { display: none; }
     background: linear-gradient(
       90deg,
       transparent 0%,
-      rgba(79,216,235,.07) 45%,
-      rgba(79,216,235,.05) 55%,
+      color-mix(in srgb, var(--color-live) 7%, transparent) 45%,
+      color-mix(in srgb, var(--color-live) 5%, transparent) 55%,
       transparent 100%
     );
     animation: hc-shimmer 1.4s ease-in-out infinite;
@@ -409,8 +413,8 @@ body:has([data-control]) header[role="banner"] { display: none; }
   position: relative;
   border-color: color-mix(in srgb, var(--hc-accent) 24%, var(--hc-border));
   background:
-    radial-gradient(95% 120% at 82% 12%, rgba(79,216,235,.09), transparent 48%),
-    radial-gradient(70% 85% at 100% 90%, rgba(79,216,235,.07), transparent 56%),
+    radial-gradient(95% 120% at 82% 12%, color-mix(in srgb, var(--color-live) 9%, transparent), transparent 48%),
+    radial-gradient(70% 85% at 100% 90%, color-mix(in srgb, var(--color-live) 7%, transparent), transparent 56%),
     linear-gradient(180deg, var(--hc-panel-card) 0%, var(--hc-panel) 100%);
 }
 .hc-stats-signal::before {
@@ -450,7 +454,7 @@ body:has([data-control]) header[role="banner"] { display: none; }
   border: 1px solid color-mix(in srgb, var(--hc-role, var(--hc-zinc)) 34%, transparent);
   border-radius: 999px;
   font-size: 0.72rem; font-weight: 500;
-  color: color-mix(in srgb, var(--hc-role, var(--hc-text-soft)) 55%, #e9f2f7 45%);
+  color: color-mix(in srgb, var(--hc-role, var(--hc-text-soft)) 55%, var(--color-ink) 45%);
 }
 
 /* Thin stage progress rail under a stage pod. */
@@ -475,7 +479,7 @@ body:has([data-control]) header[role="banner"] { display: none; }
 [data-control] .hover\:text-white:hover { color: var(--hc-text); }
 [data-control] .text-zinc-100, [data-control] .text-zinc-200 { color: var(--hc-text); }
 [data-control] .hover\:text-zinc-200:hover { color: var(--hc-text); }
-[data-control] .text-zinc-300 { color: #7f97ab; }
+[data-control] .text-zinc-300 { color: color-mix(in srgb, var(--color-ink-2) 50%, var(--color-ink-3) 50%); }
 [data-control] .text-zinc-400 { color: var(--hc-text-soft); }
 [data-control] .text-zinc-500, [data-control] .text-zinc-600 { color: var(--hc-text-dim); }
 
@@ -493,20 +497,20 @@ body:has([data-control]) header[role="banner"] { display: none; }
 [data-control] .bg-white\/\[\.015\],
 [data-control] .bg-white\/\[\.02\],
 [data-control] .bg-white\/\[\.025\],
-[data-control] .bg-white\/\[\.03\] { background-color: rgba(233,242,247,.03); }
+[data-control] .bg-white\/\[\.03\] { background-color: color-mix(in srgb, var(--color-ink) 3%, transparent); }
 [data-control] .bg-white\/\[\.035\],
 [data-control] .bg-white\/\[\.04\],
 [data-control] .bg-white\/\[\.05\],
-[data-control] .bg-white\/5 { background-color: rgba(233,242,247,.045); }
-[data-control] .bg-white\/10 { background-color: rgba(233,242,247,.07); }
+[data-control] .bg-white\/5 { background-color: color-mix(in srgb, var(--color-ink) 4.5%, transparent); }
+[data-control] .bg-white\/10 { background-color: color-mix(in srgb, var(--color-ink) 7%, transparent); }
 [data-control] .hover\:bg-white\/\[\.03\]:hover,
 [data-control] .hover\:bg-white\/\[\.035\]:hover,
 [data-control] .hover\:bg-white\/\[\.04\]:hover,
-[data-control] .hover\:bg-white\/5:hover { background-color: rgba(233,242,247,.05); }
+[data-control] .hover\:bg-white\/5:hover { background-color: color-mix(in srgb, var(--color-ink) 5%, transparent); }
 [data-control] .hover\:bg-white\/\[\.06\]:hover,
 [data-control] .hover\:bg-white\/\[\.07\]:hover,
-[data-control] .hover\:bg-white\/10:hover { background-color: rgba(233,242,247,.07); }
-[data-control] .focus-visible\:bg-white\/\[\.045\]:focus-visible { background-color: rgba(233,242,247,.05); }
+[data-control] .hover\:bg-white\/10:hover { background-color: color-mix(in srgb, var(--color-ink) 7%, transparent); }
+[data-control] .focus-visible\:bg-white\/\[\.045\]:focus-visible { background-color: color-mix(in srgb, var(--color-ink) 5%, transparent); }
 
 /* Inset wells (code panes, logs) — a deeper black-tinted well. */
 [data-control] .bg-black\/15 { background-color: rgba(0,0,0,.18); }
@@ -515,37 +519,37 @@ body:has([data-control]) header[role="banner"] { display: none; }
 [data-control] .bg-black\/30 { background-color: rgba(0,0,0,.26); }
 [data-control] .bg-black\/40 { background-color: rgba(0,0,0,.30); }
 /* Modal scrims stay dark glass (content behind must recede)… */
-[data-control] .bg-black\/55 { background-color: rgba(2,6,12,.55); }
-[data-control] .bg-black\/60 { background-color: rgba(2,6,12,.60); }
-[data-control] .bg-black\/70 { background-color: rgba(2,6,12,.70); }
+[data-control] .bg-black\/55 { background-color: color-mix(in srgb, var(--color-surface-0) 55%, transparent); }
+[data-control] .bg-black\/60 { background-color: color-mix(in srgb, var(--color-surface-0) 60%, transparent); }
+[data-control] .bg-black\/70 { background-color: color-mix(in srgb, var(--color-surface-0) 70%, transparent); }
 /* …the mobile bottom nav stays dark glass too. */
-[data-control] .bg-black\/85 { background-color: rgba(8,19,34,.92); }
+[data-control] .bg-black\/85 { background-color: color-mix(in srgb, var(--color-surface-1) 92%, transparent); }
 
 /* Bright tone text (…-50/-100/-200/-300) → bright Leitstand status ink. */
 [data-control] .text-emerald-300,
 [data-control] .text-emerald-200,
-[data-control] .text-emerald-200\/80 { color: #3ddc97; }
+[data-control] .text-emerald-200\/80 { color: var(--color-status-ok); }
 [data-control] .text-emerald-100,
-[data-control] .text-emerald-100\/90 { color: #3ddc97; }
+[data-control] .text-emerald-100\/90 { color: var(--color-status-ok); }
 [data-control] .text-cyan-300,
-[data-control] .text-cyan-200 { color: #4fd8eb; }
+[data-control] .text-cyan-200 { color: var(--color-live); }
 [data-control] .text-cyan-100,
-[data-control] .text-cyan-50 { color: #4fd8eb; }
-[data-control] .text-sky-200 { color: #4fd8eb; }
-[data-control] .text-sky-100 { color: #4fd8eb; }
+[data-control] .text-cyan-50 { color: var(--color-live); }
+[data-control] .text-sky-200 { color: var(--color-live); }
+[data-control] .text-sky-100 { color: var(--color-live); }
 [data-control] .text-amber-300,
 [data-control] .text-amber-300\/80,
 [data-control] .text-amber-200,
-[data-control] .text-amber-200\/90 { color: #f2b84b; }
+[data-control] .text-amber-200\/90 { color: var(--color-status-warn); }
 [data-control] .text-amber-100,
 [data-control] .text-amber-100\/90,
-[data-control] .text-amber-100\/80 { color: #f2b84b; }
+[data-control] .text-amber-100\/80 { color: var(--color-status-warn); }
 [data-control] .text-red-300,
-[data-control] .text-red-200 { color: #ff6b6b; }
+[data-control] .text-red-200 { color: var(--color-status-alert); }
 [data-control] .text-red-100,
-[data-control] .text-red-50 { color: #ff6b6b; }
-[data-control] .text-rose-200 { color: #ff6b6b; }
-[data-control] .text-indigo-200 { color: #7fe6f2; }
+[data-control] .text-red-50 { color: var(--color-status-alert); }
+[data-control] .text-rose-200 { color: var(--color-status-alert); }
+[data-control] .text-indigo-200 { color: var(--color-bronze-hi); }
 [data-control] .text-violet-200 { color: var(--hc-accent-text); }
 
 /* Phase C (Programm 3): Lesetypografie für gerenderte Markdown-Prosa

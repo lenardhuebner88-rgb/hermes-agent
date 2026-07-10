@@ -10,20 +10,20 @@ const themeCssPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'th
 const themeCss = readFileSync(themeCssPath, 'utf-8');
 
 const expectedTokens: Record<string, string> = {
-  '--color-surface-0': '#050b14',
-  '--color-surface-1': '#081322',
-  '--color-surface-2': '#0c1b2e',
-  '--color-surface-3': '#102438',
-  '--color-line': '#1b3049',
-  '--color-line-soft': '#132338',
-  '--color-live': '#4fd8eb',
-  '--color-brand': '#6f8fb8',
-  '--color-status-ok': '#3ddc97',
-  '--color-status-warn': '#f2b84b',
-  '--color-status-alert': '#ff6b6b',
-  '--color-ink': '#e9f2f7',
-  '--color-ink-2': '#9db4c4',
-  '--color-ink-3': '#64809a',
+  '--color-surface-0': '#0e100f',
+  '--color-surface-1': '#141715',
+  '--color-surface-2': '#1a1e1b',
+  '--color-surface-3': '#232824',
+  '--color-line': '#2a302b',
+  '--color-line-soft': '#1e2420',
+  '--color-live': '#c9884a',
+  '--color-brand': '#8a8577',
+  '--color-status-ok': '#86b97e',
+  '--color-status-warn': '#d9b23a',
+  '--color-status-alert': '#e0604f',
+  '--color-ink': '#ebe7de',
+  '--color-ink-2': '#a9a59b',
+  '--color-ink-3': '#757166',
 };
 
 describe('Leitstand theme tokens (theme.css)', () => {
@@ -37,7 +37,7 @@ describe('Leitstand theme tokens (theme.css)', () => {
   });
 
   it('defines radius-panel and radius-card', () => {
-    expect(themeCss).toMatch(/--radius-panel:\s*14px\s*;/);
-    expect(themeCss).toMatch(/--radius-card:\s*10px\s*;/);
+    expect(themeCss).toMatch(/--radius-panel:\s*10px\s*;/);
+    expect(themeCss).toMatch(/--radius-card:\s*7px\s*;/);
   });
 });
