@@ -592,6 +592,122 @@ def test_children_carry_only_planspec_subtask_id_not_redundant_planspec_id():
     )
 
 
+# ---------------------------------------------------------------------------
+# scope_files / instructions: a PlanSpec author may pin the exact edit paths and
+# implementation guidance PER SUBTASK. Before this, both fields were silently
+# dropped at ingest (BindingSubtask used Pydantic extra=ignore), so a worker got
+# only AC bullets, refused to guess paths, blocked on "scope contract incomplete",
+# and auto-retry re-dispatched the identical body → a token-burning loop. These
+# fields must thread into the child body so the worker sees the paths/guidance.
+# ---------------------------------------------------------------------------
+
+
+def test_subtask_scope_files_and_instructions_thread_into_body():
+    """Author-provided scope_files + instructions must reach the worker via the
+    child body — they are the concrete paths the scope-contract worker refuses to
+    guess."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {
+                    "id": "S1",
+                    "title": "Fix CSS",
+                    "lane": "coder",
+                    "deps": [],
+                    "scope_files": [
+                        "web/src/control/styles/control-tokens.css",
+                        "web/src/control/styles/proseReadability.guard.test.ts",
+                    ],
+                    "instructions": "Set .hc-prose code to a light token; add a CSS guard test.",
+                },
+            ],
+        }
+    )
+    body = children[0]["body"]
+    assert "web/src/control/styles/control-tokens.css" in body
+    assert "web/src/control/styles/proseReadability.guard.test.ts" in body
+    assert "Set .hc-prose code to a light token" in body
+    # both are labelled so the worker can distinguish allowed paths from guidance
+    assert "Scope files" in body
+    assert "Instructions" in body
+
+
+def test_scope_path_with_ac_token_is_not_parsed_as_acceptance_criterion():
+    """Cross-family review (Codex 2026-07-12): a scope path containing an
+    ``AC-<id>`` token (e.g. ``docs/AC-123.md``) must NOT be scooped up as an
+    acceptance criterion by the AC-fallback body parser when the subtask carries
+    no structured AC. Scope paths are emitted without bullet markers precisely so
+    they cannot match ``_parse_acceptance_criteria``'s bullet regex."""
+    from hermes_cli.kanban_db import _parse_acceptance_criteria
+
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {
+                    "id": "S1",
+                    "title": "x",
+                    "lane": "coder",
+                    "deps": [],
+                    "scope_files": ["docs/AC-123.md", "src/foo.py"],
+                },
+            ],
+        }
+    )
+    body = children[0]["body"]
+    # the path is still present for the worker to read...
+    assert "docs/AC-123.md" in body
+    # ...but the AC-fallback parser must NOT treat it as a criterion
+    assert _parse_acceptance_criteria(body) is None
+
+
+def test_subtask_without_scope_files_body_byte_identical():
+    """Default-strict: a subtask WITHOUT scope_files/instructions produces the
+    exact pre-existing body (no empty 'Scope files'/'Instructions' sections)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+            ],
+        }
+    )
+    assert children[0]["body"] == "PlanSpec subtask: S1\n\nLane: coder"
+
+
+def test_unmarked_subtask_serialization_still_byte_identical_with_scope_fields():
+    """Adding scope_files/instructions must not grow the serialized shape of an
+    unmarked subtask — drop-when-empty, exactly like kind/review_tier."""
+    unmarked = BindingSubtask(id="S1", title="Build", lane="coder")
+    dumped = unmarked.model_dump(mode="json")
+    assert "scope_files" not in dumped
+    assert "instructions" not in dumped
+
+
+def test_marked_scope_files_subtask_serializes_its_fields():
+    """A subtask that DID set scope_files/instructions round-trips them (the
+    drop-when-empty serializer never hides a set value)."""
+    marked = BindingSubtask(
+        id="S1",
+        title="Fix",
+        lane="coder",
+        scope_files=["a.css"],
+        instructions="do the thing",
+    )
+    dumped = marked.model_dump(mode="json")
+    assert dumped["scope_files"] == ["a.css"]
+    assert dumped["instructions"] == "do the thing"
+
+
+def test_scope_files_are_stripped_and_emptied_entries_dropped():
+    """scope_files entries are cleaned like deps: whitespace stripped, blanks removed."""
+    marked = BindingSubtask(
+        id="S1", title="Fix", lane="coder", scope_files=["  a.css ", "", "  "],
+    )
+    assert marked.scope_files == ["a.css"]
+
+
 def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):
     plan = tmp_path / "compiler-plan.md"
     plan.write_text(VALID_PLAN, encoding="utf-8")

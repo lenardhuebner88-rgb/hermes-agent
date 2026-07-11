@@ -65,6 +65,15 @@ class BindingSubtask(BaseModel):
     # derived floor, so a PlanSpec author/operator keeps full control. Dropped
     # from serialization when None so unmarked subtasks stay byte-identical.
     max_iterations: int | None = None
+    # scope_files / instructions: a PlanSpec author may pin the exact edit paths
+    # and implementation guidance for this subtask. Before these existed the
+    # fields were silently dropped (extra=ignore), so a worker got only AC
+    # bullets, refused to guess paths, blocked on "scope contract incomplete",
+    # and auto-retry re-dispatched the identical body — a token-burning loop.
+    # Threaded into the child body so the worker sees them. Default empty ⇒
+    # dropped from serialization, so unmarked subtasks stay byte-identical.
+    scope_files: list[str] = Field(default_factory=list)
+    instructions: str = ""
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -82,7 +91,7 @@ class BindingSubtask(BaseModel):
             raise ValueError("max_iterations must be >= 1")
         return int(value)
 
-    @field_validator("deps")
+    @field_validator("deps", "scope_files")
     @classmethod
     def _clean_deps(cls, value: list[str]) -> list[str]:
         if not isinstance(value, list):
@@ -104,6 +113,12 @@ class BindingSubtask(BaseModel):
             data.pop("review_tier", None)
         if data.get("max_iterations") is None:
             data.pop("max_iterations", None)
+        # scope_files/instructions are dropped when empty so an unmarked subtask
+        # stays byte-identical to pre-scope-fields main (same rationale as kind).
+        if not data.get("scope_files"):
+            data.pop("scope_files", None)
+        if not str(data.get("instructions") or "").strip():
+            data.pop("instructions", None)
         return data
 
 
@@ -582,6 +597,23 @@ def taskgraph_hints_to_children(
         body_parts.append(f"Lane: {task.lane}")
         if task.deps:
             body_parts.append("Depends on: " + ", ".join(task.deps))
+        # Thread author-pinned scope into the body so the scope-contract worker
+        # sees the exact allowed edit paths and guidance instead of blocking to
+        # ask for them. Emitted only when set, so unmarked subtasks stay
+        # byte-identical.
+        if task.scope_files:
+            # Paths are listed WITHOUT a bullet marker on purpose: the AC-fallback
+            # body parser (kanban_db._parse_acceptance_criteria) treats any
+            # ``- …`` / ``* …`` / ``N. …`` line containing an ``AC-<id>`` token as
+            # an acceptance criterion, so a scope path like ``docs/AC-123.md``
+            # emitted as a bullet would be misparsed as an AC when the subtask
+            # carries no structured AC. Bare path lines cannot match that regex.
+            body_parts.append(
+                "Scope files (allowed edit paths):\n"
+                + "\n".join(task.scope_files)
+            )
+        if task.instructions.strip():
+            body_parts.append("Instructions:\n" + task.instructions.strip())
         # Thread AC bullets into the body for backwards-readable task bodies,
         # and pass the structured items separately for the DB store.
         ac_items = _ac_items_for_subtask(task, effective_plan_ac)
