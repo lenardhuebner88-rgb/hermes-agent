@@ -1706,12 +1706,15 @@ export function useChainGraph(rootId: string | null, board: string | null = null
   const [error, setError] = useState("");
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
+  const paramsRef = useRef({ rootId, board });
   useEffect(() => () => { aliveRef.current = false; }, []);
+  useEffect(() => { paramsRef.current = { rootId, board }; }, [rootId, board]);
   const reload = useCallback(async (): Promise<ChainGraphResponse | null> => {
     if (!rootId) {
       if (aliveRef.current) setData(null);
       return null;
     }
+    const startParams = { rootId, board };
     inFlightRef.current = true;
     if (aliveRef.current) setLoading(true);
     try {
@@ -1720,18 +1723,19 @@ export function useChainGraph(rootId: string | null, board: string | null = null
         await fetchJSON<unknown>(withBoardParam(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/chain-graph`, board)),
         "chain-graph",
       );
-      if (aliveRef.current) {
+      // Board-Switch-Race: Ergebnis verwerfen, wenn sich die Params geändert haben.
+      if (aliveRef.current && paramsRef.current.rootId === startParams.rootId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
       }
       return parsed;
     } catch (e) {
       const detail = extractDetail(e);
-      if (aliveRef.current) setError(detail);
+      if (aliveRef.current && paramsRef.current.rootId === startParams.rootId && paramsRef.current.board === startParams.board) setError(detail);
       return null;
     } finally {
       inFlightRef.current = false;
-      if (aliveRef.current) setLoading(false);
+      if (aliveRef.current && paramsRef.current.rootId === startParams.rootId && paramsRef.current.board === startParams.board) setLoading(false);
     }
   }, [rootId, board]);
   useEffect(() => {
@@ -2063,12 +2067,15 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
   const [error, setError] = useState("");
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
+  const paramsRef = useRef({ taskId, board });
   useEffect(() => () => { aliveRef.current = false; }, []);
+  useEffect(() => { paramsRef.current = { taskId, board }; }, [taskId, board]);
   const reload = useCallback(async (): Promise<ChainCostsResponse | null> => {
     if (!taskId) {
       if (aliveRef.current) setData(null);
       return null;
     }
+    const startParams = { taskId, board };
     inFlightRef.current = true;
     if (aliveRef.current) setLoading(true);
     try {
@@ -2077,18 +2084,19 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
         await fetchJSON<unknown>(withBoardParam(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/chain-costs`, board)),
         "chain-costs",
       );
-      if (aliveRef.current) {
+      // Board-Switch-Race: Ergebnis verwerfen, wenn sich die Params geändert haben.
+      if (aliveRef.current && paramsRef.current.taskId === startParams.taskId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
       }
       return parsed;
     } catch (e) {
       const detail = extractDetail(e);
-      if (aliveRef.current) setError(detail);
+      if (aliveRef.current && paramsRef.current.taskId === startParams.taskId && paramsRef.current.board === startParams.board) setError(detail);
       return null;
     } finally {
       inFlightRef.current = false;
-      if (aliveRef.current) setLoading(false);
+      if (aliveRef.current && paramsRef.current.taskId === startParams.taskId && paramsRef.current.board === startParams.board) setLoading(false);
     }
   }, [taskId, board]);
   useEffect(() => {

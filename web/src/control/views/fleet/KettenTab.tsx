@@ -72,6 +72,19 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
     return chips.find((c) => c.state === "active")?.rootId ?? chips[0]?.rootId ?? null;
   }, [userSelectedRootId, chips]);
 
+  // Board-Switch Race-Fix: fetch nur mit einer rootId, die auch im aktuellen Board
+  // vorkommt. Solange der alte selectedRootId noch nicht auf den neuen Chip-Bestand
+  // umgeschwenkt ist, liefern wir null und unterdrücken den 404-Fetch.
+  const allBoardRootIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const t of allBoardTasks) if (t.root_id) ids.add(t.root_id);
+    return ids;
+  }, [allBoardTasks]);
+  const validRootId = useMemo(() => {
+    if (!selectedRootId) return null;
+    return allBoardRootIds.has(selectedRootId) ? selectedRootId : null;
+  }, [selectedRootId, allBoardRootIds]);
+
   const handleChipSelect = useCallback((rootId: string) => {
     setUserSelectedRootId(rootId);
   }, []);
@@ -85,10 +98,10 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const hiddenCompletedCount = completedChips.length - 3;
   const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
 
-  const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId, boardSlug);
+  const { data: chainGraph, loading: chainLoading } = useChainGraph(validRootId, boardSlug);
   const nodes = chainGraph?.nodes ?? [];
 
-  const chainCosts = useHermesChainCosts(selectedRootId, boardSlug);
+  const chainCosts = useHermesChainCosts(validRootId, boardSlug);
   const verdicts = useHermesReviewVerdicts(boardSlug);
 
   // === Worker-Join (v4): join ChainNode → Worker via task_id ===
