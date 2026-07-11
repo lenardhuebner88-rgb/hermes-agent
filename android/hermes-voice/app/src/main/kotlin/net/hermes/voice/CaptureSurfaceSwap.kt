@@ -47,3 +47,9 @@ object CaptureThreadOwnership {
     fun shouldDispatchStop(hasCaptureHandler: Boolean, onCaptureThread: Boolean): Boolean =
         hasCaptureHandler && !onCaptureThread
 }
+
+/** Final privacy gate for a captured frame, evaluated while stop ordering is locked. */
+object CaptureDeliveryPolicy {
+    fun shouldDeliver(hasEncodedFrame: Boolean, stopRequested: Boolean): Boolean =
+        hasEncodedFrame && !stopRequested
+}

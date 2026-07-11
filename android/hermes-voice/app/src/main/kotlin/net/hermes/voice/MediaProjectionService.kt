@@ -248,11 +248,20 @@ class MediaProjectionService : Service() {
     private fun pollFrame() {
         if (framesPaused || detailCaptureActive || stopRequested.get()) return
         val bitmap = acquireLatestBitmap() ?: return
-        val jpeg = encodeWithinBudget(bitmap, MAX_EDGE_PX, INITIAL_QUALITY_PERCENT)
-        bitmap.recycle()
-        if (jpeg != null) {
-            val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
-            HermesBridge.send(NativeToWebMessage.ScreenFrame(base64))
+        if (stopRequested.get()) {
+            bitmap.recycle()
+            return
+        }
+        val jpeg = try {
+            encodeWithinBudget(bitmap, MAX_EDGE_PX, INITIAL_QUALITY_PERCENT)
+        } finally {
+            bitmap.recycle()
+        }
+        val base64 = jpeg?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+        synchronized(surfaceLock) {
+            if (CaptureDeliveryPolicy.shouldDeliver(base64 != null, stopRequested.get())) {
+                HermesBridge.send(NativeToWebMessage.ScreenFrame(base64!!))
+            }
         }
     }
 
@@ -475,7 +484,10 @@ class MediaProjectionService : Service() {
         val captureHandler = handler
         val onCaptureThread = captureHandler != null && Looper.myLooper() == captureHandler.looper
         if (CaptureThreadOwnership.shouldDispatchStop(captureHandler != null, onCaptureThread)) {
-            if (!stopRequested.compareAndSet(false, true)) return
+            val firstRequest = synchronized(surfaceLock) {
+                stopRequested.compareAndSet(false, true)
+            }
+            if (!firstRequest) return
             val posted = captureHandler?.postAtFrontOfQueue { stopCaptureOnOwnerThread(reason) }
             if (posted == true) return
             // A rejected post means the capture looper is already shutting down. If teardown
@@ -483,7 +495,9 @@ class MediaProjectionService : Service() {
             stopCaptureOnOwnerThread(reason)
             return
         }
-        stopRequested.set(true)
+        synchronized(surfaceLock) {
+            stopRequested.set(true)
+        }
         stopCaptureOnOwnerThread(reason)
     }
 
