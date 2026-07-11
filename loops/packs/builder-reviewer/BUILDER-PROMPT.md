@@ -42,7 +42,7 @@ dann beende den Turn.
    ```
    git commit -m "loop(builder-reviewer): <plan-id> <kurztitel>
 
-   Co-Authored-By: Claude <noreply@anthropic.com>"
+   Co-Authored-By: OpenAI Codex <noreply@openai.com>"
    ```
 6. Schreibe nach {{STATE_DIR}}/last-status GENAU eine Zeile:
    - `BUILT <plan-id>` bei Erfolg

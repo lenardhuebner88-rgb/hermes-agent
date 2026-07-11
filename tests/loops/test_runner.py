@@ -274,7 +274,8 @@ def test_shipped_builder_reviewer_pack_loads():
     assert pack.type == "pipeline"
     assert set(pack.phases) == {"plan", "build", "verify"}
     assert pack.phases["plan"].model == "claude-opus-4-8"
-    assert pack.phases["build"].model == "claude-sonnet-5"
+    assert pack.phases["build"].engine == "codex"
+    assert pack.phases["build"].model == "gpt-5.6-sol"
     assert pack.stop["fail_streak"] == 2
     assert pack.stop["dry_rounds"] == 2  # Default gemerged
     assert pack.branch == "loop/builder-reviewer"
