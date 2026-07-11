@@ -42,6 +42,18 @@ if [[ ${#projects[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Worker shells are non-login: JAVA_HOME is usually unset there, but Gradle
+# refuses to start without it. Best-effort probe of the known JDK locations;
+# when none is found, gradlew itself fails with its own clear message.
+if [[ -z "${JAVA_HOME:-}" ]]; then
+  for candidate in "${HOME:-/nonexistent}/Android/jdk" /usr/lib/jvm/default-java /usr/lib/jvm/*; do
+    if [[ -x "$candidate/bin/java" ]]; then
+      export JAVA_HOME="$candidate"
+      break
+    fi
+  done
+fi
+
 mapfile -t projects < <(printf '%s\n' "${projects[@]}" | sort -u)
 for project in "${projects[@]}"; do
   project_dir="$REPO_ROOT/$project"
