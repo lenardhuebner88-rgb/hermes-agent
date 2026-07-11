@@ -16413,6 +16413,13 @@ _HEILER_OUTCOME_FALLBACK_CLASS = {
     "release_gate_red": HEILER_CLASS_REAL_BUG,
     "release_gate_infra": HEILER_CLASS_TRANSIENT,
 }
+# ESCALATION-CLASSIFY-RELEASE-GATE-PARK-S1: the two synthetic trigger_outcomes a
+# release gate that ACTUALLY RAN carries (set by
+# ``kanban_worktrees._escalate_release_gate`` → mapped real-bug / transient
+# above). A pre-run "awaiting release-gate GO" park is reclassified to
+# operator-gated ONLY when its trigger_outcome is NOT one of these, so a gate
+# that ran and ended red/infra is never masked (AC-2).
+_RELEASE_GATE_RAN_OUTCOMES = frozenset({"release_gate_red", "release_gate_infra"})
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
 }
@@ -18767,12 +18774,44 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
     last_error = str(evidence.get("last_error") or "")
     outcome = evidence.get("trigger_outcome")
     stall_class = evidence.get("stall_class")
-    return _classify_failure(
+    h_class, h_ev = _classify_failure(
         error=last_error,
         outcome=str(outcome) if outcome else None,
         stall_class=str(stall_class) if stall_class else None,
         reason=why_now,
     )
+    # ESCALATION-CLASSIFY-RELEASE-GATE-PARK-S1: a pre-run "awaiting release-gate
+    # GO" park is an operator gate (the operator must run
+    # ``hermes kanban release-gate <id>`` — the recommended_human_action the
+    # escalation already hands), never a product defect. The silent-block sweep
+    # stamps ``release_gate_candidate=True`` on exactly this park (block reason ==
+    # RELEASE_GATE_BLOCK_REASON), but the free-text classifier never read that
+    # structural flag — the park's boilerplate reason matches no signal, so it
+    # fell to ``unclassified`` (the dominant live 26/59 cluster). Reclassify it
+    # to the existing operator-gated class (the next phrase of the already-
+    # approved declassifier chain, not a new class).
+    #
+    # AC-2 is enforced by construction two ways: (1) only reached when
+    # ``_classify_failure`` returned UNCLASSIFIED, so this can never pull a task
+    # OUT of a real-error class; (2) excluded when the trigger_outcome is a gate
+    # that actually RAN red/infra (``_RELEASE_GATE_RAN_OUTCOMES``), so a genuine
+    # release-gate red is never masked as operator-gated.
+    if (
+        h_class == HEILER_CLASS_UNCLASSIFIED
+        and evidence.get("release_gate_candidate") is True
+        and str(outcome or "") not in _RELEASE_GATE_RAN_OUTCOMES
+    ):
+        ev = {
+            "matched": "release_gate_candidate",
+            "signal_source": "release_gate_candidate",
+        }
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return HEILER_CLASS_OPERATOR_GATED, ev
+    return h_class, h_ev
 
 
 def _escalated_classes_for_task(
