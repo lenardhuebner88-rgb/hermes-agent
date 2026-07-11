@@ -67,9 +67,10 @@
       }
 
       body {
-        min-width: 20rem;
+        min-width: 0;
         min-height: 100svh;
         margin: 0;
+        overflow-x: clip;
         background:
           radial-gradient(circle at 50% -10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
           linear-gradient(165deg, var(--color-surface-1) 0%, var(--color-surface-0) 55%, #050605 100%);
@@ -135,6 +136,10 @@
         font-weight: 750;
         letter-spacing: 0.1em;
         text-transform: uppercase;
+      }
+
+      #mode-badge[hidden] {
+        display: none;
       }
 
       #mode-badge[data-mode="live"] {
@@ -755,14 +760,336 @@
           transition-duration: 0.01ms !important;
         }
       }
+
+      /* Native app shell — one centered mobile viewport with every control
+         constrained to its own grid track. This deliberately avoids a
+         wrapping utility header: that layout was the source of the sideways
+         scroll on narrow Android WebViews. */
+      main {
+        width: min(100%, 31.5rem);
+        min-width: 0;
+        padding:
+          max(1rem, env(safe-area-inset-top))
+          max(1rem, env(safe-area-inset-right))
+          max(1rem, env(safe-area-inset-bottom))
+          max(1rem, env(safe-area-inset-left));
+        gap: 0.85rem;
+        grid-template-rows: auto auto minmax(18rem, 1fr) auto auto auto;
+      }
+
+      .app-header {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .brand-identity {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 0.65rem;
+      }
+
+      .brand-identity img {
+        width: 2.65rem;
+        height: 2.65rem;
+        flex: 0 0 auto;
+        filter: drop-shadow(0 0 0.85rem color-mix(in srgb, var(--color-spar) 22%, transparent));
+      }
+
+      .brand-identity h1 {
+        overflow: hidden;
+        margin: 0;
+        color: var(--color-ink);
+        font-size: clamp(0.78rem, 3.5vw, 0.94rem);
+        font-weight: 760;
+        letter-spacing: 0.16em;
+        text-overflow: ellipsis;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      #mode-toggle {
+        flex: 0 0 auto;
+        background: color-mix(in srgb, var(--color-surface-2) 82%, transparent);
+      }
+
+      #mode-toggle button {
+        min-width: 3.2rem;
+        min-height: 2.25rem;
+        padding: 0.35rem 0.72rem;
+      }
+
+      .privacy-row {
+        display: flex;
+        min-width: 0;
+        min-height: 1.8rem;
+        align-items: center;
+        justify-content: center;
+        gap: 0.45rem;
+        color: var(--color-ink-2);
+        font-size: 0.76rem;
+        letter-spacing: 0.02em;
+      }
+
+      .privacy-dot {
+        width: 0.46rem;
+        height: 0.46rem;
+        border-radius: 50%;
+        background: var(--color-spar-hi);
+        box-shadow: 0 0 0.8rem color-mix(in srgb, var(--color-spar-hi) 65%, transparent);
+      }
+
+      #install-chip {
+        min-height: 1.8rem;
+        margin-left: 0.2rem;
+        padding: 0.2rem 0.65rem;
+        font-size: 0.58rem;
+      }
+
+      .state-card {
+        min-width: 0;
+        min-height: 18rem;
+        padding: 2rem 1rem;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+        isolation: isolate;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      .state-card:focus-visible {
+        outline: 2px solid var(--accent-hi);
+        outline-offset: -2px;
+      }
+
+      .state-card::before {
+        position: absolute;
+        inset: 8% 9%;
+        z-index: -1;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 10%, transparent), transparent 68%);
+        content: "";
+        filter: blur(0.5rem);
+      }
+
+      .status-orb {
+        width: min(73vw, 19.5rem);
+        height: min(73vw, 19.5rem);
+        background:
+          radial-gradient(circle at 50% 46%, color-mix(in srgb, var(--color-surface-3) 72%, transparent), transparent 58%),
+          conic-gradient(from 205deg, var(--color-spar-hi), color-mix(in srgb, var(--color-spar) 28%, transparent) 31%, color-mix(in srgb, var(--color-bronze-hi) 30%, transparent) 68%, var(--color-bronze-hi));
+        box-shadow: 0 0 4.5rem color-mix(in srgb, var(--accent) 13%, transparent);
+      }
+
+      .status-orb::before {
+        inset: 0.38rem;
+        border-color: color-mix(in srgb, var(--color-ink) 28%, transparent);
+        background: var(--color-surface-0);
+      }
+
+      .status-orb::after {
+        inset: 2.25rem;
+        border-color: color-mix(in srgb, var(--accent-hi) 36%, transparent);
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, var(--color-surface-1)), var(--color-surface-0) 72%);
+        box-shadow: inset 0 0 2.75rem rgba(0, 0, 0, 0.4), 0 0 2.5rem color-mix(in srgb, var(--accent) 18%, transparent);
+      }
+
+      #voice-status {
+        font-size: clamp(2.7rem, 15vw, 4.9rem);
+        text-transform: capitalize;
+      }
+
+      #status-detail {
+        max-width: 15rem;
+        min-height: auto;
+        margin-top: 0.8rem;
+        font-size: 0.9rem;
+      }
+
+      .sharing-actions {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.7rem;
+      }
+
+      .share-button {
+        display: grid;
+        min-width: 0;
+        min-height: 5.25rem;
+        padding: 0.75rem;
+        border-radius: 1.25rem;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        color: var(--color-ink);
+        background: color-mix(in srgb, var(--color-surface-2) 78%, transparent);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+        font-size: 0.78rem;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+
+      .share-button svg {
+        width: 1.45rem;
+        height: 1.45rem;
+        color: var(--color-ink-2);
+      }
+
+      .share-button-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .share-switch {
+        width: 0.62rem;
+        height: 0.62rem;
+        border: 1px solid var(--color-ink-3);
+        border-radius: 50%;
+      }
+
+      .share-button[aria-pressed="true"] .share-switch {
+        border-color: #fff;
+        background: #fff;
+        box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--color-status-alert) 55%, transparent);
+      }
+
+      .share-meta {
+        display: flex;
+        min-width: 0;
+        grid-column: 1 / -1;
+        align-items: center;
+        justify-content: center;
+        gap: 0.65rem;
+      }
+
+      .sharing-preview {
+        width: 4rem;
+        max-height: 3rem;
+      }
+
+      .share-hint {
+        grid-column: 1 / -1;
+        padding-inline: 0.25rem;
+        text-align: center;
+      }
+
+      .transcript-card {
+        min-width: 0;
+        min-height: 0;
+        padding: 0.9rem 0.2rem 0;
+        border: 0;
+        border-top: 1px solid var(--color-line-soft);
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+        backdrop-filter: none;
+      }
+
+      .section-title {
+        margin-bottom: 0.55rem;
+        text-align: center;
+      }
+
+      #transcript {
+        max-height: min(28svh, 14rem);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+      }
+
+      #transcript-empty {
+        margin: 0.75rem 0 1rem;
+        font-size: 0.88rem;
+      }
+
+      #composer {
+        min-width: 0;
+        margin-top: 0.7rem;
+      }
+
+      #composer-input {
+        min-width: 0;
+        min-height: 3.15rem;
+        background: color-mix(in srgb, var(--color-surface-2) 82%, transparent);
+      }
+
+      #composer-submit {
+        width: 3.15rem;
+        min-width: 3.15rem;
+        min-height: 3.15rem;
+        padding: 0;
+        font-size: 0;
+      }
+
+      #composer-submit::before {
+        content: "➤";
+        font-size: 1.15rem;
+      }
+
+      .action-bar {
+        bottom: max(0.5rem, env(safe-area-inset-bottom));
+        min-width: 0;
+        padding-top: 0.25rem;
+        background: linear-gradient(to bottom, transparent, var(--color-surface-0) 24%);
+      }
+
+      #session-button,
+      #talk-button {
+        min-height: 4rem;
+        border-radius: 1.4rem;
+      }
+
+      @media (max-width: 23rem) {
+        main {
+          padding-inline: max(0.7rem, env(safe-area-inset-left));
+        }
+
+        .brand-identity h1 {
+          font-size: 0.7rem;
+          letter-spacing: 0.1em;
+        }
+
+        #mode-toggle button {
+          min-width: 2.75rem;
+          padding-inline: 0.5rem;
+        }
+      }
+
+      @media (min-width: 64rem) {
+        main {
+          width: min(100%, 31.5rem);
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: auto auto minmax(18rem, 1fr) auto auto auto;
+          grid-template-areas: none;
+        }
+
+        .app-header,
+        .state-card,
+        .action-bar,
+        .transcript-card {
+          grid-area: auto;
+        }
+
+        .transcript-card {
+          display: block;
+          max-height: none;
+          overflow: visible;
+        }
+      }
     </style>
     <script src="/voice/app.js" defer></script>
   </head>
   <body data-voice-state="idle">
     <main>
-      <header class="brand">
-        <img src="/voice/icon.svg" alt="" width="32" height="32" />
-        <h1>Hermes Voice</h1>
+      <header class="app-header">
+        <div class="brand-identity">
+          <img src="/voice/icon.svg" alt="" width="43" height="43" />
+          <h1>Hermes Voice</h1>
+        </div>
         <div id="mode-toggle" role="radiogroup" aria-label="Sprachmodus">
           <button
             type="button"
@@ -782,48 +1109,26 @@
           </button>
         </div>
         <span id="mode-badge" hidden></span>
-        <button id="install-chip" type="button" class="chip-button" hidden>Installieren</button>
-        <button
-          id="camera-chip"
-          type="button"
-          class="chip-button"
-          aria-pressed="false"
-          title="Kamera für Hermes freigeben"
-        >
-          📷 Kamera
-        </button>
-        <button
-          id="screen-chip"
-          type="button"
-          class="chip-button"
-          aria-pressed="false"
-          title="Bildschirm für Hermes freigeben"
-        >
-          🖥️ Bildschirm
-        </button>
-        <span id="screen-share-hint" class="share-hint" role="status" hidden>
-          Bildschirmteilen wird von Chrome auf Android noch nicht unterstützt.
-          Nutze die Kamera oder einen Desktop-Browser.
-        </span>
-        <span id="sharing-indicator" class="sharing-indicator" hidden>
-          <span class="sharing-dot" aria-hidden="true"></span>
-          <span>teilt</span>
-        </span>
-        <video
-          id="sharing-preview"
-          class="sharing-preview"
-          autoplay
-          muted
-          playsinline
-          hidden
-        ></video>
       </header>
 
-      <section class="state-card" aria-labelledby="voice-status">
+      <div class="privacy-row" aria-label="Verbindungsstatus">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        <span>Privat · Bereit</span>
+        <button id="install-chip" type="button" class="chip-button" hidden>Installieren</button>
+      </div>
+
+      <section
+        id="voice-trigger"
+        class="state-card"
+        role="button"
+        tabindex="0"
+        aria-label="Sprachsitzung starten"
+        aria-describedby="voice-status status-detail"
+      >
         <div class="status-orb" aria-hidden="true"></div>
         <div class="state-copy" role="status" aria-live="polite" aria-atomic="true">
           <p id="voice-status">bereit</p>
-          <p id="status-detail">Starte eine sichere Sprachsitzung, wenn du bereit bist.</p>
+          <p id="status-detail">Tippen, um zu sprechen</p>
           <div id="usage-meter" class="usage-meter" hidden>
             <div class="usage-meter-track">
               <div id="usage-meter-fill" class="usage-meter-fill"></div>
@@ -833,15 +1138,49 @@
         </div>
       </section>
 
+      <section class="sharing-actions" aria-label="Sehen freigeben">
+        <button
+          id="camera-chip"
+          type="button" class="chip-button share-button"
+          aria-pressed="false"
+          title="Kamera für Hermes freigeben"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h3l1.4-2h7.2l1.4 2h3v11H4zM12 10a3.25 3.25 0 1 0 0 6.5A3.25 3.25 0 0 0 12 10Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <span class="share-button-label">Kamera</span>
+          <span class="share-switch" aria-hidden="true"></span>
+        </button>
+        <button
+          id="screen-chip"
+          type="button" class="chip-button share-button"
+          aria-pressed="false"
+          title="Bildschirm für Hermes freigeben"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5.5h17v11h-17zM8.5 20h7M12 16.5V20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="share-button-label">Bildschirm</span>
+          <span class="share-switch" aria-hidden="true"></span>
+        </button>
+        <span id="screen-share-hint" class="share-hint" role="status" hidden>
+          Bildschirmteilen wird von Chrome auf Android noch nicht unterstützt.
+          Nutze die Kamera oder einen Desktop-Browser.
+        </span>
+        <div class="share-meta">
+          <span id="sharing-indicator" class="sharing-indicator" hidden>
+            <span class="sharing-dot" aria-hidden="true"></span>
+            <span>teilt</span>
+          </span>
+          <video id="sharing-preview" class="sharing-preview" autoplay muted playsinline hidden></video>
+        </div>
+      </section>
+
       <section class="transcript-card" aria-labelledby="transcript-title">
-        <h2 class="section-title" id="transcript-title">Gespräch</h2>
+        <h2 class="section-title" id="transcript-title">Letztes Gespräch</h2>
         <div id="transcript" aria-live="polite" aria-relevant="additions text"></div>
         <p id="transcript-empty">Noch kein Gespräch.</p>
         <form id="composer">
           <input
             id="composer-input"
             type="text"
-            placeholder="Oder schreib Hermes …"
+            placeholder="Nachricht an Hermes …"
             aria-label="Nachricht an Hermes"
             aria-disabled="true"
             autocomplete="off"
@@ -861,7 +1200,7 @@
           Gedrückt halten zum Sprechen
         </button>
         <button id="session-button" type="button" aria-label="Sprachsitzung starten">
-          Start
+          Sitzung starten
         </button>
       </div>
     </main>

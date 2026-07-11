@@ -2820,6 +2820,36 @@ def test_voice_client_install_chip_and_text_send_and_no_session_hint():
     assert "Starte zuerst eine Sitzung, dann kannst du auch schreiben." in script
 
 
+def test_voice_client_native_app_shell_prevents_horizontal_overflow():
+    """The mobile shell keeps every control in a bounded grid instead of
+    wrapping all header actions into a row wider than an Android WebView."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+
+    assert "overflow-x: clip;" in document
+    assert "min-width: 0;" in document
+    assert 'class="app-header"' in document
+    assert 'class="sharing-actions"' in document
+    assert 'id="voice-trigger"' in document
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in document
+    assert "#mode-badge[hidden]" in document
+    assert 'placeholder="Nachricht an Hermes …"' in document
+    assert "Sitzung starten" in document
+
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+    assert 'voiceTriggerElement?.addEventListener("click"' in script
+
+
+def test_voice_app_icon_uses_native_shell_palette():
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    icon = (client_dir / "icon.svg").read_text(encoding="utf-8")
+
+    assert "#0d100f" in icon
+    assert "#7bd0c0" in icon
+    assert "#dda05f" in icon
+    assert 'id="ring"' in icon
+
+
 def test_voice_client_video_sharing_capture_pipeline_tripwires():
     """"Sehen" client tripwire: camera/screen capture and the wire format
     sent over the voice websocket. Checks source-level, like the other

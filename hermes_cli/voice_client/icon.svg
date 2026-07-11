@@ -1,6 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hermes Voice">
-  <rect width="512" height="512" rx="120" fill="#071310"/>
-  <circle cx="256" cy="256" r="176" fill="#0d2b22" stroke="#34d399" stroke-width="16"/>
-  <path d="M148 266h42l24-82 42 154 42-154 24 82h42" fill="none" stroke="#a7f3d0" stroke-linecap="round" stroke-linejoin="round" stroke-width="28"/>
-  <circle cx="256" cy="256" r="22" fill="#34d399"/>
+  <defs>
+    <radialGradient id="bg" cx="42%" cy="32%" r="76%">
+      <stop offset="0" stop-color="#1a211e"/>
+      <stop offset="1" stop-color="#0d100f"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="82" y1="84" x2="430" y2="428" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7bd0c0"/>
+      <stop offset=".54" stop-color="#5fb8a8"/>
+      <stop offset="1" stop-color="#dda05f"/>
+    </linearGradient>
+    <filter id="glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="9" y="9" width="494" height="494" rx="108" fill="none" stroke="#2a302b" stroke-width="10"/>
+  <circle cx="256" cy="256" r="168" fill="#101512" stroke="url(#ring)" stroke-width="14" filter="url(#glow)"/>
+  <circle cx="256" cy="256" r="142" fill="none" stroke="#ebe7de" stroke-opacity=".14" stroke-width="4"/>
+  <path d="M126 264h54l25-82 43 154 42-154 25 82h71" fill="none" stroke="url(#ring)" stroke-linecap="round" stroke-linejoin="round" stroke-width="25" filter="url(#glow)"/>
+  <circle cx="256" cy="256" r="10" fill="#ebe7de"/>
 </svg>

@@ -56,6 +56,7 @@ const sharingPreviewElement = document.querySelector("#sharing-preview");
 const modeLiveButton = document.querySelector('[data-mode-option="live"]');
 const modeSparButton = document.querySelector('[data-mode-option="spar"]');
 const talkButtonElement = document.querySelector("#talk-button");
+const voiceTriggerElement = document.querySelector("#voice-trigger");
 
 const NO_SESSION_TEXT_HINT =
   "Starte zuerst eine Sitzung, dann kannst du auch schreiben.";
@@ -223,16 +224,18 @@ function setButton(mode) {
   renderModeToggle();
   updateTalkButtonVisibility();
   if (mode === "start") {
-    sessionButton.textContent = "Start";
+    sessionButton.textContent = "Sitzung starten";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung starten");
+    voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung starten");
     setComposerEnabled(false);
     return;
   }
   if (mode === "stop") {
-    sessionButton.textContent = "Stop";
+    sessionButton.textContent = "Sitzung beenden";
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung beenden");
+    voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung beenden");
     // Sparmodus has no typed-turn control frame server-side (walkie-talkie
     // only) — the composer stays closed for the whole session.
     setComposerEnabled(activeSession?.voiceMode !== "spar");
@@ -244,6 +247,7 @@ function setButton(mode) {
   sessionButton.textContent = "Wird beendet …";
   sessionButton.disabled = true;
   sessionButton.setAttribute("aria-label", "Sprachsitzung wird beendet");
+  voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung wird beendet");
   // After "end" the server accepts only interrupt controls — a typed frame
   // during the drain would be rejected, so the composer closes with the mic.
   setComposerEnabled(false);
@@ -251,6 +255,20 @@ function setButton(mode) {
     talkButtonElement.disabled = true;
   }
 }
+
+function activateVoiceTrigger() {
+  if (!sessionButton.disabled) {
+    sessionButton.click();
+  }
+}
+
+voiceTriggerElement?.addEventListener("click", activateVoiceTrigger);
+voiceTriggerElement?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    activateVoiceTrigger();
+  }
+});
 
 function createTranscriptEntry(role, text) {
   emptyTranscriptElement.hidden = true;
