@@ -633,21 +633,12 @@ body:has([data-control]) header[role="banner"] { display: none; }
   font-style: italic;
   opacity: 0.85;
 }
-/* Code text: the global `code { @apply text-background }` (nous-research
-   globals @layer base) paints code the DARK page background colour, which on
-   the Control dark surface renders inline/block code dark-on-dark (illegible
-   on mobile). Pin the light Control ink token explicitly so it wins (unlayered
-   .hc-prose beats the layered base rule). Sizes are rem so they clear the ≥13px
-   mobile floor against the 15px root (0.9rem = 13.5px). overflow-wrap keeps a
-   long unbreakable artefact path from forcing horizontal dialog overflow. */
 .hc-prose code {
   font-family: ui-monospace, monospace;
-  font-size: 0.9rem;
-  color: var(--hc-text);
+  font-size: 0.82em;
   background: color-mix(in srgb, var(--hc-panel-active) 72%, transparent);
   border-radius: 4px;
   padding: 0.1em 0.35em;
-  overflow-wrap: anywhere;
 }
 .hc-prose pre {
   background: var(--hc-panel-2);
@@ -657,9 +648,7 @@ body:has([data-control]) header[role="banner"] { display: none; }
   overflow-x: auto;
   margin: 0.8em 0;
 }
-/* Block code keeps its own line integrity: no mid-token wrapping — the pre
-   scrolls horizontally (overflow-x above) instead of overflowing the dialog. */
-.hc-prose pre code { background: none; padding: 0; font-size: 0.9rem; color: var(--hc-text); overflow-wrap: normal; }
+.hc-prose pre code { background: none; padding: 0; font-size: 0.78rem; }
 .hc-prose table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 0.8em 0; }
 .hc-prose th, .hc-prose td {
   border-bottom: 1px solid var(--hc-border, rgba(255,255,255,.08));
