@@ -41,3 +41,9 @@ object CaptureSurfaceSwap {
         }
     }
 }
+
+/** Pure ownership rule used to keep MediaProjection teardown on its capture looper. */
+object CaptureThreadOwnership {
+    fun shouldDispatchStop(hasCaptureHandler: Boolean, onCaptureThread: Boolean): Boolean =
+        hasCaptureHandler && !onCaptureThread
+}

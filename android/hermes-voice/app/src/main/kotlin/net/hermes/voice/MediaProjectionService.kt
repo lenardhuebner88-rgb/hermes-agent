@@ -18,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import java.io.ByteArrayOutputStream
@@ -76,6 +77,7 @@ class MediaProjectionService : Service() {
 
     /** Guards the one idempotent stop path against re-entry from any of its five triggers. */
     private val stopGate = AtomicBoolean(false)
+    private val stopRequested = AtomicBoolean(false)
     private val surfaceLock = Any()
 
     private var mediaProjectionCallback: MediaProjection.Callback? = null
@@ -235,7 +237,7 @@ class MediaProjectionService : Service() {
     private fun schedulePoll(workHandler: Handler) {
         val runnable = object : Runnable {
             override fun run() {
-                if (stopGate.get()) return
+                if (stopRequested.get()) return
                 pollFrame()
                 workHandler.postDelayed(this, POLL_INTERVAL_MS)
             }
@@ -244,7 +246,7 @@ class MediaProjectionService : Service() {
     }
 
     private fun pollFrame() {
-        if (framesPaused || detailCaptureActive) return
+        if (framesPaused || detailCaptureActive || stopRequested.get()) return
         val bitmap = acquireLatestBitmap() ?: return
         val jpeg = encodeWithinBudget(bitmap, MAX_EDGE_PX, INITIAL_QUALITY_PERCENT)
         bitmap.recycle()
@@ -255,31 +257,34 @@ class MediaProjectionService : Service() {
     }
 
     private fun acquireLatestBitmap(): Bitmap? {
-        val reader = imageReader ?: return null
-        val image = try {
-            reader.acquireLatestImage()
-        } catch (e: Exception) {
-            null
-        } ?: return null
+        synchronized(surfaceLock) {
+            if (stopRequested.get()) return null
+            val reader = imageReader ?: return null
+            val image = try {
+                reader.acquireLatestImage()
+            } catch (_: Exception) {
+                null
+            } ?: return null
 
-        try {
-            val plane = image.planes[0]
-            val rowStride = plane.rowStride
-            val pixelStride = plane.pixelStride
-            val width = image.width
-            val height = image.height
+            try {
+                val plane = image.planes[0]
+                val rowStride = plane.rowStride
+                val pixelStride = plane.pixelStride
+                val width = image.width
+                val height = image.height
 
-            val buffer: ByteBuffer = plane.buffer
-            val raw = ByteArray(buffer.remaining())
-            buffer.get(raw)
-            val tight = RowPadding.stripRowPadding(raw, width, height, rowStride, pixelStride)
+                val buffer: ByteBuffer = plane.buffer
+                val raw = ByteArray(buffer.remaining())
+                buffer.get(raw)
+                val tight = RowPadding.stripRowPadding(raw, width, height, rowStride, pixelStride)
 
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(tight))
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(tight))
 
-            return bitmap
-        } finally {
-            image.close()
+                return bitmap
+            } finally {
+                image.close()
+            }
         }
     }
 
@@ -341,7 +346,7 @@ class MediaProjectionService : Service() {
             return
         }
         workHandler.post {
-            if (stopGate.get() || detailCaptureActive) {
+            if (stopRequested.get() || detailCaptureActive) {
                 HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(requestId))
                 return@post
             }
@@ -381,7 +386,7 @@ class MediaProjectionService : Service() {
     }
 
     private fun finishDetailCapture(request: DetailRequest, jpeg: ByteArray?) {
-        if (stopGate.get()) {
+        if (stopRequested.get()) {
             detailCaptureActive = false
             return
         }
@@ -435,7 +440,7 @@ class MediaProjectionService : Service() {
                     display.surface = oldReader.surface
                 },
                 discardCandidate = { newReader.close() },
-                canCommit = { !stopGate.get() },
+                canCommit = { !stopRequested.get() },
             )
         ) {
             CaptureSurfaceSwapOutcome.COMMITTED -> {
@@ -467,6 +472,22 @@ class MediaProjectionService : Service() {
      * Safe to call more than once and from any state.
      */
     private fun stopCapture(reason: String) {
+        val captureHandler = handler
+        val onCaptureThread = captureHandler != null && Looper.myLooper() == captureHandler.looper
+        if (CaptureThreadOwnership.shouldDispatchStop(captureHandler != null, onCaptureThread)) {
+            if (!stopRequested.compareAndSet(false, true)) return
+            val posted = captureHandler?.postAtFrontOfQueue { stopCaptureOnOwnerThread(reason) }
+            if (posted == true) return
+            // A rejected post means the capture looper is already shutting down. If teardown
+            // has not won yet, the shared lock still prevents a concurrent reader close.
+            stopCaptureOnOwnerThread(reason)
+            return
+        }
+        stopRequested.set(true)
+        stopCaptureOnOwnerThread(reason)
+    }
+
+    private fun stopCaptureOnOwnerThread(reason: String) {
         val wonStop = synchronized(surfaceLock) {
             if (!stopGate.compareAndSet(false, true)) {
                 false

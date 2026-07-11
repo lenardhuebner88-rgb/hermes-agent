@@ -51,4 +51,11 @@ class CaptureSurfaceSwapTest {
         assertEquals(CaptureSurfaceSwapOutcome.ROLLED_BACK, outcome)
         assertTrue(rolledBack && discarded)
     }
+
+    @Test
+    fun `stop dispatches to capture owner instead of blocking caller`() {
+        assertTrue(CaptureThreadOwnership.shouldDispatchStop(true, false))
+        assertTrue(!CaptureThreadOwnership.shouldDispatchStop(true, true))
+        assertTrue(!CaptureThreadOwnership.shouldDispatchStop(false, false))
+    }
 }
