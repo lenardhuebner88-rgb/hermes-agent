@@ -29,6 +29,8 @@ export interface RunInspect {
 
 export interface Worker {
   run_id: string;
+  /** Additive frontend attribution when Fleet merges multiple board responses. */
+  board_slug?: string;
   task_id: string;
   task_title: string;
   task_status: TaskStatus;

@@ -42,9 +42,10 @@ interface PlanTabProps {
   accountUsage: import("../../lib/types").AccountUsageResponse | null;
   onApproveSuccess: () => void;
   onShowDetail: (ps: PlanSpecRecord) => void;
+  readOnly?: boolean;
 }
 
-export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail }: PlanTabProps) {
+export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail, readOnly = false }: PlanTabProps) {
   // PlanSpecs, die Operator-Freigabe oder den Start einer signierten, geparkten Kette brauchen.
   const pendingSpecs = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
   const pendingPaths = pendingSpecs.map((ps) => ps.path);
@@ -59,8 +60,8 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
   if (pendingSpecs.length === 0) {
     return (
       <>
-        <PlanComposer onIngestSuccess={onApproveSuccess} />
-        <AutoReleaseTile />
+        {readOnly ? null : <PlanComposer onIngestSuccess={onApproveSuccess} />}
+        {readOnly ? null : <AutoReleaseTile />}
         <div className="fleet-empty">
           <p className="fleet-empty-title">{de.fleet.planLeer}</p>
           <p className="fleet-empty-sub">{de.fleet.planLeerDesc}</p>
@@ -71,8 +72,8 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
 
   return (
     <>
-      <PlanComposer onIngestSuccess={onApproveSuccess} />
-      <AutoReleaseTile />
+      {readOnly ? null : <PlanComposer onIngestSuccess={onApproveSuccess} />}
+      {readOnly ? null : <AutoReleaseTile />}
 
       {/* Liste wartender PlanSpecs — wenn mehr als eine, als auswählbare Chips */}
       {pendingSpecs.length > 1 ? (
@@ -111,6 +112,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
           }}
           onHold={() => setSelectedPath(null)}
           onShowDetail={onShowDetail}
+          readOnly={readOnly}
         />
       ) : null}
     </>
@@ -127,9 +129,10 @@ interface PlanSpecCockpitProps {
   onApproveSuccess: () => void;
   onHold: () => void;
   onShowDetail: (ps: PlanSpecRecord) => void;
+  readOnly: boolean;
 }
 
-function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSuccess, onHold, onShowDetail }: PlanSpecCockpitProps) {
+function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSuccess, onHold, onShowDetail, readOnly }: PlanSpecCockpitProps) {
   const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   // PlanSpec-Detail (subtasks mit lane) laden
   const detail = usePlanSpecDetail(ps.path);
@@ -409,7 +412,9 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
       ) : null}
 
       {/* Aktions-Buttons */}
-      {needsIngest ? (
+      {readOnly ? (
+        <p className="fleet-plan-hint">Fremd-Board · PlanSpec nur lesen. Aktionen bleiben auf dem aktuellen Board.</p>
+      ) : needsIngest ? (
         <>
           <div className="fleet-actions">
             <button

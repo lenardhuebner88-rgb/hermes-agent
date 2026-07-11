@@ -18,7 +18,8 @@
  */
 import { useState, useMemo, useEffect } from "react";
 import { ArrowRight } from "lucide-react";
-import { useHermesWorkers, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
+import { useHermesWorkers, useAllBoardWorkers, useBoardCatalog, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
+import { useFleetBoardSelection } from "../hooks/useFleetBoardSelection";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
 import { nowSec } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -33,6 +34,7 @@ import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips, TwoPane } from "../components/leitstand";
 import { Led } from "../components/atoms";
+import { BoardSwitcher } from "../components/fleet/BoardIdentity";
 import "./fleet/fleet.css";
 
 // ─── Viewport-Hook ───────────────────────────────────────────────────────────
@@ -81,8 +83,13 @@ export function FleetView() {
   const [nodeDetailChainNodes, setNodeDetailChainNodes] = useState<ChainGraphResponse["nodes"]>([]);
 
   const workers = useHermesWorkers();
+  const fleetWorkers = useAllBoardWorkers();
+  const boardCatalog = useBoardCatalog();
+  const { selectedBoard, setSelectedBoard } = useFleetBoardSelection(boardCatalog.data);
   const board = useBoard();
+  const selectedBoardData = useBoard(selectedBoard);
   const planspecs = usePlanSpecs({ scope: "open", limit: 10 });
+  const selectedPlanspecs = usePlanSpecs({ scope: "open", limit: 10 }, selectedBoard);
   const costs = useHermesRunsCosts();
   const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
@@ -97,8 +104,10 @@ export function FleetView() {
   const now = nowSec();
 
   // Abgeleitete Daten
-  const activeWorkers = (workers.data?.workers ?? []).filter((w) => w.run_status === "running");
-  const allWorkers = workers.data?.workers ?? [];
+  const fleetWorkerData = fleetWorkers.data ?? workers.data;
+  const activeWorkers = (fleetWorkerData?.workers ?? []).filter((w) => w.run_status === "running");
+  const allWorkers = fleetWorkerData?.workers ?? [];
+  const defaultActiveWorkers = (workers.data?.workers ?? []).filter((w) => w.run_status === "running");
 
   // Blockierte Tasks aus Board
   const allBoardTasksFlat = (board.data?.columns ?? []).flatMap((c) => c.tasks);
@@ -287,6 +296,7 @@ export function FleetView() {
                 now={now}
                 cap={workers.data?.cap ?? null}
                 doneToday={costs.data?.today.runs ?? null}
+                currentBoard={boardCatalog.data?.current ?? "default"}
                 initialOpen={drawerWorker}
                 onOpenChain={(rootId: string) => {
                   setKettenRootId(rootId);
@@ -296,35 +306,55 @@ export function FleetView() {
               />
             )}
             {subtab === "ketten" && (
-              <KettenTab
-                board={board.data}
-                initialRootId={kettenRootId}
-                now={now}
-                selectedNodeId={nodeDetailId}
-                detailControlsId={isLg ? "fleet-detail-pane" : undefined}
-                onOpenNodeDetail={openNodeDetail}
-              />
+              <>
+                {boardCatalog.data ? (
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                ) : null}
+                <KettenTab
+                  board={selectedBoard ? selectedBoardData.data : board.data}
+                  boardSlug={selectedBoard}
+                  workers={selectedBoard ? activeWorkers.filter((worker) => worker.board_slug === selectedBoard) : undefined}
+                  readOnly={selectedBoard != null}
+                  initialRootId={selectedBoard ? null : kettenRootId}
+                  now={now}
+                  selectedNodeId={selectedBoard ? null : nodeDetailId}
+                  detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
+                  onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
+                />
+              </>
             )}
             {subtab === "plan" && (
-              <PlanTab
-                allPlanspecs={allPlanspecs}
-                costs={costs.data}
-                lanesCatalog={lanesCatalog.data}
-                accountUsage={accountUsage.data}
-                onApproveSuccess={() => {
-                  // Refetch planspecs nach Freigabe
-                  void planspecs.reload();
-                }}
-                onShowDetail={openPlanSpecDetail}
-              />
+              <>
+                {boardCatalog.data ? (
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                ) : null}
+                <PlanTab
+                  allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : allPlanspecs}
+                  costs={costs.data}
+                  lanesCatalog={lanesCatalog.data}
+                  accountUsage={accountUsage.data}
+                  readOnly={selectedBoard != null}
+                  onApproveSuccess={() => {
+                    // Refetch planspecs nach Freigabe
+                    void planspecs.reload();
+                  }}
+                  onShowDetail={openPlanSpecDetail}
+                />
+              </>
             )}
             {subtab === "board" && (
-              <BoardTab
-                board={board.data}
-                selectedNodeId={nodeDetailId}
-                detailControlsId={isLg ? "fleet-detail-pane" : undefined}
-                onOpenNodeDetail={openNodeDetail}
-              />
+              <>
+                {boardCatalog.data ? (
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                ) : null}
+                <BoardTab
+                  board={selectedBoard ? selectedBoardData.data : board.data}
+                  readOnly={selectedBoard != null}
+                  selectedNodeId={selectedBoard ? null : nodeDetailId}
+                  detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
+                  onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
+                />
+              </>
             )}
             {subtab === "risiko" && (
               <RisikoTab
@@ -332,7 +362,7 @@ export function FleetView() {
                 reliability={reliability.data}
                 systemHealth={systemHealth.data}
                 pressureStatus={pressureStatus.data}
-                activeWorkers={activeWorkers}
+                activeWorkers={defaultActiveWorkers}
                 lanesCatalog={lanesCatalog.data}
                 releaseGateDecisions={releaseGateDecisions}
                 releaseMode={releaseMode.data}

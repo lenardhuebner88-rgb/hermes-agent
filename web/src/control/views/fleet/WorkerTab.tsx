@@ -31,6 +31,7 @@ import { WorkerBand } from "./WorkerBand";
 import { SlotLane, FreeSlotLane, MiniLane } from "./SlotLane";
 import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
+import { BoardBadge } from "../../components/fleet/BoardIdentity";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -45,11 +46,16 @@ interface WorkerTabProps {
   cap?: number | null;
   /** Heute abgeschlossene Läufe (costs.today.runs) für den Pulse-Strip. */
   doneToday?: number | null;
+  currentBoard?: string;
 }
 
 interface WorkerSelection {
-  taskId: string;
+  key: string;
   snapshot: Worker;
+}
+
+function workerIdentity(worker: Worker): string {
+  return `${worker.board_slug ?? "current"}:${worker.task_id}`;
 }
 
 // Wie viele freie Slot-Lanes der Leerzustand zeigt (Cap, sonst 3; gedeckelt bei
@@ -68,13 +74,14 @@ export function WorkerTab({
   onOpenChain,
   cap = null,
   doneToday = null,
+  currentBoard = "default",
 }: WorkerTabProps) {
   const [selection, setSelection] = useState<WorkerSelection | null>(
-    () => (initialOpen ? { taskId: initialOpen.task_id, snapshot: initialOpen } : null),
+    () => (initialOpen ? { key: workerIdentity(initialOpen), snapshot: initialOpen } : null),
   );
   const liveEvents = useRunLiveEvents(true);
 
-  const selectedWorker = selection ? activeWorkers.find((w) => w.task_id === selection.taskId) ?? null : null;
+  const selectedWorker = selection ? activeWorkers.find((w) => workerIdentity(w) === selection.key) ?? null : null;
   const drawerWorker = selectedWorker ?? selection?.snapshot ?? null;
 
   // Pulse-Ableitung: queue = ready+scheduled, blocked = blocked-Spalte.
@@ -86,10 +93,10 @@ export function WorkerTab({
   const pulse = derivePulse({ activeWorkers, cap, queue, doneToday, blocked });
 
   const otherWorkers = drawerWorker
-    ? activeWorkers.filter((w) => w.task_id !== drawerWorker.task_id)
+    ? activeWorkers.filter((w) => workerIdentity(w) !== workerIdentity(drawerWorker))
     : [];
 
-  const select = (w: Worker) => setSelection({ taskId: w.task_id, snapshot: w });
+  const select = (w: Worker) => setSelection({ key: workerIdentity(w), snapshot: w });
 
   const drawer = drawerWorker ? (
     <WorkerDrawer
@@ -102,6 +109,7 @@ export function WorkerTab({
       onOpenWorker={select}
       onClose={() => setSelection(null)}
       onOpenChain={onOpenChain}
+      currentBoard={currentBoard}
     />
   ) : null;
 
@@ -120,7 +128,7 @@ export function WorkerTab({
               <span>{de.fleet.pulseP90Window}</span>
             </div>
             {activeWorkers.map((w) => (
-              <SlotLane key={w.run_id} worker={w} now={now} onOpen={() => select(w)} />
+              <SlotLane key={workerIdentity(w)} worker={w} now={now} onOpen={() => select(w)} />
             ))}
           </div>
           <LiveTicker
@@ -299,6 +307,7 @@ interface WorkerDrawerProps {
   onOpenWorker: (w: Worker) => void;
   onClose: () => void;
   onOpenChain: (rootId: string) => void;
+  currentBoard: string;
 }
 
 function WorkerDrawer({
@@ -311,18 +320,20 @@ function WorkerDrawer({
   onOpenWorker,
   onClose,
   onOpenChain,
+  currentBoard,
 }: WorkerDrawerProps) {
   const elapsedSec = Math.max(0, now - w.started_at);
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);
+  const foreignBoard = Boolean(w.board_slug && w.board_slug !== currentBoard);
 
   // Profil-Verlässlichkeit aus Reliability-Daten (ReliabilityResponse aus lib/schemas)
   const relProfile = reliability?.profiles?.find((p) => p.profile === w.profile);
 
   // Ketten-Position: root_id via Board-Lookup (BoardResponse aus lib/types)
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
-  const boardTask = allBoardTasks.find((t) => t.id === w.task_id);
+  const boardTask = foreignBoard ? undefined : allBoardTasks.find((t) => t.id === w.task_id);
 
   const [logOpen, setLogOpen] = useState(false);
   // root_id ist entweder der eigene Task (Root) oder der Parent-Root
@@ -352,6 +363,7 @@ function WorkerDrawer({
             {w.profile}
             <span>läuft seit {fmtSeconds(elapsedSec)} · {w.task_assignee}</span>
           </div>
+          <BoardBadge slug={w.board_slug} />
           {hbAge != null ? (
             <div className="fleet-led" style={{ marginLeft: "auto" }}>
               <span className="fleet-led-dot" />
@@ -424,7 +436,7 @@ function WorkerDrawer({
         ) : null}
 
         {/* Notiz-Historie (AC-3) — nur bei laufendem Worker. */}
-        {active ? <WorkerNotesHistory taskId={w.task_id} /> : null}
+        {active && !foreignBoard ? <WorkerNotesHistory taskId={w.task_id} /> : null}
 
         {active ? null : (
           <div className="fleet-kv" role="status">
@@ -434,11 +446,14 @@ function WorkerDrawer({
         )}
 
         {/* Worker-Steuerung: Unlock/Nudge/Restart/Terminate (Gap 1) */}
-        {active ? <WorkerLifecycleActions runId={w.run_id} /> : null}
+        {active && !foreignBoard ? <WorkerLifecycleActions runId={w.run_id} /> : null}
+        {active && foreignBoard ? (
+          <p className="fleet-plan-hint">Fremd-Board · Worker nur beobachten. Keine Board-übergreifende Steuerung.</p>
+        ) : null}
 
         {/* Action-Buttons */}
         <div className="fleet-actions">
-          {chainRootId ? (
+          {chainRootId && !foreignBoard ? (
             <button
               type="button"
               className="fleet-btn fleet-btn-primar"
@@ -447,7 +462,7 @@ function WorkerDrawer({
               {de.fleet.drawerKetteOeffnen}
             </button>
           ) : null}
-          {active ? (
+          {active && !foreignBoard ? (
             <button
               type="button"
               className="fleet-btn"
@@ -462,14 +477,14 @@ function WorkerDrawer({
         </div>
 
         {/* Log-Tail (nur bei offenem Drawer pollend, wie WorkerCard/NodeDetailDrawer) */}
-        {active && logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
+        {active && !foreignBoard && logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
 
         {/* Andere Lanes: schneller Sprung zu den übrigen aktiven Workern. */}
         {otherWorkers.length > 0 ? (
           <div className="fleet-fx-other">
             <div className="fleet-sec">{de.fleet.drawerOtherLanes}</div>
             {otherWorkers.map((ow) => (
-              <MiniLane key={ow.run_id} worker={ow} now={now} onOpen={() => onOpenWorker(ow)} />
+              <MiniLane key={workerIdentity(ow)} worker={ow} now={now} onOpen={() => onOpenWorker(ow)} />
             ))}
           </div>
         ) : null}

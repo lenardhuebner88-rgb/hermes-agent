@@ -42,6 +42,9 @@ import "./ketten-v4.css";
 
 interface KettenTabProps {
   board: BoardResponse | null;
+  boardSlug?: string | null;
+  workers?: Worker[];
+  readOnly?: boolean;
   initialRootId: string | null;
   now: number;
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
@@ -49,7 +52,7 @@ interface KettenTabProps {
   detailControlsId?: string;
 }
 
-export function KettenTab({ board, initialRootId, now, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
+export function KettenTab({ board, boardSlug = null, workers, readOnly = false, initialRootId, now, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
 
   const chips = buildChainChips(
@@ -65,7 +68,7 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail, selecte
   const [userSelectedRootId, setUserSelectedRootId] = useState<string | null>(initialRootId);
 
   const selectedRootId = useMemo(() => {
-    if (userSelectedRootId) return userSelectedRootId;
+    if (userSelectedRootId && chips.some((chip) => chip.rootId === userSelectedRootId)) return userSelectedRootId;
     return chips.find((c) => c.state === "active")?.rootId ?? chips[0]?.rootId ?? null;
   }, [userSelectedRootId, chips]);
 
@@ -82,22 +85,22 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail, selecte
   const hiddenCompletedCount = completedChips.length - 3;
   const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
 
-  const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId);
+  const { data: chainGraph, loading: chainLoading } = useChainGraph(selectedRootId, boardSlug);
   const nodes = chainGraph?.nodes ?? [];
 
-  const chainCosts = useHermesChainCosts(selectedRootId);
-  const verdicts = useHermesReviewVerdicts();
+  const chainCosts = useHermesChainCosts(selectedRootId, boardSlug);
+  const verdicts = useHermesReviewVerdicts(boardSlug);
 
   // === Worker-Join (v4): join ChainNode → Worker via task_id ===
   const { data: workersData } = useHermesWorkers();
   const workerByNodeId = useMemo(() => {
     const m = new Map<string, Worker>();
-    const ws = workersData?.workers ?? [];
+    const ws = workers ?? workersData?.workers ?? [];
     for (const w of ws) {
       if (w.task_id) m.set(w.task_id, w);
     }
     return m;
-  }, [workersData]);
+  }, [workers, workersData]);
 
   if (chips.length === 0) {
     return (
@@ -186,6 +189,7 @@ export function KettenTab({ board, initialRootId, now, onOpenNodeDetail, selecte
           onOpenNodeDetail={onOpenNodeDetail}
           selectedNodeId={selectedNodeId}
           detailControlsId={detailControlsId}
+          readOnly={readOnly}
         />
       ) : selectedRootId ? (
         <div className="kt-empty">
@@ -248,6 +252,7 @@ interface KettenGraphV4Props {
   onOpenNodeDetail: (taskId: string, chainNodes: ChainNode[]) => void;
   selectedNodeId: string | null;
   detailControlsId?: string;
+  readOnly: boolean;
 }
 
 function KettenGraphV4({
@@ -261,6 +266,7 @@ function KettenGraphV4({
   onOpenNodeDetail,
   selectedNodeId,
   detailControlsId,
+  readOnly,
 }: KettenGraphV4Props) {
   const { pct, done, total } = chainProgress(nodes);
   const focusNode = pickFocusNode(nodes);
@@ -434,7 +440,8 @@ function KettenGraphV4({
           type="button"
           className={`detail${selectedNodeId === focusNode.id ? " detail-selected" : ""}`}
           onClick={() => onOpenNodeDetail(focusNode.id, nodes)}
-          aria-label={`Node ${focusNode.title} öffnen`}
+          disabled={readOnly}
+          aria-label={readOnly ? `Node ${focusNode.title} · nur lesen` : `Node ${focusNode.title} öffnen`}
           aria-expanded={selectedNodeId === focusNode.id}
           aria-controls={detailControlsId}
         >
@@ -527,7 +534,8 @@ function KettenGraphV4({
                 type="button"
                 className={`uitem${n.status === "blocked" ? " uitem-blocked" : ""}${selectedNodeId === n.id ? " uitem-selected" : ""}`}
                 onClick={() => onOpenNodeDetail(n.id, nodes)}
-                aria-label={`Node ${n.title} öffnen`}
+                disabled={readOnly}
+                aria-label={readOnly ? `Node ${n.title} · nur lesen` : `Node ${n.title} öffnen`}
                 aria-expanded={selectedNodeId === n.id}
                 aria-controls={detailControlsId}
               >
@@ -574,7 +582,8 @@ function KettenGraphV4({
               type="button"
               className={`done-item${selectedNodeId === n.id ? " done-item-selected" : ""}`}
               onClick={() => onOpenNodeDetail(n.id, nodes)}
-              aria-label={`Node ${n.title} öffnen`}
+              disabled={readOnly}
+              aria-label={readOnly ? `Node ${n.title} · nur lesen` : `Node ${n.title} öffnen`}
               aria-expanded={selectedNodeId === n.id}
               aria-controls={detailControlsId}
             >

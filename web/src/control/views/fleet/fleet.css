@@ -1874,6 +1874,8 @@ body:has([data-fleet-theme]) [data-control] {
 
 .fleet-boardtab-row:last-child { border-bottom: none; }
 .fleet-boardtab-row:hover { background: var(--fleet-karte-hi); }
+.fleet-boardtab-row-readonly { cursor: default; }
+.fleet-boardtab-row-readonly:hover { background: transparent; }
 .fleet-boardtab-row-selected {
   background: var(--color-surface-3);
   box-shadow: inset 3px 0 var(--color-bronze);

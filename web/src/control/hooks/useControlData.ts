@@ -34,6 +34,7 @@ import {
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
+  BoardsResponseSchema,
   ChainGraphResponseSchema,
   FlowGateResponseSchema,
   FlowReleaseResponseSchema,
@@ -81,6 +82,7 @@ import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
 import { mergeLiveEvents } from "../lib/fleetHub";
+import { mergeBoardWorkers, withBoardParam, type BoardsResponse } from "../lib/multiBoard";
 import type { LiveEvent } from "../lib/types";
 import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
@@ -647,6 +649,44 @@ export function useHermesWorkers() {
   );
 }
 
+export function useBoardCatalog() {
+  return usePolling<BoardsResponse>(
+    "kanban/boards",
+    async () => parseOrThrow(
+      BoardsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/boards"),
+      "kanban/boards",
+    ),
+    60000,
+  );
+}
+
+/** Fleet-only aggregation. Existing single-board consumers keep useHermesWorkers(). */
+export function useAllBoardWorkers() {
+  return usePolling<WorkersResponse>(
+    "workers/active:all-boards",
+    async () => {
+      const catalog = parseOrThrow(
+        BoardsResponseSchema,
+        await fetchJSON<unknown>("/api/plugins/kanban/boards"),
+        "kanban/boards",
+      );
+      const activeBoards = catalog.boards.filter((board) => !board.archived);
+      if (activeBoards.length === 0) throw new Error("Keine aktiven Kanban-Boards gemeldet");
+      const responses = await Promise.all(activeBoards.map(async ({ slug }) => ({
+        board: slug,
+        response: parseOrThrow(
+          WorkersResponseSchema,
+          await fetchJSON<unknown>(withBoardParam("/api/plugins/kanban/workers/active", slug)),
+          `workers/active:${slug}`,
+        ),
+      })));
+      return mergeBoardWorkers(responses, catalog.current);
+    },
+    5000,
+  );
+}
+
 export interface RunLiveEventsState {
   events: LiveEvent[];
   loading: boolean;
@@ -773,14 +813,19 @@ export function useStatsConfig() {
 // fetches detail via /tasks/:id. The kanban plugin dashboard keeps the
 // defaults (full). The server also sends an ETag, so an unchanged board
 // revalidates as a 304 instead of re-transferring.
-export const boardLoader = async () =>
-  parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"), "kanban/board");
+export const boardLoader = async (board: string | null = null) =>
+  parseOrThrow(
+    BoardResponseSchema,
+    await fetchJSON<unknown>(withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", board)),
+    board ? `kanban/board:${board}` : "kanban/board",
+  );
 
 // Full kanban board grouped by status column — the Fleet pipeline (stage
 // counts + actionable rows) reads this. 8s keeps the operator's stage view
 // fresh without churning the DB; usePolling pauses it when the tab is hidden.
-export function useBoard() {
-  return usePolling<BoardResponse>("kanban/board", boardLoader, 8000);
+export function useBoard(board: string | null = null) {
+  const key = board ? `kanban/board:${board}` : "kanban/board";
+  return usePolling<BoardResponse>(key, () => boardLoader(board), 8000);
 }
 
 export interface PlanSpecQueryOptions {
@@ -790,20 +835,21 @@ export interface PlanSpecQueryOptions {
   search?: string;
 }
 
-function planSpecsUrl(options: PlanSpecQueryOptions = {}) {
+function planSpecsUrl(options: PlanSpecQueryOptions = {}, board: string | null = null) {
   const params = new URLSearchParams({ scope: options.scope ?? "open" });
   if (options.limit && options.limit > 0) params.set("limit", String(options.limit));
   if (options.valid != null) params.set("valid", String(options.valid));
   const query = options.search?.trim();
   if (query) params.set("q", query);
+  if (board) params.set("board", board);
   return `/api/plugins/kanban/planspecs?${params.toString()}`;
 }
 
-export function usePlanSpecs(options: PlanSpecQueryOptions = {}) {
-  const key = `kanban/planspecs:${options.scope ?? "open"}:${options.limit ?? "all"}:${options.valid ?? "any"}:${options.search?.trim() ?? ""}`;
+export function usePlanSpecs(options: PlanSpecQueryOptions = {}, board: string | null = null) {
+  const key = `kanban/planspecs:${board ?? "current"}:${options.scope ?? "open"}:${options.limit ?? "all"}:${options.valid ?? "any"}:${options.search?.trim() ?? ""}`;
   return usePolling<PlanSpecsResponse>(
     key,
-    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options)), "kanban/planspecs"),
+    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options, board)), board ? `kanban/planspecs:${board}` : "kanban/planspecs"),
     15000,
   );
 }
@@ -1654,7 +1700,7 @@ export function useFlowGate(rootId: string | null, onDone?: () => void | Promise
   return { data, loading, busy, error, reload, sizing, sweepTimeouts };
 }
 
-export function useChainGraph(rootId: string | null) {
+export function useChainGraph(rootId: string | null, board: string | null = null) {
   const [data, setData] = useState<ChainGraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1671,7 +1717,7 @@ export function useChainGraph(rootId: string | null) {
     try {
       const parsed = parseOrThrow(
         ChainGraphResponseSchema,
-        await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/chain-graph`),
+        await fetchJSON<unknown>(withBoardParam(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/chain-graph`, board)),
         "chain-graph",
       );
       if (aliveRef.current) {
@@ -1687,7 +1733,7 @@ export function useChainGraph(rootId: string | null) {
       inFlightRef.current = false;
       if (aliveRef.current) setLoading(false);
     }
-  }, [rootId]);
+  }, [rootId, board]);
   useEffect(() => {
     const initial = window.setTimeout(() => {
       void reload();
@@ -2011,7 +2057,7 @@ export function useBoardStats() {
 // Kosten-Rollup pro Kette: GET /tasks/{id}/chain-costs.
 // Nullable taskId → kein Fetch (kein Selektor aktiv). Interval 30 s — Aggregate
 // ändern sich seltener als Heartbeats, häufiger als Tages-Statistiken.
-export function useHermesChainCosts(taskId: string | null) {
+export function useHermesChainCosts(taskId: string | null, board: string | null = null) {
   const [data, setData] = useState<ChainCostsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -2028,7 +2074,7 @@ export function useHermesChainCosts(taskId: string | null) {
     try {
       const parsed = parseOrThrow(
         ChainCostsResponseSchema,
-        await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/chain-costs`),
+        await fetchJSON<unknown>(withBoardParam(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/chain-costs`, board)),
         "chain-costs",
       );
       if (aliveRef.current) {
@@ -2044,7 +2090,7 @@ export function useHermesChainCosts(taskId: string | null) {
       inFlightRef.current = false;
       if (aliveRef.current) setLoading(false);
     }
-  }, [taskId]);
+  }, [taskId, board]);
   useEffect(() => {
     const initial = window.setTimeout(() => { void reload(); }, 0);
     if (!taskId) return () => window.clearTimeout(initial);
@@ -2073,12 +2119,13 @@ export function useHermesRunsIssues() {
   );
 }
 
-export function useHermesReviewVerdicts() {
+export function useHermesReviewVerdicts(board: string | null = null) {
+  const url = withBoardParam(HERMES_REVIEW_VERDICTS_URL, board);
   return usePolling<ReviewVerdictsResponse>(
-    "tasks/review-verdicts",
+    board ? `tasks/review-verdicts:${board}` : "tasks/review-verdicts",
     async () => parseOrThrow(
       ReviewVerdictsResponseSchema,
-      await fetchJSON<unknown>(HERMES_REVIEW_VERDICTS_URL),
+      await fetchJSON<unknown>(url),
       "tasks/review-verdicts",
     ),
     20000,

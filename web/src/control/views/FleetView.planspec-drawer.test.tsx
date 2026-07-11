@@ -9,6 +9,8 @@ import type { PlanSpecRecord } from "../lib/types";
 
 const hooks = vi.hoisted(() => ({
   useHermesWorkers: vi.fn(),
+  useAllBoardWorkers: vi.fn(),
+  useBoardCatalog: vi.fn(),
   useBoard: vi.fn(),
   usePlanSpecs: vi.fn(),
   useHermesRunsCosts: vi.fn(),
@@ -88,6 +90,8 @@ const signedCompletePlanSpec = {
 
 function setHookDefaults() {
   hooks.useHermesWorkers.mockReturnValue({ data: { workers: [] }, loading: false, error: null, reload });
+  hooks.useAllBoardWorkers.mockReturnValue({ data: { workers: [] }, loading: false, error: null, reload });
+  hooks.useBoardCatalog.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useBoard.mockReturnValue({ data: { columns: [] }, loading: false, error: null, reload });
   hooks.usePlanSpecs.mockReturnValue({ data: { planspecs: [planSpec], count: 1 }, loading: false, error: null, reload });
   hooks.useHermesRunsCosts.mockReturnValue({ data: null, loading: false, error: null, reload });

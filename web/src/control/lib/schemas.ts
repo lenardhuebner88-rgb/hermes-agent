@@ -50,6 +50,7 @@ export const WorkerSchema = z.object({
   // id fails validation and — because the array has .catch([]) — silently
   // empties the ENTIRE worker list (count > 0 but zero cards rendered).
   run_id: z.coerce.string(),
+  board_slug: z.string().optional(),
   task_id: z.string().catch(""),
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("running"),
@@ -565,6 +566,17 @@ export const BoardResponseSchema = z.object({
 });
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
 export type BoardResponse = z.infer<typeof BoardResponseSchema>;
+
+export const BoardsResponseSchema = z.object({
+  boards: z.array(z.object({
+    slug: z.string(),
+    name: z.string().catch(""),
+    archived: z.boolean().catch(false),
+    is_current: z.boolean().catch(false),
+  })).catch([]),
+  current: z.string().catch("default"),
+});
+export type BoardsResponse = z.infer<typeof BoardsResponseSchema>;
 
 // Epics (Vorhaben-Ebene): GET /epics liefert pro Epic den Task-/Kosten-Rollup.
 // cost_usd/tokens sind null, wenn keine Runs Kosten gestempelt haben.

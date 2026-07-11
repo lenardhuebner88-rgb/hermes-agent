@@ -28,6 +28,7 @@ import type { PlanSpecRecord } from "./shared";
 import { LaneQuickSwitch } from "./LaneQuickSwitch";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
 import { profileLabel } from "../../lib/tones";
+import { BoardBadge } from "../../components/fleet/BoardIdentity";
 
 // ─── Heute-Subtab ────────────────────────────────────────────────────────────
 
@@ -118,7 +119,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       {/* Worker-Karten */}
       {activeWorkers.length === 0 ? null : (
         activeWorkers.map((w) => (
-          <WorkerCard key={w.run_id} worker={w} now={now} onClick={() => onWorkerClick(w)} />
+          <WorkerCard key={`${w.board_slug ?? "current"}:${w.run_id}`} worker={w} now={now} onClick={() => onWorkerClick(w)} />
         ))
       )}
 
@@ -335,6 +336,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
           {w.profile}
           <span>{w.task_id.slice(0, 10)}</span>
         </div>
+        <BoardBadge slug={w.board_slug} />
         {isLive && hbAge != null ? (
           <div className="fleet-led">
             <span className="fleet-led-dot" />

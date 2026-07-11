@@ -15,6 +15,8 @@ import { type ChainNode } from "./shared";
 
 interface BoardTabProps {
   board: BoardResponse | null;
+  /** Foreign boards are visibility-only in Stufe 3. */
+  readOnly?: boolean;
   /** Callback: öffnet den Karten-Detail-Drawer. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
   selectedNodeId?: string | null;
@@ -27,7 +29,7 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
-export function BoardTab({ board, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: BoardTabProps) {
+export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: BoardTabProps) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
@@ -122,14 +124,9 @@ export function BoardTab({ board, onOpenNodeDetail, selectedNodeId = null, detai
               </span>
               <span className="fleet-boardtab-count">{tasks.length}</span>
             </header>
-            {tasks.map((t) => (
-              <button
-                key={t.id}
-                className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
-                onClick={() => onOpenNodeDetail(t.id)}
-                aria-expanded={selectedNodeId === t.id}
-                aria-controls={detailControlsId}
-              >
+            {tasks.map((t) => {
+              const content = (
+                <>
                 <span
                   className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}
                   {...premiumLaneMarker(t.assignee)}
@@ -154,8 +151,22 @@ export function BoardTab({ board, onOpenNodeDetail, selectedNodeId = null, detai
                     )}
                   </span>
                 </span>
-              </button>
-            ))}
+                </>
+              );
+              return readOnly ? (
+                <div key={t.id} className="fleet-boardtab-row fleet-boardtab-row-readonly" title="Fremd-Board · nur lesen">{content}</div>
+              ) : (
+                <button
+                  key={t.id}
+                  className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
+                  onClick={() => onOpenNodeDetail(t.id)}
+                  aria-expanded={selectedNodeId === t.id}
+                  aria-controls={detailControlsId}
+                >
+                  {content}
+                </button>
+              );
+            })}
           </section>
         ))
       )}

@@ -12,6 +12,7 @@
 import { WorkerBand } from "./WorkerBand";
 import { heartbeatAge, fmtSeconds, laneTint, profileInitial } from "../../lib/fleetHub";
 import type { Worker } from "../../lib/types";
+import { BoardBadge } from "../../components/fleet/BoardIdentity";
 
 export function SlotLane({ worker, now, onOpen }: { worker: Worker; now: number; onOpen: () => void }) {
   const hbAge = heartbeatAge(worker.last_heartbeat_at, now);
@@ -30,6 +31,7 @@ export function SlotLane({ worker, now, onOpen }: { worker: Worker; now: number;
       <div className="fleet-lbody">
         <div className="fleet-lhead">
           <span className="fleet-lhead-t">{worker.task_title}</span>
+          <BoardBadge slug={worker.board_slug} />
           {hbAge != null ? <span className="fleet-lhead-hb">♥ {fmtSeconds(hbAge)}</span> : null}
         </div>
         <WorkerBand worker={worker} now={now} size="lane" />
@@ -67,6 +69,7 @@ export function MiniLane({ worker, now, onOpen }: { worker: Worker; now: number;
         <span className="fleet-lav-n">{worker.profile}</span>
       </div>
       <div className="fleet-lbody">
+        <BoardBadge slug={worker.board_slug} />
         <WorkerBand worker={worker} now={now} size="mini" />
       </div>
     </button>
