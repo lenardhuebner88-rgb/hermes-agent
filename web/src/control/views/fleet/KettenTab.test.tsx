@@ -237,4 +237,21 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(screen.getByText("Reviewer zugewiesen")).toBeTruthy();
     expect(screen.getByText("Critic aktiv")).toBeTruthy();
   });
+
+  it("adds the selected board to every chain graph and chain costs request", async () => {
+    render(
+      <KettenTab
+        board={BOARD}
+        boardSlug="health-track"
+        initialRootId={ROOT_ID}
+        now={2000}
+        onOpenNodeDetail={() => undefined}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(`/api/plugins/kanban/tasks/${ROOT_ID}/chain-graph?board=health-track`);
+      expect(fetchJSONMock).toHaveBeenCalledWith(`/api/plugins/kanban/tasks/${ROOT_ID}/chain-costs?board=health-track`);
+    });
+  });
 });

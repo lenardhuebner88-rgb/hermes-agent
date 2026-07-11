@@ -5,7 +5,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FleetView } from "./FleetView";
-import type { PlanSpecRecord } from "../lib/types";
+import type { BoardResponse, BoardTask, PlanSpecRecord, Worker } from "../lib/types";
+import { de } from "../i18n/de";
 
 const hooks = vi.hoisted(() => ({
   useHermesWorkers: vi.fn(),
@@ -24,6 +25,12 @@ const hooks = vi.hoisted(() => ({
   useKanbanDecisionQueue: vi.fn(),
   useReleaseStatus: vi.fn(),
   useReleaseMode: vi.fn(),
+  useChainGraph: vi.fn(),
+  useHermesChainCosts: vi.fn(),
+  useHermesReviewVerdicts: vi.fn(),
+  useRunLiveEvents: vi.fn(),
+  useWorkerLifecycle: vi.fn(),
+  useWorkerActivity: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => hooks);
@@ -88,6 +95,85 @@ const signedCompletePlanSpec = {
   kanban_child_running: 0,
 } satisfies PlanSpecRecord;
 
+function boardTask(id: string, title: string, status: BoardTask["status"], rootId: string | null = null): BoardTask {
+  return {
+    id,
+    title,
+    status,
+    assignee: null,
+    priority: 0,
+    created_at: 1,
+    started_at: status === "running" ? 2 : null,
+    completed_at: status === "done" ? 3 : null,
+    branch_name: null,
+    latest_summary: null,
+    link_counts: { parents: rootId ? 1 : 0, children: 0 },
+    comment_count: 0,
+    progress: null,
+    age: null,
+    tenant: "orchestrator",
+    root_id: rootId,
+    epic_id: null,
+  };
+}
+
+const DEFAULT_ACTIVE_ROOT = boardTask("t_default_active", "Default aktive Kette", "scheduled");
+const DEFAULT_ACTIVE_CHILD = boardTask("t_default_active_child", "Default aktiver Task", "running", DEFAULT_ACTIVE_ROOT.id);
+const DEFAULT_OLD_ROOT = boardTask("t_default_old", "Default alte Kette", "scheduled");
+const DEFAULT_OLD_CHILD = boardTask("t_default_old_child", "Default alter Worker-Task", "ready", DEFAULT_OLD_ROOT.id);
+const HEALTH_ROOT = boardTask("t_health_root", "Health aktive Kette", "scheduled");
+const HEALTH_CHILD = boardTask("t_health_child", "Health aktiver Task", "running", HEALTH_ROOT.id);
+
+const DEFAULT_BOARD: BoardResponse = {
+  columns: [{ name: "running", tasks: [DEFAULT_ACTIVE_CHILD] }, { name: "scheduled", tasks: [DEFAULT_ACTIVE_ROOT, DEFAULT_OLD_ROOT, DEFAULT_OLD_CHILD] }],
+  tenants: ["orchestrator"],
+  assignees: [],
+  latest_event_id: 1,
+  source_errors: [],
+  now: 10,
+};
+
+const HEALTH_BOARD: BoardResponse = {
+  columns: [{ name: "running", tasks: [HEALTH_CHILD] }, { name: "scheduled", tasks: [HEALTH_ROOT] }],
+  tenants: ["orchestrator"],
+  assignees: [],
+  latest_event_id: 2,
+  source_errors: [],
+  now: 10,
+};
+
+const DEFAULT_WORKER: Worker = {
+  run_id: "42",
+  task_id: DEFAULT_OLD_CHILD.id,
+  task_title: DEFAULT_OLD_CHILD.title,
+  task_status: "running",
+  task_assignee: "coder",
+  profile: "coder",
+  worker_pid: 4242,
+  started_at: 1,
+  claim_lock: "lock-42",
+  claim_expires: 100,
+  last_heartbeat_at: 9,
+  max_runtime_seconds: 1800,
+  run_status: "running",
+  run_outcome: null,
+  block_reason: null,
+  inspect: null,
+  last_heartbeat_note: null,
+  last_heartbeat_note_at: null,
+  eta_p50_seconds: null,
+  eta_p90_seconds: null,
+  step_key: null,
+  model_override: null,
+  effective_model: null,
+  input_tokens: null,
+  output_tokens: null,
+  token_status: "no_live_sample",
+  token_status_reason: null,
+  run_progress: null,
+  heartbeat_ticks: [],
+};
+
 function setHookDefaults() {
   hooks.useHermesWorkers.mockReturnValue({ data: { workers: [] }, loading: false, error: null, reload });
   hooks.useAllBoardWorkers.mockReturnValue({ data: { workers: [] }, loading: false, error: null, reload });
@@ -104,6 +190,18 @@ function setHookDefaults() {
   hooks.useKanbanDecisionQueue.mockReturnValue({ data: { decisions: [], count: 0, checked_at: 0 }, loading: false, error: null, reload });
   hooks.useReleaseStatus.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useReleaseMode.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useChainGraph.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useHermesChainCosts.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useHermesReviewVerdicts.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useRunLiveEvents.mockReturnValue({ events: [], loading: false, error: null });
+  hooks.useWorkerLifecycle.mockReturnValue({
+    busyId: null,
+    errorById: {},
+    run: vi.fn(),
+    terminate: vi.fn(),
+    clearError: vi.fn(),
+  });
+  hooks.useWorkerActivity.mockReturnValue({ data: { events: [] }, loading: false, error: null, reload });
   hooks.usePlanSpecDetail.mockImplementation((path: string | null) => {
     return {
       data: path
@@ -130,6 +228,7 @@ describe("FleetView PlanSpec detail drawer", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     api.fetchJSON.mockResolvedValue({ ok: true });
     setLgViewport(false);
     setHookDefaults();
@@ -316,5 +415,73 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(within(costDrawer).getByText("coder"));
     expect(within(costDrawer).getByText("ChatGPT/Codex"));
     expect(within(costDrawer).getByText("$0 ist bei Abo-Lanes Grenzpreis, nicht kostenlos — Tokenverbrauch und API-Äquivalent zeigen den Verbrauch."));
+  });
+
+  it("resets the active chain selection on every board switch instead of reusing the old root", async () => {
+    hooks.useHermesWorkers.mockReturnValue({ data: { workers: [DEFAULT_WORKER] }, loading: false, error: null, reload });
+    hooks.useAllBoardWorkers.mockReturnValue({ data: { workers: [DEFAULT_WORKER] }, loading: false, error: null, reload });
+    hooks.useBoardCatalog.mockReturnValue({
+      data: {
+        current: "default",
+        boards: [
+          { slug: "default", name: "Default", archived: false },
+          { slug: "health-track", name: "Health Track", archived: false },
+        ],
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+    hooks.useBoard.mockImplementation((slug?: string | null) => ({
+      data: slug === "health-track" ? HEALTH_BOARD : DEFAULT_BOARD,
+      loading: false,
+      error: null,
+      reload,
+    }));
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Worker" }));
+    fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen" }));
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.drawerKetteOeffnen }));
+    await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(DEFAULT_OLD_ROOT.id, null));
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Board auswählen" }), { target: { value: "health-track" } });
+    await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(HEALTH_ROOT.id, "health-track"));
+    expect(hooks.useChainGraph.mock.calls.some(([rootId, board]) => rootId === DEFAULT_OLD_ROOT.id && board === "health-track")).toBe(false);
+
+    hooks.useChainGraph.mockClear();
+    fireEvent.change(screen.getByRole("combobox", { name: "Board auswählen" }), { target: { value: "" } });
+    await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(DEFAULT_ACTIVE_ROOT.id, null));
+    expect(hooks.useChainGraph.mock.calls.some(([rootId]) => rootId === DEFAULT_OLD_ROOT.id)).toBe(false);
+  });
+
+  it("uses the selected board and its root for the Plan tab active-chain fetch", async () => {
+    setLgViewport(true);
+    hooks.useBoardCatalog.mockReturnValue({
+      data: {
+        current: "default",
+        boards: [
+          { slug: "default", name: "Default", archived: false },
+          { slug: "health-track", name: "Health Track", archived: false },
+        ],
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+    hooks.useBoard.mockImplementation((slug?: string | null) => ({
+      data: slug === "health-track" ? HEALTH_BOARD : DEFAULT_BOARD,
+      loading: false,
+      error: null,
+      reload,
+    }));
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    hooks.useChainGraph.mockClear();
+    fireEvent.change(screen.getByRole("combobox", { name: "Board auswählen" }), { target: { value: "health-track" } });
+
+    await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(HEALTH_ROOT.id, "health-track"));
+    expect(hooks.useChainGraph.mock.calls.some(([rootId, board]) => rootId === DEFAULT_ACTIVE_ROOT.id && board === "health-track")).toBe(false);
   });
 });

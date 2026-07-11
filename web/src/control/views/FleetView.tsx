@@ -101,6 +101,15 @@ export function FleetView() {
   const releaseStatus = useReleaseStatus();
   const releaseMode = useReleaseMode();
 
+  useEffect(() => {
+    const reset = window.setTimeout(() => {
+      setKettenRootId(null);
+      setNodeDetailId(null);
+      setNodeDetailChainNodes([]);
+    }, 0);
+    return () => window.clearTimeout(reset);
+  }, [selectedBoard]);
+
   const now = nowSec();
 
   // Abgeleitete Daten
@@ -110,7 +119,6 @@ export function FleetView() {
   const defaultActiveWorkers = (workers.data?.workers ?? []).filter((w) => w.run_status === "running");
 
   // Blockierte Tasks aus Board
-  const allBoardTasksFlat = (board.data?.columns ?? []).flatMap((c) => c.tasks);
   const blockedTasks = (board.data?.columns.find((c) => c.name === "blocked")?.tasks ?? []);
   const blockedCount = blockedTasks.length;
 
@@ -141,15 +149,17 @@ export function FleetView() {
     { id: "risiko", label: de.fleet.subtabRisiko, warn: blockedCount > 0 },
   ];
 
-  // Ketten-Chips für die persistente rechte Spalte auf Tablet/Desktop
-  const allBoardTasksForKetten = allBoardTasksFlat.map((t) => ({
+  // Ketten-Chips für die persistente rechte Spalte auf Tablet/Desktop.
+  // Root-Auswahl und Fetch-Board müssen immer aus derselben Board-Payload stammen.
+  const activeBoardData = selectedBoard ? selectedBoardData.data : board.data;
+  const activeBoardTasksForKetten = (activeBoardData?.columns ?? []).flatMap((column) => column.tasks).map((t) => ({
     id: t.id,
     title: t.title,
     root_id: t.root_id,
     status: t.status,
     completed_at: t.completed_at,
   }));
-  const kettenChipsForAside = buildChainChips(allBoardTasksForKetten);
+  const kettenChipsForAside = buildChainChips(activeBoardTasksForKetten);
 
   function closeNodeDetail() {
     setNodeDetailId(null);
@@ -169,6 +179,12 @@ export function FleetView() {
   function openPlanSpecDetail(item: PlanSpecRecord) {
     closeNodeDetail();
     setPlanspecDrawerItem(item);
+  }
+
+  function selectBoard(boardSlug: string | null) {
+    setKettenRootId(null);
+    closeNodeDetail();
+    setSelectedBoard(boardSlug);
   }
 
   const desktopDetail = isLg
@@ -211,12 +227,16 @@ export function FleetView() {
     ? (
         <div id="fleet-detail-pane">
           <KettenTab
-            board={board.data}
-            initialRootId={kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
+            key={selectedBoard ?? "current"}
+            board={activeBoardData}
+            boardSlug={selectedBoard}
+            workers={selectedBoard ? activeWorkers.filter((worker) => worker.board_slug === selectedBoard) : undefined}
+            readOnly={selectedBoard != null}
+            initialRootId={selectedBoard ? null : kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
             now={now}
-            selectedNodeId={nodeDetailId}
-            detailControlsId="fleet-detail-pane"
-            onOpenNodeDetail={openNodeDetail}
+            selectedNodeId={selectedBoard ? null : nodeDetailId}
+            detailControlsId={!selectedBoard ? "fleet-detail-pane" : undefined}
+            onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
           />
         </div>
       )
@@ -308,10 +328,11 @@ export function FleetView() {
             {subtab === "ketten" && (
               <>
                 {boardCatalog.data ? (
-                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={selectBoard} />
                 ) : null}
                 <KettenTab
-                  board={selectedBoard ? selectedBoardData.data : board.data}
+                  key={selectedBoard ?? "current"}
+                  board={activeBoardData}
                   boardSlug={selectedBoard}
                   workers={selectedBoard ? activeWorkers.filter((worker) => worker.board_slug === selectedBoard) : undefined}
                   readOnly={selectedBoard != null}
@@ -326,7 +347,7 @@ export function FleetView() {
             {subtab === "plan" && (
               <>
                 {boardCatalog.data ? (
-                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={selectBoard} />
                 ) : null}
                 <PlanTab
                   allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : allPlanspecs}
@@ -345,10 +366,10 @@ export function FleetView() {
             {subtab === "board" && (
               <>
                 {boardCatalog.data ? (
-                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={setSelectedBoard} />
+                  <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={selectBoard} />
                 ) : null}
                 <BoardTab
-                  board={selectedBoard ? selectedBoardData.data : board.data}
+                  board={activeBoardData}
                   readOnly={selectedBoard != null}
                   selectedNodeId={selectedBoard ? null : nodeDetailId}
                   detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
