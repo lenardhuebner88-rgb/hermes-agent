@@ -2779,6 +2779,13 @@ DEFAULT_CONFIG = {
         "release_gate": {
             "mode": "manual",
         },
+        # Optional post-merge integration gates per repository. Commands run
+        # in the clean detached validation worktree; repositories without an
+        # entry keep the existing Hermes/Family-Organizer gate heuristics.
+        "integration_gate": {
+            "repos": {},
+            "timeout": 900,
+        },
         # Release-gate executor: how many bounded coder-claude fixer attempts
         # (worktree-only) to make when the dashboard release gate is red before
         # escalating to the operator. 0 = escalate immediately on red.

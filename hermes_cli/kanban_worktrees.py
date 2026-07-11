@@ -233,6 +233,101 @@ def _is_fo_repo(repo_root: Path) -> bool:
         return False
 
 
+def _integration_gate_config() -> dict:
+    """Read ``kanban.integration_gate`` from the root Hermes config."""
+    raw: dict = {}
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            candidate = (root_cfg.get("kanban") or {}).get("integration_gate") or {}
+            if isinstance(candidate, dict):
+                raw = candidate
+    except Exception:
+        raw = {}
+
+    repos_raw = raw.get("repos") if isinstance(raw.get("repos"), dict) else {}
+    repos: dict[str, list[str]] = {}
+    for path, commands in repos_raw.items():
+        if not isinstance(commands, (list, tuple)):
+            continue
+        try:
+            key = str(Path(str(path)).resolve())
+        except Exception:
+            continue
+        normalized = [str(command) for command in commands if str(command).strip()]
+        if normalized:
+            repos[key] = normalized
+
+    try:
+        timeout = int(raw.get("timeout", 900))
+    except (TypeError, ValueError):
+        timeout = 900
+    if timeout <= 0:
+        timeout = 900
+    return {"repos": repos, "timeout": timeout}
+
+
+def _configured_integration_gate(
+    repo_root: Path,
+    changed_files: list[str],
+    *,
+    commands: Sequence[str],
+    timeout: int,
+) -> tuple[bool, str]:
+    """Run configured integration commands in the validation worktree."""
+    del changed_files
+    notes: list[str] = []
+    for command in commands:
+        argv = shlex.split(command)
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"{command}: TIMEOUT after {timeout}s"
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"{command}: {exc}"
+        if proc.returncode != 0:
+            tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-2000:]
+            return False, f"{command}: exit {proc.returncode}\n{tail}"
+        notes.append(f"{command} ok")
+    return True, "; ".join(notes)
+
+
+def _integration_gate_for_repo(
+    repo_root: Path,
+) -> Callable[[Path, list[str]], tuple[bool, str]]:
+    """Select a configured repo gate, else preserve the existing heuristic."""
+    config = _integration_gate_config()
+    repo_key = str(Path(repo_root).resolve())
+    commands = config["repos"].get(repo_key)
+    if commands:
+        timeout = config["timeout"]
+
+        def configured_gate(
+            worktree: Path, changed_files: list[str]
+        ) -> tuple[bool, str]:
+            return _configured_integration_gate(
+                worktree,
+                changed_files,
+                commands=commands,
+                timeout=timeout,
+            )
+
+        return configured_gate
+    return fo_integration_gate if _is_fo_repo(repo_root) else default_quick_gate
+
+
 GIT_TIMEOUT_SECONDS = 120
 MERGE_TIMEOUT_SECONDS = 300
 # Must comfortably exceed a worst-case post-merge gate (ruff 300s +
@@ -3591,11 +3686,7 @@ def integrate_chain(
                                     reintegrated_after_revert=False,
                                 )
                             restored_commit = _git(repo_root, "rev-parse", "HEAD")
-                            gate = gate_runner or (
-                                fo_integration_gate
-                                if _is_fo_repo(repo_root)
-                                else default_quick_gate
-                            )
+                            gate = gate_runner or _integration_gate_for_repo(repo_root)
                             ok, detail = _run_gate_in_validation_worktree(
                                 repo_root, restored_commit, diff_files, gate,
                             )
@@ -3714,9 +3805,7 @@ def integrate_chain(
             # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
             # The gate runs at the exact merge commit in a clean detached
             # validation worktree, never in the potentially dirty live checkout.
-            gate = gate_runner or (
-                fo_integration_gate if _is_fo_repo(repo_root) else default_quick_gate
-            )
+            gate = gate_runner or _integration_gate_for_repo(repo_root)
             ok, detail = _run_gate_in_validation_worktree(
                 repo_root, merge_commit, diff_files, gate,
             )

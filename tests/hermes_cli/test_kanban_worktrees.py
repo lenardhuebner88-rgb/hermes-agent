@@ -465,6 +465,81 @@ def test_fo_integration_gate_npm_ci_failure_fails_clearly(tmp_path, monkeypatch)
     assert "npm ci (self-heal" in detail
 
 
+def test_integration_gate_config_runs_commands_in_validation_worktree(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    validation_worktree = tmp_path / "validation"
+    repo.mkdir()
+    validation_worktree.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        kwt,
+        "_integration_gate_config",
+        lambda: {"repos": {str(repo.resolve()): ["npm test", "npm run lint"]}, "timeout": 321},
+    )
+    monkeypatch.setattr(
+        kwt,
+        "_is_fo_repo",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("heuristic must not run")),
+    )
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    gate = kwt._integration_gate_for_repo(repo)
+    ok, detail = gate(validation_worktree, ["changed.py"])
+
+    assert ok is True
+    assert detail == "npm test ok; npm run lint ok"
+    assert [call[0] for call in calls] == [
+        ["npm", "test"],
+        ["npm", "run", "lint"],
+    ]
+    assert all(call[1]["cwd"] == str(validation_worktree) for call in calls)
+    assert all(call[1]["timeout"] == 321 for call in calls)
+
+
+def test_integration_gate_without_config_keeps_existing_fo_heuristic(
+    tmp_path, monkeypatch
+):
+    fo_repo = tmp_path / "family-organizer"
+    fo_repo.mkdir()
+    (fo_repo / "package.json").write_text(
+        '{"scripts": {"build": "next build --turbo"}}', encoding="utf-8"
+    )
+    hermes_repo = tmp_path / "hermes"
+    hermes_repo.mkdir()
+    monkeypatch.setattr(
+        kwt, "_integration_gate_config", lambda: {"repos": {}, "timeout": 900}
+    )
+
+    assert kwt._integration_gate_for_repo(fo_repo) is kwt.fo_integration_gate
+    assert kwt._integration_gate_for_repo(hermes_repo) is kwt.default_quick_gate
+
+
+def test_integration_gate_config_reads_root_repo_map(kanban_home, repo):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n"
+        "  integration_gate:\n"
+        "    timeout: 123\n"
+        "    repos:\n"
+        f"      {repo}:\n"
+        "        - npm test\n",
+        encoding="utf-8",
+    )
+
+    config = kwt._integration_gate_config()
+
+    assert config == {
+        "repos": {str(repo.resolve()): ["npm test"]},
+        "timeout": 123,
+    }
+
+
 def test_provision_recreates_vanished_worktree(kanban_home, repo):
     with kb.connect() as conn:
         tid = kb.create_task(
