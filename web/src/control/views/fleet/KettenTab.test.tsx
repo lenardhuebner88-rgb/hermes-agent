@@ -254,4 +254,63 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
       expect(fetchJSONMock).toHaveBeenCalledWith(`/api/plugins/kanban/tasks/${ROOT_ID}/chain-costs?board=health-track`);
     });
   });
+
+  it("FIX-6: Board-Switch Race — keine Requests mit altem rootId auf neuem Board", async () => {
+    const { rerender } = render(
+      <KettenTab
+        board={BOARD}
+        boardSlug="board-a"
+        initialRootId={ROOT_ID}
+        now={2000}
+        onOpenNodeDetail={() => undefined}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(`/api/plugins/kanban/tasks/${ROOT_ID}/chain-graph?board=board-a`);
+    });
+
+    const OTHER_ROOT = "t_other_board";
+    const OTHER_CHILD: BoardTask = {
+      ...ROOT_TASK, id: "t_other_child", title: "Other child", status: "running", root_id: OTHER_ROOT,
+    };
+    const OTHER_TASK: BoardTask = {
+      ...ROOT_TASK, id: OTHER_ROOT, title: "Other root", status: "scheduled", root_id: OTHER_ROOT,
+    };
+    const BOARD_B: BoardResponse = {
+      columns: [{ name: "running", tasks: [OTHER_TASK, OTHER_CHILD] }],
+      tenants: ["orchestrator"], assignees: ["coder"], latest_event_id: 1,
+      source_errors: [], now: 3000,
+    };
+
+    fetchJSONMock.mockClear();
+    rerender(
+      <KettenTab
+        board={BOARD_B}
+        boardSlug="board-b"
+        initialRootId={ROOT_ID}
+        now={3000}
+        onOpenNodeDetail={() => undefined}
+      />,
+    );
+
+    // Nach dem Re-render sollten kurz keine 404-Fetches mit altem rootId passieren.
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(`/api/plugins/kanban/tasks/${OTHER_ROOT}/chain-graph?board=board-b`);
+    });
+
+    const badRequests = fetchJSONMock.mock.calls.filter(([url]) =>
+      String(url).includes(ROOT_ID) && String(url).includes("board-b"),
+    );
+    expect(badRequests).toHaveLength(0);
+
+    const chainGraphCalls = fetchJSONMock.mock.calls.filter(([url]) =>
+      String(url).includes("/chain-graph"),
+    );
+    const chainCostsCalls = fetchJSONMock.mock.calls.filter(([url]) =>
+      String(url).includes("/chain-costs"),
+    );
+    expect(chainGraphCalls).toHaveLength(1);
+    expect(chainCostsCalls).toHaveLength(1);
+  });
 });
