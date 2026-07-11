@@ -30,6 +30,21 @@ def test_state_db_persists_openrouter_generation_id(tmp_path: Path):
 
 def test_deep_audit_accumulates_cost_for_all_turns(monkeypatch):
     monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit-cost", ("hermes_cli/deep_audit.py",))
+    # run_deep_audit routes every turn through the shared autoresearch budget
+    # guard (added after this test). Turn one here bills 1M tokens — far past the
+    # 100k daily default — so the guard would refuse turn two and only the first
+    # turn's cost would accrue. This test exercises cost ACCUMULATION, not the
+    # budget guard (that lives in test_autoresearch_budget), so give it headroom.
+    from hermes_cli import autoresearch_budget
+
+    monkeypatch.setattr(
+        autoresearch_budget,
+        "load_budget_config",
+        lambda config=None: autoresearch_budget.BudgetConfig(
+            daily_token_limit=1_000_000_000,
+            daily_model_call_limit=1_000_000,
+        ),
+    )
     calls = []
 
     def resp(tool_calls, *, prompt_tokens: int, completion_tokens: int):
