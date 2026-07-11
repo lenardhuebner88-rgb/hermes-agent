@@ -153,6 +153,21 @@ _PRESERVABLE_ARTIFACT_PREFIXES = (
     # via _IGNORED_DIRTY_PREFIXES instead, so it neither parks nor preserves.
     "screenshots/",
 )
+
+
+def _resolve_chromium_shot() -> str:
+    """Resolve the ``chromium-shot`` screenshot binary.
+
+    The release-gate activation runs in a transient systemd unit whose PATH is
+    an explicit allowlist that does NOT include ``~/bin`` (where chromium-shot
+    lives), so a bare ``chromium-shot`` lookup raises FileNotFoundError, the
+    visual gate reports RED, and a bounded fixer is spawned to chase a phantom
+    CSS bug (observed 2026-07-12). Resolve PATH first, then the known ``~/bin``
+    location — matching design_board_kanban's absolute-path convention — so the
+    gate finds the tool regardless of the activation env's PATH."""
+    return shutil.which("chromium-shot") or os.path.expanduser("~/bin/chromium-shot")
+
+
 _ARTIFACT_LIKE_PREFIXES = _PRESERVABLE_ARTIFACT_PREFIXES + (
     "blob-report/",
     "coverage/",
@@ -1529,7 +1544,7 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
             try:
                 shot = subprocess.run(  # noqa: S603 -- fixed argv
                     [
-                        "chromium-shot",
+                        _resolve_chromium_shot(),
                         f"--screenshot={path}",
                         f"--window-size={size}",
                         "--virtual-time-budget=12000",
@@ -2601,6 +2616,9 @@ def spawn_release_gate_activation(
     # and HERMES_HOME when the caller pins a non-default runtime root.
     path_prefix = [
         os.path.expanduser("~/.local/bin"),
+        # ~/bin holds chromium-shot (the visual gate's screenshot tool) and other
+        # operator scripts; without it the gate's tool lookup fails in the unit.
+        os.path.expanduser("~/bin"),
         str(LIVE_CHECKOUT_ROOT / "venv" / "bin"),
         "/usr/local/bin", "/usr/bin", "/bin",
     ]
