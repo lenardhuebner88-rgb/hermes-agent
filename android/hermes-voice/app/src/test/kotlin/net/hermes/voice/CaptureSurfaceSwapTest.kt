@@ -60,7 +60,7 @@ class CaptureSurfaceSwapTest {
     }
 
     @Test
-    fun `frame delivery is denied once stop was requested`() {
+    fun `normal and detail frame delivery are denied once stop was requested`() {
         assertTrue(CaptureDeliveryPolicy.shouldDeliver(true, false))
         assertTrue(!CaptureDeliveryPolicy.shouldDeliver(true, true))
         assertTrue(!CaptureDeliveryPolicy.shouldDeliver(false, false))

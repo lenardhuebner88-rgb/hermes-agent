@@ -409,15 +409,14 @@ class MediaProjectionService : Service() {
             return
         }
         detailCaptureActive = false
-        if (jpeg == null) {
-            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
-        } else {
-            HermesBridge.send(
-                NativeToWebMessage.DetailScreenFrame(
-                    request.id,
-                    Base64.encodeToString(jpeg, Base64.NO_WRAP),
-                ),
-            )
+        val base64 = jpeg?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+        synchronized(surfaceLock) {
+            if (stopRequested.get()) return
+            if (CaptureDeliveryPolicy.shouldDeliver(base64 != null, stopRequested.get())) {
+                HermesBridge.send(NativeToWebMessage.DetailScreenFrame(request.id, base64!!))
+            } else {
+                HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+            }
         }
     }
 
