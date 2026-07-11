@@ -20,6 +20,9 @@
          plain CSS custom properties. Keep in sync by hand if theme.css
          changes the calibrated palette. */
       :root {
+        --app-height: 100dvh;
+        --app-top: 0px;
+        --mic-lift: 0;
         --color-surface-0: #0e100f;
         --color-surface-1: #141715;
         --color-surface-2: #1a1e1b;
@@ -67,9 +70,14 @@
       }
 
       body {
+        position: fixed;
+        top: var(--app-top);
+        left: 0;
+        width: 100%;
+        height: var(--app-height);
         min-width: 0;
-        min-height: 100svh;
         margin: 0;
+        overflow: hidden;
         overflow-x: clip;
         background:
           radial-gradient(circle at 50% -10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
@@ -91,7 +99,7 @@
       main {
         display: grid;
         width: min(100%, 48rem);
-        min-height: 100svh;
+        height: var(--app-height);
         margin: 0 auto;
         padding:
           max(1.25rem, env(safe-area-inset-top))
@@ -99,7 +107,7 @@
           max(1.25rem, env(safe-area-inset-bottom))
           max(1rem, env(safe-area-inset-left));
         gap: 1rem;
-        grid-template-rows: auto auto 1fr auto;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
       }
 
       .brand {
@@ -311,6 +319,8 @@
         inset: 2.1rem;
         background: color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 22%, transparent);
         box-shadow: 0 0 2.5rem color-mix(in srgb, var(--orb-color, var(--color-ink-3)) 45%, transparent);
+        transform: scale(calc(1 + var(--mic-lift)));
+        transition: transform 80ms linear, background 220ms ease-out;
       }
 
       body[data-voice-state="idle"] .status-orb {
@@ -431,8 +441,11 @@
       }
 
       .transcript-card {
+        display: flex;
+        flex-direction: column;
         min-height: 10rem;
         padding: 1.25rem;
+        overflow: hidden;
       }
 
       .section-title {
@@ -446,7 +459,11 @@
 
       #transcript {
         display: grid;
+        flex: 1;
+        min-height: 0;
         gap: 0.6rem;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         scroll-behavior: smooth;
       }
 
@@ -548,6 +565,27 @@
 
       #composer-input[aria-disabled="true"] {
         color: var(--color-ink-3);
+        cursor: not-allowed;
+        opacity: 0.72;
+      }
+
+      .composer-hint {
+        margin: 0.45rem 0 0;
+        color: var(--color-ink-3);
+        font-size: 0.72rem;
+        line-height: 1.35;
+        text-align: center;
+      }
+
+      .composer-hint[hidden] {
+        display: none;
+      }
+
+      #composer-submit:disabled {
+        color: var(--color-ink-3);
+        background: var(--color-surface-3);
+        cursor: not-allowed;
+        opacity: 0.65;
       }
 
       #composer-submit {
@@ -666,6 +704,94 @@
         opacity: 0.55;
       }
 
+      .mode-explanation {
+        min-width: 0;
+        margin: 0;
+        color: var(--color-ink-2);
+        font-size: 0.76rem;
+        line-height: 1.35;
+        text-align: center;
+      }
+
+      .connection-banner {
+        position: fixed;
+        top: calc(var(--app-top) + max(5.8rem, env(safe-area-inset-top)));
+        right: max(1rem, env(safe-area-inset-right));
+        left: max(1rem, env(safe-area-inset-left));
+        z-index: 4;
+        display: flex;
+        width: min(calc(100% - 2rem), 29.5rem);
+        min-width: 0;
+        min-height: 2.25rem;
+        margin-inline: auto;
+        padding: 0.5rem 0.75rem;
+        border: 1px solid var(--color-line);
+        border-radius: 0.8rem;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-ink-2);
+        background: color-mix(in srgb, var(--color-surface-2) 88%, transparent);
+        font-size: 0.74rem;
+        line-height: 1.3;
+        text-align: center;
+      }
+
+      .connection-banner[hidden] {
+        display: none;
+      }
+
+      .connection-banner[data-tone="warn"] {
+        border-color: color-mix(in srgb, var(--color-status-warn) 48%, var(--color-line));
+        color: #fbe3a1;
+      }
+
+      .connection-banner[data-tone="ok"] {
+        border-color: color-mix(in srgb, var(--color-status-ok) 48%, var(--color-line));
+        color: #c9e8c3;
+      }
+
+      .install-card {
+        position: fixed;
+        right: max(1rem, env(safe-area-inset-right));
+        bottom: max(6rem, calc(5rem + env(safe-area-inset-bottom)));
+        left: max(1rem, env(safe-area-inset-left));
+        z-index: 5;
+        display: grid;
+        width: min(calc(100% - 2rem), 29.5rem);
+        margin-inline: auto;
+        padding: 1rem;
+        gap: 0.8rem;
+        border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--color-line));
+        border-radius: 1rem;
+        background: color-mix(in srgb, var(--color-surface-2) 96%, transparent);
+        box-shadow: 0 1.25rem 3rem rgba(0, 0, 0, 0.48);
+        backdrop-filter: blur(1rem);
+      }
+
+      .install-card[hidden] {
+        display: none;
+      }
+
+      .install-card p {
+        margin: 0;
+        color: var(--color-ink-2);
+        font-size: 0.82rem;
+        line-height: 1.4;
+      }
+
+      .install-card strong {
+        display: block;
+        margin-bottom: 0.2rem;
+        color: var(--color-ink);
+        font-size: 0.9rem;
+      }
+
+      .install-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.6rem;
+      }
+
       #mode-badge[data-mode="spar"] {
         border-color: var(--color-spar);
         color: var(--color-spar-hi);
@@ -774,7 +900,8 @@
           max(1rem, env(safe-area-inset-bottom))
           max(1rem, env(safe-area-inset-left));
         gap: 0.85rem;
-        grid-template-rows: auto auto minmax(18rem, 1fr) auto auto auto;
+        overflow: hidden;
+        grid-template-rows: auto auto auto minmax(10rem, 1fr) auto minmax(7rem, 0.72fr) auto;
       }
 
       .app-header {
@@ -842,17 +969,10 @@
         box-shadow: 0 0 0.8rem color-mix(in srgb, var(--color-spar-hi) 65%, transparent);
       }
 
-      #install-chip {
-        min-height: 1.8rem;
-        margin-left: 0.2rem;
-        padding: 0.2rem 0.65rem;
-        font-size: 0.58rem;
-      }
-
       .state-card {
         min-width: 0;
-        min-height: 18rem;
-        padding: 2rem 1rem;
+        min-height: 0;
+        padding: 1rem;
         border: 0;
         background: transparent;
         box-shadow: none;
@@ -896,6 +1016,7 @@
         border-color: color-mix(in srgb, var(--accent-hi) 36%, transparent);
         background: radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, var(--color-surface-1)), var(--color-surface-0) 72%);
         box-shadow: inset 0 0 2.75rem rgba(0, 0, 0, 0.4), 0 0 2.5rem color-mix(in srgb, var(--accent) 18%, transparent);
+        transform: scale(calc(1 + var(--mic-lift)));
       }
 
       #voice-status {
@@ -924,6 +1045,7 @@
         padding: 0.75rem;
         border-radius: 1.25rem;
         grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-rows: auto auto;
         color: var(--color-ink);
         background: color-mix(in srgb, var(--color-surface-2) 78%, transparent);
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -942,6 +1064,21 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .share-button-state {
+        grid-column: 2 / 4;
+        overflow: hidden;
+        color: var(--color-ink-3);
+        font-size: 0.68rem;
+        font-weight: 600;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .share-button[aria-pressed="true"] .share-button-state {
+        color: #fff1f2;
       }
 
       .share-switch {
@@ -980,7 +1117,7 @@
       .transcript-card {
         min-width: 0;
         min-height: 0;
-        padding: 0.9rem 0.2rem 0;
+        padding: 0.7rem 0.2rem 0;
         border: 0;
         border-top: 1px solid var(--color-line-soft);
         border-radius: 0;
@@ -995,7 +1132,7 @@
       }
 
       #transcript {
-        max-height: min(28svh, 14rem);
+        max-height: none;
         overflow-y: auto;
         overscroll-behavior: contain;
         scrollbar-width: thin;
@@ -1059,11 +1196,24 @@
         }
       }
 
+      body[data-keyboard-open="true"] main {
+        gap: 0.5rem;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+
+      body[data-keyboard-open="true"] .privacy-row,
+      body[data-keyboard-open="true"] .mode-explanation,
+      body[data-keyboard-open="true"] .connection-banner,
+      body[data-keyboard-open="true"] .state-card,
+      body[data-keyboard-open="true"] .sharing-actions {
+        display: none;
+      }
+
       @media (min-width: 64rem) {
         main {
           width: min(100%, 31.5rem);
           grid-template-columns: minmax(0, 1fr);
-          grid-template-rows: auto auto minmax(18rem, 1fr) auto auto auto;
+          grid-template-rows: auto auto auto minmax(10rem, 1fr) auto minmax(7rem, 0.72fr) auto;
           grid-template-areas: none;
         }
 
@@ -1075,9 +1225,9 @@
         }
 
         .transcript-card {
-          display: block;
+          display: flex;
           max-height: none;
-          overflow: visible;
+          overflow: hidden;
         }
       }
     </style>
@@ -1114,8 +1264,13 @@
       <div class="privacy-row" aria-label="Verbindungsstatus">
         <span class="privacy-dot" aria-hidden="true"></span>
         <span>Privat · Bereit</span>
-        <button id="install-chip" type="button" class="chip-button" hidden>Installieren</button>
       </div>
+
+      <p id="mode-explanation" class="mode-explanation" aria-live="polite">
+        Live · natürliches Echtzeitgespräch
+      </p>
+
+      <div id="connection-banner" class="connection-banner" role="status" aria-live="polite" hidden></div>
 
       <section
         id="voice-trigger"
@@ -1148,6 +1303,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h3l1.4-2h7.2l1.4 2h3v11H4zM12 10a3.25 3.25 0 1 0 0 6.5A3.25 3.25 0 0 0 12 10Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
           <span class="share-button-label">Kamera</span>
           <span class="share-switch" aria-hidden="true"></span>
+          <span id="camera-share-state" class="share-button-state">Aus</span>
         </button>
         <button
           id="screen-chip"
@@ -1158,6 +1314,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5.5h17v11h-17zM8.5 20h7M12 16.5V20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="share-button-label">Bildschirm</span>
           <span class="share-switch" aria-hidden="true"></span>
+          <span id="screen-share-state" class="share-button-state">Aus</span>
         </button>
         <span id="screen-share-hint" class="share-hint" role="status" hidden>
           Bildschirmteilen wird von Chrome auf Android noch nicht unterstützt.
@@ -1166,7 +1323,7 @@
         <div class="share-meta">
           <span id="sharing-indicator" class="sharing-indicator" hidden>
             <span class="sharing-dot" aria-hidden="true"></span>
-            <span>teilt</span>
+            <span>Wird geteilt</span>
           </span>
           <video id="sharing-preview" class="sharing-preview" autoplay muted playsinline hidden></video>
         </div>
@@ -1183,11 +1340,13 @@
             placeholder="Nachricht an Hermes …"
             aria-label="Nachricht an Hermes"
             aria-disabled="true"
+            disabled
             autocomplete="off"
             maxlength="4000"
           />
-          <button id="composer-submit" type="submit">Senden</button>
+          <button id="composer-submit" type="submit" disabled>Senden</button>
         </form>
+        <p id="composer-hint" class="composer-hint">Nach Sitzungsstart verfügbar.</p>
       </section>
 
       <div class="action-bar">
@@ -1203,6 +1362,17 @@
           Sitzung starten
         </button>
       </div>
+
+      <aside id="install-card" class="install-card" aria-label="Hermes Voice installieren" hidden>
+        <p>
+          <strong>Wie eine echte App nutzen</strong>
+          Hermes Voice auf deinem Startbildschirm installieren – ohne Browserleiste.
+        </p>
+        <div class="install-actions">
+          <button id="install-dismiss" type="button" class="chip-button">Später</button>
+          <button id="install-button" type="button" class="chip-button">Installieren</button>
+        </div>
+      </aside>
     </main>
   </body>
 </html>

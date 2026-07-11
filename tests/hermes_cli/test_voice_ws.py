@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 import wave
 
 import pytest
@@ -499,7 +500,7 @@ def test_voice_pwa_manifest_contract():
     assert any(icon["purpose"] == "maskable" for icon in icons)
 
     for icon in icons:
-        icon_path = client_dir / icon["src"].removeprefix("/voice/")
+        icon_path = client_dir / urlsplit(icon["src"]).path.removeprefix("/voice/")
         assert icon_path.is_file(), (
             f"manifest icon src {icon['src']!r} has no file on disk"
         )
@@ -2799,7 +2800,7 @@ def test_voice_client_composer_form_present_with_max_length():
     assert 'id="composer-submit"' in document
 
 
-def test_voice_client_install_chip_and_text_send_and_no_session_hint():
+def test_voice_client_install_card_and_text_send_and_no_session_hint():
     """C5 client tripwire: beforeinstallprompt handling, the typed-turn
     websocket send, and the exact no-session hint string all exist."""
     client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
@@ -2838,6 +2839,85 @@ def test_voice_client_native_app_shell_prevents_horizontal_overflow():
 
     script = (client_dir / "app.js").read_text(encoding="utf-8")
     assert 'voiceTriggerElement?.addEventListener("click"' in script
+
+
+def test_voice_client_native_ux_wave_contracts():
+    """The mobile app shell, interaction feedback, and calm state surfaces
+    remain wired to the existing mic/share/reconnect lifecycle."""
+    client_dir = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    document = (client_dir / "index.html").read_text(encoding="utf-8")
+    script = (client_dir / "app.js").read_text(encoding="utf-8")
+
+    # Fixed VisualViewport shell: the body itself never pans; only transcript
+    # content gets an internal scroll container while the action bar stays put.
+    assert "--app-height: 100dvh" in document
+    assert "height: var(--app-height);" in document
+    assert "overflow: hidden;" in document
+    assert "#transcript" in document and "overflow-y: auto;" in document
+    assert "window.visualViewport?.addEventListener" in script
+    assert 'style.setProperty("--app-height"' in script
+    assert 'document.body.dataset.keyboardOpen' in script
+    assert 'body[data-keyboard-open="true"] main' in document
+
+    # The existing worklet RMS drives the orb; haptics are feature-detected
+    # and suppressed for operators who request reduced motion.
+    assert "const measuredRms = Number(message.rms);" in script
+    assert 'style.setProperty(\n      "--mic-lift"' in script
+    assert 'typeof navigator.vibrate !== "function"' in script
+    assert 'prefers-reduced-motion: reduce' in script
+
+    assert "Live · natürliches Echtzeitgespräch" in document
+    assert "Spar · Push-to-talk, etwas langsamer, praktisch kostenlos" in script
+    assert 'id="composer-input"' in document and "disabled" in document
+    assert "Nach Sitzungsstart verfügbar." in script
+    assert "Im Sparmodus sprichst du über die Sprechtaste." in script
+
+    assert 'id="camera-share-state"' in document
+    assert 'id="screen-share-state"' in document
+    assert "Wird geteilt · Stoppen" in script
+    assert 'id="install-card"' in document
+    assert 'id="install-chip"' not in document
+    assert 'beforeinstallprompt' in script and 'display-mode: standalone' in script
+    assert 'id="connection-banner"' in document
+    assert "Verbindung unterbrochen · neuer Versuch" in script
+    assert "Verbindung wiederhergestellt." in script
+
+
+def test_voice_client_terminal_start_error_clears_connecting_banner_before_cleanup():
+    """A denied/missing microphone must not leave the optimistic connection
+    banner visible while the primary state already reports a terminal error."""
+    script_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "app.js"
+    script = script_path.read_text(encoding="utf-8")
+    start_session = script.split("async function startSession() {", 1)[1].split(
+        "async function requestStop(session)", 1
+    )[0]
+    terminal_catch = start_session.rsplit("} catch (error) {", 1)[1]
+
+    status_index = terminal_catch.index('setStatus("error"')
+    banner_index = terminal_catch.index('setConnectionBanner("");')
+    cleanup_index = terminal_catch.index("await cleanupSession(session);")
+    assert status_index < banner_index < cleanup_index
+
+
+def test_voice_client_install_card_dismissal_persists_fail_soft():
+    script_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "app.js"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert (
+        'const INSTALL_CARD_DISMISSED_STORAGE_KEY = "hermesVoiceInstallCardDismissed";'
+        in script
+    )
+    assert "function getInstallCardDismissed()" in script
+    assert "function persistInstallCardDismissed()" in script
+    assert ".getItem(INSTALL_CARD_DISMISSED_STORAGE_KEY)" in script
+    assert '.setItem(INSTALL_CARD_DISMISSED_STORAGE_KEY, "1")' in script
+    assert "let installCardDismissed = getInstallCardDismissed();" in script
+
+    dismiss_handler = script.split(
+        'installDismissElement.addEventListener("click", () => {', 1
+    )[1].split("});", 1)[0]
+    assert "installCardDismissed = true;" in dismiss_handler
+    assert "persistInstallCardDismissed();" in dismiss_handler
 
 
 def test_voice_app_icon_uses_native_shell_palette():
@@ -2932,7 +3012,7 @@ def test_voice_client_video_sharing_autostop_and_indicator_tripwires():
     # both hidden by default and toggled by stopSharing()/startSharing().
     assert 'id="sharing-indicator" class="sharing-indicator" hidden' in document
     assert 'class="sharing-dot"' in document
-    assert ">teilt<" in document
+    assert ">Wird geteilt<" in document
     assert 'id="sharing-preview"' in document
     assert 'class="sharing-preview"' in document
     assert "sharingIndicatorElement.hidden = true" in script

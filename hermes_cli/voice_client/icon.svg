@@ -14,10 +14,13 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <rect width="512" height="512" fill="#0d100f"/>
   <rect width="512" height="512" rx="116" fill="url(#bg)"/>
   <rect x="9" y="9" width="494" height="494" rx="108" fill="none" stroke="#2a302b" stroke-width="10"/>
   <circle cx="256" cy="256" r="168" fill="#101512" stroke="url(#ring)" stroke-width="14" filter="url(#glow)"/>
   <circle cx="256" cy="256" r="142" fill="none" stroke="#ebe7de" stroke-opacity=".14" stroke-width="4"/>
-  <path d="M126 264h54l25-82 43 154 42-154 25 82h71" fill="none" stroke="url(#ring)" stroke-linecap="round" stroke-linejoin="round" stroke-width="25" filter="url(#glow)"/>
-  <circle cx="256" cy="256" r="10" fill="#ebe7de"/>
+  <g id="voice-mark" data-maskable-safe-zone="central-80-percent-circle">
+    <path d="M126 264h54l25-82 43 154 42-154 25 82h71" fill="none" stroke="url(#ring)" stroke-linecap="round" stroke-linejoin="round" stroke-width="25" filter="url(#glow)"/>
+    <circle cx="256" cy="256" r="10" fill="#ebe7de"/>
+  </g>
 </svg>

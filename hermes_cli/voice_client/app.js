@@ -45,11 +45,19 @@ const sessionButton = document.querySelector("#session-button");
 const transcriptElement = document.querySelector("#transcript");
 const emptyTranscriptElement = document.querySelector("#transcript-empty");
 const modeBadgeElement = document.querySelector("#mode-badge");
-const installChipElement = document.querySelector("#install-chip");
+const modeExplanationElement = document.querySelector("#mode-explanation");
+const connectionBannerElement = document.querySelector("#connection-banner");
+const installCardElement = document.querySelector("#install-card");
+const installButtonElement = document.querySelector("#install-button");
+const installDismissElement = document.querySelector("#install-dismiss");
 const composerForm = document.querySelector("#composer");
 const composerInput = document.querySelector("#composer-input");
+const composerSubmit = document.querySelector("#composer-submit");
+const composerHintElement = document.querySelector("#composer-hint");
 const cameraChipElement = document.querySelector("#camera-chip");
 const screenChipElement = document.querySelector("#screen-chip");
+const cameraShareStateElement = document.querySelector("#camera-share-state");
+const screenShareStateElement = document.querySelector("#screen-share-state");
 const screenShareHintElement = document.querySelector("#screen-share-hint");
 const sharingIndicatorElement = document.querySelector("#sharing-indicator");
 const sharingPreviewElement = document.querySelector("#sharing-preview");
@@ -64,6 +72,84 @@ const NO_SESSION_TEXT_HINT =
 let activeSession = null;
 let nextSessionId = 0;
 let stashedInstallPrompt = null;
+const INSTALL_CARD_DISMISSED_STORAGE_KEY = "hermesVoiceInstallCardDismissed";
+
+function getInstallCardDismissed() {
+  try {
+    return window.localStorage?.getItem(INSTALL_CARD_DISMISSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistInstallCardDismissed() {
+  try {
+    window.localStorage?.setItem(INSTALL_CARD_DISMISSED_STORAGE_KEY, "1");
+  } catch {
+    // Storage may be blocked in private/embedded contexts. Dismissal still
+    // applies for this page load through the in-memory flag below.
+  }
+}
+
+let installCardDismissed = getInstallCardDismissed();
+let connectionBannerTimer = null;
+
+function updateAppViewport() {
+  const viewport = window.visualViewport;
+  const height = viewport?.height || window.innerHeight;
+  const offsetTop = viewport?.offsetTop || 0;
+  if (Number.isFinite(height) && height > 0) {
+    document.documentElement?.style.setProperty("--app-height", `${height}px`);
+    document.documentElement?.style.setProperty("--app-top", `${offsetTop}px`);
+  }
+  const composerFocused = document.activeElement === composerInput;
+  const keyboardOpen = Boolean(
+    viewport &&
+      (composerFocused ||
+        (Number.isFinite(window.innerHeight) && viewport.height < window.innerHeight - 120)),
+  );
+  document.body.dataset.keyboardOpen = keyboardOpen ? "true" : "false";
+}
+
+window.visualViewport?.addEventListener("resize", updateAppViewport);
+window.visualViewport?.addEventListener("scroll", updateAppViewport);
+window.addEventListener("resize", updateAppViewport);
+updateAppViewport();
+composerInput.addEventListener("focus", updateAppViewport);
+composerInput.addEventListener("blur", updateAppViewport);
+
+function haptic(pattern) {
+  if (
+    typeof navigator.vibrate !== "function" ||
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+  ) {
+    return;
+  }
+  try {
+    navigator.vibrate(pattern);
+  } catch {
+    // Some embedded WebViews expose vibrate but reject it at runtime.
+  }
+}
+
+function setConnectionBanner(text, tone = "neutral", hideAfterMs = 0) {
+  if (!connectionBannerElement) {
+    return;
+  }
+  if (connectionBannerTimer !== null) {
+    window.clearTimeout(connectionBannerTimer);
+    connectionBannerTimer = null;
+  }
+  connectionBannerElement.hidden = !text;
+  connectionBannerElement.textContent = text || "";
+  connectionBannerElement.setAttribute("data-tone", tone);
+  if (text && hideAfterMs > 0) {
+    connectionBannerTimer = window.setTimeout(() => {
+      connectionBannerElement.hidden = true;
+      connectionBannerTimer = null;
+    }, hideAfterMs);
+  }
+}
 
 // Sparmodus (cascade, $0 marginal cost): chosen before Start, persisted
 // across reconnects (AC). Live stays the default — Sparmodus is opt-in.
@@ -101,6 +187,13 @@ function renderModeToggle() {
     const checked = selectedVoiceMode === mode;
     button.setAttribute("aria-checked", checked ? "true" : "false");
     button.disabled = locked;
+  }
+  if (modeExplanationElement) {
+    modeExplanationElement.hidden = locked;
+    modeExplanationElement.textContent =
+      selectedVoiceMode === "spar"
+        ? "Spar · Push-to-talk, etwas langsamer, praktisch kostenlos"
+        : "Live · natürliches Echtzeitgespräch";
   }
 }
 
@@ -170,6 +263,29 @@ let sharingCanvasContext = null;
 // ignored the same way a stray getDisplayMedia() resolution already is.
 let nativeScreen = { available: false, state: "idle", generation: 0 };
 
+function renderSharingControls() {
+  const cameraActive = sharingSource === "camera";
+  const screenActive =
+    sharingSource === "screen" ||
+    nativeScreen.state === "requesting" ||
+    nativeScreen.state === "active";
+  cameraShareStateElement.textContent = cameraActive ? "Wird geteilt · Stoppen" : "Aus";
+  screenShareStateElement.textContent =
+    nativeScreen.state === "requesting"
+      ? "Wird gestartet …"
+      : screenActive
+        ? "Wird geteilt · Stoppen"
+        : "Aus";
+  cameraChipElement.setAttribute(
+    "aria-label",
+    cameraActive ? "Kamerafreigabe stoppen" : "Kamera für Hermes freigeben",
+  );
+  screenChipElement.setAttribute(
+    "aria-label",
+    screenActive ? "Bildschirmfreigabe stoppen" : "Bildschirm für Hermes freigeben",
+  );
+}
+
 function isCurrent(session) {
   return activeSession === session;
 }
@@ -205,8 +321,13 @@ function renderModeBadge(value) {
   document.body.dataset.mode = value;
 }
 
-function setComposerEnabled(enabled) {
+function setComposerEnabled(enabled, lockedCopy = "") {
   composerInput.setAttribute("aria-disabled", enabled ? "false" : "true");
+  composerInput.disabled = !enabled;
+  composerSubmit.disabled = !enabled;
+  composerInput.placeholder = enabled ? "Nachricht an Hermes …" : lockedCopy;
+  composerHintElement.textContent = lockedCopy;
+  composerHintElement.hidden = enabled;
 }
 
 function updateTalkButtonVisibility() {
@@ -228,7 +349,8 @@ function setButton(mode) {
     sessionButton.disabled = false;
     sessionButton.setAttribute("aria-label", "Sprachsitzung starten");
     voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung starten");
-    setComposerEnabled(false);
+    setComposerEnabled(false, "Nach Sitzungsstart verfügbar.");
+    document.documentElement?.style.setProperty("--mic-lift", "0");
     return;
   }
   if (mode === "stop") {
@@ -238,7 +360,10 @@ function setButton(mode) {
     voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung beenden");
     // Sparmodus has no typed-turn control frame server-side (walkie-talkie
     // only) — the composer stays closed for the whole session.
-    setComposerEnabled(activeSession?.voiceMode !== "spar");
+    setComposerEnabled(
+      activeSession?.voiceMode !== "spar",
+      "Im Sparmodus sprichst du über die Sprechtaste.",
+    );
     if (talkButtonElement) {
       talkButtonElement.disabled = false;
     }
@@ -250,7 +375,7 @@ function setButton(mode) {
   voiceTriggerElement?.setAttribute("aria-label", "Sprachsitzung wird beendet");
   // After "end" the server accepts only interrupt controls — a typed frame
   // during the drain would be rejected, so the composer closes with the mic.
-  setComposerEnabled(false);
+  setComposerEnabled(false, "Sitzung wird beendet …");
   if (talkButtonElement) {
     talkButtonElement.disabled = true;
   }
@@ -728,6 +853,7 @@ function resetSharing(notifyNative) {
   sharingIndicatorElement.hidden = true;
   cameraChipElement.setAttribute("aria-pressed", "false");
   screenChipElement.setAttribute("aria-pressed", "false");
+  renderSharingControls();
 }
 
 function stopSharing() {
@@ -743,6 +869,7 @@ async function startSharing(source) {
     // no browser capture prompt, no local <video> preview, no capture timer.
     nativeScreen.state = "requesting";
     nativeScreen.generation = generation;
+    renderSharingControls();
     sendNativeBridgeMessage({ v: 1, type: "start_screen_capture" });
     return;
   }
@@ -771,6 +898,7 @@ async function startSharing(source) {
       "aria-pressed",
       "true",
     );
+    renderSharingControls();
     for (const track of stream.getVideoTracks()) {
       // The user can stop a screen share via the browser's own "Stop
       // sharing" UI, bypassing our chip entirely — that fires "ended".
@@ -791,7 +919,10 @@ async function startSharing(source) {
 }
 
 function toggleSharing(source) {
-  if (sharingSource === source) {
+  if (
+    sharingSource === source ||
+    (source === "screen" && nativeScreen.state !== "idle")
+  ) {
     stopSharing();
     return;
   }
@@ -807,6 +938,7 @@ function featureDetectScreenShare() {
   }
 }
 featureDetectScreenShare();
+renderSharingControls();
 
 cameraChipElement.addEventListener("click", () => {
   toggleSharing("camera");
@@ -927,6 +1059,7 @@ function handleNativeBridgeMessage(raw) {
       sharingSource = "screen";
       sharingIndicatorElement.hidden = false;
       screenChipElement.setAttribute("aria-pressed", "true");
+      renderSharingControls();
     } else {
       // Stale reply: the client already moved on (canceled, superseded by a
       // newer start/stop) before native confirmed this one — kill the
@@ -980,6 +1113,16 @@ initNativeBridge();
 function handleMicFrame(session, message) {
   if (!isCurrent(session) || session.microphoneStopped) {
     return;
+  }
+
+  const measuredRms = Number(message.rms);
+  if (Number.isFinite(measuredRms)) {
+    const targetLevel = Math.min(1, Math.max(0, measuredRms / 0.12));
+    session.micLevel = (session.micLevel || 0) * 0.7 + targetLevel * 0.3;
+    document.documentElement?.style.setProperty(
+      "--mic-lift",
+      (session.micLevel * 0.14).toFixed(3),
+    );
   }
 
   if (session.voiceMode === "spar") {
@@ -1239,6 +1382,7 @@ async function finishSession(
   if (isCurrent(session)) {
     activeSession = null;
     setButton("start");
+    setConnectionBanner("");
     if (document.body.dataset.voiceState !== "error") {
       setStatus("idle", detail || "Sitzung beendet. Du kannst neu starten.");
     }
@@ -1287,6 +1431,10 @@ async function attemptReconnect(session, event) {
     "connecting",
     `Verbindung unterbrochen – verbindet neu (Versuch ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) …`,
   );
+  setConnectionBanner(
+    `Verbindung unterbrochen · neuer Versuch ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`,
+    "warn",
+  );
   stopPlayback(session);
   session.suppressIncomingAudio = false;
   resetBargeIn(session);
@@ -1327,12 +1475,14 @@ function attachWebSocketHandlers(session) {
       return;
     }
     session.everOpen = true;
+    haptic(session.reconnectAttempts > 0 ? [8, 30, 8] : 10);
     if (session.reconnectAttempts > 0 && !session.drainRequested) {
       session.voiceState = "listening";
       setStatus(
         "listening",
         "Verbindung wiederhergestellt. Sag einfach, was Hermes tun soll.",
       );
+      setConnectionBanner("Verbindung wiederhergestellt.", "ok", 3200);
     }
   });
   socket.addEventListener("message", (event) => {
@@ -1357,6 +1507,7 @@ function attachWebSocketHandlers(session) {
   socket.addEventListener("error", () => {
     if (isCurrent(session) && session.websocket === socket && !session.drainRequested) {
       setStatus("error", "Die Sprachverbindung wurde unterbrochen.");
+      setConnectionBanner("Verbindung unterbrochen – Wiederverbindung läuft …", "warn");
     }
   });
   socket.addEventListener("close", (event) => {
@@ -1415,11 +1566,14 @@ async function startSession() {
     terminalDetail: null,
     voiceMode: selectedVoiceMode,
     sparRecording: false,
+    micLevel: 0,
   };
   activeSession = session;
+  haptic(12);
   transcriptUserScrolledUp = false;
   setButton("stop");
   setStatus("connecting", "Mikrofon und sichere Sprachverbindung werden vorbereitet.");
+  setConnectionBanner("Sichere Verbindung wird aufgebaut …");
 
   try {
     session.audioContext = new AudioContext({ latencyHint: "interactive" });
@@ -1476,6 +1630,7 @@ async function startSession() {
       return;
     }
     session.voiceState = "listening";
+    setConnectionBanner("Verbunden · verschlüsselte Sitzung aktiv", "ok", 2600);
     if (session.voiceMode === "spar") {
       // No server "mode" event exists for the cascade (that event is
       // Live-only) — the badge/accent switch to teal right here instead.
@@ -1490,6 +1645,10 @@ async function startSession() {
     }
     const technical = error && error.name ? ` [${error.name}]` : "";
     setStatus("error", safeErrorMessage(error) + technical);
+    // This is a terminal start failure (permission/device/ticket/socket), not
+    // a reconnect attempt. Clear the optimistic banner before awaiting
+    // cleanup so it can never contradict the visible error state.
+    setConnectionBanner("");
     await cleanupSession(session);
     if (isCurrent(session)) {
       activeSession = null;
@@ -1503,6 +1662,8 @@ async function requestStop(session) {
     return;
   }
   session.drainRequested = true;
+  haptic(16);
+  setConnectionBanner("");
   setButton("draining");
   statusDetailElement.textContent = "Mikrofon aus – die letzte Antwort wird noch abgespielt.";
   await stopMicrophone(session);
@@ -1528,6 +1689,7 @@ async function requestStop(session) {
   if (isCurrent(session)) {
     activeSession = null;
     setButton("start");
+    setConnectionBanner("");
     setStatus("idle", "Start abgebrochen. Du kannst neu starten.");
   }
 }
@@ -1624,10 +1786,19 @@ composerForm.addEventListener("submit", (event) => {
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   stashedInstallPrompt = event;
-  installChipElement.hidden = false;
+  if (!installCardDismissed && !isStandaloneApp()) {
+    installCardElement.hidden = false;
+  }
 });
 
-async function handleInstallChipClick() {
+function isStandaloneApp() {
+  return (
+    window.matchMedia?.("(display-mode: standalone)").matches === true ||
+    window.navigator?.standalone === true
+  );
+}
+
+async function handleInstallButtonClick() {
   if (!stashedInstallPrompt) {
     return;
   }
@@ -1635,17 +1806,27 @@ async function handleInstallChipClick() {
   stashedInstallPrompt = null;
   promptEvent.prompt();
   await promptEvent.userChoice;
-  installChipElement.hidden = true;
+  installCardElement.hidden = true;
 }
 
-installChipElement.addEventListener("click", () => {
-  void handleInstallChipClick();
+installButtonElement.addEventListener("click", () => {
+  void handleInstallButtonClick();
+});
+
+installDismissElement.addEventListener("click", () => {
+  installCardDismissed = true;
+  persistInstallCardDismissed();
+  installCardElement.hidden = true;
 });
 
 window.addEventListener("appinstalled", () => {
   stashedInstallPrompt = null;
-  installChipElement.hidden = true;
+  installCardElement.hidden = true;
 });
+
+if (isStandaloneApp()) {
+  installCardElement.hidden = true;
+}
 
 window.addEventListener("pagehide", () => {
   stopSharing();

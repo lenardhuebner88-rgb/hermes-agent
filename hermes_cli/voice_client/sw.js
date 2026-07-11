@@ -1,15 +1,15 @@
 "use strict";
 
-const CACHE = "hermes-voice-v4";
+const CACHE = "hermes-voice-v5";
 const CORE_ASSETS = [
   "/voice/offline.html",
   "/voice/app.js",
   "/voice/worklet.js",
   "/voice/manifest.json",
-  "/voice/icon.svg",
-  "/voice/icon-192.png",
-  "/voice/icon-512.png",
-  "/voice/icon-maskable-512.png",
+  "/voice/icon.svg?v=2",
+  "/voice/icon-192.png?v=2",
+  "/voice/icon-512.png?v=2",
+  "/voice/icon-maskable-512.png?v=2",
 ];
 
 self.addEventListener("install", (event) => {
