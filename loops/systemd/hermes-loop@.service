@@ -8,7 +8,7 @@ Description=Hermes Loop-Runner: Pack %i (night)
 Type=oneshot
 # Läuft im Live-Checkout; der Runner arbeitet in einem isolierten Worktree
 # unter ~/.hermes/loops/%i/wt. Standard-Packs pushen/deployen nie; die einzige
-# code-/hash-gebundene Ausnahme `dashboard-experience` darf nach Fable-PASS und
+# code-/hash-gebundene Ausnahme `dashboard-experience` darf nach Opus-Verifier-PASS und
 # Runner-Gates ff-only nach piet-fork landen. Deploy bleibt immer ausgeschlossen.
 # Über `bash` gestartet (nicht direkt), damit ein fehlendes x-Bit am shim NIE
 # wieder ein 203/EXEC-Silent-Fail gibt (2026-07-03 UI-Start-Bug).

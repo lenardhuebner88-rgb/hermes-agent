@@ -62,7 +62,8 @@ NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
 DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
 
-# Operator-Entscheid 2026-07-09: genau dieser kuratierte Fable→Sol→Fable-Loop darf
+# Operator-Entscheid 2026-07-09 (Modell-Update 2026-07-12: Fable raus, Opus 4.8
+# plant + verifiziert): genau dieser kuratierte Opus→Sol→Opus-Loop darf
 # nach einem unabhaengigen PASS ueber die deterministische Landungsleiter selbst
 # ff-mergen und nach piet-fork pushen. Die Autoritaet ist nicht nur an den Namen,
 # sondern an Quelle, Live-Repo, Rollen/Modelle und exakte Manifest-/Prompt-Inhalte
@@ -70,21 +71,21 @@ DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds"
 AUTOLAND_PACK_ALLOWLIST = frozenset({"dashboard-experience"})
 AUTOLAND_EXPECTED_REPO = Path("/home/piet/.hermes/hermes-agent").resolve()
 AUTOLAND_PHASE_CONTRACT = {
-    "plan": ("claude", "claude-fable-5", "PLANNER-PROMPT.md"),
+    "plan": ("claude", "claude-opus-4-8", "PLANNER-PROMPT.md"),
     "build": ("codex", "gpt-5.6-sol", "BUILDER-PROMPT.md"),
-    "verify": ("claude", "claude-fable-5", "VERIFIER-PROMPT.md"),
+    "verify": ("claude", "claude-opus-4-8", "VERIFIER-PROMPT.md"),
 }
 AUTOLAND_PATH_PREFIXES = ("web/src/control/",)
 # Werden zusammen mit den kuratierten Dateien aktualisiert. Der Loader prueft
 # beide Ebenen: menschenlesbaren Rollenvertrag und bytegenaue Inhaltsbindung.
 AUTOLAND_MANIFEST_SHA256 = {
-    "dashboard-experience": "b96ed2ecf0bb44e3a1c58fd333429a5f946d97592f01affacbc79d1a2a3a9f00",
+    "dashboard-experience": "656a47081bc6e91fcb06c1346c93f93316a08a8db9588d1aa7604ee3e86e3eff",
 }
 AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
-        "PLANNER-PROMPT.md": "6d4a4153b2a5377a4590b899c039ae73f5eeb9dcfe05723f2d2214fdd6a1abf7",
+        "PLANNER-PROMPT.md": "0669acde68d8e943bec71fc9c9cc6120f02e5f3bac9d81a0c4f447f759fbf67b",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
-        "VERIFIER-PROMPT.md": "e5629878f50ed0edab1b9e18bff76793470853314db35ce87632af53b9125fb1",
+        "VERIFIER-PROMPT.md": "423027eb1609f2994c7b9cedbebf8d6f669eb9d5684048ee39bf920fb89f7cd5",
     },
 }
 
@@ -244,7 +245,7 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         if actual_contract != AUTOLAND_PHASE_CONTRACT:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Phasenvertrag weicht ab; "
-                "erwartet Fable→Sol→Fable mit den kuratierten Prompts"
+                "erwartet Opus→Sol→Opus mit den kuratierten Prompts"
             )
         manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
         if manifest_hash != AUTOLAND_MANIFEST_SHA256.get(name):

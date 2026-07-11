@@ -1,15 +1,16 @@
-# dashboard-experience — operator-authorisierte Fable→Sol→Fable-Pipeline.
+# dashboard-experience — operator-authorisierte Opus→Sol→Opus-Pipeline
+# (Operator-Entscheid 2026-07-12: Fable raus, Opus 4.8 plant + verifiziert).
 # Auto-Landung ist im Runner an Repo-Pfad, Live-Repo, Rollen/Modelle und SHA-256
 # dieses Manifests sowie aller drei Prompts gebunden. Drift ist fail-closed.
 name: dashboard-experience
 type: pipeline
-description: Fable findet einen belegten Dashboard-UX-Slice, GPT-5.6 Sol baut ihn, Fable verifiziert visuell; genau ein PASS-Commit darf automatisch landen
+description: Opus 4.8 findet einen belegten Dashboard-UX-Slice, GPT-5.6 Sol baut ihn, Opus 4.8 verifiziert visuell; genau ein PASS-Commit darf automatisch landen
 stability: experimental
 repo: /home/piet/.hermes/hermes-agent
 phases:
   plan:
     engine: claude
-    model: claude-fable-5
+    model: claude-opus-4-8
     timeout: 2700
     prompt: PLANNER-PROMPT.md
   build:
@@ -19,7 +20,7 @@ phases:
     prompt: BUILDER-PROMPT.md
   verify:
     engine: claude
-    model: claude-fable-5
+    model: claude-opus-4-8
     timeout: 2700
     prompt: VERIFIER-PROMPT.md
 stop:

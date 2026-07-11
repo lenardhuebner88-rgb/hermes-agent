@@ -1569,11 +1569,11 @@ def test_autoland_accepts_ui_run_contract_overrides(tmp_path, fake_engine, monke
     state.mkdir(parents=True)
     (state / "overrides.env").write_text(
         "PHASE_PLAN_ENGINE=claude\n"
-        "PHASE_PLAN_MODEL=claude-fable-5\n"
+        "PHASE_PLAN_MODEL=claude-opus-4-8\n"
         "PHASE_BUILD_ENGINE=codex\n"
         "PHASE_BUILD_MODEL=gpt-5.6-sol\n"
         "PHASE_VERIFY_ENGINE=claude\n"
-        "PHASE_VERIFY_MODEL=claude-fable-5\n"
+        "PHASE_VERIFY_MODEL=claude-opus-4-8\n"
         "MAX_ROUNDS=15\n"
         "MAX_HOURS=4\n",
         encoding="utf-8",
@@ -1581,7 +1581,7 @@ def test_autoland_accepts_ui_run_contract_overrides(tmp_path, fake_engine, monke
     runner = LoopRunner(pack, state_root=tmp_path / "state")
 
     runner._validate_autoland_runtime()
-    assert runner.phase_cfg("verify").model == "claude-fable-5"
+    assert runner.phase_cfg("verify").model == "claude-opus-4-8"
     assert runner.stop_cfg("max_rounds") == 15
     assert runner.stop_cfg("max_hours") == 4
     assert runner._runtime_autoland_authorized() is True

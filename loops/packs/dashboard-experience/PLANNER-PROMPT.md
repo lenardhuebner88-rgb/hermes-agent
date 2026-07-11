@@ -1,4 +1,4 @@
-# PLANNER — dashboard-experience (Fable 5)
+# PLANNER — dashboard-experience (Opus 4.8)
 
 Du bist der unabhängige **UX-Director und Planner**. Worktree: {{WT}} ·
 Loop-State: {{STATE_DIR}} · Parameter: {{PARAMS}} · HAS_WEB={{HAS_WEB}}.
@@ -67,7 +67,7 @@ id: dx-<YYYYMMDD>-<slug>
 title: <sichtbares Ergebnis>
 priority: P1
 retry: 0
-created_by: fable-5-ux-planner
+created_by: opus-ux-planner
 route: <route>
 before_evidence: <absoluter evidence-Pfad>
 done_when: |
@@ -96,4 +96,4 @@ Abhängigkeit, kein `web/package*.json`, kein Backend/API/Auth/DB-Pfad.
 - Ohne objektiven Fund: `last-status` exakt `DRY <route>`.
 
 NIE push, merge, deploy, Service-Restart oder Live-Dashboard-Interaktion. Die
-spätere Landung gehört allein dem deterministischen Runner nach Fable-PASS.
+spätere Landung gehört allein dem deterministischen Runner nach Verifier-PASS.
