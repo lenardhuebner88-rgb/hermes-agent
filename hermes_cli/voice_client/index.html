@@ -267,19 +267,23 @@
 
       .detail-action {
         display: flex;
-        align-items: center;
-        gap: 0.65rem;
+        grid-column: 1 / -1;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.45rem;
         width: 100%;
       }
 
       .detail-action .chip-button {
+        width: 100%;
         min-height: 48px;
-        flex: 0 0 auto;
       }
 
       .detail-state {
         color: var(--text-muted);
         font-size: 0.78rem;
+        line-height: 1.4;
+        text-align: center;
       }
 
       .state-card,
@@ -1224,6 +1228,23 @@
       body[data-keyboard-open="true"] .state-card,
       body[data-keyboard-open="true"] .sharing-actions {
         display: none;
+      }
+
+      @media (min-width: 42rem) {
+        .detail-action {
+          flex-direction: row;
+          align-items: center;
+          gap: 0.65rem;
+        }
+
+        .detail-action .chip-button {
+          width: auto;
+          flex: 0 0 auto;
+        }
+
+        .detail-state {
+          text-align: left;
+        }
       }
 
       @media (min-width: 64rem) {

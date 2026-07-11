@@ -11,6 +11,7 @@ then drive its top-level functions directly. This exercises the real
 app.js source (not a reimplementation), which is the point of the harness.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -577,6 +578,28 @@ def test_index_html_has_usage_line_element_with_hidden_attribute():
     document = (CLIENT_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="usage-line"' in document
     assert 'class="usage-line"' in document
+
+
+def test_detail_action_stacks_on_mobile_and_restores_row_layout_on_wide_screens():
+    document = (CLIENT_DIR / "index.html").read_text(encoding="utf-8")
+    assert re.search(
+        r"\.detail-action\s*\{[^}]*grid-column:\s*1\s*/\s*-1;[^}]*"
+        r"flex-direction:\s*column;",
+        document,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.detail-action \.chip-button\s*\{[^}]*width:\s*100%;[^}]*"
+        r"min-height:\s*48px;",
+        document,
+        re.DOTALL,
+    )
+    wide = document.rsplit("@media (min-width: 42rem)", 1)[-1]
+    assert re.search(
+        r"\.detail-action\s*\{[^}]*flex-direction:\s*row;",
+        wide,
+        re.DOTALL,
+    )
 
 
 # =============================================================================
