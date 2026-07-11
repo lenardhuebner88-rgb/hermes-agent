@@ -109,12 +109,40 @@ const PHONE_ACTION_COPY = {
 };
 
 function clearPhoneAction(session) {
-  if (session) session.pendingPhoneAction = null;
+  const previousFocus = session?.phoneActionPreviousFocus;
+  if (session) {
+    session.pendingPhoneAction = null;
+    session.phoneActionPreviousFocus = null;
+  }
+  document.body.dataset.phoneActionOpen = "false";
   phoneActionCardElement.hidden = true;
   phoneActionImpactElement.textContent = "";
   phoneActionPreviewElement.textContent = "";
   phoneActionConfirmElement.disabled = false;
   phoneActionCancelElement.disabled = false;
+  if (previousFocus && previousFocus.isConnected !== false && typeof previousFocus.focus === "function") {
+    previousFocus.focus();
+  }
+}
+
+function invalidateNativePhoneActionSession(session) {
+  const sessionId = session?.nativeActionSessionId;
+  if (!sessionId) return;
+  sendNativeBridgeMessage({
+    v: 1, type: "invalidate_phone_action_session", session_id: sessionId,
+  });
+  session.nativeActionSessionId = null;
+}
+
+function beginNativePhoneActionSession(session) {
+  invalidateNativePhoneActionSession(session);
+  const randomUUID = window.crypto?.randomUUID;
+  if (typeof randomUUID !== "function") return;
+  const sessionId = randomUUID.call(window.crypto);
+  session.nativeActionSessionId = sessionId;
+  sendNativeBridgeMessage({
+    v: 1, type: "begin_phone_action_session", session_id: sessionId,
+  });
 }
 
 function sendPhoneActionResult(session, requestId, status) {
@@ -140,6 +168,12 @@ function decidePhoneAction(decision) {
 
 phoneActionConfirmElement?.addEventListener("click", () => decidePhoneAction("confirmed"));
 phoneActionCancelElement?.addEventListener("click", () => decidePhoneAction("cancelled"));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && activeSession?.pendingPhoneAction) {
+    event.preventDefault();
+    decidePhoneAction("cancelled");
+  }
+});
 
 function updateAppViewport() {
   const viewport = window.visualViewport;
@@ -1431,6 +1465,8 @@ function handleJsonMessage(session, raw) {
     session.pendingPhoneAction = {
       requestId: message.request_id, action: message.action, decided: false, executing: false,
     };
+    session.phoneActionPreviousFocus = document.activeElement;
+    document.body.dataset.phoneActionOpen = "true";
     phoneActionImpactElement.textContent = `${PHONE_ACTION_COPY[message.action]}. Diese Aktion kann außerhalb von Hermes wirken.`;
     phoneActionPreviewElement.textContent = message.preview;
     phoneActionCardElement.hidden = false;
@@ -1453,10 +1489,11 @@ function handleJsonMessage(session, raw) {
       return;
     }
     pending.executing = true;
-    if (!nativePhoneActionsAvailable || !sendNativeBridgeMessage({
+    if (!nativePhoneActionsAvailable || !session.nativeActionSessionId || !sendNativeBridgeMessage({
       v: 1, type: "execute_phone_action", request_id: pending.requestId,
       action: message.action, text: message.text, url: message.url,
       expires_at_ms: message.expires_at_ms,
+      session_id: session.nativeActionSessionId,
     })) {
       sendPhoneActionResult(session, pending.requestId, "unsupported");
       clearPhoneAction(session);
@@ -1464,7 +1501,13 @@ function handleJsonMessage(session, raw) {
     return;
   }
   if (message.type === "phone_action_closed") {
-    if (session.pendingPhoneAction?.requestId === message.request_id) clearPhoneAction(session);
+    if (session.pendingPhoneAction?.requestId === message.request_id) {
+      invalidateNativePhoneActionSession(session);
+      clearPhoneAction(session);
+      if (!session.drainRequested && hasOpenWebSocket(session)) {
+        beginNativePhoneActionSession(session);
+      }
+    }
     return;
   }
   if (message.type === "mode") {
@@ -1576,6 +1619,7 @@ async function stopMicrophone(session) {
 }
 
 async function cleanupSession(session, { closeSocket = true } = {}) {
+  invalidateNativePhoneActionSession(session);
   if (session.pendingPhoneAction && !session.pendingPhoneAction.decided && hasOpenWebSocket(session)) {
     session.websocket.send(JSON.stringify({
       type: "phone_action_decision",
@@ -1669,6 +1713,7 @@ function canReconnect(session, event) {
 }
 
 async function attemptReconnect(session, event) {
+  invalidateNativePhoneActionSession(session);
   clearPhoneAction(session);
   if (!canReconnect(session, event)) {
     finalizeWebSocketClose(session, event);
@@ -1724,6 +1769,7 @@ function attachWebSocketHandlers(session) {
       return;
     }
     session.everOpen = true;
+    beginNativePhoneActionSession(session);
     renderSharingControls();
     haptic(session.reconnectAttempts > 0 ? [8, 30, 8] : 10);
     if (session.reconnectAttempts > 0 && !session.drainRequested) {
@@ -1764,6 +1810,7 @@ function attachWebSocketHandlers(session) {
     if (!isCurrent(session) || session.websocket !== socket) {
       return;
     }
+    invalidateNativePhoneActionSession(session);
     void attemptReconnect(session, event);
   });
 }
@@ -1818,6 +1865,8 @@ async function startSession() {
     sparRecording: false,
     micLevel: 0,
     pendingPhoneAction: null,
+    phoneActionPreviousFocus: null,
+    nativeActionSessionId: null,
   };
   activeSession = session;
   haptic(12);
@@ -1913,6 +1962,7 @@ async function requestStop(session) {
     return;
   }
   session.drainRequested = true;
+  invalidateNativePhoneActionSession(session);
   haptic(16);
   setConnectionBanner("");
   setButton("draining");
@@ -2091,6 +2141,7 @@ if (isStandaloneApp()) {
 window.addEventListener("pagehide", () => {
   stopSharing();
   if (activeSession) {
+    invalidateNativePhoneActionSession(activeSession);
     void cleanupSession(activeSession);
   }
 });

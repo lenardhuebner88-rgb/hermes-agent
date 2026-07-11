@@ -776,6 +776,7 @@
       }
       .phone-action-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
       .phone-action-buttons button { min-height: 48px; }
+      body[data-phone-action-open="true"] .state-card { display: none; }
 
       .connection-banner[hidden] {
         display: none;
@@ -941,7 +942,9 @@
           max(1rem, env(safe-area-inset-bottom))
           max(1rem, env(safe-area-inset-left));
         gap: 0.85rem;
-        overflow: hidden;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior-y: contain;
         grid-template-rows: auto auto auto minmax(10rem, 1fr) auto minmax(7rem, 0.72fr) auto;
       }
 
@@ -1332,7 +1335,8 @@
 
       <section id="phone-action-card" class="phone-action-card" role="dialog"
         aria-modal="false" aria-labelledby="phone-action-title"
-        aria-describedby="phone-action-preview" hidden>
+        aria-describedby="phone-action-preview" aria-live="assertive"
+        aria-atomic="true" hidden>
         <h2 id="phone-action-title">Handy-Aktion bestätigen</h2>
         <p id="phone-action-impact"></p>
         <p id="phone-action-preview" class="phone-action-preview"></p>

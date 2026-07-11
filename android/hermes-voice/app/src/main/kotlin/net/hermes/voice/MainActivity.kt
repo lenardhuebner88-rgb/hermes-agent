@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
 
     /** True while we are asking for POST_NOTIFICATIONS ahead of a screen-capture start. */
     private var pendingCaptureStartAfterNotificationPrompt = false
-    private val phoneActionReplayGuard = PhoneActionReplayGuard()
+    private val phoneActionGate = PhoneActionExecutionGate()
 
     private val webPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -87,6 +87,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        phoneActionGate.invalidateAll()
         stopCaptureIfActive()
         HermesBridge.detach()
         super.onDestroy()
@@ -217,6 +218,8 @@ class MainActivity : ComponentActivity() {
             is WebToNativeMessage.StartScreenCapture -> handleStartScreenCaptureRequested()
             is WebToNativeMessage.StopScreenCapture -> handleStopScreenCaptureRequested()
             is WebToNativeMessage.CaptureDetailFrame -> handleDetailFrameRequested(message)
+            is WebToNativeMessage.BeginPhoneActionSession -> phoneActionGate.begin(message.sessionId)
+            is WebToNativeMessage.InvalidatePhoneActionSession -> phoneActionGate.invalidate(message.sessionId)
             is WebToNativeMessage.ExecutePhoneAction -> handlePhoneAction(message)
         }
     }
@@ -226,10 +229,24 @@ class MainActivity : ComponentActivity() {
             HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "failed"))
             return
         }
-        if (!phoneActionReplayGuard.accept(message.requestId)) {
+        val ticket = phoneActionGate.stage(message.sessionId, message.requestId)
+        if (ticket == null) {
             HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "failed"))
             return
         }
+        // WebMessage callbacks and lifecycle invalidations share the main queue.
+        // Defer the actual side effect briefly, then atomically consume the
+        // still-current authorization immediately before touching Android.
+        webView.postDelayed({ executePhoneActionIfAuthorized(message, ticket) }, 75L)
+    }
+
+    private fun executePhoneActionIfAuthorized(
+        message: WebToNativeMessage.ExecutePhoneAction,
+        ticket: Long,
+    ) {
+        if (message.expiresAtMs <= System.currentTimeMillis() ||
+            !phoneActionGate.consume(message.sessionId, message.requestId, ticket)
+        ) return
         val status = try {
             when (message.action) {
                 "copy_text" -> {

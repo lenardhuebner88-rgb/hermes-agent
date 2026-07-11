@@ -71,6 +71,8 @@ const elements = {{}};
 for (const id of elementIds) {{
   elements[id] = makeElement(id);
 }}
+const documentHandlers = {{}};
+const windowHandlers = {{}};
 
 // `context` (below) becomes the vm sandbox's global object once
 // contextified: everything the harness `body` needs to read/assert on must
@@ -112,19 +114,21 @@ const context = {{
   console: {{ info() {{}}, log() {{}} }},
   document: {{
     body: {{ dataset: {{}} }},
+    activeElement: null,
     querySelector(selector) {{
       const id = selector.replace("#", "");
       return elements[id] || makeElement(id);
     }},
-    addEventListener() {{}},
+    addEventListener(type, handler) {{ documentHandlers[type] = handler; }},
   }},
   navigator: {{}},
   performance: {{ now() {{ return 0; }} }},
   window: {{
     HermesNative: nativeBridge,
+    crypto: {{ randomUUID() {{ return "12345678-1234-4123-8123-123456789abc"; }} }},
     speechSynthesis: fakeSpeechSynthesis,
     __HERMES_SESSION_TOKEN__: undefined,
-    addEventListener() {{}},
+    addEventListener(type, handler) {{ windowHandlers[type] = handler; }},
     setTimeout,
     clearTimeout,
     setInterval,
@@ -134,6 +138,8 @@ const context = {{
   sentToNative,
   spokenUtterances,
   nativeMessageHandler: null,
+  documentHandlers,
+  windowHandlers,
 }};
 vm.createContext(context);
 vm.runInContext(source, context);
@@ -192,7 +198,7 @@ def test_phone_action_requires_user_decision_and_correlated_native_result():
     result = _run_node_harness(
         """
         const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
-        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null };
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null, nativeActionSessionId: "12345678-1234-4123-8123-123456789abc" };
         nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "native_capabilities", phone_action: true }) });
         handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r1", action: "copy_text", preview: "Vorschau" }));
         if (sentToNative.some((m) => m.type === "execute_phone_action")) throw new Error("executed before confirmation");
@@ -216,11 +222,64 @@ def test_phone_action_plain_browser_fails_closed_unsupported():
     result = _run_node_harness(
         """
         const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
-        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null };
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null, nativeActionSessionId: "12345678-1234-4123-8123-123456789abc" };
         handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r2", action: "open_url", preview: "https://example.com" }));
         decidePhoneAction("confirmed");
         handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "r2", action: "open_url", url: "https://example.com" }));
         if (socket.sent.at(-1).type !== "phone_action_result" || socket.sent.at(-1).status !== "unsupported") throw new Error("plain browser must be unsupported");
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_phone_action_escape_cancels_and_restores_previous_focus():
+    result = _run_node_harness(
+        """
+        const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+        const previous = { focused: false, isConnected: true, focus() { this.focused = true; } };
+        document.activeElement = previous;
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null, phoneActionPreviousFocus: null };
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r3", action: "share_text", preview: "Text" }));
+        let prevented = false;
+        documentHandlers.keydown({ key: "Escape", preventDefault() { prevented = true; } });
+        if (!prevented || socket.sent.at(-1).decision !== "cancelled") throw new Error("Escape did not cancel");
+        if (!previous.focused || elements["phone-action-card"].hidden !== true) throw new Error("focus/card not restored");
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_phone_action_stop_pagehide_and_disconnect_invalidate_native_generation():
+    result = _run_node_harness(
+        """
+        function sessionWithSocket(socket) {
+          return {
+            websocket: socket, drainRequested: false, pendingPhoneAction: null,
+            nativeActionSessionId: "12345678-1234-4123-8123-123456789abc",
+            playbackSources: new Set(), abortController: new AbortController(),
+            microphoneStopped: true, serverDrainTimer: null, finishing: false,
+            pendingTranscript: { user: null, assistant: null }, reconnectAttempts: 0,
+            everOpen: true, voiceMode: "live",
+          };
+        }
+        const stopSocket = { readyState: 3, sent: [], send(data) { this.sent.push(JSON.parse(data)); }, close() {} };
+        activeSession = sessionWithSocket(stopSocket);
+        void requestStop(activeSession);
+        if (!sentToNative.some((m) => m.type === "invalidate_phone_action_session")) throw new Error("stop did not invalidate");
+
+        sentToNative.length = 0;
+        const pageSocket = { readyState: 1, send() {}, close() {} };
+        activeSession = sessionWithSocket(pageSocket);
+        windowHandlers.pagehide();
+        if (!sentToNative.some((m) => m.type === "invalidate_phone_action_session")) throw new Error("pagehide did not invalidate");
+
+        sentToNative.length = 0;
+        const handlers = {};
+        const closeSocket = { readyState: 1, addEventListener(type, fn) { handlers[type] = fn; }, send() {} };
+        activeSession = sessionWithSocket(closeSocket);
+        attachWebSocketHandlers(activeSession);
+        handlers.close({ code: 1000, wasClean: true });
+        if (!sentToNative.some((m) => m.type === "invalidate_phone_action_session")) throw new Error("disconnect did not invalidate");
         """
     )
     assert result.returncode == 0, result.stderr

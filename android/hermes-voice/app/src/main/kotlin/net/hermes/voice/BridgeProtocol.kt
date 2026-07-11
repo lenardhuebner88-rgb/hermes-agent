@@ -12,10 +12,42 @@ import java.net.URI
  */
 const val BRIDGE_PROTOCOL_VERSION = 1
 
-/** One Activity/WebView lifetime, correlation ids only; payloads are never retained. */
-class PhoneActionReplayGuard {
+/** Session-bound native authorization gate; correlation ids only, never payloads. */
+class PhoneActionExecutionGate {
     private val handled = mutableSetOf<String>()
-    @Synchronized fun accept(requestId: String): Boolean = handled.add(requestId)
+    private var activeSessionId: String? = null
+    private var generation = 0L
+    private var pending: Triple<String, String, Long>? = null
+
+    @Synchronized fun begin(sessionId: String) {
+        generation += 1
+        activeSessionId = sessionId
+        pending = null
+    }
+
+    @Synchronized fun stage(sessionId: String, requestId: String): Long? {
+        if (activeSessionId != sessionId || pending != null || !handled.add(requestId)) return null
+        val ticket = generation
+        pending = Triple(sessionId, requestId, ticket)
+        return ticket
+    }
+
+    @Synchronized fun consume(sessionId: String, requestId: String, ticket: Long): Boolean {
+        val expected = Triple(sessionId, requestId, ticket)
+        if (activeSessionId != sessionId || generation != ticket || pending != expected) return false
+        pending = null
+        return true
+    }
+
+    @Synchronized fun invalidate(sessionId: String) {
+        if (activeSessionId == sessionId) invalidateAll()
+    }
+
+    @Synchronized fun invalidateAll() {
+        generation += 1
+        activeSessionId = null
+        pending = null
+    }
 }
 
 /** Messages the web page sends to native. */
@@ -23,6 +55,8 @@ sealed class WebToNativeMessage {
     object BridgeReady : WebToNativeMessage()
     object StartScreenCapture : WebToNativeMessage()
     object StopScreenCapture : WebToNativeMessage()
+    data class BeginPhoneActionSession(val sessionId: String) : WebToNativeMessage()
+    data class InvalidatePhoneActionSession(val sessionId: String) : WebToNativeMessage()
     data class CaptureDetailFrame(
         val requestId: String,
         val maxEdge: Int,
@@ -33,6 +67,7 @@ sealed class WebToNativeMessage {
         val action: String,
         val payload: String,
         val expiresAtMs: Long,
+        val sessionId: String,
     ) : WebToNativeMessage()
 }
 
@@ -58,6 +93,8 @@ object BridgeProtocol {
     private const val TYPE_STOP_SCREEN_CAPTURE = "stop_screen_capture"
     private const val TYPE_CAPTURE_DETAIL_FRAME = "capture_detail_frame"
     private const val TYPE_EXECUTE_PHONE_ACTION = "execute_phone_action"
+    private const val TYPE_BEGIN_PHONE_ACTION_SESSION = "begin_phone_action_session"
+    private const val TYPE_INVALIDATE_PHONE_ACTION_SESSION = "invalidate_phone_action_session"
 
     private const val TYPE_NATIVE_CAPABILITIES = "native_capabilities"
     private const val TYPE_SCREEN_CAPTURE_STARTED = "screen_capture_started"
@@ -68,6 +105,7 @@ object BridgeProtocol {
     private const val TYPE_SCREEN_CAPTURE_ERROR = "screen_capture_error"
     private const val TYPE_PHONE_ACTION_RESULT = "phone_action_result"
     private val REQUEST_ID = Regex("^[A-Za-z0-9_-]{32}$")
+    private val SESSION_ID = Regex("^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")
 
     /**
      * Parses a raw JSON string received from the web page.
@@ -99,13 +137,19 @@ object BridgeProtocol {
                 )
             }
             TYPE_EXECUTE_PHONE_ACTION -> parsePhoneAction(json)
+            TYPE_BEGIN_PHONE_ACTION_SESSION -> parseSessionId(json)?.let(WebToNativeMessage::BeginPhoneActionSession)
+            TYPE_INVALIDATE_PHONE_ACTION_SESSION -> parseSessionId(json)?.let(WebToNativeMessage::InvalidatePhoneActionSession)
             else -> null
         }
     }
 
+    private fun parseSessionId(json: JSONObject): String? =
+        json.optString("session_id", "").takeIf(SESSION_ID::matches)
+
     private fun parsePhoneAction(json: JSONObject): WebToNativeMessage.ExecutePhoneAction? {
         val requestId = json.optString("request_id", "")
         if (!REQUEST_ID.matches(requestId)) return null
+        val sessionId = parseSessionId(json) ?: return null
         val expiresAtMs = json.optLong("expires_at_ms", -1)
         val now = System.currentTimeMillis()
         if (expiresAtMs <= now || expiresAtMs > now + 60_000) return null
@@ -114,12 +158,12 @@ object BridgeProtocol {
                 val text = json.opt("text") as? String ?: return null
                 val limit = if (action == "copy_text") 4096 else 8192
                 if (text.isBlank() || text.length > limit || hasUnsafeControl(text)) return null
-                WebToNativeMessage.ExecutePhoneAction(requestId, action, text, expiresAtMs)
+                WebToNativeMessage.ExecutePhoneAction(requestId, action, text, expiresAtMs, sessionId)
             }
             "open_url" -> {
                 val url = json.opt("url") as? String ?: return null
                 if (!isAllowedHttpsUrl(url)) return null
-                WebToNativeMessage.ExecutePhoneAction(requestId, action, url, expiresAtMs)
+                WebToNativeMessage.ExecutePhoneAction(requestId, action, url, expiresAtMs, sessionId)
             }
             else -> null
         }
@@ -132,7 +176,8 @@ object BridgeProtocol {
         if (raw.isBlank() || raw.length > 2048 || raw.any(Char::isWhitespace)) return false
         return try {
             val uri = URI(raw)
-            uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null
+            uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null &&
+                (uri.port == -1 || uri.port in 1..65535)
         } catch (_: Exception) {
             false
         }

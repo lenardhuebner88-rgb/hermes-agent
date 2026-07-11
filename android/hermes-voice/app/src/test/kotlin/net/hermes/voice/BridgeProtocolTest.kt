@@ -88,19 +88,23 @@ class BridgeProtocolTest {
     @Test
     fun `parses and revalidates bounded phone actions`() {
         val id = "A".repeat(32)
+        val sessionId = "12345678-1234-4123-8123-123456789abc"
         val expires = System.currentTimeMillis() + 30_000
         val copy = BridgeProtocol.parseWebToNative(
-            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"copy_text","text":"abc"}""",
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"copy_text","text":"abc"}""",
         ) as WebToNativeMessage.ExecutePhoneAction
         assertEquals("abc", copy.payload)
         assertNull(BridgeProtocol.parseWebToNative(
-            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"copy_text","text":"${"x".repeat(4097)}"}""",
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"copy_text","text":"${"x".repeat(4097)}"}""",
         ))
         assertNull(BridgeProtocol.parseWebToNative(
-            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"open_url","url":"javascript:alert(1)"}""",
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"open_url","url":"javascript:alert(1)"}""",
         ))
         assertTrue(BridgeProtocol.isAllowedHttpsUrl("https://example.com/maps?q=1"))
         assertTrue(!BridgeProtocol.isAllowedHttpsUrl("content://contacts/1"))
+        assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:0/x"))
+        assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:65536/x"))
+        assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:99999/x"))
     }
 
     @Test
@@ -113,10 +117,25 @@ class BridgeProtocolTest {
     }
 
     @Test
-    fun `phone action replay guard permits a request exactly once`() {
-        val guard = PhoneActionReplayGuard()
-        assertTrue(guard.accept("x".repeat(32)))
-        assertTrue(!guard.accept("x".repeat(32)))
+    fun `phone action gate invalidates queued work and rejects replay`() {
+        val gate = PhoneActionExecutionGate()
+        val session = "12345678-1234-4123-8123-123456789abc"
+        gate.begin(session)
+        val ticket = gate.stage(session, "x".repeat(32))!!
+        gate.invalidate(session)
+        assertTrue(!gate.consume(session, "x".repeat(32), ticket))
+        gate.begin(session)
+        assertNull(gate.stage(session, "x".repeat(32)))
+    }
+
+    @Test
+    fun `phone action gate atomically consumes current authorization once`() {
+        val gate = PhoneActionExecutionGate()
+        val session = "12345678-1234-4123-8123-123456789abc"
+        gate.begin(session)
+        val ticket = gate.stage(session, "y".repeat(32))!!
+        assertTrue(gate.consume(session, "y".repeat(32), ticket))
+        assertTrue(!gate.consume(session, "y".repeat(32), ticket))
     }
 
     @Test

@@ -1,9 +1,12 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from hermes_cli.voice_phone_action import PhoneActionBroker, validate_phone_action
 from tools.voice_live_tools import FUNCTION_DECLARATIONS, NON_BLOCKING_TOOLS, VoiceToolExecutor
+
+CLIENT_HTML = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "index.html"
 
 
 @pytest.mark.parametrize("url", ["http://example.com", "javascript:alert(1)", "file:///tmp/x", "content://x", "https://u:p@example.com", "https://exa mple.com"])
@@ -59,6 +62,75 @@ async def test_broker_cancel_timeout_and_single_pending():
 
 
 @pytest.mark.asyncio
+async def test_broker_terminal_state_cancels_blocked_execute_delivery():
+    events = []
+    execute_started = asyncio.Event()
+
+    async def emit(event):
+        if event["type"] == "phone_action_execute":
+            execute_started.set()
+            await asyncio.Event().wait()
+        events.append(event)
+        return True
+
+    broker = PhoneActionBroker(emit, timeout=1)
+    request = asyncio.create_task(broker.request({"action": "copy_text", "text": "x"}))
+    await asyncio.sleep(0)
+    request_id = events[0]["request_id"]
+    decision = asyncio.create_task(broker.handle_control({
+        "type": "phone_action_decision", "request_id": request_id, "decision": "confirmed",
+    }))
+    await execute_started.wait()
+    broker.cancel()
+    assert await request == {"status": "cancelled"}
+    assert await decision is True
+    assert [event["type"] for event in events] == ["phone_action_confirmation"]
+
+
+@pytest.mark.asyncio
+async def test_broker_timeout_cancels_blocked_execute_delivery():
+    events = []
+    execute_started = asyncio.Event()
+    async def emit(event):
+        if event["type"] == "phone_action_execute":
+            execute_started.set()
+            await asyncio.Event().wait()
+        events.append(event)
+        return True
+    broker = PhoneActionBroker(emit, timeout=0.02)
+    request = asyncio.create_task(broker.request({"action": "open_url", "url": "https://example.com"}))
+    await asyncio.sleep(0)
+    request_id = events[0]["request_id"]
+    decision = asyncio.create_task(broker.handle_control({
+        "type": "phone_action_decision", "request_id": request_id, "decision": "confirmed",
+    }))
+    await execute_started.wait()
+    assert await request == {"status": "timeout"}
+    assert await decision is True
+    assert [event["type"] for event in events] == [
+        "phone_action_confirmation", "phone_action_closed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_broker_task_cancellation_closes_correlated_card():
+    events = []
+    async def emit(event):
+        events.append(event)
+        return True
+    broker = PhoneActionBroker(emit, timeout=1)
+    request = asyncio.create_task(broker.request({"action": "share_text", "text": "x"}))
+    await asyncio.sleep(0)
+    request_id = events[0]["request_id"]
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert events[-1] == {
+        "type": "phone_action_closed", "request_id": request_id, "status": "cancelled",
+    }
+
+
+@pytest.mark.asyncio
 async def test_tool_is_live_and_spar_visible_and_open_app_is_explicitly_unsupported():
     declaration = next(item for item in FUNCTION_DECLARATIONS if item["name"] == "phone_action")
     assert set(declaration["parameters"]["properties"]["action"]["enum"]) == {"copy_text", "open_url", "share_text", "open_app"}
@@ -90,3 +162,13 @@ async def test_spar_session_end_cancels_confirmation_without_execution():
     )
     assert result == {"status": "cancelled"}
     assert deferred.popleft() == {"text": '{"type":"end"}'}
+
+
+def test_confirmation_card_accessibility_and_short_viewport_scroll_contract():
+    html = CLIENT_HTML.read_text(encoding="utf-8")
+    assert 'id="phone-action-card"' in html
+    assert 'aria-live="assertive"' in html
+    assert 'aria-atomic="true"' in html
+    assert ".phone-action-buttons button { min-height: 48px; }" in html
+    assert "overflow-y: auto;" in html
+    assert 'body[data-phone-action-open="true"] .state-card { display: none; }' in html

@@ -116,10 +116,15 @@ class PhoneActionBroker:
             return await asyncio.wait_for(asyncio.shield(pending.future), self._timeout)
         except TimeoutError:
             self._finish(pending, {"status": "timeout"})
-            await self._emit(
-                {"type": "phone_action_closed", "request_id": pending.request_id, "status": "timeout"}
-            )
+            await self._emit_closed(pending, "timeout")
             return {"status": "timeout"}
+        except asyncio.CancelledError:
+            self._finish(pending, {"status": "cancelled"})
+            # Live -> fallback cancels the detached tool task while the browser
+            # and its WebSocket stay alive. Explicitly retire the correlated
+            # card instead of relying on a later socket close.
+            await self._emit_closed(pending, "cancelled")
+            raise
         finally:
             async with self._lock:
                 if self._pending is pending:
@@ -145,17 +150,7 @@ class PhoneActionBroker:
             if decision == "cancelled":
                 self._finish(pending, {"status": "cancelled"})
             elif decision == "confirmed":
-                pending.phase = "execution"
-                emitted = await self._emit(
-                    {
-                        "type": "phone_action_execute",
-                        "request_id": pending.request_id,
-                        "expires_at_ms": pending.expires_at_ms,
-                        **pending.action,
-                    }
-                )
-                if not emitted:
-                    self._finish(pending, {"status": "failed"})
+                await self._deliver_execution(pending)
             return True
         if pending.phase != "execution":
             return True
@@ -168,6 +163,59 @@ class PhoneActionBroker:
         pending = self._pending
         if pending is not None:
             self._finish(pending, {"status": status if status in PHONE_ACTION_STATUSES else "failed"})
+
+    async def _deliver_execution(self, pending: _Pending) -> None:
+        """Deliver execute only while this exact generation remains live.
+
+        A bounded event queue can block ``emit``. Race it against the terminal
+        future so timeout/session cleanup cancels the blocked put instead of
+        allowing an execute event to leak out afterwards.
+        """
+        if pending.future.done() or self._pending is not pending:
+            return
+        pending.phase = "delivery"
+        delivery = asyncio.create_task(
+            self._emit(
+                {
+                    "type": "phone_action_execute",
+                    "request_id": pending.request_id,
+                    "expires_at_ms": pending.expires_at_ms,
+                    **pending.action,
+                }
+            )
+        )
+        done, _ = await asyncio.wait(
+            {delivery, pending.future}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if pending.future in done:
+            delivery.cancel()
+            await asyncio.gather(delivery, return_exceptions=True)
+            return
+        emitted = delivery.result()
+        if (
+            emitted
+            and self._pending is pending
+            and not pending.future.done()
+            and pending.phase == "delivery"
+        ):
+            pending.phase = "execution"
+        else:
+            self._finish(pending, {"status": "failed"})
+
+    async def _emit_closed(self, pending: _Pending, status: str) -> None:
+        try:
+            await self._emit(
+                {
+                    "type": "phone_action_closed",
+                    "request_id": pending.request_id,
+                    "status": status,
+                }
+            )
+        except asyncio.CancelledError:
+            # Once inside the cancellation handler, a second cancellation may
+            # still arrive during route teardown. Terminal state is already
+            # latched, so re-raise without ever resurrecting the generation.
+            raise
 
     @staticmethod
     def _finish(pending: _Pending, result: dict[str, str]) -> None:
