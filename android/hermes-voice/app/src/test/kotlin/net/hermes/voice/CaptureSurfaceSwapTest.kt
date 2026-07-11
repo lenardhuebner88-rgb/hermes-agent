@@ -37,5 +37,18 @@ class CaptureSurfaceSwapTest {
         assertEquals(CaptureSurfaceSwapOutcome.FATAL, outcome)
         assertTrue(discarded)
     }
-}
 
+    @Test
+    fun `stop winning before commit rolls candidate back`() {
+        var rolledBack = false
+        var discarded = false
+        val outcome = CaptureSurfaceSwap.execute(
+            install = {},
+            rollback = { rolledBack = true },
+            discardCandidate = { discarded = true },
+            canCommit = { false },
+        )
+        assertEquals(CaptureSurfaceSwapOutcome.ROLLED_BACK, outcome)
+        assertTrue(rolledBack && discarded)
+    }
+}

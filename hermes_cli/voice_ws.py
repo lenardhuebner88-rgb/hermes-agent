@@ -2029,6 +2029,45 @@ async def _run_controllable_cascade(
 
 _MAX_SPAR_TURN_PCM_BYTES = _MAX_FALLBACK_PCM_BYTES
 _MAX_SPAR_DEFERRED_MESSAGES = 256
+_MAX_SPAR_DEFERRED_BYTES = _MAX_SPAR_TURN_PCM_BYTES
+_MAX_SPAR_DEFERRED_TEXT_BYTES = 64 * 1024
+
+
+@dataclass
+class _SparDeferredMessages:
+    messages: deque[tuple[dict[str, Any], int]] = field(default_factory=deque)
+    total_bytes: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.messages)
+
+    def popleft(self) -> dict[str, Any]:
+        message, size = self.messages.popleft()
+        self.total_bytes -= size
+        return message
+
+    def append(self, message: dict[str, Any]) -> bool:
+        frame = message.get("bytes")
+        text = message.get("text")
+        if frame is not None:
+            if not isinstance(frame, bytes) or len(frame) % 2:
+                return False
+            size = len(frame)
+        elif isinstance(text, str):
+            size = len(text.encode("utf-8"))
+            if size > _MAX_SPAR_DEFERRED_TEXT_BYTES:
+                return False
+        else:
+            size = 0
+        if (
+            len(self.messages) >= _MAX_SPAR_DEFERRED_MESSAGES
+            or size > _MAX_SPAR_DEFERRED_BYTES
+            or self.total_bytes + size > _MAX_SPAR_DEFERRED_BYTES
+        ):
+            return False
+        self.messages.append((message, size))
+        self.total_bytes += size
+        return True
 
 
 @dataclass
@@ -2055,6 +2094,11 @@ class _SparLookUsage:
                 "estimated_usd": 0,
                 "label": "$0 (Abo)",
                 "complete": True,
+                "look_closely": {
+                    "calls": 0,
+                    "estimated_usd": 0,
+                    "estimate_incomplete": False,
+                },
             }
         entry = self.pricing.get(self.look_model)
         input_rate = entry.get("input_per_1m") if isinstance(entry, dict) else None
@@ -2077,14 +2121,22 @@ class _SparLookUsage:
             "type": "usage_update",
             "mode": "spar",
             "estimated_usd": cost,
-            "label": (
-                f"Abo + ${cost:.4f} Detailanalyse"
-                if cost is not None
-                else "Abo + Detailkosten unbekannt"
-            ),
+            "label": self._label(cost, complete),
             "complete": complete,
-            "look_closely": {"calls": self.calls, "estimated_usd": cost},
+            "look_closely": {
+                "calls": self.calls,
+                "estimated_usd": cost,
+                "estimate_incomplete": not complete,
+            },
         }
+
+    @staticmethod
+    def _label(cost: float | None, complete: bool) -> str:
+        if cost is None:
+            return "Abo + Detailkosten unbekannt"
+        if not complete:
+            return f"Abo + mind. ${cost:.4f} Detailanalyse (unvollständig)"
+        return f"Abo + ${cost:.4f} Detailanalyse"
 
 
 def _spar_transcribe_pcm_sync(pcm: bytes, wav_path: Path, model_size: str, language: str) -> str:
@@ -2147,7 +2199,7 @@ async def _read_spar_frames(
     disconnected: asyncio.Event,
     frame_cache: VideoFrameCache,
     fresh_frames: FreshFrameBroker | None = None,
-    deferred_messages: deque[dict[str, Any]] | None = None,
+    deferred_messages: _SparDeferredMessages | None = None,
 ) -> str:
     """Read one Sparmodus turn: accumulate PCM until ``turn_end``/``end``.
 
@@ -2297,7 +2349,8 @@ async def _request_spar_detail_frame(
     disconnected: asyncio.Event,
     frame_cache: VideoFrameCache,
     fresh_frames: FreshFrameBroker,
-    deferred_messages: deque[dict[str, Any]],
+    deferred_messages: _SparDeferredMessages,
+    fatal_overflow: asyncio.Event,
 ) -> bytes | None:
     """Own the Spar websocket only while a look_closely tool call awaits its still."""
 
@@ -2357,9 +2410,10 @@ async def _request_spar_detail_frame(
                 if decoded is not None and len(decoded) <= _MAX_VIDEO_FRAME_BYTES:
                     frame_cache.store(decoded)
                 continue
-            if len(deferred_messages) >= _MAX_SPAR_DEFERRED_MESSAGES:
+            if not deferred_messages.append(message):
                 fresh_frames.cancel()
-                await _put_event(
+                fatal_overflow.set()
+                await _put_event_checkpoint(
                     events_out,
                     {
                         "type": "error",
@@ -2371,7 +2425,6 @@ async def _request_spar_detail_frame(
                     disconnected,
                 )
                 break
-            deferred_messages.append(message)
         return await request_task
     except (OSError, RuntimeError, WebSocketDisconnect):
         disconnected.set()
@@ -2537,6 +2590,7 @@ async def _run_spar_cascade(
     history: list[tuple[str, str]],
     lane: SparLlmLane,
     look_usage: _SparLookUsage | None = None,
+    fatal_overflow: asyncio.Event | None = None,
 ) -> list[tuple[str, str]]:
     """One full Sparmodus turn: STT -> LLM (+tool hops) -> TTS. Returns new history."""
     if not pcm:
@@ -2566,6 +2620,8 @@ async def _run_spar_cascade(
         )
     except LlmLaneError as exc:
         raise VoiceRuntimeError("llm_lane_failed", str(exc)) from exc
+    if fatal_overflow is not None and fatal_overflow.is_set():
+        return history
     synthesize = await _spar_synthesize_pcm_factory(spar_config.piper_voice_path)
     await _speak_response(
         reply,
@@ -3029,8 +3085,8 @@ def create_voice_router(
         disconnected = asyncio.Event()
         frame_cache = VideoFrameCache()
         fresh_frames = FreshFrameBroker()
-        deferred_messages: deque[dict[str, Any]] = deque()
-        spar_look_usage = _SparLookUsage(config.look_model, config.pricing)
+        deferred_messages = _SparDeferredMessages()
+        fatal_overflow = asyncio.Event()
         spar_detail_lock = asyncio.Lock()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
@@ -3045,17 +3101,8 @@ def create_voice_router(
                     frame_cache,
                     fresh_frames,
                     deferred_messages,
+                    fatal_overflow,
                 )
-
-        executor = VoiceToolExecutor(
-            delegate=lambda prompt: delegate_to_hermes(
-                prompt, timeout_seconds=_DELEGATE_TIMEOUT_SECONDS
-            ),
-            request_frame=_request_fresh_frame,
-            look_model=config.look_model,
-            gemini_api_key=resolve_gemini_api_key(),
-            report_look_usage=spar_look_usage.record,
-        )
 
         # One LLM lane per Sparmodus session, not per turn: for the claude
         # lane this is the persistent CLI child (see PersistentClaudeLane).
@@ -3095,6 +3142,16 @@ def create_voice_router(
                     break
                 if result != "turn_end":
                     continue
+                turn_look_usage = _SparLookUsage(config.look_model, config.pricing)
+                executor = VoiceToolExecutor(
+                    delegate=lambda prompt: delegate_to_hermes(
+                        prompt, timeout_seconds=_DELEGATE_TIMEOUT_SECONDS
+                    ),
+                    request_frame=_request_fresh_frame,
+                    look_model=config.look_model,
+                    gemini_api_key=resolve_gemini_api_key(),
+                    report_look_usage=turn_look_usage.record,
+                )
                 try:
                     history = await _run_spar_cascade(
                         bytes(turn_pcm),
@@ -3105,8 +3162,11 @@ def create_voice_router(
                         executor,
                         history,
                         lane,
-                        spar_look_usage,
+                        turn_look_usage,
+                        fatal_overflow,
                     )
+                    if fatal_overflow.is_set():
+                        break
                 except VoiceRuntimeError as exc:
                     await _put_event(
                         events_out,

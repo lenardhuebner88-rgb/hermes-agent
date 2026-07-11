@@ -76,6 +76,7 @@ class MediaProjectionService : Service() {
 
     /** Guards the one idempotent stop path against re-entry from any of its five triggers. */
     private val stopGate = AtomicBoolean(false)
+    private val surfaceLock = Any()
 
     private var mediaProjectionCallback: MediaProjection.Callback? = null
 
@@ -223,20 +224,12 @@ class MediaProjectionService : Service() {
         sourceWidth = width
         sourceHeight = height
         if (detailCaptureActive) return
-        val display = virtualDisplay ?: return
-        val (scaledWidth, scaledHeight) = FrameScaler.computeScaledDimensions(
-            width,
-            height,
-            MAX_EDGE_PX,
-        )
-        val oldReader = imageReader
-        val newReader = ImageReader.newInstance(scaledWidth, scaledHeight, PixelFormat.RGBA_8888, 2)
-        imageReader = newReader
-        display.resize(scaledWidth, scaledHeight, currentDpi)
-        display.surface = newReader.surface
-        currentWidth = scaledWidth
-        currentHeight = scaledHeight
-        oldReader?.close()
+        try {
+            swapCaptureSurface(MAX_EDGE_PX)
+        } catch (e: SurfaceSwapException) {
+            Log.w(TAG, "failed to resize orientation capture surface", e)
+            if (e.fatal) stopCapture(reason = "error")
+        }
     }
 
     private fun schedulePoll(workHandler: Handler) {
@@ -415,6 +408,12 @@ class MediaProjectionService : Service() {
     }
 
     private fun swapCaptureSurface(maxEdge: Int) {
+        synchronized(surfaceLock) {
+            swapCaptureSurfaceLocked(maxEdge)
+        }
+    }
+
+    private fun swapCaptureSurfaceLocked(maxEdge: Int) {
         val display = virtualDisplay ?: throw SurfaceSwapException(fatal = true)
         val (width, height) = FrameScaler.computeScaledDimensions(sourceWidth, sourceHeight, maxEdge)
         val oldReader = imageReader ?: throw SurfaceSwapException(fatal = true)
@@ -436,6 +435,7 @@ class MediaProjectionService : Service() {
                     display.surface = oldReader.surface
                 },
                 discardCandidate = { newReader.close() },
+                canCommit = { !stopGate.get() },
             )
         ) {
             CaptureSurfaceSwapOutcome.COMMITTED -> {
@@ -467,24 +467,30 @@ class MediaProjectionService : Service() {
      * Safe to call more than once and from any state.
      */
     private fun stopCapture(reason: String) {
-        if (!stopGate.compareAndSet(false, true)) return
+        val wonStop = synchronized(surfaceLock) {
+            if (!stopGate.compareAndSet(false, true)) {
+                false
+            } else {
+                handler?.removeCallbacksAndMessages(null)
 
-        handler?.removeCallbacksAndMessages(null)
+                imageReader?.close()
+                imageReader = null
 
-        imageReader?.close()
-        imageReader = null
+                virtualDisplay?.release()
+                virtualDisplay = null
 
-        virtualDisplay?.release()
-        virtualDisplay = null
+                mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
+                mediaProjectionCallback = null
+                mediaProjection?.stop()
+                mediaProjection = null
 
-        mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
-        mediaProjectionCallback = null
-        mediaProjection?.stop()
-        mediaProjection = null
-
-        handlerThread?.quitSafely()
-        handlerThread = null
-        handler = null
+                handlerThread?.quitSafely()
+                handlerThread = null
+                handler = null
+                true
+            }
+        }
+        if (!wonStop) return
 
         stopForeground(STOP_FOREGROUND_REMOVE)
 

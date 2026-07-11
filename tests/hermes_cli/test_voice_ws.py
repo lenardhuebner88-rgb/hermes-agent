@@ -1171,6 +1171,54 @@ async def test_detail_frame_reader_ignores_uncorrelated_payload_before_decode(mo
     assert decoded is False
 
 
+def test_spar_deferred_messages_enforces_byte_and_message_budgets_in_order():
+    from hermes_cli import voice_ws
+
+    deferred = voice_ws._SparDeferredMessages()
+    first = {"bytes": b"\x00\x00"}
+    second = {"text": json.dumps({"type": "turn_end"})}
+    assert deferred.append(first)
+    assert deferred.append(second)
+    assert deferred.total_bytes > 0
+    assert deferred.popleft() is first
+    assert deferred.popleft() is second
+    assert deferred.total_bytes == 0
+
+    assert not deferred.append({"bytes": b"\x00" * (voice_ws._MAX_SPAR_DEFERRED_BYTES + 2)})
+    assert not deferred.append({"text": "x" * (voice_ws._MAX_SPAR_DEFERRED_TEXT_BYTES + 1)})
+    assert not deferred
+    assert deferred.total_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_control", ["end", "turn_end"])
+async def test_spar_detail_deferred_257th_terminal_control_is_fatal_not_silently_dropped(
+    terminal_control,
+):
+    from hermes_cli import voice_ws
+
+    messages = [{"bytes": b"\x00\x00"} for _ in range(256)]
+    messages.append({"text": json.dumps({"type": terminal_control})})
+    websocket = _FakeVoiceInput(messages)
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    cache = voice_ws.VideoFrameCache()
+    broker = voice_ws.FreshFrameBroker()
+    deferred = voice_ws._SparDeferredMessages()
+    fatal = asyncio.Event()
+
+    result = await voice_ws._request_spar_detail_frame(
+        websocket, events, disconnected, cache, broker, deferred, fatal
+    )
+    assert result is None
+    assert fatal.is_set()
+    assert len(deferred.messages) == 256
+    assert deferred.total_bytes == 512
+    assert (await events.get())["type"] == "detail_frame_request"
+    error = await events.get()
+    assert error["error"]["code"] == "spar_input_backlog"
+
+
 @pytest.mark.asyncio
 async def test_healthy_live_audio_keeps_recent_bounded_fallback_preroll(monkeypatch):
     from hermes_cli import voice_ws
@@ -3343,6 +3391,11 @@ def test_spar_turn_runs_stt_llm_tool_tts_over_one_websocket(monkeypatch):
         "estimated_usd": 0,
         "label": "$0 (Abo)",
         "complete": True,
+        "look_closely": {
+            "calls": 0,
+            "estimated_usd": 0,
+            "estimate_incomplete": False,
+        },
     }
     assert tool_calls == [("send_to_terminal", {"session": "work", "command": "ls"})]
 
@@ -3399,6 +3452,7 @@ def test_spar_turn_look_closely_receives_correlated_detail_frame_and_reports_cos
         [
             'TOOL: look_closely {"question":"Was steht dort?"}',
             "Die kleine Schrift lautet Test.",
+            "Zweiter Turn ohne Detailanalyse.",
         ]
     )
 
@@ -3457,8 +3511,40 @@ def test_spar_turn_look_closely_receives_correlated_detail_frame_and_reports_cos
         assert usage["look_closely"]["calls"] == 1
         assert usage["estimated_usd"] > 0
         assert usage["label"] != "$0 (Abo)"
+
+        ws.send_bytes(fixture)
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json()["type"] == "transcript"
+        assert ws.receive_json()["text"] == "Zweiter Turn ohne Detailanalyse."
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        assert ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        second_usage = ws.receive_json()
+        assert second_usage["estimated_usd"] == 0
+        assert second_usage["look_closely"] == {
+            "calls": 0,
+            "estimated_usd": 0,
+            "estimate_incomplete": False,
+        }
         ws.send_json({"type": "end"})
         assert ws.receive()["type"] == "websocket.close"
+
+
+def test_spar_incomplete_look_usage_never_claims_exact_zero_cost():
+    from hermes_cli import voice_ws
+
+    usage = voice_ws._SparLookUsage(
+        "look-model",
+        {"look-model": {"input_per_1m": 0.25, "output_per_1m": 1.5}},
+    )
+    usage.record(0, 0, complete=False)
+    event = usage.event()
+    assert event["estimated_usd"] == 0
+    assert event["complete"] is False
+    assert event["look_closely"]["estimate_incomplete"] is True
+    assert event["label"] != "Abo + $0.0000 Detailanalyse"
+    assert "unvollständig" in event["label"]
 
 
 def test_spar_no_audio_reports_structured_error(monkeypatch):
