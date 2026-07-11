@@ -531,6 +531,7 @@ async def test_look_closely_negative_raw_token_field_clamped_and_incomplete():
 def test_function_declarations_cover_all_tools():
     names = {declaration["name"] for declaration in FUNCTION_DECLARATIONS}
     assert names == {
+        "phone_action",
         "list_terminals",
         "read_terminal",
         "send_to_terminal",
@@ -573,7 +574,7 @@ def test_function_declarations_validate_against_real_sdk():
 
 
 def test_non_blocking_tools_constant_matches_declarations():
-    assert NON_BLOCKING_TOOLS == frozenset({"delegate_to_hermes"})
+    assert NON_BLOCKING_TOOLS == frozenset({"delegate_to_hermes", "phone_action"})
 
 
 def test_is_non_blocking_flags_only_delegate_to_hermes():

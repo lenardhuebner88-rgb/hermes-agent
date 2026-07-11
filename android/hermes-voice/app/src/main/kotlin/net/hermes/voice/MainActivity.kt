@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -30,6 +33,7 @@ class MainActivity : ComponentActivity() {
 
     /** True while we are asking for POST_NOTIFICATIONS ahead of a screen-capture start. */
     private var pendingCaptureStartAfterNotificationPrompt = false
+    private val phoneActionReplayGuard = PhoneActionReplayGuard()
 
     private val webPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -213,7 +217,59 @@ class MainActivity : ComponentActivity() {
             is WebToNativeMessage.StartScreenCapture -> handleStartScreenCaptureRequested()
             is WebToNativeMessage.StopScreenCapture -> handleStopScreenCaptureRequested()
             is WebToNativeMessage.CaptureDetailFrame -> handleDetailFrameRequested(message)
+            is WebToNativeMessage.ExecutePhoneAction -> handlePhoneAction(message)
         }
+    }
+
+    private fun handlePhoneAction(message: WebToNativeMessage.ExecutePhoneAction) {
+        if (message.expiresAtMs <= System.currentTimeMillis()) {
+            HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "failed"))
+            return
+        }
+        if (!phoneActionReplayGuard.accept(message.requestId)) {
+            HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "failed"))
+            return
+        }
+        val status = try {
+            when (message.action) {
+                "copy_text" -> {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Hermes", message.payload))
+                    "executed"
+                }
+                "open_url" -> launchPhoneIntent(
+                    Intent(Intent.ACTION_VIEW, Uri.parse(message.payload)).addCategory(Intent.CATEGORY_BROWSABLE),
+                )
+                "share_text" -> launchShareIntent(message.payload)
+                else -> "unsupported"
+            }
+        } catch (_: SecurityException) {
+            "failed"
+        } catch (_: RuntimeException) {
+            "failed"
+        }
+        HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, status))
+    }
+
+    private fun launchPhoneIntent(intent: Intent): String {
+        if (intent.resolveActivity(packageManager) == null) return "unsupported"
+        return try {
+            startActivity(intent)
+            "executed"
+        } catch (_: ActivityNotFoundException) {
+            "unsupported"
+        }
+    }
+
+    private fun launchShareIntent(text: String): String {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        // Resolve the underlying narrow ACTION_SEND intent, not the system chooser
+        // wrapper (which may exist even when it has no actual share target).
+        if (sendIntent.resolveActivity(packageManager) == null) return "unsupported"
+        return launchPhoneIntent(Intent.createChooser(sendIntent, "Text teilen"))
     }
 
     private fun handleStartScreenCaptureRequested() {

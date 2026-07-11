@@ -45,6 +45,7 @@ from hermes_cli.voice_spar_session import (
     synthesize_to_wav as spar_synthesize_to_wav,
     transcribe_wav as spar_transcribe_wav,
 )
+from hermes_cli.voice_phone_action import PhoneActionBroker
 from hermes_constants import get_hermes_home
 from tools.transcription_tools import transcribe_audio
 from tools.tts_tool import text_to_speech_tool
@@ -1605,6 +1606,7 @@ async def _read_voice_frames(
     text_turn: _FallbackTextTurn,
     frame_cache: VideoFrameCache,
     fresh_frames: FreshFrameBroker | None = None,
+    phone_actions: PhoneActionBroker | None = None,
 ) -> str:
     video_frame_times: deque[float] = deque()
     try:
@@ -1664,6 +1666,8 @@ async def _read_voice_frames(
                 )
                 continue
             control_type = control.get("type") if isinstance(control, dict) else None
+            if phone_actions is not None and await phone_actions.handle_control(control):
+                continue
             if control_type == "end":
                 return "end"
             if control_type == "interrupt":
@@ -1857,6 +1861,8 @@ async def _read_voice_frames(
     finally:
         if fresh_frames is not None:
             fresh_frames.cancel()
+        if phone_actions is not None:
+            phone_actions.cancel()
 
 
 async def _monitor_post_end_controls(
@@ -2200,6 +2206,7 @@ async def _read_spar_frames(
     frame_cache: VideoFrameCache,
     fresh_frames: FreshFrameBroker | None = None,
     deferred_messages: _SparDeferredMessages | None = None,
+    phone_actions: PhoneActionBroker | None = None,
 ) -> str:
     """Read one Sparmodus turn: accumulate PCM until ``turn_end``/``end``.
 
@@ -2269,6 +2276,8 @@ async def _read_spar_frames(
                 )
                 continue
             control_type = control.get("type") if isinstance(control, dict) else None
+            if phone_actions is not None and await phone_actions.handle_control(control):
+                continue
             if control_type == "end":
                 return "end"
             if control_type == "turn_end":
@@ -2341,6 +2350,69 @@ async def _read_spar_frames(
     finally:
         if fresh_frames is not None:
             fresh_frames.cancel()
+        if phone_actions is not None:
+            phone_actions.cancel()
+
+
+async def _request_spar_phone_action(
+    websocket: WebSocket,
+    phone_actions: PhoneActionBroker,
+    action: dict[str, str],
+    disconnected: asyncio.Event,
+    deferred_messages: _SparDeferredMessages,
+    fatal_overflow: asyncio.Event,
+) -> dict[str, str]:
+    """Own the Spar socket while its synchronous tool hop awaits user/native input."""
+    request_task = asyncio.create_task(phone_actions.request(action))
+    receive_task: asyncio.Task[dict[str, Any]] | None = None
+    try:
+        while not request_task.done():
+            receive_task = asyncio.create_task(websocket.receive())
+            done, _ = await asyncio.wait(
+                {request_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if request_task in done:
+                receive_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await receive_task
+                receive_task = None
+                break
+            message = receive_task.result()
+            receive_task = None
+            if message.get("type") == "websocket.disconnect":
+                disconnected.set()
+                phone_actions.cancel()
+                break
+            control = None
+            text = message.get("text")
+            if isinstance(text, str):
+                try:
+                    candidate = json.loads(text)
+                except json.JSONDecodeError:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    control = candidate
+            if control is not None and control.get("type") == "end":
+                phone_actions.cancel()
+                if not deferred_messages.append(message):
+                    fatal_overflow.set()
+                break
+            if control is not None and await phone_actions.handle_control(control):
+                continue
+            if not deferred_messages.append(message):
+                fatal_overflow.set()
+                phone_actions.cancel("failed")
+                break
+        return await request_task
+    except (OSError, RuntimeError, WebSocketDisconnect):
+        disconnected.set()
+        phone_actions.cancel()
+        return await request_task
+    finally:
+        if receive_task is not None:
+            receive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await receive_task
 
 
 async def _request_spar_detail_frame(
@@ -2660,6 +2732,7 @@ async def _run_live_bridge(
     forced_end: asyncio.Event | None = None,
     frame_cache: VideoFrameCache | None = None,
     fresh_frames: FreshFrameBroker | None = None,
+    phone_actions: PhoneActionBroker | None = None,
 ) -> bool:
     live_kwargs: dict[str, Any] = {
         "voice": config.voice,
@@ -2712,6 +2785,7 @@ async def _run_live_bridge(
         look_model=config.look_model,
         gemini_api_key=api_key,
         report_look_usage=getattr(session, "record_look_closely_usage", None),
+        request_phone_action=(phone_actions.request if phone_actions is not None else None),
     )
     try:
         await session.run(
@@ -2720,6 +2794,8 @@ async def _run_live_bridge(
     except LiveFallbackRequired:
         if fresh_frames is not None:
             fresh_frames.cancel()
+        if phone_actions is not None:
+            phone_actions.cancel()
         fallback_mode.set()
         await _put_event(
             events_out,
@@ -2872,6 +2948,9 @@ def create_voice_router(
         text_turn = _FallbackTextTurn()
         frame_cache = VideoFrameCache()
         fresh_frames = FreshFrameBroker()
+        async def _emit_phone_action(event: dict[str, Any]) -> bool:
+            return await _put_event(events_out, event, disconnected)
+        phone_actions = PhoneActionBroker(_emit_phone_action)
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
@@ -2889,6 +2968,7 @@ def create_voice_router(
                 text_turn,
                 frame_cache,
                 fresh_frames,
+                phone_actions,
             )
         )
         raw_session_id = websocket.query_params.get("session")
@@ -2916,6 +2996,7 @@ def create_voice_router(
                     forced_end,
                     frame_cache,
                     fresh_frames,
+                    phone_actions,
                 )
             )
         else:
@@ -3031,6 +3112,7 @@ def create_voice_router(
                 disconnected,
             )
         finally:
+            phone_actions.cancel()
             for task in (reader_task, live_task):
                 if task is not None and not task.done():
                     task.cancel()
@@ -3087,6 +3169,9 @@ def create_voice_router(
         fresh_frames = FreshFrameBroker()
         deferred_messages = _SparDeferredMessages()
         fatal_overflow = asyncio.Event()
+        async def _emit_phone_action(event: dict[str, Any]) -> bool:
+            return await _put_event(events_out, event, disconnected)
+        phone_actions = PhoneActionBroker(_emit_phone_action)
         spar_detail_lock = asyncio.Lock()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
@@ -3137,6 +3222,7 @@ def create_voice_router(
                     frame_cache,
                     fresh_frames,
                     deferred_messages,
+                    phone_actions,
                 )
                 if result in ("disconnect", "error", "end"):
                     break
@@ -3151,6 +3237,14 @@ def create_voice_router(
                     look_model=config.look_model,
                     gemini_api_key=resolve_gemini_api_key(),
                     report_look_usage=turn_look_usage.record,
+                    request_phone_action=lambda action: _request_spar_phone_action(
+                        websocket,
+                        phone_actions,
+                        action,
+                        disconnected,
+                        deferred_messages,
+                        fatal_overflow,
+                    ),
                 )
                 try:
                     history = await _run_spar_cascade(
@@ -3194,6 +3288,7 @@ def create_voice_router(
         except asyncio.CancelledError:
             raise
         finally:
+            phone_actions.cancel()
             await lane.aclose()
             await _finish_event_sender(events_out, sender_task, disconnected)
             if not disconnected.is_set():

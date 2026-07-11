@@ -52,6 +52,7 @@ function makeElement(id) {{
       this["attr_" + name] = value;
     }},
     addEventListener() {{}},
+    focus() {{ this.focused = true; }},
     append() {{}},
     querySelector() {{
       return null;
@@ -64,6 +65,7 @@ const elementIds = [
   "transcript", "transcript-empty", "mode-badge", "install-chip",
   "camera-chip", "screen-chip", "screen-share-hint", "sharing-indicator",
   "sharing-preview", "detail-frame-button", "detail-frame-state", "composer", "composer-input",
+  "phone-action-card", "phone-action-impact", "phone-action-preview", "phone-action-confirm", "phone-action-cancel",
 ];
 const elements = {{}};
 for (const id of elementIds) {{
@@ -181,6 +183,44 @@ def test_native_capabilities_reenables_disabled_screen_chip():
         if (elements["screen-share-hint"].hidden !== true) {
           throw new Error("native_capabilities did not hide the unsupported-browser hint");
         }
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_phone_action_requires_user_decision_and_correlated_native_result():
+    result = _run_node_harness(
+        """
+        const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null };
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "native_capabilities", phone_action: true }) });
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r1", action: "copy_text", preview: "Vorschau" }));
+        if (sentToNative.some((m) => m.type === "execute_phone_action")) throw new Error("executed before confirmation");
+        decidePhoneAction("confirmed");
+        if (socket.sent.length !== 1 || socket.sent[0].type !== "phone_action_decision") throw new Error("missing decision");
+        decidePhoneAction("confirmed");
+        if (socket.sent.length !== 1) throw new Error("double decision");
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "stale", action: "copy_text", text: "secret" }));
+        if (sentToNative.some((m) => m.type === "execute_phone_action")) throw new Error("stale id executed");
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "r1", action: "copy_text", text: "secret" }));
+        const nativeCalls = sentToNative.filter((m) => m.type === "execute_phone_action");
+        if (nativeCalls.length !== 1 || nativeCalls[0].text !== "secret") throw new Error("native execution missing");
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "phone_action_result", request_id: "r1", status: "executed" }) });
+        if (socket.sent.at(-1).type !== "phone_action_result" || socket.sent.at(-1).status !== "executed") throw new Error("result missing");
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_phone_action_plain_browser_fails_closed_unsupported():
+    result = _run_node_harness(
+        """
+        const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null };
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r2", action: "open_url", preview: "https://example.com" }));
+        decidePhoneAction("confirmed");
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "r2", action: "open_url", url: "https://example.com" }));
+        if (socket.sent.at(-1).type !== "phone_action_result" || socket.sent.at(-1).status !== "unsupported") throw new Error("plain browser must be unsupported");
         """
     )
     assert result.returncode == 0, result.stderr

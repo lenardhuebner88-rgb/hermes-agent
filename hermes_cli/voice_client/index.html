@@ -757,6 +757,26 @@
         text-align: center;
       }
 
+      .phone-action-card {
+        border: 1px solid color-mix(in srgb, var(--color-bronze) 65%, transparent);
+        border-radius: 1rem;
+        background: var(--color-surface-2);
+        padding: 1rem;
+        display: grid;
+        gap: 0.75rem;
+        min-width: 0;
+      }
+      .phone-action-card[hidden] { display: none; }
+      .phone-action-card h2, .phone-action-card p { margin: 0; }
+      .phone-action-preview {
+        overflow-wrap: anywhere;
+        color: var(--color-ink-2);
+        max-height: 4.5em;
+        overflow: hidden;
+      }
+      .phone-action-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+      .phone-action-buttons button { min-height: 48px; }
+
       .connection-banner[hidden] {
         display: none;
       }
@@ -1309,6 +1329,18 @@
       </p>
 
       <div id="connection-banner" class="connection-banner" role="status" aria-live="polite" hidden></div>
+
+      <section id="phone-action-card" class="phone-action-card" role="dialog"
+        aria-modal="false" aria-labelledby="phone-action-title"
+        aria-describedby="phone-action-preview" hidden>
+        <h2 id="phone-action-title">Handy-Aktion bestätigen</h2>
+        <p id="phone-action-impact"></p>
+        <p id="phone-action-preview" class="phone-action-preview"></p>
+        <div class="phone-action-buttons">
+          <button id="phone-action-confirm" type="button">Ausführen</button>
+          <button id="phone-action-cancel" type="button">Abbrechen</button>
+        </div>
+      </section>
 
       <section
         id="voice-trigger"

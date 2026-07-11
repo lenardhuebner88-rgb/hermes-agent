@@ -17,6 +17,7 @@ from typing import Any
 
 from google import genai
 from google.genai import types
+from hermes_cli.voice_phone_action import validate_phone_action
 
 _TMUX_TIMEOUT_SECONDS = 10
 _DEFAULT_CAPTURE_LINES = 40
@@ -46,6 +47,24 @@ _LOOK_CLOSELY_SYSTEM_INSTRUCTION = (
 )
 
 FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
+    {
+        "name": "phone_action",
+        "description": (
+            "Fordert nach einer immer sichtbaren Bestätigung eine sichere Aktion "
+            "auf Piets Android-Handy an. Niemals behaupten, die Aktion sei erfolgt, "
+            "bevor das strukturierte Ergebnis 'executed' meldet. open_app ist noch "
+            "nicht unterstützt."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["copy_text", "open_url", "share_text", "open_app"]},
+                "text": {"type": "string"},
+                "url": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
     {
         "name": "list_terminals",
         "description": (
@@ -215,7 +234,7 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
     },
 ]
 
-NON_BLOCKING_TOOLS: frozenset[str] = frozenset({"delegate_to_hermes"})
+NON_BLOCKING_TOOLS: frozenset[str] = frozenset({"delegate_to_hermes", "phone_action"})
 
 Delegate = Callable[[str], Awaitable[str]]
 DelegateWithImage = Callable[[str, bytes], Awaitable[str]]
@@ -226,6 +245,7 @@ RequestFrame = Callable[[], Awaitable[bytes | None]]
 # was missing/partial, so the caller can mark its cost estimate incomplete
 # instead of silently under-reporting.
 ReportLookUsage = Callable[[int, int, bool], None]
+RequestPhoneAction = Callable[[dict[str, str]], Awaitable[dict[str, str]]]
 VOICE_FRAME_ARG = "_voice_frame"
 
 
@@ -369,6 +389,7 @@ class VoiceToolExecutor:
         look_model: str = "gemini-3.1-flash-lite",
         gemini_api_key: str | None = None,
         report_look_usage: ReportLookUsage | None = None,
+        request_phone_action: RequestPhoneAction | None = None,
     ):
         self._delegate = delegate
         self._delegate_with_image = delegate_with_image
@@ -378,6 +399,7 @@ class VoiceToolExecutor:
         self._look_model = look_model
         self._gemini_api_key = gemini_api_key
         self._report_look_usage = report_look_usage
+        self._request_phone_action = request_phone_action
 
     def is_non_blocking(self, name: str) -> bool:
         return name in NON_BLOCKING_TOOLS
@@ -423,6 +445,15 @@ class VoiceToolExecutor:
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(args, dict):
             return _error("invalid_arguments", "Tool-Argumente müssen ein Objekt sein.")
+
+        if name == "phone_action":
+            action, error = validate_phone_action(args)
+            if action is None:
+                status = "unsupported" if args.get("action") == "open_app" else "failed"
+                return {"status": status, "error": error or "Ungültige Aktion."}
+            if self._request_phone_action is None:
+                return {"status": "unsupported"}
+            return await self._request_phone_action(action)
 
         if name == "list_terminals":
             process, error = await self._run_tmux(

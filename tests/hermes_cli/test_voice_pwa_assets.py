@@ -135,6 +135,6 @@ def test_manifest_and_service_worker_share_versioned_icon_urls() -> None:
     assert all((CLIENT_DIR / urlsplit(url).path.removeprefix("/voice/")).is_file() for url in icon_urls)
 
     service_worker = (CLIENT_DIR / "sw.js").read_text(encoding="utf-8")
-    assert 'const CACHE = "hermes-voice-v5";' in service_worker
+    assert 'const CACHE = "hermes-voice-v6";' in service_worker
     assert all(f'"{url}"' in service_worker for url in icon_urls)
     assert 'fetch(request).catch(() => caches.match("/voice/offline.html"))' in service_worker

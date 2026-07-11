@@ -82,6 +82,41 @@ class BridgeProtocolTest {
         assertEquals(1, json.getInt("v"))
         assertEquals("native_capabilities", json.getString("type"))
         assertTrue(json.getBoolean("screen_capture"))
+        assertTrue(json.getBoolean("phone_action"))
+    }
+
+    @Test
+    fun `parses and revalidates bounded phone actions`() {
+        val id = "A".repeat(32)
+        val expires = System.currentTimeMillis() + 30_000
+        val copy = BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"copy_text","text":"abc"}""",
+        ) as WebToNativeMessage.ExecutePhoneAction
+        assertEquals("abc", copy.payload)
+        assertNull(BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"copy_text","text":"${"x".repeat(4097)}"}""",
+        ))
+        assertNull(BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","expires_at_ms":$expires,"action":"open_url","url":"javascript:alert(1)"}""",
+        ))
+        assertTrue(BridgeProtocol.isAllowedHttpsUrl("https://example.com/maps?q=1"))
+        assertTrue(!BridgeProtocol.isAllowedHttpsUrl("content://contacts/1"))
+    }
+
+    @Test
+    fun `serializes correlated phone action result`() {
+        val id = "_".repeat(32)
+        val json = JSONObject(BridgeProtocol.serializeNativeToWeb(NativeToWebMessage.PhoneActionResult(id, "executed")))
+        assertEquals("phone_action_result", json.getString("type"))
+        assertEquals(id, json.getString("request_id"))
+        assertEquals("executed", json.getString("status"))
+    }
+
+    @Test
+    fun `phone action replay guard permits a request exactly once`() {
+        val guard = PhoneActionReplayGuard()
+        assertTrue(guard.accept("x".repeat(32)))
+        assertTrue(!guard.accept("x".repeat(32)))
     }
 
     @Test
