@@ -64,5 +64,7 @@ class CaptureSurfaceSwapTest {
         assertTrue(CaptureDeliveryPolicy.shouldDeliver(true, false))
         assertTrue(!CaptureDeliveryPolicy.shouldDeliver(true, true))
         assertTrue(!CaptureDeliveryPolicy.shouldDeliver(false, false))
+        assertTrue(CaptureDeliveryPolicy.shouldNotifyUnavailable(false))
+        assertTrue(!CaptureDeliveryPolicy.shouldNotifyUnavailable(true))
     }
 }

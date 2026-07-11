@@ -52,4 +52,6 @@ object CaptureThreadOwnership {
 object CaptureDeliveryPolicy {
     fun shouldDeliver(hasEncodedFrame: Boolean, stopRequested: Boolean): Boolean =
         hasEncodedFrame && !stopRequested
+
+    fun shouldNotifyUnavailable(stopRequested: Boolean): Boolean = !stopRequested
 }

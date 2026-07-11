@@ -404,7 +404,11 @@ class MediaProjectionService : Service() {
         } catch (e: SurfaceSwapException) {
             Log.w(TAG, "failed to restore orientation capture surface", e)
             detailCaptureActive = false
-            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+            synchronized(surfaceLock) {
+                if (CaptureDeliveryPolicy.shouldNotifyUnavailable(stopRequested.get())) {
+                    HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+                }
+            }
             stopCapture(reason = "error")
             return
         }
