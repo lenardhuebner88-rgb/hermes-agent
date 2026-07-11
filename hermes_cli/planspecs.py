@@ -158,6 +158,7 @@ class BindingPlanSpec:
     status: str
     freigabe: str
     live_test_depth: str
+    board: str | None
     hints: TaskgraphHints
     children: list[dict[str, Any]]
 
@@ -248,6 +249,13 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     freigabe = str(frontmatter.get("freigabe") or "").strip()
     if not freigabe:
         findings.append("freigabe is required")
+    board: str | None = None
+    if "board" in frontmatter:
+        raw_board = frontmatter.get("board")
+        if not isinstance(raw_board, str) or not raw_board.strip():
+            findings.append("board must be a non-empty slug when provided")
+        else:
+            board = raw_board.strip()
     status = str(frontmatter.get("status") or "").strip()
     closed = _closed_reason(status)
     if closed:
@@ -293,9 +301,23 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
         status=status,
         freigabe=freigabe,
         live_test_depth=live_test_depth,
+        board=board,
         hints=hints,
         children=children,
     )
+
+
+def _resolve_target_board(spec: BindingPlanSpec, cli_board: str | None) -> str:
+    """Resolve CLI > PlanSpec > active board and reject unknown slugs."""
+    requested = cli_board if cli_board is not None else spec.board
+    target = requested or kanban_db.get_current_board()
+    try:
+        exists = kanban_db.board_exists(target)
+    except ValueError as exc:
+        raise PlanSpecBlocked([f"invalid board slug {target!r}: {exc}"]) from exc
+    if not exists:
+        raise PlanSpecBlocked([f"unknown board slug: {target}"])
+    return str(kanban_db.read_board_metadata(target)["slug"])
 
 
 def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str, Any] | None:
@@ -1301,7 +1323,10 @@ def _spec_max_review_tier(spec: BindingPlanSpec) -> str:
 
 
 def validate_planspec(
-    path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT
+    path: str | Path,
+    *,
+    plans_root: Path = DEFAULT_PLANS_ROOT,
+    board: str | None = None,
 ) -> dict[str, Any]:
     """Read-only validation preview for a PlanSpec — creates NOTHING, opens NO DB
     connection. The dry-run companion to :func:`ingest_planspec`.
@@ -1323,6 +1348,7 @@ def validate_planspec(
     """
     try:
         spec = parse_binding_planspec(path, plans_root=plans_root)
+        target_board = _resolve_target_board(spec, board)
     except PlanSpecBlocked as exc:
         return {
             "ok": False,
@@ -1351,6 +1377,7 @@ def validate_planspec(
         "signed": signed,
         "approved_by": str(spec.frontmatter.get("approved_by") or "").strip(),
         "freigabe": spec.freigabe,
+        "board": target_board,
         "findings": findings,
         "would_block": disposition in ("block", "invalid"),
     }
@@ -1810,6 +1837,7 @@ def ingest_planspec(
     supersede: bool = False,
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
+    target_board = _resolve_target_board(spec, board)
     # Deterministic rubric gate — layered ON TOP of parse_binding_planspec's
     # structural validation and applied BEFORE any DB write. ``--force`` bypasses
     # it but the skipped reasons are logged so the override is never silent.
@@ -1873,8 +1901,18 @@ def ingest_planspec(
                 "; ".join(warned),
             )
     idempotency_key = ingest_idempotency_key(spec)
-    conn = kanban_db.connect(board=board)
+    conn = kanban_db.connect(board=target_board)
     try:
+        children = spec.children
+        default_workdir = str(
+            kanban_db.read_board_metadata(target_board).get("default_workdir") or ""
+        ).strip()
+        if default_workdir:
+            children = [dict(child) for child in spec.children]
+            for child in children:
+                if child.get("kind") == "code":
+                    child["workspace_kind"] = "dir"
+                    child["workspace_path"] = default_workdir
         # Idempotent re-ingest: if this exact PlanSpec was already ingested
         # (same source path + content), point back at the existing chain's
         # root instead of creating a second one. The root carries the key as
@@ -1894,7 +1932,7 @@ def ingest_planspec(
                 "path": str(spec.path),
                 "root_task_id": root_id,
                 "child_ids": existing_children,
-                "children": spec.children,
+                "children": children,
                 "freigabe": spec.freigabe,
                 "live_test_depth": spec.live_test_depth,
                 "subtask_count": len(existing_children),
@@ -1993,7 +2031,7 @@ def ingest_planspec(
                 conn,
                 root_id,
                 root_assignee=None,
-                children=spec.children,
+                children=children,
                 author=author,
                 auto_promote=False,
                 initial_child_status="scheduled" if child_held_for_operator else "todo",
@@ -2010,7 +2048,7 @@ def ingest_planspec(
             "path": str(spec.path),
             "root_task_id": root_id,
             "child_ids": child_ids,
-            "children": spec.children,
+            "children": children,
             "freigabe": spec.freigabe,
             "live_test_depth": spec.live_test_depth,
             "initial_child_status": "scheduled" if child_held_for_operator else "todo",
@@ -2071,6 +2109,7 @@ def ingest_prose_plan(
         status="prose-plan",
         freigabe=freigabe_value,
         live_test_depth="smoke",
+        board=None,
         hints=compiled.hints,
         children=children,
     )

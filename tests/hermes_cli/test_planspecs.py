@@ -58,6 +58,14 @@ taskgraph_hints:
     return path
 
 
+def _set_planspec_board(path: Path, board: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace("freigabe: complete\n", f"freigabe: complete\nboard: {board}\n"),
+        encoding="utf-8",
+    )
+
+
 def _write_display_plangate(root: Path, name: str = "2026-06-16-abo-limits.md") -> Path:
     path = root / "Claude-Code" / "plans" / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,6 +201,97 @@ def test_parse_binding_planspec_to_children(tmp_path: Path):
     ]
     assert spec.children[1]["parents"] == [0]
     assert spec.children[1]["assignee"] == "coder-claude"
+
+
+def test_ingest_planspec_frontmatter_board_sets_explicit_code_workspaces(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    _set_planspec_board(path, "health-track")
+    repo = tmp_path / "health-track"
+    repo.mkdir()
+    kb.create_board("health-track", default_workdir=str(repo))
+
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert all(child["workspace_kind"] == "dir" for child in result["children"])
+    assert all(child["workspace_path"] == str(repo) for child in result["children"])
+    with kb.connect_closing(board="health-track") as conn:
+        rows = conn.execute(
+            "SELECT workspace_kind, workspace_path FROM tasks "
+            "WHERE id IN (?, ?) ORDER BY id",
+            tuple(result["child_ids"]),
+        ).fetchall()
+    assert [(row["workspace_kind"], row["workspace_path"]) for row in rows] == [
+        ("dir", str(repo)),
+        ("dir", str(repo)),
+    ]
+
+
+def test_ingest_planspec_cli_board_overrides_frontmatter_board(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    _set_planspec_board(path, "health-track")
+    health_repo = tmp_path / "health-track"
+    cli_repo = tmp_path / "cli-repo"
+    health_repo.mkdir()
+    cli_repo.mkdir()
+    kb.create_board("health-track", default_workdir=str(health_repo))
+    kb.create_board("cli-board", default_workdir=str(cli_repo))
+
+    result = planspecs.ingest_planspec(
+        path, plans_root=plans_root, board="cli-board"
+    )
+
+    assert all(child["workspace_path"] == str(cli_repo) for child in result["children"])
+    with kb.connect_closing(board="health-track") as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 0
+    with kb.connect_closing(board="cli-board") as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 3
+
+
+def test_unknown_frontmatter_board_blocks_validate_and_ingest(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    _set_planspec_board(path, "gibts-nicht")
+
+    preview = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert preview["disposition"] == "invalid"
+    assert preview["would_block"] is True
+    assert preview["findings"] == ["unknown board slug: gibts-nicht"]
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert exc.value.findings == ["unknown board slug: gibts-nicht"]
+    assert _task_count() == 0
+
+
+def test_plan_validate_shows_target_board(
+    kanban_home, tmp_path: Path, capsys, monkeypatch
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    _set_planspec_board(path, "health-track")
+    kb.create_board("health-track", default_workdir=str(tmp_path / "health-track"))
+    preview = planspecs.validate_planspec(path, plans_root=plans_root)
+    assert preview["board"] == "health-track"
+    monkeypatch.setattr(
+        plan_subcommand.planspecs,
+        "validate_planspec",
+        lambda path, *, board=None: preview,
+    )
+
+    rc = plan_subcommand.plan_command(
+        Namespace(plan_action="validate", path=str(path), board=None, json=False)
+    )
+
+    assert rc == 0
+    assert "board=health-track" in capsys.readouterr().out
 
 
 def test_parse_binding_planspec_maps_reviewer_lane_to_review_kind(tmp_path: Path):

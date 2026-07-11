@@ -59,6 +59,11 @@ def build_plan_parser(subparsers) -> None:
         ),
     )
     validate.add_argument("path", help="Path to a Vault PlanSpec markdown file")
+    validate.add_argument(
+        "--board",
+        default=None,
+        help="Kanban board slug (overrides PlanSpec frontmatter)",
+    )
     validate.add_argument("--json", action="store_true", help="Emit JSON output")
 
     prompt = sub.add_parser("sprint-prompt", help="Generate a copy-paste sprint prompt from a PlanSpec")
@@ -167,7 +172,9 @@ def plan_command(args: argparse.Namespace) -> int:
                 )
             return 0
         if action == "validate":
-            result = planspecs.validate_planspec(args.path)
+            result = planspecs.validate_planspec(
+                args.path, board=getattr(args, "board", None)
+            )
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
             else:
@@ -176,12 +183,14 @@ def plan_command(args: argparse.Namespace) -> int:
                 if disposition == "clean":
                     print(
                         f"plan validate: CLEAN {result['path']} · signed={result['signed']} "
-                        f"· no rubric findings (deterministic preview; judge not run)"
+                        f"· board={result['board']} · no rubric findings "
+                        f"(deterministic preview; judge not run)"
                     )
                 elif disposition == "warn":
                     print(
                         f"plan validate: WARN {result['path']} · operator-signed "
-                        f"(approved_by={result['approved_by']}) → would ingest with warnings:"
+                        f"(approved_by={result['approved_by']}) · board={result['board']} "
+                        "→ would ingest with warnings:"
                     )
                     for finding in findings:
                         print(f"- {finding}")
