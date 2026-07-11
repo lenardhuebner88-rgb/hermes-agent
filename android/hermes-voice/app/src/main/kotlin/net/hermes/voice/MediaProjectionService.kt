@@ -69,6 +69,7 @@ class MediaProjectionService : Service() {
     private var detailCaptureActive = false
 
     private data class DetailRequest(val id: String, val maxEdge: Int, val qualityPercent: Int)
+    private class SurfaceSwapException(val fatal: Boolean) : Exception()
 
     @Volatile
     private var framesPaused = false
@@ -355,9 +356,11 @@ class MediaProjectionService : Service() {
             try {
                 swapCaptureSurface(request.maxEdge)
                 pollDetailFrame(request, 0)
-            } catch (e: Exception) {
+            } catch (e: SurfaceSwapException) {
                 Log.w(TAG, "failed to prepare detail capture", e)
-                finishDetailCapture(request, null)
+                detailCaptureActive = false
+                HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+                if (e.fatal) stopCapture(reason = "error")
             }
         }
     }
@@ -385,13 +388,20 @@ class MediaProjectionService : Service() {
     }
 
     private fun finishDetailCapture(request: DetailRequest, jpeg: ByteArray?) {
-        try {
-            if (!stopGate.get()) swapCaptureSurface(MAX_EDGE_PX)
-        } catch (e: Exception) {
-            Log.w(TAG, "failed to restore orientation capture surface", e)
-        } finally {
+        if (stopGate.get()) {
             detailCaptureActive = false
+            return
         }
+        try {
+            swapCaptureSurface(MAX_EDGE_PX)
+        } catch (e: SurfaceSwapException) {
+            Log.w(TAG, "failed to restore orientation capture surface", e)
+            detailCaptureActive = false
+            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+            stopCapture(reason = "error")
+            return
+        }
+        detailCaptureActive = false
         if (jpeg == null) {
             HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
         } else {
@@ -405,16 +415,38 @@ class MediaProjectionService : Service() {
     }
 
     private fun swapCaptureSurface(maxEdge: Int) {
-        val display = virtualDisplay ?: return
+        val display = virtualDisplay ?: throw SurfaceSwapException(fatal = true)
         val (width, height) = FrameScaler.computeScaledDimensions(sourceWidth, sourceHeight, maxEdge)
-        val oldReader = imageReader
-        val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        imageReader = newReader
-        display.resize(width, height, currentDpi)
-        display.surface = newReader.surface
-        currentWidth = width
-        currentHeight = height
-        oldReader?.close()
+        val oldReader = imageReader ?: throw SurfaceSwapException(fatal = true)
+        val oldWidth = currentWidth
+        val oldHeight = currentHeight
+        val newReader = try {
+            ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        } catch (_: Exception) {
+            throw SurfaceSwapException(fatal = false)
+        }
+        when (
+            CaptureSurfaceSwap.execute(
+                install = {
+                    display.resize(width, height, currentDpi)
+                    display.surface = newReader.surface
+                },
+                rollback = {
+                    display.resize(oldWidth, oldHeight, currentDpi)
+                    display.surface = oldReader.surface
+                },
+                discardCandidate = { newReader.close() },
+            )
+        ) {
+            CaptureSurfaceSwapOutcome.COMMITTED -> {
+                imageReader = newReader
+                currentWidth = width
+                currentHeight = height
+                oldReader.close()
+            }
+            CaptureSurfaceSwapOutcome.ROLLED_BACK -> throw SurfaceSwapException(fatal = false)
+            CaptureSurfaceSwapOutcome.FATAL -> throw SurfaceSwapException(fatal = true)
+        }
     }
 
     private fun scaledBitmap(source: Bitmap, width: Int, height: Int): Bitmap {

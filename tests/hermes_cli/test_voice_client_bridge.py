@@ -324,6 +324,52 @@ def test_native_detail_capture_is_correlated_and_forwarded_once():
     assert result.returncode == 0, result.stderr
 
 
+def test_detail_button_reuses_typed_turn_single_flight_and_mic_gate():
+    result = _run_node_harness(
+        """
+        const fakeSocket = { readyState: 1, sent: [], send(data) { this.sent.push(data); } };
+        activeSession = {
+          websocket: fakeSocket, voiceMode: "live", drainRequested: false,
+          muteMicUntilResponse: false, micGateTimer: null, microphoneStopped: false,
+          playbackSources: new Set(), bargeTriggered: false, loudChunks: 0,
+          bargeStartedAt: null, suppressIncomingAudio: false, micLevel: 0,
+        };
+        nativeScreen.state = "active";
+        sharingSource = "screen";
+        requestLookClosely();
+        requestLookClosely();
+        const typed = fakeSocket.sent.filter((value) => typeof value === "string").map(JSON.parse);
+        if (typed.length !== 1 || typed[0].type !== "text") {
+          throw new Error("detail shortcut did not enforce one typed turn: " + JSON.stringify(typed));
+        }
+        if (elements["detail-frame-button"].disabled !== true) {
+          throw new Error("detail shortcut stayed enabled while typed turn was busy");
+        }
+        handleMicFrame(activeSession, { pcm: new ArrayBuffer(4), rms: 0 });
+        if (fakeSocket.sent.some((value) => value instanceof ArrayBuffer)) {
+          throw new Error("mic PCM leaked through typed-turn gate");
+        }
+        applyServerState(activeSession, "thinking");
+        if (activeSession.muteMicUntilResponse) {
+          throw new Error("server state did not clear the shared typed-turn gate");
+        }
+        requestLookClosely();
+        handleJsonMessage(activeSession, JSON.stringify({
+          type: "error", error: { code: "text_busy", message: "busy" },
+        }));
+        if (activeSession.muteMicUntilResponse) {
+          throw new Error("server error did not clear the shared typed-turn gate");
+        }
+        activeSession.drainRequested = true;
+        requestLookClosely();
+        if (fakeSocket.sent.filter((value) => typeof value === "string").length !== 2) {
+          throw new Error("detail shortcut sent after drain started");
+        }
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_native_screen_capture_error_surfaces_message_and_stops():
     result = _run_node_harness(
         """

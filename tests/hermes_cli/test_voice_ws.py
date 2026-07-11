@@ -1092,6 +1092,62 @@ async def test_fresh_frame_broker_coalesces_concurrent_requests_and_times_out_bo
 
 
 @pytest.mark.asyncio
+async def test_fresh_frame_broker_cancel_then_new_generation_survives_old_finally():
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    old = asyncio.create_task(broker.request(events, disconnected, timeout=1.0))
+    old_event = await events.get()
+    broker.cancel()
+    new = asyncio.create_task(broker.request(events, disconnected, timeout=1.0))
+    new_event = await events.get()
+    assert new_event["request_id"] != old_event["request_id"]
+    assert await old is None
+    assert broker.accepts(new_event["request_id"])
+    assert broker.submit(old_event["request_id"], b"late") is False
+    assert broker.submit(new_event["request_id"], b"new") is True
+    assert await new == b"new"
+
+
+@pytest.mark.asyncio
+async def test_fresh_frame_broker_first_waiter_timeout_does_not_cancel_second():
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    first = asyncio.create_task(broker.request(events, disconnected, timeout=0.02))
+    event = await events.get()
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(broker.request(events, disconnected, timeout=0.2))
+    assert await first is None
+    assert events.empty(), "shared generation must not timeout while one waiter remains"
+    assert broker.accepts(event["request_id"])
+    assert broker.submit(event["request_id"], b"in-time-for-second")
+    assert await second == b"in-time-for-second"
+
+
+@pytest.mark.asyncio
+async def test_fresh_frame_broker_last_timeout_uses_local_generation_id_and_rejects_late():
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    result = asyncio.create_task(broker.request(events, disconnected, timeout=0.01))
+    request_event = await events.get()
+    assert await result is None
+    timeout_event = await events.get()
+    assert timeout_event == {
+        "type": "detail_frame_timeout",
+        "request_id": request_event["request_id"],
+    }
+    assert broker.submit(request_event["request_id"], b"late") is False
+
+
+@pytest.mark.asyncio
 async def test_detail_frame_reader_ignores_uncorrelated_payload_before_decode(monkeypatch):
     from hermes_cli import voice_ws
 
@@ -3327,6 +3383,80 @@ def test_spar_turn_without_tool_call_speaks_direct_reply(monkeypatch):
         assert ws.receive_bytes()
         assert ws.receive_json() == {"type": "state", "value": "listening"}
         assert ws.receive_json()["type"] == "usage_update"
+        ws.send_json({"type": "end"})
+        assert ws.receive()["type"] == "websocket.close"
+
+
+def test_spar_turn_look_closely_receives_correlated_detail_frame_and_reports_cost(monkeypatch):
+    from hermes_cli import voice_ws
+
+    fixture = FIXTURE.read_bytes()
+    detail_jpeg = FIXTURE_VIDEO.read_bytes()
+
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", lambda *a, **k: "genau ansehen")
+    monkeypatch.setattr(voice_ws, "spar_synthesize_to_wav", _fake_spar_synthesize_to_wav)
+    replies = iter(
+        [
+            'TOOL: look_closely {"question":"Was steht dort?"}',
+            "Die kleine Schrift lautet Test.",
+        ]
+    )
+
+    async def fake_call_llm_lane(*_args, **_kwargs):
+        return next(replies)
+
+    async def fake_execute(self, name, args):
+        assert name == "look_closely"
+        frame = await self._request_frame()
+        assert frame == detail_jpeg
+        self._report_look_usage(1000, 100, True)
+        return {"answer": "Test"}
+
+    monkeypatch.setattr(
+        "hermes_cli.voice_spar_session.call_llm_lane", fake_call_llm_lane
+    )
+    monkeypatch.setattr(voice_ws.VoiceToolExecutor, "execute", fake_execute)
+
+    app = _voice_app(
+        extra_voice_web={
+            "spar": {},
+            "pricing": {
+                "gemini-3.1-flash-lite": {
+                    "input_per_1m": 0.25,
+                    "output_per_1m": 1.5,
+                }
+            },
+        }
+    )
+    with TestClient(app).websocket_connect("/api/voice/spar") as ws:
+        ws.send_bytes(fixture)
+        ws.send_json({"type": "turn_end"})
+        assert ws.receive_json() == {"type": "state", "value": "thinking"}
+        assert ws.receive_json()["type"] == "transcript"
+        request = ws.receive_json()
+        assert request["type"] == "detail_frame_request"
+        ws.send_json(
+            {
+                "type": "detail_frame",
+                "request_id": request["request_id"],
+                "source": "screen",
+                "data": base64.b64encode(detail_jpeg).decode("ascii"),
+            }
+        )
+        assistant = ws.receive_json()
+        assert assistant == {
+            "type": "transcript",
+            "role": "assistant",
+            "text": "Die kleine Schrift lautet Test.",
+        }
+        assert ws.receive_json() == {"type": "state", "value": "speaking"}
+        assert ws.receive_bytes()
+        assert ws.receive_json() == {"type": "state", "value": "listening"}
+        usage = ws.receive_json()
+        assert usage["mode"] == "spar"
+        assert usage["look_closely"]["calls"] == 1
+        assert usage["estimated_usd"] > 0
+        assert usage["label"] != "$0 (Abo)"
         ws.send_json({"type": "end"})
         assert ws.receive()["type"] == "websocket.close"
 

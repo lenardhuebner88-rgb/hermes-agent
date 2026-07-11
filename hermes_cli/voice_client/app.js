@@ -291,7 +291,11 @@ function renderSharingControls() {
   if (detailButtonElement) {
     const shortcutAvailable = activeSession?.voiceMode !== "spar";
     detailButtonElement.disabled =
-      !(cameraActive || screenActive) || !hasOpenWebSocket(activeSession) || !shortcutAvailable;
+      !(cameraActive || screenActive) ||
+      !hasOpenWebSocket(activeSession) ||
+      !shortcutAvailable ||
+      Boolean(activeSession?.drainRequested) ||
+      Boolean(activeSession?.muteMicUntilResponse);
     detailButtonElement.title = shortcutAvailable
       ? "Ein frisches hochauflösendes Einzelbild analysieren"
       : "Im Sparmodus bitte „Genau ansehen“ sagen";
@@ -888,13 +892,14 @@ async function handleDetailFrameRequest(session, message) {
 }
 
 function requestLookClosely() {
-  const session = activeSession;
-  if (!session || !hasOpenWebSocket(session) || (!sharingStream && nativeScreen.state !== "active")) return;
-  session.websocket.send(JSON.stringify({
-    type: "text",
-    text: "Nutze look_closely und sieh dir die aktuell geteilte Ansicht genau an. Lies kleine Schrift und UI-Details präzise.",
-  }));
-  if (detailStateElement) detailStateElement.textContent = "Genaues Ansehen angefordert …";
+  if (!sharingStream && nativeScreen.state !== "active") return;
+  if (
+    sendTypedTurn(
+      "Nutze look_closely und sieh dir die aktuell geteilte Ansicht genau an. Lies kleine Schrift und UI-Details präzise.",
+    )
+  ) {
+    if (detailStateElement) detailStateElement.textContent = "Genaues Ansehen angefordert …";
+  }
 }
 
 detailButtonElement?.addEventListener("click", requestLookClosely);
@@ -1307,6 +1312,7 @@ function clearMicGate(session) {
     window.clearTimeout(session.micGateTimer);
     session.micGateTimer = null;
   }
+  renderSharingControls();
 }
 
 function applyServerState(session, value) {
@@ -1879,18 +1885,19 @@ if (talkButtonElement) {
   talkButtonElement.addEventListener("pointerleave", endSparTurn);
 }
 
-function submitComposerText() {
-  const text = composerInput.value.trim();
+function sendTypedTurn(text) {
   if (!text) {
-    return;
+    return false;
   }
   if (
     !activeSession ||
     !hasOpenWebSocket(activeSession) ||
-    activeSession.drainRequested
+    activeSession.drainRequested ||
+    activeSession.muteMicUntilResponse ||
+    activeSession.voiceMode === "spar"
   ) {
     statusDetailElement.textContent = NO_SESSION_TEXT_HINT;
-    return;
+    return false;
   }
   const session = activeSession;
   session.websocket.send(JSON.stringify({ type: "text", text }));
@@ -1904,8 +1911,16 @@ function submitComposerText() {
     if (isCurrent(session)) {
       session.muteMicUntilResponse = false;
       session.micGateTimer = null;
+      renderSharingControls();
     }
   }, MIC_GATE_FAILSAFE_MS);
+  renderSharingControls();
+  return true;
+}
+
+function submitComposerText() {
+  const text = composerInput.value.trim();
+  if (!sendTypedTurn(text)) return;
   composerInput.value = "";
 }
 

@@ -7,7 +7,7 @@ import base64
 import binascii
 from collections import OrderedDict, deque
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 import json
 import logging
@@ -1468,9 +1468,7 @@ class FreshFrameBroker:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._request_id: str | None = None
-        self._future: asyncio.Future[bytes | None] | None = None
-        self._waiters = 0
+        self._generation: _FreshFrameGeneration | None = None
 
     async def request(
         self,
@@ -1480,13 +1478,14 @@ class FreshFrameBroker:
         timeout: float = _LOOK_CLOSELY_FRAME_WAIT_SECONDS,
     ) -> bytes | None:
         async with self._lock:
-            if self._future is not None and not self._future.done():
-                future = self._future
+            generation = self._generation
+            if generation is not None and not generation.future.done():
+                generation.waiters += 1
             else:
                 request_id = uuid.uuid4().hex
                 future = asyncio.get_running_loop().create_future()
-                self._request_id = request_id
-                self._future = future
+                generation = _FreshFrameGeneration(request_id, future, 1)
+                self._generation = generation
                 await _put_event(
                     events_out,
                     {
@@ -1497,49 +1496,57 @@ class FreshFrameBroker:
                     },
                     disconnected,
                 )
-            self._waiters += 1
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-        except TimeoutError:
-            await _put_event(
-                events_out,
-                {"type": "detail_frame_timeout", "request_id": self._request_id},
-                disconnected,
+            return await asyncio.wait_for(
+                asyncio.shield(generation.future), timeout=timeout
             )
+        except TimeoutError:
             return None
         finally:
+            report_timeout = False
             async with self._lock:
-                self._waiters = max(0, self._waiters - 1)
-                if self._future is future and (future.done() or self._waiters == 0):
-                    self._request_id = None
-                    self._future = None
+                generation.waiters = max(0, generation.waiters - 1)
+                if self._generation is generation and generation.waiters == 0:
+                    report_timeout = not generation.future.done()
+                    self._generation = None
+            if report_timeout:
+                await _put_event(
+                    events_out,
+                    {
+                        "type": "detail_frame_timeout",
+                        "request_id": generation.request_id,
+                    },
+                    disconnected,
+                )
 
     def submit(self, request_id: object, frame: bytes | None) -> bool:
-        if (
-            not isinstance(request_id, str)
-            or request_id != self._request_id
-            or self._future is None
-            or self._future.done()
-        ):
+        generation = self._generation
+        if not self.accepts(request_id) or generation is None:
             return False
-        self._future.set_result(frame)
+        generation.future.set_result(frame)
         return True
 
     def accepts(self, request_id: object) -> bool:
+        generation = self._generation
         return (
             isinstance(request_id, str)
-            and request_id == self._request_id
-            and self._future is not None
-            and not self._future.done()
+            and generation is not None
+            and request_id == generation.request_id
+            and not generation.future.done()
         )
 
     def cancel(self) -> None:
-        future = self._future
-        self._request_id = None
-        self._future = None
-        self._waiters = 0
-        if future is not None and not future.done():
-            future.set_result(None)
+        generation = self._generation
+        self._generation = None
+        if generation is not None and not generation.future.done():
+            generation.future.set_result(None)
+
+
+@dataclass
+class _FreshFrameGeneration:
+    request_id: str
+    future: asyncio.Future[bytes | None]
+    waiters: int
 
 async def _try_start_fallback_text_turn(
     text: str,
@@ -2021,6 +2028,63 @@ async def _run_controllable_cascade(
 # =============================================================================
 
 _MAX_SPAR_TURN_PCM_BYTES = _MAX_FALLBACK_PCM_BYTES
+_MAX_SPAR_DEFERRED_MESSAGES = 256
+
+
+@dataclass
+class _SparLookUsage:
+    look_model: str
+    pricing: dict[str, Any]
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    incomplete: bool = False
+
+    def record(self, input_tokens: int, output_tokens: int, complete: bool = True) -> None:
+        self.calls += 1
+        self.input_tokens += max(0, input_tokens)
+        self.output_tokens += max(0, output_tokens)
+        if not complete:
+            self.incomplete = True
+
+    def event(self) -> dict[str, Any]:
+        if self.calls == 0:
+            return {
+                "type": "usage_update",
+                "mode": "spar",
+                "estimated_usd": 0,
+                "label": "$0 (Abo)",
+                "complete": True,
+            }
+        entry = self.pricing.get(self.look_model)
+        input_rate = entry.get("input_per_1m") if isinstance(entry, dict) else None
+        output_rate = entry.get("output_per_1m") if isinstance(entry, dict) else None
+        rates_valid = all(
+            isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and math.isfinite(rate)
+            and rate >= 0
+            for rate in (input_rate, output_rate)
+        )
+        cost = None
+        if rates_valid:
+            cost = (
+                self.input_tokens / 1_000_000 * float(input_rate)
+                + self.output_tokens / 1_000_000 * float(output_rate)
+            )
+        complete = rates_valid and not self.incomplete
+        return {
+            "type": "usage_update",
+            "mode": "spar",
+            "estimated_usd": cost,
+            "label": (
+                f"Abo + ${cost:.4f} Detailanalyse"
+                if cost is not None
+                else "Abo + Detailkosten unbekannt"
+            ),
+            "complete": complete,
+            "look_closely": {"calls": self.calls, "estimated_usd": cost},
+        }
 
 
 def _spar_transcribe_pcm_sync(pcm: bytes, wav_path: Path, model_size: str, language: str) -> str:
@@ -2083,6 +2147,7 @@ async def _read_spar_frames(
     disconnected: asyncio.Event,
     frame_cache: VideoFrameCache,
     fresh_frames: FreshFrameBroker | None = None,
+    deferred_messages: deque[dict[str, Any]] | None = None,
 ) -> str:
     """Read one Sparmodus turn: accumulate PCM until ``turn_end``/``end``.
 
@@ -2093,7 +2158,11 @@ async def _read_spar_frames(
     video_frame_times: deque[float] = deque()
     try:
         while True:
-            message = await websocket.receive()
+            message = (
+                deferred_messages.popleft()
+                if deferred_messages
+                else await websocket.receive()
+            )
             if message.get("type") == "websocket.disconnect":
                 disconnected.set()
                 return "disconnect"
@@ -2220,6 +2289,99 @@ async def _read_spar_frames(
     finally:
         if fresh_frames is not None:
             fresh_frames.cancel()
+
+
+async def _request_spar_detail_frame(
+    websocket: WebSocket,
+    events_out: asyncio.Queue[dict[str, Any] | None],
+    disconnected: asyncio.Event,
+    frame_cache: VideoFrameCache,
+    fresh_frames: FreshFrameBroker,
+    deferred_messages: deque[dict[str, Any]],
+) -> bytes | None:
+    """Own the Spar websocket only while a look_closely tool call awaits its still."""
+
+    request_task = asyncio.create_task(fresh_frames.request(events_out, disconnected))
+    receive_task: asyncio.Task[dict[str, Any]] | None = None
+    frame_times: deque[float] = deque()
+    try:
+        while not request_task.done():
+            receive_task = asyncio.create_task(websocket.receive())
+            done, _ = await asyncio.wait(
+                {request_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if request_task in done:
+                receive_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await receive_task
+                receive_task = None
+                break
+            message = receive_task.result()
+            receive_task = None
+            if message.get("type") == "websocket.disconnect":
+                disconnected.set()
+                fresh_frames.cancel()
+                break
+            text = message.get("text")
+            control: dict[str, Any] | None = None
+            if isinstance(text, str):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    control = parsed
+            control_type = control.get("type") if control is not None else None
+            if control_type == "detail_frame" and fresh_frames.accepts(
+                control.get("request_id")
+            ):
+                if not _video_frame_rate_allowed(frame_times):
+                    continue
+                decoded = _decode_video_frame(control)
+                if decoded is not None and len(decoded) <= _MAX_VIDEO_FRAME_BYTES:
+                    fresh_frames.submit(control.get("request_id"), decoded)
+                continue
+            if control_type == "detail_frame_unavailable" and fresh_frames.accepts(
+                control.get("request_id")
+            ):
+                fresh_frames.submit(control.get("request_id"), None)
+                continue
+            if control_type == "sharing_stopped":
+                frame_cache.clear()
+                fresh_frames.cancel()
+                continue
+            if control_type == "video_frame":
+                if not _video_frame_rate_allowed(frame_times):
+                    continue
+                decoded = _decode_video_frame(control)
+                if decoded is not None and len(decoded) <= _MAX_VIDEO_FRAME_BYTES:
+                    frame_cache.store(decoded)
+                continue
+            if len(deferred_messages) >= _MAX_SPAR_DEFERRED_MESSAGES:
+                fresh_frames.cancel()
+                await _put_event(
+                    events_out,
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "spar_input_backlog",
+                            "message": "Zu viele Eingaben während der Detailanalyse.",
+                        },
+                    },
+                    disconnected,
+                )
+                break
+            deferred_messages.append(message)
+        return await request_task
+    except (OSError, RuntimeError, WebSocketDisconnect):
+        disconnected.set()
+        fresh_frames.cancel()
+        return await request_task
+    finally:
+        if receive_task is not None:
+            receive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await receive_task
 
 
 @dataclass
@@ -2374,6 +2536,7 @@ async def _run_spar_cascade(
     executor: VoiceToolExecutor,
     history: list[tuple[str, str]],
     lane: SparLlmLane,
+    look_usage: _SparLookUsage | None = None,
 ) -> list[tuple[str, str]]:
     """One full Sparmodus turn: STT -> LLM (+tool hops) -> TTS. Returns new history."""
     if not pcm:
@@ -2414,7 +2577,9 @@ async def _run_spar_cascade(
     )
     await _put_event(
         events_out,
-        {
+        look_usage.event()
+        if look_usage is not None
+        else {
             "type": "usage_update",
             "mode": "spar",
             "estimated_usd": 0,
@@ -2864,12 +3029,23 @@ def create_voice_router(
         disconnected = asyncio.Event()
         frame_cache = VideoFrameCache()
         fresh_frames = FreshFrameBroker()
+        deferred_messages: deque[dict[str, Any]] = deque()
+        spar_look_usage = _SparLookUsage(config.look_model, config.pricing)
+        spar_detail_lock = asyncio.Lock()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
 
         async def _request_fresh_frame() -> bytes | None:
-            return await fresh_frames.request(events_out, disconnected)
+            async with spar_detail_lock:
+                return await _request_spar_detail_frame(
+                    websocket,
+                    events_out,
+                    disconnected,
+                    frame_cache,
+                    fresh_frames,
+                    deferred_messages,
+                )
 
         executor = VoiceToolExecutor(
             delegate=lambda prompt: delegate_to_hermes(
@@ -2878,6 +3054,7 @@ def create_voice_router(
             request_frame=_request_fresh_frame,
             look_model=config.look_model,
             gemini_api_key=resolve_gemini_api_key(),
+            report_look_usage=spar_look_usage.record,
         )
 
         # One LLM lane per Sparmodus session, not per turn: for the claude
@@ -2906,7 +3083,13 @@ def create_voice_router(
             while True:
                 turn_pcm = bytearray()
                 result = await _read_spar_frames(
-                    websocket, turn_pcm, events_out, disconnected, frame_cache, fresh_frames
+                    websocket,
+                    turn_pcm,
+                    events_out,
+                    disconnected,
+                    frame_cache,
+                    fresh_frames,
+                    deferred_messages,
                 )
                 if result in ("disconnect", "error", "end"):
                     break
@@ -2922,6 +3105,7 @@ def create_voice_router(
                         executor,
                         history,
                         lane,
+                        spar_look_usage,
                     )
                 except VoiceRuntimeError as exc:
                     await _put_event(
