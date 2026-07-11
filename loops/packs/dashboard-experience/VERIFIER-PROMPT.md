@@ -54,6 +54,10 @@ PASS nur wenn alles gilt:
   `## Verifier-Evidence` im Plan.
 - FAIL: `last-status` exakt `FAIL <hauptgrund>` und konkrete, umsetzbare Punkte unter
   `## Verifier-Feedback`. Der Driver revertiert und erlaubt höchstens einen Retry.
+- HART: Beende deinen Turn NIEMALS, bevor `last-status` geschrieben ist. Keine
+  Hintergrund-Tasks, auf die du „wartest" — führe Evidence-Builds und alle Checks
+  im Vordergrund aus. Ein beendeter Turn ohne `last-status` zählt als FAIL ohne
+  Begründung und revertiert den Build (Vorfall 2026-07-12 R1).
 
 Du fixt nichts. NIE push, merge, deploy, Service-Restart oder Live-Dashboard-Zugriff.
 Nur der deterministische Runner darf nach deinem PASS ff-only landen, Gates erneut

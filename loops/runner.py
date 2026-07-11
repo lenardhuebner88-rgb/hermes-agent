@@ -85,7 +85,7 @@ AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
         "PLANNER-PROMPT.md": "0669acde68d8e943bec71fc9c9cc6120f02e5f3bac9d81a0c4f447f759fbf67b",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
-        "VERIFIER-PROMPT.md": "423027eb1609f2994c7b9cedbebf8d6f669eb9d5684048ee39bf920fb89f7cd5",
+        "VERIFIER-PROMPT.md": "f6f4db9b95c55f6ebbfc0514a656c1b362e997d3a9f64344621c786de9ca94db",
     },
 }
 
