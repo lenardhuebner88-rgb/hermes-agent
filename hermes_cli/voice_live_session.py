@@ -704,6 +704,7 @@ class GeminiLiveSession:
         *,
         voice: str = "Puck",
         system_instruction: str = DEFAULT_SYSTEM_INSTRUCTION,
+        context_suffix: str = "",
         initial_handle: str | None = None,
         on_handle_update: Callable[[str | None], None] | None = None,
         context_trigger_tokens: int = _DEFAULT_CONTEXT_TRIGGER_TOKENS,
@@ -725,6 +726,7 @@ class GeminiLiveSession:
         self._api_key = api_key
         self._voice = voice
         self._system_instruction = system_instruction
+        self._context_suffix = context_suffix
         self._resumption_handle: str | None = initial_handle
         self._on_handle_update = on_handle_update
         self._context_trigger_tokens = context_trigger_tokens
@@ -879,6 +881,12 @@ class GeminiLiveSession:
             ).replace(
                 _LOOK_CLOSELY_SENTENCE_FRAGMENT, _LOOK_CLOSELY_SENTENCE_ON_DEMAND
             )
+        if self._context_suffix:
+            # Applied LAST, after every fragment/default comparison above —
+            # those all compare against ``self._system_instruction`` (the raw
+            # constructor value), so appending a suffix here can never make a
+            # default persona stop matching its own fragment-toggle checks.
+            system_instruction = f"{system_instruction}\n\n{self._context_suffix}"
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             system_instruction=system_instruction,

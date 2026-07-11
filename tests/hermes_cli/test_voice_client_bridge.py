@@ -494,3 +494,178 @@ def test_index_html_has_usage_line_element_with_hidden_attribute():
     document = (CLIENT_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="usage-line"' in document
     assert 'class="usage-line"' in document
+
+
+# =============================================================================
+# Spar-Warmup client hint (fire-and-forget POST /api/voice/spar/warmup)
+# =============================================================================
+
+
+def _run_warmup_harness(body: str, *, stored_mode: str = "live") -> subprocess.CompletedProcess:
+    """A dedicated node:vm harness (own ``window.localStorage``/``fetch`` fakes).
+
+    Separate from ``_run_node_harness`` above because ``getStoredVoiceMode()``
+    (and therefore whether the page-load warmup fires) runs at module TOP
+    LEVEL — the stored mode must be in place *before* ``vm.runInContext(source, ...)``
+    executes, which the shared harness's fixed template doesn't allow for.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the standalone voice client harness")
+
+    repo_root = Path(__file__).parents[2]
+    harness = f"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("hermes_cli/voice_client/app.js", "utf8");
+
+function makeElement(id) {{
+  return {{
+    id, hidden: false, disabled: false, textContent: "", title: "",
+    dataset: {{}}, children: [],
+    classList: {{ toggle() {{}} }},
+    setAttribute(name, value) {{ this["attr_" + name] = value; }},
+    addEventListener() {{}},
+    append() {{}},
+    querySelector() {{ return null; }},
+  }};
+}}
+
+const elementIds = [
+  "voice-status", "status-detail", "usage-line", "session-button",
+  "transcript", "transcript-empty", "mode-badge", "install-chip",
+  "camera-chip", "screen-chip", "screen-share-hint", "sharing-indicator",
+  "sharing-preview", "composer", "composer-input",
+];
+const elements = {{}};
+for (const id of elementIds) {{
+  elements[id] = makeElement(id);
+}}
+
+const fetchCalls = [];
+const fakeStorage = {{
+  value: {stored_mode!r} === "spar" ? "spar" : null,
+  getItem(key) {{ return this.value; }},
+  setItem(key, value) {{ this.value = value; }},
+}};
+
+const context = {{
+  AbortController, ArrayBuffer, DataView, Headers, URL,
+  WebSocket: {{ OPEN: 1, CONNECTING: 0 }},
+  console: {{ info() {{}}, log() {{}} }},
+  document: {{
+    body: {{ dataset: {{}} }},
+    querySelector(selector) {{
+      const id = selector.replace("#", "");
+      return elements[id] || makeElement(id);
+    }},
+    addEventListener() {{}},
+  }},
+  navigator: {{}},
+  performance: {{ now() {{ return 0; }} }},
+  window: {{
+    __HERMES_SESSION_TOKEN__: "loopback-token",
+    localStorage: fakeStorage,
+    addEventListener() {{}},
+    setTimeout, clearTimeout, setInterval, clearInterval,
+  }},
+  fetch(url, opts) {{
+    fetchCalls.push({{ url, opts }});
+    return Promise.resolve({{ ok: true }});
+  }},
+  elements,
+  fetchCalls,
+}};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`
+  {body}
+`, context);
+"""
+    return subprocess.run(
+        [node, "-e", harness],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def test_spar_warmup_fires_once_on_page_load_when_stored_mode_is_spar():
+    result = _run_warmup_harness(
+        """
+        if (fetchCalls.length !== 1) {
+          throw new Error("expected exactly one page-load warmup fetch, got " + fetchCalls.length);
+        }
+        if (fetchCalls[0].url !== "/api/voice/spar/warmup") {
+          throw new Error("unexpected warmup URL: " + fetchCalls[0].url);
+        }
+        if (fetchCalls[0].opts.method !== "POST") {
+          throw new Error("warmup must be a POST");
+        }
+        if (fetchCalls[0].opts.headers.get("X-Hermes-Session-Token") !== "loopback-token") {
+          throw new Error("warmup did not carry the loopback session token header");
+        }
+        """,
+        stored_mode="spar",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_spar_warmup_does_not_fire_on_page_load_when_stored_mode_is_live():
+    result = _run_warmup_harness(
+        """
+        if (fetchCalls.length !== 0) {
+          throw new Error("live mode must not trigger a warmup fetch on load, got " + fetchCalls.length);
+        }
+        """,
+        stored_mode="live",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_spar_warmup_fires_on_toggle_to_spar():
+    result = _run_warmup_harness(
+        """
+        selectVoiceMode("spar");
+        if (fetchCalls.length !== 1) {
+          throw new Error("expected exactly one warmup fetch after toggling to spar, got " + fetchCalls.length);
+        }
+        """,
+        stored_mode="live",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_spar_warmup_is_throttled_to_once_per_minute():
+    result = _run_warmup_harness(
+        """
+        selectVoiceMode("spar");
+        selectVoiceMode("live");
+        selectVoiceMode("spar");
+        if (fetchCalls.length !== 1) {
+          throw new Error("expected the throttle to block the second warmup within 60s, got " + fetchCalls.length);
+        }
+        """,
+        stored_mode="live",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_spar_warmup_does_not_fire_on_toggle_to_live():
+    result = _run_warmup_harness(
+        """
+        // Page load already fired one warmup (stored mode is spar); toggling
+        // to live must not add a second one.
+        if (fetchCalls.length !== 1) {
+          throw new Error("expected exactly the page-load warmup, got " + fetchCalls.length);
+        }
+        selectVoiceMode("live");
+        if (fetchCalls.length !== 1) {
+          throw new Error("toggling to live must never trigger a warmup fetch, got " + fetchCalls.length);
+        }
+        """,
+        stored_mode="spar",
+    )
+    assert result.returncode == 0, result.stderr

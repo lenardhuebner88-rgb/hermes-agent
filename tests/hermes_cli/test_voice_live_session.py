@@ -563,6 +563,55 @@ def test_connect_config_on_demand_custom_system_instruction_never_rewritten() ->
     )
 
 
+def test_connect_config_context_suffix_appended_after_default_persona() -> None:
+    """The suffix lands after every fragment-toggle rewrite, default persona intact."""
+
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        context_suffix="[Aktueller Arbeitskontext aus Piets letzten Sessions]\nFoo.",
+    )
+    config = wrapper._connect_config()
+
+    assert config.system_instruction.endswith(
+        "[Aktueller Arbeitskontext aus Piets letzten Sessions]\nFoo."
+    )
+    # video_mode default (on_demand) fragment-toggle rewrite must still have
+    # fired — the suffix is appended AFTER it, not instead of it.
+    assert "KEIN automatisches Standbild" in config.system_instruction
+
+
+def test_connect_config_context_suffix_appended_to_custom_system_instruction() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "model",
+        "de-DE",
+        [],
+        "secret",
+        system_instruction="Custom persona.",
+        context_suffix="Extra context.",
+    )
+    config = wrapper._connect_config()
+
+    assert config.system_instruction == "Custom persona.\n\nExtra context."
+
+
+def test_connect_config_empty_context_suffix_leaves_instruction_unchanged() -> None:
+    from hermes_cli.voice_live_session import DEFAULT_SYSTEM_INSTRUCTION, GeminiLiveSession
+
+    wrapper = GeminiLiveSession("model", "de-DE", [], "secret", context_suffix="")
+    config = wrapper._connect_config()
+
+    assert not config.system_instruction.endswith("\n\n")
+    assert "Aktueller Arbeitskontext" not in config.system_instruction
+    assert config.system_instruction != DEFAULT_SYSTEM_INSTRUCTION  # on_demand rewrite
+
+
 def test_connect_config_carries_configured_voice_persona_and_both_tools() -> None:
     from hermes_cli.voice_live_session import GeminiLiveSession
 

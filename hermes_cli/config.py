@@ -956,6 +956,13 @@ DEFAULT_CONFIG = {
         # Model used by the look_closely tool's on-demand image analysis
         # (a plain generate_content call, never a Live session).
         "look_model": "gemini-3.1-flash-lite",
+        # Prepend a short "what Piet is working on" excerpt from the shared
+        # memsearch daily notes to the system instruction at session start
+        # (both Live and Sparmodus) — no recall_memory tool call needed for
+        # this proactive context. False restores exactly pre-2026-07-11
+        # behavior (no suffix, no file reads). See voice_ws._voice_memory_
+        # context_block().
+        "memory_preload": True,
         # Verified 2026-07-10 from ai.google.dev/gemini-api/docs/pricing.
         # Used server-side only, to estimate session cost from
         # usage_metadata; absent/unknown models simply skip cost estimation.

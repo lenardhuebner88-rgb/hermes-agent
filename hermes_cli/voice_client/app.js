@@ -103,6 +103,35 @@ function renderModeToggle() {
   }
 }
 
+// Spar-Warmup (turn-1-latency): fire-and-forget hint to the server to
+// prespawn a persistent claude-lane child + load the whisper model before
+// the next Sparmodus session actually starts. Best-effort only — a failed
+// or throttled warmup just costs the next session its usual cold-start
+// latency, nothing else depends on it. Throttled client-side so page load
+// plus a toggle click within the same minute can't fire it twice.
+const SPAR_WARMUP_THROTTLE_MS = 60_000;
+let lastSparWarmupAt = -Infinity;
+
+function warmupSparMode() {
+  const now = Date.now();
+  if (now - lastSparWarmupAt < SPAR_WARMUP_THROTTLE_MS) {
+    return;
+  }
+  lastSparWarmupAt = now;
+  const headers = new Headers();
+  const loopbackToken = window.__HERMES_SESSION_TOKEN__;
+  if (typeof loopbackToken === "string" && loopbackToken.length > 0) {
+    headers.set("X-Hermes-Session-Token", loopbackToken);
+  }
+  fetch("/api/voice/spar/warmup", {
+    method: "POST",
+    credentials: "same-origin",
+    headers,
+  }).catch(() => {
+    // Ignored — see comment above.
+  });
+}
+
 function selectVoiceMode(mode) {
   if (activeSession || (mode !== "live" && mode !== "spar")) {
     return;
@@ -110,11 +139,17 @@ function selectVoiceMode(mode) {
   selectedVoiceMode = mode;
   setStoredVoiceMode(mode);
   renderModeToggle();
+  if (mode === "spar") {
+    warmupSparMode();
+  }
 }
 
 modeLiveButton?.addEventListener("click", () => selectVoiceMode("live"));
 modeSparButton?.addEventListener("click", () => selectVoiceMode("spar"));
 renderModeToggle();
+if (selectedVoiceMode === "spar") {
+  warmupSparMode();
+}
 
 // "Sehen" (camera/screen sharing): state lives outside any voice session
 // object because the toggle chips are always visible in the header — a

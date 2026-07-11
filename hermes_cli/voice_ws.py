@@ -25,7 +25,7 @@ import uuid
 import wave
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import psutil
 
 from hermes_cli.config import load_env
@@ -39,6 +39,7 @@ from hermes_cli.voice_spar_session import (
     SPAR_SYSTEM_INSTRUCTION,
     LlmLaneError,
     SparLlmLane,
+    _load_whisper_model as spar_load_whisper_model,
     create_llm_lane as spar_create_llm_lane,
     run_turn as spar_run_turn,
     synthesize_to_wav as spar_synthesize_to_wav,
@@ -156,6 +157,16 @@ _VALID_VIDEO_MODES = {"stream", "on_demand"}
 _DEFAULT_LOOK_MODEL = "gemini-3.1-flash-lite"
 _LOOK_CLOSELY_FRAME_WAIT_SECONDS = 3.0
 
+# Proactive memory injection (see _voice_memory_context_block()).
+_MEMORY_NOTES_DIR = Path("/home/piet/.memsearch/shared/memory")
+_MEMORY_CONTEXT_DAYS = 2
+_MEMORY_CONTEXT_CHARS_PER_DAY = 600
+_MEMORY_CONTEXT_HEADER = "[Aktueller Arbeitskontext aus Piets letzten Sessions]"
+
+# Spar-Warmup: prespawned persistent claude-lane pool (see prespawn_spar_
+# claude_lane()).
+_SPAR_LANE_POOL_TTL_SECONDS = 300.0
+
 
 @dataclass
 class VoiceWebConfig:
@@ -176,6 +187,7 @@ class VoiceWebConfig:
     video_mode: str = _DEFAULT_VIDEO_MODE
     look_model: str = _DEFAULT_LOOK_MODEL
     pricing: dict = field(default_factory=dict)
+    memory_preload: bool = True
 
 
 class VoiceRuntimeError(RuntimeError):
@@ -348,6 +360,8 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
     if not isinstance(pricing, dict):
         pricing = {}
 
+    memory_preload = section.get("memory_preload") is not False
+
     return VoiceWebConfig(
         enabled=section.get("enabled") is True,
         model=model,
@@ -366,6 +380,7 @@ def voice_web_config(raw: dict) -> VoiceWebConfig:
         video_mode=video_mode,
         look_model=look_model,
         pricing=pricing,
+        memory_preload=memory_preload,
     )
 
 
@@ -468,6 +483,54 @@ def spar_web_config(raw: dict) -> SparWebConfig:
         max_tool_hops=max_tool_hops,
         llm_timeout_seconds=llm_timeout_seconds,
     )
+
+
+def _tail_at_paragraph_boundary(text: str, max_chars: int) -> str:
+    """The last ``max_chars`` of *text*, snapped forward past a cut mid-line.
+
+    A hard ``text[-max_chars:]`` slice usually starts mid-sentence; skipping
+    to the next newline lands on a paragraph/bullet/header boundary instead
+    (a leading ``## ``/``### ``/``- `` line is fine to keep as-is).
+    """
+    tail = text[-max_chars:]
+    newline = tail.find("\n")
+    if 0 <= newline < len(tail) - 1:
+        tail = tail[newline + 1 :]
+    return tail.strip()
+
+
+def _voice_memory_context_block() -> str:
+    """Best-effort "what Piet is working on" excerpt for session-start context.
+
+    Reads the last :data:`_MEMORY_CONTEXT_DAYS` daily memsearch notes
+    (``shared/memory/YYYY-MM-DD.md``, one file per day) and takes roughly
+    the last :data:`_MEMORY_CONTEXT_CHARS_PER_DAY` characters of each — at a
+    paragraph boundary where possible — concatenated oldest-first. No CLI
+    call (that would add session-start latency): a direct, best-effort file
+    read that returns "" on any error (missing dir, permissions, empty/
+    unreadable files), so a memsearch outage never blocks a voice session
+    from starting.
+    """
+    try:
+        files = sorted(_MEMORY_NOTES_DIR.glob("*.md"))
+    except OSError:
+        return ""
+    if not files:
+        return ""
+    chunks: list[str] = []
+    for path in files[-_MEMORY_CONTEXT_DAYS:]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        excerpt = _tail_at_paragraph_boundary(text, _MEMORY_CONTEXT_CHARS_PER_DAY)
+        if excerpt:
+            chunks.append(excerpt)
+    if not chunks:
+        return ""
+    return f"{_MEMORY_CONTEXT_HEADER}\n" + "\n\n".join(chunks)
 
 
 def resolve_gemini_api_key() -> str:
@@ -941,7 +1004,14 @@ def _schedule_voice_attachment_cleanup(
 
 @asynccontextmanager
 async def _voice_router_lifespan(_app: Any):
-    """Re-arm exact retention deadlines for attachments left by a crash."""
+    """Re-arm exact retention deadlines for attachments left by a crash.
+
+    Also owns the Spar-Warmup lane pool's shutdown: a prespawned but never-
+    consumed claude-lane child must not survive the server process. This is
+    a fallback only — the pool's own TTL (``_SPAR_LANE_POOL_TTL_SECONDS``)
+    already bounds a leaked child's lifetime even if this lifespan is never
+    invoked for some reason.
+    """
 
     attachment_dir = get_hermes_home() / "cache" / "voice-web" / "attachments"
     _sweep_voice_attachments(attachment_dir)
@@ -949,7 +1019,10 @@ async def _voice_router_lifespan(_app: Any):
         for path in attachment_dir.glob("*.jpg"):
             if path.is_file():
                 _schedule_voice_attachment_cleanup(path)
-    yield
+    try:
+        yield
+    finally:
+        await _discard_spar_lane_pool()
 
 
 def _html_safe_json(value: str) -> str:
@@ -1998,6 +2071,149 @@ async def _read_spar_frames(
         return "disconnect"
 
 
+@dataclass
+class _PooledSparLane:
+    """One prespawned, idle claude-lane child waiting for its first session."""
+
+    lane: SparLlmLane
+    model: str | None
+    system_instruction: str
+    created_at: float
+
+
+_SPAR_LANE_POOL: _PooledSparLane | None = None
+# Guards every read-modify-write of _SPAR_LANE_POOL so two concurrent warmup
+# calls (or a warmup racing a session start) can never spawn/consume the pool
+# entry twice. Nothing here awaits anything that yields back into this same
+# critical section, so plain mutual exclusion is enough.
+_SPAR_LANE_POOL_LOCK = asyncio.Lock()
+
+
+def _spar_lane_pool_expired(entry: _PooledSparLane, *, now: float | None = None) -> bool:
+    current = time.monotonic() if now is None else now
+    return current - entry.created_at > _SPAR_LANE_POOL_TTL_SECONDS
+
+
+async def _discard_pooled_lane(entry: _PooledSparLane) -> None:
+    try:
+        await entry.lane.aclose()
+    except Exception:
+        _log.warning("Failed to close a prespawned Sparmodus lane", exc_info=True)
+
+
+def spar_effective_system_instruction(
+    spar_config: SparWebConfig, voice_config: VoiceWebConfig
+) -> str:
+    """The Sparmodus system instruction, with the memory-context suffix if enabled.
+
+    Shared by the real session start (``voice_spar``) and the warmup
+    prespawn (:func:`prespawn_spar_claude_lane`) so a pooled lane's spawn-
+    time ``--system-prompt`` matches what a real session would build — a
+    mismatch just means the pool entry gets discarded as stale, never a
+    wrong-context reply (see :func:`_take_pooled_spar_lane`).
+    """
+    if not voice_config.memory_preload:
+        return spar_config.system_instruction
+    suffix = _voice_memory_context_block()
+    if not suffix:
+        return spar_config.system_instruction
+    return f"{spar_config.system_instruction}\n\n{suffix}"
+
+
+async def prespawn_spar_claude_lane(
+    spar_config: SparWebConfig, voice_config: VoiceWebConfig
+) -> None:
+    """Best-effort, idempotent prespawn of one persistent claude-lane child.
+
+    Consumed by the next Sparmodus session start (see
+    :func:`_take_pooled_spar_lane`) so the ~5s CLI startup overlaps with this
+    warmup call instead of the first turn's latency budget. A no-op unless
+    Sparmodus is enabled and configured for the claude lane (the codex lane
+    is already stateless-per-turn, nothing to prespawn). The lock plus the
+    "already warm" check make concurrent/duplicate warmup calls spawn at
+    most one child; an expired entry is retired before a fresh one replaces
+    it, so the pool never holds more than one live child at a time.
+    """
+    global _SPAR_LANE_POOL
+    if not spar_config.enabled or spar_config.llm_lane != "claude":
+        return
+    async with _SPAR_LANE_POOL_LOCK:
+        existing = _SPAR_LANE_POOL
+        if existing is not None and not _spar_lane_pool_expired(existing):
+            return  # already warm
+        if existing is not None:
+            _SPAR_LANE_POOL = None
+            await _discard_pooled_lane(existing)
+        system_instruction = spar_effective_system_instruction(spar_config, voice_config)
+        lane = spar_create_llm_lane(
+            "claude",
+            model=spar_config.llm_model,
+            timeout=spar_config.llm_timeout_seconds,
+            system_instruction=system_instruction,
+        )
+        try:
+            await lane.start()
+        except LlmLaneError:
+            _log.warning("Sparmodus claude-lane prespawn failed", exc_info=True)
+            return
+        _SPAR_LANE_POOL = _PooledSparLane(
+            lane=lane,
+            model=spar_config.llm_model,
+            system_instruction=system_instruction,
+            created_at=time.monotonic(),
+        )
+
+
+async def _take_pooled_spar_lane(
+    spar_config: SparWebConfig, voice_config: VoiceWebConfig
+) -> SparLlmLane | None:
+    """Consume the pooled lane for a new session if it fits and is still fresh.
+
+    Returns ``None`` (the caller then spawns its own lane as before) when
+    there is no pool entry, it expired, or its spawn-time config no longer
+    matches this session's — never raises, so a mismatch just forfeits the
+    warmup instead of breaking session start.
+    """
+    global _SPAR_LANE_POOL
+    async with _SPAR_LANE_POOL_LOCK:
+        entry = _SPAR_LANE_POOL
+        if entry is None:
+            return None
+        _SPAR_LANE_POOL = None
+        system_instruction = spar_effective_system_instruction(spar_config, voice_config)
+        if (
+            _spar_lane_pool_expired(entry)
+            or entry.model != spar_config.llm_model
+            or entry.system_instruction != system_instruction
+        ):
+            await _discard_pooled_lane(entry)
+            return None
+        return entry.lane
+
+
+async def _discard_spar_lane_pool() -> None:
+    """Best-effort pool teardown, called from the router lifespan on shutdown."""
+    global _SPAR_LANE_POOL
+    async with _SPAR_LANE_POOL_LOCK:
+        entry = _SPAR_LANE_POOL
+        _SPAR_LANE_POOL = None
+    if entry is not None:
+        await _discard_pooled_lane(entry)
+
+
+async def _warm_whisper_model(model_size: str) -> None:
+    """Best-effort: load+cache the Sparmodus whisper model off the event loop.
+
+    ``_load_whisper_model`` already caches per size (module-level dict in
+    voice_spar_session.py) — this just pays that load cost during warmup
+    instead of on the first real turn's STT step.
+    """
+    try:
+        await asyncio.to_thread(spar_load_whisper_model, model_size)
+    except Exception:
+        _log.warning("Whisper warmup failed for model=%s", model_size, exc_info=True)
+
+
 async def _run_spar_cascade(
     pcm: bytes,
     spar_config: SparWebConfig,
@@ -2075,6 +2291,7 @@ async def _run_live_bridge(
     live_kwargs: dict[str, Any] = {
         "voice": config.voice,
         "system_instruction": config.system_instruction,
+        "context_suffix": _voice_memory_context_block() if config.memory_preload else "",
         "context_trigger_tokens": config.context_trigger_tokens,
         "context_target_tokens": config.context_target_tokens,
         "google_search_enabled": config.google_search_enabled,
@@ -2231,6 +2448,25 @@ def create_voice_router(
             media_type=media_type,
             headers=headers,
         )
+
+    @router.post("/api/voice/spar/warmup")
+    async def voice_spar_warmup() -> JSONResponse:
+        """Idempotent, best-effort turn-1-latency warmup for the next Spar session.
+
+        Auth is the same as every other ``/api/`` route in the dashboard app:
+        the app-wide session-token/cookie gate (``hermes_cli.web_server``)
+        already covers this path (not in ``PUBLIC_API_PATHS``), so no
+        additional check is needed here — this route has no WS upgrade, so
+        the ``ws_*_reason`` callbacks (websocket-only) don't apply.
+        """
+        if not spar_config.enabled or spar_config.llm_lane != "claude":
+            return JSONResponse({"warmed": False})
+        await asyncio.gather(
+            _warm_whisper_model(spar_config.whisper_model),
+            prespawn_spar_claude_lane(spar_config, config),
+            return_exceptions=True,
+        )
+        return JSONResponse({"warmed": True})
 
     @router.websocket("/api/voice/live")
     async def voice_live(websocket: WebSocket) -> None:
@@ -2501,11 +2737,19 @@ def create_voice_router(
 
         # One LLM lane per Sparmodus session, not per turn: for the claude
         # lane this is the persistent CLI child (see PersistentClaudeLane).
-        lane = spar_create_llm_lane(
+        # A warm pooled lane (see prespawn_spar_claude_lane / the /api/voice/
+        # spar/warmup route) is consumed here if one fits and is still
+        # fresh; otherwise a fresh lane is spawned exactly as before.
+        pooled_lane = (
+            await _take_pooled_spar_lane(spar_config, config)
+            if spar_config.llm_lane == "claude"
+            else None
+        )
+        lane = pooled_lane or spar_create_llm_lane(
             spar_config.llm_lane,
             model=spar_config.llm_model,
             timeout=spar_config.llm_timeout_seconds,
-            system_instruction=spar_config.system_instruction,
+            system_instruction=spar_effective_system_instruction(spar_config, config),
         )
 
         history: list[tuple[str, str]] = []

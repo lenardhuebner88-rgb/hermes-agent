@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import wave
 
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -3263,3 +3264,461 @@ def test_spar_llm_lane_failure_reports_structured_error(monkeypatch):
         assert error_event["error"]["code"] == "llm_lane_failed"
         ws.send_json({"type": "end"})
         assert ws.receive()["type"] == "websocket.close"
+
+
+# =============================================================================
+# Proactive memory injection (voice_web.memory_preload)
+# =============================================================================
+
+_MEMSEARCH_FIXTURE_1 = FIXTURE.parent / "memsearch_daily_sample_1.md"
+_MEMSEARCH_FIXTURE_2 = FIXTURE.parent / "memsearch_daily_sample_2.md"
+
+
+def test_voice_web_config_memory_preload_defaults_true():
+    from hermes_cli.voice_ws import voice_web_config
+
+    assert voice_web_config({}).memory_preload is True
+
+
+def test_voice_web_config_memory_preload_false_disables():
+    from hermes_cli.voice_ws import voice_web_config
+
+    cfg = voice_web_config({"voice_web": {"memory_preload": False}})
+    assert cfg.memory_preload is False
+    # Fail-open like the other boolean flags in this module: only the
+    # literal False disables it.
+    cfg2 = voice_web_config({"voice_web": {"memory_preload": "false"}})
+    assert cfg2.memory_preload is True
+
+
+def _seed_real_memsearch_daily_notes(memory_dir):
+    """Copy 2 REAL harvested daily memsearch notes (not synthetic fixtures).
+
+    These are verbatim tails of Piet's actual shared/memory/*.md files
+    (2026-07-10/11), captured once as test fixtures — proves the excerpt
+    logic against the real Markdown shape (## Session/### HH:MM headers,
+    HTML transcript comments, "- " bullets), not a hand-written stand-in.
+    """
+    (memory_dir / "2026-07-10.md").write_text(
+        _MEMSEARCH_FIXTURE_1.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (memory_dir / "2026-07-11.md").write_text(
+        _MEMSEARCH_FIXTURE_2.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+
+def test_voice_memory_context_block_uses_real_daily_note_format(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    _seed_real_memsearch_daily_notes(tmp_path)
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+
+    block = voice_ws._voice_memory_context_block()
+
+    assert block.startswith(voice_ws._MEMORY_CONTEXT_HEADER)
+    # Both real daily excerpts are present, oldest first.
+    day1_text = _MEMSEARCH_FIXTURE_1.read_text(encoding="utf-8").strip()
+    day2_text = _MEMSEARCH_FIXTURE_2.read_text(encoding="utf-8").strip()
+    assert day1_text[-80:] in block
+    assert day2_text[-80:] in block
+    assert block.index(day1_text[-40:]) < block.index(day2_text[-40:])
+    # Never starts mid-sentence: snapped to the next newline.
+    for chunk in block.split("\n\n")[1:]:
+        assert not chunk.startswith(" ")
+
+
+def test_voice_memory_context_block_only_last_two_days(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    (tmp_path / "2026-07-01.md").write_text("Zu alt, darf nicht auftauchen.", encoding="utf-8")
+    _seed_real_memsearch_daily_notes(tmp_path)
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+
+    block = voice_ws._voice_memory_context_block()
+
+    assert "Zu alt" not in block
+
+
+def test_voice_memory_context_block_missing_dir_returns_empty(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path / "does-not-exist")
+
+    assert voice_ws._voice_memory_context_block() == ""
+
+
+def test_voice_memory_context_block_empty_dir_returns_empty(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+
+    assert voice_ws._voice_memory_context_block() == ""
+
+
+def test_voice_memory_context_block_unreadable_file_is_skipped_not_raised(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import voice_ws
+
+    bad = tmp_path / "2026-07-11.md"
+    bad.write_text("some content", encoding="utf-8")
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+
+    real_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == bad:
+            raise OSError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    assert voice_ws._voice_memory_context_block() == ""
+
+
+@pytest.mark.asyncio
+async def test_run_live_bridge_passes_memory_context_suffix(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+
+    _seed_real_memsearch_daily_notes(tmp_path)
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+
+    captured_kwargs = {}
+
+    class CapturingGeminiLiveSession:
+        def __init__(self, model, language, tools, api_key, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        async def run(self, *args, **kwargs):
+            raise voice_ws.LiveFallbackRequired("done")
+
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
+
+    config = voice_ws.VoiceWebConfig(enabled=True, memory_preload=True)
+    await voice_ws._run_live_bridge(
+        config,
+        "server-key",
+        asyncio.Queue(),
+        asyncio.Queue(),
+        asyncio.Event(),
+        asyncio.Event(),
+        None,
+    )
+
+    assert captured_kwargs["context_suffix"].startswith(voice_ws._MEMORY_CONTEXT_HEADER)
+
+
+@pytest.mark.asyncio
+async def test_run_live_bridge_memory_preload_false_passes_empty_suffix(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import voice_ws
+
+    _seed_real_memsearch_daily_notes(tmp_path)
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+    monkeypatch.setattr(voice_ws, "resolve_gemini_api_key", lambda: "server-key")
+
+    captured_kwargs = {}
+
+    class CapturingGeminiLiveSession:
+        def __init__(self, model, language, tools, api_key, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        async def run(self, *args, **kwargs):
+            raise voice_ws.LiveFallbackRequired("done")
+
+    monkeypatch.setattr(voice_ws, "GeminiLiveSession", CapturingGeminiLiveSession)
+
+    config = voice_ws.VoiceWebConfig(enabled=True, memory_preload=False)
+    await voice_ws._run_live_bridge(
+        config,
+        "server-key",
+        asyncio.Queue(),
+        asyncio.Queue(),
+        asyncio.Event(),
+        asyncio.Event(),
+        None,
+    )
+
+    assert captured_kwargs["context_suffix"] == ""
+
+
+def test_spar_effective_system_instruction_appends_memory_suffix(monkeypatch, tmp_path):
+    from hermes_cli import voice_ws
+    from hermes_cli.voice_spar_session import SPAR_SYSTEM_INSTRUCTION
+
+    _seed_real_memsearch_daily_notes(tmp_path)
+    monkeypatch.setattr(voice_ws, "_MEMORY_NOTES_DIR", tmp_path)
+
+    spar_config = voice_ws.SparWebConfig(system_instruction=SPAR_SYSTEM_INSTRUCTION)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=True)
+
+    effective = voice_ws.spar_effective_system_instruction(spar_config, voice_config)
+
+    assert effective.startswith(SPAR_SYSTEM_INSTRUCTION)
+    assert voice_ws._MEMORY_CONTEXT_HEADER in effective
+
+
+def test_spar_effective_system_instruction_memory_preload_false_is_unchanged():
+    from hermes_cli import voice_ws
+    from hermes_cli.voice_spar_session import SPAR_SYSTEM_INSTRUCTION
+
+    spar_config = voice_ws.SparWebConfig(system_instruction=SPAR_SYSTEM_INSTRUCTION)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    effective = voice_ws.spar_effective_system_instruction(spar_config, voice_config)
+
+    assert effective == SPAR_SYSTEM_INSTRUCTION
+
+
+# =============================================================================
+# Spar-Warmup: turn-1-latency prespawn pool (/api/voice/spar/warmup)
+# =============================================================================
+
+FAKE_CLAUDE_STREAM_CLI = Path(__file__).parent / "fixtures" / "fake_claude_stream_cli.py"
+
+
+@pytest_asyncio.fixture
+async def spar_lane_pool_cleanup():
+    """Guarantee no leaked lane child survives a failed assertion mid-test.
+
+    Async (not a plain ``asyncio.run()`` in a sync fixture): the pooled
+    lane's subprocess transport is bound to whichever event loop spawned it,
+    so tearing it down must happen on that SAME loop — a fresh
+    ``asyncio.run()`` loop can't touch it (a real, empirically hit failure
+    mode here: "Future attached to a different loop"). Used only by the
+    plain async-unit tests below, which run their whole body (including
+    fixture teardown) on pytest-asyncio's one test loop; the TestClient-based
+    tests instead rely on the router's own lifespan shutdown hook (see
+    ``_voice_router_lifespan``), which runs on the portal loop that actually
+    spawned the child.
+    """
+    yield
+    from hermes_cli import voice_ws
+
+    if voice_ws._SPAR_LANE_POOL is not None:
+        await voice_ws._discard_spar_lane_pool()
+
+
+@pytest.mark.asyncio
+async def test_prespawn_spar_claude_lane_warms_pool(monkeypatch, spar_lane_pool_cleanup):
+    from hermes_cli import voice_ws
+    from hermes_cli.voice_spar_session import PersistentClaudeLane
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    spar_config = voice_ws.SparWebConfig(llm_lane="claude", llm_timeout_seconds=5.0)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+
+    assert voice_ws._SPAR_LANE_POOL is not None
+    assert isinstance(voice_ws._SPAR_LANE_POOL.lane, PersistentClaudeLane)
+    assert voice_ws._SPAR_LANE_POOL.lane._process is not None
+    assert voice_ws._SPAR_LANE_POOL.lane._process.returncode is None
+
+
+@pytest.mark.asyncio
+async def test_prespawn_spar_claude_lane_noop_for_codex_lane(spar_lane_pool_cleanup):
+    from hermes_cli import voice_ws
+
+    spar_config = voice_ws.SparWebConfig(llm_lane="codex")
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+
+    assert voice_ws._SPAR_LANE_POOL is None
+
+
+@pytest.mark.asyncio
+async def test_prespawn_spar_claude_lane_noop_when_spar_disabled(spar_lane_pool_cleanup):
+    from hermes_cli import voice_ws
+
+    spar_config = voice_ws.SparWebConfig(enabled=False, llm_lane="claude")
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+
+    assert voice_ws._SPAR_LANE_POOL is None
+
+
+@pytest.mark.asyncio
+async def test_prespawn_spar_claude_lane_double_call_spawns_one_child(
+    monkeypatch, spar_lane_pool_cleanup
+):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    spar_config = voice_ws.SparWebConfig(llm_lane="claude", llm_timeout_seconds=5.0)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+    first_pid = voice_ws._SPAR_LANE_POOL.lane._process.pid
+
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+    second_pid = voice_ws._SPAR_LANE_POOL.lane._process.pid
+
+    assert first_pid == second_pid  # no second child spawned
+
+
+@pytest.mark.asyncio
+async def test_take_pooled_spar_lane_consumes_and_clears_pool(
+    monkeypatch, spar_lane_pool_cleanup
+):
+    from hermes_cli import voice_ws
+    from hermes_cli.voice_spar_session import PersistentClaudeLane
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    spar_config = voice_ws.SparWebConfig(llm_lane="claude", llm_timeout_seconds=5.0)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+
+    lane = await voice_ws._take_pooled_spar_lane(spar_config, voice_config)
+
+    assert isinstance(lane, PersistentClaudeLane)
+    assert voice_ws._SPAR_LANE_POOL is None
+    try:
+        reply = await lane.turn("hallo", history=[])
+        assert reply == "HALLO"
+    finally:
+        await lane.aclose()
+
+
+@pytest.mark.asyncio
+async def test_take_pooled_spar_lane_none_when_pool_empty():
+    from hermes_cli import voice_ws
+
+    spar_config = voice_ws.SparWebConfig(llm_lane="claude")
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+
+    assert await voice_ws._take_pooled_spar_lane(spar_config, voice_config) is None
+
+
+@pytest.mark.asyncio
+async def test_take_pooled_spar_lane_expired_entry_discarded(
+    monkeypatch, spar_lane_pool_cleanup
+):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    spar_config = voice_ws.SparWebConfig(llm_lane="claude", llm_timeout_seconds=5.0)
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+    await voice_ws.prespawn_spar_claude_lane(spar_config, voice_config)
+    stale_process = voice_ws._SPAR_LANE_POOL.lane._process
+    voice_ws._SPAR_LANE_POOL.created_at -= voice_ws._SPAR_LANE_POOL_TTL_SECONDS + 1
+
+    lane = await voice_ws._take_pooled_spar_lane(spar_config, voice_config)
+
+    assert lane is None
+    assert voice_ws._SPAR_LANE_POOL is None
+    await asyncio.wait_for(stale_process.wait(), timeout=5.0)
+    assert stale_process.returncode is not None  # the expired child was terminated
+
+
+@pytest.mark.asyncio
+async def test_take_pooled_spar_lane_model_mismatch_discarded(
+    monkeypatch, spar_lane_pool_cleanup
+):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    warm_config = voice_ws.SparWebConfig(
+        llm_lane="claude", llm_model="haiku", llm_timeout_seconds=5.0
+    )
+    voice_config = voice_ws.VoiceWebConfig(memory_preload=False)
+    await voice_ws.prespawn_spar_claude_lane(warm_config, voice_config)
+
+    mismatched_config = voice_ws.SparWebConfig(
+        llm_lane="claude", llm_model="sonnet", llm_timeout_seconds=5.0
+    )
+    lane = await voice_ws._take_pooled_spar_lane(mismatched_config, voice_config)
+
+    assert lane is None
+    assert voice_ws._SPAR_LANE_POOL is None
+
+
+def test_voice_spar_warmup_route_prespawns_claude_lane(monkeypatch):
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    app = _voice_app(
+        extra_voice_web={
+            "memory_preload": False,
+            "spar": {"llm_lane": "claude", "llm_timeout_seconds": 5.0},
+        }
+    )
+    # `with TestClient(app) as client:` keeps the whole call on ONE portal/
+    # event loop (like a real deployed server's single persistent loop) and
+    # runs the router's own lifespan shutdown on exit (see
+    # ``_voice_router_lifespan``), which discards any pooled lane cleanly —
+    # no separate teardown fixture needed here.
+    with TestClient(app) as client:
+        response = client.post("/api/voice/spar/warmup")
+        assert response.status_code == 200
+        assert response.json() == {"warmed": True}
+        assert voice_ws._SPAR_LANE_POOL is not None
+    assert voice_ws._SPAR_LANE_POOL is None
+
+
+def test_voice_spar_warmup_route_noop_for_codex_lane():
+    from hermes_cli import voice_ws
+
+    app = _voice_app(extra_voice_web={"spar": {"llm_lane": "codex"}})
+    response = TestClient(app).post("/api/voice/spar/warmup")
+
+    assert response.status_code == 200
+    assert response.json() == {"warmed": False}
+    assert voice_ws._SPAR_LANE_POOL is None
+
+
+def test_voice_spar_websocket_reuses_pooled_lane_without_recreating(monkeypatch):
+    """The websocket handler consumes the warm pool entry instead of spawning fresh."""
+    from hermes_cli import voice_ws
+
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", str(FAKE_CLAUDE_STREAM_CLI))
+    monkeypatch.setattr(voice_ws, "spar_transcribe_wav", lambda *a, **k: "hallo")
+    monkeypatch.setattr(voice_ws, "spar_synthesize_to_wav", _fake_spar_synthesize_to_wav)
+
+    app = _voice_app(
+        extra_voice_web={
+            "memory_preload": False,
+            "spar": {"llm_lane": "claude", "llm_timeout_seconds": 5.0},
+        }
+    )
+    # A real deployed server runs its whole lifetime on ONE event loop; a
+    # bare `client.post(...)` outside `with TestClient(app) as client:` opens
+    # and tears down its own portal/loop per call, which would spawn the
+    # pooled lane's subprocess on a loop the later websocket_connect() call
+    # (a separate portal) can't touch. Sharing one `with` block mirrors the
+    # real single-loop deployment.
+    with TestClient(app) as client:
+        warm = client.post("/api/voice/spar/warmup")
+        assert warm.json() == {"warmed": True}
+        pooled_pid = voice_ws._SPAR_LANE_POOL.lane._process.pid
+
+        def _fail_create_llm_lane(*_args, **_kwargs):
+            raise AssertionError(
+                "a warm pooled lane should have been reused instead of spawning fresh"
+            )
+
+        monkeypatch.setattr(voice_ws, "spar_create_llm_lane", _fail_create_llm_lane)
+
+        fixture = FIXTURE.read_bytes()
+        with client.websocket_connect("/api/voice/spar") as ws:
+            ws.send_bytes(fixture)
+            ws.send_json({"type": "turn_end"})
+            assert ws.receive_json() == {"type": "state", "value": "thinking"}
+            transcript = ws.receive_json()
+            assert transcript == {"type": "transcript", "role": "user", "text": "hallo"}
+            reply = ws.receive_json()
+            assert reply["type"] == "transcript" and reply["role"] == "assistant"
+            assert reply["text"].upper() == reply["text"]  # fake CLI echoes uppercased
+            assert ws.receive_json() == {"type": "state", "value": "speaking"}
+            assert ws.receive_bytes()
+            assert ws.receive_json() == {"type": "state", "value": "listening"}
+            ws.receive_json()  # usage_update
+            ws.send_json({"type": "end"})
+            assert ws.receive()["type"] == "websocket.close"
+
+    assert voice_ws._SPAR_LANE_POOL is None  # consumed, not re-pooled
+    assert pooled_pid  # sanity: a real child pid was captured before consumption
