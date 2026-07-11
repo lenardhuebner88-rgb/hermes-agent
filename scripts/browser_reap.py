@@ -12,7 +12,8 @@ Design (CAP-S2, grounded on the CAP-S1 recon):
     1. its cmdline matches one of the NARROW positive signatures below
        (package/output-dir tokens — never a bare ``chrome`` or ``--headless``,
        which are shared by the Meet bot and interactive browsers),
-    2. its age exceeds the threshold (default 6h — no legitimate MCP/control-shot
+    2. its age is STRICTLY greater than the threshold (default 6h — an age of
+       exactly 6h is preserved; no legitimate MCP/control-shot
        automation session runs that long), AND
     3. it looks ORPHANED (parent is init/subreaper or already dead). This guards a
        live, long-running interactive Claude Playwright MCP whose parent process is
@@ -148,8 +149,9 @@ def plan_reap(
         if sig is None:
             continue
         age = now - p.create_time
-        if age < threshold_seconds:
-            continue  # fresh — an active session (AC-2)
+        if age <= threshold_seconds:
+            continue  # fresh — an active session; AC-1 requires strictly age>threshold
+            #          so age == threshold (exactly 6h) is preserved, not reaped (AC-2)
         if not is_orphaned(p, live_pids, cmd_by_pid):
             continue  # live parent — an in-use MCP, leave it
         candidates.append(

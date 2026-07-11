@@ -117,6 +117,27 @@ def test_fresh_mcp_process_is_not_selected():
     assert br.plan_reap(procs, now=NOW, threshold_seconds=THRESHOLD) == []
 
 
+def test_mcp_at_exactly_threshold_is_not_selected():
+    # AC-1 boundary: age == threshold (exactly 6h) must NOT be reaped — the AC
+    # requires strictly "Alter > Schwelle". Guards the `<` vs `<=` regression.
+    procs = [
+        _proc(104, ["npx", "-y", "@playwright/mcp@0.0.76", "--headless"], age_hours=6.0, ppid=1),
+    ]
+    assert br.plan_reap(procs, now=NOW, threshold_seconds=THRESHOLD) == []
+
+
+def test_mcp_just_over_threshold_is_selected():
+    # AC-1 boundary companion: an infinitesimally over-6h match IS reaped, so the
+    # `<=` fix does not accidentally exclude everything above the threshold.
+    procs = [
+        _proc(105, ["npx", "-y", "@playwright/mcp@0.0.76", "--headless"], ppid=1),
+    ]
+    # age = threshold + 1s
+    procs = [br.ProcInfo(pid=105, ppid=1, create_time=NOW - (THRESHOLD + 1.0), cmdline=procs[0].cmdline)]
+    picks = br.plan_reap(procs, now=NOW, threshold_seconds=THRESHOLD)
+    assert [c.pid for c in picks] == [105]
+
+
 def test_non_mcp_chrome_is_not_selected():
     # AC-2: a non-headless / non-Playwright Chrome, even if ancient + orphaned
     procs = [

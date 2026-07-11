@@ -1,0 +1,33 @@
+# Hermes agent-browser reaper — TEMPLATE (CAP-S2).
+#
+# Conservative user-manager oneshot that sweeps orphaned + over-aged
+# Playwright-MCP / headless-Chromium leaks via scripts/browser_reap.py.
+# It is NOT auto-armed: copy/install/enable is an explicit operator action
+# (CAP-S6). The flock lock mirrors the other Hermes reaper templates and
+# prevents overlapping sweeps if a previous run is still active.
+#
+# First rollout runs --dry-run (default in browser_reap.py too): it only prints
+# WOULD-KILL journal lines and signals nothing. After the operator confirms the
+# journal against a real >6h orphaned MCP, flip ExecStart to --apply.
+#
+# Adjust WorkingDirectory/ExecStart if the checkout or venv lives somewhere else
+# than Piet's default paths.
+
+[Unit]
+Description=Hermes agent-browser reaper (manual operator timer template)
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/browser_reap.WIRING.md
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/piet/.hermes/hermes-agent
+ExecStart=/usr/bin/flock -n /tmp/agent-browser-reap.lock /home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/browser_reap.py --dry-run
+# Surface WOULD-KILL / KILL decisions in the user journal (AC-3 observability).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

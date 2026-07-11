@@ -1,0 +1,19 @@
+# Hermes agent-browser reaper timer — TEMPLATE (CAP-S2).
+#
+# Fires 10 min after boot and then every 15 min — the same cadence as the
+# existing ui-preview-reap.timer that sweeps the vite orphan. NOT auto-armed;
+# the operator installs/enables it explicitly (CAP-S6). The service uses flock,
+# so an overlapping run is skipped rather than queued.
+
+[Unit]
+Description=Hermes agent-browser reaper schedule
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/browser_reap.WIRING.md
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=agent-browser-reap.service
+
+[Install]
+WantedBy=timers.target

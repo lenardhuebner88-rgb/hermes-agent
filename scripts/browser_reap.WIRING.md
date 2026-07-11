@@ -6,14 +6,34 @@
 root) that a caged worker cannot commit to. This file is the exact, minimal wiring
 for the operator/integrator to apply there after review.
 
-## Timer — already exists, no new unit needed
+## Timer-Anbindung — repo-durable unit templates (preferred, CAP-S2)
 
-`~/.config/systemd/user/ui-preview-reap.timer` already drives
-`ui-preview.sh reap` (`OnBootSec=10min`, `OnUnitActiveSec=15min`, `Persistent=true`).
-Extending the `reap` subcommand is therefore the whole "Timer-Anbindung": the
-existing timer picks it up automatically. **Do not add a new unit.**
+The scheduling is delivered as **repo-tracked** unit templates (reviewed +
+versioned, the durable artifact a cross-repo `ui-preview.sh` edit could not be):
 
-## The change — one line in `~/.hermes/scripts/ui-preview.sh`
+- `scripts/systemd/agent-browser-reap.service` — `Type=oneshot`, flock-guarded,
+  `ExecStart` runs the venv python on `scripts/browser_reap.py --dry-run`.
+- `scripts/systemd/agent-browser-reap.timer` — `OnBootSec=10min`,
+  `OnUnitActiveSec=15min`, `Persistent=true`, `WantedBy=timers.target` (same
+  cadence as `ui-preview-reap.timer`).
+
+Both are **templates**: not enabled/started here. Installation + activation is
+the operator/verifier job (CAP-S6):
+
+```bash
+install -m644 scripts/systemd/agent-browser-reap.service ~/.config/systemd/user/
+install -m644 scripts/systemd/agent-browser-reap.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agent-browser-reap.timer
+```
+
+Flip the unit's `ExecStart` from `--dry-run` to `--apply` only after the journal
+observation window (below) confirms the `WOULD-KILL` lines are genuine orphans.
+
+## Alternative — one line in `~/.hermes/scripts/ui-preview.sh`
+
+If you prefer to fold the sweep into the existing `ui-preview-reap.timer` instead
+of a sister unit (no new unit, but a cross-repo edit),
 
 Append to `cmd_reap()` (after the existing vite cleanup, before `return 0`):
 
