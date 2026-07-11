@@ -14,7 +14,7 @@ const val BRIDGE_PROTOCOL_VERSION = 1
 
 /** Session-bound native authorization gate; correlation ids only, never payloads. */
 class PhoneActionExecutionGate {
-    private val handled = mutableSetOf<String>()
+    private val handled = linkedSetOf<String>()
     private var activeSessionId: String? = null
     private var generation = 0L
     private var pending: Triple<String, String, Long>? = null
@@ -27,6 +27,7 @@ class PhoneActionExecutionGate {
 
     @Synchronized fun stage(sessionId: String, requestId: String): Long? {
         if (activeSessionId != sessionId || pending != null || !handled.add(requestId)) return null
+        while (handled.size > 256) handled.remove(handled.first())
         val ticket = generation
         pending = Triple(sessionId, requestId, ticket)
         return ticket
@@ -153,7 +154,22 @@ object BridgeProtocol {
         val expiresAtMs = json.optLong("expires_at_ms", -1)
         val now = System.currentTimeMillis()
         if (expiresAtMs <= now || expiresAtMs > now + 60_000) return null
-        return when (val action = json.optString("action", "")) {
+        val action = json.optString("action", "")
+        val payloadKey = when (action) {
+            "copy_text", "share_text" -> "text"
+            "open_url" -> "url"
+            "open_app" -> "app"
+            else -> return null
+        }
+        val expectedKeys = setOf(
+            KEY_VERSION, KEY_TYPE, "request_id", "session_id", "expires_at_ms", "action", payloadKey,
+        )
+        val actualKeys = buildSet {
+            val iterator = json.keys()
+            while (iterator.hasNext()) add(iterator.next())
+        }
+        if (actualKeys != expectedKeys) return null
+        return when (action) {
             "copy_text", "share_text" -> {
                 val text = json.opt("text") as? String ?: return null
                 val limit = if (action == "copy_text") 4096 else 8192
@@ -165,9 +181,18 @@ object BridgeProtocol {
                 if (!isAllowedHttpsUrl(url)) return null
                 WebToNativeMessage.ExecutePhoneAction(requestId, action, url, expiresAtMs, sessionId)
             }
+            "open_app" -> {
+                val app = json.opt("app") as? String ?: return null
+                if (app !in ALLOWED_APP_TARGETS) return null
+                WebToNativeMessage.ExecutePhoneAction(requestId, action, app, expiresAtMs, sessionId)
+            }
             else -> null
         }
     }
+
+    private val ALLOWED_APP_TARGETS = setOf(
+        "settings", "wifi", "bluetooth", "calendar", "alarms",
+    )
 
     private fun hasUnsafeControl(text: String): Boolean =
         text.any { it.code == 0 || it.code < 32 && it != '\t' && it != '\n' && it != '\r' }

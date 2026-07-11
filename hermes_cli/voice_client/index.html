@@ -1013,6 +1013,18 @@
         box-shadow: 0 0 0.8rem color-mix(in srgb, var(--color-spar-hi) 65%, transparent);
       }
 
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
       .state-card {
         min-width: 0;
         min-height: 0;
@@ -1324,14 +1336,14 @@
 
       <div class="privacy-row" aria-label="Verbindungsstatus">
         <span class="privacy-dot" aria-hidden="true"></span>
-        <span>Privat · Bereit</span>
+        <span id="privacy-status">Privat · Bereit</span>
       </div>
 
       <p id="mode-explanation" class="mode-explanation" aria-live="polite">
         Live · natürliches Echtzeitgespräch
       </p>
 
-      <div id="connection-banner" class="connection-banner" role="status" aria-live="polite" hidden></div>
+      <div id="connection-banner" class="connection-banner" aria-hidden="true" hidden></div>
 
       <section id="phone-action-card" class="phone-action-card" role="dialog"
         aria-modal="false" aria-labelledby="phone-action-title"
@@ -1419,7 +1431,8 @@
 
       <section class="transcript-card" aria-labelledby="transcript-title">
         <h2 class="section-title" id="transcript-title">Letztes Gespräch</h2>
-        <div id="transcript" aria-live="polite" aria-relevant="additions text"></div>
+        <div id="transcript" aria-live="off"></div>
+        <p id="final-turn-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
         <p id="transcript-empty">Noch kein Gespräch.</p>
         <form id="composer">
           <input

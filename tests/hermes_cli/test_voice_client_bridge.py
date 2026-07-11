@@ -42,6 +42,7 @@ function makeElement(id) {{
     title: "",
     dataset: {{}},
     children: [],
+    handlers: {{}},
     classList: {{
       calls: [],
       toggle(name, force) {{
@@ -51,7 +52,7 @@ function makeElement(id) {{
     setAttribute(name, value) {{
       this["attr_" + name] = value;
     }},
-    addEventListener() {{}},
+    addEventListener(type, handler) {{ this.handlers[type] = handler; }},
     focus() {{ this.focused = true; }},
     append() {{}},
     querySelector() {{
@@ -66,6 +67,7 @@ const elementIds = [
   "camera-chip", "screen-chip", "screen-share-hint", "sharing-indicator",
   "sharing-preview", "detail-frame-button", "detail-frame-state", "composer", "composer-input",
   "phone-action-card", "phone-action-impact", "phone-action-preview", "phone-action-confirm", "phone-action-cancel",
+  "mode-toggle", "mode-live", "mode-spar", "privacy-status", "final-turn-announcer", "connection-banner",
 ];
 const elements = {{}};
 for (const id of elementIds) {{
@@ -116,6 +118,8 @@ const context = {{
     body: {{ dataset: {{}} }},
     activeElement: null,
     querySelector(selector) {{
+      if (selector === '[data-mode-option="live"]') return elements["mode-live"];
+      if (selector === '[data-mode-option="spar"]') return elements["mode-spar"];
       const id = selector.replace("#", "");
       return elements[id] || makeElement(id);
     }},
@@ -123,6 +127,7 @@ const context = {{
   }},
   navigator: {{}},
   performance: {{ now() {{ return 0; }} }},
+  fetch() {{ return Promise.resolve({{ ok: true }}); }},
   window: {{
     HermesNative: nativeBridge,
     crypto: {{ randomUUID() {{ return "12345678-1234-4123-8123-123456789abc"; }} }},
@@ -227,6 +232,24 @@ def test_phone_action_plain_browser_fails_closed_unsupported():
         decidePhoneAction("confirmed");
         handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "r2", action: "open_url", url: "https://example.com" }));
         if (socket.sent.at(-1).type !== "phone_action_result" || socket.sent.at(-1).status !== "unsupported") throw new Error("plain browser must be unsupported");
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_open_app_payload_reaches_native_and_terminal_result_returns_to_server():
+    result = _run_node_harness(
+        """
+        const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+        activeSession = { websocket: socket, drainRequested: false, pendingPhoneAction: null, nativeActionSessionId: "12345678-1234-4123-8123-123456789abc" };
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "native_capabilities", phone_action: true }) });
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_confirmation", request_id: "r-app", action: "open_app", preview: "WLAN-Einstellungen" }));
+        decidePhoneAction("confirmed");
+        handleJsonMessage(activeSession, JSON.stringify({ type: "phone_action_execute", request_id: "r-app", action: "open_app", app: "wifi", expires_at_ms: 123456789 }));
+        const call = sentToNative.filter((m) => m.type === "execute_phone_action").at(-1);
+        if (!call || call.app !== "wifi" || call.action !== "open_app") throw new Error("open_app payload missing");
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "phone_action_result", request_id: "r-app", status: "executed" }) });
+        if (socket.sent.at(-1).type !== "phone_action_result" || socket.sent.at(-1).status !== "executed") throw new Error("terminal result missing");
         """
     )
     assert result.returncode == 0, result.stderr
@@ -699,6 +722,65 @@ def test_detail_action_stacks_on_mobile_and_restores_row_layout_on_wide_screens(
         wide,
         re.DOTALL,
     )
+
+
+def test_mode_radio_keys_wrap_focus_and_keep_roving_tabindex():
+    result = _run_node_harness(
+        r'''
+const modeToggle = elements["mode-toggle"];
+const live = elements["mode-live"];
+const spar = elements["mode-spar"];
+const press = (key) => modeToggle.handlers.keydown({ key, preventDefault() {} });
+
+if (live.tabIndex !== 0 || spar.tabIndex !== -1) throw new Error("initial roving tabindex wrong");
+press("ArrowLeft");
+if (selectedVoiceMode !== "spar" || !spar.focused || spar.tabIndex !== 0 || live.tabIndex !== -1) {
+  throw new Error("ArrowLeft did not wrap Live to Spar");
+}
+live.focused = false;
+spar.focused = false;
+press("ArrowRight");
+if (selectedVoiceMode !== "live" || !live.focused) throw new Error("ArrowRight did not wrap Spar to Live");
+press("End");
+if (selectedVoiceMode !== "spar") throw new Error("End did not select Spar");
+press("Home");
+if (selectedVoiceMode !== "live") throw new Error("Home did not select Live");
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_privacy_status_tracks_reconnect_and_microphone_stop_immediately():
+    result = _run_node_harness(
+        r'''
+const session = {
+  reconnectAttempts: 0,
+  everOpen: true,
+  drainRequested: false,
+  finishing: false,
+  voiceState: "listening",
+  microphoneStopped: false,
+  pendingPhoneAction: null,
+  playbackSources: new Set(),
+  suppressIncomingAudio: false,
+  bargeTriggered: false,
+  loudChunks: 0,
+  bargeStartedAt: null,
+};
+activeSession = session;
+const reconnect = attemptReconnect(session, { code: 1006 });
+if (session.voiceState !== "connecting" || elements["privacy-status"].textContent !== "Privat · Verbindet") {
+  throw new Error("reconnect privacy state is stale");
+}
+session.finishing = true;
+session.voiceState = "listening";
+stopMicrophone(session);
+if (elements["privacy-status"].textContent !== "Privat · Verbunden") {
+  throw new Error("microphone stop privacy state is stale");
+}
+'''
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # =============================================================================

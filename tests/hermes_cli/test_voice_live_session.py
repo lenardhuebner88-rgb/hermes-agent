@@ -3186,8 +3186,8 @@ async def test_guardrail_tick_hard_budget_fires_only_when_estimate_complete() ->
 
 
 @pytest.mark.asyncio
-async def test_guardrail_tick_incomplete_estimate_never_hard_stops() -> None:
-    from hermes_cli.voice_live_session import GeminiLiveSession
+async def test_guardrail_tick_incomplete_lower_bound_still_hard_stops() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession, LiveSessionEnded
 
     wrapper = GeminiLiveSession(
         "gemini-3.1-flash-live-preview",
@@ -3207,8 +3207,44 @@ async def test_guardrail_tick_incomplete_estimate_never_hard_stops() -> None:
     )
     assert wrapper._usage_meter.estimate_incomplete is True
 
-    await wrapper._guardrail_tick(events_out)  # must not raise
+    with pytest.raises(LiveSessionEnded) as exc_info:
+        await wrapper._guardrail_tick(events_out)
+    assert exc_info.value.reason == "hard_budget"
+    assert events_out.get_nowait() == {"type": "session_ended", "reason": "hard_budget"}
 
+
+@pytest.mark.asyncio
+async def test_guardrail_tick_over_attributed_details_do_not_false_stop() -> None:
+    from hermes_cli.voice_live_session import GeminiLiveSession
+
+    wrapper = GeminiLiveSession(
+        "gemini-3.1-flash-live-preview",
+        "de-DE",
+        [],
+        "secret",
+        pricing=_PRICING_TABLE,
+        session_soft_minutes=100.0,
+        session_max_minutes=200.0,
+        session_hard_budget_usd=0.01,
+    )
+    events_out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wrapper._session_started_at = time.monotonic()
+    wrapper._usage_meter.record(
+        _usage_metadata(
+            prompt_total=10,
+            response_total=0,
+            prompt_details=[
+                (types.MediaModality.TEXT, 1_000_000),
+                (types.MediaModality.AUDIO, 1_000_000),
+            ],
+            response_details=[],
+        )
+    )
+    assert wrapper._usage_meter.estimate_incomplete is True
+    assert wrapper._usage_meter.estimated_usd() > 0.01
+    assert wrapper._usage_meter.guaranteed_floor_usd() < 0.01
+
+    await wrapper._guardrail_tick(events_out)
     assert events_out.empty()
 
 

@@ -16,6 +16,13 @@ URL_MAX_CHARS = 2_048
 PHONE_ACTION_STATUSES = frozenset(
     {"executed", "cancelled", "timeout", "unsupported", "failed"}
 )
+APP_TARGET_LABELS = {
+    "settings": "Android-Einstellungen",
+    "wifi": "WLAN-Einstellungen",
+    "bluetooth": "Bluetooth-Einstellungen",
+    "calendar": "Kalender",
+    "alarms": "Wecker und Timer",
+}
 
 EmitEvent = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -25,11 +32,9 @@ def validate_phone_action(args: dict[str, Any]) -> tuple[dict[str, str] | None, 
     if not isinstance(args, dict):
         return None, "Die Aktion muss ein Objekt sein."
     action = args.get("action")
-    if action == "open_app":
-        return None, "open_app ist noch nicht sicher unterstützt."
-    if action not in {"copy_text", "share_text", "open_url"}:
+    if action not in {"copy_text", "share_text", "open_url", "open_app"}:
         return None, "Unbekannte Handy-Aktion."
-    expected = "url" if action == "open_url" else "text"
+    expected = "url" if action == "open_url" else "app" if action == "open_app" else "text"
     if set(args) != {"action", expected}:
         return None, "Die Aktion enthält unerlaubte oder fehlende Felder."
     value = args.get(expected)
@@ -58,10 +63,14 @@ def validate_phone_action(args: dict[str, Any]) -> tuple[dict[str, str] | None, 
             or port is not None and not 1 <= port <= 65535
         ):
             return None, "Nur gültige HTTPS-URLs ohne Zugangsdaten sind erlaubt."
+    if action == "open_app" and value not in APP_TARGET_LABELS:
+        return None, "Dieses App-Ziel ist nicht erlaubt."
     return {"action": action, expected: value}, None
 
 
 def phone_action_preview(action: dict[str, str]) -> str:
+    if action.get("action") == "open_app":
+        return APP_TARGET_LABELS.get(action.get("app", ""), "Unbekanntes Ziel")
     value = action.get("url") or action.get("text") or ""
     value = " ".join(value.split())
     return value if len(value) <= 180 else value[:179].rstrip() + "…"

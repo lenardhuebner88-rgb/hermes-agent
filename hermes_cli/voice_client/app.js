@@ -47,6 +47,8 @@ const emptyTranscriptElement = document.querySelector("#transcript-empty");
 const modeBadgeElement = document.querySelector("#mode-badge");
 const modeExplanationElement = document.querySelector("#mode-explanation");
 const connectionBannerElement = document.querySelector("#connection-banner");
+const privacyStatusElement = document.querySelector("#privacy-status");
+const finalTurnAnnouncerElement = document.querySelector("#final-turn-announcer");
 const installCardElement = document.querySelector("#install-card");
 const installButtonElement = document.querySelector("#install-button");
 const installDismissElement = document.querySelector("#install-dismiss");
@@ -106,6 +108,7 @@ const PHONE_ACTION_COPY = {
   copy_text: "Text in die Zwischenablage kopieren",
   open_url: "Eine externe HTTPS-Adresse öffnen",
   share_text: "Androids Teilen-Menü mit diesem Text öffnen",
+  open_app: "Ein freigegebenes Android-Ziel öffnen",
 };
 
 function clearPhoneAction(session) {
@@ -267,6 +270,7 @@ function renderModeToggle() {
     }
     const checked = selectedVoiceMode === mode;
     button.setAttribute("aria-checked", checked ? "true" : "false");
+    button.tabIndex = checked ? 0 : -1;
     button.disabled = locked;
   }
   if (modeExplanationElement) {
@@ -321,6 +325,27 @@ function selectVoiceMode(mode) {
 
 modeLiveButton?.addEventListener("click", () => selectVoiceMode("live"));
 modeSparButton?.addEventListener("click", () => selectVoiceMode("spar"));
+document.querySelector("#mode-toggle")?.addEventListener("keydown", (event) => {
+  if (activeSession || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+  const modes = ["live", "spar"];
+  const currentIndex = modes.indexOf(selectedVoiceMode);
+  let nextIndex;
+  if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = modes.length - 1;
+  } else if (["ArrowRight", "ArrowDown"].includes(event.key)) {
+    nextIndex = (currentIndex + 1) % modes.length;
+  } else {
+    nextIndex = (currentIndex - 1 + modes.length) % modes.length;
+  }
+  const nextMode = modes[nextIndex];
+  selectVoiceMode(nextMode);
+  (nextMode === "spar" ? modeSparButton : modeLiveButton)?.focus();
+});
 renderModeToggle();
 if (selectedVoiceMode === "spar") {
   warmupSparMode();
@@ -379,6 +404,7 @@ function renderSharingControls() {
       ? "Ein frisches hochauflösendes Einzelbild analysieren"
       : "Im Sparmodus bitte „Genau ansehen“ sagen";
   }
+  updatePrivacyStatus();
 }
 
 function isCurrent(session) {
@@ -395,6 +421,26 @@ function setStatus(value, detail) {
   if (normalized === "idle") {
     hideModeBadge();
   }
+  updatePrivacyStatus();
+}
+
+function updatePrivacyStatus() {
+  if (!privacyStatusElement) return;
+  let text = "Privat · Bereit";
+  if (navigator.onLine === false) {
+    text = "Offline";
+  } else if (sharingSource === "camera") {
+    text = "Privat · Kamera aktiv";
+  } else if (sharingSource === "screen" || nativeScreen.state === "active") {
+    text = "Privat · Bildschirm aktiv";
+  } else if (activeSession?.voiceState === "connecting") {
+    text = "Privat · Verbindet";
+  } else if (activeSession && !activeSession.microphoneStopped) {
+    text = "Privat · Mikrofon aktiv";
+  } else if (activeSession) {
+    text = "Privat · Verbunden";
+  }
+  privacyStatusElement.textContent = text;
 }
 
 function hideModeBadge() {
@@ -538,6 +584,8 @@ function upsertTranscript(session, role, text, partial) {
     scrollTranscriptIntoView(entry);
     if (partial) {
       session.pendingTranscript[key] = entry;
+    } else {
+      announceFinalTurn(role, text);
     }
     return;
   }
@@ -546,7 +594,13 @@ function upsertTranscript(session, role, text, partial) {
   if (!partial) {
     session.pendingTranscript[key] = null;
     scrollTranscriptIntoView(pending);
+    announceFinalTurn(role, text);
   }
+}
+
+function announceFinalTurn(role, text) {
+  if (!finalTurnAnnouncerElement || !text.trim()) return;
+  finalTurnAnnouncerElement.textContent = `${role === "assistant" ? "Hermes" : "Du"}: ${text}`;
 }
 
 // Auto-scroll follows new turns only while the operator is already at (or
@@ -1238,7 +1292,7 @@ function handleNativeBridgeMessage(raw) {
     const pending = session?.pendingPhoneAction;
     if (
       pending && pending.requestId === message.request_id && pending.executing &&
-      ["executed", "unsupported", "failed"].includes(message.status)
+      ["executed", "cancelled", "timeout", "unsupported", "failed"].includes(message.status)
     ) {
       sendPhoneActionResult(session, pending.requestId, message.status);
       clearPhoneAction(session);
@@ -1491,7 +1545,7 @@ function handleJsonMessage(session, raw) {
     pending.executing = true;
     if (!nativePhoneActionsAvailable || !session.nativeActionSessionId || !sendNativeBridgeMessage({
       v: 1, type: "execute_phone_action", request_id: pending.requestId,
-      action: message.action, text: message.text, url: message.url,
+      action: message.action, text: message.text, url: message.url, app: message.app,
       expires_at_ms: message.expires_at_ms,
       session_id: session.nativeActionSessionId,
     })) {
@@ -1599,6 +1653,7 @@ async function stopMicrophone(session) {
     return;
   }
   session.microphoneStopped = true;
+  updatePrivacyStatus();
   if (session.workletNode) {
     session.workletNode.port.onmessage = null;
     session.workletNode.port.postMessage({ type: "stop" });
@@ -1721,6 +1776,7 @@ async function attemptReconnect(session, event) {
   }
 
   session.reconnectAttempts += 1;
+  session.voiceState = "connecting";
   setStatus(
     "connecting",
     `Verbindung unterbrochen – verbindet neu (Versuch ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) …`,
@@ -2137,6 +2193,18 @@ window.addEventListener("appinstalled", () => {
 if (isStandaloneApp()) {
   installCardElement.hidden = true;
 }
+
+window.addEventListener("offline", () => {
+  updatePrivacyStatus();
+  setConnectionBanner("Offline · Verbindung pausiert", "warn");
+});
+
+window.addEventListener("online", () => {
+  updatePrivacyStatus();
+  setConnectionBanner("Netzwerk wieder verfügbar", "ok", 2600);
+});
+
+updatePrivacyStatus();
 
 window.addEventListener("pagehide", () => {
   stopSharing();

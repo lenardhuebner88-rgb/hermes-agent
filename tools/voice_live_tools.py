@@ -52,8 +52,8 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         "description": (
             "Fordert nach einer immer sichtbaren Bestätigung eine sichere Aktion "
             "auf Piets Android-Handy an. Niemals behaupten, die Aktion sei erfolgt, "
-            "bevor das strukturierte Ergebnis 'executed' meldet. open_app ist noch "
-            "nicht unterstützt."
+            "bevor das strukturierte Ergebnis 'executed' meldet. open_app öffnet nur "
+            "die feste Allowlist Einstellungen, WLAN, Bluetooth, Kalender oder Wecker."
         ),
         "parameters": {
             "type": "object",
@@ -61,6 +61,10 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "action": {"type": "string", "enum": ["copy_text", "open_url", "share_text", "open_app"]},
                 "text": {"type": "string"},
                 "url": {"type": "string"},
+                "app": {
+                    "type": "string",
+                    "enum": ["settings", "wifi", "bluetooth", "calendar", "alarms"],
+                },
             },
             "required": ["action"],
         },
@@ -449,8 +453,7 @@ class VoiceToolExecutor:
         if name == "phone_action":
             action, error = validate_phone_action(args)
             if action is None:
-                status = "unsupported" if args.get("action") == "open_app" else "failed"
-                return {"status": status, "error": error or "Ungültige Aktion."}
+                return {"status": "failed", "error": error or "Ungültige Aktion."}
             if self._request_phone_action is None:
                 return {"status": "unsupported"}
             return await self._request_phone_action(action)

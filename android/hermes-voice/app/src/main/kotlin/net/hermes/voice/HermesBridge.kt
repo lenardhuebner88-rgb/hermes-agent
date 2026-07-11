@@ -1,6 +1,8 @@
 package net.hermes.voice
 
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
 
@@ -14,13 +16,14 @@ object HermesBridge {
 
     val captureState = CaptureStateMachine()
 
-    @Volatile
-    private var replyProxy: JavaScriptReplyProxy? = null
+    private val replyChannel = BridgeGenerationGate<JavaScriptReplyProxy>()
 
-    fun isAlive(): Boolean = replyProxy != null
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    fun isAlive(): Boolean = replyChannel.snapshot() != null
 
     fun detach() {
-        replyProxy = null
+        replyChannel.detach()
     }
 
     /**
@@ -39,14 +42,29 @@ object HermesBridge {
         if (!isMainFrame) return null
         if (!VoiceAppConfig.originMatches(sourceOrigin.toString())) return null
 
-        replyProxy = proxy
         val raw = message.data ?: return null
-        return BridgeProtocol.parseWebToNative(raw)
+        val parsed = BridgeProtocol.parseWebToNative(raw) ?: return null
+        replyChannel.attach(proxy)
+        return parsed
     }
 
     /** Sends a native -> web message through the captured reply proxy, if any is attached. */
     fun send(message: NativeToWebMessage) {
-        val proxy = replyProxy ?: return
-        proxy.postMessage(BridgeProtocol.serializeNativeToWeb(message))
+        val (proxy, generation) = replyChannel.snapshot() ?: return
+        val payload = BridgeProtocol.serializeNativeToWeb(message)
+        val deliver: () -> Unit = {
+            if (replyChannel.isCurrent(proxy, generation)) {
+                proxy.postMessage(payload)
+            }
+            Unit
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            deliver()
+        } else {
+            // JavaScriptReplyProxy is @UiThread. Capture frames and projection
+            // callbacks originate on the service HandlerThread, so every
+            // native -> web delivery must cross this single main-thread gate.
+            mainHandler.post(deliver)
+        }
     }
 }

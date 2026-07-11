@@ -570,6 +570,23 @@ def test_voice_client_renders_partial_transcripts_with_fallback_compat():
     assert "message.partial === true" in script
 
 
+def test_voice_client_accessibility_announces_only_final_turns_and_supports_radio_keys():
+    client_root = Path(__file__).parents[2] / "hermes_cli" / "voice_client"
+    document = (client_root / "index.html").read_text(encoding="utf-8")
+    script = (client_root / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="transcript" aria-live="off"' in document
+    assert 'id="final-turn-announcer"' in document
+    assert 'id="connection-banner" class="connection-banner" aria-hidden="true"' in document
+    assert 'id="privacy-status"' in document
+    assert "announceFinalTurn(role, text);" in script
+    assert "button.tabIndex = checked ? 0 : -1;" in script
+    for key in ("ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"):
+        assert f'"{key}"' in script
+    assert 'window.addEventListener("offline"' in script
+    assert 'window.addEventListener("online"' in script
+
+
 def test_voice_client_barge_in_tracks_audible_playback_not_server_state():
     script_path = Path(__file__).parents[2] / "hermes_cli" / "voice_client" / "app.js"
     script = script_path.read_text(encoding="utf-8")

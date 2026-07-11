@@ -18,30 +18,32 @@ enum class CaptureState {
 
 class CaptureStateMachine(initial: CaptureState = CaptureState.IDLE) {
 
-    var state: CaptureState = initial
-        private set
+    private var currentState: CaptureState = initial
+
+    val state: CaptureState
+        @Synchronized get() = currentState
 
     /**
      * Starts a new capture request. Only legal from IDLE. Returns false (rejected — caller
      * should reply screen_capture_error "busy") if a capture is already in flight.
      */
-    fun start(): Boolean {
-        if (state != CaptureState.IDLE) return false
-        state = CaptureState.REQUESTING
+    @Synchronized fun start(): Boolean {
+        if (currentState != CaptureState.IDLE) return false
+        currentState = CaptureState.REQUESTING
         return true
     }
 
     /** REQUESTING -> STARTING, once the capture-intent result (RESULT_OK) is in hand. */
-    fun advanceToStarting(): Boolean {
-        if (state != CaptureState.REQUESTING) return false
-        state = CaptureState.STARTING
+    @Synchronized fun advanceToStarting(): Boolean {
+        if (currentState != CaptureState.REQUESTING) return false
+        currentState = CaptureState.STARTING
         return true
     }
 
     /** STARTING -> CAPTURING, once the foreground service + virtual display are live. */
-    fun advanceToCapturing(): Boolean {
-        if (state != CaptureState.STARTING) return false
-        state = CaptureState.CAPTURING
+    @Synchronized fun advanceToCapturing(): Boolean {
+        if (currentState != CaptureState.STARTING) return false
+        currentState = CaptureState.CAPTURING
         return true
     }
 
@@ -51,11 +53,11 @@ class CaptureStateMachine(initial: CaptureState = CaptureState.IDLE) {
      * for every subsequent call (already stopping) or when there was nothing running (IDLE).
      * Never throws, regardless of current state.
      */
-    fun stop(): Boolean {
-        return when (state) {
+    @Synchronized fun stop(): Boolean {
+        return when (currentState) {
             CaptureState.IDLE, CaptureState.STOPPING -> false
             CaptureState.REQUESTING, CaptureState.STARTING, CaptureState.CAPTURING -> {
-                state = CaptureState.STOPPING
+                currentState = CaptureState.STOPPING
                 true
             }
         }
@@ -65,7 +67,7 @@ class CaptureStateMachine(initial: CaptureState = CaptureState.IDLE) {
      * Marks cleanup as complete and returns to IDLE, allowing a new capture to start. Safe to
      * call from any state (including IDLE already) and safe to call more than once.
      */
-    fun finishStop() {
-        state = CaptureState.IDLE
+    @Synchronized fun finishStop() {
+        currentState = CaptureState.IDLE
     }
 }

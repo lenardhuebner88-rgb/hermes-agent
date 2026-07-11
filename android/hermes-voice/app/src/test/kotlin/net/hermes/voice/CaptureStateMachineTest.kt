@@ -1,11 +1,34 @@
 package net.hermes.voice
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CaptureStateMachineTest {
+
+    @Test
+    fun `concurrent starts admit exactly one capture generation`() {
+        val machine = CaptureStateMachine()
+        val workers = 16
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(workers)
+        val results = (1..workers).map {
+            pool.submit<Boolean> {
+                ready.countDown()
+                start.await()
+                machine.start()
+            }
+        }
+        ready.await()
+        start.countDown()
+        assertEquals(1, results.count { it.get() })
+        assertEquals(CaptureState.REQUESTING, machine.state)
+        pool.shutdownNow()
+    }
 
     @Test
     fun `starts from idle`() {

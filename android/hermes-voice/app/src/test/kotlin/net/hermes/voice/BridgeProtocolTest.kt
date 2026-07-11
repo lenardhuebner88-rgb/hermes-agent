@@ -105,6 +105,16 @@ class BridgeProtocolTest {
         assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:0/x"))
         assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:65536/x"))
         assertTrue(!BridgeProtocol.isAllowedHttpsUrl("https://example.com:99999/x"))
+        val openApp = BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"open_app","app":"wifi"}""",
+        ) as WebToNativeMessage.ExecutePhoneAction
+        assertEquals("wifi", openApp.payload)
+        assertNull(BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"open_app","app":"com.android.settings"}""",
+        ))
+        assertNull(BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"execute_phone_action","request_id":"$id","session_id":"$sessionId","expires_at_ms":$expires,"action":"open_app","app":"wifi","url":"https://example.com"}""",
+        ))
     }
 
     @Test
@@ -136,6 +146,20 @@ class BridgeProtocolTest {
         val ticket = gate.stage(session, "y".repeat(32))!!
         assertTrue(gate.consume(session, "y".repeat(32), ticket))
         assertTrue(!gate.consume(session, "y".repeat(32), ticket))
+    }
+
+    @Test
+    fun `recent replay remains rejected across a new session`() {
+        val gate = PhoneActionExecutionGate()
+        val first = "12345678-1234-4123-8123-123456789abc"
+        val second = "87654321-4321-4321-8321-cba987654321"
+        val request = "z".repeat(32)
+        gate.begin(first)
+        val firstTicket = gate.stage(first, request)!!
+        assertTrue(gate.consume(first, request, firstTicket))
+        assertNull(gate.stage(first, request))
+        gate.begin(second)
+        assertNull(gate.stage(second, request))
     }
 
     @Test

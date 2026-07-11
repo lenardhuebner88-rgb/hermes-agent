@@ -12,6 +12,8 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.AlarmClock
+import android.provider.Settings
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -244,9 +246,17 @@ class MainActivity : ComponentActivity() {
         message: WebToNativeMessage.ExecutePhoneAction,
         ticket: Long,
     ) {
-        if (message.expiresAtMs <= System.currentTimeMillis() ||
-            !phoneActionGate.consume(message.sessionId, message.requestId, ticket)
-        ) return
+        if (message.expiresAtMs <= System.currentTimeMillis()) {
+            // Retire the staged generation even though no side effect is
+            // allowed, otherwise the gate would remain permanently busy.
+            phoneActionGate.consume(message.sessionId, message.requestId, ticket)
+            HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "timeout"))
+            return
+        }
+        if (!phoneActionGate.consume(message.sessionId, message.requestId, ticket)) {
+            HermesBridge.send(NativeToWebMessage.PhoneActionResult(message.requestId, "cancelled"))
+            return
+        }
         val status = try {
             when (message.action) {
                 "copy_text" -> {
@@ -258,6 +268,7 @@ class MainActivity : ComponentActivity() {
                     Intent(Intent.ACTION_VIEW, Uri.parse(message.payload)).addCategory(Intent.CATEGORY_BROWSABLE),
                 )
                 "share_text" -> launchShareIntent(message.payload)
+                "open_app" -> launchAllowlistedApp(message.payload)
                 else -> "unsupported"
             }
         } catch (_: SecurityException) {
@@ -287,6 +298,21 @@ class MainActivity : ComponentActivity() {
         // wrapper (which may exist even when it has no actual share target).
         if (sendIntent.resolveActivity(packageManager) == null) return "unsupported"
         return launchPhoneIntent(Intent.createChooser(sendIntent, "Text teilen"))
+    }
+
+    private fun launchAllowlistedApp(target: String): String {
+        val intent = when (target) {
+            "settings" -> Intent(Settings.ACTION_SETTINGS)
+            "wifi" -> Intent(Settings.ACTION_WIFI_SETTINGS)
+            "bluetooth" -> Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+            "calendar" -> Intent.makeMainSelectorActivity(
+                Intent.ACTION_MAIN,
+                Intent.CATEGORY_APP_CALENDAR,
+            )
+            "alarms" -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
+            else -> return "unsupported"
+        }
+        return launchPhoneIntent(intent)
     }
 
     private fun handleStartScreenCaptureRequested() {

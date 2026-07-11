@@ -22,6 +22,10 @@ def test_phone_action_accepts_bounded_https_and_rejects_limits_and_extra_fields(
     assert validate_phone_action({"action": "copy_text", "text": "x" * 4097})[0] is None
     assert validate_phone_action({"action": "share_text", "text": "x" * 8193})[0] is None
     assert validate_phone_action({"action": "copy_text", "text": "ok", "url": "https://evil"})[0] is None
+    assert validate_phone_action({"action": "open_app", "app": "wifi"})[0] == {
+        "action": "open_app", "app": "wifi",
+    }
+    assert validate_phone_action({"action": "open_app", "app": "com.android.settings"})[0] is None
 
 
 @pytest.mark.asyncio
@@ -131,7 +135,7 @@ async def test_broker_task_cancellation_closes_correlated_card():
 
 
 @pytest.mark.asyncio
-async def test_tool_is_live_and_spar_visible_and_open_app_is_explicitly_unsupported():
+async def test_tool_is_live_and_spar_visible_and_open_app_is_allowlisted():
     declaration = next(item for item in FUNCTION_DECLARATIONS if item["name"] == "phone_action")
     assert set(declaration["parameters"]["properties"]["action"]["enum"]) == {"copy_text", "open_url", "share_text", "open_app"}
     assert "phone_action" in NON_BLOCKING_TOOLS
@@ -143,7 +147,10 @@ async def test_tool_is_live_and_spar_visible_and_open_app_is_explicitly_unsuppor
     assert await executor.execute("phone_action", {"action": "copy_text", "text": "abc"}) == {"status": "executed"}
     assert callback_calls == [{"action": "copy_text", "text": "abc"}]
     result = await executor.execute("phone_action", {"action": "open_app", "app": "settings"})
-    assert result["status"] == "unsupported"
+    assert result == {"status": "executed"}
+    assert callback_calls[-1] == {"action": "open_app", "app": "settings"}
+    rejected = await executor.execute("phone_action", {"action": "open_app", "app": "evil"})
+    assert rejected["status"] == "failed"
 
 
 @pytest.mark.asyncio

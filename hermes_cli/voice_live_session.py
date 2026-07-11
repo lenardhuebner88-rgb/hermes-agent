@@ -558,6 +558,8 @@ class _UsageMeter:
         self.usage_messages = 0
         self.input = _ModalityTokens()
         self.output = _ModalityTokens()
+        self._input_total_floor = 0
+        self._output_total_floor = 0
         self.estimate_incomplete = self._pricing is None
 
     @staticmethod
@@ -593,6 +595,10 @@ class _UsageMeter:
 
     def record(self, usage: types.UsageMetadata) -> None:
         self.usage_messages += 1
+        if isinstance(usage.prompt_token_count, int) and usage.prompt_token_count > 0:
+            self._input_total_floor += usage.prompt_token_count
+        if isinstance(usage.response_token_count, int) and usage.response_token_count > 0:
+            self._output_total_floor += usage.response_token_count
         self._accumulate(
             self.input, usage.prompt_token_count, usage.prompt_tokens_details
         )
@@ -685,6 +691,23 @@ class _UsageMeter:
                 * self._cheapest_rate(output_rates)
             )
         return cost
+
+    def guaranteed_floor_usd(self) -> float | None:
+        """Cost floor derived only from provider totals and cheapest valid rates.
+
+        Detail lists can disagree with totals in either direction. They remain
+        useful for the displayed estimate, but hard-budget enforcement uses
+        only these non-negative totals so an over-attributed detail list can
+        never create a false stop.
+        """
+        if self._pricing is None:
+            return None
+        input_rates = self._pricing["input_per_1m"]
+        output_rates = self._pricing["output_per_1m"]
+        return (
+            self._input_total_floor / 1_000_000 * self._cheapest_rate(input_rates)
+            + self._output_total_floor / 1_000_000 * self._cheapest_rate(output_rates)
+        )
 
     @property
     def pricing_as_of(self) -> str | None:
@@ -804,6 +827,12 @@ class GeminiLiveSession:
             + self._extra_usage.output_tokens / 1_000_000 * float(output_rate)
         )
         return cost, self._extra_usage.incomplete
+
+    def _combined_guaranteed_floor(self) -> float:
+        """Known billed-cost floor across Live totals and reported detail calls."""
+        live_floor = self._usage_meter.guaranteed_floor_usd() or 0.0
+        look_floor, _incomplete = self._look_closely_cost()
+        return live_floor + look_floor
 
     @staticmethod
     def _valid_look_rate(value: Any) -> bool:
@@ -1463,12 +1492,7 @@ class GeminiLiveSession:
             raise LiveSessionEnded("max_duration")
         hard_budget = self._session_hard_budget_usd
         if hard_budget is not None:
-            estimated_usd, estimate_incomplete = self._combined_estimate()
-            if (
-                not estimate_incomplete
-                and estimated_usd is not None
-                and estimated_usd >= hard_budget
-            ):
+            if self._combined_guaranteed_floor() >= hard_budget:
                 self._put_guardrail_event_best_effort(
                     events_out, {"type": "session_ended", "reason": "hard_budget"}
                 )
