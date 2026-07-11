@@ -16,6 +16,11 @@ sealed class WebToNativeMessage {
     object BridgeReady : WebToNativeMessage()
     object StartScreenCapture : WebToNativeMessage()
     object StopScreenCapture : WebToNativeMessage()
+    data class CaptureDetailFrame(
+        val requestId: String,
+        val maxEdge: Int,
+        val quality: Double,
+    ) : WebToNativeMessage()
 }
 
 /** Messages native sends to the web page. */
@@ -23,6 +28,8 @@ sealed class NativeToWebMessage {
     object NativeCapabilities : NativeToWebMessage()
     object ScreenCaptureStarted : NativeToWebMessage()
     data class ScreenFrame(val base64Jpeg: String) : NativeToWebMessage()
+    data class DetailScreenFrame(val requestId: String, val base64Jpeg: String) : NativeToWebMessage()
+    data class DetailScreenFrameUnavailable(val requestId: String) : NativeToWebMessage()
     data class ScreenCaptureStopped(val reason: String) : NativeToWebMessage()
     data class ScreenCaptureError(val code: String, val message: String) : NativeToWebMessage()
 }
@@ -35,10 +42,13 @@ object BridgeProtocol {
     private const val TYPE_BRIDGE_READY = "bridge_ready"
     private const val TYPE_START_SCREEN_CAPTURE = "start_screen_capture"
     private const val TYPE_STOP_SCREEN_CAPTURE = "stop_screen_capture"
+    private const val TYPE_CAPTURE_DETAIL_FRAME = "capture_detail_frame"
 
     private const val TYPE_NATIVE_CAPABILITIES = "native_capabilities"
     private const val TYPE_SCREEN_CAPTURE_STARTED = "screen_capture_started"
     private const val TYPE_SCREEN_FRAME = "screen_frame"
+    private const val TYPE_DETAIL_SCREEN_FRAME = "detail_screen_frame"
+    private const val TYPE_DETAIL_SCREEN_FRAME_UNAVAILABLE = "detail_screen_frame_unavailable"
     private const val TYPE_SCREEN_CAPTURE_STOPPED = "screen_capture_stopped"
     private const val TYPE_SCREEN_CAPTURE_ERROR = "screen_capture_error"
 
@@ -62,6 +72,15 @@ object BridgeProtocol {
             TYPE_BRIDGE_READY -> WebToNativeMessage.BridgeReady
             TYPE_START_SCREEN_CAPTURE -> WebToNativeMessage.StartScreenCapture
             TYPE_STOP_SCREEN_CAPTURE -> WebToNativeMessage.StopScreenCapture
+            TYPE_CAPTURE_DETAIL_FRAME -> {
+                val requestId = json.optString("request_id", "")
+                if (!requestId.matches(Regex("^[a-f0-9]{32}$"))) return null
+                WebToNativeMessage.CaptureDetailFrame(
+                    requestId = requestId,
+                    maxEdge = json.optInt("max_edge", 2048).coerceIn(1024, 2048),
+                    quality = json.optDouble("quality", 0.9).coerceIn(0.65, 0.92),
+                )
+            }
             else -> null
         }
     }
@@ -81,6 +100,15 @@ object BridgeProtocol {
             is NativeToWebMessage.ScreenFrame -> {
                 json.put(KEY_TYPE, TYPE_SCREEN_FRAME)
                 json.put("data", message.base64Jpeg)
+            }
+            is NativeToWebMessage.DetailScreenFrame -> {
+                json.put(KEY_TYPE, TYPE_DETAIL_SCREEN_FRAME)
+                json.put("request_id", message.requestId)
+                json.put("data", message.base64Jpeg)
+            }
+            is NativeToWebMessage.DetailScreenFrameUnavailable -> {
+                json.put(KEY_TYPE, TYPE_DETAIL_SCREEN_FRAME_UNAVAILABLE)
+                json.put("request_id", message.requestId)
             }
             is NativeToWebMessage.ScreenCaptureStopped -> {
                 json.put(KEY_TYPE, TYPE_SCREEN_CAPTURE_STOPPED)

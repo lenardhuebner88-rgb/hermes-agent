@@ -35,8 +35,12 @@ class MediaProjectionService : Service() {
     companion object {
         const val ACTION_START = "net.hermes.voice.action.START_CAPTURE"
         const val ACTION_STOP = "net.hermes.voice.action.STOP_CAPTURE"
+        const val ACTION_CAPTURE_DETAIL = "net.hermes.voice.action.CAPTURE_DETAIL"
         const val EXTRA_RESULT_CODE = "net.hermes.voice.extra.RESULT_CODE"
         const val EXTRA_RESULT_DATA = "net.hermes.voice.extra.RESULT_DATA"
+        const val EXTRA_REQUEST_ID = "net.hermes.voice.extra.REQUEST_ID"
+        const val EXTRA_MAX_EDGE = "net.hermes.voice.extra.MAX_EDGE"
+        const val EXTRA_QUALITY = "net.hermes.voice.extra.QUALITY"
 
         private const val TAG = "MediaProjectionService"
         private const val NOTIFICATION_ID = 1001
@@ -46,6 +50,8 @@ class MediaProjectionService : Service() {
         private const val MAX_LADDER_STEPS = 6
         private const val POLL_INTERVAL_MS = 1000L
         private const val INITIAL_QUALITY_PERCENT = 70
+        private const val DETAIL_RETRY_MS = 80L
+        private const val DETAIL_MAX_ATTEMPTS = 20
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -57,6 +63,12 @@ class MediaProjectionService : Service() {
     private var currentWidth = 0
     private var currentHeight = 0
     private var currentDpi = 0
+    private var sourceWidth = 0
+    private var sourceHeight = 0
+    @Volatile
+    private var detailCaptureActive = false
+
+    private data class DetailRequest(val id: String, val maxEdge: Int, val qualityPercent: Int)
 
     @Volatile
     private var framesPaused = false
@@ -77,6 +89,7 @@ class MediaProjectionService : Service() {
         when (intent?.action) {
             ACTION_START -> handleStart(intent)
             ACTION_STOP -> stopCapture(reason = "user")
+            ACTION_CAPTURE_DETAIL -> handleDetailRequest(intent)
             else -> stopCapture(reason = "error")
         }
         return START_NOT_STICKY
@@ -201,9 +214,14 @@ class MediaProjectionService : Service() {
         currentWidth = scaledWidth
         currentHeight = scaledHeight
         currentDpi = dpi
+        sourceWidth = metrics.widthPixels
+        sourceHeight = metrics.heightPixels
     }
 
     private fun handleContentResize(width: Int, height: Int) {
+        sourceWidth = width
+        sourceHeight = height
+        if (detailCaptureActive) return
         val display = virtualDisplay ?: return
         val (scaledWidth, scaledHeight) = FrameScaler.computeScaledDimensions(
             width,
@@ -232,13 +250,23 @@ class MediaProjectionService : Service() {
     }
 
     private fun pollFrame() {
-        if (framesPaused) return
-        val reader = imageReader ?: return
+        if (framesPaused || detailCaptureActive) return
+        val bitmap = acquireLatestBitmap() ?: return
+        val jpeg = encodeWithinBudget(bitmap, MAX_EDGE_PX, INITIAL_QUALITY_PERCENT)
+        bitmap.recycle()
+        if (jpeg != null) {
+            val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            HermesBridge.send(NativeToWebMessage.ScreenFrame(base64))
+        }
+    }
+
+    private fun acquireLatestBitmap(): Bitmap? {
+        val reader = imageReader ?: return null
         val image = try {
             reader.acquireLatestImage()
         } catch (e: Exception) {
             null
-        } ?: return
+        } ?: return null
 
         try {
             val plane = image.planes[0]
@@ -255,32 +283,30 @@ class MediaProjectionService : Service() {
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(tight))
 
-            val jpeg = encodeWithinBudget(bitmap, width, height)
-            bitmap.recycle()
-
-            if (jpeg != null) {
-                val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
-                HermesBridge.send(NativeToWebMessage.ScreenFrame(base64))
-            }
+            return bitmap
         } finally {
             image.close()
         }
     }
 
     /**
-     * Scales to <= [MAX_EDGE_PX] longest edge, then encodes at [INITIAL_QUALITY_PERCENT]. If the
-     * result exceeds [MAX_FRAME_BYTES], walks [FrameScaler.stepDownLadder] (lower quality, then
+     * Scales to the requested bounded longest edge and quality. If the result exceeds
+     * [MAX_FRAME_BYTES], walks [FrameScaler.stepDownLadder] (lower quality, then
      * shrinking dimensions) up to [MAX_LADDER_STEPS] attempts. Returns null (drop the frame) if
      * still over budget.
      */
-    private fun encodeWithinBudget(source: Bitmap, srcWidth: Int, srcHeight: Int): ByteArray? {
+    private fun encodeWithinBudget(
+        source: Bitmap,
+        maxEdge: Int,
+        initialQualityPercent: Int,
+    ): ByteArray? {
         val (baseWidth, baseHeight) = FrameScaler.computeScaledDimensions(
-            srcWidth,
-            srcHeight,
-            MAX_EDGE_PX,
+            source.width,
+            source.height,
+            maxEdge,
         )
         val base = scaledBitmap(source, baseWidth, baseHeight)
-        val firstAttempt = compress(base, INITIAL_QUALITY_PERCENT)
+        val firstAttempt = compress(base, initialQualityPercent)
         if (firstAttempt.size <= MAX_FRAME_BYTES) {
             if (base !== source) base.recycle()
             return firstAttempt
@@ -306,6 +332,89 @@ class MediaProjectionService : Service() {
 
         if (base !== source) base.recycle()
         return null
+    }
+
+    private fun handleDetailRequest(intent: Intent) {
+        val requestId = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return
+        val request = DetailRequest(
+            requestId,
+            intent.getIntExtra(EXTRA_MAX_EDGE, 2048).coerceIn(1024, 2048),
+            (intent.getDoubleExtra(EXTRA_QUALITY, 0.9).coerceIn(0.65, 0.92) * 100).roundToInt(),
+        )
+        val workHandler = handler
+        if (workHandler == null || detailCaptureActive || framesPaused) {
+            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(requestId))
+            return
+        }
+        workHandler.post {
+            if (stopGate.get() || detailCaptureActive) {
+                HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(requestId))
+                return@post
+            }
+            detailCaptureActive = true
+            try {
+                swapCaptureSurface(request.maxEdge)
+                pollDetailFrame(request, 0)
+            } catch (e: Exception) {
+                Log.w(TAG, "failed to prepare detail capture", e)
+                finishDetailCapture(request, null)
+            }
+        }
+    }
+
+    private fun pollDetailFrame(request: DetailRequest, attempt: Int) {
+        val workHandler = handler ?: return finishDetailCapture(request, null)
+        val bitmap = acquireLatestBitmap()
+        if (bitmap == null) {
+            if (attempt < DETAIL_MAX_ATTEMPTS) {
+                workHandler.postDelayed({ pollDetailFrame(request, attempt + 1) }, DETAIL_RETRY_MS)
+            } else {
+                finishDetailCapture(request, null)
+            }
+            return
+        }
+        val jpeg = try {
+            encodeWithinBudget(bitmap, request.maxEdge, request.qualityPercent)
+        } catch (e: Exception) {
+            Log.w(TAG, "failed to encode detail capture", e)
+            null
+        } finally {
+            bitmap.recycle()
+        }
+        finishDetailCapture(request, jpeg)
+    }
+
+    private fun finishDetailCapture(request: DetailRequest, jpeg: ByteArray?) {
+        try {
+            if (!stopGate.get()) swapCaptureSurface(MAX_EDGE_PX)
+        } catch (e: Exception) {
+            Log.w(TAG, "failed to restore orientation capture surface", e)
+        } finally {
+            detailCaptureActive = false
+        }
+        if (jpeg == null) {
+            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(request.id))
+        } else {
+            HermesBridge.send(
+                NativeToWebMessage.DetailScreenFrame(
+                    request.id,
+                    Base64.encodeToString(jpeg, Base64.NO_WRAP),
+                ),
+            )
+        }
+    }
+
+    private fun swapCaptureSurface(maxEdge: Int) {
+        val display = virtualDisplay ?: return
+        val (width, height) = FrameScaler.computeScaledDimensions(sourceWidth, sourceHeight, maxEdge)
+        val oldReader = imageReader
+        val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        imageReader = newReader
+        display.resize(width, height, currentDpi)
+        display.surface = newReader.surface
+        currentWidth = width
+        currentHeight = height
+        oldReader?.close()
     }
 
     private fun scaledBitmap(source: Bitmap, width: Int, height: Int): Bitmap {

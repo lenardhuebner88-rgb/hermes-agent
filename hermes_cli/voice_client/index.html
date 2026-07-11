@@ -265,6 +265,23 @@
         object-fit: cover;
       }
 
+      .detail-action {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        width: 100%;
+      }
+
+      .detail-action .chip-button {
+        min-height: 48px;
+        flex: 0 0 auto;
+      }
+
+      .detail-state {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+      }
+
       .state-card,
       .transcript-card {
         border: 1px solid var(--color-line);
@@ -1326,6 +1343,20 @@
             <span>Wird geteilt</span>
           </span>
           <video id="sharing-preview" class="sharing-preview" autoplay muted playsinline hidden></video>
+        </div>
+        <div class="detail-action">
+          <button
+            id="detail-frame-button"
+            type="button"
+            class="chip-button"
+            aria-describedby="detail-frame-state"
+            disabled
+          >
+            Genau ansehen
+          </button>
+          <span id="detail-frame-state" class="detail-state" role="status" aria-live="polite">
+            Einzelbild für kleine Schrift und UI-Details
+          </span>
         </div>
       </section>
 

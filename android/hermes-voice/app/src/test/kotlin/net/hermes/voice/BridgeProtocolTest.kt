@@ -27,6 +27,22 @@ class BridgeProtocolTest {
     }
 
     @Test
+    fun `parses bounded correlated detail capture request`() {
+        val id = "a".repeat(32)
+        val result = BridgeProtocol.parseWebToNative(
+            """{"v":1,"type":"capture_detail_frame","request_id":"$id","max_edge":4096,"quality":1.0}""",
+        ) as WebToNativeMessage.CaptureDetailFrame
+        assertEquals(id, result.requestId)
+        assertEquals(2048, result.maxEdge)
+        assertEquals(0.92, result.quality, 0.001)
+        assertNull(
+            BridgeProtocol.parseWebToNative(
+                """{"v":1,"type":"capture_detail_frame","request_id":"stale"}""",
+            ),
+        )
+    }
+
+    @Test
     fun `rejects malformed json`() {
         assertNull(BridgeProtocol.parseWebToNative("not json at all"))
         assertNull(BridgeProtocol.parseWebToNative("""{"v":1,"type":"bridge_ready""""))
@@ -98,6 +114,17 @@ class BridgeProtocolTest {
         )
         assertEquals(1, json.getInt("v"))
         assertEquals("screen_frame", json.getString("type"))
+        assertEquals("Zm9v", json.getString("data"))
+    }
+
+    @Test
+    fun `serializes correlated detail screen frame`() {
+        val id = "b".repeat(32)
+        val json = JSONObject(
+            BridgeProtocol.serializeNativeToWeb(NativeToWebMessage.DetailScreenFrame(id, "Zm9v")),
+        )
+        assertEquals("detail_screen_frame", json.getString("type"))
+        assertEquals(id, json.getString("request_id"))
         assertEquals("Zm9v", json.getString("data"))
     }
 

@@ -61,6 +61,8 @@ const screenShareStateElement = document.querySelector("#screen-share-state");
 const screenShareHintElement = document.querySelector("#screen-share-hint");
 const sharingIndicatorElement = document.querySelector("#sharing-indicator");
 const sharingPreviewElement = document.querySelector("#sharing-preview");
+const detailButtonElement = document.querySelector("#detail-frame-button");
+const detailStateElement = document.querySelector("#detail-frame-state");
 const modeLiveButton = document.querySelector('[data-mode-option="live"]');
 const modeSparButton = document.querySelector('[data-mode-option="spar"]');
 const talkButtonElement = document.querySelector("#talk-button");
@@ -256,6 +258,8 @@ let sharingIntervalId = null;
 let sharingStartGeneration = 0;
 let sharingCanvasElement = null;
 let sharingCanvasContext = null;
+let pendingDetailRequestId = null;
+const MAX_DETAIL_FRAME_BYTES = 512 * 1024;
 
 // Native Android screen-share bridge (Bridge Protocol v1, JSON strings both
 // ways). `nativeScreen.generation` snapshots `sharingStartGeneration` at
@@ -284,6 +288,14 @@ function renderSharingControls() {
     "aria-label",
     screenActive ? "Bildschirmfreigabe stoppen" : "Bildschirm für Hermes freigeben",
   );
+  if (detailButtonElement) {
+    const shortcutAvailable = activeSession?.voiceMode !== "spar";
+    detailButtonElement.disabled =
+      !(cameraActive || screenActive) || !hasOpenWebSocket(activeSession) || !shortcutAvailable;
+    detailButtonElement.title = shortcutAvailable
+      ? "Ein frisches hochauflösendes Einzelbild analysieren"
+      : "Im Sparmodus bitte „Genau ansehen“ sagen";
+  }
 }
 
 function isCurrent(session) {
@@ -808,6 +820,85 @@ async function captureAndSendFrame() {
   );
 }
 
+async function encodeDetailFrame(maxEdge, quality) {
+  if (!sharingStream) return "";
+  const videoWidth = sharingPreviewElement.videoWidth;
+  const videoHeight = sharingPreviewElement.videoHeight;
+  if (!videoWidth || !videoHeight) return "";
+  let edge = Math.max(1024, Math.min(2048, Number(maxEdge) || 2048));
+  let jpegQuality = Math.max(0.65, Math.min(0.92, Number(quality) || 0.9));
+  const canvas = getSharingCanvas();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const scale = Math.min(1, edge / Math.max(videoWidth, videoHeight));
+    canvas.width = Math.max(1, Math.round(videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(videoHeight * scale));
+    sharingCanvasContext.drawImage(sharingPreviewElement, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", jpegQuality));
+    if (!blob) return "";
+    if (blob.size <= MAX_DETAIL_FRAME_BYTES) return encodeBlobAsBase64(blob);
+    if (attempt < 2) jpegQuality -= 0.12;
+    else edge = Math.round(edge * 0.82);
+  }
+  return "";
+}
+
+function sendDetailUnavailable(session, requestId) {
+  if (isCurrent(session) && hasOpenWebSocket(session)) {
+    session.websocket.send(JSON.stringify({ type: "detail_frame_unavailable", request_id: requestId }));
+  }
+  if (pendingDetailRequestId === requestId) pendingDetailRequestId = null;
+  if (detailStateElement) detailStateElement.textContent = "Kein Detailbild verfügbar";
+  renderSharingControls();
+}
+
+async function handleDetailFrameRequest(session, message) {
+  const requestId = typeof message.request_id === "string" ? message.request_id : "";
+  if (!/^[a-f0-9]{32}$/.test(requestId) || !isCurrent(session)) return;
+  pendingDetailRequestId = requestId;
+  if (detailStateElement) detailStateElement.textContent = "Detailbild wird aufgenommen …";
+  if (detailButtonElement) detailButtonElement.disabled = true;
+
+  if (nativeScreen.state === "active") {
+    if (!sendNativeBridgeMessage({
+      v: 1,
+      type: "capture_detail_frame",
+      request_id: requestId,
+      max_edge: message.max_edge,
+      quality: message.quality,
+    })) {
+      sendDetailUnavailable(session, requestId);
+    }
+    return;
+  }
+  if (!sharingStream || !canSendVideoFrame(session)) {
+    sendDetailUnavailable(session, requestId);
+    return;
+  }
+  const data = await encodeDetailFrame(message.max_edge, message.quality);
+  if (!data || pendingDetailRequestId !== requestId || !isCurrent(session) || !hasOpenWebSocket(session)) {
+    sendDetailUnavailable(session, requestId);
+    return;
+  }
+  session.websocket.send(JSON.stringify({
+    type: "detail_frame", request_id: requestId, data, source: sharingSource,
+  }));
+  pendingDetailRequestId = null;
+  if (detailStateElement) detailStateElement.textContent = "Detailbild gesendet";
+  renderSharingControls();
+}
+
+function requestLookClosely() {
+  const session = activeSession;
+  if (!session || !hasOpenWebSocket(session) || (!sharingStream && nativeScreen.state !== "active")) return;
+  session.websocket.send(JSON.stringify({
+    type: "text",
+    text: "Nutze look_closely und sieh dir die aktuell geteilte Ansicht genau an. Lies kleine Schrift und UI-Details präzise.",
+  }));
+  if (detailStateElement) detailStateElement.textContent = "Genaues Ansehen angefordert …";
+}
+
+detailButtonElement?.addEventListener("click", requestLookClosely);
+
 // notifyNative=false is for the path where NATIVE told us the share already
 // stopped/errored (screen_capture_stopped/screen_capture_error): echoing
 // stop_screen_capture back in that case would risk a ping-pong loop with the
@@ -949,10 +1040,14 @@ screenChipElement.addEventListener("click", () => {
 
 function sendNativeBridgeMessage(message) {
   try {
-    window.HermesNative?.postMessage(JSON.stringify(message));
+    const bridge = window.HermesNative;
+    if (!bridge || typeof bridge.postMessage !== "function") return false;
+    bridge.postMessage(JSON.stringify(message));
+    return true;
   } catch {
     // The bridge object can vanish or throw across WebView lifecycle
     // transitions (activity recreation, process death) — never fatal here.
+    return false;
   }
 }
 
@@ -1077,6 +1172,29 @@ function handleNativeBridgeMessage(raw) {
       activeSession.websocket.send(
         JSON.stringify({ type: "video_frame", data: message.data, source: "screen" }),
       );
+    }
+    return;
+  }
+  if (message.type === "detail_screen_frame") {
+    const requestId = typeof message.request_id === "string" ? message.request_id : "";
+    if (
+      requestId === pendingDetailRequestId &&
+      nativeScreen.state === "active" &&
+      canSendVideoFrame(activeSession) &&
+      typeof message.data === "string"
+    ) {
+      activeSession.websocket.send(JSON.stringify({
+        type: "detail_frame", request_id: requestId, data: message.data, source: "screen",
+      }));
+      pendingDetailRequestId = null;
+      if (detailStateElement) detailStateElement.textContent = "Detailbild gesendet";
+      renderSharingControls();
+    }
+    return;
+  }
+  if (message.type === "detail_screen_frame_unavailable") {
+    if (message.request_id === pendingDetailRequestId) {
+      sendDetailUnavailable(activeSession, message.request_id);
     }
     return;
   }
@@ -1225,6 +1343,18 @@ function handleJsonMessage(session, raw) {
 
   if (message.type === "state") {
     applyServerState(session, message.value);
+    return;
+  }
+  if (message.type === "detail_frame_request") {
+    void handleDetailFrameRequest(session, message);
+    return;
+  }
+  if (message.type === "detail_frame_timeout") {
+    if (message.request_id === pendingDetailRequestId) {
+      pendingDetailRequestId = null;
+      if (detailStateElement) detailStateElement.textContent = "Detailaufnahme hat zu lange gedauert";
+      renderSharingControls();
+    }
     return;
   }
   if (message.type === "mode") {
@@ -1475,6 +1605,7 @@ function attachWebSocketHandlers(session) {
       return;
     }
     session.everOpen = true;
+    renderSharingControls();
     haptic(session.reconnectAttempts > 0 ? [8, 30, 8] : 10);
     if (session.reconnectAttempts > 0 && !session.drainRequested) {
       session.voiceState = "listening";

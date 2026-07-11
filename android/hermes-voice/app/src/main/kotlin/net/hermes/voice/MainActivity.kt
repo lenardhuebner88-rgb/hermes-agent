@@ -212,6 +212,7 @@ class MainActivity : ComponentActivity() {
             }
             is WebToNativeMessage.StartScreenCapture -> handleStartScreenCaptureRequested()
             is WebToNativeMessage.StopScreenCapture -> handleStopScreenCaptureRequested()
+            is WebToNativeMessage.CaptureDetailFrame -> handleDetailFrameRequested(message)
         }
     }
 
@@ -246,6 +247,21 @@ class MainActivity : ComponentActivity() {
         startService(
             Intent(this, MediaProjectionService::class.java)
                 .setAction(MediaProjectionService.ACTION_STOP),
+        )
+    }
+
+    private fun handleDetailFrameRequested(message: WebToNativeMessage.CaptureDetailFrame) {
+        if (HermesBridge.captureState.state != CaptureState.CAPTURING) {
+            HermesBridge.send(NativeToWebMessage.DetailScreenFrameUnavailable(message.requestId))
+            return
+        }
+        startService(
+            Intent(this, MediaProjectionService::class.java).apply {
+                action = MediaProjectionService.ACTION_CAPTURE_DETAIL
+                putExtra(MediaProjectionService.EXTRA_REQUEST_ID, message.requestId)
+                putExtra(MediaProjectionService.EXTRA_MAX_EDGE, message.maxEdge)
+                putExtra(MediaProjectionService.EXTRA_QUALITY, message.quality)
+            },
         )
     }
 }

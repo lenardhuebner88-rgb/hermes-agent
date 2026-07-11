@@ -62,7 +62,7 @@ const elementIds = [
   "voice-status", "status-detail", "usage-line", "session-button",
   "transcript", "transcript-empty", "mode-badge", "install-chip",
   "camera-chip", "screen-chip", "screen-share-hint", "sharing-indicator",
-  "sharing-preview", "composer", "composer-input",
+  "sharing-preview", "detail-frame-button", "detail-frame-state", "composer", "composer-input",
 ];
 const elements = {{}};
 for (const id of elementIds) {{
@@ -290,6 +290,40 @@ def test_native_screen_capture_stopped_does_not_echo_stop_command():
     assert result.returncode == 0, result.stderr
 
 
+def test_native_detail_capture_is_correlated_and_forwarded_once():
+    result = _run_node_harness(
+        """
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "native_capabilities", screen_capture: true }) });
+        const fakeSocket = { readyState: 1, sent: [], send(data) { this.sent.push(data); } };
+        activeSession = { websocket: fakeSocket, mode: null, muteMicUntilResponse: false };
+        toggleSharing("screen");
+        nativeMessageHandler({ data: JSON.stringify({ v: 1, type: "screen_capture_started" }) });
+        const requestId = "a".repeat(32);
+        handleJsonMessage(activeSession, JSON.stringify({
+          type: "detail_frame_request", request_id: requestId, max_edge: 2048, quality: 0.9,
+        }));
+        const capture = sentToNative.find((message) => message.type === "capture_detail_frame");
+        if (!capture || capture.request_id !== requestId || capture.max_edge !== 2048) {
+          throw new Error("missing correlated native detail request: " + JSON.stringify(sentToNative));
+        }
+        nativeMessageHandler({ data: JSON.stringify({
+          v: 1, type: "detail_screen_frame", request_id: "b".repeat(32), data: "STALE",
+        }) });
+        if (fakeSocket.sent.some((raw) => JSON.parse(raw).type === "detail_frame")) {
+          throw new Error("stale native detail reply was forwarded");
+        }
+        nativeMessageHandler({ data: JSON.stringify({
+          v: 1, type: "detail_screen_frame", request_id: requestId, data: "FRESH",
+        }) });
+        const detailFrames = fakeSocket.sent.map(JSON.parse).filter((message) => message.type === "detail_frame");
+        if (detailFrames.length !== 1 || detailFrames[0].request_id !== requestId || detailFrames[0].data !== "FRESH") {
+          throw new Error("fresh detail frame was not forwarded exactly once");
+        }
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_native_screen_capture_error_surfaces_message_and_stops():
     result = _run_node_harness(
         """
@@ -478,6 +512,9 @@ def test_bridge_protocol_strings_present_in_app_js():
         '"screen_frame"',
         '"screen_capture_stopped"',
         '"screen_capture_error"',
+        '"capture_detail_frame"',
+        '"detail_screen_frame"',
+        '"detail_frame_request"',
         '"usage_update"',
         '"usage_warning"',
         '"session_ended"',

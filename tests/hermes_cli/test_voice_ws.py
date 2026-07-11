@@ -1019,7 +1019,7 @@ class _FakeVoiceInput:
 
 
 async def _read_test_voice_frames(
-    websocket, fallback_mode, *, video_mode="stream", frame_cache=None
+    websocket, fallback_mode, *, video_mode="stream", frame_cache=None, fresh_frames=None
 ):
     """Defaults to ``video_mode="stream"`` so every pre-existing caller keeps
     exercising today's video_in-relay behavior unchanged (see
@@ -1048,8 +1048,71 @@ async def _read_test_voice_frames(
         config,
         text_turn,
         frame_cache,
+        fresh_frames,
     )
     return result, fallback_pcm, events_out, video_in
+
+
+@pytest.mark.asyncio
+async def test_fresh_frame_broker_correlates_and_never_returns_stale_frame():
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    request = asyncio.create_task(broker.request(events, disconnected, timeout=1.0))
+    event = await events.get()
+
+    assert event["type"] == "detail_frame_request"
+    assert event["max_edge"] == 2048
+    assert broker.submit("0" * 32, b"stale") is False
+    assert not request.done()
+    assert broker.submit(event["request_id"], b"fresh") is True
+    assert await request == b"fresh"
+    assert broker.submit(event["request_id"], b"replay") is False
+
+
+@pytest.mark.asyncio
+async def test_fresh_frame_broker_coalesces_concurrent_requests_and_times_out_bounded():
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    events = asyncio.Queue()
+    disconnected = asyncio.Event()
+    first = asyncio.create_task(broker.request(events, disconnected, timeout=0.05))
+    second = asyncio.create_task(broker.request(events, disconnected, timeout=0.05))
+    event = await events.get()
+    await asyncio.sleep(0)
+
+    assert events.empty()
+    assert broker.accepts(event["request_id"])
+    assert await first is None
+    assert await second is None
+    assert not broker.accepts(event["request_id"])
+
+
+@pytest.mark.asyncio
+async def test_detail_frame_reader_ignores_uncorrelated_payload_before_decode(monkeypatch):
+    from hermes_cli import voice_ws
+
+    broker = voice_ws.FreshFrameBroker()
+    decoded = False
+
+    def fail_decode(_control):
+        nonlocal decoded
+        decoded = True
+        raise AssertionError("uncorrelated detail payload must not be decoded")
+
+    monkeypatch.setattr(voice_ws, "_decode_video_frame", fail_decode)
+    messages = [
+        {"text": json.dumps({"type": "detail_frame", "request_id": "0" * 32, "data": "huge", "source": "screen"})},
+        {"text": json.dumps({"type": "end"})},
+    ]
+    result, *_ = await _read_test_voice_frames(
+        _FakeVoiceInput(messages), asyncio.Event(), fresh_frames=broker
+    )
+    assert result == "end"
+    assert decoded is False
 
 
 @pytest.mark.asyncio
@@ -2721,9 +2784,7 @@ async def test_video_frame_cache_wait_for_update_returns_none_when_never_offered
 async def test_run_live_bridge_wires_look_closely_request_frame_and_usage(
     monkeypatch,
 ):
-    """request_frame is served directly from frame_cache — no client
-    round-trip event — since ``_read_voice_frames`` always populates the
-    cache regardless of video_mode."""
+    """request_frame emits a correlated detail request and ignores the old cache."""
     from hermes_cli import voice_ws
     from tools.voice_live_tools import VoiceToolExecutor
 
@@ -2754,6 +2815,7 @@ async def test_run_live_bridge_wires_look_closely_request_frame_and_usage(
     disconnected = asyncio.Event()
     frame_cache = voice_ws.VideoFrameCache()
     frame_cache.store(real_jpeg)
+    fresh_frames = voice_ws.FreshFrameBroker()
     config = voice_ws.VoiceWebConfig(video_mode="on_demand")
 
     bridge_task = asyncio.create_task(
@@ -2768,16 +2830,19 @@ async def test_run_live_bridge_wires_look_closely_request_frame_and_usage(
             None,
             None,
             None,
-            frame_cache,
+                frame_cache,
+                fresh_frames,
         )
     )
     await asyncio.sleep(0.01)
 
     request_frame = captured_executor_kwargs["request_frame"]
-    frame = await request_frame()
+    frame_task = asyncio.create_task(request_frame())
+    request_event = await events_out.get()
+    assert request_event["type"] == "detail_frame_request"
+    assert fresh_frames.submit(request_event["request_id"], real_jpeg)
+    frame = await frame_task
     assert frame == real_jpeg
-    # No client round-trip: request_frame() reads the cache directly, so no
-    # "request_frame" (or any other) event is enqueued.
     assert events_out.empty()
 
     captured_executor_kwargs["report_look_usage"](120, 14, True)

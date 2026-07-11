@@ -21,8 +21,8 @@ import subprocess
 import sys
 import time
 from typing import Any
-import uuid
 import wave
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -156,6 +156,8 @@ _DEFAULT_VIDEO_MODE = "on_demand"
 _VALID_VIDEO_MODES = {"stream", "on_demand"}
 _DEFAULT_LOOK_MODEL = "gemini-3.1-flash-lite"
 _LOOK_CLOSELY_FRAME_WAIT_SECONDS = 3.0
+_DETAIL_FRAME_MAX_EDGE = 2048
+_DETAIL_FRAME_QUALITY = 0.9
 
 # Proactive memory injection (see _voice_memory_context_block()).
 _MEMORY_NOTES_DIR = Path("/home/piet/.memsearch/shared/memory")
@@ -1426,9 +1428,9 @@ class VideoFrameCache:
     gating against inflating the per-turn Gemini prompt with a continuous
     1fps stream happens downstream at the relay
     (``_VideoFrameRelay.forward_to_live``), not by withholding frames here.
-    The ``look_closely`` tool requests a fresh capture via
-    :meth:`wait_for_update`, falling back to whatever is cached (possibly
-    ``None``) if no fresher frame arrives before the deadline.
+    This cache remains for orientation/watch/delegation compatibility.
+    ``look_closely`` deliberately bypasses it and uses :class:`FreshFrameBroker`
+    so a detail request can never consume a stale 1-fps still.
     """
 
     def __init__(self) -> None:
@@ -1455,6 +1457,89 @@ class VideoFrameCache:
             pass
         return self._frame
 
+
+class FreshFrameBroker:
+    """Correlate one bounded, server-requested detail capture at a time.
+
+    The broker intentionally retains no completed frame. Concurrent
+    ``look_closely`` calls coalesce onto the same in-flight capture; once the
+    waiter completes (or times out), the JPEG is released.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._request_id: str | None = None
+        self._future: asyncio.Future[bytes | None] | None = None
+        self._waiters = 0
+
+    async def request(
+        self,
+        events_out: asyncio.Queue[dict[str, Any] | None],
+        disconnected: asyncio.Event,
+        *,
+        timeout: float = _LOOK_CLOSELY_FRAME_WAIT_SECONDS,
+    ) -> bytes | None:
+        async with self._lock:
+            if self._future is not None and not self._future.done():
+                future = self._future
+            else:
+                request_id = uuid.uuid4().hex
+                future = asyncio.get_running_loop().create_future()
+                self._request_id = request_id
+                self._future = future
+                await _put_event(
+                    events_out,
+                    {
+                        "type": "detail_frame_request",
+                        "request_id": request_id,
+                        "max_edge": _DETAIL_FRAME_MAX_EDGE,
+                        "quality": _DETAIL_FRAME_QUALITY,
+                    },
+                    disconnected,
+                )
+            self._waiters += 1
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except TimeoutError:
+            await _put_event(
+                events_out,
+                {"type": "detail_frame_timeout", "request_id": self._request_id},
+                disconnected,
+            )
+            return None
+        finally:
+            async with self._lock:
+                self._waiters = max(0, self._waiters - 1)
+                if self._future is future and (future.done() or self._waiters == 0):
+                    self._request_id = None
+                    self._future = None
+
+    def submit(self, request_id: object, frame: bytes | None) -> bool:
+        if (
+            not isinstance(request_id, str)
+            or request_id != self._request_id
+            or self._future is None
+            or self._future.done()
+        ):
+            return False
+        self._future.set_result(frame)
+        return True
+
+    def accepts(self, request_id: object) -> bool:
+        return (
+            isinstance(request_id, str)
+            and request_id == self._request_id
+            and self._future is not None
+            and not self._future.done()
+        )
+
+    def cancel(self) -> None:
+        future = self._future
+        self._request_id = None
+        self._future = None
+        self._waiters = 0
+        if future is not None and not future.done():
+            future.set_result(None)
 
 async def _try_start_fallback_text_turn(
     text: str,
@@ -1512,6 +1597,7 @@ async def _read_voice_frames(
     config: VoiceWebConfig,
     text_turn: _FallbackTextTurn,
     frame_cache: VideoFrameCache,
+    fresh_frames: FreshFrameBroker | None = None,
 ) -> str:
     video_frame_times: deque[float] = deque()
     try:
@@ -1701,9 +1787,51 @@ async def _read_voice_frames(
                 frame_cache.store(decoded_frame)
                 _enqueue_video_frame(video_in, decoded_frame)
                 continue
+            if control_type == "detail_frame":
+                if fresh_frames is None or not fresh_frames.accepts(control.get("request_id")):
+                    continue
+                if fallback_mode.is_set():
+                    fresh_frames.cancel()
+                    continue
+                if not _video_frame_rate_allowed(video_frame_times):
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "video_rate_limited",
+                                "message": "Zu viele Video-Frames. Bitte langsamer senden.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                decoded_frame = _decode_video_frame(control)
+                if decoded_frame is None or len(decoded_frame) > _MAX_VIDEO_FRAME_BYTES:
+                    await _put_event(
+                        events_out,
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "invalid_detail_frame",
+                                "message": "Das Detailbild ist ungültig.",
+                            },
+                        },
+                        disconnected,
+                    )
+                    continue
+                if fresh_frames is not None:
+                    fresh_frames.submit(control.get("request_id"), decoded_frame)
+                continue
+            if control_type == "detail_frame_unavailable":
+                if fresh_frames is not None and fresh_frames.accepts(control.get("request_id")):
+                    fresh_frames.submit(control.get("request_id"), None)
+                continue
             if control_type == "sharing_stopped":
                 _enqueue_sharing_stopped(video_in)
                 frame_cache.clear()
+                if fresh_frames is not None:
+                    fresh_frames.cancel()
                 continue
             await _put_event(
                 events_out,
@@ -1719,6 +1847,9 @@ async def _read_voice_frames(
     except WebSocketDisconnect:
         disconnected.set()
         return "disconnect"
+    finally:
+        if fresh_frames is not None:
+            fresh_frames.cancel()
 
 
 async def _monitor_post_end_controls(
@@ -1951,6 +2082,7 @@ async def _read_spar_frames(
     events_out: asyncio.Queue[dict[str, Any] | None],
     disconnected: asyncio.Event,
     frame_cache: VideoFrameCache,
+    fresh_frames: FreshFrameBroker | None = None,
 ) -> str:
     """Read one Sparmodus turn: accumulate PCM until ``turn_end``/``end``.
 
@@ -2052,8 +2184,24 @@ async def _read_spar_frames(
                     continue
                 frame_cache.store(decoded_frame)
                 continue
+            if control_type == "detail_frame":
+                if fresh_frames is None or not fresh_frames.accepts(control.get("request_id")):
+                    continue
+                if not _video_frame_rate_allowed(video_frame_times):
+                    continue
+                decoded_frame = _decode_video_frame(control)
+                if decoded_frame is not None and len(decoded_frame) <= _MAX_VIDEO_FRAME_BYTES:
+                    if fresh_frames is not None:
+                        fresh_frames.submit(control.get("request_id"), decoded_frame)
+                continue
+            if control_type == "detail_frame_unavailable":
+                if fresh_frames is not None and fresh_frames.accepts(control.get("request_id")):
+                    fresh_frames.submit(control.get("request_id"), None)
+                continue
             if control_type == "sharing_stopped":
                 frame_cache.clear()
+                if fresh_frames is not None:
+                    fresh_frames.cancel()
                 continue
             await _put_event(
                 events_out,
@@ -2069,6 +2217,9 @@ async def _read_spar_frames(
     except WebSocketDisconnect:
         disconnected.set()
         return "disconnect"
+    finally:
+        if fresh_frames is not None:
+            fresh_frames.cancel()
 
 
 @dataclass
@@ -2287,6 +2438,7 @@ async def _run_live_bridge(
     video_in: asyncio.Queue[bytes | None] | None = None,
     forced_end: asyncio.Event | None = None,
     frame_cache: VideoFrameCache | None = None,
+    fresh_frames: FreshFrameBroker | None = None,
 ) -> bool:
     live_kwargs: dict[str, Any] = {
         "voice": config.voice,
@@ -2319,20 +2471,10 @@ async def _run_live_bridge(
     )
 
     async def _request_fresh_frame() -> bytes | None:
-        """Serve look_closely the freshest cached still, waiting briefly if none yet.
-
-        No client round-trip: with sharing active the next 1fps tick lands
-        within ~1s regardless of video_mode (see ``_read_voice_frames``,
-        which always stores into ``frame_cache``), so a short local wait is
-        enough — no separate "request_frame" protocol message needed.
-        """
-
-        if frame_cache is None:
+        """Request one new, correlated high-resolution capture from the client."""
+        if fresh_frames is None:
             return None
-        cached = frame_cache.peek()
-        if cached is not None:
-            return cached
-        return await frame_cache.wait_for_update(_LOOK_CLOSELY_FRAME_WAIT_SECONDS)
+        return await fresh_frames.request(events_out, disconnected)
 
     executor = VoiceToolExecutor(
         delegate=lambda prompt: delegate_to_hermes(
@@ -2355,6 +2497,8 @@ async def _run_live_bridge(
             audio_in, events_out, executor, text_in=text_in, video_in=video_in
         )
     except LiveFallbackRequired:
+        if fresh_frames is not None:
+            fresh_frames.cancel()
         fallback_mode.set()
         await _put_event(
             events_out,
@@ -2506,6 +2650,7 @@ def create_voice_router(
         disconnected = asyncio.Event()
         text_turn = _FallbackTextTurn()
         frame_cache = VideoFrameCache()
+        fresh_frames = FreshFrameBroker()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
@@ -2522,6 +2667,7 @@ def create_voice_router(
                 config,
                 text_turn,
                 frame_cache,
+                fresh_frames,
             )
         )
         raw_session_id = websocket.query_params.get("session")
@@ -2548,6 +2694,7 @@ def create_voice_router(
                     video_in,
                     forced_end,
                     frame_cache,
+                    fresh_frames,
                 )
             )
         else:
@@ -2716,15 +2863,13 @@ def create_voice_router(
         )
         disconnected = asyncio.Event()
         frame_cache = VideoFrameCache()
+        fresh_frames = FreshFrameBroker()
         sender_task = asyncio.create_task(
             _send_voice_events(websocket, events_out, disconnected)
         )
 
         async def _request_fresh_frame() -> bytes | None:
-            cached = frame_cache.peek()
-            if cached is not None:
-                return cached
-            return await frame_cache.wait_for_update(_LOOK_CLOSELY_FRAME_WAIT_SECONDS)
+            return await fresh_frames.request(events_out, disconnected)
 
         executor = VoiceToolExecutor(
             delegate=lambda prompt: delegate_to_hermes(
@@ -2761,7 +2906,7 @@ def create_voice_router(
             while True:
                 turn_pcm = bytearray()
                 result = await _read_spar_frames(
-                    websocket, turn_pcm, events_out, disconnected, frame_cache
+                    websocket, turn_pcm, events_out, disconnected, frame_cache, fresh_frames
                 )
                 if result in ("disconnect", "error", "end"):
                     break
