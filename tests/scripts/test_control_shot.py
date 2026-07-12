@@ -34,6 +34,15 @@ class FakeResource:
         self.close_calls += 1
 
 
+class FakeProcessTable:
+    def __init__(self) -> None:
+        self.chrome_pids: set[int] = set()
+
+    def ps(self, process_name: str) -> set[int]:
+        assert process_name == "chrome"
+        return set(self.chrome_pids)
+
+
 class FakeContext(FakeResource):
     def __init__(self, *, login_ok: bool = False) -> None:
         super().__init__()
@@ -56,12 +65,24 @@ class FakePage:
 
 
 class FakeBrowser(FakeResource):
-    def __init__(self, *, login_ok: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        login_ok: bool = False,
+        process_table: FakeProcessTable | None = None,
+    ) -> None:
         super().__init__()
         self.context = FakeContext(login_ok=login_ok)
+        self.process_table = process_table
+        self.pid = 4242
 
     def new_context(self, **kwargs):
         return self.context
+
+    def close(self) -> None:
+        super().close()
+        if self.process_table is not None:
+            self.process_table.chrome_pids.discard(self.pid)
 
 
 class FakeChromium:
@@ -69,6 +90,8 @@ class FakeChromium:
         self.browser = browser
 
     def launch(self, **kwargs):
+        if self.browser.process_table is not None:
+            self.browser.process_table.chrome_pids.add(self.browser.pid)
         return self.browser
 
 
@@ -84,7 +107,8 @@ class FakePlaywright:
 
 
 def test_login_failure_closes_context_and_browser(monkeypatch, tmp_path: Path):
-    browser = FakeBrowser()
+    process_table = FakeProcessTable()
+    browser = FakeBrowser(process_table=process_table)
     fake_module = types.SimpleNamespace(sync_playwright=lambda: FakePlaywright(browser))
     monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
     monkeypatch.setattr(control_shot, "_credentials", lambda: ("user", "password"))
@@ -102,6 +126,7 @@ def test_login_failure_closes_context_and_browser(monkeypatch, tmp_path: Path):
 
     assert browser.context.close_calls == 1
     assert browser.close_calls == 1
+    assert process_table.ps("chrome") == set()
 
 
 def test_successful_capture_closes_context_and_browser(monkeypatch, tmp_path: Path):
