@@ -7756,6 +7756,13 @@ def _end_run(
             cost_block = metadata_for_store.setdefault("cost", {})
             if isinstance(cost_block, dict):
                 cost_block.setdefault("cost_status", "unknown")
+    # Stamp schema-free failure metadata for crash/timeout/gave_up/etc. runs.
+    # This lives in metadata only; no DB-schema assumption on worker_exit_kind
+    # or worker_failure_fingerprint columns.
+    if isinstance(metadata_for_store, dict) and error:
+        failure_meta = _run_failure_metadata(outcome, error)
+        if failure_meta:
+            metadata_for_store.update(failure_meta)
     conn.execute(
         """
         UPDATE task_runs
@@ -15730,6 +15737,7 @@ def enforce_max_runtime(
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "sigkill": killed},
+                closed_run_id=run_id,
             )
     return timed_out
 
@@ -15902,6 +15910,29 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
+# Outcomes that are terminal/requeue bookkeeping rather than worker failures.
+# Completed/blocked/reclaimed/stale runs do NOT get a failure fingerprint.
+_NON_FAILURE_RUN_OUTCOMES = frozenset({
+    "completed",
+    "blocked",
+    "reclaimed",
+    "stale",
+    "rate_limited",
+    "spawn_retry",
+    "transient_retry",
+})
+
+
+def _run_failure_metadata(outcome: str, error: Optional[str]) -> dict[str, str]:
+    """Schema-free failure metadata to stamp into a closed run's metadata."""
+    if not error or not outcome or outcome in _NON_FAILURE_RUN_OUTCOMES:
+        return {}
+    return {
+        "worker_exit_kind": outcome,
+        "worker_failure_fingerprint": _error_fingerprint(error),
+    }
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -15938,8 +15969,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # write_txn so can't nest). ``protocol_violation`` flags the
     # clean-exit-but-still-running case so we can trip the breaker
     # immediately instead of incrementing by 1.
-    crash_details: list[tuple[str, int, str, bool, str]] = []
-    # (task_id, pid, claimer, protocol_violation, error_text)
+    crash_details: list[tuple[str, int, str, bool, str, Optional[int]]] = []
+    # (task_id, pid, claimer, protocol_violation, error_text, run_id)
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at, current_run_id, "
@@ -16139,6 +16170,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         row["claim_lock"],
                         protocol_violation,
                         error_text,
+                        run_id,
                     ))
     # Outside the main txn: increment the unified failure counter for
     # each crashed task. If the breaker trips, the task transitions
@@ -16154,10 +16186,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     if crash_details:
         # Fingerprint errors to detect systemic failures.
         _fp_counts: dict[str, int] = {}
-        for _, _, _, _, err_text in crash_details:
+        for _, _, _, _, err_text, _ in crash_details:
             fp = _error_fingerprint(err_text)
             _fp_counts[fp] = _fp_counts.get(fp, 0) + 1
-        for tid, pid, claimer, protocol_violation, error_text in crash_details:
+        for tid, pid, claimer, protocol_violation, error_text, run_id in crash_details:
             fp = _error_fingerprint(error_text)
             is_systemic = not protocol_violation and _fp_counts.get(fp, 0) >= 3
             tripped = _record_task_failure(
@@ -16169,6 +16201,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
+                closed_run_id=run_id,
             )
             if tripped:
                 auto_blocked.append(tid)
@@ -16639,8 +16672,33 @@ def _heiler_classification_payload(
     return payload
 
 
+def _count_same_cause_runs(
+    conn: sqlite3.Connection,
+    task_id: str,
+    fingerprint: str,
+    closed_run_id: Optional[int],
+) -> int:
+    """Count matching prior runs plus the just-closed failure run."""
+    if closed_run_id is not None:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM task_runs "
+            "WHERE task_id = ? AND id != ? "
+            "  AND json_extract(metadata, '$.worker_failure_fingerprint') = ?",
+            (task_id, int(closed_run_id), fingerprint),
+        ).fetchone()
+        return (int(row[0]) if row else 0) + 1
+    row = conn.execute(
+        "SELECT COUNT(*) FROM task_runs "
+        "WHERE task_id = ? "
+        "  AND json_extract(metadata, '$.worker_failure_fingerprint') = ?",
+        (task_id, fingerprint),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def _operator_escalation_payload(
     *,
+    conn: sqlite3.Connection,
     task_id: str,
     row: sqlite3.Row,
     failures: int,
@@ -16649,6 +16707,7 @@ def _operator_escalation_payload(
     error: str,
     outcome: str,
     event_payload_extra: Optional[dict],
+    closed_run_id: Optional[int] = None,
 ) -> dict:
     evidence = {
         "trigger_outcome": outcome,
@@ -16658,6 +16717,12 @@ def _operator_escalation_payload(
     }
     if event_payload_extra:
         evidence["context"] = dict(event_payload_extra)
+    evidence["same_cause_count"] = _count_same_cause_runs(
+        conn,
+        task_id,
+        _error_fingerprint(error),
+        closed_run_id,
+    )
     return {
         "task": {
             "id": task_id,
@@ -16749,6 +16814,7 @@ def _record_task_failure(
     count_failure: bool = True,
     summary: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    closed_run_id: Optional[int] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -16947,6 +17013,7 @@ def _record_task_failure(
             # end-of-txn classification carries no escalation reference (the
             # original escalation already has its paired one).
             esc_payload = _operator_escalation_payload(
+                conn=conn,
                 task_id=task_id,
                 row=row,
                 failures=failures,
@@ -16955,6 +17022,7 @@ def _record_task_failure(
                 error=error,
                 outcome=outcome,
                 event_payload_extra=event_payload_extra,
+                closed_run_id=run_id if end_run else closed_run_id,
             )
             new_class, _ = _classify_escalation_payload(esc_payload)
             escalation_coalesced = new_class in _escalated_classes_for_task(

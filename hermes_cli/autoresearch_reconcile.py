@@ -270,6 +270,7 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
 def _escalation_payload(conn, task_id: str, proposal: dict[str, Any], reason: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     payload = kb._operator_escalation_payload(
+        conn=conn,
         task_id=task_id,
         row=row,
         failures=1,
