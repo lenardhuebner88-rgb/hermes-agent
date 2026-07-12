@@ -13,32 +13,24 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import threading
 from pathlib import Path
 
 DEFAULT_BASE = "http://127.0.0.1:9119"
 ENV_FILE = Path.home() / ".hermes" / ".env"
-CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 class ShotError(RuntimeError):
     """User-facing failure."""
 
 
-def _close_quietly(resource: object | None, *, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
-    """Best-effort close without allowing teardown to hang the caller."""
+def _close_quietly(resource: object | None) -> None:
+    """Best-effort close on the calling thread for Playwright sync API safety."""
     if resource is None:
         return
-
-    def close() -> None:
-        try:
-            resource.close()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - teardown must preserve the original outcome
-            pass
-
-    thread = threading.Thread(target=close, daemon=True, name="control-shot-close")
-    thread.start()
-    thread.join(timeout)
+    try:
+        resource.close()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - teardown must preserve the original outcome
+        pass
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
