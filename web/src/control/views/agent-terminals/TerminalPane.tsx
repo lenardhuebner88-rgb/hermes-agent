@@ -15,7 +15,7 @@ import {
   TERMINAL_THEME_STATIC,
 } from "../../../lib/xtermSurface";
 import type { TerminalTarget } from "./layout";
-import { buildAttachQuery, canFitTerminal, formatPtyResize, reconnectDelayMs } from "./terminalPaneModel";
+import { buildAttachQuery, canFitTerminal, reconnectDelayMs } from "./terminalPaneModel";
 
 const RESIZE_SEND_DEBOUNCE_MS = 300;
 
@@ -45,6 +45,10 @@ export interface TerminalPaneProps {
   className?: string;
   onActivate?: () => void;
   onConnectionChange?: (state: TerminalPaneConnectionState) => void;
+}
+
+function formatPtyResize(cols: number, rows: number): string {
+  return `\x1b]777;RESIZE:${Math.max(1, Math.round(cols))}x${Math.max(1, Math.round(rows))}\x07`;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane(

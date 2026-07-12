@@ -74,7 +74,6 @@ import { Sparkline } from "../components/fleet/Sparkline";
 import { KpiTile, SignalChip, type SignalTone } from "../components/leitstand";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
-import { formatPtyResize } from "./agent-terminals/terminalPaneModel";
 import { TerminalUsageDock } from "./agent-terminals/TerminalUsageDock";
 import {
   normalizeDesktopLayout,
@@ -240,6 +239,14 @@ export function reconnectDelayMs(attempt: number): number {
   return RECONNECT_DELAYS_MS[index];
 }
 
+/** Build the PTY resize escape sequence, clamping to valid dimensions (≥ 2, floored).
+ *  Handles NaN/Infinity by falling back to 2 (Math.max propagates NaN, so we guard). */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function formatPtyResize(cols: number, rows: number): string {
+  const c = Math.max(2, Number.isFinite(cols) ? Math.floor(cols) : 0);
+  const r = Math.max(2, Number.isFinite(rows) ? Math.floor(rows) : 0);
+  return `\x1b[RESIZE:${c};${r}]`;
+}
 
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
 export function hasUnseenActivity(window: AgentTerminalWindow, lastSeen: Record<string, number>): boolean {
