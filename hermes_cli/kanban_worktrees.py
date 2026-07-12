@@ -1695,51 +1695,6 @@ def _resolve_fixer_worktree(
     return wt, chain_branch(root_id)
 
 
-def _self_heal_release_toolchain(root: Path) -> Optional[str]:
-    """Restore a complete ``node_modules`` before the web release build.
-
-    The release gate runs in a detached validation worktree whose
-    ``node_modules`` / ``web/node_modules`` are symlinks into the LIVE checkout
-    (see ``_link_shared_dependencies``). When that live tree is missing a
-    lock-pinned build bin — e.g. ``web/package.json`` bumped ``typescript`` but
-    the live checkout was never re-``npm ci``'d — ``npm run build`` exits
-    ``tsc: not found`` and the integrator parks/reverts already-approved work,
-    the exact failure ``fo_integration_gate`` guards against (t_8fbe701d).
-
-    Restore a correct tree INSIDE the worktree without mutating the live
-    checkout: drop the two node_modules symlinks (``is_symlink``/``unlink`` so
-    the live directories are never followed), then ``npm ci`` a fresh real
-    install from the committed lockfile. The ``.venv`` symlink is deliberately
-    left intact. Returns ``None`` on success or an error string."""
-    npm_bin = shutil.which("npm") or "npm"
-    for rel in ("node_modules", "web/node_modules"):
-        link = root / rel
-        try:
-            if link.is_symlink():
-                link.unlink()
-        except OSError as exc:
-            return f"release-gate self-heal: could not unlink {rel}: {exc}"
-    try:
-        proc = subprocess.run(  # noqa: S603 -- fixed argv
-            [npm_bin, "ci"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=RELEASE_GATE_COMMAND_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return (
-            "release-gate self-heal (npm ci): "
-            f"TIMEOUT after {RELEASE_GATE_COMMAND_TIMEOUT}s"
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"release-gate self-heal (npm ci): command error: {exc}"
-    if proc.returncode != 0:
-        tail = ((proc.stdout or "") + (proc.stderr or "")).strip()[-2000:]
-        return f"release-gate self-heal (npm ci): exit {proc.returncode}\n{tail}"
-    return None
-
-
 def _default_release_gate_runner(
     commands: Optional[Sequence[str]] = None,
     *,
@@ -1757,17 +1712,6 @@ def _default_release_gate_runner(
     the detached commit.
     """
     root = Path(repo_root or LIVE_CHECKOUT_ROOT)
-    # Self-heal an incomplete web toolchain before building: the symlinked live
-    # node_modules may be missing a lock-pinned bin (e.g. tsc after a typescript
-    # bump the live checkout never re-installed), which would fail the build
-    # with "tsc: not found" and wrongly park the release. Only for a web-build
-    # repo, and only when tsc is actually absent (no cost on a complete tree).
-    if (root / "web" / "package.json").is_file() and _resolve_node_bin(
-        root, "tsc"
-    ) is None:
-        heal_err = _self_heal_release_toolchain(root)
-        if heal_err:
-            return False, heal_err
     cmds = list(commands or _RELEASE_GATE_COMMANDS)
     quoted_root = shlex.quote(str(root))
     cmds = [cmd.replace(str(LIVE_CHECKOUT_ROOT), quoted_root) for cmd in cmds]
