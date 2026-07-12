@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO_ROOT / "loops" / "packs"
+MODELS_FILE = REPO_ROOT / "loops" / "models.yaml"
 # Werkstatt-Substrat (v2.1): vom Operator/Dashboard angelegte Packs leben im State,
 # nie im Repo — Browser-Edits dürfen den Live-Checkout nicht dirty machen.
 _HERMES_HOME = get_hermes_home()
@@ -62,24 +63,23 @@ NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
 DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
 
-# Operator-Entscheid 2026-07-09 (Modell-Update 2026-07-12: Fable raus, Opus 4.8
-# plant + verifiziert): genau dieser kuratierte Opus→Sol→Opus-Loop darf
+# Operator-Entscheid 2026-07-09: genau dieser kuratierte Drei-Phasen-Loop darf
 # nach einem unabhaengigen PASS ueber die deterministische Landungsleiter selbst
 # ff-mergen und nach piet-fork pushen. Die Autoritaet ist nicht nur an den Namen,
-# sondern an Quelle, Live-Repo, Rollen/Modelle und exakte Manifest-/Prompt-Inhalte
+# sondern an Quelle, Live-Repo, Rollen/Engines und exakte Sicherheits-/Prompt-Inhalte
 # gebunden. Eine Pack-Kopie oder Manifest-Aenderung faellt dadurch fail-closed aus.
 AUTOLAND_PACK_ALLOWLIST = frozenset({"dashboard-experience"})
 AUTOLAND_EXPECTED_REPO = Path("/home/piet/.hermes/hermes-agent").resolve()
 AUTOLAND_PHASE_CONTRACT = {
-    "plan": ("claude", "claude-opus-4-8", "PLANNER-PROMPT.md"),
-    "build": ("codex", "gpt-5.6-sol", "BUILDER-PROMPT.md"),
-    "verify": ("claude", "claude-opus-4-8", "VERIFIER-PROMPT.md"),
+    "plan": ("claude", "PLANNER-PROMPT.md"),
+    "build": ("codex", "BUILDER-PROMPT.md"),
+    "verify": ("claude", "VERIFIER-PROMPT.md"),
 }
 AUTOLAND_PATH_PREFIXES = ("web/src/control/",)
 # Werden zusammen mit den kuratierten Dateien aktualisiert. Der Loader prueft
 # beide Ebenen: menschenlesbaren Rollenvertrag und bytegenaue Inhaltsbindung.
-AUTOLAND_MANIFEST_SHA256 = {
-    "dashboard-experience": "656a47081bc6e91fcb06c1346c93f93316a08a8db9588d1aa7604ee3e86e3eff",
+AUTOLAND_SAFETY_SHA256 = {
+    "dashboard-experience": "457e7f5aa1527478430803835c6efceb7c06f363013295a7faff5ec30677a003",
 }
 AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
@@ -94,6 +94,29 @@ PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
 RETRY_RE = re.compile(r"^retry:\s*(\d+)", re.MULTILINE)
 PLAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PASS_STATUS_RE = re.compile(r"^PASS\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127})$")
+
+
+def _autoland_safety_hash(raw: dict) -> str:
+    """Hash landing authority while excluding runtime model and budget choices."""
+    phases = raw.get("phases") or {}
+    projection = {
+        "name": raw.get("name"),
+        "type": raw.get("type"),
+        "repo": raw.get("repo"),
+        "stability": raw.get("stability"),
+        "phases": {
+            phase: {"engine": cfg.get("engine"), "prompt": cfg.get("prompt")}
+            for phase, cfg in phases.items()
+        },
+        "stop_keys": sorted((raw.get("stop") or {}).keys()),
+        "params": raw.get("params") or {},
+        "notify": raw.get("notify") or {},
+        "autoland": raw.get("autoland", False),
+    }
+    canonical = json.dumps(
+        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class ManifestError(ValueError):
@@ -239,18 +262,17 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 f"{AUTOLAND_EXPECTED_REPO}, ist {Path(repo).expanduser().resolve()}"
             )
         actual_contract = {
-            phase: (cfg.engine, cfg.model, cfg.prompt)
+            phase: (cfg.engine, cfg.prompt)
             for phase, cfg in phases.items()
         }
         if actual_contract != AUTOLAND_PHASE_CONTRACT:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Phasenvertrag weicht ab; "
-                "erwartet Opus→Sol→Opus mit den kuratierten Prompts"
+                "erwartet die kuratierten Engine-Rollen und Prompts"
             )
-        manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        if manifest_hash != AUTOLAND_MANIFEST_SHA256.get(name):
+        if _autoland_safety_hash(raw) != AUTOLAND_SAFETY_SHA256.get(name):
             raise ManifestError(
-                f"Pack {name!r}: autoland-Manifestinhalt weicht vom kuratierten Hash ab"
+                f"Pack {name!r}: autoland-Sicherheitsprojektion weicht vom kuratierten Hash ab"
             )
         expected_prompts = AUTOLAND_PROMPT_SHA256.get(name, {})
         actual_prompts = {
@@ -825,13 +847,9 @@ class LoopRunner:
                 "Autoland akzeptiert nur Engine, Modell, MAX_ROUNDS und MAX_HOURS"
             )
 
-        catalog_path = REPO_ROOT / "loops" / "models.yaml"
-        catalog_data = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
+        catalog_data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8")) or {}
         catalog = catalog_data.get("engines", {})
         for phase in self.pack.phases:
-            prefix = f"PHASE_{phase.upper()}_"
-            if not ({f"{prefix}ENGINE", f"{prefix}MODEL"} & self.overrides.keys()):
-                continue
             cfg = self.phase_cfg(phase)
             engine_entry = catalog.get(cfg.engine)
             if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
@@ -858,18 +876,11 @@ class LoopRunner:
                 )
 
     def _runtime_autoland_authorized(self) -> bool:
-        """Nur der gebundene Phasenvertrag darf automatisch pushen; Budgets sind frei."""
+        """Runtime models may float; engine roles remain part of landing authority."""
         if not self.pack.autoland:
             return False
-        phase_keys = {
-            key for key in self.overrides
-            if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
-        }
-        if not phase_keys:
-            return True  # Das Pack-Manifest selbst wurde bereits fail-closed validiert.
         return all(
-            (self.phase_cfg(phase).engine, self.phase_cfg(phase).model)
-            == AUTOLAND_PHASE_CONTRACT[phase][:2]
+            self.phase_cfg(phase).engine == AUTOLAND_PHASE_CONTRACT[phase][0]
             for phase in AUTOLAND_PHASE_CONTRACT
         )
 
