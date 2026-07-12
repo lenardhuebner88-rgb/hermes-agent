@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -247,3 +248,56 @@ def test_respec_blank_ac_whitespace_raises_and_ac_unchanged(kanban_home):
         assert conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 1
     assert row["acceptance_criteria"] is not None
     assert "must survive" in row["acceptance_criteria"]
+
+
+def test_respec_review_gated_blocked_task_avoids_terminal_review_authority(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "_review_gate_should_apply", lambda conn, task_id, run_id: True)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="review gated", body="old", assignee="coder")
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="review-gated task done transition requires terminal review authority",
+        ):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (tid,))
+
+        new_id = kb.respec_task(
+            conn,
+            tid,
+            body="replacement",
+            acceptance_criteria="- AC-1: replacement AC",
+            author="operator",
+        )
+
+    with kb.connect() as conn:
+        old = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        new = conn.execute("SELECT * FROM tasks WHERE id = ?", (new_id,)).fetchone()
+    assert old["status"] == "archived"
+    assert old["result"] == f"respecced → {new_id}"
+    assert new["body"] == "replacement"
+    assert "replacement AC" in new["acceptance_criteria"]
+
+
+def test_respec_rolls_back_source_and_replacement_on_link_failure(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        tid = _create_with_status(conn, "blocked", body="old")
+
+    def fail_link(conn, parent_id, child_id):
+        raise RuntimeError("link failed")
+
+    monkeypatch.setattr(kb, "_link_tasks_in_txn", fail_link)
+    with pytest.raises(RuntimeError, match="link failed"):
+        with kb.connect() as conn:
+            kb.respec_task(conn, tid, body="replacement")
+
+    with kb.connect() as conn:
+        source = kb.get_task(conn, tid)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+    assert source is not None
+    assert source.status == "blocked"
+    assert source.completed_at is None
+    assert task_count == 1

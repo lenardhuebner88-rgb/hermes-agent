@@ -13641,7 +13641,7 @@ def respec_task(
     """Archive ``task_id`` and create a replacement task with a new spec.
 
     This intentionally does **not** edit ``tasks.body`` in place. The old task
-    keeps its original body, is completed then archived, and receives a pointer
+    keeps its original body, is archived as superseded, and receives a pointer
     comment. The new task copies the old task's assignee/priority/kind/epic and
     parent links, plus a provenance dependency ``old -> new``.
 
@@ -13700,7 +13700,7 @@ def respec_task(
         conn.execute(
             """
             UPDATE tasks
-               SET status = 'done',
+               SET status = 'archived',
                    completed_at = ?,
                    result = ?,
                    claim_lock = NULL,
@@ -13710,12 +13710,6 @@ def respec_task(
              WHERE id = ?
             """,
             (now, pointer, task_id),
-        )
-        _enqueue_closeout_in_txn(
-            conn,
-            task_id,
-            summary=pointer,
-            release_context={"auto_release_candidate": False},
         )
         _append_event(
             conn,
@@ -13791,6 +13785,10 @@ def respec_task(
         for parent_id in old_parent_ids:
             _link_tasks_in_txn(conn, parent_id, new_id)
         _link_tasks_in_txn(conn, task_id, new_id)
+        conn.execute(
+            "UPDATE tasks SET status = ? WHERE id = ?",
+            (existing["status"], new_id),
+        )
 
         conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
@@ -13808,18 +13806,6 @@ def respec_task(
             task_id,
             "respecced",
             {"new_task": new_id, "copied_parents": old_parent_ids},
-        )
-        conn.execute(
-            """
-            UPDATE tasks
-               SET status = 'archived',
-                   claim_lock = NULL,
-                   claim_expires = NULL,
-                   worker_pid = NULL,
-                   current_run_id = NULL
-             WHERE id = ?
-            """,
-            (task_id,),
         )
         _append_event(conn, task_id, "archived", {"respecced_to": new_id})
         return new_id
