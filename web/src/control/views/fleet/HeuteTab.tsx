@@ -98,13 +98,16 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
           Kein leerer Platzhalter, wenn nichts wartet. */}
       {actionRows.length > 0 ? (
         <div className="mb-3 grid gap-2" aria-label="Handlungsbedarf">
-          {actionRows.map((row) => (
+          {actionRows.map((row, index) => (
             <button
               key={row.key}
               type="button"
               className="flex min-h-11 w-full items-center gap-2.5 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-left text-status-warn"
               onClick={() => onNavigate(row.target)}
               aria-label={row.label}
+              // Primärer Handlungs-Callout wird — wie zuvor die globale PendingBar —
+              // höflich angekündigt; nur die erste Zeile ist die Live-Region.
+              aria-live={index === 0 ? "polite" : undefined}
             >
               <Led kind="warn" />
               <span className="min-w-0 flex-1 truncate text-sec font-medium">{row.label}</span>

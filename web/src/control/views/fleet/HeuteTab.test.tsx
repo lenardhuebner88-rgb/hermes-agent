@@ -178,6 +178,8 @@ describe("HeuteTab action block + idle state", () => {
     });
 
     const row = screen.getByRole("button", { name: "Freigabe wartet: Cockpit-Umbau" });
+    // Primärer Handlungs-Callout wird höflich angekündigt (Ersatz der globalen PendingBar auf Heute).
+    expect(row.getAttribute("aria-live")).toBe("polite");
     fireEvent.click(row);
     expect(onNavigate).toHaveBeenCalledWith("plan");
   });
