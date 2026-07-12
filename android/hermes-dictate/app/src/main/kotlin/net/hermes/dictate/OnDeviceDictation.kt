@@ -21,7 +21,8 @@ fun interface RecognizeIntentFactory {
  *
  * Extras that only exist on newer SDK levels are feature-detected via [sdkInt] and gracefully
  * omitted on older devices, so an unsupported extra can never wedge the recognizer. The German
- * language is selected explicitly by the caller (blank falls back to `de-DE` in [OnDeviceDictation]).
+ * The caller may leave language blank for provider auto-detection; in that case no language extra
+ * is pinned, so an uncertain recognizer can choose rather than silently forcing German.
  */
 class DefaultRecognizeIntentFactory(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
@@ -30,9 +31,11 @@ class DefaultRecognizeIntentFactory(
     override fun create(language: String): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-            // Some engines consult EXTRA_LANGUAGE_PREFERENCE as the fallback locale hint.
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
+            if (language.isNotBlank()) {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+                // Some engines consult EXTRA_LANGUAGE_PREFERENCE as the fallback locale hint.
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
+            }
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             // Belt-and-braces alongside the dedicated on-device recognizer: never networked models.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
@@ -130,7 +133,7 @@ class OnDeviceDictation(
         if (destroyed || pendingSegment) return false
         val r = boundRecognizer() ?: return false
         pendingSegment = true
-        r.startListening(intentFactory.create(languageTag.ifBlank { "de-DE" }))
+        r.startListening(intentFactory.create(languageTag))
         return true
     }
 

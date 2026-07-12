@@ -544,6 +544,7 @@ def test_function_declarations_cover_all_tools():
         "hermes_status",
         "recall_memory",
         "schedule_reminder",
+        "health_track_capture",
     }
 
 

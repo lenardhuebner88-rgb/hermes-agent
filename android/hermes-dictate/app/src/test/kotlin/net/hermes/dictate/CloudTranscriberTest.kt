@@ -85,6 +85,24 @@ class CloudTranscriberTest {
     }
 
     @Test
+    fun `polish request carries only allowlisted app category and style metadata`() {
+        val transport = FakeTransport(HttpResponse(200, """{"ok":true,"transcript":"x"}""", emptyList()))
+        transcriber(transport).transcribe(
+            audio,
+            "audio/mp4",
+            language = "de",
+            polish = true,
+            appCategory = "email",
+            style = "formal",
+        )
+        val body = JSONObject(String(transport.lastBody, Charsets.UTF_8))
+        assertEquals("email", body.getString("app_category"))
+        assertEquals("formal", body.getString("style"))
+        assertTrue(!body.has("context_before"))
+        assertTrue(!body.has("app_package"))
+    }
+
+    @Test
     fun `missing cookie header is simply omitted`() {
         val transport = FakeTransport(HttpResponse(200, """{"ok":true,"transcript":"x"}""", emptyList()))
         transcriber(transport, FakeCookies(header = null)).transcribe(audio, "audio/mp4")

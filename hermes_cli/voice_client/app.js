@@ -1287,6 +1287,14 @@ function handleNativeBridgeMessage(raw) {
     }
     return;
   }
+  if (message.type === "dictation_draft" && typeof message.text === "string") {
+    // Explicit Diktat handoff creates a draft only. The user still presses Send;
+    // no agent turn or side effect is triggered by receiving the Android intent.
+    composerInput.value = message.text.slice(0, 4000);
+    composerInput.focus?.();
+    statusDetailElement.textContent = "Entwurf aus Hermes Diktat – zum Senden bestätigen.";
+    return;
+  }
   if (message.type === "phone_action_result") {
     const session = activeSession;
     const pending = session?.pendingPhoneAction;

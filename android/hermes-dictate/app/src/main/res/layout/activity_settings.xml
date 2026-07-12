@@ -202,6 +202,112 @@
             android:textColor="@color/text_primary"
             android:textSize="15sp" />
 
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="@string/bubble_size" android:textColor="@color/text_primary" />
+        <SeekBar android:id="@+id/bubble_size_seek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="115" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/bubble_opacity" android:textColor="@color/text_primary" />
+        <SeekBar android:id="@+id/bubble_opacity_seek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" />
+        <Switch android:id="@+id/bubble_shrink_switch" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/bubble_shrink" android:textColor="@color/text_primary" />
+        <Switch android:id="@+id/local_recovery_switch" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/local_recovery" android:textColor="@color/text_primary" />
+
+        <Switch
+            android:id="@+id/local_refine_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:minHeight="48dp"
+            android:text="@string/local_refine_switch"
+            android:textColor="@color/text_primary"
+            android:textSize="15sp" />
+
+        <!-- Personal dictionary -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/section_dictionary"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/dictionary_editor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_key"
+            android:gravity="top|start"
+            android:hint="@string/dictionary_hint"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:minHeight="96dp"
+            android:padding="12dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_dim"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/dictionary_help"
+            android:textColor="@color/text_dim"
+            android:textSize="12sp" />
+
+        <!-- Voice snippets -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/section_snippets"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/snippet_editor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_key"
+            android:gravity="top|start"
+            android:hint="@string/snippet_hint"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:minHeight="96dp"
+            android:padding="12dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_dim"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/snippet_help"
+            android:textColor="@color/text_dim"
+            android:textSize="12sp" />
+
+        <!-- Language -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/section_style"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/style_group"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton android:id="@+id/style_auto" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/style_auto" android:textColor="@color/text_primary" />
+            <RadioButton android:id="@+id/style_neutral" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/style_neutral" android:textColor="@color/text_primary" />
+            <RadioButton android:id="@+id/style_formal" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/style_formal" android:textColor="@color/text_primary" />
+            <RadioButton android:id="@+id/style_casual" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/style_casual" android:textColor="@color/text_primary" />
+            <RadioButton android:id="@+id/style_concise" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/style_concise" android:textColor="@color/text_primary" />
+        </RadioGroup>
+
         <!-- Language -->
         <TextView
             android:layout_width="wrap_content"
@@ -238,6 +344,13 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/lang_en"
+                android:textColor="@color/text_primary" />
+
+            <RadioButton
+                android:id="@+id/radio_auto"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lang_auto"
                 android:textColor="@color/text_primary" />
         </RadioGroup>
 

@@ -82,6 +82,7 @@ sealed class NativeToWebMessage {
     data class ScreenCaptureStopped(val reason: String) : NativeToWebMessage()
     data class ScreenCaptureError(val code: String, val message: String) : NativeToWebMessage()
     data class PhoneActionResult(val requestId: String, val status: String) : NativeToWebMessage()
+    data class DictationDraft(val text: String) : NativeToWebMessage()
 }
 
 object BridgeProtocol {
@@ -98,6 +99,7 @@ object BridgeProtocol {
     private const val TYPE_INVALIDATE_PHONE_ACTION_SESSION = "invalidate_phone_action_session"
 
     private const val TYPE_NATIVE_CAPABILITIES = "native_capabilities"
+    private const val TYPE_DICTATION_DRAFT = "dictation_draft"
     private const val TYPE_SCREEN_CAPTURE_STARTED = "screen_capture_started"
     private const val TYPE_SCREEN_FRAME = "screen_frame"
     private const val TYPE_DETAIL_SCREEN_FRAME = "detail_screen_frame"
@@ -247,6 +249,10 @@ object BridgeProtocol {
                 json.put(KEY_TYPE, TYPE_PHONE_ACTION_RESULT)
                 json.put("request_id", message.requestId)
                 json.put("status", message.status)
+            }
+            is NativeToWebMessage.DictationDraft -> {
+                json.put(KEY_TYPE, TYPE_DICTATION_DRAFT)
+                json.put("text", message.text.take(4_000))
             }
         }
         return json.toString()

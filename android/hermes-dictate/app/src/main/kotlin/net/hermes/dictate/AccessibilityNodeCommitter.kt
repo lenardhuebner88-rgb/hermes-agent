@@ -17,19 +17,25 @@ import android.view.accessibility.AccessibilityNodeInfo
 class AccessibilityNodeCommitter(private val context: Context) {
 
     /**
-     * @return true if the text made it into the field, either via ACTION_SET_TEXT or the
-     *   clipboard fallback.
+     * @return the exact formatted segment if it reached the field via ACTION_SET_TEXT or the
+     *   clipboard fallback; null when neither path succeeded.
      */
-    fun commit(node: AccessibilityNodeInfo, segment: String): Boolean {
-        if (segment.isEmpty()) return true
+    fun commit(node: AccessibilityNodeInfo, segment: String): String? {
+        if (segment.isEmpty()) return ""
         val fieldText = node.text?.toString() ?: ""
         val selStart = node.textSelectionStart
         val selEnd = node.textSelectionEnd
         val result = TextSplicer.splice(fieldText, selStart, selEnd, segment)
 
-        if (setTextDirect(node, result)) return true
-        return commitViaClipboard(node, result.formattedSegment)
+        if (setTextDirect(node, result)) return result.formattedSegment
+        return if (commitViaClipboard(node, result.formattedSegment)) result.formattedSegment else null
     }
+
+    fun applyEdit(node: AccessibilityNodeInfo, result: DictationEdits.Result): Boolean =
+        setTextDirect(
+            node,
+            TextSplicer.Result(result.newText, result.newCursor, formattedSegment = ""),
+        )
 
     private fun setTextDirect(node: AccessibilityNodeInfo, result: TextSplicer.Result): Boolean {
         if (!node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return false

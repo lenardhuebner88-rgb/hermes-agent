@@ -18,6 +18,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 from hermes_cli.voice_phone_action import validate_phone_action
+from hermes_cli.voice_health_track import health_track_capture
 
 _TMUX_TIMEOUT_SECONDS = 10
 _DEFAULT_CAPTURE_LINES = 40
@@ -47,6 +48,27 @@ _LOOK_CLOSELY_SYSTEM_INSTRUCTION = (
 )
 
 FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
+    {
+        "name": "health_track_capture",
+        "description": (
+            "Erstellt eine strukturierte Health-Track-Vorschau. Zuerst immer confirm=false "
+            "aufrufen, Vorschau sichtbar vorlesen/anzeigen und erst nach ausdrücklichem Ja erneut "
+            "mit confirm=true. Ein blocked/adapter_pending-Ergebnis niemals als Write ausgeben."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["weight", "meal"]},
+                "date": {"type": "string", "description": "ISO-Datum YYYY-MM-DD"},
+                "target_account": {"type": "string", "enum": ["piet"]},
+                "weight_kg": {"type": "number"},
+                "description": {"type": "string"},
+                "amounts": {"type": "string"},
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["kind", "date", "target_account", "confirm"],
+        },
+    },
     {
         "name": "phone_action",
         "description": (
@@ -457,6 +479,9 @@ class VoiceToolExecutor:
             if self._request_phone_action is None:
                 return {"status": "unsupported"}
             return await self._request_phone_action(action)
+
+        if name == "health_track_capture":
+            return health_track_capture(args)
 
         if name == "list_terminals":
             process, error = await self._run_tmux(

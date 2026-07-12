@@ -9,6 +9,7 @@ object DictateConfig {
 
     /** Existing dashboard endpoint (Slice-G contract: no new STT backend). */
     const val TRANSCRIBE_URL = "$ALLOWED_ORIGIN/api/audio/transcribe"
+    const val STATUS_URL = "$ALLOWED_ORIGIN/api/dictate/status"
     const val LOGIN_URL = "$ALLOWED_ORIGIN/login"
 
     /** Cheap gated GET used to answer "is the cookie session still valid?" (200 vs 401). */
@@ -44,6 +45,24 @@ class DictatePrefs(context: Context) {
         get() = prefs.getString("language_tag", null)?.takeIf { it.isNotBlank() }
         set(value) = prefs.edit().putString("language_tag", value ?: "").apply()
 
+    var languageMode: LanguageMode
+        get() {
+            val stored = prefs.getString("language_mode", null)
+            return runCatching { LanguageMode.valueOf(stored.orEmpty()) }.getOrNull()
+                ?: when (languageTag) {
+                    "de-DE" -> LanguageMode.GERMAN
+                    "en-US" -> LanguageMode.ENGLISH
+                    else -> LanguageMode.SYSTEM
+                }
+        }
+        set(value) = prefs.edit().putString("language_mode", value.name).apply()
+
+    val recognitionLanguageTag: String
+        get() = DictationLanguage.recognitionTag(languageMode)
+
+    val cloudLanguageHint: String?
+        get() = DictationLanguage.cloudHint(languageMode)
+
     /**
      * Overlay bubble: prefer cloud transcription over on-device for every tap. Still gated by
      * [cloudEnabled] and an active login — the controller's per-use reset to ON_DEVICE after
@@ -63,6 +82,18 @@ class DictatePrefs(context: Context) {
         get() = prefs.getBoolean("overlay_bubble_on_right", true)
         set(value) = prefs.edit().putBoolean("overlay_bubble_on_right", value).apply()
 
+    var overlayBubbleSize: Int
+        get() = BubbleAppearance.nearestSize(prefs.getInt("overlay_bubble_size", 85))
+        set(value) = prefs.edit().putInt("overlay_bubble_size", BubbleAppearance.nearestSize(value)).apply()
+
+    var overlayBubbleOpacity: Int
+        get() = BubbleAppearance.nearestOpacity(prefs.getInt("overlay_bubble_opacity", 80))
+        set(value) = prefs.edit().putInt("overlay_bubble_opacity", BubbleAppearance.nearestOpacity(value)).apply()
+
+    var overlayShrinkIdle: Boolean
+        get() = prefs.getBoolean("overlay_shrink_idle", false)
+        set(value) = prefs.edit().putBoolean("overlay_shrink_idle", value).apply()
+
     /**
      * "Flow-Polish": server-side dictation cleanup (punctuation, filler words, self-corrections)
      * on cloud transcriptions. Applies only to the cloud path — on-device text never leaves the
@@ -72,10 +103,64 @@ class DictatePrefs(context: Context) {
         get() = prefs.getBoolean("flow_polish", true)
         set(value) = prefs.edit().putBoolean("flow_polish", value).apply()
 
+    /** Local personal dictionary, one `spoken => written` rule per line. */
+    var dictionaryRules: String
+        get() = prefs.getString("dictionary_rules", "") ?: ""
+        set(value) = prefs.edit().putString("dictionary_rules", value).apply()
+
+    /** Voice-triggered snippets, one `cue => expansion` rule per line. */
+    var snippetRules: String
+        get() = prefs.getString("snippet_rules", "") ?: ""
+        set(value) = prefs.edit().putString("snippet_rules", value).apply()
+
+    /** Deterministic on-device removal of fillers, repetitions and simple spoken backtracks. */
+    var localRefine: Boolean
+        get() = prefs.getBoolean("local_refine", true)
+        set(value) = prefs.edit().putBoolean("local_refine", value).apply()
+
+    var localRecoveryEnabled: Boolean
+        get() = prefs.getBoolean("local_recovery_enabled", true)
+        set(value) = prefs.edit().putBoolean("local_recovery_enabled", value).apply()
+
+    var lastRecoveryText: String
+        get() = prefs.getString("last_recovery_text", "") ?: ""
+        set(value) = prefs.edit().putString("last_recovery_text", value.takeLast(4_000)).apply()
+
+    var personalStyle: String
+        get() = prefs.getString("style_personal", "casual") ?: "casual"
+        set(value) = prefs.edit().putString("style_personal", value).apply()
+
+    var workStyle: String
+        get() = prefs.getString("style_work", "formal") ?: "formal"
+        set(value) = prefs.edit().putString("style_work", value).apply()
+
+    var emailStyle: String
+        get() = prefs.getString("style_email", "formal") ?: "formal"
+        set(value) = prefs.edit().putString("style_email", value).apply()
+
+    var otherStyle: String
+        get() = prefs.getString("style_other", "formal") ?: "formal"
+        set(value) = prefs.edit().putString("style_other", value).apply()
+
+    /** One-tap override; `auto` falls back to the documented per-category defaults above. */
+    var styleOverride: String
+        get() = prefs.getString("style_override", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("style_override", value).apply()
+
+    fun styleForPackage(packageName: String?): String {
+        if (styleOverride != "auto") return styleOverride
+        return when (DictationContext.category(packageName)) {
+            AppCategory.PERSONAL -> personalStyle
+            AppCategory.WORK -> workStyle
+            AppCategory.EMAIL -> emailStyle
+            AppCategory.OTHER -> otherStyle
+        }
+    }
+
     /**
      * ISO-639-1 hint for the server ("de-DE" → "de"). Falls back to "de" — the same default
      * locale the on-device path uses — so cloud whisper never wastes quality on misdetection.
      */
-    val languageHint: String
-        get() = (languageTag ?: "de-DE").substringBefore('-').lowercase()
+    val languageHint: String?
+        get() = cloudLanguageHint
 }

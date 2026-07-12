@@ -1113,6 +1113,32 @@ class AudioTranscriptionRequest(BaseModel):
     # Opt-in "Flow polish" pass: dictation cleanup (filler-word removal,
     # punctuation/casing, self-correction resolution) after transcription.
     polish: bool = False
+    # Allowlisted metadata only. Field contents and concrete package names are
+    # deliberately not part of this endpoint's contract.
+    app_category: Optional[str] = None
+    style: Optional[str] = None
+
+
+class DictateStatusReport(BaseModel):
+    """Bounded operational metadata from Hermes Dictate.
+
+    This contract deliberately has no transcript, field-content, package-name,
+    or audio field. ``extra = forbid`` makes that privacy boundary fail closed.
+    """
+
+    app_version: str
+    engine: str
+    language: str
+    style: str
+    surface: str
+    microphone_permission: bool
+    service_enabled: bool
+    event: str = "contact"
+    latency_ms: Optional[int] = None
+    last_error: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
 
 
 class ManagedFileUpload(BaseModel):
@@ -1973,6 +1999,140 @@ async def read_managed_file(request: Request, path: str):
 # downloads via the same auth_middleware precedent as /api/files/download.
 _ARTIFACTS_DIR = Path.home() / "Android" / "artifacts"
 _ARTIFACT_EXTENSIONS = {".apk", ".sha256", ".txt"}
+
+_DICTATE_STATUS_LOCK = threading.Lock()
+_DICTATE_STATUS: Dict[str, Any] = {
+    "last_contact_at": None,
+    "app_version": None,
+    "engine": None,
+    "language": None,
+    "style": None,
+    "surface": None,
+    "microphone_permission": None,
+    "service_enabled": None,
+    "last_error": None,
+    "dictations": 0,
+    "failures": 0,
+    "retries": 0,
+    "busy": 0,
+    "latency_ms": None,
+}
+_DICTATE_LATENCY_SAMPLES: List[int] = []
+_DICTATE_ENGINES = {"on_device", "cloud"}
+_DICTATE_LANGUAGES = {"system", "german", "english", "auto"}
+_DICTATE_STATUS_STYLES = {"auto", "formal", "casual", "concise", "neutral"}
+_DICTATE_SURFACES = {"overlay", "ime"}
+_DICTATE_EVENTS = {"contact", "success", "failure", "retry"}
+_DICTATE_ERRORS = {
+    "no_speech", "language_unavailable", "recognizer_unavailable",
+    "recognizer_busy", "recognizer_other", "mic_permission",
+    "recording_failed", "cloud_auth", "cloud_network", "cloud_server",
+    "cloud_too_large", "cloud_empty", "insert_failed",
+}
+
+
+def _latest_dictate_artifact() -> Optional[Dict[str, Any]]:
+    if not _ARTIFACTS_DIR.is_dir():
+        return None
+    candidates = [
+        path for path in _ARTIFACTS_DIR.iterdir()
+        if path.is_file()
+        and path.suffix.lower() == ".apk"
+        and "dictate" in path.name.lower()
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    stat_result = latest.stat()
+    return {
+        "name": latest.name,
+        "url": f"/api/artifacts/{urllib.parse.quote(latest.name)}",
+        "size": stat_result.st_size,
+        "mtime": int(stat_result.st_mtime),
+    }
+
+
+def _dictate_percentile(values: List[int], percentile: float) -> Optional[int]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * percentile + 0.5)))
+    return ordered[index]
+
+
+@app.get("/api/dictate/status")
+async def get_dictate_status():
+    """Return metadata-only Dictate health; never audio or dictated text."""
+    with _DICTATE_STATUS_LOCK:
+        status = dict(_DICTATE_STATUS)
+        latencies = list(_DICTATE_LATENCY_SAMPLES)
+    attempts = status["dictations"] + status["failures"]
+    return {
+        "schema": "hermes-dictate-status-v1",
+        "connected": status["last_contact_at"] is not None,
+        **status,
+        "success_rate_percent": round(status["dictations"] * 100 / attempts, 1) if attempts else None,
+        "latency_p50_ms": _dictate_percentile(latencies, 0.50),
+        "latency_p95_ms": _dictate_percentile(latencies, 0.95),
+        "apk": _latest_dictate_artifact(),
+    }
+
+
+@app.post("/api/dictate/status")
+async def report_dictate_status(payload: DictateStatusReport):
+    """Accept a bounded heartbeat/event without collecting text or audio."""
+    app_version = payload.app_version.strip()
+    engine = payload.engine.strip().lower()
+    language = payload.language.strip().lower()
+    style = payload.style.strip().lower()
+    surface = payload.surface.strip().lower()
+    event = payload.event.strip().lower()
+    last_error = (payload.last_error or "").strip().lower() or None
+    if not app_version or len(app_version) > 64:
+        raise HTTPException(status_code=400, detail="Invalid app version")
+    if engine not in _DICTATE_ENGINES:
+        raise HTTPException(status_code=400, detail="Invalid dictation engine")
+    if language not in _DICTATE_LANGUAGES:
+        raise HTTPException(status_code=400, detail="Invalid dictation language")
+    if style not in _DICTATE_STATUS_STYLES:
+        raise HTTPException(status_code=400, detail="Invalid dictation style")
+    if surface not in _DICTATE_SURFACES:
+        raise HTTPException(status_code=400, detail="Invalid dictation surface")
+    if event not in _DICTATE_EVENTS:
+        raise HTTPException(status_code=400, detail="Invalid dictation event")
+    if payload.latency_ms is not None and not 0 <= payload.latency_ms <= 120_000:
+        raise HTTPException(status_code=400, detail="Invalid dictation latency")
+    if last_error is not None and last_error not in _DICTATE_ERRORS:
+        raise HTTPException(status_code=400, detail="Invalid dictation error")
+
+    with _DICTATE_STATUS_LOCK:
+        _DICTATE_STATUS.update({
+            "last_contact_at": int(time.time()),
+            "app_version": app_version,
+            "engine": engine,
+            "language": language,
+            "style": style,
+            "surface": surface,
+            "microphone_permission": payload.microphone_permission,
+            "service_enabled": payload.service_enabled,
+        })
+        if payload.latency_ms is not None:
+            _DICTATE_STATUS["latency_ms"] = payload.latency_ms
+        if event == "success":
+            _DICTATE_STATUS["dictations"] += 1
+            _DICTATE_STATUS["last_error"] = None
+            if payload.latency_ms is not None:
+                _DICTATE_LATENCY_SAMPLES.append(payload.latency_ms)
+                del _DICTATE_LATENCY_SAMPLES[:-100]
+        elif event == "failure":
+            _DICTATE_STATUS["failures"] += 1
+            _DICTATE_STATUS["last_error"] = last_error
+            if last_error == "recognizer_busy":
+                _DICTATE_STATUS["busy"] += 1
+        elif event == "retry":
+            _DICTATE_STATUS["retries"] += 1
+        snapshot = dict(_DICTATE_STATUS)
+    return {"ok": True, **snapshot}
 
 
 @app.get("/api/artifacts")
@@ -3681,6 +3841,8 @@ async def check_hermes_update(force: bool = False):
 # enough to reject garbage before it reaches a provider API, not a full tag
 # validator.
 _LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+_DICTATION_APP_CATEGORIES = {"personal", "work", "email", "other"}
+_DICTATION_STYLES = {"formal", "casual", "concise", "neutral"}
 
 
 @app.post("/api/audio/transcribe")
@@ -3720,6 +3882,13 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     language = (payload.language or "").strip() or None
     if language and not _LANGUAGE_TAG_RE.match(language):
         raise HTTPException(status_code=400, detail="Invalid language tag")
+
+    app_category = (payload.app_category or "").strip().lower() or None
+    if app_category and app_category not in _DICTATION_APP_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid app category")
+    style = (payload.style or "").strip().lower() or None
+    if style and style not in _DICTATION_STYLES:
+        raise HTTPException(status_code=400, detail="Invalid dictation style")
 
     temp_path = ""
     try:
@@ -3767,7 +3936,14 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
         loop = asyncio.get_running_loop()
         polish_result = await loop.run_in_executor(
-            None, polish_transcript, transcript, language
+            None,
+            functools.partial(
+                polish_transcript,
+                transcript,
+                language,
+                app_category=app_category,
+                style=style,
+            ),
         )
         transcript = str(polish_result.get("text") or transcript).strip() or transcript
         polished = bool(polish_result.get("polished"))

@@ -29,7 +29,7 @@
     <string name="err_no_speech">Nichts gehört – Diktat gestoppt</string>
     <string name="err_language_unavailable">Offline-Sprachpaket fehlt – in den Android-Einstellungen laden</string>
     <string name="err_recognizer_unavailable">Keine On-Device-Spracherkennung verfügbar (braucht Android 12+ mit Sprachpaket)</string>
-    <string name="err_recognizer_busy">Spracherkennung ist belegt – bitte erneut versuchen</string>
+    <string name="err_recognizer_busy">Mikrofon belegt – Hermes Voice oder anderen Recorder schließen; Hermes versucht begrenzt neu</string>
     <string name="err_recognizer_other">Erkennung fehlgeschlagen – bitte erneut versuchen</string>
     <string name="err_mic_permission">Mikrofon-Berechtigung fehlt – bitte erteilen</string>
     <string name="err_recording_failed">Aufnahme fehlgeschlagen</string>
@@ -60,11 +60,32 @@
     <string name="overlay_hint">Zeigt eine Diktier-Blase über jeder App – kein Tastaturwechsel nötig. Aktivierung erfolgt in den Android-Bedienungshilfen.</string>
     <string name="cloud_preferred_switch">Blase bevorzugt Cloud (statt On-Device)</string>
     <string name="flow_polish_switch">Flow-Polish: Cloud-Text serverseitig glätten (Füllwörter, Satzzeichen)</string>
+    <string name="bubble_size">Blasengröße (70 / 85 / 100 / 115 %)</string>
+    <string name="bubble_opacity">Deckkraft (20 / 40 / 60 / 80 / 100 %)</string>
+    <string name="bubble_shrink">Im Leerlauf verkleinern</string>
+    <string name="local_recovery">Letztes Diktat lokal zur Wiederherstellung merken</string>
+    <string name="copy_recent">Letztes Diktat kopieren</string>
+    <string name="retry_cloud">Cloud-Diktat einmal erneut versuchen</string>
+    <string name="send_to_hermes">Text ausdrücklich als Entwurf an Hermes Voice übergeben</string>
+    <string name="local_refine_switch">Lokale Auto-Edits: Füllwörter, Wiederholungen und Rückkorrekturen</string>
+    <string name="section_dictionary">Persönliches Wörterbuch</string>
+    <string name="dictionary_hint">gesprochen => geschrieben\nhermes agent => Hermes Agent</string>
+    <string name="dictionary_help">Eine Regel pro Zeile. Namen, Fachbegriffe und Akronyme bleiben lokal auf diesem Gerät.</string>
+    <string name="section_snippets">Sprach-Snippets</string>
+    <string name="snippet_hint">terminlink => https://…\nsignatur => Viele Grüße\\nPiet</string>
+    <string name="snippet_help">Sprich den Auslöser als eigenes Segment. \\n in der Ersetzung erzeugt einen Zeilenumbruch.</string>
+    <string name="section_style">Schreibstil</string>
+    <string name="style_auto">Auto</string>
+    <string name="style_neutral">Neutral</string>
+    <string name="style_formal">Formell</string>
+    <string name="style_casual">Locker</string>
+    <string name="style_concise">Knapp</string>
 
     <string name="section_language">Diktiersprache</string>
     <string name="lang_system">Systemsprache</string>
     <string name="lang_de">Deutsch</string>
     <string name="lang_en">Englisch</string>
+    <string name="lang_auto">Auto-Erkennung</string>
     <string name="section_cloud">Cloud-Diktat (Opt-in)</string>
     <string name="cloud_switch">Cloud-Transkription erlauben</string>
     <string name="cloud_hint">Standard ist On-Device: ohne Opt-in verlässt kein Audio das Gerät. Mit Opt-in zeigt die Tastatur einen Cloud-Chip; er gilt pro Diktat und springt danach automatisch auf On-Device zurück. Cloud nutzt deinen eigenen Hermes-Server (%1$s).</string>

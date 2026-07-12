@@ -190,6 +190,37 @@ export const AccountUsageResponseSchema = z.object({
 export type AccountUsageWindow = z.infer<typeof AccountUsageWindowSchema>;
 export type AccountUsageProvider = z.infer<typeof AccountUsageProviderSchema>;
 
+const DictateApkSchema = z.object({
+  name: z.string(),
+  url: z.string(),
+  size: z.coerce.number().catch(0),
+  mtime: z.coerce.number().catch(0),
+});
+
+export const DictateStatusResponseSchema = z.object({
+  schema: z.literal("hermes-dictate-status-v1"),
+  connected: z.boolean().catch(false),
+  last_contact_at: z.coerce.number().nullable().catch(null),
+  app_version: z.string().nullable().catch(null),
+  engine: z.enum(["on_device", "cloud"]).nullable().catch(null),
+  language: z.enum(["system", "german", "english", "auto"]).nullable().catch(null),
+  style: z.enum(["auto", "formal", "casual", "concise", "neutral"]).nullable().catch(null),
+  surface: z.enum(["overlay", "ime"]).nullable().catch(null),
+  microphone_permission: z.boolean().nullable().catch(null),
+  service_enabled: z.boolean().nullable().catch(null),
+  last_error: z.string().nullable().catch(null),
+  dictations: z.coerce.number().catch(0),
+  failures: z.coerce.number().catch(0),
+  retries: z.coerce.number().catch(0),
+  busy: z.coerce.number().catch(0),
+  success_rate_percent: z.coerce.number().nullable().catch(null),
+  latency_ms: z.coerce.number().nullable().catch(null),
+  latency_p50_ms: z.coerce.number().nullable().catch(null),
+  latency_p95_ms: z.coerce.number().nullable().catch(null),
+  apk: DictateApkSchema.nullable().catch(null),
+});
+export type DictateStatusResponse = z.infer<typeof DictateStatusResponseSchema>;
+
 export const PlanSpecRecordSchema = z.object({
   path: z.string().catch(""),
   agent: z.string().catch(""),

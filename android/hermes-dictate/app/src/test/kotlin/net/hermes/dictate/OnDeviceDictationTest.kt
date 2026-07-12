@@ -78,10 +78,10 @@ class OnDeviceDictationTest {
     }
 
     @Test
-    fun `startSegment uses the German default when the language is blank`() {
+    fun `startSegment preserves blank language for auto detection`() {
         val r = mock<SpeechRecognizer>()
         OnDeviceDictation(QueueFactory(r), callbacks, intentFactory).startSegment("")
-        verify(intentFactory).create(eq("de-DE"))
+        verify(intentFactory).create(eq(""))
     }
 
     @Test

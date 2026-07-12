@@ -275,6 +275,65 @@ class TestWebServerEndpoints:
         assert "active_sessions" in data
         assert data["can_update_hermes"] is True
 
+    def test_dictate_status_is_metadata_only_and_exposes_latest_apk(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        apk = tmp_path / "hermes-dictate-1.0.apk"
+        apk.write_bytes(b"apk")
+        monkeypatch.setattr(web_server, "_ARTIFACTS_DIR", tmp_path)
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({
+                "last_contact_at": None,
+                "app_version": None,
+                "engine": None,
+                "language": None,
+                "style": None,
+                "surface": None,
+                "microphone_permission": None,
+                "service_enabled": None,
+                "last_error": None,
+                "dictations": 0,
+                "failures": 0,
+                "retries": 0,
+                "busy": 0,
+                "latency_ms": None,
+            })
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+
+        report = {
+            "app_version": "1.0",
+            "engine": "on_device",
+            "language": "german",
+            "style": "formal",
+            "surface": "overlay",
+            "microphone_permission": True,
+            "service_enabled": True,
+            "event": "success",
+            "latency_ms": 840,
+        }
+        response = self.client.post("/api/dictate/status", json=report)
+        assert response.status_code == 200
+
+        status = self.client.get("/api/dictate/status").json()
+        assert status["schema"] == "hermes-dictate-status-v1"
+        assert status["connected"] is True
+        assert status["dictations"] == 1
+        assert status["latency_ms"] == 840
+        assert status["success_rate_percent"] == 100.0
+        assert status["latency_p50_ms"] == 840
+        assert status["latency_p95_ms"] == 840
+        assert status["busy"] == 0
+        assert status["apk"]["name"] == apk.name
+        assert status["apk"]["url"] == f"/api/artifacts/{apk.name}"
+        assert "transcript" not in status
+        assert "audio" not in status
+
+        rejected = self.client.post(
+            "/api/dictate/status",
+            json={**report, "transcript": "must never be accepted"},
+        )
+        assert rejected.status_code == 422
+
     def test_gateway_drain_begin_writes_marker(self):
         from gateway import drain_control
 
@@ -1196,6 +1255,44 @@ class TestWebServerEndpoints:
         payload = resp.json()
         assert payload["polished"] is True
         assert payload["transcript"] == "Hallo, das ist ein Test."
+
+    def test_audio_transcription_passes_allowlisted_category_and_style_to_polish(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        monkeypatch.setattr(
+            transcription_tools,
+            "transcribe_audio",
+            lambda path, **kwargs: {
+                "success": True,
+                "transcript": "hallo piet",
+                "provider": "test",
+            },
+        )
+        captured = {}
+
+        def fake_polish(text, language, **kwargs):
+            captured.update({"text": text, "language": language, **kwargs})
+            return {"text": "Hallo Piet.", "polished": True}
+
+        monkeypatch.setattr(transcription_tools, "polish_transcript", fake_polish)
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "language": "de",
+                "polish": True,
+                "app_category": "email",
+                "style": "formal",
+            },
+        )
+        assert resp.status_code == 200
+        assert captured == {
+            "text": "hallo piet",
+            "language": "de",
+            "app_category": "email",
+            "style": "formal",
+        }
 
     def test_audio_transcription_rejects_invalid_base64(self):
         resp = self.client.post(

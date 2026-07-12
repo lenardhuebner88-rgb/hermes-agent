@@ -14,8 +14,8 @@
 
     <ImageButton
         android:id="@+id/pill_cancel"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
         android:background="@android:color/transparent"
         android:src="@drawable/ic_close"
         android:padding="12dp"
@@ -36,10 +36,20 @@
         android:textSize="14sp"
         android:text="@string/status_listening" />
 
+    <Button
+        android:id="@+id/pill_hermes"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:background="@drawable/bg_key"
+        android:contentDescription="@string/send_to_hermes"
+        android:text="H"
+        android:textColor="@color/accent"
+        android:textStyle="bold" />
+
     <ImageButton
         android:id="@+id/pill_confirm"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
         android:background="@android:color/transparent"
         android:src="@drawable/ic_check"
         android:backgroundTint="@color/accent"

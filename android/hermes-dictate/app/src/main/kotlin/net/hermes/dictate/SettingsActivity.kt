@@ -8,12 +8,15 @@ import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.RadioGroup
+import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import java.util.concurrent.Executors
 
 class SettingsActivity : ComponentActivity() {
@@ -58,19 +61,77 @@ class SettingsActivity : ComponentActivity() {
         flowPolishSwitch.isChecked = prefs.flowPolish
         flowPolishSwitch.setOnCheckedChangeListener { _, checked -> prefs.flowPolish = checked }
 
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        val localRefineSwitch = findViewById<Switch>(R.id.local_refine_switch)
+        localRefineSwitch.isChecked = prefs.localRefine
+        localRefineSwitch.setOnCheckedChangeListener { _, checked -> prefs.localRefine = checked }
+
+        findViewById<SeekBar>(R.id.bubble_size_seek).apply {
+            progress = prefs.overlayBubbleSize
+            setOnSeekBarChangeListener(prefListener { prefs.overlayBubbleSize = it })
+        }
+        findViewById<SeekBar>(R.id.bubble_opacity_seek).apply {
+            progress = prefs.overlayBubbleOpacity
+            setOnSeekBarChangeListener(prefListener { prefs.overlayBubbleOpacity = it })
+        }
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        findViewById<Switch>(R.id.bubble_shrink_switch).apply {
+            isChecked = prefs.overlayShrinkIdle
+            setOnCheckedChangeListener { _, checked -> prefs.overlayShrinkIdle = checked }
+        }
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        findViewById<Switch>(R.id.local_recovery_switch).apply {
+            isChecked = prefs.localRecoveryEnabled
+            setOnCheckedChangeListener { _, checked ->
+                prefs.localRecoveryEnabled = checked
+                if (!checked) prefs.lastRecoveryText = ""
+            }
+        }
+
+        findViewById<EditText>(R.id.dictionary_editor).apply {
+            setText(prefs.dictionaryRules)
+            doAfterTextChanged { prefs.dictionaryRules = it?.toString().orEmpty() }
+        }
+        findViewById<EditText>(R.id.snippet_editor).apply {
+            setText(prefs.snippetRules)
+            doAfterTextChanged { prefs.snippetRules = it?.toString().orEmpty() }
+        }
+
         val radioGroup = findViewById<RadioGroup>(R.id.language_group)
         radioGroup.check(
-            when (prefs.languageTag) {
-                "de-DE" -> R.id.radio_de
-                "en-US" -> R.id.radio_en
-                else -> R.id.radio_system
+            when (prefs.languageMode) {
+                LanguageMode.GERMAN -> R.id.radio_de
+                LanguageMode.ENGLISH -> R.id.radio_en
+                LanguageMode.AUTO -> R.id.radio_auto
+                LanguageMode.SYSTEM -> R.id.radio_system
             },
         )
         radioGroup.setOnCheckedChangeListener { _, checkedId ->
-            prefs.languageTag = when (checkedId) {
-                R.id.radio_de -> "de-DE"
-                R.id.radio_en -> "en-US"
-                else -> null
+            prefs.languageMode = when (checkedId) {
+                R.id.radio_de -> LanguageMode.GERMAN
+                R.id.radio_en -> LanguageMode.ENGLISH
+                R.id.radio_auto -> LanguageMode.AUTO
+                else -> LanguageMode.SYSTEM
+            }
+        }
+
+        val styleGroup = findViewById<RadioGroup>(R.id.style_group)
+        styleGroup.check(
+            when (prefs.styleOverride) {
+                "neutral" -> R.id.style_neutral
+                "formal" -> R.id.style_formal
+                "casual" -> R.id.style_casual
+                "concise" -> R.id.style_concise
+                else -> R.id.style_auto
+            },
+        )
+        styleGroup.setOnCheckedChangeListener { _, checkedId ->
+            prefs.styleOverride = when (checkedId) {
+                R.id.style_neutral -> "neutral"
+                R.id.style_formal -> "formal"
+                R.id.style_casual -> "casual"
+                R.id.style_concise -> "concise"
+                else -> "auto"
             }
         }
 
@@ -107,6 +168,14 @@ class SettingsActivity : ComponentActivity() {
         if (requested && !micGranted()) {
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    private fun prefListener(save: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) save(progress)
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
 
     private fun micGranted(): Boolean =

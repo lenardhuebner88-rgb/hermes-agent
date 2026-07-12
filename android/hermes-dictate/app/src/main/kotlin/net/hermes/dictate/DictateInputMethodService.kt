@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -37,23 +38,32 @@ class DictateInputMethodService :
     OnDeviceDictation.Callbacks,
     CloudRecorder.Events {
 
-    private val controller = DictationController()
+    private lateinit var controller: DictationController
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var prefs: DictatePrefs
     private lateinit var uploadExecutor: ExecutorService
+    private lateinit var statusExecutor: ExecutorService
 
     private var dictation: OnDeviceDictation? = null
     private var recorder: CloudRecorder? = null
     private val transcriber by lazy {
         CloudTranscriber(DictateConfig.TRANSCRIBE_URL, WebViewCookieStore(), UrlConnectionTransport())
     }
+    private val statusReporter by lazy {
+        DictateStatusReporter(DictateConfig.STATUS_URL, WebViewCookieStore(), UrlConnectionTransport())
+    }
 
     /** Audio captured for the cloud path, alive only between StopRecording and Upload. */
     private var pendingAudio: ByteArray? = null
+    private var cloudAppCategory: String? = null
+    private var cloudStyle: String? = null
+    private var cloudPolishAllowed = true
 
     /** Field text before the current composing region; basis for spacing/capitalization. */
     private var segmentBefore: CharSequence? = null
     private var composingActive = false
+    private var lastCommittedText: String? = null
+    private var dictationStartedAtMs: Long? = null
 
     private var panel: View? = null
     private var statusView: TextView? = null
@@ -69,9 +79,18 @@ class DictateInputMethodService :
     override fun onCreate() {
         super.onCreate()
         prefs = DictatePrefs(this)
+        val pipeline = DictationTextPipeline(
+            dictionaryRules = { prefs.dictionaryRules },
+            snippetRules = { prefs.snippetRules },
+            languageTag = { prefs.recognitionLanguageTag.takeIf(String::isNotBlank) },
+            localRefine = { prefs.localRefine },
+        )
+        controller = DictationController(pipeline::process)
         uploadExecutor = Executors.newSingleThreadExecutor()
+        statusExecutor = Executors.newSingleThreadExecutor()
         // A process killed mid-recording must not leave audio in the cache indefinitely.
         CloudRecorder.cleanupStale(this)
+        reportStatus(DictateStatusEvent.CONTACT)
     }
 
     override fun onDestroy() {
@@ -79,6 +98,7 @@ class DictateInputMethodService :
         dictation?.destroy()
         recorder?.abort()
         uploadExecutor.shutdownNow()
+        statusExecutor.shutdownNow()
         micPulse?.cancel()
         micPulse = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -163,6 +183,7 @@ class DictateInputMethodService :
             )
             return
         }
+        dictationStartedAtMs = SystemClock.elapsedRealtime()
         run(controller.micTapped())
     }
 
@@ -184,6 +205,8 @@ class DictateInputMethodService :
                 is Cmd.Upload -> startUpload(cmd.token)
                 is Cmd.Preview -> showPreview(cmd.text)
                 is Cmd.CommitSegment -> commitSegment(cmd.text)
+                Cmd.UndoLastSegment -> undoLastSegment()
+                Cmd.DeleteLastSentence -> deleteLastSentence()
                 Cmd.ClearPreview -> clearPreview()
                 is Cmd.Status -> applyStatus(cmd.status)
                 Cmd.ModeChanged -> refreshModeChip()
@@ -208,17 +231,21 @@ class DictateInputMethodService :
                 DefaultRecognizeIntentFactory(callingPackage = packageName),
             ).also { dictation = it }
         }
-        if (!d.startSegment(prefs.languageTag ?: "")) {
+        if (!d.startSegment(prefs.recognitionLanguageTag)) {
             // If the recognizer rejected the segment, it is likely wedged. Destroy the instance,
             // rebind a fresh one, and retry once.
             d.recreate()
-            if (!d.startSegment(prefs.languageTag ?: "")) {
+            if (!d.startSegment(prefs.recognitionLanguageTag)) {
                 mainHandler.post { run(controller.recognizerError(RecognizerFailure.BUSY)) }
             }
         }
     }
 
     private fun startRecording() {
+        val packageName = currentInputEditorInfo?.packageName
+        cloudAppCategory = DictationContext.category(packageName).wireName()
+        cloudStyle = prefs.styleForPackage(packageName)
+        cloudPolishAllowed = !SensitiveFieldPolicy.isSensitive(currentInputEditorInfo?.inputType ?: 0)
         val r = recorder ?: CloudRecorder(this, this).also { recorder = it }
         if (!r.start()) {
             mainHandler.post { run(controller.recordingError()) }
@@ -243,8 +270,12 @@ class DictateInputMethodService :
                 audio,
                 "audio/mp4",
                 language = prefs.languageHint,
-                polish = prefs.flowPolish,
+                polish = prefs.flowPolish && cloudPolishAllowed,
+                appCategory = cloudAppCategory,
+                style = cloudStyle,
             )
+            cloudAppCategory = null
+            cloudStyle = null
             mainHandler.post { run(controller.uploadFinished(token, outcome)) }
         }
     }
@@ -288,10 +319,31 @@ class DictateInputMethodService :
         // With an active composing region the live before-cursor text would include the
         // preview itself — use the snapshot from the segment start instead.
         val basis = if (composingActive) segmentBefore else ic.getTextBeforeCursor(64, 0)
+        val formatted = CommitFormatter.format(basis, text)
         ic.beginBatchEdit()
-        ic.commitText(CommitFormatter.format(basis, text), 1)
+        ic.commitText(formatted, 1)
         ic.endBatchEdit()
+        lastCommittedText = formatted
         composingActive = false
+        reportStatus(DictateStatusEvent.SUCCESS)
+    }
+
+    private fun undoLastSegment() {
+        val ic = currentInputConnection ?: return
+        val inserted = lastCommittedText ?: return
+        val before = ic.getTextBeforeCursor(inserted.length, 0)?.toString().orEmpty()
+        if (before == inserted) {
+            ic.deleteSurroundingText(inserted.length, 0)
+            lastCommittedText = null
+        }
+    }
+
+    private fun deleteLastSentence() {
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(2_000, 0)?.toString().orEmpty()
+        val edit = DictationEdits.deleteLastSentence(before, before.length) ?: return
+        ic.deleteSurroundingText(edit.deletedChars, 0)
+        lastCommittedText = null
     }
 
     private fun clearPreview() {
@@ -394,11 +446,37 @@ class DictateInputMethodService :
                 mainHandler.postDelayed(statusResetRunnable, 2_500)
             }
             is UiStatus.Failed -> {
+                reportStatus(DictateStatusEvent.FAILURE, error = status.kind)
                 showStatus(getString(errorText(status.kind)), error = true)
                 mainHandler.postDelayed(statusResetRunnable, 5_000)
             }
         }
         refreshMicVisual()
+    }
+
+    private fun reportStatus(event: DictateStatusEvent, error: ErrorKind? = null) {
+        // The existing cloud switch is the user's explicit network opt-in. Metadata must not
+        // create a new outbound channel while privacy-first on-device mode is selected.
+        if (!prefs.cloudEnabled || !::statusExecutor.isInitialized || statusExecutor.isShutdown) return
+        val latency = if (event == DictateStatusEvent.SUCCESS) {
+            dictationStartedAtMs?.let { (SystemClock.elapsedRealtime() - it).coerceAtLeast(0) }
+        } else null
+        if (event == DictateStatusEvent.SUCCESS || event == DictateStatusEvent.FAILURE) {
+            dictationStartedAtMs = null
+        }
+        val snapshot = DictateStatusSnapshot(
+            appVersion = DictateAppVersion.current(this),
+            engine = if (controller.mode == Mode.CLOUD) "cloud" else "on_device",
+            language = prefs.languageMode.name.lowercase(),
+            style = prefs.styleOverride,
+            surface = "ime",
+            microphonePermission = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+            serviceEnabled = true,
+            event = event,
+            latencyMs = latency,
+            lastError = error?.name?.lowercase(),
+        )
+        statusExecutor.execute { statusReporter.report(snapshot) }
     }
 
     private fun errorText(kind: ErrorKind): Int = when (kind) {

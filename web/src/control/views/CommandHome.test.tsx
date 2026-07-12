@@ -23,6 +23,7 @@ const hooks = vi.hoisted(() => {
     useDecisionInbox: vi.fn(),
     useSystemHealth: vi.fn(),
     useAccountUsage: vi.fn(),
+    useDictateStatus: vi.fn(),
     useHermesWorkers: vi.fn(),
     useHermesTodayDigest: vi.fn(),
     useBoard: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("../hooks/useControlData", () => ({
   useDecisionInbox: hooks.useDecisionInbox,
   useSystemHealth: hooks.useSystemHealth,
   useAccountUsage: hooks.useAccountUsage,
+  useDictateStatus: hooks.useDictateStatus,
   useHermesWorkers: hooks.useHermesWorkers,
   useHermesTodayDigest: hooks.useHermesTodayDigest,
   useBoard: hooks.useBoard,
@@ -116,6 +118,28 @@ function installCommandHomeFixtures() {
     }],
     cache_ttl_seconds: 300,
   }));
+  hooks.useDictateStatus.mockReturnValue(hooks.poll({
+    schema: "hermes-dictate-status-v1",
+    connected: true,
+    last_contact_at: 1,
+    app_version: "1.0",
+    engine: "on_device",
+    language: "german",
+    style: "formal",
+    surface: "overlay",
+    microphone_permission: true,
+    service_enabled: true,
+    last_error: null,
+    dictations: 3,
+    failures: 0,
+    retries: 0,
+    busy: 0,
+    success_rate_percent: 100,
+    latency_ms: 700,
+    latency_p50_ms: 700,
+    latency_p95_ms: 700,
+    apk: null,
+  }));
   hooks.useHermesWorkers.mockReturnValue(hooks.poll({ workers: [], count: 0, cap: 3, checked_at: 1 }));
   hooks.useHermesTodayDigest.mockReturnValue(hooks.poll({ schema: "kanban-today-digest-v1", generated_at: "2026-07-05T12:00:00Z", shipped_today: 3, lead_time_p50_seconds: null, by_assignee: [] }));
   hooks.useBoard.mockReturnValue(hooks.poll({ columns: [{ name: "held", tasks: [{ id: "t_held", title: "Held", status: "held" }] }], generated_at: 1 }));
@@ -170,6 +194,7 @@ describe("CommandHome", () => {
     expect(html).toContain("Held Task braucht Fix-Redispatch");
     expect(html).toContain("System-/Kosten-Puls");
     expect(html).toContain("Max Limit");
+    expect(html).toContain("Hermes Diktat");
     expect(html).toContain("Quick-Jumps");
     expect(html).toContain("Fleet");
     expect(html).toContain("System");

@@ -6,6 +6,7 @@ import type { KnowledgeCatalog } from "../views/knowledge/knowledge.helpers";
 import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
 import {
   AccountUsageResponseSchema,
+  DictateStatusResponseSchema,
   BacklogDetailSchema,
   BacklogResponseSchema,
   OrchestrationDetailSchema,
@@ -72,7 +73,7 @@ import {
   ReleaseModeResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
+import type { DictateStatusResponse, TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse, LanesCatalogResponse } from "../lib/schemas";
@@ -813,6 +814,18 @@ export function useAccountUsage() {
     "account-usage",
     async () => parseOrThrow(AccountUsageResponseSchema, await fetchJSON<unknown>("/api/account-usage"), "account-usage"),
     60000,
+  );
+}
+
+export function useDictateStatus() {
+  return usePolling<DictateStatusResponse>(
+    "dictate-status",
+    async () => parseOrThrow(
+      DictateStatusResponseSchema,
+      await fetchJSON<unknown>("/api/dictate/status"),
+      "dictate-status",
+    ),
+    15_000,
   );
 }
 

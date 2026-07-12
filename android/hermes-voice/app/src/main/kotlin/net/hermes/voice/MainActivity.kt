@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
     /** True while we are asking for POST_NOTIFICATIONS ahead of a screen-capture start. */
     private var pendingCaptureStartAfterNotificationPrompt = false
     private val phoneActionGate = PhoneActionExecutionGate()
+    private var pendingDictationDraft: String? = null
 
     private val webPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -85,7 +86,19 @@ class MainActivity : ComponentActivity() {
         setContentView(webView)
         configureWebView()
         setupBridge()
+        captureDictationDraft(intent)
         webView.loadUrl(VoiceAppConfig.VOICE_URL)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        captureDictationDraft(intent)
+    }
+
+    private fun captureDictationDraft(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return
+        pendingDictationDraft = intent.getStringExtra(Intent.EXTRA_TEXT)
+            ?.trim()?.take(4_000)?.takeIf { it.isNotEmpty() }
     }
 
     override fun onDestroy() {
@@ -216,6 +229,10 @@ class MainActivity : ComponentActivity() {
         when (message) {
             is WebToNativeMessage.BridgeReady -> {
                 HermesBridge.send(NativeToWebMessage.NativeCapabilities)
+                pendingDictationDraft?.let {
+                    HermesBridge.send(NativeToWebMessage.DictationDraft(it))
+                    pendingDictationDraft = null
+                }
             }
             is WebToNativeMessage.StartScreenCapture -> handleStartScreenCaptureRequested()
             is WebToNativeMessage.StopScreenCapture -> handleStopScreenCaptureRequested()

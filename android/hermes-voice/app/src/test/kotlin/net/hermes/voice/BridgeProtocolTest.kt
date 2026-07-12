@@ -7,6 +7,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BridgeProtocolTest {
+    @Test
+    fun `dictation draft is bounded and never auto-executes`() {
+        val json = JSONObject(
+            BridgeProtocol.serializeNativeToWeb(NativeToWebMessage.DictationDraft("x".repeat(5_000))),
+        )
+        assertEquals("dictation_draft", json.getString("type"))
+        assertEquals(4_000, json.getString("text").length)
+        assertTrue(!json.has("send"))
+    }
 
     @Test
     fun `parses valid bridge_ready message`() {

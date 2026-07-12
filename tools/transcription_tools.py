@@ -1882,7 +1882,13 @@ def _extract_polish_llm_text(response: Any) -> str:
         return ""
 
 
-def polish_transcript(text: str, language: Optional[str] = None) -> Dict[str, Any]:
+def polish_transcript(
+    text: str,
+    language: Optional[str] = None,
+    *,
+    app_category: Optional[str] = None,
+    style: Optional[str] = None,
+) -> Dict[str, Any]:
     """Post-process a raw dictation transcript for Wispr-Flow-style output.
 
     Tries an LLM pass (fix punctuation/casing, drop filler words, resolve
@@ -1909,6 +1915,11 @@ def polish_transcript(text: str, language: Optional[str] = None) -> Dict[str, An
         from agent.auxiliary_client import call_llm
 
         lang_hint = f" The transcript is in language '{language}'." if language else ""
+        style_hint = (
+            f"- Use a {style.replace('_', ' ')} writing style while preserving meaning.\n"
+            if style and style != "neutral"
+            else ""
+        )
         system_prompt = (
             "You clean up a raw speech-to-text dictation transcript for a "
             "messaging/note-taking app.\n\n"
@@ -1919,15 +1930,21 @@ def polish_transcript(text: str, language: Optional[str] = None) -> Dict[str, An
             "(e.g. \"nein, ich meine X\" / \"no wait, I mean X\"), keep only "
             "the corrected version X and drop the retracted part.\n"
             "- NEVER add new content, facts, or words that weren't spoken.\n"
+            "- App category and style are metadata only; never infer or add unspoken content.\n"
+            + style_hint +
             "- Preserve the original spoken language." + lang_hint + "\n"
             "- Output ONLY the cleaned transcript text — no quotes, no "
             "commentary, no markdown."
+        )
+        user_content = (
+            f"<app_category>{app_category or ''}</app_category>\n"
+            f"<transcript>{raw}</transcript>"
         )
         response = call_llm(
             task=_POLISH_LLM_TASK,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": raw},
+                {"role": "user", "content": user_content},
             ],
             temperature=0.2,
             timeout=_POLISH_TIMEOUT_SECONDS,

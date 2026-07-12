@@ -30,6 +30,7 @@ import {
   useAccountUsage,
   useBoard,
   useDecisionInbox,
+  useDictateStatus,
   useFixRedispatch,
   useRepairDeliverable,
   useVetoEscalation,
@@ -50,6 +51,7 @@ import { KpiTile, RoleChip, SignalChip, SignalLabel, type SignalTone } from "../
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
+import { DictateStatusTile } from "../components/DictateStatusTile";
 import "./command-home.css";
 
 const SURFACE: Record<InboxSurface, { label: string; tone: SignalTone }> = {
@@ -85,6 +87,7 @@ export function CommandHome({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
+  const dictate = useDictateStatus();
   // Der Surface-Filter lebt NUR im URL-Param (?surface=) — abgeleitet statt
   // als State-Spiegel (der frühere Sync-Effect verletzte react-hooks/
   // set-state-in-effect und konnte mit Taps um den Zustand konkurrieren).
@@ -194,6 +197,8 @@ export function CommandHome({ density }: { density: Density }) {
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
+
+      <DictateStatusTile status={dictate.data} loading={dictate.loading && !dictate.data} error={dictate.error} />
 
       {/* ── STRATEGEN-VORSCHLÄGE ────────────────────────────────────────────── */}
       <StrategistSignalTile onOpen={() => navigate("/control/stratege")} />

@@ -28,6 +28,9 @@ sealed class Cmd {
     /** Commit a finished segment (already punctuation-mapped) into the field. */
     data class CommitSegment(val text: String) : Cmd()
 
+    object UndoLastSegment : Cmd()
+    object DeleteLastSentence : Cmd()
+
     object ClearPreview : Cmd()
     data class Status(val status: UiStatus) : Cmd()
 
@@ -93,7 +96,9 @@ sealed class CloudOutcome {
  * ON_DEVICE, and failures surface visibly instead of silently retrying cloud.
  */
 class DictationController(
-    private val map: (String) -> String = PunctuationMapper::map,
+    private val transform: (String) -> DictationTransform = {
+        DictationTransform.Text(PunctuationMapper.map(it))
+    },
 ) {
     enum class Phase { IDLE, LISTENING, STOPPING, RECORDING, WAITING_FILE, UPLOADING }
 
@@ -105,6 +110,8 @@ class DictationController(
     private var emptyRounds = 0
     private var busyRestarts = 0
     private var uploadToken = 0
+    private var retryAvailable = false
+    private var retryConsumed = false
 
     fun micTapped(): List<Cmd> = when (phase) {
         Phase.IDLE -> {
@@ -141,28 +148,31 @@ class DictationController(
 
     fun recognizerPartial(text: String): List<Cmd> {
         if (phase != Phase.LISTENING && phase != Phase.STOPPING) return emptyList()
-        val mapped = map(text)
-        return if (mapped.isEmpty()) emptyList() else listOf(Cmd.Preview(mapped))
+        val result = transform(text)
+        return if (result is DictationTransform.Text && result.value.isNotEmpty()) {
+            listOf(Cmd.Preview(result.value))
+        } else {
+            emptyList()
+        }
     }
 
     fun recognizerFinal(text: String): List<Cmd> = when (phase) {
         Phase.LISTENING -> {
-            val mapped = map(text)
-            if (mapped.isEmpty()) {
+            val result = transform(text)
+            if (result is DictationTransform.Text && result.value.isEmpty()) {
                 emptySegmentRound()
             } else {
                 emptyRounds = 0
-                // Chain: commit this segment and immediately start the next one.
-                listOf(Cmd.CommitSegment(mapped), Cmd.StartRecognizer)
+                commandsFor(result) + Cmd.StartRecognizer
             }
         }
         Phase.STOPPING -> {
             phase = Phase.IDLE
-            val mapped = map(text)
-            if (mapped.isEmpty()) {
+            val result = transform(text)
+            if (result is DictationTransform.Text && result.value.isEmpty()) {
                 listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
             } else {
-                listOf(Cmd.CommitSegment(mapped), Cmd.Status(UiStatus.Idle))
+                commandsFor(result) + Cmd.Status(UiStatus.Idle)
             }
         }
         else -> emptyList()
@@ -209,6 +219,8 @@ class DictationController(
     fun recordingReady(ok: Boolean): List<Cmd> {
         if (phase != Phase.WAITING_FILE) return listOf(Cmd.AbortRecording)
         return if (ok) {
+            retryAvailable = false
+            retryConsumed = false
             phase = Phase.UPLOADING
             uploadToken += 1
             listOf(Cmd.Upload(uploadToken), Cmd.Status(UiStatus.Uploading))
@@ -226,20 +238,37 @@ class DictationController(
         val cmds = resetModeToOnDevice().toMutableList()
         when (outcome) {
             is CloudOutcome.Success -> {
-                val mapped = map(outcome.transcript)
-                if (mapped.isEmpty()) {
+                retryAvailable = false
+                val result = transform(outcome.transcript)
+                if (result is DictationTransform.Text && result.value.isEmpty()) {
                     cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_EMPTY))
                 } else {
-                    cmds += Cmd.CommitSegment(mapped)
+                    cmds += commandsFor(result)
                     cmds += Cmd.Status(UiStatus.CloudDone(outcome.provider))
                 }
             }
             CloudOutcome.AuthRequired -> cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_AUTH))
-            is CloudOutcome.Network -> cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_NETWORK))
-            is CloudOutcome.Server -> cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_SERVER))
+            is CloudOutcome.Network -> {
+                retryAvailable = !retryConsumed
+                cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_NETWORK))
+            }
+            is CloudOutcome.Server -> {
+                retryAvailable = !retryConsumed
+                cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_SERVER))
+            }
             CloudOutcome.TooLarge -> cmds += Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_TOO_LARGE))
         }
         return cmds
+    }
+
+    /** Exactly one explicit retry is allowed for the most recent retryable cloud failure. */
+    fun retryCloud(): List<Cmd> {
+        if (phase != Phase.IDLE || !retryAvailable || retryConsumed) return emptyList()
+        retryAvailable = false
+        retryConsumed = true
+        uploadToken += 1
+        phase = Phase.UPLOADING
+        return listOf(Cmd.Upload(uploadToken), Cmd.Status(UiStatus.Uploading))
     }
 
     /**
@@ -291,6 +320,12 @@ class DictationController(
         } else {
             listOf(Cmd.ClearPreview, Cmd.StartRecognizer)
         }
+    }
+
+    private fun commandsFor(result: DictationTransform): List<Cmd> = when (result) {
+        is DictationTransform.Text -> listOf(Cmd.CommitSegment(result.value))
+        DictationTransform.UndoLastSegment -> listOf(Cmd.ClearPreview, Cmd.UndoLastSegment)
+        DictationTransform.DeleteLastSentence -> listOf(Cmd.ClearPreview, Cmd.DeleteLastSentence)
     }
 
     private fun failStop(kind: ErrorKind): List<Cmd> {

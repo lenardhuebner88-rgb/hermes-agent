@@ -44,6 +44,8 @@ class CloudTranscriber(
         mimeType: String,
         language: String? = null,
         polish: Boolean = false,
+        appCategory: String? = null,
+        style: String? = null,
     ): CloudOutcome {
         if (audio.isEmpty()) return CloudOutcome.Server("Empty recording")
         if (audio.size > MAX_AUDIO_BYTES) return CloudOutcome.TooLarge
@@ -56,6 +58,10 @@ class CloudTranscriber(
                 // opt-in dictation polish pass; both default off server-side for compatibility.
                 language?.takeIf { it.isNotBlank() }?.let { put("language", it) }
                 if (polish) put("polish", true)
+                appCategory?.takeIf { it in ALLOWED_APP_CATEGORIES }?.let {
+                    put("app_category", it)
+                }
+                style?.takeIf { it in ALLOWED_STYLES }?.let { put("style", it) }
             }
             .toString()
             .toByteArray(Charsets.UTF_8)
@@ -120,5 +126,8 @@ class CloudTranscriber(
 
         /** Whisper-class transcription of a multi-minute clip can take a while server-side. */
         const val READ_TIMEOUT_MS = 90_000
+
+        private val ALLOWED_STYLES = setOf("formal", "casual", "concise", "neutral")
+        private val ALLOWED_APP_CATEGORIES = setOf("personal", "work", "email", "other")
     }
 }

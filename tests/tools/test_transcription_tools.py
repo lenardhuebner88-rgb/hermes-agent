@@ -1713,6 +1713,36 @@ class TestPolishTranscript:
         assert captured["timeout"] == 8.0
         assert captured["task"] == "stt_dictation_polish"
 
+    def test_app_category_and_style_are_metadata_without_field_context(self, monkeypatch):
+        from tools.transcription_tools import polish_transcript
+
+        class _Message:
+            content = "Hallo Piet."
+
+        class _Choice:
+            message = _Message()
+
+        class _Response:
+            choices = [_Choice()]
+
+        captured = {}
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kwargs: captured.update(kwargs) or _Response(),
+        )
+        result = polish_transcript(
+            "hallo piet",
+            "de",
+            app_category="email",
+            style="formal",
+        )
+        assert result["polished"] is True
+        assert "metadata only" in captured["messages"][0]["content"]
+        assert "formal writing style" in captured["messages"][0]["content"]
+        user = captured["messages"][1]["content"]
+        assert "<app_category>email</app_category>" in user
+        assert "context_before" not in user
+
     def test_llm_error_falls_back_to_deterministic(self, monkeypatch):
         from tools.transcription_tools import polish_transcript
 

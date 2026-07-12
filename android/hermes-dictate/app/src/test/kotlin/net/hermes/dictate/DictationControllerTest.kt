@@ -35,6 +35,16 @@ class DictationControllerTest {
     }
 
     @Test
+    fun `explicit spoken edit command clears preview edits and keeps listening`() {
+        val c = DictationController { LocalFlowRefiner.transform(it, "de-DE") }
+        c.micTapped()
+        assertEquals(
+            listOf<Cmd>(Cmd.ClearPreview, Cmd.UndoLastSegment, Cmd.StartRecognizer),
+            c.recognizerFinal("nein zurück"),
+        )
+    }
+
+    @Test
     fun `two consecutive dictations work without restarting the IME`() {
         val c = controller()
         // First dictation: tap, final, stop tap, final.
@@ -203,6 +213,21 @@ class DictationControllerTest {
         assertTrue(cmds.contains(Cmd.Status(UiStatus.Failed(ErrorKind.CLOUD_NETWORK))))
         assertTrue(cmds.contains(Cmd.ModeChanged))
         assertEquals(Mode.ON_DEVICE, c.mode)
+    }
+
+    @Test
+    fun `retryable cloud failure permits exactly one explicit retry`() {
+        val c = controller()
+        c.cloudToggleTapped(true)
+        c.micTapped()
+        c.micTapped()
+        val first = (c.recordingReady(true).first() as Cmd.Upload).token
+        c.uploadFinished(first, CloudOutcome.Network("timeout"))
+        val retry = c.retryCloud()
+        assertTrue(retry.first() is Cmd.Upload)
+        val retryToken = (retry.first() as Cmd.Upload).token
+        c.uploadFinished(retryToken, CloudOutcome.Network("again"))
+        assertEquals(emptyList<Cmd>(), c.retryCloud())
     }
 
     @Test

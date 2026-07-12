@@ -323,6 +323,29 @@ def test_native_bridge_ignores_malformed_and_unknown_messages():
     assert result.returncode == 0, result.stderr
 
 
+def test_dictation_handoff_populates_draft_without_auto_sending():
+    result = _run_node_harness(
+        """
+        handleNativeBridgeMessage(JSON.stringify({
+          v: 1, type: "dictation_draft", text: "Trage 82,4 Kilo ein"
+        }));
+        if (elements["composer-input"].value !== "Trage 82,4 Kilo ein") {
+          throw new Error("dictation draft was not populated");
+        }
+        if (!elements["composer-input"].focused) {
+          throw new Error("dictation draft did not focus composer");
+        }
+        if (!elements["status-detail"].textContent.includes("bestätigen")) {
+          throw new Error("explicit confirmation hint missing");
+        }
+        if (sentToNative.some((message) => message.type === "send")) {
+          throw new Error("draft receipt must never auto-send");
+        }
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_native_screen_share_start_stop_and_frame_gating():
     result = _run_node_harness(
         """
