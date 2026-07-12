@@ -7400,6 +7400,12 @@ def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client
             )
             # allowed kind
             kb._append_event(conn, ta, "heartbeat", {"note": "alpha beat"}, run_id=ra)
+            # allowed kind with a malformed payload as persisted in task_events
+            conn.execute(
+                "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'blocked', '{malformed', ?)",
+                (ta, ra, now),
+            )
             # allowed kind with null note
             kb._append_event(conn, tb, "claimed", None, run_id=rb)
             # noise kind (excluded by allowlist)
@@ -7407,12 +7413,15 @@ def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client
     finally:
         conn.close()
 
-    data = client.get("/api/plugins/kanban/runs/live-events").json()
-    assert data["count"] == 2
-    assert [e["kind"] for e in data["events"]] == ["claimed", "heartbeat"]
-    assert data["events"][1]["task_title"] == "alpha"
-    assert data["events"][1]["profile"] == "coder"
-    assert data["events"][1]["note"] == "alpha beat"
+    response = client.get("/api/plugins/kanban/runs/live-events")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 3
+    assert [e["kind"] for e in data["events"]] == ["claimed", "blocked", "heartbeat"]
+    assert data["events"][2]["task_title"] == "alpha"
+    assert data["events"][2]["profile"] == "coder"
+    assert data["events"][2]["note"] == "alpha beat"
+    assert data["events"][1]["note"] is None
     assert data["events"][0]["task_id"] == tb
     assert "latest_id" in data and data["latest_id"] is not None
     assert "checked_at" in data
@@ -7422,8 +7431,8 @@ def test_live_events_returns_newest_first_respects_since_id_and_allowlist(client
     board_data = client.get(
         f"/api/plugins/kanban/runs/live-events?board={kb.DEFAULT_BOARD}"
     ).json()
-    assert board_data["count"] == 2
-    assert [e["kind"] for e in board_data["events"]] == ["claimed", "heartbeat"]
+    assert board_data["count"] == 3
+    assert [e["kind"] for e in board_data["events"]] == ["claimed", "blocked", "heartbeat"]
 
     # since_id should return only newer events
     latest_id = data["latest_id"]

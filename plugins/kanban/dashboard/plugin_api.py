@@ -3082,7 +3082,10 @@ def get_live_events(
         row_id = int(row["id"])
         if latest_id is None or row_id > latest_id:
             latest_id = row_id
-        payload = json.loads(row["payload"]) if row["payload"] else None
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+        except Exception:
+            payload = None
         events.append(
             {
                 "id": row_id,
