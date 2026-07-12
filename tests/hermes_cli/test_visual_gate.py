@@ -102,6 +102,7 @@ def test_run_visual_gate_uses_ephemeral_loopback_url_and_tears_down(tmp_path, mo
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(kwt, "_VisualGateStaticServer", FakeServer)
+    monkeypatch.setattr(kwt, "_resolve_chromium_shot", lambda: "chromium-shot")
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
 
     assert kwt._run_visual_gate(repo, tmp_path / "screens") is None
