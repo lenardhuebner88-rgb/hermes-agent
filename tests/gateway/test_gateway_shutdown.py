@@ -660,3 +660,75 @@ def test_pid_exists_zombie_via_proc_fallback_returns_false(monkeypatch):
 
     assert status._pid_exists(4242) is False
     kill.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Exit-category diagnostic (GWF-S4): one structured line at process end.
+# ---------------------------------------------------------------------------
+
+def test_exit_after_graceful_shutdown_logs_category_and_preserves_code(
+    monkeypatch, caplog
+):
+    """The process-end chokepoint emits exactly one exit-category line and
+    still hands the original exit code to os._exit (no behaviour change)."""
+    import logging
+
+    captured = {}
+    # Replace the hard-exit with a recorder so the test process survives.
+    monkeypatch.setattr(
+        gateway_run.os, "_exit", lambda code: captured.__setitem__("code", code)
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_LAST_SHUTDOWN_CONTEXT",
+        {"planned": True, "signal_initiated": False, "ctx": {"signal": "SIGTERM"}},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        gateway_run._exit_after_graceful_shutdown(0)
+
+    assert captured["code"] == 0  # exit code preserved verbatim
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "Gateway exit diagnostic" in r.getMessage()
+    ]
+    assert len(lines) == 1, "exit category must be logged exactly once"
+    assert "category=regular" in lines[0]
+    assert "exit_code=0" in lines[0]
+
+
+def test_forced_exit_emits_diagnostic_line_in_isolated_subprocess(tmp_path):
+    """Isolated forced test-exit: a real os._exit at the chokepoint still
+    prints the diagnostic line first and preserves the exit code."""
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    repo_root = pathlib.Path(gateway_run.__file__).resolve().parents[1]
+    script = (
+        "import logging, sys\n"
+        "logging.basicConfig(level=logging.WARNING, stream=sys.stderr)\n"
+        "import gateway.run as gr\n"
+        "gr._LAST_SHUTDOWN_CONTEXT = {"
+        "'planned': False, 'signal_initiated': True, "
+        "'ctx': {'signal': 'SIGTERM', 'mem_available_ratio': 0.5}}\n"
+        "gr._exit_after_graceful_shutdown(1)\n"
+        "sys.stderr.write('UNREACHABLE\\n')\n"
+    )
+    env = dict(os.environ, PYTHONPATH=str(repo_root), HERMES_HOME=str(tmp_path))
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+
+    assert proc.returncode == 1, f"exit code not preserved: {proc.stderr[-2000:]}"
+    assert "Gateway exit diagnostic: category=unknown" in proc.stderr, proc.stderr[-2000:]
+    assert "exit_code=1" in proc.stderr
+    # os._exit really fired — the line after it never ran.
+    assert "UNREACHABLE" not in proc.stderr
