@@ -13643,7 +13643,8 @@ def respec_task(
     This intentionally does **not** edit ``tasks.body`` in place. The old task
     keeps its original body, is archived as superseded, and receives a pointer
     comment. The new task copies the old task's assignee/priority/kind/epic and
-    parent links, plus a provenance dependency ``old -> new``.
+    parent links. Existing downstream dependencies are rewired to the
+    replacement; provenance is recorded in events/comments, not as a graph edge.
 
     Returns the replacement task id, or ``None`` for an unknown/guarded task.
     """
@@ -13694,6 +13695,43 @@ def respec_task(
             (task_id,),
         ).fetchall()
         old_parent_ids = [row["parent_id"] for row in old_parent_rows]
+        old_child_rows = conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+            (task_id,),
+        ).fetchall()
+        old_child_ids = [row["child_id"] for row in old_child_rows]
+        # Status of the replacement. ``triage``/``scheduled`` are held states
+        # that carry no parent-completion meaning, so they pass through
+        # unchanged. Otherwise the replacement is a fresh executable node whose
+        # readiness is derived from its (copied) true parents — never inherited
+        # blindly from the archived source.
+        copied_due_at = existing["due_at"]
+        if existing["status"] in {"triage", "scheduled"}:
+            replacement_status = existing["status"]
+        elif copied_due_at is not None and int(copied_due_at) > now:
+            # K9 time-based scheduling gate: a replacement that copies a
+            # still-future ``due_at`` must sit in ``todo`` — never ``ready`` — so
+            # ``recompute_ready`` holds it until the wall clock reaches ``due_at``
+            # and ``claim_task`` can never grab it early. Evaluated *before* the
+            # parent-completion check below so a fully-done parent chain cannot
+            # promote a not-yet-due replacement.
+            replacement_status = "todo"
+        else:
+            parent_statuses = (
+                conn.execute(
+                    "SELECT status FROM tasks WHERE id IN ("
+                    + ",".join("?" * len(old_parent_ids))
+                    + ")",
+                    old_parent_ids,
+                ).fetchall()
+                if old_parent_ids
+                else []
+            )
+            replacement_status = (
+                "ready"
+                if all(row["status"] == "done" for row in parent_statuses)
+                else "todo"
+            )
         author_name = (author or "").strip() or "user"
         pointer = f"respecced → {new_id}"
 
@@ -13737,7 +13775,7 @@ def respec_task(
                 new_body,
                 new_ac,
                 existing["assignee"],
-                existing["status"],
+                replacement_status,
                 existing["priority"],
                 author_name,
                 now,
@@ -13765,8 +13803,8 @@ def respec_task(
                 existing["live_test_depth"],
                 existing["review_tier"],
                 existing["ui_impact"],
-                existing["block_kind"],
-                int(existing["block_recurrences"] or 0),
+                None,
+                0,
             ),
         )
         _append_event(
@@ -13775,20 +13813,27 @@ def respec_task(
             "created",
             {
                 "assignee": existing["assignee"],
-                "status": existing["status"],
+                "status": replacement_status,
                 "parents": old_parent_ids,
                 "respecced_from": task_id,
                 "tenant": existing["tenant"],
             },
         )
 
+        # Rewire the dependency graph so the replacement is the executable node:
+        # it inherits the source's true parents, and every downstream child is
+        # moved off the archived source onto the replacement. Provenance
+        # (old -> new) lives in events/comments, NOT as a graph edge — an
+        # ``old -> new`` link would leave the replacement permanently blocked on
+        # an archived (never-``done``) parent.
         for parent_id in old_parent_ids:
             _link_tasks_in_txn(conn, parent_id, new_id)
-        _link_tasks_in_txn(conn, task_id, new_id)
-        conn.execute(
-            "UPDATE tasks SET status = ? WHERE id = ?",
-            (existing["status"], new_id),
-        )
+        for child_id in old_child_ids:
+            conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (task_id, child_id),
+            )
+            _link_tasks_in_txn(conn, new_id, child_id)
 
         conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
@@ -13805,7 +13850,11 @@ def respec_task(
             conn,
             task_id,
             "respecced",
-            {"new_task": new_id, "copied_parents": old_parent_ids},
+            {
+                "new_task": new_id,
+                "copied_parents": old_parent_ids,
+                "rewired_children": old_child_ids,
+            },
         )
         _append_event(conn, task_id, "archived", {"respecced_to": new_id})
         return new_id

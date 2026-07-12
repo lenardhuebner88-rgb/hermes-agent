@@ -92,8 +92,8 @@ def test_respec_body_file_archives_old_task_and_creates_linked_replacement(
         )
         child_id = kb.create_task(
             conn,
-            title="Existing child must stay on old task",
-            body="Do not move this v1 child link.",
+            title="Existing child follows replacement",
+            body="This child must be rewired to the replacement.",
             parents=[old_id],
         )
         old_before = kb.get_task(conn, old_id)
@@ -134,9 +134,9 @@ def test_respec_body_file_archives_old_task_and_creates_linked_replacement(
         assert new_task.kind == fixture["kind"]
         assert new_task.epic_id == "epic-live"
         assert (parent_id, new_id) in _task_links(conn)
-        assert (old_id, new_id) in _task_links(conn)
-        assert (old_id, child_id) in _task_links(conn)
-        assert (new_id, child_id) not in _task_links(conn)
+        assert (old_id, new_id) not in _task_links(conn)
+        assert (old_id, child_id) not in _task_links(conn)
+        assert (new_id, child_id) in _task_links(conn)
         comments = kb.list_comments(conn, old_id)
     assert any(f"respecced → {new_id}" in comment.body for comment in comments)
 
