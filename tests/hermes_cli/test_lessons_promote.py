@@ -110,8 +110,8 @@ def _candidate(
 # ---------------------------------------------------------------------------
 
 
-def test_promote_creates_held_tasks(kanban_home, repo_dir):
-    """Eligible clusters become blocked (held) Kanban tasks assigned to coder."""
+def test_promote_creates_review_triage_tasks(kanban_home, repo_dir):
+    """Eligible clusters become review-only triage tasks."""
     _make_harvest_file(
         kanban_home,
         [
@@ -139,17 +139,20 @@ def test_promote_creates_held_tasks(kanban_home, repo_dir):
     assert result["capped"] == 0
     assert len(result["created"]) == 2
 
-    # Verify the tasks landed in the DB as blocked (held) and assigned to coder
+    # Verify triage state, reviewer contract, and lack of execution workspace.
     with kb.connect_closing(board=None) as conn:
         rows = conn.execute(
-            "SELECT title, status FROM tasks WHERE assignee='coder'"
+            "SELECT title, status, assignee, kind, workspace_kind, workspace_path "
+            "FROM tasks WHERE created_by='lessons-promote'"
         ).fetchall()
     titles = [r[0] for r in rows]
     statuses = [r[1] for r in rows]
     title_text = " ".join(titles)
     assert "release-gate/born-blocked-holds" in title_text
     assert "dirty-worktree/parallel-session-overlap" in title_text
-    assert all(s == "blocked" for s in statuses), f"Expected all blocked, got {statuses}"
+    assert all(s == "triage" for s in statuses)
+    assert all(r[2] == "reviewer" and r[3] == "review" for r in rows)
+    assert all(r[4] == "scratch" and r[5] is None for r in rows)
 
 
 def test_promote_task_body_contains_evidence(kanban_home, repo_dir):
@@ -172,11 +175,16 @@ def test_promote_task_body_contains_evidence(kanban_home, repo_dir):
 
     with kb.connect_closing(board=None) as conn:
         body = conn.execute(
-            "SELECT body FROM tasks WHERE assignee='coder' LIMIT 1"
+            "SELECT body FROM tasks WHERE created_by='lessons-promote' LIMIT 1"
         ).fetchone()[0]
     assert "evidence point" in body.lower() or "evidence points" in body.lower()
     assert "Sample evidence one" in body
     assert "AGENTS.md" in body
+    for verdict in ("DOCUMENTED", "REJECT", "SPLIT", "APPROVE_DOC_EDIT"):
+        assert verdict in body
+    assert "exact target path" in body
+    assert "exact section" in body
+    assert "one-sentence wording" in body
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +330,8 @@ def test_promote_is_idempotent(kanban_home, repo_dir):
     assert result1["promoted"] == 1
 
     result2 = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=5)
-    assert result2["promoted"] == 1
-    assert result1["created"][0]["task_id"] == result2["created"][0]["task_id"]
+    assert result2["promoted"] == 0
+    assert result2["skipped_existing"] == 1
 
     # Only one task in the DB for this cluster
     with kb.connect_closing(board=None) as conn:
@@ -331,6 +339,56 @@ def test_promote_is_idempotent(kanban_home, repo_dir):
             "SELECT COUNT(*) FROM tasks WHERE title LIKE '%release-gate/born-blocked-holds%'"
         ).fetchone()[0]
     assert count == 1
+
+
+def test_promote_does_not_regenerate_archived_cluster(kanban_home, repo_dir):
+    """An archived review decision remains durable across later harvests."""
+    _make_harvest_file(
+        kanban_home,
+        [
+            _candidate(
+                "release-gate/born-blocked-holds",
+                evidence_count=2,
+                source_ids=["t_01"],
+            )
+        ],
+    )
+    first = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=5)
+    with kb.connect_closing(board=None) as conn:
+        assert kb.archive_task(conn, first["created"][0]["task_id"])
+
+    second = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=5)
+    assert second["promoted"] == 0
+    assert second["skipped_existing"] == 1
+    with kb.connect_closing(board=None) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE idempotency_key = ?",
+            ("lessons:release-gate-born-blocked-holds",),
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_promote_dry_run_respects_archived_cluster(kanban_home, repo_dir):
+    """Dry-run reports archived decisions instead of phantom creations."""
+    _make_harvest_file(
+        kanban_home,
+        [
+            _candidate(
+                "release-gate/born-blocked-holds",
+                evidence_count=2,
+                source_ids=["t_01"],
+            )
+        ],
+    )
+    first = lessons.run_promote(harvest_path=None, repo_dir=repo_dir, cap=5)
+    with kb.connect_closing(board=None) as conn:
+        assert kb.archive_task(conn, first["created"][0]["task_id"])
+
+    dry = lessons.run_promote(
+        harvest_path=None, repo_dir=repo_dir, cap=5, dry_run=True
+    )
+    assert dry["promoted"] == 0
+    assert dry["skipped_existing"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -410,14 +468,8 @@ def test_promote_no_candidates(kanban_home, repo_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_promote_task_has_dispatchable_workspace(kanban_home, repo_dir):
-    """Promoted tasks carry workspace_kind=worktree + absolute workspace_path.
-
-    Without an explicit workspace_path, the code-role board-default guard
-    (kanban_db.py:4483-4508) raises ValueError on boards with a
-    default_workdir, and resolve_workspace would fail for dir kernels
-    lacking a path.
-    """
+def test_promote_task_has_no_execution_workspace(kanban_home, repo_dir):
+    """A triage candidate cannot edit docs before a reviewer decision."""
     _make_harvest_file(
         kanban_home,
         [
@@ -434,18 +486,11 @@ def test_promote_task_has_dispatchable_workspace(kanban_home, repo_dir):
 
     with kb.connect_closing(board=None) as conn:
         row = conn.execute(
-            "SELECT workspace_kind, workspace_path FROM tasks "
-            "WHERE assignee='coder' LIMIT 1"
+            "SELECT workspace_kind, workspace_path, status FROM tasks "
+            "WHERE created_by='lessons-promote' LIMIT 1"
         ).fetchone()
     assert row is not None
-    ws_kind, ws_path = row
-    assert ws_kind == "worktree", f"Expected worktree, got {ws_kind!r}"
-    assert ws_path is not None and ws_path != "", (
-        f"Expected non-empty workspace_path, got {ws_path!r}"
-    )
-    assert Path(ws_path).is_absolute(), (
-        f"Expected absolute workspace_path, got {ws_path!r}"
-    )
+    assert tuple(row) == ("scratch", None, "triage")
 
 
 def test_promote_works_on_board_with_default_workdir(tmp_path, monkeypatch):
@@ -493,13 +538,11 @@ def test_promote_works_on_board_with_default_workdir(tmp_path, monkeypatch):
     assert result["promoted"] == 1
     with kb.connect_closing(board=None) as conn:
         row = conn.execute(
-            "SELECT workspace_kind, workspace_path FROM tasks "
-            "WHERE assignee='coder' LIMIT 1"
+            "SELECT workspace_kind, workspace_path, status FROM tasks "
+            "WHERE created_by='lessons-promote' LIMIT 1"
         ).fetchone()
     assert row is not None
-    ws_kind, ws_path = row
-    assert ws_kind == "worktree"
-    assert ws_path and Path(ws_path).is_absolute()
+    assert tuple(row) == ("scratch", None, "triage")
 
 
 # ---------------------------------------------------------------------------

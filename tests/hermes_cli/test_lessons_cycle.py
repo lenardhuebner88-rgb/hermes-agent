@@ -1,9 +1,9 @@
 """Tests for ``hermes lessons cycle`` — one-shot harvest then promote (L4).
 
 AC: cycle runs harvest, and only when candidates meeting the threshold were
-produced, runs promote against the fresh artefact. Promoted tasks stay HELD
-(blocked) — no auto-unblock. When harvest yields zero candidates, promote is
-skipped entirely (idle is correct, not an error).
+produced, runs promote against the fresh artefact. Promoted tasks stay in
+reviewer triage. When harvest yields zero candidates, promote is skipped
+entirely (idle is correct, not an error).
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def _insert_disposition_item(conn, *, source_task_id, evidence, next_action="", 
 
 
 def test_cycle_harvests_and_promotes_end_to_end(kanban_home, loops_root, repo_dir):
-    """A synthetic disposition/ledger input -> cycle produces a held task."""
+    """A synthetic disposition/ledger input -> cycle produces a triage task."""
     now = int(time.time())
     with kb.connect() as conn:
         tid1 = _create_task(conn, title="Artifact issue")
@@ -104,11 +104,11 @@ def test_cycle_harvests_and_promotes_end_to_end(kanban_home, loops_root, repo_di
 
     with kb.connect_closing(board=None) as conn:
         rows = conn.execute(
-            "SELECT title, status FROM tasks WHERE assignee='coder' AND created_by='lessons-promote'"
+            "SELECT title, status FROM tasks "
+            "WHERE assignee='reviewer' AND created_by='lessons-promote'"
         ).fetchall()
     assert rows, "expected at least one lessons-promote task"
-    # Promoted tasks stay HELD (blocked) — no auto-unblock.
-    assert all(status == "blocked" for _title, status in rows)
+    assert all(status == "triage" for _title, status in rows)
 
 
 def test_cycle_harvests_from_the_same_board_promote_targets(kanban_home, loops_root, repo_dir):
@@ -157,13 +157,15 @@ def test_cycle_harvests_from_the_same_board_promote_targets(kanban_home, loops_r
 
     with kb.connect_closing(board="other-board") as conn:
         rows = conn.execute(
-            "SELECT title FROM tasks WHERE assignee='coder' AND created_by='lessons-promote'"
+            "SELECT title FROM tasks "
+            "WHERE assignee='reviewer' AND created_by='lessons-promote'"
         ).fetchall()
     assert rows, "expected the promoted task on the SAME board harvest read from"
 
     with kb.connect_closing(board=None) as conn:
         default_rows = conn.execute(
-            "SELECT title FROM tasks WHERE assignee='coder' AND created_by='lessons-promote'"
+            "SELECT title FROM tasks "
+            "WHERE assignee='reviewer' AND created_by='lessons-promote'"
         ).fetchall()
     assert not default_rows, "promote must not land on the default board when board='other-board'"
 

@@ -195,6 +195,37 @@ def test_harvest_includes_source_ids_disposition(kanban_home, loops_root):
     assert any(sid.startswith("te_") for sid in source_ids)
 
 
+def test_harvest_excludes_lessons_promote_block_events(kanban_home, loops_root):
+    """Promotion cards must not become evidence for their own cluster."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        generated = kb.create_task(
+            conn,
+            title="generated docs review",
+            assignee="coder",
+            created_by="lessons-promote",
+            initial_status="blocked",
+        )
+        real = _create_task(conn, title="real release hold")
+        _insert_blocked_event(conn, task_id=generated, reason="born blocked")
+        _insert_blocked_event(
+            conn, task_id=real, reason="awaiting release-gate GO from operator"
+        )
+
+    lessons.run_harvest(loops_root=loops_root, window_days=30, now_ts=now)
+    data = json.loads(
+        (kanban_home / "state" / "lessons" / "harvest_candidates.json").read_text("utf-8")
+    )
+    cluster = next(
+        c
+        for c in data["candidates"]
+        if c["cluster"] == "release-gate/born-blocked-holds"
+    )
+    assert cluster["evidence_point_count"] == 1
+    assert cluster["meets_threshold"] is False
+    assert all(sample.get("task_id") != generated for sample in cluster["evidence_samples"])
+
+
 def test_harvest_includes_loop_ledger_entries(kanban_home, loops_root):
     """Loop LEDGER entries are harvested and attributed to trap clusters."""
     now = int(time.time())

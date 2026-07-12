@@ -262,10 +262,12 @@ def harvest_blocked_events(
     """
     since = _days_ago_ts(window_days, now=now_ts)
     rows = conn.execute(
-        "SELECT id, task_id, run_id, payload, created_at "
-        "FROM task_events "
-        "WHERE kind = 'blocked' AND created_at >= ? "
-        "ORDER BY created_at DESC",
+        "SELECT e.id, e.task_id, e.run_id, e.payload, e.created_at "
+        "FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id "
+        "WHERE e.kind = 'blocked' AND e.created_at >= ? "
+        "AND COALESCE(t.created_by, '') != 'lessons-promote' "
+        "ORDER BY e.created_at DESC",
         (since,),
     ).fetchall()
     out: list[dict[str, Any]] = []
@@ -626,7 +628,7 @@ def _is_cluster_documented(cluster: str, signature: tuple[str, ...], docs_text: 
 
 
 def _build_task_body(candidate: dict[str, Any], cluster_slug: str) -> str:
-    """Compose the docs-edit task brief for a promoted candidate."""
+    """Compose a review-only triage brief for a promoted candidate."""
     cluster = candidate.get("cluster", cluster_slug)
     evidence_count = candidate.get("evidence_point_count", 0)
     source_ids = candidate.get("source_ids", [])
@@ -640,9 +642,9 @@ def _build_task_body(candidate: dict[str, Any], cluster_slug: str) -> str:
         f"evidence points (>= {MIN_EVIDENCE_FOR_CANDIDATE}) in the latest harvest.",
         "",
         "### Target",
-        f"Add a one-line pitfall entry to **AGENTS.md** (Important Pitfalls section) "
-        f"or the affected **SKILL.md**, depending on where the trap surfaces.",
-        "Do NOT commit directly — this task is a held docs-edit request awaiting review.",
+        "Review whether this cluster represents one coherent, recurring trap and whether "
+        "it is already covered by **AGENTS.md** or a relevant **SKILL.md**.",
+        "This is triage only: do not edit files, create a worktree, or dispatch a coder.",
         "",
         "### Evidence (from harvest_candidates.json)",
         f"- Source types: {', '.join(sorted(set(source_types))) or 'n/a'}",
@@ -658,9 +660,16 @@ def _build_task_body(candidate: dict[str, Any], cluster_slug: str) -> str:
                 text = text[:497] + "..."
             lines.append(f"{i}. {text}")
     lines.append("")
-    lines.append("### Acceptance")
-    lines.append("- Pitfall is documented in AGENTS.md or the relevant SKILL.md.")
-    lines.append("- One sentence capturing the trap and the mitigation.")
+    lines.append("### Decision contract")
+    lines.append("- Record exactly one verdict: DOCUMENTED, REJECT, SPLIT, or APPROVE_DOC_EDIT.")
+    lines.append(
+        "- APPROVE_DOC_EDIT must name one exact target path, one exact section, and "
+        "the proposed one-sentence wording."
+    )
+    lines.append(
+        "- SPLIT must name the separate failure classes; REJECT/DOCUMENTED must cite "
+        "the decisive evidence or existing doc path."
+    )
     lines.append("- No speculative content — only what the evidence supports.")
     return "\n".join(lines)
 
@@ -672,17 +681,17 @@ def run_promote(
     dry_run: bool = False,
     board: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Promote harvest candidates to held docs-edit Kanban tasks.
+    """Promote harvest candidates to reviewer-triage Kanban tasks.
 
     Reads ``harvest_candidates.json``, filters clusters with
     ``meets_threshold=True`` (>= 2 evidence points), deduplicates against
     existing pitfalls in AGENTS.md and docs/agent-dev-guide.md, and creates
-    **held** Kanban tasks (``initial_status='blocked'``) for the top-N
-    candidates. The assignee is ``coder`` — these are docs-edit requests,
-    not direct commits.
+    non-dispatchable reviewer triage tasks for the top-N candidates. A
+    separate, bounded docs-edit task may be created only after an explicit
+    ``APPROVE_DOC_EDIT`` disposition.
 
-    Idempotent via ``idempotency_key='lessons:<slug>'`` — re-running with
-    the same harvest artefact produces no duplicate tasks.
+    Idempotent via ``idempotency_key='lessons:<slug>'`` across every task
+    status, including archived dispositions.
 
     Returns a summary dict with counts of promoted, skipped (documented),
     and capped.
@@ -740,33 +749,31 @@ def run_promote(
     for cand in to_promote:
         cluster = cand.get("cluster", "")
         slug = _slug_from_cluster(cluster)
-        title = f"Docs-Edit: document recurring trap-class '{cluster}' as pitfall"
+        title = f"Docs-Review: assess recurring trap-class '{cluster}'"
         body = _build_task_body(cand, slug)
         idem = f"lessons:{slug}"
 
-        if dry_run:
-            created.append({"title": title, "idempotency_key": idem, "dry_run": True})
-            continue
-
-        # Anchor each held docs-edit task in a dispatchable worktree workspace
-        # tied to the target repo.  Without an explicit ``workspace_path``, the
-        # code-role board-default guard (kanban_db.py:4483-4508) raises on
-        # boards with a ``default_workdir`` and a later ``resolve_workspace``
-        # call would fail for ``dir`` kernels lacking a path.  ``worktree`` with
-        # an absolute repo anchor materialises a linked worktree under
-        # ``<repo>/.worktrees/<task-id>`` at dispatch time.
         with kanban_db.connect_closing(board=board) as conn:
+            existing = conn.execute(
+                "SELECT id, status FROM tasks WHERE idempotency_key = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (idem,),
+            ).fetchone()
+            if existing is not None:
+                skipped_existing.append(cluster)
+                continue
+            if dry_run:
+                created.append({"title": title, "idempotency_key": idem, "dry_run": True})
+                continue
             created_id = kanban_db.create_task(
                 conn,
                 title=title,
                 body=body,
-                assignee="coder",
+                assignee="reviewer",
                 created_by="lessons-promote",
-                workspace_kind="worktree",
-                workspace_path=str(repo_dir.resolve()),
                 idempotency_key=idem,
-                initial_status="blocked",
-                kind="code",
+                triage=True,
+                kind="review",
                 tenant="planspec",
             )
         created.append({"task_id": created_id, "cluster": cluster, "title": title})
@@ -775,13 +782,16 @@ def run_promote(
         "promoted": len(created),
         "skipped_documented": len(skipped_documented),
         "documented_clusters": skipped_documented,
+        "skipped_existing": len(skipped_existing),
+        "existing_clusters": skipped_existing,
         "capped": capped,
         "created": created,
     }
     logger.info(
-        "Lessons promote: %d promoted, %d already documented, %d capped",
+        "Lessons promote: %d promoted, %d documented, %d existing, %d capped",
         len(created),
         len(skipped_documented),
+        len(skipped_existing),
         capped,
     )
     return summary
