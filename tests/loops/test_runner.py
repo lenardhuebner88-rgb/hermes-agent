@@ -111,9 +111,16 @@ def write_autoland_pack(packs_dir: Path, repo: Path, **overrides) -> Path:
     )
     manifest_path = pack_dir / "pack.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    for phase, (engine, model, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
-        source = pack_dir / f"{phase}.md"
-        (pack_dir / prompt_name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    production_manifest = yaml.safe_load(
+        (runner_module.REPO_ROOT / "loops" / "packs" / "dashboard-experience" / "pack.yaml")
+        .read_text(encoding="utf-8")
+    )
+    for phase, (engine, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
+        model = production_manifest["phases"][phase]["model"]
+        old_prompt = pack_dir / manifest["phases"][phase]["prompt"]
+        (pack_dir / prompt_name).write_text(
+            old_prompt.read_text(encoding="utf-8"), encoding="utf-8"
+        )
         manifest["phases"][phase].update(
             engine=engine, model=model, prompt=prompt_name,
         )
@@ -127,13 +134,14 @@ def authorize_autoland_fixture(
     monkeypatch, packs_dir: Path, repo: Path, pack_dir: Path
 ) -> None:
     """Bindet die Produktionsschienen für einen expliziten Temp-Test neu."""
-    manifest = pack_dir / "pack.yaml"
     monkeypatch.setattr(runner_module, "PACKS_DIR", packs_dir)
     monkeypatch.setattr(runner_module, "AUTOLAND_EXPECTED_REPO", repo.resolve())
     monkeypatch.setattr(
         runner_module,
-        "AUTOLAND_MANIFEST_SHA256",
-        {"dashboard-experience": runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()},
+        "AUTOLAND_SAFETY_SHA256",
+        {"dashboard-experience": runner_module._autoland_safety_hash(
+            yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+        )},
     )
     monkeypatch.setattr(
         runner_module,
@@ -141,7 +149,7 @@ def authorize_autoland_fixture(
         {
             "dashboard-experience": {
                 prompt: runner_module.hashlib.sha256((pack_dir / prompt).read_bytes()).hexdigest()
-                for _, _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
+                for _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
             }
         },
     )
@@ -153,11 +161,10 @@ def load_autoland_fixture(tmp_path: Path, monkeypatch, **overrides):
     pack_dir = write_autoland_pack(packs_dir, repo, **overrides)
     authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
     pack = load_pack(packs_dir, "dashboard-experience")
-    # Nach dem erfolgreichen Vertrags-Test nur den Prozessadapter durch den
-    # registrierten Fake ersetzen; der geladene Produktionsvertrag bleibt belegt.
-    for phase in pack.phases.values():
-        phase.engine = "fake"
-        phase.model = "fake-1"
+    # Die Produktionsrollen bleiben sichtbar; nur ihre Prozessadapter werden
+    # für den Test auf den registrierten Fake umgebogen.
+    monkeypatch.setitem(engines.ENGINES, "claude", engines.ENGINES["fake"])
+    monkeypatch.setitem(engines.ENGINES, "codex", engines.ENGINES["fake"])
     return repo, pack
 
 
@@ -371,7 +378,7 @@ def test_autoland_rejects_custom_copy_with_authorized_name(
         load_pack(custom, "dashboard-experience")
 
 
-def test_autoland_rejects_phase_contract_drift(tmp_path, fake_engine, monkeypatch):
+def test_autoland_accepts_catalog_model_drift(tmp_path, fake_engine, monkeypatch):
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
     pack_dir = write_autoland_pack(packs_dir, repo)
@@ -380,8 +387,8 @@ def test_autoland_rejects_phase_contract_drift(tmp_path, fake_engine, monkeypatc
     manifest["phases"]["verify"]["model"] = "anderes-modell"
     (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
-    with pytest.raises(ManifestError, match="Phasenvertrag"):
-        load_pack(packs_dir, "dashboard-experience")
+    pack = load_pack(packs_dir, "dashboard-experience")
+    assert pack.phases["verify"].model == "anderes-modell"
 
 
 def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypatch):
@@ -393,7 +400,7 @@ def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypa
     manifest["params"] = {"routes": "/zu-breit"}
     (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
-    with pytest.raises(ManifestError, match="Manifestinhalt"):
+    with pytest.raises(ManifestError, match="Sicherheitsprojektion"):
         load_pack(packs_dir, "dashboard-experience")
 
 
@@ -1603,7 +1610,7 @@ def test_autoland_rejects_model_outside_ui_catalog(tmp_path, fake_engine, monkey
         runner._validate_autoland_runtime()
 
 
-def test_autoland_custom_phase_contract_disables_automatic_landing(
+def test_autoland_custom_catalog_model_preserves_automatic_landing(
     tmp_path, fake_engine, monkeypatch
 ):
     _, pack = load_autoland_fixture(tmp_path, monkeypatch)
@@ -1616,13 +1623,13 @@ def test_autoland_custom_phase_contract_disables_automatic_landing(
     runner = LoopRunner(pack, state_root=tmp_path / "state")
 
     runner._validate_autoland_runtime()
-    assert runner._runtime_autoland_authorized() is False
+    assert runner._runtime_autoland_authorized() is True
     runner._prepare_runtime_land_mode()
     runner.consume_overrides()
 
     resumed = LoopRunner(pack, state_root=tmp_path / "state")
     assert resumed.overrides == {}
-    assert resumed._manual_land_required("resume") is True
+    assert resumed._manual_land_required("resume") is False
 
 
 def test_autoland_rejects_fractional_budget_override(tmp_path, fake_engine, monkeypatch):
