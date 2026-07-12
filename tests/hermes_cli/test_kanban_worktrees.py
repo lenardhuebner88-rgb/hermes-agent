@@ -1629,6 +1629,59 @@ def test_reverted_merge_is_reintegrated_not_clean(repo):
     assert not info["path"].exists()
 
 
+def test_reverted_ancestor_is_replayed_with_later_branch_commit(repo):
+    """A later B commit must not make a reverted, reviewed A look integrated."""
+    info = _provisioned_chain(
+        repo, "t_reverted_ancestor", relpath="acceptance.py",
+        content="ACCEPTED = True\n",
+    )
+    accepted_commit = _git(info["path"], "rev-parse", "HEAD")
+    first = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate,
+    )
+    assert first["action"] == "merged"
+
+    _git(repo, "revert", "-m", "1", "--no-edit", first["merge_commit"])
+    _git(repo, "branch", info["branch"], accepted_commit)
+    _git(repo, "worktree", "add", str(info["path"]), info["branch"])
+    _commit_in(info["path"], "hardening.py", "HARDENED = True\n", "B")
+
+    gated_files = []
+
+    def recording_gate(_repo, files):
+        gated_files.extend(files)
+        return True, "recorded"
+
+    out = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=recording_gate,
+    )
+
+    assert out["action"] == "merged"
+    assert (repo / "acceptance.py").read_text() == "ACCEPTED = True\n"
+    assert (repo / "hardening.py").read_text() == "HARDENED = True\n"
+    assert set(out["changed_files"]) == {"acceptance.py", "hardening.py"}
+    assert set(gated_files) == {"acceptance.py", "hardening.py"}
+
+
+def test_branch_created_after_revert_does_not_restore_unrelated_merge(repo):
+    info = _provisioned_chain(repo, "t_old", relpath="old.py", content="OLD = True\n")
+    first = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate,
+    )
+    _git(repo, "revert", "-m", "1", "--no-edit", first["merge_commit"])
+
+    later = _provisioned_chain(
+        repo, "t_later", relpath="later.py", content="LATER = True\n",
+    )
+    out = kwt.integrate_chain(
+        repo, later["path"], later["branch"], "main", gate_runner=_ok_gate,
+    )
+
+    assert out["action"] == "merged"
+    assert not (repo / "old.py").exists()
+    assert out["changed_files"] == ["later.py"]
+
+
 def test_reintegration_gate_uses_clean_validation_worktree(repo):
     """The revert-of-revert gate is isolated from later foreign live WIP."""
     info = _provisioned_chain(repo, "t_reint_fdc", relpath="restored.py")

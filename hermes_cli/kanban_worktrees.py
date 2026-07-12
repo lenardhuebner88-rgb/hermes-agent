@@ -644,6 +644,31 @@ def _revert_commits_for_merge(repo: Path, merge_commit: str, target: str) -> lis
     ]
 
 
+def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[str]:
+    """Find a reverted merge parent whose reviewed patch is in *branch*."""
+    merges = _git(repo, "rev-list", "--first-parent", "--merges", target)
+    for merge_commit in merges.splitlines():
+        parents = _git(repo, "show", "-s", "--format=%P", merge_commit).split()
+        if len(parents) < 2:
+            continue
+        merged_parent = parents[1]
+        if not _branch_is_ancestor(repo, merged_parent, branch):
+            continue
+        reverts = _revert_commits_for_merge(repo, merge_commit, target)
+        if not reverts or any(
+            _branch_is_ancestor(repo, revert, branch) for revert in reverts
+        ):
+            continue
+        changed = _changed_files_between(repo, parents[0], merged_parent)
+        if changed and any(
+            _git(repo, "rev-parse", f"{target}:{path}", check=False)
+            != _git(repo, "rev-parse", f"{merged_parent}:{path}", check=False)
+            for path in changed
+        ):
+            return merged_parent
+    return None
+
+
 def _changed_files_between(repo: Path, left: str, right: str) -> list[str]:
     return [
         f
@@ -3791,8 +3816,19 @@ def integrate_chain(
             if not (wt_path.exists() and (wt_path / ".git").exists()):
                 return parked("chain worktree missing before rebase")
             target_head = _git(repo_root, "rev-parse", cur)
+            reverted_ancestor = _reverted_merged_ancestor(
+                repo_root, branch, target_head,
+            )
+            rebase_args = ["rebase", target_head]
+            if reverted_ancestor:
+                replay_base = _git(
+                    repo_root, "rev-parse", f"{reverted_ancestor}^1",
+                )
+                rebase_args = [
+                    "rebase", "--onto", target_head, replay_base, branch,
+                ]
             try:
-                _git(wt_path, "rebase", target_head, timeout=MERGE_TIMEOUT_SECONDS)
+                _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)
             except (WorktreeError, subprocess.TimeoutExpired) as exc:
                 # Conflict (or timeout): abort cleanly so the worktree returns to
                 # its pre-rebase committed state, then signal rebase_conflict so
@@ -3807,6 +3843,10 @@ def integrate_chain(
                     ),
                     "target": cur,
                 }
+            # A reverted-ancestor replay can restore acceptance paths omitted by
+            # the pre-rebase triple-dot diff as shared ancestry.  Gate and
+            # receipt the actual tree delta that is about to land.
+            diff_files = _changed_files_between(repo_root, target_head, branch)
             # Successful rebase: fall through to the existing merge block. The
             # --no-ff merge stays (preserves the merge-commit audit trail).
 
