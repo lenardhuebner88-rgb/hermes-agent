@@ -106,6 +106,61 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
 
 
+def test_list_and_detail_report_next_timer_fire_from_systemctl(api, monkeypatch):
+    client, calls, _tmp = api
+    enabled_units = {
+        "hermes-loop@nacht.timer",
+        "hermes-loop@fliessband.timer",
+    }
+
+    def timer_systemctl(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        unit = args[-1]
+        if args[0] == "is-enabled":
+            enabled = unit in enabled_units
+            return subprocess.CompletedProcess(
+                args,
+                0 if enabled else 1,
+                stdout="enabled\n" if enabled else "disabled\n",
+                stderr="",
+            )
+        if args[0] == "list-timers":
+            stdout = ""
+            if unit == "hermes-loop@nacht.timer":
+                stdout = (
+                    "NEXT                         LEFT LAST                               PASSED "
+                    "UNIT                       ACTIVATES\n"
+                    "Mon 2026-07-13 00:52:00 CEST  20h Sun 2026-07-12 00:52:09 CEST "
+                    "3h 42min ago hermes-loop@nacht.timer hermes-loop@nacht.service\n"
+                    "\n1 timers listed.\n"
+                )
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(control_loops, "_systemctl", timer_systemctl)
+
+    packs = client.get("/api/loops").json()["packs"]
+    nacht = next(pack for pack in packs if pack["name"] == "nacht")
+    assert nacht["next_timer_fire"] == "2026-07-13T00:52:00"
+    assert nacht["running"] is False
+    assert nacht["queue"] is None
+    assert nacht["commits_ahead"] == 0
+    assert nacht["timer_enabled"] is True
+
+    fliessband = next(pack for pack in packs if pack["name"] == "fliessband")
+    assert fliessband["next_timer_fire"] is None
+
+    detail = client.get("/api/loops/nacht/detail").json()
+    assert detail["next_timer_fire"] == nacht["next_timer_fire"]
+    assert ("list-timers", "--no-pager", "hermes-loop@nacht.timer") in calls
+
+    enabled_units.clear()
+    disabled = next(
+        pack for pack in client.get("/api/loops").json()["packs"]
+        if pack["name"] == "nacht"
+    )
+    assert disabled["next_timer_fire"] is None
+
 
 def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
     from hermes_cli import control_loops as cl

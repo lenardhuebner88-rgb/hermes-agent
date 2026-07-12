@@ -362,6 +362,25 @@ def _timer_enabled(name: str) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "enabled"
 
 
+def _next_timer_fire(name: str) -> str | None:
+    unit = _timer_unit(name)
+    res = _systemctl("list-timers", "--no-pager", unit)
+    if res.returncode != 0:
+        return None
+    for line in res.stdout.splitlines():
+        if unit not in line:
+            continue
+        match = re.search(r"\b(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\b", line)
+        if not match:
+            return None
+        try:
+            parsed = datetime.strptime(" ".join(match.groups()), "%Y-%m-%d %H:%M:%S")
+            return parsed.isoformat()
+        except ValueError:
+            return None
+    return None
+
+
 def _unit_failed_fast(unit: str, probe: float = 0.6) -> bool:
     """True, wenn die Unit unmittelbar nach dem Start bereits 'failed' ist (Sofort-Fail
     wie 203/EXEC). 'activating'/'active' = ordentlich angelaufen → False. Seam für Tests."""
@@ -404,6 +423,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "queue": qcounts if pack.type == "pipeline" else None,
         "commits_ahead": len(_commits_ahead(pack)),
         "timer_enabled": timer_enabled,
+        "next_timer_fire": _next_timer_fire(pack.name) if timer_enabled else None,
         "timer_schedule": _timer_schedule(pack.name),
         "timer_next_run": _timer_next_run(pack.name),
     }
