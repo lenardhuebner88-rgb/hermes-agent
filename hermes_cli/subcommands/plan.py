@@ -96,7 +96,10 @@ def plan_command(args: argparse.Namespace) -> int:
         return 0
     try:
         if action in ("list", "ls"):
-            records = planspecs.list_planspecs(scope="all" if getattr(args, "all", False) else "open")
+            records = planspecs.list_planspecs(
+                scope="all" if getattr(args, "all", False) else "open",
+                include_kanban_status=True,
+            )
             if getattr(args, "json", False):
                 print(json.dumps({"planspecs": records}, ensure_ascii=False))
             else:
