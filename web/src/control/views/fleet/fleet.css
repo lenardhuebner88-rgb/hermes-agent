@@ -824,7 +824,8 @@ body:has([data-fleet-theme]) [data-control] {
   display: flex;
   align-items: center;
   gap: 6px;
-  font: 500 10.5px/1 var(--hc-font-mono);
+  /* Heartbeat/Status ist operativ — ≥12px, nicht auf ID-Niveau schrumpfen. */
+  font: 500 12px/1.15 var(--hc-font-mono);
   color: var(--fleet-puls);
 }
 .fleet-led-dot {
@@ -874,7 +875,8 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-wk-meta {
   display: flex;
   gap: 8px 12px;
-  font: 400 11px/1.2 var(--hc-font-mono);
+  /* Operative Metadaten (Modell, Token-Fortschritt, Laufzeit, ETA) müssen ≥12px lesbar bleiben. */
+  font: 400 12px/1.35 var(--hc-font-mono);
   color: var(--fleet-t3);
   flex-wrap: wrap;
   align-items: baseline;
