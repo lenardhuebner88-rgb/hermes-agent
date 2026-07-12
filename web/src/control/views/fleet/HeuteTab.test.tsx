@@ -1,53 +1,72 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useEffect, useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PendingItem } from "../../lib/fleetHub";
 import type { CostBucket, RunsCostsResponse } from "../../lib/schemas";
 import type { Worker } from "../../lib/types";
 import { HeuteTab } from "./HeuteTab";
 import type { PlanSpecRecord } from "./shared";
+import { loadLanes, smokeCheckLaneConfig, updateLane } from "../lanes/api";
+import type { LanesResponse } from "../lanes/api";
 
-// Zählt echte (Re-)Mounts des Disclosure-Kindes. Ein Remount setzt den lokalen
-// open-Zustand zurück und ersetzt den Button-DOM-Knoten — genau das darf ein
-// Live-Poll-Rerender NICHT auslösen (siehe Disclosure-Stabilitäts-Test unten).
-let laneSwitchMounts = 0;
+// Regressionstest gegen den ECHTEN LaneQuickSwitch: nur die lanes/api-Schicht
+// wird gemockt (Muster aus LaneQuickSwitch.test.tsx), das Disclosure selbst
+// bleibt die reale Komponente. Der Stabilitätstest unten prüft damit echtes
+// Reconciliation-Verhalten (ein Remount würde open zurücksetzen) statt eines
+// zustandsbehafteten Stubs, der nur sich selbst bewiese (Tautologie).
+vi.mock("../lanes/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lanes/api")>();
+  return {
+    ...actual,
+    loadLanes: vi.fn(),
+    smokeCheckLaneConfig: vi.fn(),
+    updateLane: vi.fn(),
+  };
+});
 
-// Zustandsbehaftetes Double für LaneQuickSwitch: ein Disclosure mit lokalem
-// open-Zustand, aria-expanded und zwei Selects im offenen Panel. Steht
-// stellvertretend für den realen Schnellschalter; sein Zustand überlebt genau
-// dann, wenn HeuteTab den Knoten über Rerender hinweg wiederverwendet.
-vi.mock("./LaneQuickSwitch", () => ({
-  LaneQuickSwitch: () => {
-    const [open, setOpen] = useState(false);
-    useEffect(() => {
-      laneSwitchMounts += 1;
-    }, []);
-    return (
-      <section aria-label="Lane-Modell-Schnellschalter">
-        <button
-          data-testid="lane-disclosure-toggle"
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen((prev) => !prev)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") setOpen((prev) => !prev);
-          }}
-        >
-          Lane &amp; Modell
-        </button>
-        {open ? (
-          <div data-testid="lane-disclosure-panel">
-            <select aria-label="Profil" />
-            <select aria-label="Modell" />
-          </div>
-        ) : null}
-      </section>
-    );
-  },
-}));
+function lanesPayload(): LanesResponse {
+  return {
+    lanes: [
+      {
+        id: "fast",
+        name: "Fast lane",
+        active: true,
+        builtin: false,
+        created_at: 1,
+        updated_at: 1,
+        profiles: {
+          coder: { worker_runtime: "hermes" as const, provider: "openrouter", model: "openai/gpt-4.1-mini" },
+        },
+      },
+    ],
+    count: 1,
+    active_id: "fast",
+    profiles: [
+      {
+        name: "coder",
+        worker_runtime: "hermes" as const,
+        default_provider: "openrouter",
+        default_model: "openai/gpt-4.1-mini",
+        fallback_providers: [],
+        description: "Coder lane",
+      },
+    ],
+    models: [
+      { id: "openai/gpt-4.1-mini", label: "GPT 4.1 Mini", runtime: "hermes" as const, provider: "openrouter", group: "API" },
+    ],
+  };
+}
+
+beforeEach(() => {
+  vi.mocked(smokeCheckLaneConfig).mockReset();
+  vi.mocked(updateLane).mockReset();
+  // Default: never resolve → HeuteTab's übrige Tests sehen einen harmlosen,
+  // statischen "Lane wird geladen…"-Platzhalter, ohne post-unmount setState /
+  // act()-Warnung. Der Disclosure-Test überschreibt dies mit echten Daten.
+  vi.mocked(loadLanes).mockReset().mockReturnValue(new Promise<LanesResponse>(() => {}));
+});
 
 afterEach(cleanup);
 
@@ -268,8 +287,8 @@ describe("HeuteTab PlanSpec relevance ordering", () => {
 });
 
 describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
-  it("behält denselben Disclosure-Knoten und offenen Zustand, wenn Live-Daten davor einfügen", () => {
-    laneSwitchMounts = 0;
+  it("hält den echten LaneQuickSwitch offen, wenn Live-Daten davor einfügen", async () => {
+    vi.mocked(loadLanes).mockResolvedValue(lanesPayload());
 
     // Initial: keine PlanSpecs, kein aktiver Worker, keine Handlungszeile —
     // die konditionalen Geschwister vor dem Disclosure fehlen alle.
@@ -290,16 +309,18 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
       />,
     );
 
-    const toggle = screen.getByTestId("lane-disclosure-toggle");
+    // Der reale Schnellschalter lädt seine Lane async — auf den Toggle warten.
+    const toggle = await screen.findByRole("button", { name: "Lane- und Modellkonfiguration" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
     fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByTestId("lane-disclosure-panel")).toBeTruthy();
+    await waitFor(() => expect(toggle.getAttribute("aria-expanded")).toBe("true"));
+    expect(screen.getByLabelText("Modell")).toBeTruthy();
     expect(screen.getAllByRole("combobox")).toHaveLength(2);
 
     // Live-Poll-Rerender: aktive Worker, laufende PlanSpecs und eine
     // Handlungszeile erscheinen — alle als Geschwister VOR dem Disclosure.
+    // Ein index-/key-gebundener Remount würde open auf false zurücksetzen.
     rerender(
       <HeuteTab
         allWorkers={[worker("1", "coder"), worker("2", "premium")]}
@@ -317,17 +338,16 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
       />,
     );
 
-    const toggleAfter = screen.getByTestId("lane-disclosure-toggle");
-    // Kein Remount: derselbe DOM-Knoten, kein zusätzlicher Mount, Zustand hält.
-    expect(laneSwitchMounts).toBe(1);
+    // Kein Remount: identischer DOM-Knoten, offener Zustand + beide Selects halten.
+    const toggleAfter = screen.getByRole("button", { name: "Lane- und Modellkonfiguration" });
     expect(toggleAfter).toBe(toggle);
     expect(toggleAfter.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByTestId("lane-disclosure-panel")).toBeTruthy();
+    expect(screen.getByLabelText("Modell")).toBeTruthy();
     expect(screen.getAllByRole("combobox")).toHaveLength(2);
 
-    // Enter auf dem Toggle schließt den Disclosure wieder (false).
-    fireEvent.keyDown(toggleAfter, { key: "Enter" });
-    expect(toggleAfter.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByTestId("lane-disclosure-panel")).toBeNull();
+    // Erneuter Klick (der reale onClick-Handler) schließt den Disclosure (false).
+    fireEvent.click(toggleAfter);
+    await waitFor(() => expect(toggleAfter.getAttribute("aria-expanded")).toBe("false"));
+    expect(screen.queryByLabelText("Modell")).toBeNull();
   });
 });
