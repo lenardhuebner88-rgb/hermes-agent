@@ -19888,6 +19888,131 @@ def summarize_dispatch_holds(
     return total, counts, dominant
 
 
+def dispatch_kwargs_from_config(kanban_config: Any) -> dict[str, Any]:
+    """Resolve the config knobs that affect dispatch candidate evaluation."""
+    cfg = kanban_config if isinstance(kanban_config, dict) else {}
+
+    def positive_int(name: str) -> Optional[int]:
+        return _dispatch_policy.positive_int(cfg.get(name))
+
+    def positive_number(name: str) -> Optional[float]:
+        return _dispatch_policy.positive_number(cfg.get(name))
+
+    raw_serialize = cfg.get("serialize_by_repo", True)
+    if isinstance(raw_serialize, str):
+        serialize_by_repo = raw_serialize.strip().lower() not in {
+            "0", "false", "no", "off", "",
+        }
+    elif raw_serialize is None:
+        serialize_by_repo = True
+    else:
+        serialize_by_repo = bool(raw_serialize)
+
+    return {
+        "default_assignee": (cfg.get("default_assignee") or "").strip() or None,
+        "max_in_progress": positive_int("max_in_progress"),
+        "max_spawn": positive_int("max_spawn"),
+        "max_in_progress_per_profile": positive_int(
+            "max_in_progress_per_profile"
+        ),
+        "serialize_by_repo": serialize_by_repo,
+        "max_concurrent_per_repo": positive_int("max_concurrent_per_repo") or 1,
+        "daily_token_cap_per_profile": positive_int(
+            "daily_token_cap_per_profile"
+        ),
+        "daily_cost_cap_usd": positive_number("daily_cost_cap_usd"),
+        "per_task_input_token_cap": positive_int("per_task_input_token_cap"),
+    }
+
+
+def _repo_holder_for_root(
+    conn: sqlite3.Connection,
+    repo_root: str,
+) -> Optional[dict[str, Any]]:
+    """Return the first non-terminal task occupying ``repo_root``."""
+    for row in conn.execute(
+        "SELECT id, status, worker_pid, workspace_kind, workspace_path FROM tasks "
+        "WHERE status NOT IN ('done', 'archived', 'ready', 'scheduled')"
+    ):
+        if _repo_root_for_row(row["workspace_kind"], row["workspace_path"]) == repo_root:
+            return {
+                "task_id": row["id"],
+                "status": row["status"],
+                "worker_pid": row["worker_pid"],
+            }
+    return None
+
+
+def list_dispatch_holds(
+    conn: sqlite3.Connection,
+    *,
+    board: Optional[str] = None,
+    **dispatch_kwargs: Any,
+) -> dict[str, Any]:
+    """Return a side-effect-free, per-task view of current dispatch holds."""
+    dispatch_kwargs.pop("dry_run", None)
+    dispatch_kwargs.pop("hold_scan_only", None)
+    result = _dispatch_once_locked(
+        conn,
+        board=board,
+        dry_run=True,
+        hold_scan_only=True,
+        **dispatch_kwargs,
+    )
+
+    held_ids = {
+        item[0] if isinstance(item, (list, tuple)) else item
+        for _label, attr in _DISPATCH_HOLD_BUCKETS
+        for item in (getattr(result, attr, None) or ())
+    }
+    task_rows: dict[str, sqlite3.Row] = {}
+    if held_ids:
+        placeholders = ",".join("?" for _ in held_ids)
+        task_rows = {
+            row["id"]: row
+            for row in conn.execute(
+                "SELECT id, title, assignee, priority, created_at FROM tasks "
+                f"WHERE id IN ({placeholders})",
+                sorted(held_ids),
+            )
+        }
+
+    holds: list[dict[str, Any]] = []
+    for label, attr in _DISPATCH_HOLD_BUCKETS:
+        for item in (getattr(result, attr, None) or ()):
+            if isinstance(item, (list, tuple)):
+                task_id, detail = item[0], item[1:]
+            else:
+                task_id, detail = item, ()
+            task = task_rows.get(task_id)
+            hold: dict[str, Any] = {
+                "task_id": task_id,
+                "title": task["title"] if task else None,
+                "assignee": task["assignee"] if task else None,
+                "priority": task["priority"] if task else None,
+                "bucket": label,
+                "since": task["created_at"] if task else None,
+            }
+            if label == "repo_serialized":
+                repo_root = detail[0] if detail else None
+                hold["repo_root"] = repo_root
+                hold["holder"] = (
+                    _repo_holder_for_root(conn, repo_root) if repo_root else None
+                )
+            elif label == "chain_worktree_serialized":
+                hold["chain_root_id"] = detail[0] if detail else None
+            elif label in {"respawn_guarded", "role_mismatch"}:
+                hold["reason"] = detail[0] if detail else None
+            elif label == "budget_held":
+                hold["reason"] = detail[1] if len(detail) > 1 else None
+            elif label == "per_profile_capped":
+                hold["current"] = detail[1] if len(detail) > 1 else None
+                hold["cap"] = dispatch_kwargs.get("max_in_progress_per_profile")
+            holds.append(hold)
+
+    return {"holds": holds, "count": len(holds), "checked_at": int(time.time())}
+
+
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     """Return True iff there is at least one ready+assigned+unclaimed task
     whose assignee maps to a real Hermes profile.
@@ -21149,6 +21274,7 @@ def _dispatch_once_locked(
     per_task_input_token_cap: Optional[int] = None,
     auto_retry_blocked: bool = False,
     auto_retry_blocked_backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+    hold_scan_only: bool = False,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -21178,43 +21304,38 @@ def _dispatch_once_locked(
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
     """
-    # Reap zombie children from previously spawned workers. See
-    # reap_worker_zombies() for the full rationale.
-    reap_worker_zombies()
-
     result = DispatchResult()
-    # Refresh liveness for detached claude-CLI workers BEFORE the reclaimers
-    # run: a live ``claude -p`` child never self-heartbeats, so this keeps its
-    # ``last_heartbeat_at`` fresh and stops detect_stale_running from
-    # false-positive reclaiming a healthy long run. Hermes-runtime workers are
-    # skipped (they self-heartbeat). Fail-soft; never blocks dispatch.
-    result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
-    result.reclaimed = release_stale_claims(conn)
-    result.stale = detect_stale_running(
-        conn,
-        stale_timeout_seconds=stale_timeout_seconds,
-    )
-    result.crashed = detect_crashed_workers(conn)
-    # detect_crashed_workers stashes protocol-violation auto-blocks on
-    # itself so the public list-return stays stable. Pull them into the
-    # DispatchResult here so telemetry / tests see the trip.
-    _crash_auto_blocked = getattr(detect_crashed_workers, "_last_auto_blocked", [])
-    if _crash_auto_blocked:
-        result.auto_blocked.extend(_crash_auto_blocked)
-    # Rate-limited requeues (quota wall, no failure counted) — surface for
-    # telemetry / tests. These tasks went back to ``ready`` and the respawn
-    # guard will defer them until the quota window clears.
-    _crash_rate_limited = getattr(detect_crashed_workers, "_last_rate_limited", [])
-    if _crash_rate_limited:
-        result.rate_limited.extend(_crash_rate_limited)
-    result.timed_out = enforce_max_runtime(conn)
-    if auto_retry_blocked:
-        result.auto_retried_blocked = auto_retry_blocked_tasks(
+    if not hold_scan_only:
+        # The hold report reuses only candidate evaluation. All maintenance
+        # before it can write and therefore remains exclusive to real ticks.
+        reap_worker_zombies()
+        result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
+        result.reclaimed = release_stale_claims(conn)
+        result.stale = detect_stale_running(
             conn,
-            backoff_seconds=auto_retry_blocked_backoff_seconds,
-            failure_limit=failure_limit,
+            stale_timeout_seconds=stale_timeout_seconds,
         )
-    result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+        result.crashed = detect_crashed_workers(conn)
+        _crash_auto_blocked = getattr(
+            detect_crashed_workers, "_last_auto_blocked", []
+        )
+        if _crash_auto_blocked:
+            result.auto_blocked.extend(_crash_auto_blocked)
+        _crash_rate_limited = getattr(
+            detect_crashed_workers, "_last_rate_limited", []
+        )
+        if _crash_rate_limited:
+            result.rate_limited.extend(_crash_rate_limited)
+        result.timed_out = enforce_max_runtime(conn)
+        if auto_retry_blocked:
+            result.auto_retried_blocked = auto_retry_blocked_tasks(
+                conn,
+                backoff_seconds=auto_retry_blocked_backoff_seconds,
+                failure_limit=failure_limit,
+            )
+        result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    else:
+        dry_run = True
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full

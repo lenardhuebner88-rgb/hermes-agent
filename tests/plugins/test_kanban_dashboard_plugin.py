@@ -8443,3 +8443,35 @@ def test_release_gate_endpoint_rejects_non_blocked_gate(client):
     )
     assert response.status_code == 409
     assert "not blocked" in response.json()["detail"]
+
+
+def test_dispatch_holds_endpoint_uses_effective_config(client, kanban_home):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  max_in_progress_per_profile: 1\n",
+        encoding="utf-8",
+    )
+    conn = kb.connect()
+    try:
+        running = kb.create_task(conn, title="running coder", assignee="coder")
+        waiter = kb.create_task(conn, title="ready coder", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running', claim_lock = 'test:1' WHERE id = ?",
+                (running,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL WHERE id = ?",
+                (waiter,),
+            )
+    finally:
+        conn.close()
+
+    response = client.get("/api/plugins/kanban/dispatch/holds")
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["count"] == 1
+    hold = report["holds"][0]
+    assert hold["task_id"] == waiter
+    assert hold["bucket"] == "per_profile_capped"
+    assert hold["current"] == 1
+    assert hold["cap"] == 1

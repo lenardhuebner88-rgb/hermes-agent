@@ -926,6 +926,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                              f"(spawn_failed, timed_out, or crashed; default: {kb.DEFAULT_SPAWN_FAILURE_LIMIT})")
     p_disp.add_argument("--json", action="store_true")
 
+    p_holds = sub.add_parser(
+        "holds",
+        help="List tasks the dispatcher is currently holding and why",
+    )
+    p_holds.add_argument("--json", action="store_true")
+
     # --- daemon (deprecated) ---
     p_daemon = sub.add_parser(
         "daemon",
@@ -1402,6 +1408,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "archive":  _cmd_archive,
             "tail":     _cmd_tail,
             "dispatch": _cmd_dispatch,
+            "holds":    _cmd_holds,
             "daemon":   _cmd_daemon,
             "watch":    _cmd_watch,
             "stats":    _cmd_stats,
@@ -3452,6 +3459,45 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    return 0
+
+
+def _cmd_holds(args: argparse.Namespace) -> int:
+    """Handle ``hermes kanban holds [--json]``."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        kanban_config = config.get("kanban", {}) if isinstance(config, dict) else {}
+    except Exception:
+        kanban_config = {}
+    dispatch_kwargs = kb.dispatch_kwargs_from_config(kanban_config)
+    with kb.connect_closing(board=getattr(args, "board", None)) as conn:
+        report = kb.list_dispatch_holds(
+            conn,
+            board=getattr(args, "board", None),
+            **dispatch_kwargs,
+        )
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    if report["count"] == 0:
+        print("No dispatch holds.")
+        return 0
+    print(f"Dispatch holds ({report['count']}):")
+    for hold in report["holds"]:
+        line = f"  - {hold['task_id']}  {hold['bucket']}"
+        if hold["bucket"] == "repo_serialized":
+            holder = hold.get("holder") or {}
+            line += (
+                f"  repo={hold.get('repo_root')}  "
+                f"holder={holder.get('task_id')} ({holder.get('status')})"
+            )
+        elif hold["bucket"] == "per_profile_capped":
+            line += f"  {hold.get('assignee')} at {hold.get('current')}/{hold.get('cap')}"
+        elif hold.get("reason"):
+            line += f"  reason={hold['reason']}"
+        print(line)
     return 0
 
 
