@@ -255,6 +255,24 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
   });
 
+  it("surfaces retained board data as stale after a failed refresh", () => {
+    hooks.useBoard.mockReturnValue({
+      data: DEFAULT_BOARD,
+      loading: false,
+      error: "500: audit injected board failure",
+      errorObj: { code: "500", message: "500: audit injected board failure" },
+      isStale: true,
+      lastUpdated: Math.floor(Date.now() / 1000) - 10,
+      reload,
+    });
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Board" }));
+
+    expect(screen.getByText(/Daten von vor/)).toBeTruthy();
+    expect(screen.getByText("Default aktive Kette")).toBeTruthy();
+  });
+
   it("mounts PlanSpec detail beside the list without an overlay at lg", () => {
     setLgViewport(true);
     const { container } = renderFleetView();

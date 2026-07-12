@@ -33,7 +33,7 @@ import { PlanSpecDetailContent, PlanSpecDetailDrawer } from "./fleet/PlanSpecDet
 import { PlanTab } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips, TwoPane } from "../components/leitstand";
-import { Led } from "../components/atoms";
+import { Led, StaleBadge } from "../components/atoms";
 import { BoardSwitcher } from "../components/fleet/BoardIdentity";
 import "./fleet/fleet.css";
 
@@ -110,6 +110,7 @@ export function FleetView() {
   const decisionQueue = useKanbanDecisionQueue();
   const releaseStatus = useReleaseStatus();
   const releaseMode = useReleaseMode();
+  const activeBoardState = selectedBoard ? selectedBoardData : board;
 
   useEffect(() => {
     const reset = window.setTimeout(() => {
@@ -269,6 +270,17 @@ export function FleetView() {
           classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
         />
       </div>
+
+      {(activeBoardState.isStale || activeBoardState.error) ? (
+        <div className="mb-2 flex justify-end" role="status" aria-live="polite">
+          <StaleBadge
+            isStale={activeBoardState.isStale}
+            lastUpdated={activeBoardState.lastUpdated}
+            errorObj={activeBoardState.errorObj}
+            error={activeBoardState.error}
+          />
+        </div>
+      ) : null}
 
       {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs.
           Auf Heute übernimmt der Tab selbst den Handlungsblock (kein Doppel-Callout),
