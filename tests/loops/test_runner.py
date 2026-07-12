@@ -434,6 +434,13 @@ def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypa
         load_pack(packs_dir, "dashboard-experience")
 
 
+def test_dashboard_experience_manifest_still_pinned():
+    # Proves the field additions did NOT require editing the SHA-pinned pack.
+    manifest = PACKS_DIR / "dashboard-experience" / "pack.yaml"
+    actual = runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert actual == runner_module.AUTOLAND_MANIFEST_SHA256["dashboard-experience"]
+
+
 def test_autoland_rejects_prompt_content_drift(tmp_path, fake_engine, monkeypatch):
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
