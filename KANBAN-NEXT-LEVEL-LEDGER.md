@@ -34,7 +34,7 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Align the regression with the security contract and add a negative assertion that the full path is absent.
 - After:       Diagnostic contains `https://example.test/<path redacted>` and does not contain `https://example.test/v1`.
 - Gates:       Targeted file 7 passed / 0 failed, exit 0; Ruff on the changed test exit 0.
-- Commit:      NONE
+- Commit:      `4b4235836`
 - Status:      FIXED
 
 ### N-02  Valid Codex auth satisfies vision requirements
@@ -43,13 +43,13 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Severity:    S1
 - Invariant:   A valid Codex-auth fixture is accepted by vision requirement checks.
 - Repro:       `scripts/run_tests.sh tests/tools/test_vision_tools.py`
-- Before:      Prior isolated rerun failed `test_check_requirements_accepts_codex_auth`.
-- Test:        Pending current fail-first rerun.
-- Change:      NONE
-- After:       Pending.
-- Gates:       Pending.
+- Before:      Current fail-first rerun: 84 passed / 1 failed. The fixture combined valid OAuth tokens with `gpt-4o`, which is not in the current Codex OAuth catalog; commit `1cc12db2f` intentionally skips non-Codex main models before attempting auth.
+- Test:        `scripts/run_tests.sh tests/tools/test_vision_tools.py` failed before the change at `check_vision_requirements() is True`.
+- Change:      Use catalog-valid, vision-capable `gpt-5.4` so the test isolates the promised Codex-auth requirement instead of contradicting the model-routing guard.
+- After:       The fixture uses catalog-valid, vision-capable `gpt-5.4`; Codex OAuth client resolution succeeds without weakening the non-Codex-model guard.
+- Gates:       Targeted file 85 passed / 0 failed, exit 0; Ruff on the changed test exit 0.
 - Commit:      NONE
-- Status:      OPEN
+- Status:      FIXED
 
 ## Iteration 1 — Information completeness and archive truth
 
