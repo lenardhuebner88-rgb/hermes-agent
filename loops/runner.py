@@ -1532,6 +1532,20 @@ class LoopRunner:
     def _land_gates(self, repo: Path, base: str) -> tuple[bool, str]:
         """Beweis nach dem ff-Merge: Collection-Sweep + affected Tests (+ Frontend,
         wenn web/ berührt). Seam für Tests."""
+        if self.pack.land_gates is not None:
+            for cmd in self.pack.land_gates:
+                argv = shlex.split(cmd)
+                try:
+                    res = subprocess.run(
+                        argv, cwd=str(repo), capture_output=True,
+                        encoding="utf-8", errors="replace", timeout=2400, check=False,
+                    )
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    return False, f"{cmd}: {exc}"
+                if res.returncode != 0:
+                    tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
+                    return False, f"{cmd} rot (rc={res.returncode}):\n{tail}"
+            return True, "land_gates grün (" + ", ".join(self.pack.land_gates) + ")"
         py = repo / "venv" / "bin" / "python"
         steps: list[tuple[str, list[str], Path]] = [
             ("collection", [str(py), "-m", "pytest", "--co", "-q", "-p", "no:cacheprovider", "tests/"], repo),

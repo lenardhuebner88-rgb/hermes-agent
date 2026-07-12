@@ -684,6 +684,33 @@ def test_ensure_wt_uses_base_branch(tmp_path, fake_engine):
     assert head == pack.branch
 
 
+def test_land_gates_custom_commands(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir, "cgates", "pipeline", repo, land_gates=["true", "false"]
+    )
+    pack = load_pack(packs_dir, "cgates")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is False
+    assert "false" in report
+
+
+def test_land_gates_custom_all_green(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_pack(packs_dir, "ggates", "pipeline", repo, land_gates=["true"])
+    pack = load_pack(packs_dir, "ggates")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is True
+
+
 def test_parse_worktree_paths():
     porcelain = (
         "worktree /home/x/repo\nHEAD abc\nbranch refs/heads/main\n\n"
