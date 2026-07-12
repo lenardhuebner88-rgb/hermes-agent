@@ -176,6 +176,53 @@ def _timer_next_run(name: str) -> str | None:
     return next_run.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _timer_snapshot(names: list[str]) -> dict[str, dict[str, Any]]:
+    """Read all timer facts with two systemctl processes instead of three per pack."""
+    if not names:
+        return {}
+    units = [_timer_unit(name) for name in names]
+    show = _systemctl(
+        "show",
+        *units,
+        "--property=Id",
+        "--property=UnitFileState",
+        "--property=TimersCalendar",
+    )
+    snapshot: dict[str, dict[str, Any]] = {}
+    if show.returncode == 0:
+        for block in re.split(r"\n\s*\n", show.stdout.strip()):
+            fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            unit = fields.get("Id", "")
+            if not unit.startswith("hermes-loop@") or not unit.endswith(".timer"):
+                continue
+            name = unit.removeprefix("hermes-loop@").removesuffix(".timer")
+            schedule_match = _TIMER_ON_CALENDAR_RE.search(fields.get("TimersCalendar", ""))
+            snapshot[name] = {
+                "timer_enabled": fields.get("UnitFileState") == "enabled",
+                "timer_schedule": schedule_match.group(1) if schedule_match else DEFAULT_TIMER_SCHEDULE,
+                "timer_next_run": None,
+            }
+    timers = _systemctl("list-timers", "--all", "--output=json", "--no-legend")
+    try:
+        rows = json.loads(timers.stdout) if timers.returncode == 0 else []
+    except (TypeError, ValueError):
+        rows = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        unit = row.get("unit")
+        next_usec = row.get("next")
+        if not isinstance(unit, str) or not unit.startswith("hermes-loop@") or not unit.endswith(".timer"):
+            continue
+        if not isinstance(next_usec, int) or next_usec <= 0:
+            continue
+        name = unit.removeprefix("hermes-loop@").removesuffix(".timer")
+        if name in snapshot:
+            next_run = datetime.fromtimestamp(next_usec / 1_000_000, tz=timezone.utc)
+            snapshot[name]["timer_next_run"] = next_run.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return snapshot
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     """Datei im Zielverzeichnis schreiben und atomar ersetzen."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +448,11 @@ def _unit_failed_fast(unit: str, probe: float = 0.6) -> bool:
     return _systemctl("is-active", unit).stdout.strip() == "failed"
 
 
-def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
+def _pack_summary(
+    name: str,
+    source: str = "repo",
+    timer_snapshot: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     try:
         pack = loop_runner.load_pack(_dir_for(name), name)
     except loop_runner.ManifestError as exc:
@@ -412,7 +463,8 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         if (state / "queue" / stage).is_dir() else 0
         for stage in loop_runner.QUEUE_STAGES
     }
-    timer_enabled = _timer_enabled(pack.name)
+    timer = timer_snapshot.get(pack.name) if timer_snapshot else None
+    timer_enabled = timer["timer_enabled"] if timer else _timer_enabled(pack.name)
     token_usage, _phase_events = _phase_usage(state)
     return {
         "name": pack.name,
@@ -435,8 +487,8 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "queue": qcounts if pack.type == "pipeline" else None,
         "commits_ahead": len(_commits_ahead(pack)),
         "timer_enabled": timer_enabled,
-        "timer_schedule": _timer_schedule(pack.name),
-        "timer_next_run": _timer_next_run(pack.name),
+        "timer_schedule": timer["timer_schedule"] if timer else _timer_schedule(pack.name),
+        "timer_next_run": timer["timer_next_run"] if timer else _timer_next_run(pack.name),
         "token_usage": token_usage,
     }
 
@@ -467,7 +519,9 @@ def register_loops_routes(app: FastAPI) -> None:
 
     @app.get("/api/loops")
     def list_loops() -> dict[str, Any]:
-        return {"packs": [_pack_summary(name, source) for name, source in _all_pack_names()]}
+        packs = _all_pack_names()
+        timers = _timer_snapshot([name for name, _source in packs])
+        return {"packs": [_pack_summary(name, source, timers) for name, source in packs]}
 
     @app.get("/api/loops/models")
     def loop_models() -> dict[str, Any]:

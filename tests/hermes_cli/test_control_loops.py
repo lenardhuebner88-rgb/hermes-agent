@@ -134,6 +134,33 @@ def test_real_phase_usage_ledger_flows_to_summary_and_detail(api):
     assert detail["phase_usage"] == rows
 
 
+def test_list_loops_batches_timer_systemctl_for_all_packs(api, monkeypatch):
+    client, _calls, _tmp = api
+    calls: list[tuple[str, ...]] = []
+
+    def batched_systemctl(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "show":
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "TimersCalendar={ OnCalendar=*-*-* 23:37:00 ; next_elapse=(null) }\n"
+                    "Id=hermes-loop@fliessband.timer\nUnitFileState=disabled\n\n"
+                    "TimersCalendar={ OnCalendar=*-*-* 23:37:00 ; next_elapse=(null) }\n"
+                    "Id=hermes-loop@nacht.timer\nUnitFileState=disabled\n"
+                ),
+                stderr="",
+            )
+        if args[0] == "list-timers":
+            return subprocess.CompletedProcess(args, 0, stdout="[]\n", stderr="")
+        raise AssertionError(f"unexpected per-pack systemctl: {args}")
+
+    monkeypatch.setattr(control_loops, "_systemctl", batched_systemctl)
+    assert client.get("/api/loops").status_code == 200
+    assert [call[0] for call in calls] == ["show", "list-timers"]
+
+
 
 def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
     from hermes_cli import control_loops as cl
