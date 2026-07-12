@@ -3472,6 +3472,60 @@ def test_detect_crashed_workers_isolated_failure_normal_retry(
             )
 
 
+def test_detect_crashed_workers_preserves_review_stage_on_reclaim(
+    kanban_home, monkeypatch,
+):
+    """A crashed reviewer returns to review while a crashed coder returns ready."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import profiles as profiles_mod
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        _kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda _name: True)
+
+    with kb.connect_closing() as conn:
+        review_tid = kb.create_task(conn, title="review crash", assignee="coder")
+        assert kb.claim_task(conn, review_tid) is not None
+        assert kb.complete_task(
+            conn,
+            review_tid,
+            summary="implementation complete",
+            review_gate=True,
+        )
+        assert kb.claim_review_task(
+            conn,
+            review_tid,
+            reviewer_profile="verifier",
+        ) is not None
+        kb._set_worker_pid(conn, review_tid, 81001)
+
+        coder_tid = kb.create_task(conn, title="coder crash", assignee="coder")
+        assert kb.claim_task(conn, coder_tid) is not None
+        kb._set_worker_pid(conn, coder_tid, 81002)
+
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id IN (?, ?)",
+            (int(time.time()) - 60, review_tid, coder_tid),
+        )
+        conn.commit()
+
+        kb.detect_crashed_workers(conn)
+
+        assert kb.get_task(conn, review_tid).status == "review"
+        assert kb.get_task(conn, coder_tid).status == "ready"
+
+
 def test_detect_crashed_workers_skips_freshly_claimed_tasks(
     kanban_home, monkeypatch,
 ):

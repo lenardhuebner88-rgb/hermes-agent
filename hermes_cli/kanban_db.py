@@ -16046,12 +16046,21 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
 
+            # Preserve a pending review stage when the dead worker owned a
+            # review-claimed run. Resolve before _end_run clears current_run_id.
+            _reclaim_target = (
+                "review"
+                if _run_originated_from_review(
+                    conn, row["id"], row["current_run_id"]
+                )
+                else "ready"
+            )
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
-                (row["id"], pid, row["claim_lock"]),
+                (_reclaim_target, row["id"], pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
                 # Rate-limited requeues are a clean release, not a crash —
