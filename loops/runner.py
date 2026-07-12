@@ -1575,7 +1575,7 @@ class LoopRunner:
 
     def _push(self, repo: Path) -> tuple[bool, str]:
         """Push NUR piet-fork, nur ff (kein --force). Seam für Tests."""
-        res = self.git("push", "piet-fork", "main", cwd=repo)
+        res = self.git("push", self.pack.land_remote, self.pack.base_branch, cwd=repo)
         return res.returncode == 0, (res.stderr.strip() or res.stdout.strip())
 
     def _safe_land_rollback(
@@ -1587,7 +1587,7 @@ class LoopRunner:
         den Loop-Fehlerpfad verworfen werden. In diesem Fall bleibt alles stehen
         und die Landung wird als manuell zu klaeren markiert.
         """
-        current = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+        current = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
         if current != expected_head:
             return False, (
                 f"main ist parallel weitergelaufen ({current[:9]} statt "
@@ -1618,7 +1618,7 @@ class LoopRunner:
         anchor = f"loop-rebase/{self.pack.name}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         if self.git("tag", anchor, self.pack.branch, cwd=repo).returncode != 0:
             return False, "Rebase-Anker-Tag ließ sich nicht setzen"
-        res = self.git("rebase", "main", cwd=self.wt)
+        res = self.git("rebase", self.pack.base_branch, cwd=self.wt)
         if res.returncode != 0:
             self.git("rebase", "--abort", cwd=self.wt)
             self.git("tag", "-d", anchor, cwd=repo)
@@ -1628,7 +1628,9 @@ class LoopRunner:
 
     def cmd_land(self, push: bool = True, require_push: bool = False) -> bool:
         repo = self.pack.repo
-        ahead = self.git("rev-list", "--count", f"main..{self.pack.branch}", cwd=repo).stdout.strip()
+        ahead = self.git(
+            "rev-list", "--count", f"{self.pack.base_branch}..{self.pack.branch}", cwd=repo
+        ).stdout.strip()
         if not ahead or ahead == "0":
             self.say("Nichts zu landen (Branch ist nicht vor main).")
             return True
@@ -1636,7 +1638,7 @@ class LoopRunner:
             self.say("ABBRUCH: 10-building/ ist nicht leer — UNVERIFIZIERTE Arbeit zuerst klären.")
             return False
         cur = self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
-        if cur != "main":
+        if cur != self.pack.base_branch:
             self.say(f"ABBRUCH: Live-Checkout steht auf {cur!r}, nicht auf main.")
             return False
         dirty = self.git("status", "--porcelain", cwd=repo).stdout.strip()
@@ -1644,9 +1646,9 @@ class LoopRunner:
             self.say("ABBRUCH: Live-Checkout ist dirty (parallele Arbeit?) — Landung braucht einen sauberen Baum:\n"
                      + "\n".join(dirty.splitlines()[:10]))
             return False
-        base = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+        base = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
         tag = f"loop-land/{self.pack.name}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        if self.git("tag", tag, "main", cwd=repo).returncode != 0:
+        if self.git("tag", tag, self.pack.base_branch, cwd=repo).returncode != 0:
             self.say("ABBRUCH: Rollback-Anker-Tag konnte nicht gesetzt werden.")
             return False
         rebase_note = ""
@@ -1666,7 +1668,7 @@ class LoopRunner:
                 self.ledger(f"LAND abgebrochen: ff nach auto-rebase fehlgeschlagen (base {base[:9]})")
                 return False
             rebase_note = f" · {reb_msg.splitlines()[0]}"
-        merged_head = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+        merged_head = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
         ok, report = self._land_gates(repo, base)
         if not ok:
             # Baum war sauber, Merge war reiner ff → --keep rollt den Ref zurück,
@@ -1699,8 +1701,8 @@ class LoopRunner:
                                    reason=f"{rollback_report}; {report.splitlines()[0]}")
             return False
         pushed = ""
-        if push:
-            current = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+        if push and self.pack.land_push:
+            current = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
             if current != merged_head:
                 reason = (
                     f"main ist vor dem Push parallel weitergelaufen ({current[:9]} "
@@ -1711,7 +1713,7 @@ class LoopRunner:
                 self.notify(f"⛔ {self.pack.name} LAND: {reason}. Anker {tag}.")
                 return False
             p_ok, p_msg = self._push(repo)
-            current = self.git("rev-parse", "main", cwd=repo).stdout.strip()
+            current = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
             if current != merged_head:
                 reason = (
                     f"main ist während des Pushs parallel weitergelaufen "
@@ -1764,7 +1766,9 @@ class LoopRunner:
             moved += 1
         self.visual_attestation_path.unlink(missing_ok=True)
         self.ensure_wt(fresh=True)
-        new_main = self.git("rev-parse", "--short", "main", cwd=repo).stdout.strip()
+        new_main = self.git(
+            "rev-parse", "--short", self.pack.base_branch, cwd=repo
+        ).stdout.strip()
         self.ledger(
             f"LAND ✅ {ahead} Commits → main {new_main} "
             f"(Anker {tag}, {moved} Pläne archiviert){pushed}{rebase_note}"

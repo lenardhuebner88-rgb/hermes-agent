@@ -1297,6 +1297,34 @@ def test_land_happy_path_merges_tags_archives_and_freshens(tmp_path, fake_engine
     assert "LAND ✅" in runner.ledger_path.read_text(encoding="utf-8")
 
 
+def test_land_push_false_skips_push(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir,
+        "nopush",
+        "pipeline",
+        repo,
+        land_gates=["true"],
+        land_push=False,
+    )
+    pack = load_pack(packs_dir, "nopush")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls = []
+    monkeypatch.setattr(
+        runner, "_push", lambda repo: (calls.append(repo) or (True, "ok"))
+    )
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_in(runner.wt, "slice")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+
+    assert runner.cmd_land(push=True) is True
+    assert calls == []
+
+
 def test_land_aborts_on_dirty_live_checkout(tmp_path, fake_engine):
     repo, runner, pushes = make_landable(tmp_path)
     (repo / "README.md").write_text("fremde parallele arbeit\n", encoding="utf-8")
