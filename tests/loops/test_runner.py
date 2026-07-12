@@ -1124,7 +1124,8 @@ def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
     hb = json.loads((runner.state / "heartbeat.json").read_text(encoding="utf-8"))
     assert hb["current"] is None, "nach Phasen-Ende darf keine Phase als aktiv stehen"
     assert len(hb["last"]) == 2 and hb["last"][0]["phase"] == "round"
-    assert {"secs", "rc", "at", "engine", "model"} <= set(hb["last"][0])
+    assert {"secs", "rc", "at", "engine", "model", "round"} <= set(hb["last"][0])
+    assert [entry["round"] for entry in hb["last"]] == [1, 2]
 
 
 def test_sweep_stops_on_usage_limit(tmp_path, fake_engine):

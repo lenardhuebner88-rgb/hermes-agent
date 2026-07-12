@@ -979,6 +979,8 @@ export interface LoopHeartbeatCurrent {
   /** lokale ISO-Zeit ohne Zone (Runner-Host = Backend-Host). */
   started_at: string;
   timeout: number;
+  /** Echte Runner-Runde; fehlt bei älteren Heartbeats und der Plan-Phase. */
+  round?: number;
 }
 
 /** Ein abgeschlossener Phasen-Eintrag der 20er-Historie. */
@@ -989,6 +991,7 @@ export interface LoopHeartbeatHistoryEntry {
   secs: number;
   rc: number;
   at: string;
+  round?: number;
 }
 
 export interface LoopHeartbeat {
@@ -1001,6 +1004,9 @@ export interface LoopPackSummary {
   type: "pipeline" | "sweep";
   /** "repo" = kuratiertes Manifest aus loops/packs/, "custom" = per Werkstatt dupliziert. */
   source?: "repo" | "custom";
+  /** Gebundener Projektpfad aus dem Pack-Manifest; kein frei editierbares Ziel. */
+  repo: string;
+  base_branch: string;
   /** true = genau ein verifizierter PASS-Commit darf nach den Gates automatisch landen. */
   autoland?: boolean;
   description: string;

@@ -1,13 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
   Anchor,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  FolderGit2,
   PauseCircle,
   Play,
   RefreshCw,
+  Search,
   Square,
   Workflow,
   Wrench,
@@ -601,6 +604,152 @@ const nightFieldStyle: React.CSSProperties = {
   color: "var(--ln-ink)",
 };
 
+interface LoopModelChoice {
+  engine: string;
+  engineLabel: string;
+  model: string;
+}
+
+function LoopModelPicker({
+  phase,
+  value,
+  models,
+  busy,
+  onChange,
+}: {
+  phase: string;
+  value: { engine: string; model: string };
+  models: LoopModelsResponse | null;
+  busy: boolean;
+  onChange: (next: { engine: string; model: string }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const panelId = useId();
+  const triggerId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const choices = useMemo<LoopModelChoice[]>(() =>
+    Object.entries(models?.engines ?? {}).flatMap(([engine, entry]) =>
+      entry.models.map((model) => ({ engine, engineLabel: entry.label || engine, model })),
+    ), [models]);
+  const normalized = query.trim().toLocaleLowerCase("de");
+  const filtered = normalized
+    ? choices.filter((choice) =>
+        `${choice.engine} ${choice.engineLabel} ${choice.model}`.toLocaleLowerCase("de").includes(normalized),
+      )
+    : choices;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) {
+        setOpen(false);
+        setQuery("");
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [open]);
+
+  const closePicker = () => {
+    setOpen(false);
+    setQuery("");
+  };
+  const restoreTriggerFocus = () => {
+    queueMicrotask(() => document.getElementById(triggerId)?.focus());
+  };
+
+  return (
+    <div ref={rootRef} className="relative min-w-0">
+      <button
+        id={triggerId}
+        type="button"
+        disabled={busy || choices.length === 0}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        aria-label={t.chooseModel(phase)}
+        onClick={() => setOpen((current) => !current)}
+        className={cn(
+          "flex min-h-12 w-full items-center gap-2 rounded-md border px-3 py-2 text-left disabled:opacity-60",
+          NIGHT_FOCUS,
+        )}
+        style={nightFieldStyle}
+      >
+        <EngineDot engine={value.engine} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-data text-sm" style={{ color: "var(--ln-ink)" }}>{value.model}</span>
+          <span className="block truncate text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
+            {models?.engines[value.engine]?.label ?? value.engine}
+          </span>
+        </span>
+        <ChevronDown aria-hidden className={cn("h-4 w-4 shrink-0 transition-transform", open && "rotate-180")} />
+      </button>
+      {open ? (
+        <div
+          id={panelId}
+          role="region"
+          aria-label={t.modelCatalogTitle(phase)}
+          className="mt-2 rounded-xl border p-2 sm:p-3"
+          style={{ borderColor: "var(--ln-sodium)", background: "var(--ln-void)" }}
+        >
+          <label className="relative block">
+            <Search aria-hidden className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: "var(--ln-ink-mute)" }} />
+            <input
+              type="search"
+              value={query}
+              autoFocus
+              aria-label={t.modelSearch}
+              placeholder={t.modelSearch}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  closePicker();
+                  restoreTriggerFocus();
+                }
+              }}
+              className={cn(NIGHT_FIELD_CLASS, "pl-9")}
+              style={nightFieldStyle}
+            />
+          </label>
+          <div className="mt-2 max-h-72 space-y-1 overflow-y-auto overscroll-contain">
+            {filtered.length > 0 ? filtered.map((choice) => {
+              const selected = choice.engine === value.engine && choice.model === value.model;
+              return (
+                <button
+                  key={`${choice.engine}:${choice.model}`}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => {
+                    onChange({ engine: choice.engine, model: choice.model });
+                    closePicker();
+                    restoreTriggerFocus();
+                  }}
+                  className={cn("flex min-h-12 w-full items-center gap-2 rounded-lg border px-3 py-2 text-left", NIGHT_FOCUS)}
+                  style={{
+                    borderColor: selected ? "var(--ln-sodium)" : "var(--ln-line)",
+                    background: selected ? "var(--ln-raised)" : "transparent",
+                    color: "var(--ln-ink)",
+                  }}
+                >
+                  <EngineDot engine={choice.engine} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-all font-data text-sm">{choice.model}</span>
+                    <span className="block text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>{choice.engineLabel}</span>
+                  </span>
+                  {selected ? <CheckCircle2 aria-hidden className="h-4 w-4 shrink-0" style={{ color: "var(--ln-ok)" }} /> : null}
+                </button>
+              );
+            }) : (
+              <p className="px-2 py-4 text-center text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.modelCatalogEmpty}</p>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function LoopStartForm({
   pack,
   models,
@@ -627,8 +776,6 @@ function LoopStartForm({
   const paramNames = useMemo(() => Object.keys(pack.params), [pack]);
   const [paramValues, setParamValues] = useState<Record<string, string>>(() => ({ ...pack.params }));
 
-  const engines = models?.engines ?? {};
-  const engineNames = Object.keys(engines);
   const captionStyle: React.CSSProperties = { color: "var(--ln-ink-soft)" };
 
   const handleSubmit = () => {
@@ -658,58 +805,16 @@ function LoopStartForm({
       ) : null}
       {phaseNames.map((phase) => {
         const value = phaseValues[phase];
-        const engineModels = engines[value.engine]?.models ?? [];
         return (
-          <div key={phase} className="grid gap-2 sm:grid-cols-[minmax(0,90px)_minmax(0,1fr)_minmax(0,1fr)] sm:items-end">
-            <span className="font-data text-xs font-semibold uppercase tracking-[0.1em]" style={{ color: "var(--ln-ink)" }}>
-              {phase}
-            </span>
-            <label className="min-w-0">
-              <span className="text-[11px] uppercase tracking-[0.08em]" style={captionStyle}>{t.phaseEngine}</span>
-              <span className="mt-1 flex items-center gap-2">
-                <EngineDot engine={value.engine} />
-                <select
-                  value={value.engine}
-                  disabled={busy}
-                  aria-label={`${t.phaseEngine} ${phase}`}
-                  onChange={(e) => {
-                    const engine = e.target.value;
-                    const firstModel = engines[engine]?.models[0] ?? "";
-                    setPhaseValues((prev) => ({ ...prev, [phase]: { engine, model: firstModel } }));
-                  }}
-                  className={NIGHT_FIELD_CLASS}
-                  style={nightFieldStyle}
-                >
-                  {engineNames.map((name) => {
-                    const disabled = (engines[name]?.models.length ?? 0) === 0;
-                    return (
-                      <option key={name} value={name} disabled={disabled}>
-                        {engines[name]?.label ?? name}
-                        {disabled ? ` — ${t.neuralwattDisabled}` : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-              </span>
-            </label>
-            <label className="min-w-0">
-              <span className="text-[11px] uppercase tracking-[0.08em]" style={captionStyle}>{t.phaseModel}</span>
-              <select
-                value={value.model}
-                disabled={busy || engineModels.length === 0}
-                aria-label={`${t.phaseModel} ${phase}`}
-                onChange={(e) => {
-                  const model = e.target.value;
-                  setPhaseValues((prev) => ({ ...prev, [phase]: { ...prev[phase], model } }));
-                }}
-                className={cn(NIGHT_FIELD_CLASS, "mt-1")}
-                style={nightFieldStyle}
-              >
-                {engineModels.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-            </label>
+          <div key={phase} className="grid gap-2 rounded-xl border p-3 sm:grid-cols-[minmax(0,90px)_minmax(0,1fr)] sm:items-center" style={{ borderColor: "var(--ln-line)" }}>
+            <span className="font-data text-xs font-semibold uppercase tracking-[0.1em]" style={{ color: "var(--ln-ink)" }}>{phase}</span>
+            <LoopModelPicker
+              phase={phase}
+              value={value}
+              models={models}
+              busy={busy}
+              onChange={(next) => setPhaseValues((prev) => ({ ...prev, [phase]: next }))}
+            />
           </div>
         );
       })}
@@ -985,6 +1090,41 @@ interface LoopCardProps {
   onDuplicate: (source: string, name: string) => void;
 }
 
+function LoopCardAction({
+  children,
+  disabled,
+  onClick,
+  tone = "neutral",
+  filled = false,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  tone?: "neutral" | "bronze" | "alert";
+  filled?: boolean;
+}) {
+  const color = tone === "alert" ? "var(--ln-fail)" : tone === "bronze" ? "var(--ln-sodium)" : "var(--ln-ink-soft)";
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-semibold disabled:opacity-50",
+        NIGHT_FOCUS,
+        "!font-display",
+      )}
+      style={{
+        borderColor: color,
+        background: filled ? color : "transparent",
+        color: filled ? (tone === "alert" ? "var(--ln-ink)" : "var(--ln-sodium-ink)") : color,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 const TIMER_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 function TimerScheduleControl({
@@ -1144,47 +1284,46 @@ function LoopCard({
             pendingStop ? (
               <span className="inline-flex flex-wrap items-center gap-2">
                 <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
-                <Button size="xs" disabled={busy} onClick={() => onStop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-fail)", color: "var(--ln-ink)" }}>
+                <LoopCardAction disabled={busy} onClick={() => onStop(pack.name)} tone="alert" filled>
                   {busy ? "…" : t.confirmYes}
-                </Button>
-                <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                </LoopCardAction>
+                <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(null)}>{t.confirmNo}</LoopCardAction>
               </span>
             ) : (
-              <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingStop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-fail)" }}>
+              <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(pack.name)} tone="alert">
                 <Square className="h-3.5 w-3.5" />{t.actions.stop}
-              </Button>
+              </LoopCardAction>
             )
           ) : (
             <>
-              <Button
-                size="xs"
+              <LoopCardAction
                 disabled={busy}
                 onClick={() => onOpenStart(pack.name)}
-                className={cn("border-0", NIGHT_ACTION_CLASS)}
-                style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
+                tone="bronze"
+                filled
               >
                 <Play className="h-3.5 w-3.5" />{t.actions.start}
-              </Button>
+              </LoopCardAction>
               {canLand ? (
                 pendingLand ? (
                   <span className="inline-flex flex-wrap items-center gap-2">
                     <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmLand}</span>
-                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}>
+                    <LoopCardAction disabled={busy} onClick={() => onLand(pack.name)} tone="bronze" filled>
                       {busy ? "…" : t.confirmYes}
-                    </Button>
-                    <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                    </LoopCardAction>
+                    <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(null)}>{t.confirmNo}</LoopCardAction>
                   </span>
                 ) : (
-                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-sodium)", borderColor: "var(--ln-sodium)" }}>
+                  <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(pack.name)} tone="bronze">
                     <Anchor className="h-3.5 w-3.5" />{t.actions.land}
-                  </Button>
+                  </LoopCardAction>
                 )
               ) : null}
             </>
           )}
-          <Button size="xs" ghost disabled={busy} onClick={() => onToggleWorkshop(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>
+          <LoopCardAction disabled={busy} onClick={() => onToggleWorkshop(pack.name)}>
             <Wrench className="h-3.5 w-3.5" />{t.actions.workshop}
-          </Button>
+          </LoopCardAction>
         </div>
       </div>
 
@@ -1255,6 +1394,75 @@ function newestGlobalEvent(packs: LoopPackSummary[]): LoopHeartbeatHistoryEntry 
   return best;
 }
 
+const PIPELINE_PROGRESS_LABEL: Record<string, string> = {
+  plan: "Plan",
+  build: "Build",
+  verify: "Verify",
+};
+
+function latestRound(pack: LoopPackSummary): number | null {
+  const current = pack.heartbeat?.current?.round;
+  if (current != null) return current;
+  const history = pack.heartbeat?.last ?? [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index].round != null) return history[index].round!;
+  }
+  return null;
+}
+
+function LoopPipelineProgress({ pack, nowMs }: { pack: LoopPackSummary; nowMs: number }) {
+  const segments = deriveRingSegments(pack, nowMs);
+  const current = pack.heartbeat?.current ?? null;
+  const maxRounds = pack.stop.max_rounds ?? 1;
+
+  return (
+    <div data-testid="loop-mobile-progress" className="mt-4 border-t pt-4" style={{ borderColor: "var(--ln-line)" }}>
+      <div className="flex flex-wrap items-end justify-between gap-1.5">
+        <p className="font-data text-sm font-semibold tabular-nums" style={{ color: "var(--ln-ink)" }}>
+          {t.progressRound(latestRound(pack), maxRounds)}
+        </p>
+        <p className="text-[11px]" style={{ color: "var(--ln-ink-mute)" }}>{t.progressEvidence}</p>
+      </div>
+      <ol className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {segments.map((segment, index) => {
+          const active = segment.state === "current";
+          const done = segment.state === "done";
+          const startedMs = active && current ? Date.parse(current.started_at) : Number.NaN;
+          const elapsed = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
+          const status = done ? t.phaseStateDone : active ? t.phaseStateActive(fmtDur(elapsed)) : t.phaseStateWaiting;
+          return (
+            <li
+              key={segment.key}
+              className="flex min-h-14 items-center gap-3 rounded-lg border px-3 py-2"
+              style={{
+                borderColor: active ? "var(--ln-sodium)" : done ? "var(--ln-ok)" : "var(--ln-line)",
+                background: active ? "var(--ln-raised)" : "transparent",
+              }}
+            >
+              <span
+                aria-hidden
+                className="grid size-7 shrink-0 place-items-center rounded-full border font-data text-xs"
+                style={{
+                  borderColor: active ? "var(--ln-sodium)" : done ? "var(--ln-ok)" : "var(--ln-line)",
+                  color: active ? "var(--ln-sodium)" : done ? "var(--ln-ok)" : "var(--ln-ink-mute)",
+                }}
+              >
+                {done ? "✓" : active ? "•" : index + 1}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-xs font-semibold uppercase tracking-[0.06em]" style={{ color: "var(--ln-ink)" }}>
+                  {PIPELINE_PROGRESS_LABEL[segment.key] ?? segment.key}
+                </span>
+                <span className="block font-data text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>{status}</span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function LoopsHero({
   packs,
   nowMs,
@@ -1281,14 +1489,17 @@ function LoopsHero({
       style={{ borderColor: "var(--ln-line)", background: "var(--ln-surface)" }}
     >
       {hero ? (
-        <div className="flex flex-wrap items-center gap-4">
-          <LoopRing
-            size={112}
-            state="running"
-            segments={hero.type === "pipeline" ? deriveRingSegments(hero, nowMs) : undefined}
-            ticks={hero.type === "sweep" ? deriveRingTicks(hero) : undefined}
-          />
-          <div className="min-w-0 flex-1">
+        <>
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="hidden sm:inline-flex">
+              <LoopRing
+                size={112}
+                state="running"
+                segments={hero.type === "pipeline" ? deriveRingSegments(hero, nowMs) : undefined}
+                ticks={hero.type === "sweep" ? deriveRingTicks(hero) : undefined}
+              />
+            </span>
+            <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="truncate text-xl font-semibold" style={{ ...displayFont, color: "var(--ln-ink)" }}>
                 {hero.name}
@@ -1315,7 +1526,7 @@ function LoopsHero({
                 t.heartbeatBetweenPhases
               )}
             </p>
-            <div className="mt-3">
+            <div className="mt-3 hidden sm:block">
               {pendingStopPack === hero.name ? (
                 <span className="inline-flex flex-wrap items-center gap-2">
                   <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
@@ -1336,8 +1547,42 @@ function LoopsHero({
                 </Button>
               )}
             </div>
+            </div>
           </div>
-        </div>
+          {hero.type === "pipeline" ? <LoopPipelineProgress pack={hero} nowMs={nowMs} /> : null}
+          <div className="mt-3 sm:hidden">
+            {pendingStopPack === hero.name ? (
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={busyPack === hero.name}
+                  onClick={() => onStop(hero.name)}
+                  className={cn("inline-flex min-h-12 items-center justify-center rounded-lg border px-4 text-sm font-semibold", NIGHT_FOCUS, "!font-display")}
+                  style={{ borderColor: "var(--ln-fail)", background: "var(--ln-fail)", color: "var(--ln-ink)" }}
+                >
+                  {busyPack === hero.name ? "…" : t.confirmYes}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSetPendingStop(null)}
+                  className={cn("inline-flex min-h-12 items-center justify-center rounded-lg border px-4 text-sm font-semibold", NIGHT_FOCUS, "!font-display")}
+                  style={{ borderColor: "var(--ln-line)", color: "var(--ln-ink-soft)" }}
+                >
+                  {t.confirmNo}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onSetPendingStop(hero.name)}
+                className={cn("inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-lg border px-4 text-sm font-semibold", NIGHT_FOCUS, "!font-display")}
+                style={{ borderColor: "var(--ln-line)", color: "var(--ln-fail)" }}
+              >
+                <Square aria-hidden className="h-4 w-4" />{t.actions.stop}
+              </button>
+            )}
+          </div>
+        </>
       ) : (
         <div className="flex flex-wrap items-center gap-4">
           <LoopRing size={112} state="idle" />
@@ -1443,6 +1688,7 @@ export function LoopsGrid({
   onSaveFile,
   onDuplicate,
 }: LoopsGridProps) {
+  const [repoFilter, setRepoFilter] = useState<string | null>(null);
   if (packs.length === 0) {
     return (
       <div className="rounded-card border border-dashed p-4 text-left" style={{ borderColor: "var(--ln-line)" }}>
@@ -1453,6 +1699,59 @@ export function LoopsGrid({
   }
 
   const runnable = packs.filter((p): p is LoopPackSummary => !isLoopPackError(p));
+  const repoPaths = Array.from(new Set(runnable.map((pack) => pack.repo || t.sourceRepo))).sort();
+  const effectiveRepoFilter = repoFilter && repoPaths.includes(repoFilter) ? repoFilter : null;
+  const visible = effectiveRepoFilter
+    ? packs.filter((pack) => !isLoopPackError(pack) && (pack.repo || t.sourceRepo) === effectiveRepoFilter)
+    : packs;
+  const repoGroups = Array.from(new Set(
+    visible.filter((pack): pack is LoopPackSummary => !isLoopPackError(pack)).map((pack) => pack.repo || t.sourceRepo),
+  )).map((repo) => ({
+    repo,
+    packs: visible.filter((pack): pack is LoopPackSummary => !isLoopPackError(pack) && (pack.repo || t.sourceRepo) === repo),
+  }));
+  const broken = visible.filter(isLoopPackError);
+  const repoName = (repo: string) => repo.replace(/\/+$/, "").split("/").pop() || repo;
+
+  const renderPack = (pack: LoopPackSummary) => (
+    <LoopCard
+      key={pack.name}
+      pack={pack}
+      models={models}
+      selected={selectedPack === pack.name}
+      detail={selectedPack === pack.name ? detail : null}
+      detailLoading={selectedPack === pack.name ? detailLoading : false}
+      detailError={selectedPack === pack.name ? detailError : null}
+      busy={busyPack === pack.name}
+      actionError={actionErrorByPack[pack.name]}
+      landNote={landNoteByPack[pack.name]}
+      startOpen={startOpenPack === pack.name}
+      pendingStop={pendingStopPack === pack.name}
+      pendingLand={pendingLandPack === pack.name}
+      workshopOpen={workshopOpenPack === pack.name}
+      files={workshopOpenPack === pack.name ? files : null}
+      filesLoading={workshopOpenPack === pack.name ? filesLoading : false}
+      filesError={workshopOpenPack === pack.name ? filesError : null}
+      fileSaveBusy={fileSaveBusy}
+      fileSaveError={fileSaveError}
+      duplicateBusy={duplicateBusy}
+      duplicateError={duplicateError}
+      nowMs={nowMs}
+      onSetPendingStop={onSetPendingStop}
+      onSetPendingLand={onSetPendingLand}
+      onToggleDetail={onToggleDetail}
+      onToggleWorkshop={onToggleWorkshop}
+      onOpenStart={onOpenStart}
+      onCloseStart={onCloseStart}
+      onSubmitStart={onSubmitStart}
+      onStop={onStop}
+      onLand={onLand}
+      onToggleTimer={onToggleTimer}
+      onSaveTimerSchedule={onSaveTimerSchedule}
+      onSaveFile={onSaveFile}
+      onDuplicate={onDuplicate}
+    />
+  );
 
   return (
     <div className="space-y-4">
@@ -1464,51 +1763,45 @@ export function LoopsGrid({
         onSetPendingStop={onSetPendingStop}
         onStop={onStop}
       />
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 sm:gap-4">
-        {packs.map((pack) =>
-          isLoopPackError(pack) ? (
-            <LoopErrorCard key={pack.name} pack={pack} />
-          ) : (
-            <LoopCard
-              key={pack.name}
-              pack={pack}
-              models={models}
-              selected={selectedPack === pack.name}
-              detail={selectedPack === pack.name ? detail : null}
-              detailLoading={selectedPack === pack.name ? detailLoading : false}
-              detailError={selectedPack === pack.name ? detailError : null}
-              busy={busyPack === pack.name}
-              actionError={actionErrorByPack[pack.name]}
-              landNote={landNoteByPack[pack.name]}
-              startOpen={startOpenPack === pack.name}
-              pendingStop={pendingStopPack === pack.name}
-              pendingLand={pendingLandPack === pack.name}
-              workshopOpen={workshopOpenPack === pack.name}
-              files={workshopOpenPack === pack.name ? files : null}
-              filesLoading={workshopOpenPack === pack.name ? filesLoading : false}
-              filesError={workshopOpenPack === pack.name ? filesError : null}
-              fileSaveBusy={fileSaveBusy}
-              fileSaveError={fileSaveError}
-              duplicateBusy={duplicateBusy}
-              duplicateError={duplicateError}
-              nowMs={nowMs}
-              onSetPendingStop={onSetPendingStop}
-              onSetPendingLand={onSetPendingLand}
-              onToggleDetail={onToggleDetail}
-              onToggleWorkshop={onToggleWorkshop}
-              onOpenStart={onOpenStart}
-              onCloseStart={onCloseStart}
-              onSubmitStart={onSubmitStart}
-              onStop={onStop}
-              onLand={onLand}
-              onToggleTimer={onToggleTimer}
-              onSaveTimerSchedule={onSaveTimerSchedule}
-              onSaveFile={onSaveFile}
-              onDuplicate={onDuplicate}
-            />
-          ),
-        )}
-      </div>
+      {repoPaths.length > 1 ? (
+        <div role="group" className="flex gap-2 overflow-x-auto pb-1" aria-label={t.repoFilterLabel}>
+          {[null, ...repoPaths].map((repo) => {
+            const active = effectiveRepoFilter === repo;
+            return (
+              <button
+                key={repo ?? "all"}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setRepoFilter(repo)}
+                className={cn("min-h-12 shrink-0 rounded-full border px-4 text-xs", NIGHT_FOCUS)}
+                style={{
+                  borderColor: active ? "var(--ln-sodium)" : "var(--ln-line)",
+                  color: active ? "var(--ln-sodium)" : "var(--ln-ink-soft)",
+                  background: active ? "var(--ln-raised)" : "transparent",
+                }}
+              >
+                {repo ? repoName(repo) : t.allRepos}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+      {repoGroups.map((group) => (
+        <section key={group.repo} className="space-y-2.5" aria-label={`${t.boundRepo}: ${repoName(group.repo)}`}>
+          <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-1">
+            <FolderGit2 aria-hidden className="h-4 w-4 shrink-0" style={{ color: "var(--ln-sodium)" }} />
+            <h2 className="font-display text-sm font-semibold" style={{ color: "var(--ln-ink)" }}>{repoName(group.repo)}</h2>
+            <span className="min-w-0 truncate font-data text-[11px]" title={group.repo} style={{ color: "var(--ln-ink-mute)" }}>{group.repo}</span>
+            <span className="font-data text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
+              {t.boundBranch(Array.from(new Set(group.packs.map((pack) => pack.base_branch))).join(", ") || "main")}
+            </span>
+          </header>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 sm:gap-4">
+            {group.packs.map(renderPack)}
+          </div>
+        </section>
+      ))}
+      {broken.length > 0 ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{broken.map((pack) => <LoopErrorCard key={pack.name} pack={pack} />)}</div> : null}
     </div>
   );
 }

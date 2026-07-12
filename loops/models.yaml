@@ -4,9 +4,8 @@
 # Codex-Modell 2026-07-09 gegen `~/.codex/config.toml` geprüft:
 # default_model = "gpt-5.6-sol"; gpt-5.5/gpt-5.3-codex bleiben als bewiesene
 # Fallbacks im Katalog.
-# neuralwatt-Modelle: Liste kuratiert; live geprüft 2026-07-03 gegen
-# GET /v1/models (API liefert 16 IDs: glm-5.2 ±fast/flex/short-Varianten,
-# kimi-k2.6 ±fast/flex, kimi-k2.7-code ±flex, qwen3.5-397b ±fast, qwen3.6-35b ±fast).
+# neuralwatt-Modelle: vollständige auf diesem Host konfigurierte Auswahl
+# (`model_catalog.providers.neuralwatt.extra_models`, geprüft 2026-07-12).
 engines:
   claude:
     label: "Claude (Abo)"
@@ -24,4 +23,17 @@ engines:
     models: [reviewer, coder]
   neuralwatt:
     label: "NeuralWatt (Abo)"
-    models: [glm-5.2, glm-5.2-flex, kimi-k2.7-code, kimi-k2.6-fast, qwen3.5-397b-fast]
+    models:
+      - glm-5.2
+      - glm-5.2-fast
+      - glm-5.2-short
+      - glm-5.2-short-fast
+      - kimi-k2.6
+      - kimi-k2.6-fast
+      - kimi-k2.7-code
+      - kimi-k2.5-fast
+      - moonshotai/Kimi-K2.5
+      - qwen3.5-397b
+      - qwen3.5-397b-fast
+      - qwen3.6-35b
+      - qwen3.6-35b-fast

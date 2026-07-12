@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
 // Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
@@ -32,6 +32,8 @@ const runningPipeline: LoopPack = {
   // "source" ist ein neueres Feld (control_loops.py:220, Nachtschicht-Redesign) —
   // beide Fixture-Packs sind reale kuratierte Manifeste unter loops/packs/.
   source: "repo",
+  repo: "/home/piet/.hermes/hermes-agent",
+  base_branch: "main",
   description: "Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial",
   stability: "stable",
   phases: {
@@ -43,7 +45,7 @@ const runningPipeline: LoopPack = {
   params: { max_plans: "8", focus: "Hermes-Board/Kanban-Robustheit" },
   running: true,
   heartbeat: {
-    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00", timeout: 3600 },
+    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00", timeout: 3600, round: 1 },
     last: [
       { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00" },
       { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00" },
@@ -69,6 +71,8 @@ const idleSweepWithCommits: LoopPack = {
   name: "doc-sweep",
   type: "sweep",
   source: "repo",
+  repo: "/home/piet/.hermes/hermes-agent",
+  base_branch: "main",
   description: "Pro Runde EINE Doku-Drift zwischen Repo-Doku und Code-Verhalten finden und die Doku korrigieren",
   stability: "experimental",
   phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 2400 } },
@@ -117,7 +121,7 @@ const models: LoopModelsResponse = {
     claude: { label: "Claude (Abo)", models: ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"] },
     kimi: { label: "Kimi (Coding-Abo)", models: ["kimi-code/kimi-for-coding"] },
     codex: { label: "Codex (ChatGPT-Abo)", models: ["gpt-5.5", "gpt-5.3-codex"] },
-    neuralwatt: { label: "NeuralWatt (Abo) — geplant, kein Adapter", models: [] },
+    neuralwatt: { label: "NeuralWatt (Abo)", models: ["glm-5.2", "kimi-k2.7-code", "qwen3.6-35b-fast"] },
   },
 };
 
@@ -196,6 +200,31 @@ function renderInteractiveGrid(packs: LoopPack[], overrides: Partial<LoopsGridPr
 }
 
 describe("LoopsGrid", () => {
+  it("groups packs by repository and shows the bound base branch", () => {
+    const healthTrack: LoopPack = {
+      ...idleSweepWithCommits,
+      name: "health-track-ux",
+      repo: "/home/piet/projects/health-track",
+      base_branch: "main",
+    };
+    const html = renderGrid([runningPipeline, healthTrack]);
+
+    expect(html).toContain("hermes-agent");
+    expect(html).toContain("health-track");
+    expect(html).toContain("main");
+  });
+
+  it("shows state-based mobile progress with round and phases but no invented percentage", () => {
+    renderInteractiveGrid([runningPipeline], { nowMs: Date.parse("2026-07-02T23:14:30") });
+    const progress = screen.getByTestId("loop-mobile-progress");
+
+    expect(progress.textContent).toContain("Runde 1 / 12");
+    expect(progress.textContent).toContain("Plan");
+    expect(progress.textContent).toContain("Build");
+    expect(progress.textContent).toContain("Verify");
+    expect(progress.textContent).not.toContain("%");
+  });
+
   it("renders a running pipeline pack with live status, stability/type badges and queue counts", () => {
     const html = renderGrid([runningPipeline]);
     expect(html).toContain("builder-reviewer");
@@ -634,6 +663,45 @@ const idlePipeline: LoopPack = {
 };
 
 describe("LoopStartForm — SKIP_PLAN-Override", () => {
+  it("filters the complete model catalog and applies engine plus model to one phase", async () => {
+    const onSubmitStart = vi.fn();
+    renderInteractiveGrid([idlePipeline], {
+      startOpenPack: idlePipeline.name,
+      onSubmitStart,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Modell für build auswählen" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Modelle durchsuchen" }), {
+      target: { value: "kimi-k2.7" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /kimi-k2\.7-code/ }));
+    const buildTrigger = screen.getByRole("button", { name: "Modell für build auswählen" });
+    expect(buildTrigger.getAttribute("aria-expanded")).toBe("false");
+    await waitFor(() => expect(document.activeElement).toBe(buildTrigger));
+    fireEvent.click(screen.getByRole("button", { name: t.submitStart }));
+
+    expect(onSubmitStart).toHaveBeenCalledWith(idlePipeline.name, {
+      PHASE_BUILD_ENGINE: "neuralwatt",
+      PHASE_BUILD_MODEL: "kimi-k2.7-code",
+    });
+  });
+
+  it("exposes the active repository filter to assistive technology", () => {
+    const healthTrack: LoopPack = {
+      ...idleSweepWithCommits,
+      name: "health-track-ux",
+      repo: "/home/piet/projects/health-track",
+    };
+    renderInteractiveGrid([idlePipeline, healthTrack]);
+
+    const filter = screen.getByRole("button", { name: "health-track" });
+    expect(filter.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(filter);
+    expect(filter.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByText("builder-reviewer")).toBeNull();
+    expect(screen.getByText("health-track-ux")).not.toBeNull();
+  });
+
   it("zeigt die Checkbox bei Sweep-Packs (keine Planungsphase) gar nicht", () => {
     render(
       <LoopsGrid

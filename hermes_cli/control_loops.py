@@ -387,6 +387,8 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "name": pack.name,
         "type": pack.type,
         "source": source,
+        "repo": str(pack.repo),
+        "base_branch": pack.base_branch,
         "description": pack.description,
         "stability": pack.stability,
         "phases": {

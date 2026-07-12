@@ -87,7 +87,7 @@ def api(tmp_path, monkeypatch):
 
 
 def test_list_loops_shows_packs_hides_templates(api):
-    client, _calls, _tmp = api
+    client, _calls, tmp = api
     data = client.get("/api/loops").json()
     names = [p["name"] for p in data["packs"]]
     assert names == ["fliessband", "nacht"]
@@ -99,6 +99,8 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["timer_schedule"] == "23:37"
     assert nacht["timer_next_run"] is None
     assert nacht["autoland"] is False
+    assert nacht["repo"] == str((tmp / "kein-repo").resolve())
+    assert nacht["base_branch"] == "main"
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
     assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
@@ -145,6 +147,20 @@ def test_models_endpoint_serves_catalog(api):
     client, _calls, _tmp = api
     data = client.get("/api/loops/models").json()
     assert data["engines"]["claude"]["models"] == ["claude-sonnet-5"]
+
+
+def test_list_loops_preserves_round_number_from_heartbeat(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True)
+    (state / "heartbeat.json").write_text(
+        '{"current":{"phase":"build","engine":"codex","model":"gpt-5.6-sol",'
+        '"started_at":"2026-07-12T12:00:00","timeout":3600,"round":3},"last":[]}',
+        encoding="utf-8",
+    )
+
+    pack = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "fliessband")
+    assert pack["heartbeat"]["current"]["round"] == 3
 
 
 def test_unknown_and_invalid_pack_names_404(api):

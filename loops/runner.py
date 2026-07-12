@@ -796,21 +796,29 @@ class LoopRunner:
                 else:
                     os.environ[key] = value
 
-    def run_phase(self, phase: str, **extra: str) -> engines.EngineResult:
+    def run_phase(
+        self, phase: str, *, round_: int | None = None, **extra: str
+    ) -> engines.EngineResult:
         cfg = self.phase_cfg(phase)
         self.say(f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}, timeout={cfg.timeout}s)")
         self.status_path.write_text("", encoding="utf-8")
         prompt = self.render_prompt(phase, **extra)
         started = time.time()
         started_iso = datetime.now().strftime("%FT%T")
-        self._heartbeat({"phase": phase, "engine": cfg.engine, "model": cfg.model,
-                         "started_at": started_iso, "timeout": cfg.timeout})
+        current = {"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                   "started_at": started_iso, "timeout": cfg.timeout}
+        if round_ is not None:
+            current["round"] = round_
+        self._heartbeat(current)
         with self._worker_environment(phase):
             result = engines.get_engine(cfg.engine)(cfg.model, prompt, self.wt, cfg.timeout)
         self.phase_secs[phase] = int(time.time() - started)
-        self._heartbeat(None, done={"phase": phase, "engine": cfg.engine, "model": cfg.model,
-                                    "secs": self.phase_secs[phase], "rc": result.rc,
-                                    "at": started_iso})
+        done = {"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                "secs": self.phase_secs[phase], "rc": result.rc,
+                "at": started_iso}
+        if round_ is not None:
+            done["round"] = round_
+        self._heartbeat(None, done=done)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
         self.say(f"Phase {phase} fertig in {self.phase_secs[phase]}s (rc={result.rc})")
@@ -1202,7 +1210,7 @@ class LoopRunner:
             if self.pack.autoland:
                 self.visual_attestation_path.unlink(missing_ok=True)
 
-            build = self.run_phase("build", PLAN_PATH=str(building))
+            build = self.run_phase("build", round_=rnd, PLAN_PATH=str(building))
             if build.usage_limit:
                 # Invariante „Branch = nur verified-oder-reverted" auch hier halten:
                 # existiert schon ein Commit, MUSS er als UNVERIFIED ausgewiesen werden
@@ -1244,7 +1252,9 @@ class LoopRunner:
                 continue
 
             evidence_before = self._verifier_evidence_dirs()
-            verify = self.run_phase("verify", PLAN_PATH=str(building), RANGE=f"{prehead}..HEAD")
+            verify = self.run_phase(
+                "verify", round_=rnd, PLAN_PATH=str(building), RANGE=f"{prehead}..HEAD"
+            )
             if verify.usage_limit:
                 self.say("Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT (Plan in 10-building/).")
                 self.ledger(f"R{rnd} ⚠️ {building.name} BUILT aber UNVERIFIED (usage-limit)")
@@ -1323,7 +1333,7 @@ class LoopRunner:
             if not self.guard_clean():
                 break
             self.say(f"═══ Runde {rnd} ═══")
-            result = self.run_phase("round")
+            result = self.run_phase("round", round_=rnd)
             if result.usage_limit:
                 self.say("Usage-Limit — Stop.")
                 self.notify(f"{self.pack.name}: Usage-Limit in Runde {rnd} — gestoppt.")

@@ -1810,6 +1810,7 @@ export const LoopHeartbeatCurrentSchema = z.object({
   model: z.string().catch(""),
   started_at: z.string().catch(""),
   timeout: z.coerce.number().catch(0),
+  round: z.coerce.number().int().positive().optional().catch(undefined),
 });
 
 export const LoopHeartbeatHistoryEntrySchema = z.object({
@@ -1819,6 +1820,7 @@ export const LoopHeartbeatHistoryEntrySchema = z.object({
   secs: z.coerce.number().catch(0),
   rc: z.coerce.number().catch(0),
   at: z.string().catch(""),
+  round: z.coerce.number().int().positive().optional().catch(undefined),
 });
 
 export const LoopHeartbeatSchema = z.object({
@@ -1831,6 +1833,8 @@ export const LoopPackSummarySchema = z.object({
   type: z.enum(["pipeline", "sweep"]),
   // "repo" = kuratiertes Manifest, "custom" = per Werkstatt dupliziert (control_loops.py:220).
   source: z.enum(["repo", "custom"]).optional(),
+  repo: z.string().catch(""),
+  base_branch: z.string().catch("main"),
   autoland: z.boolean().catch(false),
   description: z.string().catch(""),
   stability: z.string().catch("experimental"),
