@@ -1528,7 +1528,48 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
     scripted_mobile_path = run_dir / "mobile-playwright.png"
     screenshot_paths = [desktop_path, mobile_path, scripted_mobile_path]
 
-    server = _VisualGateStaticServer(repo_root / "hermes_cli" / "web_dist")
+    web_dist = repo_root / "hermes_cli" / "web_dist"
+    web_dist_index = web_dist / "index.html"
+    if not web_dist_index.is_file():
+        try:
+            build = subprocess.run(  # noqa: S603 -- fixed argv
+                ["npm", "run", "build"],
+                cwd=str(repo_root / "web"),
+                capture_output=True,
+                text=True,
+                timeout=RELEASE_GATE_COMMAND_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return _visual_gate_error(
+                "frontend build for missing web_dist timed out after "
+                f"{RELEASE_GATE_COMMAND_TIMEOUT}s",
+                screenshot_paths,
+            )
+        except FileNotFoundError:
+            return _visual_gate_error(
+                "frontend build for missing web_dist failed: npm not found",
+                screenshot_paths,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _visual_gate_error(
+                f"frontend build for missing web_dist failed: {exc}",
+                screenshot_paths,
+            )
+        if build.returncode != 0:
+            tail = ((build.stdout or "") + "\n" + (build.stderr or "")).strip()[-2000:]
+            return _visual_gate_error(
+                "frontend build for missing web_dist failed with exit "
+                f"{build.returncode}\n{tail}",
+                screenshot_paths,
+            )
+        if not web_dist_index.is_file():
+            return _visual_gate_error(
+                "frontend build completed but web_dist is still missing index.html: "
+                f"{web_dist_index}",
+                screenshot_paths,
+            )
+
+    server = _VisualGateStaticServer(web_dist)
     try:
         try:
             visual_gate_url = server.start()
