@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { PendingItem } from "../../lib/fleetHub";
 import type { CostBucket, RunsCostsResponse } from "../../lib/schemas";
 import type { Worker } from "../../lib/types";
 import { HeuteTab } from "./HeuteTab";
@@ -93,23 +94,31 @@ function renderHeute({
   activeWorkers = [],
   costsData = null,
   plans = [],
+  blockedCount = 2,
+  pendingItems = [],
+  onNavigate = () => undefined,
 }: {
   activeWorkers?: Worker[];
   costsData?: RunsCostsResponse | null;
   plans?: PlanSpecRecord[];
+  blockedCount?: number;
+  pendingItems?: PendingItem[];
+  onNavigate?: (target: "worker" | "plan" | "risiko") => void;
 } = {}) {
   return render(
     <HeuteTab
       allWorkers={activeWorkers}
       activeWorkers={activeWorkers}
-      blockedCount={2}
+      blockedCount={blockedCount}
       pendingApprovals={0}
       allPlanspecs={plans}
       costs={costsData}
       daily={null}
       now={100}
+      pendingItems={pendingItems}
       onWorkerClick={() => undefined}
       onPlanSpecClick={() => undefined}
+      onNavigate={onNavigate}
     />,
   );
 }
@@ -156,5 +165,64 @@ describe("HeuteTab PlanSpec status chips", () => {
     expect(label.className).toContain("truncate");
     expect(label.getAttribute("title")).toBe(longStatus);
     expect(label.parentElement?.className).toContain("max-w-[min(52%,28rem)]");
+  });
+});
+
+describe("HeuteTab action block + idle state", () => {
+  it("shows a tappable action row for a waiting approval that navigates to Plan", () => {
+    const onNavigate = vi.fn();
+    renderHeute({
+      blockedCount: 0,
+      pendingItems: [{ kind: "approval", topic: "Cockpit-Umbau", targetSubtab: "plan" }],
+      onNavigate,
+    });
+
+    const row = screen.getByRole("button", { name: "Freigabe wartet: Cockpit-Umbau" });
+    fireEvent.click(row);
+    expect(onNavigate).toHaveBeenCalledWith("plan");
+  });
+
+  it("summarizes remaining blockers without double-counting operator holds", () => {
+    renderHeute({
+      blockedCount: 3,
+      pendingItems: [{ kind: "blocked", topic: "Halt A", targetSubtab: "risiko" }],
+    });
+
+    expect(screen.getByRole("button", { name: "Operator-Halt: Halt A" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "2 Aufgaben blockiert — im Risiko-Tab lösen" })).toBeTruthy();
+  });
+
+  it("renders no action block and a compact idle state when nothing waits and no worker runs", () => {
+    renderHeute({ blockedCount: 0, activeWorkers: [] });
+
+    expect(screen.queryByLabelText("Handlungsbedarf")).toBeNull();
+    expect(screen.getByText("Keine Worker aktiv — Board ruht.")).toBeTruthy();
+  });
+});
+
+describe("HeuteTab PlanSpec relevance ordering", () => {
+  function spec(topic: string, overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
+    return { ...planSpec("open"), path: `/${topic}.md`, topic, ...overrides };
+  }
+
+  function renderedPlanTopics(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll(".fleet-ps-name")).map((el) => el.textContent ?? "");
+  }
+
+  it("renders operator-waiting and running plans ahead of merely-open ones", () => {
+    const waiting = spec("Waiting", { freigabe: "operator", kanban_state: "queued" });
+    const running = spec("Running", { kanban_state: "running" });
+    const open = spec("Open", { kanban_state: "not_ingested", open: true });
+
+    const { container } = renderHeute({ plans: [open, running, waiting] });
+    expect(renderedPlanTopics(container)).toEqual(["Waiting", "Running", "Open"]);
+  });
+
+  it("keeps input order for plans of equal relevance", () => {
+    const a = spec("Alpha", { open: true });
+    const b = spec("Beta", { open: true });
+
+    const { container } = renderHeute({ plans: [a, b] });
+    expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta"]);
   });
 });

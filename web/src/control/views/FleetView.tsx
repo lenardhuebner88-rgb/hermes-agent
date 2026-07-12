@@ -220,10 +220,13 @@ export function FleetView() {
       ? "PlanSpec-Details"
       : "Aktive Kette";
 
+  // Heute ist ein Tages-Cockpit, kein zweiter Ketten-Tab: die volle Kette
+  // wird auf Heute NICHT mehr automatisch in die rechte Pane gespiegelt (AC-4).
   const desktopIdleDetail = isLg
     && desktopDetail === undefined
     && kettenChipsForAside.length > 0
     && subtab !== "ketten"
+    && subtab !== "heute"
     ? (
         <div id="fleet-detail-pane">
           <KettenTab
@@ -255,9 +258,10 @@ export function FleetView() {
         classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
       />
 
-      {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs,
-          über allen Subtabs gleich sichtbar (kein full-bleed Glow-Band mehr). */}
-      {pendingItems.length > 0 ? (
+      {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs.
+          Auf Heute übernimmt der Tab selbst den Handlungsblock (kein Doppel-Callout),
+          auf allen anderen Subtabs bleibt diese Zeile die gemeinsame Affordanz. */}
+      {pendingItems.length > 0 && subtab !== "heute" ? (
         <PendingBar items={pendingItems} onNavigate={(target) => setSubtab(target)} />
       ) : null}
 
@@ -301,11 +305,13 @@ export function FleetView() {
                 costs={costs.data}
                 daily={daily.data}
                 now={now}
+                pendingItems={pendingItems}
                 onWorkerClick={(w) => {
                   setDrawerWorker(w);
                   setSubtab("worker");
                 }}
                 onPlanSpecClick={openPlanSpecDetail}
+                onNavigate={setSubtab}
               />
             )}
             {subtab === "worker" && (
