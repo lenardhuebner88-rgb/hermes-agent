@@ -199,23 +199,48 @@ function batchConfirmResultForIds(ids: string[], response: BatchConfirmResponse)
 // public LoadState shape is UNCHANGED (errorObj/isStale are additive) so no view
 // needs to change. updateData patches the local snapshot for optimistic edits;
 // the next poll/reload overwrites it with server truth (same as before).
+function emptyPollingSnapshot<T>(): StoreSnapshot<T> {
+  return { data: null, error: null, errorObj: null, loading: true, lastUpdated: null, isStale: false };
+}
+
 function usePolling<T>(key: string, loader: () => Promise<T>, intervalMs: number): LoadState<T> {
-  const [snap, setSnap] = useState<StoreSnapshot<T>>(() => getSnapshot<T>(key) ?? {
-    data: null, error: null, errorObj: null, loading: true, lastUpdated: null, isStale: false,
-  });
+  const [state, setState] = useState<{ key: string; snap: StoreSnapshot<T> }>(() => ({
+    key,
+    snap: getSnapshot<T>(key) ?? emptyPollingSnapshot<T>(),
+  }));
+  // A hook instance survives prop/key changes. Never expose its previous key's
+  // snapshot for the transition render: child effects run before this hook's
+  // subscription effect and would otherwise issue stale-id requests scoped to
+  // the new board. A cache hit for the NEW key remains valid SWR data.
+  const snap = state.key === key
+    ? state.snap
+    : (getSnapshot<T>(key) ?? emptyPollingSnapshot<T>());
   const loaderRef = useRef(loader);
   useEffect(() => {
     loaderRef.current = loader;
   }, [loader]);
 
   useEffect(() => {
-    return subscribe<T>(key, () => loaderRef.current(), intervalMs, setSnap);
+    return subscribe<T>(key, () => loaderRef.current(), intervalMs, (next) => {
+      setState({ key, snap: next });
+    });
   }, [key, intervalMs]);
 
   const reload = useCallback(() => refresh(key), [key]);
   const updateData = useCallback<React.Dispatch<React.SetStateAction<T | null>>>((action) => {
-    setSnap((s) => ({ ...s, data: typeof action === "function" ? (action as (prev: T | null) => T | null)(s.data) : action }));
-  }, []);
+    setState((current) => {
+      const base = current.key === key ? current.snap : (getSnapshot<T>(key) ?? emptyPollingSnapshot<T>());
+      return {
+        key,
+        snap: {
+          ...base,
+          data: typeof action === "function"
+            ? (action as (prev: T | null) => T | null)(base.data)
+            : action,
+        },
+      };
+    });
+  }, [key]);
 
   return {
     data: snap.data,
