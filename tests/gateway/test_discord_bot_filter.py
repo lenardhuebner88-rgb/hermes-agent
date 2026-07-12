@@ -3,6 +3,7 @@
 import os
 import re
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock
 
 
@@ -206,8 +207,14 @@ class TestDiscordBotFilter(unittest.TestCase):
 
     def test_default_is_none(self):
         """Default behavior (no env var) should be 'none'."""
-        default = os.getenv("DISCORD_ALLOW_BOTS", "none")
-        self.assertEqual(default, "none")
+        # Hermetic: the intent is "when DISCORD_ALLOW_BOTS is unset, the code
+        # defaults to 'none'". Do not depend on the ambient env — the operator
+        # may legitimately set DISCORD_ALLOW_BOTS in ~/.hermes/.env, which the
+        # validation gate loads. patch.dict restores the original env on exit.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DISCORD_ALLOW_BOTS", None)
+            default = os.getenv("DISCORD_ALLOW_BOTS", "none")
+            self.assertEqual(default, "none")
 
     def test_case_insensitive(self):
         """Allow_bots value should be case-insensitive."""
