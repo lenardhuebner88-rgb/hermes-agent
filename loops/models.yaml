@@ -37,3 +37,6 @@ engines:
       - qwen3.5-397b-fast
       - qwen3.6-35b
       - qwen3.6-35b-fast
+  xai:
+    label: "xAI / Grok (Abo)"
+    models: [grok-4.5]

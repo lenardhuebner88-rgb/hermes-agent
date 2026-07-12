@@ -16,6 +16,7 @@ def test_registry_contains_claude_and_rejects_unknown():
     assert "claude" in engines.ENGINES
     assert "hermes" in engines.ENGINES
     assert "neuralwatt" in engines.ENGINES
+    assert "xai" in engines.ENGINES
     with pytest.raises(KeyError, match="warpantrieb"):
         engines.get_engine("warpantrieb")
 
@@ -114,6 +115,74 @@ def test_neuralwatt_cli_flags_usage_limit_output(monkeypatch, tmp_path):
 
     monkeypatch.setattr(neuralwatt_cli.subprocess, "run", fake_run)
     result = neuralwatt_cli.run("kimi-k2.7-code", "x", tmp_path, 60)
+    assert result.usage_limit is True
+
+
+def test_xai_cli_maps_grok_45_to_official_grok_build_subscription_slot(
+    monkeypatch, tmp_path
+):
+    from loops.engines import xai_cli
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["cwd"] = kwargs.get("cwd")
+        seen["env"] = kwargs.get("env")
+        seen["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Grok answer", stderr="")
+
+    monkeypatch.setattr(xai_cli.subprocess, "run", fake_run)
+    result = xai_cli.run("grok-4.5", "build it", tmp_path, 321)
+
+    assert result.rc == 0 and result.output == "Grok answer"
+    assert seen["cmd"] == [
+        xai_cli.GROK_BIN,
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--always-approve",
+        "--model",
+        "grok-build",
+        "--single",
+        "build it",
+        "--output-format",
+        "plain",
+    ]
+    assert seen["env"]["HERMES_SANDBOX_MODE"] == "1"
+    assert seen["cwd"] == str(tmp_path)
+    assert seen["timeout"] == 321
+
+
+def test_xai_cli_timeout_maps_to_124_and_merges_output(monkeypatch, tmp_path):
+    from loops.engines import xai_cli
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"], output=b"partial out", stderr=b"partial err")
+
+    monkeypatch.setattr(xai_cli.subprocess, "run", fake_run)
+    result = xai_cli.run("grok-4.5", "x", tmp_path, 60)
+
+    assert result == engines.EngineResult(
+        rc=124,
+        output="partial outpartial err",
+        usage_limit=False,
+        timed_out=True,
+    )
+
+
+def test_xai_cli_uses_shared_usage_limit_detection(monkeypatch, tmp_path):
+    from loops.engines import xai_cli
+
+    monkeypatch.setattr(
+        xai_cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="HTTP 429 rate_limit_exceeded"
+        ),
+    )
+
+    result = xai_cli.run("grok-4.5", "x", tmp_path, 60)
     assert result.usage_limit is True
 
 
