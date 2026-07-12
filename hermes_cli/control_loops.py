@@ -25,7 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -162,13 +162,18 @@ def _timer_schedule(name: str) -> str:
 
 
 def _timer_next_run(name: str) -> str | None:
-    res = _systemctl(
-        "show", "--property=NextElapseUSecRealtime", "--value", _timer_unit(name),
-    )
+    res = _systemctl("list-timers", _timer_unit(name), "--output=json", "--no-legend")
     if res.returncode != 0:
         return None
-    value = res.stdout.strip()
-    return value if value and value.lower() != "n/a" else None
+    try:
+        rows = json.loads(res.stdout)
+        next_usec = rows[0]["next"]
+        if not isinstance(next_usec, int) or next_usec <= 0:
+            return None
+        next_run = datetime.fromtimestamp(next_usec / 1_000_000, tz=timezone.utc)
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        return None
+    return next_run.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _atomic_write(path: Path, content: bytes) -> None:

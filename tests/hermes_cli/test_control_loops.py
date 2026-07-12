@@ -314,6 +314,10 @@ def test_timer_schedule_rearms_enabled_timer_and_reports_next_run(api, monkeypat
         calls.append(args)
         if args[0] == "is-enabled":
             return subprocess.CompletedProcess(args, 0, stdout="enabled\n", stderr="")
+        if args[0] == "list-timers":
+            return subprocess.CompletedProcess(
+                args, 0, stdout='[{"next":1783642500000000,"unit":"hermes-loop@nacht.timer"}]\n', stderr="",
+            )
         if args[0] == "show":
             return subprocess.CompletedProcess(
                 args, 0, stdout="Fri 2026-07-10 02:15:00 CEST\n", stderr="",
@@ -324,7 +328,7 @@ def test_timer_schedule_rearms_enabled_timer_and_reports_next_run(api, monkeypat
     resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "02:15"})
     assert resp.status_code == 200, resp.text
     assert ("restart", "hermes-loop@nacht.timer") in calls
-    assert resp.json()["timer_next_run"] == "Fri 2026-07-10 02:15:00 CEST"
+    assert resp.json()["timer_next_run"] == "2026-07-10T00:15:00Z"
 
 
 def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disabled_timer(api, monkeypatch):
@@ -340,6 +344,10 @@ def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disab
                 stdout="{ OnCalendar=*-*-* 04:50:00 ; next_elapse=Fri 2026-07-10 04:50:00 CEST }\n",
                 stderr="",
             )
+        if args[0] == "list-timers":
+            return subprocess.CompletedProcess(
+                args, 0, stdout='[{"next":1783651800000000,"unit":"hermes-loop@nacht.timer"}]\n', stderr="",
+            )
         if "--property=NextElapseUSecRealtime" in args:
             return subprocess.CompletedProcess(
                 args, 0, stdout="Fri 2026-07-10 04:50:00 CEST\n", stderr="",
@@ -350,7 +358,7 @@ def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disab
     nacht = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "nacht")
     assert nacht["timer_enabled"] is False
     assert nacht["timer_schedule"] == "04:50"
-    assert nacht["timer_next_run"] == "Fri 2026-07-10 04:50:00 CEST"
+    assert nacht["timer_next_run"] == "2026-07-10T02:50:00Z"
 
 
 @pytest.mark.parametrize(

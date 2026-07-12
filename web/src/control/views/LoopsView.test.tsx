@@ -2,7 +2,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LoopsGrid, useLoopNowMs, type LoopsGridProps } from "./LoopsView";
+import { formatLoopTimestamp, LoopsGrid, useLoopNowMs, type LoopsGridProps } from "./LoopsView";
 // Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
 import loopsViewSource from "./LoopsView.tsx?raw";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
@@ -73,7 +73,7 @@ const runningPipeline: LoopPack = {
   commits_ahead: 0,
   timer_enabled: true,
   timer_schedule: "23:37",
-  timer_next_run: "Thu 2026-07-09 23:37:00 CEST",
+  timer_next_run: "2026-07-09T21:37:00Z",
 };
 
 // Gleiches Manifest, aber zwischen zwei Phasen (heartbeat.current == null,
@@ -380,12 +380,16 @@ describe("LoopsGrid — Mono-Konsolidierung (W3-5)", () => {
 });
 
 describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
+  it("formats the backend ISO instant in the operator timezone", () => {
+    expect(formatLoopTimestamp("2026-07-09T21:37:00Z", "Europe/Berlin")).toBe("Do., 09.07., 23:37 MESZ");
+  });
+
   it("zeigt gespeicherte lokale Uhrzeit und den echten nächsten Lauf", () => {
     const { container } = renderInteractiveGrid([runningPipeline]);
     const view = within(container);
     const input = view.getByLabelText(`${t.timerTimeLabel} builder-reviewer`) as HTMLInputElement;
     expect(input.value).toBe("23:37");
-    expect(view.getByText(t.timerNextRun("Thu 2026-07-09 23:37:00 CEST"))).toBeTruthy();
+    expect(container.textContent).not.toContain("2026-07-09T21:37:00Z");
   });
 
   it("aktiviert Speichern erst nach einer gültigen Änderung und reicht die Uhrzeit weiter", () => {
