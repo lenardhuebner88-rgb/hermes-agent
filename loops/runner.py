@@ -83,7 +83,7 @@ AUTOLAND_MANIFEST_SHA256 = {
 }
 AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
-        "PLANNER-PROMPT.md": "0669acde68d8e943bec71fc9c9cc6120f02e5f3bac9d81a0c4f447f759fbf67b",
+        "PLANNER-PROMPT.md": "8a65ad96a5398d1eb3f01c00f1051ef5a6c580a46d978447307707f13303758b",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
         "VERIFIER-PROMPT.md": "f6f4db9b95c55f6ebbfc0514a656c1b362e997d3a9f64344621c786de9ca94db",
     },
@@ -938,6 +938,27 @@ class LoopRunner:
         plan.rename(self.queue / "00-planned" / plan.name)
         return "retry"
 
+    def _bounce_invalid_plans(self) -> None:
+        """Pläne mit unparsierbarem Frontmatter/id koennen nie autolanden
+        (pass_status_matches_plan bindet an genau diese ID) — vor Build+Verify
+        verwerfen statt einen ganzen Zyklus zu verschwenden (2026-07-12: ein
+        `title:` begann mit einem nackten Anführungszeichen und brach damit die
+        YAML, `parse_plan_id` lieferte "", ein echter PASS wurde als
+        PASS_ID_MISMATCH revertiert)."""
+        for plan in sorted((self.queue / "00-planned").glob("*.md")):
+            try:
+                text = plan.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if parse_plan_id(text):
+                continue
+            target = self.queue / "90-bounced" / plan.name
+            if target.exists():  # Namens-Wiederverwendung: alte Evidenz nicht überschreiben
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                target = target.with_name(f"{target.stem}.{stamp}.md")
+            plan.rename(target)
+            self.ledger(f"plan-invalid: {target.name} (Frontmatter/id unparsierbar — vor Build verworfen)")
+
     # ── Kommandos ──
     def cmd_plan(self, fresh: bool = False) -> bool:
         self._validate_autoland_runtime()
@@ -952,6 +973,7 @@ class LoopRunner:
             self.say("Usage-Limit im Planner — Stop.")
             self.notify(f"{self.pack.name}: Usage-Limit beim Planen — gestoppt.")
             return False
+        self._bounce_invalid_plans()
         n = self.qcount("00-planned")
         status = "TIMEOUT" if result.timed_out else self.last_status()
         self.say(f"Planner fertig: status=[{status}], {n} Pläne in der Queue")
@@ -1371,10 +1393,14 @@ class LoopRunner:
     def _autoland_pending(self) -> bool:
         if self.qcount("20-verified") > 0:
             return True
-        ahead = self.git(
-            "rev-list", "--count", f"main..{self.pack.branch}", cwd=self.pack.repo
+        # Netto-Diff statt reiner Commitzahl (2026-07-12): ein verify-fail wird
+        # revertiert (Build-Commit + Revert-Commit), der Branch steht dann zwar
+        # mit ahead>0 vor main, traegt aber netto NICHTS zu landen — reine
+        # Commitzahl haette hier faelschlich "pending" gemeldet.
+        net = self.git(
+            "diff", "--name-only", f"main...{self.pack.branch}", cwd=self.pack.repo
         ).stdout.strip()
-        return ahead not in ("", "0")
+        return bool(net)
 
     def _try_autoland(self, context: str) -> bool:
         if self.stop_requested():
@@ -1399,7 +1425,14 @@ class LoopRunner:
             return True
         # Ein frueherer Run kann nach PASS an einem voruebergehend dirty Live-
         # Checkout gescheitert sein. Erst diesen einen verifizierten Commit landen;
-        # niemals weitere Arbeit darauf stapeln.
+        # niemals weitere Arbeit darauf stapeln (Invariante bewusst beibehalten —
+        # ein hier eingefuehrter queue-unfinished-Fall-through wuerde verifizierte
+        # Arbeit stranden/ueberstapeln, Codex-Review 2026-07-12).
+        # Deadlock-Fix 2026-07-12: der Wedge (revertierter Verify-Fail-Round →
+        # ahead>0 ohne Landungsstoff PLUS Retry-Plan) wird bereits in
+        # _autoland_pending() geloest (Netto-Diff statt Commitzahl → netto-leerer
+        # Branch ist nicht mehr "pending", cmd_night faellt in den Round-Loop und
+        # arbeitet den Retry ab). Hier braucht es KEINEN zusaetzlichen Guard.
         if self.pack.autoland and self._autoland_pending():
             if self._manual_land_required("resume"):
                 return True

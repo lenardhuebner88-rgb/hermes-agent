@@ -89,6 +89,22 @@ Der Plan muss in EINEM Commit umsetzbar sein. Er darf ausschließlich
 `web/src/control/**` und dortige Tests verändern. Kein Raw-Hex, keine neue
 Abhängigkeit, kein `web/package*.json`, kein Backend/API/Auth/DB-Pfad.
 
+**Das YAML-Frontmatter MUSS valides YAML sein** (der Runner parst es mit
+`yaml.safe_load`; scheitert das, ist die Plan-ID leer und der Plan kann NIE
+autolanden — bricht `id`, wird der ganze Build+Verify-Zyklus verschwendet
+und ein echter PASS als PASS_ID_MISMATCH revertiert). Besonders `title:` (und
+jeder andere Wert mit Anführungszeichen, Doppelpunkt, `#` oder führendem
+Sonderzeichen): entweder ein reiner Skalar OHNE führendes Anführungszeichen,
+oder der GESAMTE Wert in doppelte Anführungszeichen gefasst mit intern
+escapten `\"`.
+
+- FALSCH (bricht die YAML — Wert beginnt mit `"`, läuft dann unquotiert weiter):
+  `title: "Landen"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün`
+- RICHTIG (ganzer Wert gequotet, internes `"` escaped):
+  `title: "\"Landen\"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün"`
+- RICHTIG (einfacher: ganz ohne Anführungszeichen):
+  `title: Landen-Aktion in Loops nutzt Bronze/neutral statt Status-Grün`
+
 ## Abschluss
 
 - Ledger: `PLANNER <route> <objective-fix|directional-design> <kurzgrund>`.

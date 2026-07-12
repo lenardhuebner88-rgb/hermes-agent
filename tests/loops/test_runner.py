@@ -25,6 +25,7 @@ from loops.runner import (
     bump_retry,
     load_pack,
     main,
+    parse_plan_frontmatter,
     parse_plan_id,
     parse_overrides,
     pass_status_matches_plan,
@@ -58,6 +59,42 @@ Evidenz: modul.py:42 wirft bei leerem Input.
 ## Ansatz
 Guard einbauen + Regressionstest.
 """
+
+# Echte, live gebounct(e) Frontmatter-Fallgrube (2026-07-12): `title:` beginnt mit
+# einem nackten `"` und läuft dann unquotiert weiter — invalides YAML. Wortgleich
+# aus dem geernteten Original-Plan
+# .hermes/loops/dashboard-experience/queue/00-planned/P1-loops-land-action-status-green.md
+BROKEN_TITLE_PLAN = """---
+id: dx-20260712-loops-land-status-green
+title: "Landen"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)
+priority: P1
+retry: 1
+created_by: opus-ux-planner
+route: /control/loops
+before_evidence: /home/piet/.hermes/loops/dashboard-experience/evidence/20260712T073115Z-before
+done_when: |
+  Für ein idle Pack mit unverdauten Commits (commits_ahead > 0) rendert der
+  "Landen"-Trigger sowie sein Bestätigungs-Knopf ("Ja") NICHT mehr in der
+  Status-Grün-Farbe (`--ln-ok` / `--color-status-ok`).
+anti_scope: |
+  Keine Layout-, Reihenfolge- oder Formänderung außer der Farb-/Vokabular-Korrektur.
+tests: |
+  web/src/control/views/LoopsView.test.tsx
+files_hint: web/src/control/views/LoopsView.tsx
+---
+## Evidenz
+Details siehe before-Evidenz.
+
+## Ansatz
+Kleinster konsistenter Fix, ausschließlich Farb-/Token-Tausch.
+"""
+
+# Gleiche Frontmatter, `title:` diesmal korrekt als EIN gequoteter Skalar mit
+# escaptem internen `"` — valides YAML, entspricht der PLANNER-PROMPT-Regel.
+QUOTED_TITLE_PLAN = BROKEN_TITLE_PLAN.replace(
+    'title: "Landen"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)',
+    'title: "\\"Landen\\"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)"',
+)
 
 
 def g(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -432,6 +469,66 @@ def test_pass_status_must_match_frontmatter_plan_id_exactly():
     assert not pass_status_matches_plan("PASS fremder-plan", PLAN_BODY)
     assert not pass_status_matches_plan("PASS fl-20260702-beispiel extra", PLAN_BODY)
     assert parse_plan_id(PLAN_BODY.replace("id: fl-20260702-beispiel", "id: [kaputt]")) == ""
+
+
+def test_broken_title_frontmatter_from_real_bounced_plan_is_unparseable():
+    """Belegte Regression (2026-07-12): `title: "Landen"-Aktion …` beginnt mit
+    einem nackten `"` und läuft dann unquotiert weiter — invalides YAML. Der
+    fail-closed Parser liefert leer statt zu raten, damit kein impliziter PASS
+    entsteht — genau das ließ vorher einen echten Verifier-PASS als
+    PASS_ID_MISMATCH revertieren."""
+    assert parse_plan_frontmatter(BROKEN_TITLE_PLAN) == {}
+    assert parse_plan_id(BROKEN_TITLE_PLAN) == ""
+    assert not pass_status_matches_plan(
+        "PASS dx-20260712-loops-land-status-green", BROKEN_TITLE_PLAN
+    )
+
+
+def test_properly_quoted_title_frontmatter_parses_and_matches_pass():
+    frontmatter = parse_plan_frontmatter(QUOTED_TITLE_PLAN)
+    assert frontmatter["title"] == (
+        '"Landen"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün '
+        "(DESIGN-Doktrin #3)"
+    )
+    assert parse_plan_id(QUOTED_TITLE_PLAN) == "dx-20260712-loops-land-status-green"
+    assert pass_status_matches_plan(
+        "PASS dx-20260712-loops-land-status-green", QUOTED_TITLE_PLAN
+    )
+
+
+def test_cmd_plan_bounces_plans_with_invalid_frontmatter_before_build(
+    tmp_path, fake_engine
+):
+    """Bug #2 Teil A: ein Plan, dessen id sich nicht sicher parsen lässt, kann
+    nie autolanden (pass_status_matches_plan bindet an genau diese ID) — vor
+    Build+Verify verwerfen statt einen ganzen Zyklus zu verschwenden."""
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "planval", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "planval")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state_dir = Path(kv["STATE"])
+        (state_dir / "queue" / "00-planned" / "P1-gut.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state_dir / "queue" / "00-planned" / "P1-kaputt.md").write_text(
+            BROKEN_TITLE_PLAN, encoding="utf-8"
+        )
+        (state_dir / "last-status").write_text("PLANNED 2\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+
+    assert runner.cmd_plan() is True
+    assert runner.qcount("00-planned") == 1
+    assert (runner.queue / "00-planned" / "P1-gut.md").is_file()
+    assert not (runner.queue / "00-planned" / "P1-kaputt.md").exists()
+    assert (runner.queue / "90-bounced" / "P1-kaputt.md").is_file()
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "plan-invalid: P1-kaputt.md" in ledger
+    assert "unparsierbar" in ledger
 
 
 def test_handle_fail_retry_then_bounce(tmp_path, fake_engine):
@@ -1292,7 +1389,13 @@ def test_autoland_pass_without_fresh_visual_evidence_is_reverted(
     runner._push = lambda repo: (pushes.append(str(repo)) or (True, "ok"))
     base = g(repo, "rev-parse", "main").stdout
 
-    assert runner.cmd_night() is False
+    # Bug #1 (2026-07-12): der revertierte Round hinterlaesst einen netto-leeren
+    # Branch (Build-Commit + Revert-Commit) UND den Retry-Plan zurueck in
+    # 00-planned — _autoland_pending() ist jetzt False (nichts zu landen), also
+    # wird gar nicht erst versucht zu autolanden. Vor dem Fix meldete
+    # cmd_night hier faelschlich exit-4 ("unvollstaendige Landung"), obwohl der
+    # fail_streak-Stop ein legitimer, erwarteter Rundenabschluss ist.
+    assert runner.cmd_night() is True
     assert pushes == []
     assert g(repo, "rev-parse", "main").stdout == base
     assert runner.qcount("20-verified") == 0
@@ -1675,6 +1778,79 @@ def test_autoland_resume_lands_first_and_preserves_next_run_overrides(
     assert calls == [], "Resume landet nur; es plant nicht im selben Timer-Lauf weiter"
     assert (state / "overrides.env").is_file()
     assert not (state / "overrides.consumed.env").exists()
+
+
+def test_autoland_pending_ignores_net_zero_verify_fail_revert(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Bug #1 (2026-07-12): ein verify-fail wird revertiert (Build-Commit +
+    Revert-Commit). Der Branch steht dann mit ahead>0 vor main, traegt aber
+    NETTO nichts zu landen — reine Commitzahl haette hier faelschlich
+    'pending' gemeldet und den Resume-Zweig fuer immer festgehalten."""
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    prehead = runner.rev_parse()
+    commit_control_in(runner.wt, "verify-fail")
+    assert runner.revert_range(prehead)
+
+    assert runner._autoland_pending() is False
+
+    commit_control_in(runner.wt, "echte-aenderung")
+    assert runner._autoland_pending() is True
+
+
+def test_autoland_resume_drains_pending_queue_instead_of_deadlocking(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Bug #1 (2026-07-12): vor dem Fix haette ein netto-leerer Branch (Build +
+    Revert eines verify-fail) den Resume-Kurzschluss ausgeloest, obwohl der
+    zugehoerige Retry-Plan schon wieder in 00-planned wartete — dessen Runde
+    wurde NIE erreicht (_autoland_queue_ready blockt wegen planned>0). Der
+    Fix laesst cmd_night in diesem Fall in den normalen Nachtlauf durchfallen
+    und die wartende Queue abarbeiten."""
+    behaviors, calls = fake_engine
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    # Simuliert einen bereits abgeschlossenen verify-fail-Round.
+    prehead = runner.rev_parse()
+    commit_control_in(runner.wt, "verify-fail")
+    assert runner.revert_range(prehead)
+    # ... und der zugehörige Retry-Plan wartet bereits wieder in 00-planned
+    # (genau das, was handle_fail nach einem verify-fail dort ablegt).
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(
+        PLAN_BODY.replace("retry: 0", "retry: 1"), encoding="utf-8"
+    )
+
+    def plan_dry(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "DRY /control/route\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_control_in(cwd, "ux-drain")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_dry
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok_with_visual_evidence("PASS fl-20260702-beispiel")
+
+    runner.cmd_night()
+
+    assert calls == ["plan", "build", "verify"], (
+        "Resume-Kurzschluss haette die wartende Retry-Queue nie erreicht (Deadlock)"
+    )
+    assert runner.qcount("00-planned") == 0
 
 
 def test_autoland_requires_explicit_fable_pass_status(
