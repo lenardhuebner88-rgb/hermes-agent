@@ -758,6 +758,29 @@ def test_stranded_in_ready_uses_latest_ready_transition():
     assert [d for d in diags if d.kind == "stranded_in_ready"] == []
 
 
+@pytest.mark.parametrize(
+    "hold_kind",
+    (
+        "repo_serialized",
+        "chain_worktree_serialized",
+        "budget_held",
+        "role_fit_held",
+    ),
+)
+def test_stranded_in_ready_skips_latest_policy_hold(hold_kind):
+    """A dispatcher policy hold is intentional, not a missing worker."""
+    now = 100_000
+    task = _task(status="ready", assignee="demo", claim_lock=None)
+    events = [
+        _event("created", ts=now - 6 * 3600),
+        _event(hold_kind, ts=now - 5 * 60),
+    ]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+
+    assert [d for d in diags if d.kind == "stranded_in_ready"] == []
+
+
 def test_stranded_in_ready_severity_escalates_with_age():
     """warning → error → critical at 2x and 6x threshold."""
     now = 100_000

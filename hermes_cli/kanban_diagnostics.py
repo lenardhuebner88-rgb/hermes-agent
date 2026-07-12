@@ -42,6 +42,13 @@ import time
 # critical first so operators see the worst fires at the top.
 SEVERITY_ORDER = ("warning", "error", "critical")
 
+POLICY_HOLD_EVENT_KINDS = {
+    "repo_serialized",
+    "chain_worktree_serialized",
+    "budget_held",
+    "role_fit_held",
+}
+
 
 def severity_at_or_above(severity: Optional[str], threshold: Optional[str]) -> bool:
     """Return True when ``severity`` meets or exceeds ``threshold``."""
@@ -1305,6 +1312,10 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         # Unassigned tasks: the dispatcher's ``skipped_unassigned`` is
         # already the right signal. A separate diagnostic here would
         # double-flag the same condition.
+        return []
+    if events and _event_kind(events[-1]) in POLICY_HOLD_EVENT_KINDS:
+        # Dispatcher policy is intentionally keeping this task ready.
+        # Production callers pass events in ascending event-id order.
         return []
 
     # Find the most recent event that put this task into ready.
