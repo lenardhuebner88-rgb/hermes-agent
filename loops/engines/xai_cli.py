@@ -66,7 +66,7 @@ def _session_ids(cwd: Path) -> set[str]:
         return set()
 
 
-def _new_session_usage(cwd: Path, before: set[str]) -> dict[str, int | None]:
+def _new_session_usage(cwd: Path, before: set[str]) -> dict[str, int | str | None]:
     new_ids = _session_ids(cwd) - before
     totals = {
         "input_tokens": 0,
@@ -97,9 +97,22 @@ def _new_session_usage(cwd: Path, before: set[str]) -> dict[str, int | None]:
             if isinstance(value, int) and value >= 0:
                 totals[target] += value
                 found = True
+    provenance_path = None
+    if len(new_ids) == 1:
+        sid = next(iter(new_ids))
+        provenance_path = str(
+            GROK_HOME / "sessions" / quote(str(cwd), safe="") / sid / "updates.jsonl"
+        )
     if not found:
-        return {key: None for key in (*totals, "total_tokens")}
-    return {**totals, "total_tokens": totals["input_tokens"] + totals["output_tokens"]}
+        return {
+            **{key: None for key in (*totals, "total_tokens")},
+            "provenance_path": provenance_path,
+        }
+    return {
+        **totals,
+        "total_tokens": totals["input_tokens"] + totals["output_tokens"],
+        "provenance_path": provenance_path,
+    }
 
 
 def _decode(raw: bytes | str | None) -> str:

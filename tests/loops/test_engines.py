@@ -194,9 +194,9 @@ def test_xai_cli_captures_real_session_token_usage_without_changing_command(monk
     grok_home = tmp_path / "grok-home"
     monkeypatch.setattr(xai_cli, "GROK_HOME", grok_home, raising=False)
     sid = "019f589b-56b7-7362-a20d-0ea300e5bef9"
+    session = grok_home / "sessions" / quote(str(tmp_path), safe="") / sid
 
     def fake_run(cmd, **kwargs):
-        session = grok_home / "sessions" / quote(str(tmp_path), safe="") / sid
         session.mkdir(parents=True)
         log = grok_home / "logs" / "unified.jsonl"
         log.parent.mkdir(parents=True)
@@ -215,6 +215,7 @@ def test_xai_cli_captures_real_session_token_usage_without_changing_command(monk
     assert result.output_tokens == 50
     assert result.reasoning_tokens == 40
     assert result.total_tokens == 270
+    assert result.provenance_path == str(session / "updates.jsonl")
 
 
 @pytest.mark.parametrize(

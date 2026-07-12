@@ -835,6 +835,7 @@ class LoopRunner:
             output_tokens=result.output_tokens,
             reasoning_tokens=result.reasoning_tokens,
             total_tokens=result.total_tokens,
+            provenance_path=result.provenance_path,
             billing="subscription" if subscription_engine else "unknown",
             metered_cost_eur=0.0 if subscription_engine else None,
         )
@@ -1270,7 +1271,11 @@ class LoopRunner:
 
             evidence_before = self._verifier_evidence_dirs()
             verify = self.run_phase(
-                "verify", round_=rnd, PLAN_PATH=str(building), RANGE=f"{prehead}..HEAD"
+                "verify",
+                round_=rnd,
+                PLAN_PATH=str(building),
+                RANGE=f"{prehead}..HEAD",
+                BUILD_PROVENANCE=build.provenance_path or "",
             )
             if verify.usage_limit:
                 self.say("Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT (Plan in 10-building/).")

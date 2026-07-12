@@ -129,6 +129,7 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
             lines.append("PLAN={{PLAN_PATH}}")
         if pname == "verify":
             lines.append("RANGE={{RANGE}}")
+            lines.append("BUILD_PROVENANCE={{BUILD_PROVENANCE}}")
         prompt.write_text("\n".join(lines) + "\n", encoding="utf-8")
         phases[pname] = {"engine": "fake", "model": "fake-1", "timeout": 60, "prompt": f"{pname}.md"}
     manifest = {
@@ -2139,11 +2140,16 @@ def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_eng
             output_tokens=23,
             reasoning_tokens=20,
             total_tokens=123,
+            provenance_path="/tmp/real-builder-updates.jsonl",
         )
+
+    def verify_phase(kv, cwd):
+        assert kv["BUILD_PROVENANCE"] == "/tmp/real-builder-updates.jsonl"
+        return ok("PASS fl-20260702-beispiel")(kv, cwd)
 
     behaviors["plan"] = plan_phase
     behaviors["build"] = build_phase
-    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    behaviors["verify"] = verify_phase
 
     runner.cmd_night()
 
@@ -2158,6 +2164,7 @@ def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_eng
     assert build_usage["engine"] == "fake"
     assert build_usage["total_tokens"] == 123
     assert build_usage["cached_input_tokens"] == 80
+    assert build_usage["provenance_path"] == "/tmp/real-builder-updates.jsonl"
     assert build_usage["billing"] == "unknown"
     assert "metered_cost_eur" not in build_usage
 

@@ -37,6 +37,7 @@ class EngineResult:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     total_tokens: int | None = None
+    provenance_path: str | None = None
 
 
 # 2026-07-05 live gelernt: bei einem 69k-Zeilen-Codex-Build-Output tauchten
