@@ -2038,7 +2038,7 @@ def _latest_dictate_artifact() -> Optional[Dict[str, Any]]:
         path for path in _ARTIFACTS_DIR.iterdir()
         if path.is_file()
         and path.suffix.lower() == ".apk"
-        and "dictate" in path.name.lower()
+        and path.name.lower().startswith("hermes-dictate")
     ]
     if not candidates:
         return None

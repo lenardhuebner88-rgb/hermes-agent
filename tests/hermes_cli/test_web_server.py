@@ -280,6 +280,11 @@ class TestWebServerEndpoints:
 
         apk = tmp_path / "hermes-dictate-1.0.apk"
         apk.write_bytes(b"apk")
+        # A newer Hermes Voice build may mention "dictate" in its descriptive name, but must
+        # never replace the Dictate APK link in the dashboard tile.
+        voice_apk = tmp_path / "hermes-voice-dictate-handoff.apk"
+        voice_apk.write_bytes(b"voice")
+        os.utime(voice_apk, (apk.stat().st_mtime + 10, apk.stat().st_mtime + 10))
         monkeypatch.setattr(web_server, "_ARTIFACTS_DIR", tmp_path)
         with web_server._DICTATE_STATUS_LOCK:
             web_server._DICTATE_STATUS.update({
