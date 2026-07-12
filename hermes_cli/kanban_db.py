@@ -22633,6 +22633,32 @@ def _is_claude_verdict_read_only_lane(
     )
 
 
+_SPAWN_TEXT_STRIP_TABLE = {
+    codepoint: None
+    for codepoint in list(range(0x00, 0x09))
+    + list(range(0x0B, 0x0D))
+    + list(range(0x0E, 0x20))
+    + [0x7F]
+}
+
+
+def _sanitize_spawn_text(text: str) -> str:
+    """Strip NUL and other C0 control chars from a subprocess-bound string.
+
+    Task bodies/comments are free-form operator/reviewer text and can carry
+    mangled encoding artifacts (observed: German umlauts stored as
+    ``\\x00fc`` instead of ``ü``). ``subprocess.Popen`` raises ``ValueError:
+    embedded null byte`` on any argv element containing ``\\x00``, which
+    fails the spawn and blocks the task — for ANY corrupted comment/context,
+    fleet-wide. Only the transient spawn payload is sanitized; the stored DB
+    data is untouched. ``\\t``/``\\n``/``\\r`` and all non-control unicode
+    (e.g. ``ü``, ``€``) are preserved.
+    """
+    if not text:
+        return text
+    return text.translate(_SPAWN_TEXT_STRIP_TABLE)
+
+
 def _spawn_claude_worker(
     task: Task,
     workspace: str,
@@ -22794,6 +22820,12 @@ def _spawn_claude_worker(
         "explanation. Every paid external API call must be disclosed in the "
         "task (cost + provider)."
     )
+    # Defensive: the prompt is assembled from task body/comments, which may
+    # carry corrupted bytes (e.g. mangled umlauts stored as embedded NUL).
+    # `subprocess.Popen`'s argv element containing `\x00` raises `ValueError:
+    # embedded null byte` and fails the spawn — sanitize just before the
+    # transient spawn payload is finalized (DB data itself stays untouched).
+    prompt = _sanitize_spawn_text(prompt)
 
     denied_tools = list(_CLAUDE_CLI_ALWAYS_DENIED_TOOLS)
     if read_only_verdict_lane:
