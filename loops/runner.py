@@ -618,7 +618,7 @@ class LoopRunner:
             # aufräumen, sonst schlägt das erneute add dauerhaft fehl.
             self.git("worktree", "prune", cwd=self.pack.repo)
         self.wt.parent.mkdir(parents=True, exist_ok=True)
-        res = self.git("worktree", "add", "-B", self.pack.branch, str(self.wt), "main", cwd=self.pack.repo)
+        res = self.git("worktree", "add", "-B", self.pack.branch, str(self.wt), self.pack.base_branch, cwd=self.pack.repo)
         if res.returncode != 0:
             raise RuntimeError(f"worktree add fehlgeschlagen: {res.stderr.strip()}")
 

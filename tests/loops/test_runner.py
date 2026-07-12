@@ -669,6 +669,21 @@ def test_ensure_wt_guard_clean_and_revert(tmp_path, fake_engine):
     ).read_text(encoding="utf-8")
 
 
+def test_ensure_wt_uses_base_branch(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    g(repo, "branch", "-m", "main", "trunk")
+    write_pack(
+        tmp_path / "packs", "wtbase", "pipeline", repo, base_branch="trunk"
+    )
+    pack = load_pack(tmp_path / "packs", "wtbase")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner.ensure_wt()
+
+    head = g(runner.wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    assert head == pack.branch
+
+
 def test_parse_worktree_paths():
     porcelain = (
         "worktree /home/x/repo\nHEAD abc\nbranch refs/heads/main\n\n"
