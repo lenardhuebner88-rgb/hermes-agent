@@ -13,14 +13,32 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 from pathlib import Path
 
 DEFAULT_BASE = "http://127.0.0.1:9119"
 ENV_FILE = Path.home() / ".hermes" / ".env"
+CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 class ShotError(RuntimeError):
     """User-facing failure."""
+
+
+def _close_quietly(resource: object | None, *, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
+    """Best-effort close without allowing teardown to hang the caller."""
+    if resource is None:
+        return
+
+    def close() -> None:
+        try:
+            resource.close()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - teardown must preserve the original outcome
+            pass
+
+    thread = threading.Thread(target=close, daemon=True, name="control-shot-close")
+    thread.start()
+    thread.join(timeout)
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -98,29 +116,32 @@ def take_shot(
                 sys.exit(3)
             raise ShotError(f"failed to launch chromium: {exc}") from exc
 
-        context = browser.new_context(viewport={"width": width, "height": height})
-        login_response = context.request.post(
-            f"{base.rstrip('/')}/auth/password-login",
-            data={"provider": "basic", "username": username, "password": password, "next": "/"},
-        )
-        status = login_response.status
-        if not login_response.ok:
-            raise ShotError(f"login failed: HTTP {status}")
-        body = login_response.json()
-        if not body.get("ok"):
-            raise ShotError(f"login failed: server rejected credentials (HTTP {status})")
-        print(f"login: ok ({status})")
+        context = None
+        try:
+            context = browser.new_context(viewport={"width": width, "height": height})
+            login_response = context.request.post(
+                f"{base.rstrip('/')}/auth/password-login",
+                data={"provider": "basic", "username": username, "password": password, "next": "/"},
+            )
+            status = login_response.status
+            if not login_response.ok:
+                raise ShotError(f"login failed: HTTP {status}")
+            body = login_response.json()
+            if not body.get("ok"):
+                raise ShotError(f"login failed: server rejected credentials (HTTP {status})")
+            print(f"login: ok ({status})")
 
-        page = context.new_page()
-        url = _resolve_url(base, route)
-        response = page.goto(url, wait_until="networkidle", timeout=30_000)
-        if response is not None and response.status >= 400:
-            raise ShotError(f"route {url} returned HTTP {response.status}")
-        page.wait_for_timeout(wait_ms)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(out), full_page=full_page)
-        context.close()
-        browser.close()
+            page = context.new_page()
+            url = _resolve_url(base, route)
+            response = page.goto(url, wait_until="networkidle", timeout=30_000)
+            if response is not None and response.status >= 400:
+                raise ShotError(f"route {url} returned HTTP {response.status}")
+            page.wait_for_timeout(wait_ms)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out), full_page=full_page)
+        finally:
+            _close_quietly(context)
+            _close_quietly(browser)
 
 
 def main() -> int:
