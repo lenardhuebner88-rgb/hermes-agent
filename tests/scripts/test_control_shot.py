@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -29,9 +30,11 @@ class FakeRequest:
 class FakeResource:
     def __init__(self) -> None:
         self.close_calls = 0
+        self.close_threads: list[threading.Thread] = []
 
     def close(self) -> None:
         self.close_calls += 1
+        self.close_threads.append(threading.current_thread())
 
 
 class FakeProcessTable:
@@ -107,6 +110,7 @@ class FakePlaywright:
 
 
 def test_login_failure_closes_context_and_browser(monkeypatch, tmp_path: Path):
+    calling_thread = threading.current_thread()
     process_table = FakeProcessTable()
     browser = FakeBrowser(process_table=process_table)
     fake_module = types.SimpleNamespace(sync_playwright=lambda: FakePlaywright(browser))
@@ -126,6 +130,8 @@ def test_login_failure_closes_context_and_browser(monkeypatch, tmp_path: Path):
 
     assert browser.context.close_calls == 1
     assert browser.close_calls == 1
+    assert browser.context.close_threads == [calling_thread]
+    assert browser.close_threads == [calling_thread]
     assert process_table.ps("chrome") == set()
 
 
