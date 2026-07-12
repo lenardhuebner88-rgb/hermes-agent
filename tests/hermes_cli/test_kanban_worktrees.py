@@ -625,6 +625,80 @@ def test_scheduled_tasks_do_not_hold_repo_serialization_lock(
     assert parked not in spawned
 
 
+def test_blocked_tasks_do_not_hold_repo_serialization_lock(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    with kb.connect() as conn:
+        blocked = kb.create_task(
+            conn, title="blocked", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        assert kb.block_task(conn, blocked, reason="waiting for operator")
+        ready = kb.create_task(
+            conn, title="ready", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        res = kb.dispatch_once(
+            conn, spawn_fn=lambda task, workspace: spawned.setdefault(task.id, workspace),
+            serialize_by_repo=True,
+        )
+
+    assert ready in spawned
+    assert blocked not in spawned
+    assert res.skipped_repo_serialized == []
+
+
+def test_running_and_review_tasks_still_hold_repo_serialization_lock(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+
+    for inflight_status in ("running", "review"):
+        spawned = {}
+        with kb.connect() as conn:
+            holder = kb.create_task(
+                conn, title=f"{inflight_status} holder", assignee="coder",
+                workspace_kind="dir", workspace_path=str(repo),
+            )
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (inflight_status, holder))
+            ready = kb.create_task(
+                conn, title=f"ready behind {inflight_status}", assignee="coder",
+                workspace_kind="dir", workspace_path=str(repo),
+            )
+            res = kb.dispatch_once(
+                conn, spawn_fn=lambda task, workspace: spawned.setdefault(task.id, workspace),
+                serialize_by_repo=True,
+            )
+
+        assert ready not in spawned
+        assert ready in [task_id for task_id, _ in res.skipped_repo_serialized]
+
+
+def test_promoted_blocked_task_can_be_retried(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn, title="retry me", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        assert kb.block_task(conn, task_id, reason="bounded prerequisite")
+        assert kb.promote_task(conn, task_id, actor="operator") == (True, None)
+        res = kb.dispatch_once(
+            conn, spawn_fn=lambda task, workspace: spawned.setdefault(task.id, workspace),
+            serialize_by_repo=True,
+        )
+
+    assert task_id in spawned
+    assert res.skipped_repo_serialized == []
+
+
 def test_conflict_fixer_exempt_from_repo_serialization_lock(
     kanban_home, repo, all_assignees_spawnable, monkeypatch
 ):
@@ -723,11 +797,15 @@ def test_conflict_fixer_exempt_under_full_cap(
         spawned[task.id] = workspace
 
     with kb.connect() as conn:
-        # Zwei blockierte Tasks füllen Cap=2 voll.
-        for i in range(2):
-            bid = kb.create_task(conn, title=f"blk{i}", assignee="coder",
-                                 workspace_kind="dir", workspace_path=str(repo))
-            assert kb.block_task(conn, bid, reason="integration parked")
+        holders = [
+            kb.create_task(conn, title=f"holder{i}", assignee="coder",
+                           workspace_kind="dir", workspace_path=str(repo))
+            for i in range(2)
+        ]
+        conn.executemany(
+            "UPDATE tasks SET status = 'running' WHERE id = ?",
+            [(holder,) for holder in holders],
+        )
         fixer = kb.create_task(
             conn, title="Konflikt-Fixer", assignee="coder",
             workspace_kind="dir", workspace_path=str(repo),

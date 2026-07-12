@@ -21177,14 +21177,10 @@ def _dispatch_once_locked(
         _per_profile_running = _dispatch_policy.profile_running_counts(conn)
 
     # serialize_by_repo (A+C): a per-resolved-repo_root in-flight lock beside the
-    # per-profile cap. Seed from every NON-TERMINAL task that is NOT itself a fresh
-    # ready candidate and NOT merely parked for later — i.e. exclude 'done',
-    # 'archived', 'ready', and 'scheduled'. Excluding 'ready' is what lets the
-    # first ready candidate for an idle repo claim (it re-adds itself on claim,
-    # step 3d). Excluding 'scheduled' keeps deliberately parked backlog cards
-    # from blocking unrelated ready work in the same repo. INCLUDING 'review' and
-    # 'blocked' is the fix for the 0167-0171 wave (a task parked in review/blocked
-    # must keep holding its repo so N+1 never branches from a stale main).
+    # per-profile cap. Seed from active execution/review work only. A settled
+    # blocked card has released its claim/process and must not starve later ready
+    # work; running and review cards still protect against branching from stale
+    # main. The first ready candidate re-adds itself on claim (step 3d).
     # Empty set + flag off => strict no-op.
     _max_per_repo = max(1, int(max_concurrent_per_repo or 1))
     _repo_count: dict[str, int] = {}
@@ -21533,18 +21529,13 @@ def _dispatch_once_locked(
                     current,
                 ))
                 continue
-        # serialize_by_repo guard: another non-terminal task holds this repo_root
+        # serialize_by_repo guard: active execution/review holds this repo_root
         # this tick -> defer THIS candidate (continue, never break: other repos must
         # still flow). Emit ONE deduped repo_serialized event (role_fit_held pattern).
         #
         # EXEMPTION: a conflict-park fixer is dispatched specifically to repair a
-        # parked (blocked) chain INSIDE that chain's own worktree. The blocked
-        # parent still holds the repo slot (intended: keeps other tasks from
-        # branching N+1 off stale main — the 0167-0171 invariant). But the fixer
-        # works in the SAME parked worktree, not a fresh branch, so it must break
-        # the slot — otherwise parent (holds slot) and fixer (needs slot to clear
-        # the block) deadlock forever (2026-06-20 burn-dashboard incident). Only
-        # the fixer is exempt; every other same-repo candidate stays serialized.
+        # parked chain INSIDE that chain's own worktree. Keep its exemption so it
+        # can also repair a chain while active running/review work fills the cap.
         _is_conflict_fixer = bool(
             row["idempotency_key"]
             and str(row["idempotency_key"]).startswith(CONFLICT_FIXER_IDEM_PREFIX)

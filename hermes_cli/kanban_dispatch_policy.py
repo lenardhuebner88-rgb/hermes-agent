@@ -41,11 +41,16 @@ def repo_inflight_counts(
     conn: sqlite3.Connection,
     repo_root_for_row: Callable[[str, str], Optional[str]],
 ) -> dict[str, int]:
-    """Count non-terminal repo slots that hold serialization capacity."""
+    """Count active execution/review repo slots that hold serialization capacity.
+
+    A blocked task has settled: ``block_task`` releases its claim and worker PID,
+    so keeping it in this count would let an operator-gated card starve all future
+    work for the repository. Ready candidates are added as they are spawned.
+    """
     counts: dict[str, int] = {}
     for row in conn.execute(
         "SELECT workspace_kind, workspace_path FROM tasks "
-        "WHERE status NOT IN ('done', 'archived', 'ready', 'scheduled')"
+        "WHERE status IN ('running', 'review')"
     ):
         repo_root = repo_root_for_row(row["workspace_kind"], row["workspace_path"])
         if repo_root:
