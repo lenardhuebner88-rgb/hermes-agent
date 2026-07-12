@@ -86,7 +86,7 @@ In production do not run a daemon or manual loop. The gateway dispatches every t
 Use manual dispatch only for local tests or scoped recovery:
 
 ```bash
-hermes kanban dispatch --once
+hermes kanban dispatch
 ```
 
 Worker lifecycle evidence:
