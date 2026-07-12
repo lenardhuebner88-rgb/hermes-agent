@@ -41,12 +41,14 @@ Revert-/Land-Rails, nicht vom Engine-Sandbox.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from . import EngineResult, detect_usage_limit, register
 
 CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+_TOKENS_USED_RE = re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE)
 
 
 @register("codex")
@@ -76,8 +78,10 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
             rc=124, output=out, usage_limit=detect_usage_limit(out), timed_out=True
         )
     out = (proc.stdout or "") + (proc.stderr or "")
+    token_match = _TOKENS_USED_RE.search(out)
+    total_tokens = int(token_match.group(1).replace(",", "")) if token_match else None
     return EngineResult(
-        rc=proc.returncode, output=out, usage_limit=detect_usage_limit(out)
+        rc=proc.returncode, output=out, usage_limit=detect_usage_limit(out), total_tokens=total_tokens
     )
 
 

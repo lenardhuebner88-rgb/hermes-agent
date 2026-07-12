@@ -821,6 +821,23 @@ class LoopRunner:
         self._heartbeat(None, done=done)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
+        subscription_engine = cfg.engine in {"claude", "codex", "kimi", "neuralwatt", "xai"}
+        self.ledger_event(
+            event="phase_usage",
+            round=round_,
+            phase=phase,
+            engine=cfg.engine,
+            model=cfg.model,
+            secs=self.phase_secs[phase],
+            rc=result.rc,
+            input_tokens=result.input_tokens,
+            cached_input_tokens=result.cached_input_tokens,
+            output_tokens=result.output_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+            total_tokens=result.total_tokens,
+            billing="subscription" if subscription_engine else "unknown",
+            metered_cost_eur=0.0 if subscription_engine else None,
+        )
         self.say(f"Phase {phase} fertig in {self.phase_secs[phase]}s (rc={result.rc})")
         return result
 

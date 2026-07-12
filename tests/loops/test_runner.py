@@ -2130,7 +2130,16 @@ def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_eng
     def build_phase(kv, cwd):
         commit_in(cwd, "t1")
         (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
-        return engines.EngineResult(rc=0, output="", usage_limit=False)
+        return engines.EngineResult(
+            rc=0,
+            output="",
+            usage_limit=False,
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=23,
+            reasoning_tokens=20,
+            total_tokens=123,
+        )
 
     behaviors["plan"] = plan_phase
     behaviors["build"] = build_phase
@@ -2140,10 +2149,17 @@ def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_eng
 
     jsonl = runner.ledger_path.parent / "ledger.jsonl"
     events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
-    verified = [e for e in events if e["phase"] == "verify" and e["verdict"] == "ok"]
+    verified = [e for e in events if e["phase"] == "verify" and e.get("verdict") == "ok"]
     assert len(verified) == 1
     assert verified[0]["build_secs"] is not None
     assert verified[0]["verify_secs"] is not None
+    usage = [e for e in events if e.get("event") == "phase_usage"]
+    build_usage = next(e for e in usage if e["phase"] == "build")
+    assert build_usage["engine"] == "fake"
+    assert build_usage["total_tokens"] == 123
+    assert build_usage["cached_input_tokens"] == 80
+    assert build_usage["billing"] == "unknown"
+    assert "metered_cost_eur" not in build_usage
 
 
 def test_pipeline_verify_fail_writes_fail_and_bounced_events(tmp_path, fake_engine):
@@ -2167,8 +2183,8 @@ def test_pipeline_verify_fail_writes_fail_and_bounced_events(tmp_path, fake_engi
 
     jsonl = runner.ledger_path.parent / "ledger.jsonl"
     events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
-    fails = [e for e in events if e["verdict"] == "fail" and e["phase"] == "verify"]
-    bounced = [e for e in events if e["verdict"] == "bounced"]
+    fails = [e for e in events if e.get("verdict") == "fail" and e["phase"] == "verify"]
+    bounced = [e for e in events if e.get("verdict") == "bounced"]
     stopped = [e for e in events if e["phase"] == "stop"]
     assert len(fails) == 2
     assert all(e["fail_kind"] == "verify_fail" for e in fails)

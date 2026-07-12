@@ -8,6 +8,7 @@ tmp, systemd hinter dem _systemctl-Seam gefaked. Kein echtes systemctl/git-Repo.
 from __future__ import annotations
 
 import fcntl
+import json
 import subprocess
 from pathlib import Path
 
@@ -104,6 +105,33 @@ def test_list_loops_shows_packs_hides_templates(api):
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
     assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
+
+
+def test_real_phase_usage_ledger_flows_to_summary_and_detail(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True)
+    rows = [
+        {"ts": "2026-07-13T01:00:00", "pack": "fliessband", "event": "phase_usage", "round": 1,
+         "phase": "build", "engine": "xai", "model": "grok-4.5", "total_tokens": 270,
+         "input_tokens": 220, "cached_input_tokens": 180, "output_tokens": 50,
+         "reasoning_tokens": 40, "billing": "subscription", "metered_cost_eur": 0.0},
+        {"ts": "2026-07-13T01:01:00", "pack": "fliessband", "event": "phase_usage", "round": 1,
+         "phase": "verify", "engine": "codex", "model": "gpt-5.6-sol", "total_tokens": 100,
+         "billing": "subscription", "metered_cost_eur": 0.0},
+    ]
+    (state / "ledger.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
+    )
+
+    pack = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "fliessband")
+    assert pack["token_usage"] == {
+        "total_tokens": 370,
+        "metered_cost_eur": 0.0,
+        "billing": "subscription",
+    }
+    detail = client.get("/api/loops/fliessband/detail").json()
+    assert detail["phase_usage"] == rows
 
 
 

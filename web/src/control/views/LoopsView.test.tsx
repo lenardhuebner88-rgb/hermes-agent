@@ -75,6 +75,7 @@ const runningPipeline: LoopPack = {
   timer_enabled: true,
   timer_schedule: "23:37",
   timer_next_run: "2026-07-09T21:37:00Z",
+  token_usage: { total_tokens: 370, metered_cost_eur: 0, billing: "subscription" },
 };
 
 // Gleiches Manifest, aber zwischen zwei Phasen (heartbeat.current == null,
@@ -234,6 +235,11 @@ function renderInteractiveGrid(packs: LoopPack[], overrides: Partial<LoopsGridPr
 }
 
 describe("LoopsGrid", () => {
+  it("renders aggregate tokens and honest zero metered subscription spend from the real ledger shape", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain(t.tokenUsage(370));
+    expect(html).toContain(t.subscriptionZeroMetered);
+  });
   it("groups packs by repository and shows the bound base branch", () => {
     const healthTrack: LoopPack = {
       ...idleSweepWithCommits,
@@ -614,6 +620,9 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
     queue_entries: null,
     commits: [],
     overrides: {},
+    phase_usage: [
+      { ts: "2026-07-13T01:00:00", round: 1, phase: "build", engine: "xai", model: "grok-4.5", total_tokens: 270, input_tokens: 220, cached_input_tokens: 180, output_tokens: 50, reasoning_tokens: 40, billing: "subscription", metered_cost_eur: 0 },
+    ],
   };
 
   it("renders a parsed ledger line's raw text and round/phase chips inside the open Logbuch disclosure", () => {
@@ -626,6 +635,11 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
   it("renders an unparsable ledger line verbatim instead of crashing", () => {
     const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
     expect(html).toContain("# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf");
+  });
+
+  it("renders per-round phase tokens in detail", () => {
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).toContain("R1 · build · grok-4.5 · 270 Tokens · Abo · €0 gemessen");
   });
 });
 

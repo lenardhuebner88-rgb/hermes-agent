@@ -32,6 +32,11 @@ class EngineResult:
     output: str
     usage_limit: bool
     timed_out: bool = False
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 # 2026-07-05 live gelernt: bei einem 69k-Zeilen-Codex-Build-Output tauchten

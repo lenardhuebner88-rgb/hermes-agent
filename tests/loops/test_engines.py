@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -186,6 +188,35 @@ def test_xai_cli_uses_shared_usage_limit_detection(monkeypatch, tmp_path):
     assert result.usage_limit is True
 
 
+def test_xai_cli_captures_real_session_token_usage_without_changing_command(monkeypatch, tmp_path):
+    from loops.engines import xai_cli
+
+    grok_home = tmp_path / "grok-home"
+    monkeypatch.setattr(xai_cli, "GROK_HOME", grok_home, raising=False)
+    sid = "019f589b-56b7-7362-a20d-0ea300e5bef9"
+
+    def fake_run(cmd, **kwargs):
+        session = grok_home / "sessions" / quote(str(tmp_path), safe="") / sid
+        session.mkdir(parents=True)
+        log = grok_home / "logs" / "unified.jsonl"
+        log.parent.mkdir(parents=True)
+        rows = [
+            {"sid": sid, "msg": "shell.turn.inference_done", "ctx": {"prompt_tokens": 100, "cached_prompt_tokens": 80, "completion_tokens": 20, "reasoning_tokens": 15}},
+            {"sid": sid, "msg": "shell.turn.inference_done", "ctx": {"prompt_tokens": 120, "cached_prompt_tokens": 100, "completion_tokens": 30, "reasoning_tokens": 25}},
+        ]
+        log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Grok answer", stderr="")
+
+    monkeypatch.setattr(xai_cli.subprocess, "run", fake_run)
+    result = xai_cli.run("grok-4.5", "build it", tmp_path, 321)
+
+    assert result.input_tokens == 220
+    assert result.cached_input_tokens == 180
+    assert result.output_tokens == 50
+    assert result.reasoning_tokens == 40
+    assert result.total_tokens == 270
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -358,6 +389,18 @@ def test_codex_cli_builds_headless_command(monkeypatch, tmp_path):
     assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
     assert "--full-auto" not in cmd
     assert cmd[-1] == "sag OK"
+
+
+def test_codex_cli_parses_total_token_footer(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        codex_cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 0, stdout="OK\ntokens used\n27,684\n", stderr="",
+        ),
+    )
+    result = codex_cli.run("gpt-5.6-sol", "x", tmp_path, 60)
+    assert result.total_tokens == 27_684
 
 
 def test_codex_cli_timeout_maps_to_timed_out(monkeypatch, tmp_path):

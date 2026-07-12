@@ -8,12 +8,15 @@ the transport boundary.  This path does not use an API key or OpenRouter.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 from . import EngineResult, detect_usage_limit, register
 
 GROK_BIN = os.environ.get("GROK_BIN", "/home/piet/.npm-global/bin/grok")
+GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 
 _CLI_MODEL_ALIASES = {"grok-4.5": "grok-build"}
 
@@ -36,6 +39,7 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
     ]
     env = dict(os.environ)
     env["HERMES_SANDBOX_MODE"] = "1"  # a loop builder must never write to the live board
+    sessions_before = _session_ids(cwd)
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd), env=env, capture_output=True,
@@ -45,7 +49,57 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
         out = _decode(exc.stdout) + _decode(exc.stderr)
         return EngineResult(rc=124, output=out, usage_limit=detect_usage_limit(out), timed_out=True)
     out = (proc.stdout or "") + (proc.stderr or "")
-    return EngineResult(rc=proc.returncode, output=out, usage_limit=detect_usage_limit(out))
+    usage = _new_session_usage(cwd, sessions_before)
+    return EngineResult(
+        rc=proc.returncode,
+        output=out,
+        usage_limit=detect_usage_limit(out),
+        **usage,
+    )
+
+
+def _session_ids(cwd: Path) -> set[str]:
+    root = GROK_HOME / "sessions" / quote(str(cwd), safe="")
+    try:
+        return {entry.name for entry in root.iterdir() if entry.is_dir()}
+    except OSError:
+        return set()
+
+
+def _new_session_usage(cwd: Path, before: set[str]) -> dict[str, int | None]:
+    new_ids = _session_ids(cwd) - before
+    totals = {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    found = False
+    try:
+        lines = (GROK_HOME / "logs" / "unified.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if event.get("sid") not in new_ids or event.get("msg") != "shell.turn.inference_done":
+            continue
+        ctx = event.get("ctx") if isinstance(event.get("ctx"), dict) else {}
+        for source, target in (
+            ("prompt_tokens", "input_tokens"),
+            ("cached_prompt_tokens", "cached_input_tokens"),
+            ("completion_tokens", "output_tokens"),
+            ("reasoning_tokens", "reasoning_tokens"),
+        ):
+            value = ctx.get(source)
+            if isinstance(value, int) and value >= 0:
+                totals[target] += value
+                found = True
+    if not found:
+        return {key: None for key in (*totals, "total_tokens")}
+    return {**totals, "total_tokens": totals["input_tokens"] + totals["output_tokens"]}
 
 
 def _decode(raw: bytes | str | None) -> str:

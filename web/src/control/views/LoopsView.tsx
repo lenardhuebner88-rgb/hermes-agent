@@ -575,6 +575,21 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
         </div>
       ) : null}
       <div>
+        <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailTokens}</p>
+        {detail.phase_usage.length > 0 ? (
+          <ul className="mt-1 space-y-1 font-data" style={{ color: "var(--ln-ink-soft)" }}>
+            {detail.phase_usage.map((usage, index) => (
+              <li key={`${usage.ts}-${usage.phase}-${index}`}>
+                {usage.round ? `R${usage.round} · ` : ""}{usage.phase} · {usage.model} · {usage.total_tokens != null ? t.tokenUsage(usage.total_tokens) : "Tokens —"}
+                {usage.billing === "subscription" && usage.metered_cost_eur === 0 ? ` · ${t.subscriptionZeroMetered}` : ""}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoTokens}</p>
+        )}
+      </div>
+      <div>
         <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailCommits}</p>
         {detail.commits.length > 0 ? (
           <ul className="mt-1 space-y-0.5 font-data" style={{ color: "var(--ln-ink-soft)" }}>
@@ -1281,6 +1296,14 @@ function LoopCard({
       <CardTelemetryLine pack={pack} nowMs={nowMs} />
       {pack.heartbeat?.last.length ? <PhaseHistoryBars last={pack.heartbeat.last} /> : null}
       {pack.queue ? <LoopQueueStepper queue={pack.queue} /> : null}
+      {pack.token_usage?.total_tokens != null ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <NightPill tone="sodium">{t.tokenUsage(pack.token_usage.total_tokens)}</NightPill>
+          {pack.token_usage.billing === "subscription" && pack.token_usage.metered_cost_eur === 0 ? (
+            <NightPill tone="ok">{t.subscriptionZeroMetered}</NightPill>
+          ) : null}
+        </div>
+      ) : null}
       {pack.commits_ahead > 0 ? (
         <div className="mt-2" title={hasVerifiedPipelinePlan ? t.commitsAheadHint : t.commitsUnverifiedHint}>
           <NightPill tone={hasVerifiedPipelinePlan ? "sodium" : "warn"}>

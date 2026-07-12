@@ -326,6 +326,31 @@ def _heartbeat(state: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _phase_usage(state: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    path = state / "ledger.jsonl"
+    events: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "phase_usage":
+            events.append(event)
+    token_values = [event["total_tokens"] for event in events if isinstance(event.get("total_tokens"), int)]
+    costs = [float(event["metered_cost_eur"]) for event in events if isinstance(event.get("metered_cost_eur"), (int, float))]
+    billings = {event.get("billing") for event in events if isinstance(event.get("billing"), str)}
+    billing = next(iter(billings)) if len(billings) == 1 else "mixed" if billings else "unknown"
+    return {
+        "total_tokens": sum(token_values) if token_values else None,
+        "metered_cost_eur": sum(costs) if costs else None,
+        "billing": billing,
+    }, events
+
+
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -388,6 +413,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         for stage in loop_runner.QUEUE_STAGES
     }
     timer_enabled = _timer_enabled(pack.name)
+    token_usage, _phase_events = _phase_usage(state)
     return {
         "name": pack.name,
         "type": pack.type,
@@ -411,6 +437,7 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "timer_enabled": timer_enabled,
         "timer_schedule": _timer_schedule(pack.name),
         "timer_next_run": _timer_next_run(pack.name),
+        "token_usage": token_usage,
     }
 
 
@@ -467,12 +494,14 @@ def register_loops_routes(app: FastAPI) -> None:
             for stage in loop_runner.QUEUE_STAGES
         }
         overrides_path = state / "overrides.env"
+        _token_usage, phase_usage = _phase_usage(state)
         return {
             **_pack_summary(loaded.name, source),
             "ledger_tail": ledger_tail,
             "queue_entries": queue_entries if loaded.type == "pipeline" else None,
             "commits": _commits_ahead(loaded),
             "overrides": loop_runner.parse_overrides(overrides_path),
+            "phase_usage": phase_usage,
         }
 
     @app.post("/api/loops/{pack}/start")
