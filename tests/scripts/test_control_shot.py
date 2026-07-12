@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -35,6 +36,12 @@ class FakeResource:
     def close(self) -> None:
         self.close_calls += 1
         self.close_threads.append(threading.current_thread())
+
+
+class HangingFakeResource(FakeResource):
+    def close(self) -> None:
+        super().close()
+        time.sleep(1)
 
 
 class FakeProcessTable:
@@ -133,6 +140,19 @@ def test_login_failure_closes_context_and_browser(monkeypatch, tmp_path: Path):
     assert browser.context.close_threads == [calling_thread]
     assert browser.close_threads == [calling_thread]
     assert process_table.ps("chrome") == set()
+
+
+def test_close_quietly_bounds_hung_close_on_calling_thread():
+    resource = HangingFakeResource()
+    calling_thread = threading.current_thread()
+
+    started = time.monotonic()
+    control_shot._close_quietly(resource, timeout_seconds=0.01)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert resource.close_calls == 1
+    assert resource.close_threads == [calling_thread]
 
 
 def test_successful_capture_closes_context_and_browser(monkeypatch, tmp_path: Path):
