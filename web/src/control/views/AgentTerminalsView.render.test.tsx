@@ -40,6 +40,10 @@ let documentHidden = false;
 // xterm's live selection is not React state — the view reads it on demand via
 // term.getSelection(), so the fake mirrors that pull model instead of a prop.
 let terminalSelection = "";
+// Per-pane selections, keyed by the pane's data-terminal-surface order. Each xterm
+// owns its own selection; the copy chord must read the pane it was fired in, not
+// whatever pane happens to be active.
+let paneSelections: Record<string, string> = {};
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -55,7 +59,7 @@ vi.mock("@/lib/xtermSurface", () => ({
   TERMINAL_THEME_STATIC: {},
   TERMINAL_MAIN_BACKGROUND: "terminal-background",
   TERMINAL_PANE_BACKGROUND: "terminal-pane-background",
-  createHermesXtermSurface: vi.fn(() => ({
+  createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => ({
     term: {
       clear: vi.fn(),
       reset: terminalResetMock,
@@ -66,7 +70,7 @@ vi.mock("@/lib/xtermSurface", () => ({
       scrollPages: terminalScrollPagesMock,
       scrollToBottom: terminalScrollToBottomMock,
       focus: terminalFocusMock,
-      getSelection: () => terminalSelection,
+      getSelection: () => paneSelections[host?.dataset?.terminalSurface ?? ""] ?? terminalSelection,
       dispose: vi.fn(),
       options: {},
       cols: 80,
@@ -226,6 +230,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   websocketSends = [];
   terminalSelection = "";
+  paneSelections = {};
   window.localStorage.clear();
   installDom(false);
   clipboardWriteMock.mockResolvedValue(undefined);
@@ -498,13 +503,46 @@ describe("AgentTerminalsView desktop rendering", () => {
 
   it("copies the xterm selection via Ctrl+Shift+C without sending ETX to tmux", async () => {
     await renderView();
-    await waitFor(() => expect(screen.getByTestId("terminal-pane-host-0")).toBeTruthy());
+    const host = await screen.findByTestId("terminal-pane-host-0");
     terminalSelection = "pane-zeile aus dem scrollback";
 
-    fireEvent.keyDown(document, { key: "C", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(host, { key: "C", ctrlKey: true, shiftKey: true });
 
     await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith("pane-zeile aus dem scrollback"));
     // The copy path must never reach the socket — ETX (\x03) would SIGINT the agent.
+    expect(websocketSends).not.toContain("\x03");
+  });
+
+  // The chord is bound document-wide (xterm binds its own keydown on the helper
+  // textarea, so it has to be caught in the capture phase). That makes it the
+  // handler's job to reject foreign targets: a selection left behind in the
+  // terminal must not hijack the copy the user performs in a text field.
+  it("leaves the copy chord to the browser outside the terminal surface, even with a stale selection", async () => {
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+    terminalSelection = "alter terminaltext";
+    const composer = await screen.findByLabelText("Text an Terminal senden");
+
+    const shiftCNotPrevented = fireEvent.keyDown(composer, { key: "C", ctrlKey: true, shiftKey: true });
+    const insertNotPrevented = fireEvent.keyDown(composer, { key: "Insert", ctrlKey: true });
+
+    expect(shiftCNotPrevented).toBe(true);
+    expect(insertNotPrevented).toBe(true);
+    expect(clipboardWriteMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Kopiert")).toBeNull();
+  });
+
+  it("copies the selection of the pane the chord was fired in, not the active pane", async () => {
+    await renderView();
+    fireEvent.click(await screen.findByTestId("terminal-layout-button-2"));
+    const extraHost = await screen.findByTestId("terminal-pane-host-1");
+    paneSelections["0"] = "auswahl aus pane 0";
+    paneSelections["1"] = "auswahl aus pane 1";
+
+    fireEvent.keyDown(extraHost, { key: "C", ctrlKey: true, shiftKey: true });
+
+    await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith("auswahl aus pane 1"));
+    expect(clipboardWriteMock).not.toHaveBeenCalledWith("auswahl aus pane 0");
     expect(websocketSends).not.toContain("\x03");
   });
 
@@ -520,10 +558,11 @@ describe("AgentTerminalsView desktop rendering", () => {
 
   it("copies nothing when no selection exists", async () => {
     await renderView();
+    const host = await screen.findByTestId("terminal-pane-host-0");
     terminalSelection = "";
 
     fireEvent.click(await screen.findByRole("button", { name: "Auswahl kopieren" }));
-    fireEvent.keyDown(document, { key: "C", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(host, { key: "C", ctrlKey: true, shiftKey: true });
 
     expect(clipboardWriteMock).not.toHaveBeenCalled();
     expect(await screen.findByText("Keine Auswahl")).toBeTruthy();
@@ -533,9 +572,10 @@ describe("AgentTerminalsView desktop rendering", () => {
   // selection exists would silently break the only way to stop a runaway agent.
   it("leaves plain Ctrl+C to the terminal even with an active selection", async () => {
     await renderView();
+    const host = await screen.findByTestId("terminal-pane-host-0");
     terminalSelection = "markierter text";
 
-    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    fireEvent.keyDown(host, { key: "c", ctrlKey: true });
 
     expect(clipboardWriteMock).not.toHaveBeenCalled();
   });

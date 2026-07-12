@@ -262,6 +262,26 @@ export function isTerminalCopyShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "m
   return event.key === "Insert";
 }
 
+/**
+ * Pane order of the xterm surface a keyboard event was fired in, or null when it
+ * came from anywhere else (composer, rename field, session rail, Fleet card …).
+ *
+ * The copy chord has to be caught document-wide in the capture phase — xterm binds
+ * its own keydown on the helper textarea, so a listener on the pane would be too
+ * late. That makes rejecting foreign targets this function's job: without it, a
+ * selection left behind in a terminal would hijack the user's Ctrl+Shift+C inside a
+ * text field and silently put stale terminal output on the clipboard.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function terminalSurfaceOrder(target: EventTarget | null): number | null {
+  const element = target as Element | null;
+  if (typeof element?.closest !== "function") return null;
+  const surface = element.closest("[data-terminal-surface]");
+  const order = surface?.getAttribute("data-terminal-surface");
+  if (!order || !/^\d+$/.test(order)) return null;
+  return Number(order);
+}
+
 /** Build the PTY resize escape sequence, clamping to valid dimensions (≥ 2, floored).
  *  Handles NaN/Infinity by falling back to 2 (Math.max propagates NaN, so we guard). */
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
@@ -1354,16 +1374,18 @@ export function AgentTerminalsView() {
     return () => window.clearTimeout(timer);
   }, [pendingTerminate]);
 
-  /** xterm's selection is not React state — read it from the pane that has focus. */
-  const readActiveSelection = useCallback((): string => {
-    if (activePane > 0) return extraPaneRefs[activePane - 1]?.current?.getSelection() ?? "";
-    return termRef.current?.getSelection() ?? "";
-  }, [activePane, extraPaneRefs]);
+  /** xterm's selection is not React state — pull it from the pane that owns it. */
+  const readPaneSelection = useCallback(
+    (paneOrder: number): string => {
+      if (paneOrder > 0) return extraPaneRefs[paneOrder - 1]?.current?.getSelection() ?? "";
+      return termRef.current?.getSelection() ?? "";
+    },
+    [extraPaneRefs],
+  );
 
   // Copy path. Never touches wsRef: a copy must not put ETX (or any byte) on the
   // socket, otherwise "copy" would SIGINT the very agent whose output is being copied.
-  const copySelection = useCallback(async (): Promise<void> => {
-    const selection = readActiveSelection();
+  const copyText = useCallback(async (selection: string): Promise<void> => {
     if (!selection) {
       setCopyState("empty");
       return;
@@ -1374,7 +1396,19 @@ export function AgentTerminalsView() {
     } catch {
       setCopyState("error");
     }
-  }, [readActiveSelection]);
+  }, []);
+
+  /** Selection of the focused pane — for callers without a pane of their own
+   *  (toolbar button, handoff panel), unlike the keyboard chord which knows its pane. */
+  const readActiveSelection = useCallback(
+    (): string => readPaneSelection(activePane),
+    [activePane, readPaneSelection],
+  );
+
+  const copySelection = useCallback(
+    (): Promise<void> => copyText(readActiveSelection()),
+    [copyText, readActiveSelection],
+  );
 
   useEffect(() => {
     if (copyState === "idle") return;
@@ -1385,17 +1419,23 @@ export function AgentTerminalsView() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTerminalCopyShortcut(event)) return;
+      // Only chords fired inside an xterm surface are ours, and they copy THAT pane —
+      // outside (composer, rename field, …) the focused control's own copy must win,
+      // even while a stale selection still sits in a terminal.
+      const paneOrder = terminalSurfaceOrder(event.target);
+      if (paneOrder === null) return;
+      const selection = readPaneSelection(paneOrder);
       // No selection → stay out of the way entirely and let the key reach the app.
-      if (!readActiveSelection()) return;
+      if (!selection) return;
       event.preventDefault();
       event.stopPropagation();
-      void copySelection();
+      void copyText(selection);
     };
     // Capture phase: xterm binds its own keydown on the helper textarea, so the chord
     // has to be intercepted before it can be turned into terminal input.
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [copySelection, readActiveSelection]);
+  }, [copyText, readPaneSelection]);
 
   const renameWindow = useCallback(async () => {
     if (!selectedWindow) return;
@@ -2522,6 +2562,7 @@ export function AgentTerminalsView() {
     <div
       ref={hostRef}
       data-testid="terminal-pane-host-0"
+      data-terminal-surface="0"
       className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden bg-surface-0"
       onMouseDown={() => setActivePane(0)}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}

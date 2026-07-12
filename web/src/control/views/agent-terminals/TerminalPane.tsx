@@ -290,6 +290,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     <div
       ref={hostRef}
       data-testid={`terminal-pane-host-${paneOrder}`}
+      // Marks this host as an xterm surface: the view's copy chord only fires for
+      // events originating inside one, and copies exactly this pane's selection.
+      data-terminal-surface={String(paneOrder)}
       data-ready={connection.ready ? "true" : "false"}
       className={`h-full min-h-0 min-w-0 overflow-hidden bg-surface-0 ${className}`}
       onMouseDown={onActivate}
