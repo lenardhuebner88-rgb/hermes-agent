@@ -10,6 +10,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -31,10 +32,13 @@ def _json_request(
     url: str,
     *,
     payload: dict[str, Any] | None = None,
+    extra_headers: dict[str, str] | None = None,
     timeout: float,
 ) -> dict[str, Any]:
     data = None
     headers = {"Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -59,6 +63,42 @@ def _json_request(
     if not isinstance(parsed, dict):
         raise SmokeError(f"{method} {url} returned a non-object JSON payload")
     return parsed
+
+
+def _text_request(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    *,
+    timeout: float,
+) -> str:
+    request = urllib.request.Request(url, headers={"Accept": "text/html"}, method="GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise SmokeError(f"GET {url} returned HTTP {exc.code}: {body[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise SmokeError(f"GET {url} failed: {exc.reason}") from exc
+
+
+_SESSION_TOKEN_RE = re.compile(
+    r"window\.__HERMES_SESSION_TOKEN__=(\"(?:\\.|[^\"\\])*\")"
+)
+
+
+def _session_token_from_html(html: str) -> str:
+    """Extract the JSON-escaped loopback token without ever logging it."""
+    match = _SESSION_TOKEN_RE.search(html)
+    if match is None:
+        raise SmokeError("authenticated dashboard HTML is missing the session token injection")
+    try:
+        token = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise SmokeError("dashboard session token injection is malformed") from exc
+    if not isinstance(token, str) or not token:
+        raise SmokeError("dashboard session token injection is empty")
+    return token
 
 
 def _base_url(raw: str) -> str:
@@ -172,10 +212,20 @@ def main(argv: list[str] | None = None) -> int:
         if login.get("ok") is not True:
             raise SmokeError("password login did not return ok=true")
 
+        # Password auth establishes the browser/session cookie. In loopback
+        # ``--insecure`` mode protected APIs additionally require the ephemeral
+        # token injected into the authenticated SPA HTML; gated mode omits it
+        # and authorizes the cookie directly. Mirror the browser in both modes.
+        control_html = _text_request(opener, f"{base}/control", timeout=args.timeout)
+        api_headers: dict[str, str] = {}
+        if "window.__HERMES_SESSION_TOKEN__" in control_html:
+            api_headers["X-Hermes-Session-Token"] = _session_token_from_html(control_html)
+
         payload = _json_request(
             opener,
             "GET",
             f"{base}/api/health-status",
+            extra_headers=api_headers,
             timeout=args.timeout,
         )
         _validate_health_payload(payload)
