@@ -25,6 +25,13 @@ def _package_tree(root: Path, browsers: list[dict[str, object]] | None) -> None:
         (package / "browsers.json").write_text(json.dumps({"browsers": browsers}))
 
 
+def _python_package_tree(root: Path, browsers: list[dict[str, object]]) -> Path:
+    package = root / ".venv" / "lib" / "python3.12" / "site-packages" / "playwright" / "driver" / "package"
+    package.mkdir(parents=True)
+    (package / "browsers.json").write_text(json.dumps({"browsers": browsers}))
+    return package
+
+
 def test_outputs_only_regular_files_strictly_older_than_fourteen_days(tmp_path):
     root = tmp_path / "outputs"
     root.mkdir()
@@ -95,6 +102,38 @@ def test_multiple_valid_installations_are_combined_without_hardcoded_revisions(t
 
     assert status == "ok"
     assert [action.path.name for action in actions] == ["chromium-333"]
+
+
+def test_default_discovery_combines_python_driver_and_other_project_node_modules(tmp_path):
+    home = tmp_path / "home"
+    python_package = _python_package_tree(home / "python-project", [{"name": "chromium", "revision": "1223"}])
+    node_project = home / "Family Organizer"
+    _package_tree(node_project, [{"name": "firefox", "revision": "1490"}])
+
+    roots, error = rr.discover_package_roots(home)
+    tokens, token_error = rr._revision_tokens(roots)
+
+    assert error is None
+    assert token_error is None
+    assert python_package.parent.parent.parent in roots
+    assert node_project / "node_modules" in roots
+    assert {("chromium", "1223"), ("firefox", "1490")} <= tokens
+
+
+def test_browser_path_override_for_different_cache_fails_closed(tmp_path):
+    packages = tmp_path / "packages"
+    _package_tree(packages, [{"name": "chromium", "revision": "111"}])
+    cache = tmp_path / "shared-cache"
+    (cache / "chromium-999").mkdir(parents=True)
+
+    actions, status = rr.plan_browser_actions(
+        cache,
+        [packages],
+        browsers_path_override=str(tmp_path / "other-cache"),
+    )
+
+    assert actions == []
+    assert status.startswith("fail-closed")
 
 
 def test_one_ambiguous_installed_package_makes_browser_cleanup_fail_closed(tmp_path):

@@ -21,10 +21,6 @@ from typing import Callable, Iterator, Sequence
 
 DEFAULT_OUTPUTS_ROOT = Path("/home/piet/.hermes/playwright-mcp-output")
 DEFAULT_BROWSER_CACHE = Path("/home/piet/.cache/ms-playwright")
-DEFAULT_PACKAGE_ROOTS = (
-    Path("/home/piet/.npm/_npx"),
-    Path("/home/piet/.hermes/hermes-agent/node_modules"),
-)
 DEFAULT_KANBAN_DB = Path("/home/piet/.hermes/kanban.db")
 DEFAULT_LOCK_FILE = Path("/home/piet/.hermes/retention-reap.lock")
 DEFAULT_OUTPUT_DAYS = 14.0
@@ -76,8 +72,41 @@ def plan_output_actions(root: Path, *, now: float, max_age_seconds: float) -> li
     return actions
 
 
+def discover_package_roots(home: Path) -> tuple[list[Path], str | None]:
+    """Find every Node and Python package root below home without entering package trees."""
+    roots: set[Path] = set()
+    errors: list[OSError] = []
+
+    def record_error(error: OSError) -> None:
+        # Unreadable service-owned trees cannot contain an installation active
+        # for this user; other traversal failures still make discovery unsafe.
+        if not isinstance(error, PermissionError):
+            errors.append(error)
+
+    try:
+        for directory, names, _files in os.walk(home, onerror=record_error):
+            path = Path(directory)
+            if path.name == "node_modules":
+                roots.add(path)
+                names.clear()
+                continue
+            if path.name in {"site-packages", "dist-packages"}:
+                roots.add(path)
+                names.clear()
+                continue
+            names[:] = [name for name in names if name not in {".git", "__pycache__"}]
+    except OSError as exc:
+        errors.append(exc)
+    if errors:
+        return [], f"package discovery error: {errors[0]}"
+    if not roots:
+        return [], "no Node or Python package roots discovered"
+    return sorted(roots), None
+
+
 def _metadata_files(package_roots: Sequence[Path]) -> tuple[list[Path], str | None]:
     package_jsons: list[Path] = []
+    python_browser_files: list[Path] = []
     for root in package_roots:
         if not root.exists():
             continue
@@ -97,20 +126,24 @@ def _metadata_files(package_roots: Sequence[Path]) -> tuple[list[Path], str | No
                     continue
                 if data.get("name") in _PLAYWRIGHT_PACKAGES:
                     package_jsons.append(candidate)
+            python_browser_files.extend(root.glob("playwright/driver/package/browsers.json"))
         except OSError as exc:
             return [], f"package scan error: {exc}"
-    if not package_jsons:
+    if not package_jsons and not python_browser_files:
         return [], "no installed Playwright package metadata"
-    return sorted(set(package_jsons)), None
+    return sorted(set(package_jsons + python_browser_files)), None
 
 
 def _revision_tokens(package_roots: Sequence[Path]) -> tuple[set[tuple[str, str]], str | None]:
-    package_jsons, error = _metadata_files(package_roots)
+    metadata_files, error = _metadata_files(package_roots)
     if error:
         return set(), error
     browser_files: set[Path] = set()
-    for package_json in package_jsons:
-        package_dir = package_json.parent
+    for metadata_file in metadata_files:
+        if metadata_file.name == "browsers.json":
+            browser_files.add(metadata_file)
+            continue
+        package_dir = metadata_file.parent
         candidates = [package_dir / "browsers.json"]
         if package_dir.name != "playwright-core":
             candidates.append(package_dir.parent / "playwright-core" / "browsers.json")
@@ -147,9 +180,20 @@ def _is_referenced_browser_dir(name: str, revision: str, tokens: set[tuple[str, 
     return False
 
 
-def plan_browser_actions(cache: Path, package_roots: Sequence[Path]) -> tuple[list[DeleteAction], str]:
+def plan_browser_actions(
+    cache: Path,
+    package_roots: Sequence[Path],
+    *,
+    browsers_path_override: str | None = None,
+) -> tuple[list[DeleteAction], str]:
     if not cache.is_dir():
         return [], "cache-missing"
+    if browsers_path_override:
+        if browsers_path_override == "0":
+            return [], "fail-closed: PLAYWRIGHT_BROWSERS_PATH=0 uses per-package caches"
+        override = Path(browsers_path_override).expanduser().resolve()
+        if override != cache.expanduser().resolve():
+            return [], f"fail-closed: PLAYWRIGHT_BROWSERS_PATH targets {override}, not {cache}"
     tokens, error = _revision_tokens(package_roots)
     if error:
         return [], f"fail-closed: {error}"
@@ -244,7 +288,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--keep-backup-sets", type=int, default=DEFAULT_BACKUP_SETS)
     parser.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    roots = args.package_roots if args.package_roots is not None else list(DEFAULT_PACKAGE_ROOTS)
+    if args.package_roots is not None:
+        roots = args.package_roots
+        discovery_error = None
+    else:
+        roots, discovery_error = discover_package_roots(Path.home())
     now = time.time() if args.now is None else args.now
 
     with exclusive_lock(args.lock_file) as acquired:
@@ -254,7 +302,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_actions = plan_output_actions(
             args.outputs_root, now=now, max_age_seconds=args.output_days * 24 * 60 * 60
         )
-        browser_actions, browser_status = plan_browser_actions(args.browser_cache, roots)
+        if discovery_error:
+            browser_actions, browser_status = [], f"fail-closed: {discovery_error}"
+        else:
+            browser_actions, browser_status = plan_browser_actions(
+                args.browser_cache,
+                roots,
+                browsers_path_override=os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+            )
         backup_actions = plan_backup_actions(args.kanban_db, keep_sets=args.keep_backup_sets)
         actions = output_actions + browser_actions + backup_actions
         execute_actions(actions, apply=args.apply, log=lambda line: print(line, flush=True))

@@ -6,7 +6,12 @@
 - browser revision directories in `~/.cache/ms-playwright` that are not referenced by dynamically discovered Playwright `package.json` + `browsers.json` metadata;
 - `~/.hermes/kanban.db.bak*` sets, grouping each primary backup with `-wal`/`-shm` sidecars and retaining the three newest sets.
 
-The default is dry-run. Every candidate is journalled as `WOULD-DELETE` with path and byte size. `--apply` is the only deletion mode. Browser cleanup fails closed when installed metadata is missing or invalid. A non-blocking process lock makes overlapping runs exit successfully without acting.
+The default is dry-run. Every candidate is journalled as `WOULD-DELETE` with path and byte size. `--apply` is the only deletion mode. Browser metadata is discovered dynamically below the user's home in every
+`node_modules`, `site-packages`, and `dist-packages` tree, including Python's
+bundled Playwright driver. Browser cleanup fails closed when installed metadata
+is missing or invalid, or when `PLAYWRIGHT_BROWSERS_PATH` targets a different
+cache. A non-blocking process lock makes overlapping runs exit successfully
+without acting.
 
 ## Repo-durable timer templates
 
