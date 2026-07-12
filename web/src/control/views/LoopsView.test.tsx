@@ -2,7 +2,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatLoopTimestamp, LoopsGrid, useLoopNowMs, type LoopsGridProps } from "./LoopsView";
+import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { formatLoopTimestamp, useLoopNowMs } from "../lib/loopTime";
 // Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
 import loopsViewSource from "./LoopsView.tsx?raw";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
