@@ -11,6 +11,7 @@ import {
   ArrowRight,
   ArrowUp,
   Bot,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -19,6 +20,7 @@ import {
   ChevronsDown,
   ChevronsUp,
   ClipboardList,
+  Copy,
   CornerDownLeft,
   Gauge,
   Grid2X2,
@@ -108,6 +110,11 @@ const LASTSEEN_STORAGE_KEY = "hermes-terminals-lastseen";
 const FONT_MIN = 8;
 const FONT_MAX = 20;
 const PRIMARY_SESSION = "work";
+/** An armed close disarms itself, so a row armed and forgotten cannot be killed later by a stray click. */
+const TERMINATE_ARM_TIMEOUT_MS = 8000;
+const COPY_STATUS_TIMEOUT_MS = 2000;
+
+type TerminalCopyState = "idle" | "copied" | "empty" | "error";
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 const OVERVIEW_POLL_MS = 5000;
 // Debounce window for RESIZE escape sends (fit() stays immediate).  Mobile keyboards
@@ -237,6 +244,22 @@ export function chipLabel(window: AgentTerminalWindow): string {
 export function reconnectDelayMs(attempt: number): number {
   const index = Math.min(Math.max(Math.trunc(attempt), 0), RECONNECT_DELAYS_MS.length - 1);
   return RECONNECT_DELAYS_MS[index];
+}
+
+/**
+ * True for the terminal's copy chords: Ctrl+Shift+C and Ctrl+Insert.
+ *
+ * Plain Ctrl+C is deliberately NOT a copy chord. It is the only way to interrupt
+ * a running agent, and the common "copy when something is selected" shortcut would
+ * silently swallow that interrupt whenever a stale selection is left in the buffer.
+ * Both chords here are copy-only — neither ever writes ETX (or anything else) to
+ * the socket. Cmd/Meta is left to the OS.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function isTerminalCopyShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "key">): boolean {
+  if (event.metaKey || !event.ctrlKey) return false;
+  if (event.shiftKey) return event.key === "C" || event.key === "c";
+  return event.key === "Insert";
 }
 
 /** Build the PTY resize escape sequence, clamping to valid dimensions (≥ 2, floored).
@@ -520,6 +543,10 @@ function FleetCard({
   onRespawn,
   onKill,
   onTerminate,
+  terminateArmed,
+  terminateBusy,
+  onConfirmTerminate,
+  onCancelTerminate,
 }: {
   win: AgentTerminalOverviewWindow;
   now: number;
@@ -529,7 +556,12 @@ function FleetCard({
   onOpen: () => void;
   onRespawn: () => void;
   onKill: () => void;
+  /** Arms the close guard (step 1) — it never kills on its own. */
   onTerminate: () => void;
+  terminateArmed: boolean;
+  terminateBusy: boolean;
+  onConfirmTerminate: () => void;
+  onCancelTerminate: () => void;
 }) {
   const meta = fleetStateMeta(win.state);
   const dead = win.state === "dead";
@@ -593,19 +625,50 @@ function FleetCard({
           </button>
         </div>
       )}
+      {/* Two-step close, same guard as the session rail — a single click on a Fleet
+          card must never be able to kill a live agent session. */}
       {!dead && (
         <div className="flex gap-1.5">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onTerminate();
-            }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/30 px-2 py-1.5 text-[11px] text-status-alert hover:border-status-alert/60 hover:bg-status-alert/10"
-            aria-label={`Session beenden ${win.session}:${win.window}`}
-          >
-            <Trash2 className="h-3 w-3" />Session beenden
-          </button>
+          {terminateArmed ? (
+            <>
+              <button
+                type="button"
+                disabled={terminateBusy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onConfirmTerminate();
+                }}
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/60 bg-status-alert/15 px-2 py-1.5 text-[11px] text-status-alert hover:bg-status-alert/25 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label={`Beenden bestätigen ${win.session}:${win.window}`}
+              >
+                <Check className="h-3 w-3" />Wirklich beenden
+              </button>
+              <button
+                type="button"
+                disabled={terminateBusy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCancelTerminate();
+                }}
+                className="inline-flex items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label={`Beenden abbrechen ${win.session}:${win.window}`}
+              >
+                <X className="h-3 w-3" />Abbrechen
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onTerminate();
+              }}
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/30 px-2 py-1.5 text-[11px] text-status-alert hover:border-status-alert/60 hover:bg-status-alert/10"
+              aria-label={`Session beenden ${win.session}:${win.window}`}
+            >
+              <Trash2 className="h-3 w-3" />Session beenden
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -671,7 +734,11 @@ export function AgentTerminalsView() {
     }
   });
   const [activePane, setActivePane] = useState(0);
-  const [primaryIsolated, setPrimaryIsolated] = useState(() => !compactLayout && desktopLayout > 1);
+  // Isolation is a property of the layout, not of history: every desktop attach
+  // gets its own tmux client so the browser never forces its window size onto the
+  // other clients of that session. Compact/mobile keeps the single direct attach
+  // (its viewport IS the intended size) — that contract is unchanged.
+  const primaryIsolated = !compactLayout;
   const [paneConnections, setPaneConnections] = useState<Record<number, TerminalPaneConnectionState>>({});
   const [rightRail, setRightRail] = useState<"usage" | "tools" | null>(() => !compactLayout && desktopLayout === 4 ? null : "usage");
   const [loading, setLoading] = useState(true);
@@ -726,6 +793,10 @@ export function AgentTerminalsView() {
   const [renameValue, setRenameValue] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  /** `session:window` of the window whose close is armed (step 1 of the guard), or null. */
+  const [pendingTerminate, setPendingTerminate] = useState<string | null>(null);
+  const [terminateBusy, setTerminateBusy] = useState(false);
+  const [copyState, setCopyState] = useState<TerminalCopyState>("idle");
   const [view, setView] = useState<"terminal" | "flotte">("terminal");
   const [overview, setOverview] = useState<AgentTerminalOverviewWindow[]>([]);
   const [overviewNow, setOverviewNow] = useState<number>(() => Date.now() / 1000);
@@ -761,17 +832,15 @@ export function AgentTerminalsView() {
       return;
     }
     if (paneIndex === 0) {
-      if (desktopLayout === 1) setPrimaryIsolated(false);
       setTarget(next);
     } else {
       setExtraTargets((current) => current.map((candidate, index) => (index === paneIndex - 1 ? next : candidate)));
     }
     setActivePane(paneIndex);
-  }, [desktopLayout, paneTargets, visiblePaneCount]);
+  }, [paneTargets, visiblePaneCount]);
 
   const chooseDesktopLayout = useCallback((layout: DesktopTerminalLayout) => {
     setDesktopLayout(layout);
-    if (layout > 1) setPrimaryIsolated(true);
     if (layout === 4) setRightRail(null);
     setActivePane((current) => Math.min(current, layout - 1));
   }, []);
@@ -780,7 +849,6 @@ export function AgentTerminalsView() {
     if (!compactLayout) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- compact mode must keep one direct mobile attach.
     setActivePane(0);
-    setPrimaryIsolated(false);
   }, [compactLayout]);
 
   useEffect(() => {
@@ -1085,7 +1153,10 @@ export function AgentTerminalsView() {
     tmuxCopyModeRef.current = false;
     setSocketReady(false);
     setSocketConnecting(true);
-    term.clear();
+    // reset(), not clear(): clear() keeps the last line plus every mode the previous
+    // session left behind (alternate buffer, scroll region, SGR/charset state), so the
+    // old agent's frame bleeds into the new target. reset() hands over a clean surface.
+    term.reset();
     term.writeln(`Attaching ${target.session}:${target.window} …`);
 
     // Backoff-Reconnect, geteilt zwischen "Verbindung ging auf, dann weg" (onclose)
@@ -1248,20 +1319,83 @@ export function AgentTerminalsView() {
     [refresh],
   );
 
-  const terminateWindow = useCallback(
+  // Close guard, step 1 of 2. window.confirm() blocks the renderer thread: against a
+  // live tmux the native dialog hung for ~30s and still did not close the window. The
+  // guard is therefore in-app — arming a row, never blocking, and auto-disarming so a
+  // forgotten armed row cannot be killed by a later stray click.
+  const requestTerminate = useCallback((win: { session: string; window: string }) => {
+    setError(null);
+    setPendingTerminate(paneTargetKey(win));
+  }, []);
+
+  const cancelTerminate = useCallback(() => setPendingTerminate(null), []);
+
+  // Close guard, step 2 of 2 — the only path that actually kills a tmux window.
+  const confirmTerminate = useCallback(
     async (win: { session: string; window: string }) => {
-      const label = `${win.session}:${win.window}`;
-      if (!window.confirm(`Session ${label} wirklich beenden? Laufende Agent-Arbeit wird beendet.`)) return;
       setError(null);
+      setTerminateBusy(true);
       try {
         await api.terminateAgentTerminalWindow(win.session, win.window);
+        setPendingTerminate(null);
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setTerminateBusy(false);
       }
     },
     [refresh],
   );
+
+  useEffect(() => {
+    if (!pendingTerminate) return;
+    const timer = window.setTimeout(() => setPendingTerminate(null), TERMINATE_ARM_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [pendingTerminate]);
+
+  /** xterm's selection is not React state — read it from the pane that has focus. */
+  const readActiveSelection = useCallback((): string => {
+    if (activePane > 0) return extraPaneRefs[activePane - 1]?.current?.getSelection() ?? "";
+    return termRef.current?.getSelection() ?? "";
+  }, [activePane, extraPaneRefs]);
+
+  // Copy path. Never touches wsRef: a copy must not put ETX (or any byte) on the
+  // socket, otherwise "copy" would SIGINT the very agent whose output is being copied.
+  const copySelection = useCallback(async (): Promise<void> => {
+    const selection = readActiveSelection();
+    if (!selection) {
+      setCopyState("empty");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(selection);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  }, [readActiveSelection]);
+
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = window.setTimeout(() => setCopyState("idle"), COPY_STATUS_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isTerminalCopyShortcut(event)) return;
+      // No selection → stay out of the way entirely and let the key reach the app.
+      if (!readActiveSelection()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void copySelection();
+    };
+    // Capture phase: xterm binds its own keydown on the helper textarea, so the chord
+    // has to be intercepted before it can be turned into terminal input.
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [copySelection, readActiveSelection]);
 
   const renameWindow = useCallback(async () => {
     if (!selectedWindow) return;
@@ -1673,11 +1807,20 @@ export function AgentTerminalsView() {
                         </button>
                       </>
                     )}
-                    {!dead && (
-                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => void terminateWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-status-alert/70 hover:bg-status-alert/10 hover:text-status-alert">
+                    {!dead && (pendingTerminate === `${win.session}:${win.window}` ? (
+                      <>
+                        <button type="button" aria-label={`Beenden bestätigen ${win.session}:${win.window}`} title="Wirklich beenden — die laufende Agent-Arbeit geht verloren" disabled={terminateBusy} onClick={() => void confirmTerminate(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft bg-status-alert/20 text-status-alert hover:bg-status-alert/30 disabled:cursor-not-allowed disabled:opacity-40">
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                        <button type="button" aria-label={`Beenden abbrechen ${win.session}:${win.window}`} title="Abbrechen" disabled={terminateBusy} onClick={cancelTerminate} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => requestTerminate(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-status-alert/70 hover:bg-status-alert/10 hover:text-status-alert">
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
-                    )}
+                    ))}
                   </div>
                 );
               })}
@@ -2115,11 +2258,17 @@ export function AgentTerminalsView() {
             <Trash2 className="h-4 w-4" /><span>Fenster entfernen</span>
           </button>
         )}
-        {!sessionSheetDead && (
-          <button type="button" onClick={() => { void terminateWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
+        {/* Same two-step guard as the desktop rail: the first tap arms, the second kills.
+            The sheet stays open in between so the armed state is visible where it was armed. */}
+        {!sessionSheetDead && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
+          <button type="button" aria-label={`Beenden bestätigen ${selectedWindow.session}:${selectedWindow.window}`} disabled={terminateBusy} onClick={() => { void confirmTerminate(selectedWindow).then(() => setSessionSheetOpen(false)); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/50 bg-status-alert/15 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/25 disabled:cursor-not-allowed disabled:opacity-40">
+            <Check className="h-4 w-4" /><span>Wirklich beenden</span>
+          </button>
+        ) : (
+          <button type="button" aria-label={`Session beenden ${selectedWindow.session}:${selectedWindow.window}`} onClick={() => requestTerminate(selectedWindow)} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
             <Trash2 className="h-4 w-4" /><span>Session beenden</span>
           </button>
-        )}
+        ))}
         <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
         </button>
@@ -2256,7 +2405,11 @@ export function AgentTerminalsView() {
                 onOpen={() => openFromFleet(win)}
                 onRespawn={() => void respawnWindow(win)}
                 onKill={() => void killWindow(win)}
-                onTerminate={() => void terminateWindow(win)}
+                onTerminate={() => requestTerminate(win)}
+                terminateArmed={pendingTerminate === key}
+                terminateBusy={terminateBusy}
+                onConfirmTerminate={() => void confirmTerminate(win)}
+                onCancelTerminate={cancelTerminate}
               />
             );
           })}
@@ -2494,8 +2647,27 @@ export function AgentTerminalsView() {
           {compactLayout && chipStrip}
           {!compactLayout && view === "terminal" && (
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-soft bg-surface-1 px-3 py-2 text-xs text-ink-2">
-              <div className="flex min-w-0 items-center gap-2"><Activity className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "missing window"}</span></div>
+              <div className="flex min-w-0 items-center gap-2">
+                <Activity className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "missing window"}</span>
+                {copyState !== "idle" && (
+                  <span role="status" className={cn("shrink-0 text-[10px]", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
+                    {copyState === "copied" ? "Kopiert" : copyState === "empty" ? "Keine Auswahl" : "Kopieren fehlgeschlagen"}
+                  </span>
+                )}
+              </div>
               <div className="flex shrink-0 items-center gap-1">
+                {/* Copy is a UI-only action — it reads the xterm selection and never writes
+                    to the socket, so it cannot interrupt the attached agent. */}
+                <button
+                  type="button"
+                  aria-label="Auswahl kopieren"
+                  title="Auswahl kopieren (Strg+Umschalt+C)"
+                  onClick={() => void copySelection()}
+                  className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
                 {([1, 2, 4] as DesktopTerminalLayout[]).map((layout) => (
                   <button
                     key={layout}
@@ -2593,7 +2765,7 @@ export function AgentTerminalsView() {
       {handoffOpen && (
         <TerminalHandoffPanel
           target={target}
-          getSelection={() => activePane > 0 ? extraPaneRefs[activePane - 1]?.current?.getSelection() ?? "" : termRef.current?.getSelection() ?? ""}
+          getSelection={readActiveSelection}
           onClose={() => setHandoffOpen(false)}
         />
       )}

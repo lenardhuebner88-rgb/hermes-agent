@@ -7,6 +7,7 @@ import {
   formatActivityAge,
   formatPtyResize,
   hasUnseenActivity,
+  isTerminalCopyShortcut,
   orderOverviewForFleet,
   orderWindowsForStrip,
   pickInitialTarget,
@@ -317,5 +318,36 @@ describe("formatPtyResize", () => {
 
   it("formats the default 80×24 size", () => {
     expect(formatPtyResize(80, 24)).toBe("\x1b[RESIZE:80;24]");
+  });
+});
+
+describe("isTerminalCopyShortcut", () => {
+  const event = (patch: Partial<KeyboardEvent>): KeyboardEvent =>
+    ({ ctrlKey: false, metaKey: false, shiftKey: false, key: "", ...patch }) as KeyboardEvent;
+
+  it("accepts Ctrl+Shift+C in both key casings", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "C" }))).toBe(true);
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "c" }))).toBe(true);
+  });
+
+  it("accepts Ctrl+Insert", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "Insert" }))).toBe(true);
+  });
+
+  // Plain Ctrl+C must keep reaching tmux as ETX — it is the agent interrupt.
+  it("rejects plain Ctrl+C so the interrupt still reaches the agent", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "c" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "C" }))).toBe(false);
+  });
+
+  it("rejects unrelated keys and bare modifiers", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "V" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ shiftKey: true, key: "C" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ key: "Insert" }))).toBe(false);
+  });
+
+  // Cmd+C on macOS is the OS-level copy — the browser already handles it.
+  it("rejects meta-key combinations", () => {
+    expect(isTerminalCopyShortcut(event({ metaKey: true, ctrlKey: true, shiftKey: true, key: "C" }))).toBe(false);
   });
 });

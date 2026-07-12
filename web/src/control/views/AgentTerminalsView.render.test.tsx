@@ -32,9 +32,14 @@ const terminalScrollLinesMock = vi.fn();
 const terminalScrollPagesMock = vi.fn();
 const terminalScrollToBottomMock = vi.fn();
 const terminalFocusMock = vi.fn();
+const terminalResetMock = vi.fn();
+const clipboardWriteMock = vi.fn();
 let triggerResize: (() => void) | null = null;
 let websocketSends: string[] = [];
 let documentHidden = false;
+// xterm's live selection is not React state — the view reads it on demand via
+// term.getSelection(), so the fake mirrors that pull model instead of a prop.
+let terminalSelection = "";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -53,6 +58,7 @@ vi.mock("@/lib/xtermSurface", () => ({
   createHermesXtermSurface: vi.fn(() => ({
     term: {
       clear: vi.fn(),
+      reset: terminalResetMock,
       writeln: vi.fn(),
       write: vi.fn(),
       onData: vi.fn(() => ({ dispose: vi.fn() })),
@@ -60,6 +66,7 @@ vi.mock("@/lib/xtermSurface", () => ({
       scrollPages: terminalScrollPagesMock,
       scrollToBottom: terminalScrollToBottomMock,
       focus: terminalFocusMock,
+      getSelection: () => terminalSelection,
       dispose: vi.fn(),
       options: {},
       cols: 80,
@@ -198,6 +205,11 @@ function installDom(matches = false) {
   } as unknown as typeof ResizeObserver;
   global.requestAnimationFrame = (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 0);
   global.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  // jsdom ships no Clipboard API; the view's copy path is async-clipboard-first.
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: clipboardWriteMock },
+  });
 }
 
 /** Renders the view under a MemoryRouter — the "Zurück"-chip needs useNavigate() context. */
@@ -213,8 +225,10 @@ async function renderView() {
 beforeEach(() => {
   vi.clearAllMocks();
   websocketSends = [];
+  terminalSelection = "";
   window.localStorage.clear();
   installDom(false);
+  clipboardWriteMock.mockResolvedValue(undefined);
   apiMock.getAgentTerminalCapabilities.mockResolvedValue(capability);
   apiMock.getAgentTerminalWindows.mockResolvedValue({ windows });
   apiMock.ensureAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
@@ -438,16 +452,127 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
   });
 
-  it("offers a confirmed terminate action for live windows and refreshes", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  // window.confirm() blocks the whole renderer thread; against a live tmux the
+  // dialog hung ~30s and never closed the window. The close path must therefore
+  // arm in-app and never reach for the native dialog.
+  it("terminates a live window only after an in-app second step, never via window.confirm", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
     await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Session beenden hermes-agents:codex" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("Session hermes-agents:codex wirklich beenden? Laufende Agent-Arbeit wird beendet.");
+    // Step 1 arms only — no kill call yet.
+    expect(apiMock.terminateAgentTerminalWindow).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Beenden bestätigen hermes-agents:codex" }));
+
     await waitFor(() => expect(apiMock.terminateAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "codex"));
     await waitFor(() => expect(apiMock.getAgentTerminalWindows.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  it("disarms the terminate guard on cancel and kills nothing", async () => {
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Session beenden hermes-agents:codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Beenden abbrechen hermes-agents:codex" }));
+
+    expect(screen.getByRole("button", { name: "Session beenden hermes-agents:codex" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Beenden bestätigen hermes-agents:codex" })).toBeNull();
+    expect(apiMock.terminateAgentTerminalWindow).not.toHaveBeenCalled();
+  });
+
+  // Arming one row must not arm every row — otherwise a mis-click on the confirm
+  // of a neighbouring row kills a live agent session.
+  it("arms the terminate guard for one window at a time", async () => {
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Session beenden hermes-agents:codex" }));
+
+    expect(screen.getByRole("button", { name: "Beenden bestätigen hermes-agents:codex" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Beenden bestätigen hermes-agents:hermes" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Session beenden hermes-agents:hermes" })).toBeTruthy();
+  });
+
+  it("copies the xterm selection via Ctrl+Shift+C without sending ETX to tmux", async () => {
+    await renderView();
+    await waitFor(() => expect(screen.getByTestId("terminal-pane-host-0")).toBeTruthy());
+    terminalSelection = "pane-zeile aus dem scrollback";
+
+    fireEvent.keyDown(document, { key: "C", ctrlKey: true, shiftKey: true });
+
+    await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith("pane-zeile aus dem scrollback"));
+    // The copy path must never reach the socket — ETX (\x03) would SIGINT the agent.
+    expect(websocketSends).not.toContain("\x03");
+  });
+
+  it("copies the selection via the visible toolbar control without sending ETX", async () => {
+    await renderView();
+    terminalSelection = "kopierbare ausgabe";
+
+    fireEvent.click(await screen.findByRole("button", { name: "Auswahl kopieren" }));
+
+    await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith("kopierbare ausgabe"));
+    expect(websocketSends).not.toContain("\x03");
+  });
+
+  it("copies nothing when no selection exists", async () => {
+    await renderView();
+    terminalSelection = "";
+
+    fireEvent.click(await screen.findByRole("button", { name: "Auswahl kopieren" }));
+    fireEvent.keyDown(document, { key: "C", ctrlKey: true, shiftKey: true });
+
+    expect(clipboardWriteMock).not.toHaveBeenCalled();
+    expect(await screen.findByText("Keine Auswahl")).toBeTruthy();
+  });
+
+  // Plain Ctrl+C stays the agent interrupt — hijacking it whenever a stale
+  // selection exists would silently break the only way to stop a runaway agent.
+  it("leaves plain Ctrl+C to the terminal even with an active selection", async () => {
+    await renderView();
+    terminalSelection = "markierter text";
+
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+
+    expect(clipboardWriteMock).not.toHaveBeenCalled();
+  });
+
+  // The desktop single view attached directly (no isolated=1), so tmux forced
+  // every other client to the browser's window size. Isolation is the desktop
+  // contract for every layout; compact/mobile keeps its direct attach.
+  it("attaches the desktop single view in isolated mode and keeps it isolated across target switches", async () => {
+    await renderView();
+    const { buildWsUrl } = await import("@/lib/api");
+
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBe("1");
+    });
+
+    fireEvent.click((await screen.findAllByText("codex"))[0]);
+
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]?.session).toBe("hermes-agents");
+      expect(primaryCalls.at(-1)?.[1]?.window).toBe("codex");
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBe("1");
+    });
+  });
+
+  // term.clear() keeps the prompt line plus every mode the old session left set
+  // (alt buffer, scroll region, SGR), so the previous agent's frame bled into the
+  // next one. Only a full reset() gives the new target a clean surface.
+  it("resets the xterm buffer when the target switches", async () => {
+    await renderView();
+    await waitFor(() => expect(terminalResetMock).toHaveBeenCalled());
+    const resetsAfterMount = terminalResetMock.mock.calls.length;
+
+    fireEvent.click((await screen.findAllByText("codex"))[0]);
+
+    await waitFor(() => expect(terminalResetMock.mock.calls.length).toBeGreaterThan(resetsAfterMount));
   });
 
   it("opens the create-session modal and resets a stale workdir localStorage key to home after capability load", async () => {

@@ -149,7 +149,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let disposed = false;
     manualCloseRef.current = false;
     reconnectAttemptRef.current = 0;
-    termRef.current?.clear();
+    // reset(), not clear(): clear() leaves the previous session's modes (alternate
+    // buffer, scroll region, SGR) in place, mixing the old frame into the new target.
+    termRef.current?.reset();
     termRef.current?.writeln(`Attaching ${target.session}:${target.window} …`);
 
     const clearReconnect = () => {
