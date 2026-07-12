@@ -5,13 +5,13 @@ import {
   chipLabel,
   classifyTerminalState,
   formatActivityAge,
-  formatPtyResize,
   hasUnseenActivity,
   orderOverviewForFleet,
   orderWindowsForStrip,
   pickInitialTarget,
   reconnectDelayMs,
 } from "./AgentTerminalsView";
+import { formatPtyResize } from "./agent-terminals/terminalPaneModel";
 
 // Echtes Datenformat: 9-Fenster-Inventar aus dem Live-System (tmux list-windows -a
 // -F 'session:window active pane_id pane_pid pane_current_command pane_current_path
