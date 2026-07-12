@@ -16180,32 +16180,53 @@ def repair_deliverable_posted_not_completed(
     """Terminalize a recoverable deliverable/protocol miss without approval.
 
     This closes only the missing ``kanban_complete`` protocol step when a
-    prior ``deliverable_posted_not_completed`` event carries clear evidence.
-    It does not write a review verdict.
+    ``deliverable_posted_not_completed`` event from the current task cycle
+    carries clear evidence. It does not write a review verdict.
     """
-    row = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
-        (task_id, DELIVERABLE_POSTED_NOT_COMPLETED),
-    ).fetchone()
-    if row is None or not row["payload"]:
-        return False
-    try:
-        evidence_payload = json.loads(row["payload"])
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(evidence_payload, dict):
-        return False
-    evidence = evidence_payload.get("evidence")
-    if not isinstance(evidence, dict):
-        return False
-
     now = int(time.time())
     actor = (actor or "operator").strip() or "operator"
     summary = (
         "Protocol repair: deliverable was posted but worker missed kanban_complete."
     )
     with write_txn(conn):
+        row = conn.execute(
+            """
+            SELECT evidence.payload
+              FROM task_events AS evidence
+             WHERE evidence.task_id = ?
+               AND evidence.kind = ?
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM task_events AS reentry
+                    WHERE reentry.task_id = evidence.task_id
+                      AND reentry.id > evidence.id
+                      AND (
+                          reentry.kind IN (
+                              'unblocked', 'reclaimed', 'promoted', 'claimed'
+                          )
+                          OR (
+                              reentry.kind = 'status'
+                              AND json_extract(reentry.payload, '$.status') = 'ready'
+                          )
+                      )
+               )
+             ORDER BY evidence.id DESC
+             LIMIT 1
+            """,
+            (task_id, DELIVERABLE_POSTED_NOT_COMPLETED),
+        ).fetchone()
+        if row is None or not row["payload"]:
+            return False
+        try:
+            evidence_payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(evidence_payload, dict):
+            return False
+        evidence = evidence_payload.get("evidence")
+        if not isinstance(evidence, dict):
+            return False
+
         with _review_done_terminal_authority():
             cur = conn.execute(
                 """

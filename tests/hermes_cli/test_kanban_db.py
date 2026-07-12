@@ -9237,6 +9237,58 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     assert all(row["verdict"] is None for row in verdicts)
 
 
+def test_stale_deliverable_event_does_not_repair_later_failure_cycle(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="render quarterly report",
+            assignee="coder",
+            max_retries=1,
+        )
+        assert kb.claim_task(conn, tid) is not None
+        kb.add_comment(
+            conn,
+            tid,
+            "coder",
+            (
+                "# Deliverable: render quarterly report\n\n"
+                "The quarterly report is complete and mapped to the requested "
+                "objective. Evidence includes the final section list, validation "
+                "notes, and remaining risk. " + "x" * 120
+            ),
+        )
+        first_pid = 424244
+        kb._set_worker_pid(conn, tid, first_pid)
+        kb._record_worker_exit(first_pid, 0)
+
+        assert tid not in kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+
+        second_pid = 424245
+        kb._set_worker_pid(conn, tid, second_pid)
+        kb._record_worker_exit(second_pid, 1)
+        assert tid in kb.detect_crashed_workers(conn)
+
+        events = kb.list_events(conn, tid)
+        assert len([
+            event for event in events
+            if event.kind == kb.DELIVERABLE_POSTED_NOT_COMPLETED
+        ]) == 1
+        assert "unblocked" in [event.kind for event in events]
+        assert "gave_up" in [event.kind for event in events]
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        assert not kb.repair_deliverable_posted_not_completed(conn, tid)
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
 def test_protocol_miss_without_deliverable_still_hard_blocks(
     kanban_home, monkeypatch,
 ):
