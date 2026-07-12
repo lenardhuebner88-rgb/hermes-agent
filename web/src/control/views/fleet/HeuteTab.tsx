@@ -7,6 +7,7 @@
  */
 import { useMemo, useState } from "react";
 import { ArrowRight } from "lucide-react";
+import type { DotKind } from "../../lib/tones";
 import {
   buildLagezeile,
   runProgressFraction,
@@ -87,22 +88,44 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
   // PlanSpecs nach aktueller Relevanz statt beliebiger erster fünf (AC-6).
   const rankedPlanspecs = useMemo(() => rankPlanSpecsByRelevance(allPlanspecs).slice(0, 5), [allPlanspecs]);
 
+  // Operativer Lage-Hero (AC-R1): Blockade dominiert, sonst ruhiger Zustand.
+  const hero = deriveHeroState(blockedCount, actionRows, activeWorkers.length);
+
   return (
     <>
-      {/* Lagezeile — Cockpit-Kopf: die Flottenlage in einem Atemzug. */}
-      <p className="fleet-lage">
-        <LagezeileFormatted text={lagezeile} />
-      </p>
+      {/* Operativer Lage-Hero — die aktuelle Lage ist der visuelle Einstieg.
+          Blockiert = klarer Incident-Hero mit Aktion; sonst ruhiger. */}
+      <section className={`fleet-hero fleet-hero-${hero.tone}`} aria-label="Aktuelle Lage">
+        <div className="fleet-hero-main">
+          <span className="fleet-hero-eyebrow">
+            {hero.tone !== "idle" ? <Led kind={hero.led} size={7} /> : null}
+            {hero.eyebrow}
+          </span>
+          <h2 className="fleet-hero-headline">
+            <LagezeileFormatted text={lagezeile} />
+          </h2>
+        </div>
+        {hero.cta ? (
+          <button
+            type="button"
+            className={`fleet-hero-cta${hero.cta.ghost ? " fleet-hero-cta-ghost" : ""}`}
+            onClick={() => onNavigate(hero.cta!.target)}
+          >
+            {hero.cta.label}
+            <ArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" />
+          </button>
+        ) : null}
+      </section>
 
-      {/* 1. Handlungsbedarf/Blocker — antippbar, vor rein informativen Karten.
+      {/* 1. Handlungsbedarf/Blocker — antippbare Detailzeilen unter dem Hero.
           Kein leerer Platzhalter, wenn nichts wartet. */}
       {actionRows.length > 0 ? (
-        <div className="mb-3 grid gap-2" aria-label="Handlungsbedarf">
+        <div className="fleet-actionlist" aria-label="Handlungsbedarf">
           {actionRows.map((row, index) => (
             <button
               key={row.key}
               type="button"
-              className="flex min-h-11 w-full items-center gap-2.5 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-left text-status-warn"
+              className="fleet-actionrow"
               onClick={() => onNavigate(row.target)}
               aria-label={row.label}
               // Primärer Handlungs-Callout wird — wie zuvor die globale PendingBar —
@@ -110,7 +133,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
               aria-live={index === 0 ? "polite" : undefined}
             >
               <Led kind="warn" />
-              <span className="min-w-0 flex-1 truncate text-sec font-medium">{row.label}</span>
+              <span className="fleet-actionrow-label">{row.label}</span>
               <ArrowRight className="h-4 w-4 shrink-0 opacity-70" aria-hidden="true" />
             </button>
           ))}
@@ -119,6 +142,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
 
       {/* 2. Aktive Worker und laufende Arbeit — vor den KPIs und PlanSpecs.
           Bei null aktiven Workern ein kompakter Idle-Zustand statt Leere. */}
+      <p className="fleet-section-eyebrow">Jetzt</p>
       {activeWorkers.length === 0 ? (
         <div className="fleet-idle">Keine Worker aktiv — Board ruht.</div>
       ) : (
@@ -133,7 +157,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
           <div className="fleet-kp fleet-kp-aktiv">
             <div className="fleet-kp-num">{kpi.aktiv}</div>
             <div className="fleet-kp-label">{de.fleet.kpiAktiv}</div>
-            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={activeProfileBreakdown}>{activeProfileBreakdown}</div>
+            <div className="fleet-kp-dim" title={activeProfileBreakdown}>{activeProfileBreakdown}</div>
           </div>
         ) : null}
         <div className="fleet-kp">
@@ -158,7 +182,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
               {kpi.kosten24hEquiv ? <small> äquiv.</small> : null}
             </div>
             <div className="fleet-kp-label">{de.fleet.kpiKosten}</div>
-            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={costAverageDimension}>{costAverageDimension}</div>
+            <div className="fleet-kp-dim" title={costAverageDimension}>{costAverageDimension}</div>
           </button>
         ) : null}
       </div>
@@ -167,15 +191,67 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
         <CostDrawer costs={costs} daily={daily} onClose={() => setCostDrawerOpen(false)} />
       ) : null}
 
-      {/* 4. Relevante offene/laufende PlanSpecs — nach Relevanz, nicht Reihenfolge. */}
-      {rankedPlanspecs.map((ps) => (
-        <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
-      ))}
+      {/* 4. Relevante offene/laufende PlanSpecs — nach Relevanz, nicht Reihenfolge.
+          Planung ist visuell sekundär zur laufenden Arbeit (AC-4). */}
+      {rankedPlanspecs.length > 0 ? (
+        <>
+          <p className="fleet-section-eyebrow fleet-section-eyebrow-plan">Planung</p>
+          {rankedPlanspecs.map((ps) => (
+            <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
+          ))}
+        </>
+      ) : null}
 
       {/* 5. Sekundäre Lane-/Modellkonfiguration — zuletzt, initial eingeklappt. */}
       <LaneQuickSwitch />
     </>
   );
+}
+
+// ─── Operativer Lage-Hero (AC-R1) ─────────────────────────────────────────────
+
+type HeroTone = "alert" | "warn" | "live" | "idle";
+
+interface HeroState {
+  tone: HeroTone;
+  led: DotKind;
+  eyebrow: string;
+  cta: { label: string; target: HeuteNavTarget; ghost: boolean } | null;
+}
+
+/**
+ * deriveHeroState: übersetzt die Flottenlage in einen dominanten Hero-Zustand.
+ * Blockade schlägt wartende Freigabe schlägt laufende Arbeit schlägt Ruhe.
+ * Nur aus Live-Daten (blockierte Aufgaben, Handlungszeilen, aktive Worker) —
+ * keine erfundene Kennzahl. Die eindeutige Aktion zeigt in den Ziel-Subtab.
+ */
+function deriveHeroState(blockedCount: number, actionRows: ActionRow[], activeCount: number): HeroState {
+  if (blockedCount > 0) {
+    return {
+      tone: "alert",
+      led: "error",
+      eyebrow: "Blockade",
+      cta: { label: "Im Risiko-Tab lösen", target: "risiko", ghost: false },
+    };
+  }
+  const approval = actionRows.find((row) => row.target === "plan");
+  if (approval) {
+    return {
+      tone: "warn",
+      led: "warn",
+      eyebrow: "Wartet auf dich",
+      cta: { label: "Im Plan-Tab freigeben", target: "plan", ghost: false },
+    };
+  }
+  if (activeCount > 0) {
+    return {
+      tone: "live",
+      led: "live",
+      eyebrow: "Aktuelle Lage",
+      cta: { label: "Worker ansehen", target: "worker", ghost: true },
+    };
+  }
+  return { tone: "idle", led: "idle", eyebrow: "Aktuelle Lage", cta: null };
 }
 
 // ─── Handlungsblock-Ableitung ─────────────────────────────────────────────────

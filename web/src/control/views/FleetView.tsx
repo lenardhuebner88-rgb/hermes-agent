@@ -16,7 +16,7 @@
  * Design: dunkles Marineblau-Theme NUR im Fleet-Tab-Scope ([data-fleet-theme]).
  * Glow/Puls ausschließlich bei laufender Aktivität (Licht = Leben).
  */
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { ArrowRight } from "lucide-react";
 import { useHermesWorkers, useAllBoardWorkers, useBoardCatalog, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
 import { useFleetBoardSelection } from "../hooks/useFleetBoardSelection";
@@ -71,6 +71,16 @@ interface SubtabDef {
 export function FleetView() {
   const [subtab, setSubtab] = useState<FleetSubtab>("heute");
   const isLg = useIsLg();
+  // Aktiven Subtab-Chip automatisch in den sichtbaren Bereich scrollen, damit
+  // er auf schmalen Viewports nie hinter dem rechten Rand verschwindet (AC-R2).
+  const subtabStripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const active = subtabStripRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    // scrollIntoView fehlt in jsdom (Testumgebung) — defensiv aufrufen.
+    if (typeof active?.scrollIntoView === "function") {
+      active.scrollIntoView({ inline: "nearest", block: "nearest" });
+    }
+  }, [subtab]);
   const [drawerWorker, setDrawerWorker] = useState<Worker | null>(null);
   // PlanSpec-Detail-Drawer: vom Fleet-Besitz aus öffenbar (Heute/Plan-Karten).
   const [planspecDrawerItem, setPlanspecDrawerItem] = useState<PlanSpecRecord | null>(null);
@@ -249,14 +259,16 @@ export function FleetView() {
     <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
       {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes.
           Erste Inhaltszeile direkt unter der Shell-Masthead (W3-1a). */}
-      <SubtabChips
-        items={subtabDefs}
-        active={subtab}
-        onSelect={setSubtab}
-        ariaLabelPrefix="Subtab"
-        className="py-2.5"
-        classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
-      />
+      <div ref={subtabStripRef}>
+        <SubtabChips
+          items={subtabDefs}
+          active={subtab}
+          onSelect={setSubtab}
+          ariaLabelPrefix="Subtab"
+          className="py-2.5 fleet-subtabs"
+          classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
+        />
+      </div>
 
       {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs.
           Auf Heute übernimmt der Tab selbst den Handlungsblock (kein Doppel-Callout),
