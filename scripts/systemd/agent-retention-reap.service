@@ -1,0 +1,16 @@
+# Hermes retention reaper — repo-tracked template; not installed or enabled automatically.
+# Initial rollout is intentionally dry-run. Add --apply only after journal review.
+
+[Unit]
+Description=Hermes local artifact retention reaper (dry-run template)
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/retention_reap.WIRING.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/piet/.hermes/hermes-agent
+ExecStart=/usr/bin/python3 /home/piet/.hermes/hermes-agent/scripts/retention_reap.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+# Hermes retention reaper timer — repo-tracked template; not enabled automatically.
+
+[Unit]
+Description=Daily Hermes local artifact retention sweep
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/retention_reap.WIRING.md
+
+[Timer]
+OnCalendar=*-*-* 04:45:00
+Persistent=true
+Unit=agent-retention-reap.service
+
+[Install]
+WantedBy=timers.target
