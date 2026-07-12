@@ -100,6 +100,29 @@ def _write_prose_plan(root: Path, name: str = "prose-plan.md") -> Path:
     return path
 
 
+def test_plan_list_json_requests_existing_kanban_bindings(monkeypatch, capsys):
+    expected = [
+        {"path": "/active.md", "kanban_state": "running", "kanban_root_task_id": "t_active"},
+        {"path": "/closed.md", "kanban_state": "completed", "kanban_root_task_id": "t_closed"},
+    ]
+
+    def fake_list_planspecs(*, scope, include_kanban_status=False):
+        assert scope == "all"
+        assert include_kanban_status is True
+        return expected
+
+    monkeypatch.setattr(plan_subcommand.planspecs, "list_planspecs", fake_list_planspecs)
+
+    rc = plan_subcommand.plan_command(Namespace(plan_action="list", all=True, json=True))
+
+    assert rc == 0
+    assert capsys.readouterr().out == (
+        '{"planspecs": [{"path": "/active.md", "kanban_state": "running", '
+        '"kanban_root_task_id": "t_active"}, {"path": "/closed.md", '
+        '"kanban_state": "completed", "kanban_root_task_id": "t_closed"}]}\n'
+    )
+
+
 def test_compile_preview_prints_children(kanban_home, tmp_path: Path, capsys):
     path = _write_prose_plan(tmp_path)
 
