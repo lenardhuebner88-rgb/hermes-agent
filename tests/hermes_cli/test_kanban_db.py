@@ -12752,6 +12752,48 @@ def test_b2_explicit_approved_not_overwritten_by_later_verdict(kanban_home, monk
         assert _latest_run_verdict(conn, t) == "APPROVED"
 
 
+@requires_git
+def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_path):
+    """Regression: the B1 diff snapshot captured at the coder→verifier handoff
+    must survive `_maybe_advance_review_chain`'s stage-advance event, so the
+    reviewer stage (stage 1) still sees the changed-files evidence instead of
+    the 'No machine diff snapshot' fallback. Before the fix, the stage-advance
+    event dropped changed_files/diff_stat and the reviewer's context regressed
+    to the no-snapshot fallback (infinite bounce loop bug)."""
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(
+            conn, title="widget", assignee="coder", review_tier="review",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        # Coder submits → real B1 snapshot rides the FIRST submitted_for_review
+        # event (stage 0, verifier).
+        assert kb._submit_for_review(
+            conn, t, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+
+        # Verifier (stage 0) claims and APPROVES → chain advances to stage 1
+        # (reviewer) via _maybe_advance_review_chain, appending a SECOND,
+        # newer submitted_for_review event.
+        assert kb.claim_review_task(conn, t) is not None
+        assert kb.complete_task(
+            conn, t, result="lgtm", summary="lgtm",
+            metadata={"review_verdict": "APPROVED"}, review_gate=True,
+        ) is True
+
+        # Reviewer (stage 1) claims — its context must read the CARRIED
+        # snapshot from the newest submitted_for_review event.
+        assert kb.claim_review_task(conn, t, reviewer_profile="reviewer") is not None
+        ctx = kb.build_worker_context(conn, t)
+    assert "Changed files at submit" in ctx
+    assert "tracked.py" in ctx
+    assert "No machine diff snapshot" not in ctx
+
+
 def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
     """An ordinary coder completion leaves task_runs.verdict NULL."""
     with kb.connect_closing() as conn:

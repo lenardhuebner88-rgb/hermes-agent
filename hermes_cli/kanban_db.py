@@ -11251,6 +11251,19 @@ def _maybe_advance_review_chain(
             "target_profile": next_profile,
             "advanced_from_stage": stage,
         }
+        # Carry forward the B1 diff-snapshot keys from the event we just read
+        # so the next stage's reviewer context still renders the changed-files
+        # evidence instead of the "no snapshot captured" fallback. The
+        # snapshot was captured once at the original coder→verifier handoff;
+        # every subsequent stage-advance must propagate it (never fabricate).
+        for _snap_key in (
+            "changed_files",
+            "diff_stat",
+            "diff_base_commit",
+            "diff_baseline",
+        ):
+            if _snap_key in payload:
+                next_payload[_snap_key] = payload[_snap_key]
         _append_event(
             conn,
             task_id,
