@@ -425,6 +425,12 @@ describe("LoopsGrid — Live-Phase-Chip (heartbeat)", () => {
     expect(html).toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "8m"));
   });
 
+  it("discloses a current heartbeat older than 30 seconds as last-known telemetry", () => {
+    const startedMs = Date.parse(runningPipeline.heartbeat!.current!.started_at);
+    const html = renderGrid([runningPipeline], { nowMs: startedMs + 31_000 });
+    expect(html.split(t.heartbeatStale("31s")).length - 1).toBe(2); // hero + card
+  });
+
   it("shows 'zwischen Phasen' when running but heartbeat.current is null", () => {
     const html = renderGrid([betweenPhasesPipeline]);
     expect(html).toContain(t.heartbeatBetweenPhases);

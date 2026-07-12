@@ -430,14 +430,21 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
     const startedMs = Date.parse(current.started_at);
     const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
     return (
-      <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
-        <span
-          aria-hidden
-          className={cn("inline-block h-1.5 w-1.5 rounded-full", !reduceMotion && "animate-pulse")}
-          style={{ background: "var(--ln-sodium)" }}
-        />
-        {t.heartbeatCurrent(current.phase, current.model, fmtDur(elapsedSec))}
-      </p>
+      <>
+        <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
+          <span
+            aria-hidden
+            className={cn("inline-block h-1.5 w-1.5 rounded-full", !reduceMotion && elapsedSec <= 30 && "animate-pulse")}
+            style={{ background: elapsedSec > 30 ? "var(--ln-warn)" : "var(--ln-sodium)" }}
+          />
+          {t.heartbeatCurrent(current.phase, current.model, fmtDur(elapsedSec))}
+        </p>
+        {elapsedSec > 30 ? (
+          <p className="mt-1 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+            {t.heartbeatStale(fmtDur(elapsedSec))}
+          </p>
+        ) : null}
+      </>
     );
   }
   const last = pack.heartbeat?.last ?? [];
@@ -1511,6 +1518,10 @@ function LoopsHero({
 }) {
   const running = packs.filter((p) => p.running);
   const hero = running[0] ?? null;
+  const heroStartedMs = hero?.heartbeat?.current ? Date.parse(hero.heartbeat.current.started_at) : Number.NaN;
+  const heroElapsedSec = Number.isFinite(heroStartedMs)
+    ? Math.max(0, Math.floor((nowMs - heroStartedMs) / 1000))
+    : 0;
 
   return (
     <section
@@ -1546,17 +1557,18 @@ function LoopsHero({
                     hero.heartbeat.current.phase,
                     hero.heartbeat.current.engine,
                     hero.heartbeat.current.model,
-                    fmtDur(
-                      Number.isFinite(Date.parse(hero.heartbeat.current.started_at))
-                        ? Math.max(0, Math.floor((nowMs - Date.parse(hero.heartbeat.current.started_at)) / 1000))
-                        : 0,
-                    ),
+                    fmtDur(heroElapsedSec),
                   )}
                 </>
               ) : (
                 t.heartbeatBetweenPhases
               )}
             </p>
+            {hero.heartbeat?.current && heroElapsedSec > 30 ? (
+              <p className="mt-1 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+                {t.heartbeatStale(fmtDur(heroElapsedSec))}
+              </p>
+            ) : null}
             <div className="mt-3 hidden sm:block">
               {pendingStopPack === hero.name ? (
                 <span className="inline-flex flex-wrap items-center gap-2">

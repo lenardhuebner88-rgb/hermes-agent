@@ -807,6 +807,7 @@ export const de = {
     // Live-Phase (heartbeat.json — Telemetrie, best effort).
     heartbeatBetweenPhases: "zwischen Phasen",
     heartbeatCurrent: (phase: string, model: string, dur: string) => `${phase} · ${model} · seit ${dur}`,
+    heartbeatStale: (age: string) => `Letztes Telemetrie-Signal vor ${age}; Phase nicht live bestätigt.`,
     telemetryIdleLast: (phase: string, ok: boolean, secs: number, age: string) =>
       `zuletzt: ${phase} ${ok ? "✓" : "✗"} ${secs}s · vor ${age}`,
     // Lagebild-Hero: die Crew (laufende Packs) bzw. ihre Ruhe (nichts läuft).
