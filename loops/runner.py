@@ -121,6 +121,10 @@ class Pack:
     notify: dict[str, str] = field(default_factory=dict)
     params: dict[str, str] = field(default_factory=dict)
     autoland: bool = False
+    base_branch: str = "main"
+    land_remote: str = "piet-fork"
+    land_gates: list[str] | None = None
+    land_push: bool = True
 
     @property
     def branch(self) -> str:
@@ -262,6 +266,25 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 f"Pack {name!r}: autoland-Promptinhalt weicht vom kuratierten Hash ab"
             )
 
+    base_branch = raw.get("base_branch", "main")
+    if not isinstance(base_branch, str) or not base_branch.strip():
+        raise ManifestError(f"Pack {name!r}: base_branch muss ein nicht-leerer String sein")
+    land_remote = raw.get("land_remote", "piet-fork")
+    if not isinstance(land_remote, str) or not land_remote.strip():
+        raise ManifestError(f"Pack {name!r}: land_remote muss ein nicht-leerer String sein")
+    land_push = raw.get("land_push", True)
+    if not isinstance(land_push, bool):
+        raise ManifestError(f"Pack {name!r}: land_push muss boolean sein")
+    land_gates_raw = raw.get("land_gates")
+    if land_gates_raw is not None:
+        if not isinstance(land_gates_raw, list) or not all(
+            isinstance(c, str) and c.strip() for c in land_gates_raw
+        ):
+            raise ManifestError(
+                f"Pack {name!r}: land_gates muss eine Liste nicht-leerer Strings sein"
+            )
+    land_gates = list(land_gates_raw) if land_gates_raw is not None else None
+
     params = {str(k): str(v) for k, v in (raw.get("params") or {}).items()}
     notify = {str(k): str(v) for k, v in (raw.get("notify") or {}).items()}
 
@@ -270,6 +293,8 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         phases=phases, stop=stop, description=str(raw.get("description", "")),
         stability=str(raw.get("stability", "experimental")), notify=notify,
         params=params, autoland=autoland,
+        base_branch=base_branch, land_remote=land_remote,
+        land_gates=land_gates, land_push=land_push,
     )
 
 

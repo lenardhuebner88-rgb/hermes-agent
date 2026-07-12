@@ -449,6 +449,37 @@ def test_autoland_rejects_prompt_content_drift(tmp_path, fake_engine, monkeypatc
         load_pack(packs_dir, "dashboard-experience")
 
 
+def test_new_land_fields_default(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "defaults", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "defaults")
+    assert pack.base_branch == "main"
+    assert pack.land_remote == "piet-fork"
+    assert pack.land_gates is None
+    assert pack.land_push is True
+
+
+def test_new_land_fields_override(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs", "custom", "pipeline", repo,
+        base_branch="develop", land_remote="origin",
+        land_gates=["npm run gate"], land_push=False,
+    )
+    pack = load_pack(tmp_path / "packs", "custom")
+    assert pack.base_branch == "develop"
+    assert pack.land_remote == "origin"
+    assert pack.land_gates == ["npm run gate"]
+    assert pack.land_push is False
+
+
+def test_land_gates_must_be_list_of_str(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "bad", "pipeline", repo, land_gates="npm run gate")
+    with pytest.raises(ManifestError, match="land_gates"):
+        load_pack(tmp_path / "packs", "bad")
+
+
 # ── (c) Retry-Disposition auf echter Plan-Datei ──────────────────────────────
 
 def test_parse_and_bump_retry(tmp_path):
