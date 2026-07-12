@@ -6,6 +6,8 @@
  * Worker-Karte, PlanSpec-Karte, Fertig-24h-Sparkline).
  */
 import { useMemo, useState } from "react";
+import { ArrowRight } from "lucide-react";
+import type { DotKind } from "../../lib/tones";
 import {
   buildLagezeile,
   runProgressFraction,
@@ -20,6 +22,8 @@ import {
   premiumLaneMarker,
   deriveSparklinePoints,
   type SparklinePoint,
+  type PlanSpecActionState,
+  type PendingItem,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import type { Worker } from "../../lib/types";
@@ -27,8 +31,12 @@ import type { CostBucket, CostProfileRow, RunsCostsResponse, RunsDailyResponse }
 import type { PlanSpecRecord } from "./shared";
 import { LaneQuickSwitch } from "./LaneQuickSwitch";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
+import { Led } from "../../components/atoms";
 import { profileLabel } from "../../lib/tones";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
+
+/** Ziel-Subtabs, zu denen der Heute-Handlungsblock und Karten navigieren. */
+type HeuteNavTarget = "worker" | "plan" | "risiko";
 
 // ─── Heute-Subtab ────────────────────────────────────────────────────────────
 
@@ -41,11 +49,14 @@ interface HeuteTabProps {
   costs: RunsCostsResponse | null;
   daily: RunsDailyResponse | null;
   now: number;
+  /** Wartende Freigaben + Operator-Halts (aus FleetView), für den Handlungsblock. */
+  pendingItems: PendingItem[];
   onWorkerClick: (w: Worker) => void;
   onPlanSpecClick: (ps: PlanSpecRecord) => void;
+  onNavigate: (target: HeuteNavTarget) => void;
 }
 
-export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, onWorkerClick, onPlanSpecClick }: HeuteTabProps) {
+export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, pendingItems, onWorkerClick, onPlanSpecClick, onNavigate }: HeuteTabProps) {
   const [costDrawerOpen, setCostDrawerOpen] = useState(false);
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
@@ -67,20 +78,86 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
   const showCostKpi = kpi.kosten24h != null && costAverageDimension !== null;
   const kpiTileCount = 2 + Number(showActiveKpi) + Number(showCostKpi);
 
+  // Handlungsblock (AC-1/AC-5): wartende Freigaben + Operator-Halts als
+  // antippbare Zeilen, plus eine Sammelzeile für sonst blockierte Aufgaben.
+  const actionRows = useMemo(
+    () => buildActionRows(pendingItems, blockedCount),
+    [pendingItems, blockedCount],
+  );
+
+  // PlanSpecs nach aktueller Relevanz statt beliebiger erster fünf (AC-6).
+  const rankedPlanspecs = useMemo(() => rankPlanSpecsByRelevance(allPlanspecs).slice(0, 5), [allPlanspecs]);
+
+  // Operativer Lage-Hero (AC-R1): Blockade dominiert, sonst ruhiger Zustand.
+  const hero = deriveHeroState(blockedCount, actionRows, activeWorkers.length);
+
   return (
     <>
-      {/* Lagezeile */}
-      <p className="fleet-lage">
-        <LagezeileFormatted text={lagezeile} />
-      </p>
+      {/* Operativer Lage-Hero — die aktuelle Lage ist der visuelle Einstieg.
+          Blockiert = klarer Incident-Hero mit Aktion; sonst ruhiger. */}
+      <section className={`fleet-hero fleet-hero-${hero.tone}`} aria-label="Aktuelle Lage">
+        <div className="fleet-hero-main">
+          <span className="fleet-hero-eyebrow">
+            {hero.tone !== "idle" ? <Led kind={hero.led} size={7} /> : null}
+            {hero.eyebrow}
+          </span>
+          <h2 className="fleet-hero-headline">
+            <LagezeileFormatted text={lagezeile} />
+          </h2>
+        </div>
+        {hero.cta ? (
+          <button
+            type="button"
+            className={`fleet-hero-cta${hero.cta.ghost ? " fleet-hero-cta-ghost" : ""}`}
+            onClick={() => onNavigate(hero.cta!.target)}
+          >
+            {hero.cta.label}
+            <ArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" />
+          </button>
+        ) : null}
+      </section>
 
-      {/* KPI-Panel */}
+      {/* 1. Handlungsbedarf/Blocker — antippbare Detailzeilen unter dem Hero.
+          Kein leerer Platzhalter, wenn nichts wartet. */}
+      {actionRows.length > 0 ? (
+        <div className="fleet-actionlist" aria-label="Handlungsbedarf">
+          {actionRows.map((row, index) => (
+            <button
+              key={row.key}
+              type="button"
+              className="fleet-actionrow"
+              onClick={() => onNavigate(row.target)}
+              aria-label={row.label}
+              // Primärer Handlungs-Callout wird — wie zuvor die globale PendingBar —
+              // höflich angekündigt; nur die erste Zeile ist die Live-Region.
+              aria-live={index === 0 ? "polite" : undefined}
+            >
+              <Led kind="warn" />
+              <span className="fleet-actionrow-label">{row.label}</span>
+              <ArrowRight className="h-4 w-4 shrink-0 opacity-70" aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {/* 2. Aktive Worker und laufende Arbeit — vor den KPIs und PlanSpecs.
+          Bei null aktiven Workern ein kompakter Idle-Zustand statt Leere. */}
+      <p className="fleet-section-eyebrow">Jetzt</p>
+      {activeWorkers.length === 0 ? (
+        <div className="fleet-idle">Keine Worker aktiv — Board ruht.</div>
+      ) : (
+        activeWorkers.map((w) => (
+          <WorkerCard key={`${w.board_slug ?? "current"}:${w.run_id}`} worker={w} now={now} onClick={() => onWorkerClick(w)} />
+        ))
+      )}
+
+      {/* 3. KPI-Panel — höchstens vier belastbare Tages-KPIs. */}
       <div className="fleet-kpanel" style={{ "--fleet-kp-count": kpiTileCount } as React.CSSProperties}>
         {showActiveKpi ? (
           <div className="fleet-kp fleet-kp-aktiv">
             <div className="fleet-kp-num">{kpi.aktiv}</div>
             <div className="fleet-kp-label">{de.fleet.kpiAktiv}</div>
-            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={activeProfileBreakdown}>{activeProfileBreakdown}</div>
+            <div className="fleet-kp-dim" title={activeProfileBreakdown}>{activeProfileBreakdown}</div>
           </div>
         ) : null}
         <div className="fleet-kp">
@@ -105,7 +182,7 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
               {kpi.kosten24hEquiv ? <small> äquiv.</small> : null}
             </div>
             <div className="fleet-kp-label">{de.fleet.kpiKosten}</div>
-            <div className="mt-1 truncate font-data text-[10px] text-ink-2" title={costAverageDimension}>{costAverageDimension}</div>
+            <div className="fleet-kp-dim" title={costAverageDimension}>{costAverageDimension}</div>
           </button>
         ) : null}
       </div>
@@ -114,21 +191,148 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
         <CostDrawer costs={costs} daily={daily} onClose={() => setCostDrawerOpen(false)} />
       ) : null}
 
-      <LaneQuickSwitch />
+      {/* 4. Relevante offene/laufende PlanSpecs — nach Relevanz, nicht Reihenfolge.
+          Planung ist visuell sekundär zur laufenden Arbeit (AC-4). */}
+      {rankedPlanspecs.length > 0 ? (
+        <>
+          <p className="fleet-section-eyebrow fleet-section-eyebrow-plan">Planung</p>
+          {rankedPlanspecs.map((ps) => (
+            <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
+          ))}
+        </>
+      ) : null}
 
-      {/* Worker-Karten */}
-      {activeWorkers.length === 0 ? null : (
-        activeWorkers.map((w) => (
-          <WorkerCard key={`${w.board_slug ?? "current"}:${w.run_id}`} worker={w} now={now} onClick={() => onWorkerClick(w)} />
-        ))
-      )}
-
-      {/* PlanSpec-Karten */}
-      {allPlanspecs.slice(0, 5).map((ps) => (
-        <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
-      ))}
+      {/* 5. Sekundäre Lane-/Modellkonfiguration — zuletzt, initial eingeklappt.
+          Stabiler Anker: Der Disclosure hält seinen lokalen open/aria-expanded-Zustand
+          nur, solange React diesen Knoten über Live-Poll-Rerender hinweg wiederverwendet.
+          Der explizite Key macht die Reconciliation key- statt index-basiert, sodass ein
+          Einfügen/Entfernen konditionaler Geschwister davor (Worker-Karten, PlanSpecs,
+          Handlungszeilen) den Knoten selbst dann nicht remountet, wenn sich die Slot-Zahl
+          durch spätere Umbauten ändert. Invariante ist per Regressionstest gesichert
+          (HeuteTab.test.tsx → "Disclosure-Stabilität bei Live-Polling"). */}
+      <LaneQuickSwitch key="lane-config" />
     </>
   );
+}
+
+// ─── Operativer Lage-Hero (AC-R1) ─────────────────────────────────────────────
+
+type HeroTone = "alert" | "warn" | "live" | "idle";
+
+interface HeroState {
+  tone: HeroTone;
+  led: DotKind;
+  eyebrow: string;
+  cta: { label: string; target: HeuteNavTarget; ghost: boolean } | null;
+}
+
+/**
+ * deriveHeroState: übersetzt die Flottenlage in einen dominanten Hero-Zustand.
+ * Blockade schlägt wartende Freigabe schlägt laufende Arbeit schlägt Ruhe.
+ * Nur aus Live-Daten (blockierte Aufgaben, Handlungszeilen, aktive Worker) —
+ * keine erfundene Kennzahl. Die eindeutige Aktion zeigt in den Ziel-Subtab.
+ */
+function deriveHeroState(blockedCount: number, actionRows: ActionRow[], activeCount: number): HeroState {
+  if (blockedCount > 0) {
+    return {
+      tone: "alert",
+      led: "error",
+      eyebrow: "Blockade",
+      cta: { label: "Im Risiko-Tab lösen", target: "risiko", ghost: false },
+    };
+  }
+  const approval = actionRows.find((row) => row.target === "plan");
+  if (approval) {
+    return {
+      tone: "warn",
+      led: "warn",
+      eyebrow: "Wartet auf dich",
+      cta: { label: "Im Plan-Tab freigeben", target: "plan", ghost: false },
+    };
+  }
+  if (activeCount > 0) {
+    return {
+      tone: "live",
+      led: "live",
+      eyebrow: "Aktuelle Lage",
+      cta: { label: "Worker ansehen", target: "worker", ghost: true },
+    };
+  }
+  return { tone: "idle", led: "idle", eyebrow: "Aktuelle Lage", cta: null };
+}
+
+// ─── Handlungsblock-Ableitung ─────────────────────────────────────────────────
+
+interface ActionRow {
+  key: string;
+  label: string;
+  target: HeuteNavTarget;
+}
+
+/**
+ * buildActionRows: wartende Freigaben + Operator-Halts als antippbare Zeilen,
+ * plus eine Sammelzeile für sonst blockierte Aufgaben (ohne Doppelzählung der
+ * bereits als Operator-Halt gelisteten). Rein aus Live-Daten — kein Fake-CTA.
+ */
+function buildActionRows(pendingItems: PendingItem[], blockedCount: number): ActionRow[] {
+  const rows: ActionRow[] = pendingItems.map((item, index) => ({
+    key: `pi-${index}`,
+    label: item.kind === "approval" ? `Freigabe wartet: ${item.topic}` : `Operator-Halt: ${item.topic}`,
+    target: item.targetSubtab,
+  }));
+  const holdCount = pendingItems.filter((item) => item.kind === "blocked").length;
+  const otherBlocked = blockedCount - holdCount;
+  if (otherBlocked > 0) {
+    rows.push({
+      key: "blocked-rest",
+      label: otherBlocked === 1
+        ? "Eine Aufgabe blockiert — im Risiko-Tab lösen"
+        : `${otherBlocked} Aufgaben blockiert — im Risiko-Tab lösen`,
+      target: "risiko",
+    });
+  }
+  return rows;
+}
+
+// ─── PlanSpec-Relevanz-Ranking (AC-6) ─────────────────────────────────────────
+
+/**
+ * rankPlanSpecsByRelevance: sortiert PlanSpecs nach aktueller Handlungsrelevanz
+ * statt Katalog-Reihenfolge. Reine Funktion über die vorhandenen kanban-Felder
+ * (keine neue API): wartet-auf-Operator > startbare signierte Kette > laufend >
+ * eingereiht > sonst offen. Sekundär: mehr aktive/blockierte Kinder zuerst.
+ * Stabil (behält Eingangsreihenfolge bei Gleichstand).
+ */
+function planSpecRelevanceRank(ps: PlanSpecRecord): number {
+  const state: PlanSpecActionState = {
+    freigabe: ps.freigabe,
+    kanban_state: ps.kanban_state,
+    kanban_root_status: ps.kanban_root_status,
+    kanban_root_task_id: ps.kanban_root_task_id,
+    kanban_child_total: ps.kanban_child_total,
+    kanban_child_done: ps.kanban_child_done,
+    kanban_child_running: ps.kanban_child_running,
+    kanban_child_blocked: ps.kanban_child_blocked,
+  };
+  if (planSpecWaitsForOperator(ps.freigabe, ps.kanban_state)) return 5;
+  if (planSpecHasParkedSignedChain(state)) return 4;
+  const kanbanState = String(ps.kanban_state ?? "").toLowerCase();
+  if (kanbanState === "running" || (ps.kanban_child_running ?? 0) > 0) return 3;
+  if (kanbanState === "queued") return 2;
+  if (ps.open) return 1;
+  return 0;
+}
+
+function rankPlanSpecsByRelevance(planspecs: PlanSpecRecord[]): PlanSpecRecord[] {
+  return planspecs
+    .map((ps, index) => ({
+      ps,
+      index,
+      rank: planSpecRelevanceRank(ps),
+      activity: (ps.kanban_child_running ?? 0) + (ps.kanban_child_blocked ?? 0),
+    }))
+    .sort((a, b) => b.rank - a.rank || b.activity - a.activity || a.index - b.index)
+    .map((entry) => entry.ps);
 }
 
 function CostDrawer({ costs, daily, onClose }: { costs: RunsCostsResponse | null; daily: RunsDailyResponse | null; onClose: () => void }) {

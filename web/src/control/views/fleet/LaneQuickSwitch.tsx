@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { ChevronDown } from "lucide-react";
 
 import {
   FALLBACK_MODELS,
@@ -52,12 +53,36 @@ function guardEntry(row: EditorRow) {
   };
 }
 
+/** Effektives Modell-Label der aktiven Auswahl fürs Summary: Override-Modell,
+ *  sonst der Profil-Default. Nur live vorhandene Werte, kein Fake. */
+function effectiveModelLabel(row: EditorRow | null, models: LaneModelOption[]): string | null {
+  if (!row) return null;
+  if (row.model) {
+    const match = models.find((m) => m.id === row.model && (m.provider ?? "") === (row.provider ?? ""));
+    return match?.label ?? row.model;
+  }
+  return row.defaultLabel;
+}
+
+/** Effektiver Provider fürs Summary: Override- oder Default-Provider; auf
+ *  claude-cli-Lanes (kein Provider) die Runtime als Kennung. null = nichts live. */
+function effectiveProviderLabel(row: EditorRow | null): string | null {
+  if (!row) return null;
+  const provider = row.provider ?? row.defaultProvider;
+  if (provider) return provider;
+  return row.worker_runtime === "claude-cli" ? "claude-cli" : null;
+}
+
 export function LaneQuickSwitch() {
   const [data, setData] = useState<LanesResponse | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [choice, setChoice] = useState("");
   const [state, setState] = useState<SaveState>("loading");
   const [message, setMessage] = useState<string | null>(null);
+  // Sekundäre Konfiguration: initial geschlossen (AC-2). Erfolgreiches Speichern
+  // darf schließen, Fehler/Concurrency-Konflikte halten sie offen (AC-3).
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
 
   const models = useMemo(() => data?.models?.length ? data.models : FALLBACK_MODELS, [data]);
   const modelOptions = useMemo(() => modelsForSelect(models), [models]);
@@ -149,6 +174,9 @@ export function LaneQuickSwitch() {
       );
       await updateLane(freshLane.id, { profiles: nextProfiles });
       await refresh("Lane gespeichert; gilt ab dem nächsten Worker-Spawn.");
+      // Nur der Erfolgspfad schließt die Disclosure — alle früheren Returns
+      // (Concurrency, Guard-Konflikt, Fehler) lassen sie offen und sichtbar.
+      setOpen(false);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
       setState("idle");
@@ -163,45 +191,69 @@ export function LaneQuickSwitch() {
     return null;
   }
 
+  // Summary (immer sichtbar, auch geschlossen): aktive Lane, effektives Profil,
+  // Provider und Modell — nur soweit live vorhanden (AC-2).
+  const summaryRow = selectedRow ?? editableRows[0] ?? null;
+  const summaryProvider = effectiveProviderLabel(summaryRow);
+  const summaryModel = effectiveModelLabel(summaryRow, models);
+  const summaryFacts = [summaryRow?.profile, summaryProvider, summaryModel].filter(Boolean).join(" · ");
+
   return (
     <section className="fleet-lane-switch" aria-label="Lane-Modell-Schnellschalter">
-      <div className="fleet-lane-switch__header">
-        <div>
-          <p className="fleet-lane-switch__eyebrow">Aktive Lane</p>
-          <strong>{lane.name}</strong>
+      <button
+        type="button"
+        className="fleet-lane-switch__toggle"
+        aria-label="Lane- und Modellkonfiguration"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <span className="fleet-lane-switch__summary">
+          <span className="fleet-lane-switch__eyebrow">Lane &amp; Modell</span>
+          <span className="fleet-lane-switch__summary-lane">{lane.name}</span>
+          {summaryFacts ? <span className="fleet-lane-switch__summary-facts">{summaryFacts}</span> : null}
+        </span>
+        <ChevronDown className="fleet-lane-switch__chevron" aria-hidden="true" />
+      </button>
+
+      {open ? (
+        <div id={panelId} className="fleet-lane-switch__panel">
+          <div className="fleet-lane-switch__panel-head">
+            <span className="fleet-lane-switch__eyebrow">Aktive Lane · {lane.name}</span>
+            <button type="button" className="fleet-lane-switch__ghost" onClick={() => void refresh()} disabled={state !== "idle"}>
+              Neu laden
+            </button>
+          </div>
+          <div className="fleet-lane-switch__grid">
+            <label>
+              Profil
+              <select value={selectedProfile ?? ""} onChange={(event) => handleProfileChange(event.target.value)}>
+                {editableRows.map((row) => (
+                  <option key={row.profile} value={row.profile}>{row.profile}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Modell
+              <select value={selectedChoice} onChange={(event) => { setChoice(event.target.value); setMessage(null); }}>
+                <option value="">Standard ({selectedRow?.defaultLabel ?? "automatisch"})</option>
+                {modelOptions.map((model) => (
+                  <option key={optionValue(model)} value={optionValue(model)}>
+                    {model.group ? `${model.group} · ` : ""}{model.label || model.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="fleet-lane-switch__footer">
+            <button type="button" onClick={() => void handleSave()} disabled={!hasChange || state !== "idle"}>
+              {state === "checking" ? "Prüfe…" : state === "saving" ? "Speichere…" : "Modell speichern"}
+            </button>
+            <span className="fleet-lane-switch__hint">Guard: Spawn-Check vor PUT /lanes/{lane.id}</span>
+          </div>
+          {message ? <p className="fleet-lane-switch__message" role="status">{message}</p> : null}
         </div>
-        <button type="button" className="fleet-lane-switch__ghost" onClick={() => void refresh()} disabled={state !== "idle"}>
-          Neu laden
-        </button>
-      </div>
-      <div className="fleet-lane-switch__grid">
-        <label>
-          Profil
-          <select value={selectedProfile ?? ""} onChange={(event) => handleProfileChange(event.target.value)}>
-            {editableRows.map((row) => (
-              <option key={row.profile} value={row.profile}>{row.profile}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Modell
-          <select value={selectedChoice} onChange={(event) => { setChoice(event.target.value); setMessage(null); }}>
-            <option value="">Standard ({selectedRow?.defaultLabel ?? "automatisch"})</option>
-            {modelOptions.map((model) => (
-              <option key={optionValue(model)} value={optionValue(model)}>
-                {model.group ? `${model.group} · ` : ""}{model.label || model.id}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="fleet-lane-switch__footer">
-        <button type="button" onClick={() => void handleSave()} disabled={!hasChange || state !== "idle"}>
-          {state === "checking" ? "Prüfe…" : state === "saving" ? "Speichere…" : "Modell speichern"}
-        </button>
-        <span className="fleet-lane-switch__hint">Guard: Spawn-Check vor PUT /lanes/{lane.id}</span>
-      </div>
-      {message ? <p className="fleet-lane-switch__message" role="status">{message}</p> : null}
+      ) : null}
     </section>
   );
 }

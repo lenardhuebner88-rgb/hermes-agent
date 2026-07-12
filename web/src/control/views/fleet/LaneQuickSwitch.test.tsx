@@ -68,7 +68,32 @@ describe("LaneQuickSwitch", () => {
     cleanup();
   });
 
-  it("runs spawn-check and saves the full profiles map via PUT", async () => {
+  function openDisclosure() {
+    fireEvent.click(screen.getByRole("button", { name: "Lane- und Modellkonfiguration" }));
+  }
+
+  it("starts collapsed with a live summary and reveals the config only on toggle", async () => {
+    vi.mocked(loadLanes).mockResolvedValue(lanes(1));
+
+    render(<LaneQuickSwitch />);
+
+    // Summary shows active lane + effective profile/provider/model while collapsed.
+    await screen.findByText("Fast lane");
+    expect(screen.getByText(/coder · openrouter/)).toBeTruthy();
+    const toggle = screen.getByRole("button", { name: "Lane- und Modellkonfiguration" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByLabelText("Modell")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Modell speichern" })).toBeNull();
+
+    fireEvent.click(toggle);
+
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByLabelText("Modell")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Neu laden" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Modell speichern" })).toBeTruthy();
+  });
+
+  it("runs spawn-check and saves the full profiles map via PUT, then closes", async () => {
     vi.mocked(loadLanes)
       .mockResolvedValueOnce(lanes(1))
       .mockResolvedValueOnce(lanes(1))
@@ -83,6 +108,7 @@ describe("LaneQuickSwitch", () => {
     render(<LaneQuickSwitch />);
 
     await screen.findByText("Fast lane");
+    openDisclosure();
     fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|openrouter|qwen/qwen3.7-max" } });
     fireEvent.click(screen.getByRole("button", { name: "Modell speichern" }));
 
@@ -101,10 +127,14 @@ describe("LaneQuickSwitch", () => {
         },
       },
     }));
-    expect(await screen.findByText("Lane gespeichert; gilt ab dem nächsten Worker-Spawn.")).toBeTruthy();
+    // Successful save collapses the disclosure again (AC-3).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Lane- und Modellkonfiguration" }).getAttribute("aria-expanded")).toBe("false"),
+    );
+    expect(screen.queryByLabelText("Modell")).toBeNull();
   });
 
-  it("reloads and refuses to overwrite when the active lane changed concurrently", async () => {
+  it("reloads and refuses to overwrite when the active lane changed concurrently, staying open", async () => {
     vi.mocked(loadLanes)
       .mockResolvedValueOnce(lanes(1))
       .mockResolvedValueOnce(lanes(2, "openai/gpt-4.1-mini"));
@@ -112,11 +142,15 @@ describe("LaneQuickSwitch", () => {
     render(<LaneQuickSwitch />);
 
     await screen.findByText("Fast lane");
+    openDisclosure();
     fireEvent.change(screen.getByLabelText("Modell"), { target: { value: "hermes|openrouter|qwen/qwen3.7-max" } });
     fireEvent.click(screen.getByRole("button", { name: "Modell speichern" }));
 
     expect(await screen.findByText("Aktive Lane wurde parallel geändert — neu geladen. Bitte Auswahl prüfen und erneut speichern.")).toBeTruthy();
     expect(smokeCheckLaneConfig).not.toHaveBeenCalled();
     expect(updateLane).not.toHaveBeenCalled();
+    // Concurrency conflict keeps the disclosure open and the message visible (AC-3).
+    expect(screen.getByRole("button", { name: "Lane- und Modellkonfiguration" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByLabelText("Modell")).toBeTruthy();
   });
 });

@@ -90,11 +90,22 @@ body:has([data-fleet-theme]) [data-control] {
 }
 
 /* ── Chips (Subtabs) ──────────────────────────────────────────────────────── */
+/* Fleet-Subtab-Leiste: horizontal scrollbar, mit Fade-/Peek-Affordanz am
+   rechten Rand, damit „Risiko" nie kaputt abgeschnitten wirkt (AC-R2). Der
+   aktive Chip wird von FleetView automatisch in den sichtbaren Bereich
+   gescrollt. */
+.fleet-subtabs {
+  mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+}
 .fleet-chip {
-  font-size: 11.5px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--fleet-t2);
-  padding: 6px 11px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
   border-radius: 999px;
   border: 1px solid var(--fleet-linie);
   white-space: nowrap;
@@ -134,18 +145,158 @@ body:has([data-fleet-theme]) [data-control] {
   background: var(--fleet-signal);
 }
 
-/* ── Lagezeile ───────────────────────────────────────────────────────────────*/
-.fleet-lage {
-  font: italic 400 17px/1.45 var(--hc-font-display);
-  padding: 2px 0;
+/* ── Operativer Lage-Hero (AC-R1) ────────────────────────────────────────────
+ * Die aktuelle Lage ist der visuelle Einstieg: ein dominanter Hero mit
+ * Situations-LED, großer Schlagzeile und (wenn nötig) einer eindeutigen Aktion.
+ * Ton nach Lage — Blockade (alert) laut, sonst ruhiger. Der Akzentkanal bleibt
+ * Bronze/Status-Trio treu (DESIGN.md): Status = LED + Label, CTA = Bronze-Button. */
+.fleet-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--fleet-linie);
+  border-left: 3px solid var(--fleet-linie-stark);
+  border-radius: var(--radius-panel, 10px);
+  background: var(--fleet-tiefe);
+  position: relative;
+  overflow: hidden;
+}
+.fleet-hero-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.fleet-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 700 11px/1 var(--hc-font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+}
+.fleet-hero-headline {
+  margin: 0;
+  font: 600 26px/1.18 var(--hc-font-display);
+  letter-spacing: -0.01em;
   color: var(--fleet-t1);
 }
-.fleet-lage em {
-  font-style: italic;
-  color: var(--fleet-puls);
+.fleet-hero-headline em {
+  font-style: normal;
+  color: var(--fleet-t1);
 }
-.fleet-lage .fleet-amber {
+.fleet-hero-headline .fleet-amber {
   color: var(--fleet-signal);
+  font-style: normal;
+}
+/* CTA: Bronze-Affordanz, Touch-Ziel ≥44px (DESIGN 5). */
+.fleet-hero-cta {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--fleet-puls);
+  border-radius: var(--radius-card, 7px);
+  background: color-mix(in oklab, var(--fleet-puls) 16%, var(--fleet-karte));
+  color: var(--fleet-t1);
+  font: 600 13.5px/1 var(--hc-font-sans);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
+}
+.fleet-hero-cta:hover { background: color-mix(in oklab, var(--fleet-puls) 26%, var(--fleet-karte)); }
+.fleet-hero-cta:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--fleet-puls); }
+.fleet-hero-cta-ghost {
+  border-color: var(--fleet-linie-stark);
+  background: transparent;
+  color: var(--fleet-t2);
+  font-weight: 500;
+}
+.fleet-hero-cta-ghost:hover { border-color: var(--fleet-t3); color: var(--fleet-t1); background: transparent; }
+/* Blockade dominiert: alert-Akzent an Kante + Schlagzeile. */
+.fleet-hero-alert {
+  border-color: color-mix(in oklab, var(--fleet-rot) 40%, transparent);
+  border-left-color: var(--fleet-rot);
+  background: color-mix(in oklab, var(--fleet-rot) 8%, var(--fleet-tiefe));
+}
+.fleet-hero-alert .fleet-hero-eyebrow { color: var(--fleet-rot); }
+.fleet-hero-warn {
+  border-left-color: var(--fleet-signal);
+  background: color-mix(in oklab, var(--fleet-signal) 6%, var(--fleet-tiefe));
+}
+.fleet-hero-warn .fleet-hero-eyebrow { color: var(--fleet-signal); }
+.fleet-hero-live { border-left-color: color-mix(in oklab, var(--fleet-puls) 55%, transparent); }
+.fleet-hero-idle {
+  border-left-color: var(--fleet-linie);
+  background: var(--fleet-nacht);
+}
+.fleet-hero-idle .fleet-hero-headline { color: var(--fleet-t2); }
+@media (max-width: 560px) {
+  .fleet-hero {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 13px;
+    padding: 14px 15px;
+  }
+  .fleet-hero-headline { font-size: 22px; }
+  .fleet-hero-cta { justify-content: center; }
+}
+
+/* Sektions-Eyebrow: trennt „Jetzt" (laufende Arbeit) von „Planung". */
+.fleet-section-eyebrow {
+  margin: 16px 0 8px;
+  font: 700 11px/1 var(--hc-font-display);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+}
+.fleet-section-eyebrow-plan { color: var(--fleet-t3); opacity: 0.85; }
+
+/* Handlungs-Detailzeilen unter dem Hero — sekundär, aber antippbar (≥44px). */
+.fleet-actionlist {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.fleet-actionrow {
+  display: flex;
+  min-height: 44px;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in oklab, var(--fleet-signal) 30%, transparent);
+  border-radius: var(--radius-card, 7px);
+  background: color-mix(in oklab, var(--fleet-signal) 9%, transparent);
+  color: var(--fleet-signal);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.fleet-actionrow:hover { background: color-mix(in oklab, var(--fleet-signal) 14%, transparent); }
+.fleet-actionrow-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 13px/1.35 var(--hc-font-sans);
+}
+
+/* Kompakter Idle-Zustand für "keine Worker aktiv" — statt Leere (AC-5). */
+.fleet-idle {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--fleet-linie);
+  border-radius: var(--radius-card);
+  background: var(--fleet-tiefe);
+  color: var(--fleet-t3);
+  font: 400 12px/1.35 var(--hc-font-sans);
 }
 
 /* ── KPI-Panel ────────────────────────────────────────────────────────────── */
@@ -155,40 +306,55 @@ body:has([data-fleet-theme]) [data-control] {
      als Custom-Property statt Inline-Style, damit die Phone-Media-Query unten
      weiterhin gewinnt (Inline-Styles schlagen Media-Queries — belegte Falle). */
   grid-template-columns: repeat(var(--fleet-kp-count, 4), minmax(0, 1fr));
-  background: var(--fleet-tiefe);
+  /* 1px-Gap auf Linien-Fläche → saubere Hairline-Teiler zwischen ALLEN
+     Nachbarn (Zeilen wie Spalten), damit das 2-Spalten-Umbrechen auf Mobile
+     nicht auf border-left-Tricks angewiesen ist. */
+  gap: 1px;
+  background: var(--fleet-linie);
   border: 1px solid var(--fleet-linie);
   border-radius: 13px;
   overflow: hidden;
 }
-@media (max-width: 380px) {
+/* Mobile: NIE drei gequetschte Spalten (AC-R2). Zwei Spalten, ungerade letzte
+   Kachel füllt die Zeile (2+1). Greift bereits bei 390px. */
+@media (max-width: 560px) {
   .fleet-kpanel {
     grid-template-columns: 1fr 1fr;
   }
+  .fleet-kp:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
 }
 .fleet-kp {
-  padding: 10px 12px 9px;
+  padding: 12px 13px 11px;
   position: relative;
-}
-.fleet-kp + .fleet-kp {
-  border-left: 1px solid var(--fleet-linie);
+  background: var(--fleet-tiefe);
 }
 .fleet-kp-num {
-  font: 600 20px/1 var(--hc-font-mono);
+  font: 600 24px/1.05 var(--hc-font-mono);
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   color: var(--fleet-t1);
 }
 .fleet-kp-num small {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fleet-t3);
   font-weight: 500;
 }
 .fleet-kp-label {
-  font: 500 9px/1 var(--hc-font-sans);
+  font: 700 10px/1 var(--hc-font-display);
   color: var(--fleet-t3);
-  letter-spacing: 0.09em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  margin-top: 2px;
+  margin-top: 4px;
+}
+.fleet-kp-dim {
+  margin-top: 5px;
+  font: 500 11px/1.3 var(--hc-font-mono);
+  color: var(--fleet-t2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fleet-kp-aktiv .fleet-kp-num {
   color: var(--fleet-puls);
@@ -418,16 +584,78 @@ body:has([data-fleet-theme]) [data-control] {
   font: 700 10px/1 var(--hc-font-mono);
 }
 
-/* ── Lane-Modell-Schnellschalter ──────────────────────────────────────────── */
+/* ── Lane-Modell-Schnellschalter (eingeklappte Sekundär-Konfiguration) ─────────
+ * Sekundär und barrierearm: neutral-dunkle Surface, KEIN Amber-Element (AC-2).
+ * Bronze-Akzent nur für Chevron/Fokus/aktiven Zustand — nie die ganze Fläche. */
 .fleet-lane-switch {
-  margin: 12px 0;
-  padding: 12px;
+  margin: 20px 0 12px;
   border: 1px solid var(--color-line-soft);
   border-radius: var(--radius-panel);
   background: var(--color-surface-2);
   color: var(--color-ink);
 }
-.fleet-lane-switch__header,
+.fleet-lane-switch__toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-live);
+  border-radius: var(--radius-panel);
+}
+.fleet-lane-switch__toggle:hover .fleet-lane-switch__chevron,
+.fleet-lane-switch__toggle[aria-expanded="true"] .fleet-lane-switch__chevron {
+  color: var(--color-live);
+}
+/* Disclosure-Summary: immer sichtbar, Touch-Höhe ≥44px, Tastatur-bedienbar
+   (nativer <button>, aria-expanded am Element). */
+.fleet-lane-switch__toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-lane-switch__summary {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+.fleet-lane-switch__summary-lane {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-ink);
+  font: 700 12px/1.2 var(--hc-font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-lane-switch__summary-facts {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-ink-2);
+  font: 400 10.5px/1.2 var(--hc-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-lane-switch__chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--color-ink-2);
+  transition: transform 150ms ease;
+}
+.fleet-lane-switch__toggle[aria-expanded="true"] .fleet-lane-switch__chevron {
+  transform: rotate(180deg);
+}
+.fleet-lane-switch__panel {
+  padding: 0 12px 12px;
+}
+.fleet-lane-switch__panel-head,
 .fleet-lane-switch__footer {
   display: flex;
   align-items: center;
@@ -461,7 +689,12 @@ body:has([data-fleet-theme]) [data-control] {
   background: var(--color-surface-1);
   color: var(--color-ink);
 }
-.fleet-lane-switch button {
+/* NUR die Panel-Buttons (Speichern/Neu laden) tragen den Bronze-Akzent —
+ * NICHT der Summary-Toggle. `.fleet-lane-switch button` matchte auch den
+ * `__toggle` und outspezifizierte dessen `background: transparent`, wodurch die
+ * GESCHLOSSENE Zeile das stärkste Amber-Element der Seite wurde (AC-2). Scope
+ * daher auf `__panel button`. */
+.fleet-lane-switch__panel button {
   border: 1px solid var(--color-line-soft);
   border-radius: var(--radius-card);
   padding: 8px 10px;
@@ -470,7 +703,7 @@ body:has([data-fleet-theme]) [data-control] {
   cursor: pointer;
   font-weight: 700;
 }
-.fleet-lane-switch button:disabled {
+.fleet-lane-switch__panel button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -485,7 +718,7 @@ body:has([data-fleet-theme]) [data-control] {
   .fleet-lane-switch__grid {
     grid-template-columns: 1fr;
   }
-  .fleet-lane-switch__header,
+  .fleet-lane-switch__panel-head,
   .fleet-lane-switch__footer {
     flex-direction: column;
     align-items: stretch;
@@ -535,7 +768,7 @@ body:has([data-fleet-theme]) [data-control] {
   position: relative;
   overflow: hidden;
   cursor: pointer;
-  transition: border-color 0.12s;
+  transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
   min-height: 40px; /* touch target */
 }
 .fleet-wk:hover {
@@ -591,7 +824,8 @@ body:has([data-fleet-theme]) [data-control] {
   display: flex;
   align-items: center;
   gap: 6px;
-  font: 500 10.5px/1 var(--hc-font-mono);
+  /* Heartbeat/Status ist operativ — ≥12px, nicht auf ID-Niveau schrumpfen. */
+  font: 500 12px/1.15 var(--hc-font-mono);
   color: var(--fleet-puls);
 }
 .fleet-led-dot {
@@ -610,26 +844,27 @@ body:has([data-fleet-theme]) [data-control] {
 
 /* ── Worker-Name / Task / Note ────────────────────────────────────────────── */
 .fleet-wk-name {
-  font: 600 13px/1 var(--hc-font-sans);
-  color: var(--fleet-t1);
+  font: 600 12.5px/1 var(--hc-font-sans);
+  color: var(--fleet-t2);
 }
 .fleet-wk-name span {
   font: 400 10.5px/1 var(--hc-font-mono);
   color: var(--fleet-t3);
   margin-left: 6px;
 }
+/* Task-Titel ist der primäre Inhalt der Karte — kräftiger als der Profilname. */
 .fleet-wk-task {
-  font: 400 12.5px/1.45 var(--hc-font-sans);
-  color: var(--fleet-t2);
+  font: 500 14px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t1);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 .fleet-wk-note {
-  font: 400 11px/1 var(--hc-font-mono);
+  font: 400 12px/1.35 var(--hc-font-mono);
   color: var(--fleet-puls);
-  opacity: 0.85;
+  opacity: 0.9;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -639,14 +874,21 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-wk-meta {
   display: flex;
-  gap: 12px;
-  font: 400 10.5px/1 var(--hc-font-mono);
+  gap: 8px 12px;
+  /* Operative Metadaten (Modell, Token-Fortschritt, Laufzeit, ETA) müssen ≥12px lesbar bleiben. */
+  font: 400 12px/1.35 var(--hc-font-mono);
   color: var(--fleet-t3);
   flex-wrap: wrap;
+  align-items: baseline;
 }
 .fleet-wk-meta b {
   color: var(--fleet-t2);
   font-weight: 500;
+}
+/* Click-Affordanz: klare Karte, hebt sich beim Hover an. */
+.fleet-wk:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 .fleet-meta-right {
   margin-left: auto;
@@ -679,22 +921,22 @@ body:has([data-fleet-theme]) [data-control] {
   box-shadow: 0 0 9px var(--fleet-puls);
 }
 
-/* ── PlanSpec-Karte ────────────────────────────────────────────────────────── */
+/* ── PlanSpec-Karte (Planung — visuell sekundär zur laufenden Arbeit) ───────── */
 .fleet-ps {
-  background: var(--fleet-karte);
+  background: var(--fleet-tiefe);
   border: 1px solid var(--fleet-linie);
-  border-radius: 14px;
-  padding: 11px 13px;
+  border-radius: 12px;
+  padding: 10px 13px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   text-align: left;
   font: inherit;
   color: inherit;
   cursor: pointer;
   width: 100%;
 }
-.fleet-ps:hover { border-color: var(--fleet-t3); }
+.fleet-ps:hover { border-color: var(--fleet-linie-stark); }
 .fleet-ps-top {
   display: flex;
   align-items: center;
@@ -702,11 +944,20 @@ body:has([data-fleet-theme]) [data-control] {
   min-height: 40px; /* touch target */
 }
 .fleet-ps-name {
-  font: 600 12.5px/1 var(--hc-font-sans);
-  color: var(--fleet-t1);
+  font: 600 13px/1.3 var(--hc-font-sans);
+  color: var(--fleet-t2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Mobile: Titel bis zu zwei Zeilen statt aggressiver Einzeilen-Abschneidung. */
+@media (max-width: 560px) {
+  .fleet-ps-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
 }
 .fleet-ps-badge {
   margin-left: auto;
@@ -718,14 +969,24 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-ps-badge-lauf  { color: var(--fleet-puls);   border: 1px solid color-mix(in oklab, var(--fleet-puls) 40%, transparent); }
 .fleet-ps-badge-amber { color: var(--fleet-signal);  border: 1px solid color-mix(in oklab, var(--fleet-signal) 40%, transparent); }
 .fleet-ps-badge-gruen { color: var(--fleet-gruen);   border: 1px solid color-mix(in oklab, var(--fleet-gruen) 35%, transparent); }
+/* Metadaten als lesbare Chips statt Mikroschrift (revision #4/#6). */
 .fleet-ps-meta {
   display: flex;
-  gap: 12px;
-  font: 400 10.5px/1 var(--hc-font-mono);
-  color: var(--fleet-t3);
+  gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
 }
-.fleet-ps-meta b { color: var(--fleet-t2); font-weight: 500; }
+.fleet-ps-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--fleet-linie);
+  background: color-mix(in oklab, var(--fleet-karte) 60%, transparent);
+  font: 500 11.5px/1.3 var(--hc-font-mono);
+  color: var(--fleet-t3);
+}
+.fleet-ps-meta b { color: var(--fleet-t2); font-weight: 600; }
 
 /* ── Empty State ─────────────────────────────────────────────────────────────*/
 .fleet-empty {
