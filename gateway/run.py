@@ -1707,14 +1707,6 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
-# Breadcrumb left by shutdown_signal_handler for the process-end exit
-# classifier in _exit_after_graceful_shutdown().  Carries the already-computed
-# planned/signal-initiated flags plus the shutdown snapshot so the single exit
-# diagnostic line can categorise WHY the process ended.  None until a signal
-# arrives (early-exit paths classify from the exit code alone).
-_LAST_SHUTDOWN_CONTEXT: Optional[Dict[str, Any]] = None
-
-
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -20018,18 +20010,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM/SIGINT",
             )
 
-        # Leave a breadcrumb for the process-end exit classifier
-        # (_exit_after_graceful_shutdown → _log_exit_category). Records the
-        # decision we just made (planned vs unexpected signal) plus the live
-        # snapshot, so the single exit diagnostic line can categorise WHY the
-        # gateway ended. Purely informational — does not affect teardown.
-        global _LAST_SHUTDOWN_CONTEXT
-        _LAST_SHUTDOWN_CONTEXT = {
-            "planned": bool(planned_takeover or planned_stop),
-            "signal_initiated": bool(_signal_initiated_shutdown),
-            "ctx": _shutdown_ctx,
-        }
-
         # Always log who/what triggered the signal — most useful single
         # line when diagnosing "the gateway keeps dying" tickets.  Format
         # is one line, key=value, parent_cmdline last (often long).
@@ -20375,10 +20355,6 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
             stream.flush()
         except Exception:
             pass
-    # One structured exit-category diagnostic line at the true process-end
-    # chokepoint — every exit path funnels through here, so the category is
-    # always logged exactly once. Best-effort; never blocks the exit.
-    _log_exit_category(exit_code)
     # Guaranteed cleanup chokepoint: os._exit skips atexit, and the early
     # SystemExit exit paths never run _stop_impl, so release here (idempotent).
     try:
@@ -20388,35 +20364,6 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
     except Exception:
         pass
     os._exit(exit_code)
-
-
-def _log_exit_category(exit_code: int) -> None:
-    """Emit ONE structured exit-category diagnostic line at process end.
-
-    Reads the shutdown breadcrumb left by ``shutdown_signal_handler`` (if a
-    signal drove the exit) plus the final ``exit_code``, derives a bounded
-    category, and logs it. Purely diagnostic: it does NOT change shutdown
-    behaviour or the exit code, and any failure here is swallowed so it can
-    never prevent the process from exiting.
-    """
-    try:
-        from gateway.shutdown_forensics import (
-            classify_exit_category,
-            format_exit_category_for_log,
-        )
-        breadcrumb = _LAST_SHUTDOWN_CONTEXT
-        category = classify_exit_category(exit_code, breadcrumb=breadcrumb)
-        logger.warning(
-            "Gateway exit diagnostic: %s",
-            format_exit_category_for_log(
-                category, exit_code, breadcrumb=breadcrumb
-            ),
-        )
-    except Exception as _e:  # noqa: BLE001 — diagnostics must never block exit
-        try:
-            logger.debug("exit-category diagnostic failed: %s", _e)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

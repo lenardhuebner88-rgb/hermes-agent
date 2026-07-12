@@ -84,12 +84,7 @@ async function main() {
       waitUntil: "domcontentloaded",
       timeout: CONNECT_TIMEOUT_MS,
     });
-    // Readiness anchor: the shared masthead (present on every viewport) proves
-    // the SPA mounted. Do NOT wait on brand copy like "Hermes Control" — the
-    // W2-a responsive shell (2026-07-10) dropped that visible text in favour of
-    // the "Hermes:9119" health badge, leaving it only in document.title, which
-    // getByText never matches → 15s timeout on an otherwise-healthy page.
-    await page.getByTestId("control-masthead").filter({ visible: true }).first()
+    await page.getByText("Hermes Control").filter({ visible: true }).first()
       .waitFor({ timeout: 15_000 });
 
     const overflowBeforeInteraction = await page.evaluate(readOverflow);
