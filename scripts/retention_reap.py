@@ -217,7 +217,7 @@ def execute_actions(actions: Sequence[DeleteAction], *, apply: bool, log: Callab
 @contextmanager
 def exclusive_lock(path: Path) -> Iterator[bool]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+")
+    handle = path.open("a+", encoding="utf-8")
     acquired = False
     try:
         try:
