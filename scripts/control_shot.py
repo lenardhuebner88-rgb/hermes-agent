@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import signal
 import sys
-import threading
 from pathlib import Path
 
 DEFAULT_BASE = "http://127.0.0.1:9119"
@@ -23,35 +21,6 @@ ENV_FILE = Path.home() / ".hermes" / ".env"
 
 class ShotError(RuntimeError):
     """User-facing failure."""
-
-
-class _CloseTimeout(BaseException):
-    """Internal signal used to interrupt a hung synchronous Playwright close."""
-
-
-def _close_quietly(resource: object | None, *, timeout_seconds: float = 2.0) -> None:
-    """Bounded best-effort close on the Playwright sync API's calling thread."""
-    if resource is None:
-        return
-
-    if threading.current_thread() is not threading.main_thread():
-        raise RuntimeError("Playwright sync resources must close on the main thread")
-
-    def interrupt_close(_signum: int, _frame: object) -> None:
-        raise _CloseTimeout
-
-    previous_handler = signal.signal(signal.SIGALRM, interrupt_close)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
-    try:
-        # SIGALRM bounds the call without moving thread-affine Playwright sync
-        # objects into the incompatible worker thread used by the first fix.
-        resource.close()  # type: ignore[attr-defined]
-    except (_CloseTimeout, Exception):  # noqa: BLE001 - preserve the original outcome
-        pass
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -129,32 +98,29 @@ def take_shot(
                 sys.exit(3)
             raise ShotError(f"failed to launch chromium: {exc}") from exc
 
-        context = None
-        try:
-            context = browser.new_context(viewport={"width": width, "height": height})
-            login_response = context.request.post(
-                f"{base.rstrip('/')}/auth/password-login",
-                data={"provider": "basic", "username": username, "password": password, "next": "/"},
-            )
-            status = login_response.status
-            if not login_response.ok:
-                raise ShotError(f"login failed: HTTP {status}")
-            body = login_response.json()
-            if not body.get("ok"):
-                raise ShotError(f"login failed: server rejected credentials (HTTP {status})")
-            print(f"login: ok ({status})")
+        context = browser.new_context(viewport={"width": width, "height": height})
+        login_response = context.request.post(
+            f"{base.rstrip('/')}/auth/password-login",
+            data={"provider": "basic", "username": username, "password": password, "next": "/"},
+        )
+        status = login_response.status
+        if not login_response.ok:
+            raise ShotError(f"login failed: HTTP {status}")
+        body = login_response.json()
+        if not body.get("ok"):
+            raise ShotError(f"login failed: server rejected credentials (HTTP {status})")
+        print(f"login: ok ({status})")
 
-            page = context.new_page()
-            url = _resolve_url(base, route)
-            response = page.goto(url, wait_until="networkidle", timeout=30_000)
-            if response is not None and response.status >= 400:
-                raise ShotError(f"route {url} returned HTTP {response.status}")
-            page.wait_for_timeout(wait_ms)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            page.screenshot(path=str(out), full_page=full_page)
-        finally:
-            _close_quietly(context)
-            _close_quietly(browser)
+        page = context.new_page()
+        url = _resolve_url(base, route)
+        response = page.goto(url, wait_until="networkidle", timeout=30_000)
+        if response is not None and response.status >= 400:
+            raise ShotError(f"route {url} returned HTTP {response.status}")
+        page.wait_for_timeout(wait_ms)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(out), full_page=full_page)
+        context.close()
+        browser.close()
 
 
 def main() -> int:

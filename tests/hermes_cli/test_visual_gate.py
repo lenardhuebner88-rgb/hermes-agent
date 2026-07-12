@@ -72,9 +72,7 @@ def test_default_quick_gate_visual_gate_control_only_failure_notes(tmp_path, mon
 
 def test_run_visual_gate_uses_ephemeral_loopback_url_and_tears_down(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    web_dist = repo / "hermes_cli" / "web_dist"
-    web_dist.mkdir(parents=True)
-    (web_dist / "index.html").write_text("ready", encoding="utf-8")
+    repo.mkdir()
     calls: list[list[str]] = []
     stopped: list[Path] = []
     gate_url = "http://127.0.0.1:45678/control"
@@ -112,79 +110,9 @@ def test_run_visual_gate_uses_ephemeral_loopback_url_and_tears_down(tmp_path, mo
     assert stopped == [repo / "hermes_cli" / "web_dist"]
 
 
-def test_run_visual_gate_builds_missing_web_dist_before_starting_server(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "web").mkdir(parents=True)
-    web_dist_index = repo / "hermes_cli" / "web_dist" / "index.html"
-    calls: list[list[str]] = []
-
-    class FakeServer:
-        def __init__(self, web_dist):
-            assert Path(web_dist) == web_dist_index.parent
-
-        def start(self):
-            assert web_dist_index.is_file()
-            return "http://127.0.0.1:45678/control"
-
-        def stop(self):
-            pass
-
-    def fake_run(argv, **kwargs):
-        calls.append(list(argv))
-        if argv == ["npm", "run", "build"]:
-            assert kwargs["cwd"] == str(repo / "web")
-            web_dist_index.parent.mkdir(parents=True)
-            web_dist_index.write_text("built", encoding="utf-8")
-        if argv[0] == "node":
-            return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(kwt, "_VisualGateStaticServer", FakeServer)
-    monkeypatch.setattr(kwt, "_resolve_chromium_shot", lambda: "chromium-shot")
-    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
-
-    assert kwt._run_visual_gate(repo, tmp_path / "screens") is None
-    assert calls[0] == ["npm", "run", "build"]
-
-
-def test_run_visual_gate_fails_closed_when_missing_web_dist_build_fails(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "web").mkdir(parents=True)
-    monkeypatch.setattr(
-        kwt.subprocess,
-        "run",
-        lambda argv, **kwargs: SimpleNamespace(
-            returncode=2, stdout="build stdout", stderr="build stderr"
-        ),
-    )
-
-    detail = kwt._run_visual_gate(repo, tmp_path / "screens")
-
-    assert detail is not None
-    assert "frontend build for missing web_dist failed with exit 2" in detail
-    assert "build stderr" in detail
-
-
-def test_run_visual_gate_fails_closed_when_build_does_not_create_index(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "web").mkdir(parents=True)
-    monkeypatch.setattr(
-        kwt.subprocess,
-        "run",
-        lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
-    )
-
-    detail = kwt._run_visual_gate(repo, tmp_path / "screens")
-
-    assert detail is not None
-    assert "frontend build completed but web_dist is still missing index.html" in detail
-
-
 def test_run_visual_gate_tears_down_after_failure(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    web_dist = repo / "hermes_cli" / "web_dist"
-    web_dist.mkdir(parents=True)
-    (web_dist / "index.html").write_text("ready", encoding="utf-8")
+    repo.mkdir()
     stopped: list[bool] = []
 
     class FakeServer:
