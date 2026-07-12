@@ -240,6 +240,126 @@ class TestCheckSystemdTimingAlignment:
         result = sf.check_systemd_timing_alignment(180.0)
         assert result is None
 
+
+# ---------------------------------------------------------------------------
+# read_mem_available_ratio + snapshot integration
+# ---------------------------------------------------------------------------
+
+class TestReadMemAvailableRatio:
+    @pytest.mark.skipif(sys.platform == "win32", reason="Linux /proc/meminfo only")
+    def test_returns_ratio_in_unit_interval_on_linux(self):
+        ratio = sf.read_mem_available_ratio()
+        # /proc/meminfo exists on Linux; ratio must be a sane fraction.
+        assert ratio is None or (0.0 < ratio <= 1.0)
+
+    def test_parses_synthetic_meminfo(self, monkeypatch):
+        fake = "MemTotal:       1000 kB\nMemAvailable:    250 kB\nCached: 10 kB\n"
+
+        def fake_open(path, *a, **k):
+            import io
+            assert path == "/proc/meminfo"
+            return io.StringIO(fake)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert sf.read_mem_available_ratio() == pytest.approx(0.25)
+
+    def test_returns_none_when_meminfo_unreadable(self, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("nope")
+
+        monkeypatch.setattr("builtins.open", boom)
+        assert sf.read_mem_available_ratio() is None
+
+    def test_returns_none_on_malformed_meminfo(self, monkeypatch):
+        def fake_open(path, *a, **k):
+            import io
+            return io.StringIO("MemTotal:       garbage\n")
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert sf.read_mem_available_ratio() is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Linux /proc only")
+    def test_snapshot_includes_mem_ratio_when_available(self):
+        ctx = sf.snapshot_shutdown_context(signal.SIGTERM)
+        if "mem_available_ratio" in ctx:
+            assert 0.0 < ctx["mem_available_ratio"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# classify_exit_category
+# ---------------------------------------------------------------------------
+
+class TestClassifyExitCategory:
+    def test_planned_breadcrumb_is_regular(self):
+        bc = {"planned": True, "signal_initiated": False, "ctx": {}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "regular"
+
+    def test_planned_wins_even_under_memory_pressure(self):
+        # An intentional stop stays "regular" even if memory is tight.
+        bc = {"planned": True, "ctx": {"mem_available_ratio": 0.01}}
+        assert sf.classify_exit_category(0, breadcrumb=bc) == "regular"
+
+    def test_oom_evidence_yields_oom_near(self):
+        bc = {"signal_initiated": True, "ctx": {"mem_available_ratio": 0.02}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "oom_near"
+
+    def test_no_oom_claim_without_evidence(self):
+        # Unexpected signal, but no memory number → fail closed to unknown,
+        # NOT a guessed oom_near.
+        bc = {"signal_initiated": True, "ctx": {"signal": "SIGKILL"}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "unknown"
+
+    def test_healthy_memory_is_not_oom(self):
+        bc = {"signal_initiated": True, "ctx": {"mem_available_ratio": 0.9}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "unknown"
+
+    def test_compression_hint(self):
+        bc = {"signal_initiated": True, "hint": "compression", "ctx": {}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "compression_related"
+
+    def test_api_interrupt_hint(self):
+        bc = {"signal_initiated": True, "hint": "api_interrupt", "ctx": {}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "api_interrupt"
+
+    def test_oom_evidence_outranks_hint(self):
+        bc = {"hint": "compression", "ctx": {"mem_available_ratio": 0.01}}
+        assert sf.classify_exit_category(1, breadcrumb=bc) == "oom_near"
+
+    def test_no_breadcrumb_clean_exit_is_regular(self):
+        assert sf.classify_exit_category(0, breadcrumb=None) == "regular"
+
+    def test_no_breadcrumb_service_restart_code_is_regular(self):
+        assert sf.classify_exit_category(75, breadcrumb=None) == "regular"
+
+    def test_no_breadcrumb_nonzero_exit_is_unknown(self):
+        assert sf.classify_exit_category(1, breadcrumb=None) == "unknown"
+
+    def test_result_is_always_a_known_category(self):
+        for bc in (None, {}, {"planned": True}, {"signal_initiated": True},
+                   {"hint": "bogus"}, {"ctx": {"mem_available_ratio": "x"}}):
+            assert sf.classify_exit_category(0, breadcrumb=bc) in sf.EXIT_CATEGORIES
+
+    def test_never_raises_on_garbage_ctx(self):
+        bc = {"ctx": {"mem_available_ratio": None}, "planned": None}
+        assert sf.classify_exit_category(3, breadcrumb=bc) in sf.EXIT_CATEGORIES
+
+
+class TestFormatExitCategoryForLog:
+    def test_includes_category_and_exit_code(self):
+        bc = {"signal_initiated": True,
+              "ctx": {"signal": "SIGTERM", "mem_available_ratio": 0.02}}
+        line = sf.format_exit_category_for_log("oom_near", 1, breadcrumb=bc)
+        assert "category=oom_near" in line
+        assert "exit_code=1" in line
+        assert "signal=SIGTERM" in line
+        assert "mem_available_ratio=0.020" in line
+
+    def test_handles_missing_breadcrumb(self):
+        line = sf.format_exit_category_for_log("regular", 0, breadcrumb=None)
+        assert "category=regular" in line
+        assert "exit_code=0" in line
+        assert "mem_available_ratio=?" in line
+
     def test_returns_none_when_unit_undeterminable(self, monkeypatch):
         monkeypatch.setenv("INVOCATION_ID", "abc")
         # /proc/self/cgroup likely doesn't end in .service for the test runner
