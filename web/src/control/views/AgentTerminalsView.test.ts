@@ -7,10 +7,12 @@ import {
   formatActivityAge,
   formatPtyResize,
   hasUnseenActivity,
+  isTerminalCopyShortcut,
   orderOverviewForFleet,
   orderWindowsForStrip,
   pickInitialTarget,
   reconnectDelayMs,
+  terminalSurfaceOrder,
 } from "./AgentTerminalsView";
 
 // Echtes Datenformat: 9-Fenster-Inventar aus dem Live-System (tmux list-windows -a
@@ -317,5 +319,67 @@ describe("formatPtyResize", () => {
 
   it("formats the default 80×24 size", () => {
     expect(formatPtyResize(80, 24)).toBe("\x1b[RESIZE:80;24]");
+  });
+});
+
+describe("isTerminalCopyShortcut", () => {
+  const event = (patch: Partial<KeyboardEvent>): KeyboardEvent =>
+    ({ ctrlKey: false, metaKey: false, shiftKey: false, key: "", ...patch }) as KeyboardEvent;
+
+  it("accepts Ctrl+Shift+C in both key casings", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "C" }))).toBe(true);
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "c" }))).toBe(true);
+  });
+
+  it("accepts Ctrl+Insert", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "Insert" }))).toBe(true);
+  });
+
+  // Plain Ctrl+C must keep reaching tmux as ETX — it is the agent interrupt.
+  it("rejects plain Ctrl+C so the interrupt still reaches the agent", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "c" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, key: "C" }))).toBe(false);
+  });
+
+  it("rejects unrelated keys and bare modifiers", () => {
+    expect(isTerminalCopyShortcut(event({ ctrlKey: true, shiftKey: true, key: "V" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ shiftKey: true, key: "C" }))).toBe(false);
+    expect(isTerminalCopyShortcut(event({ key: "Insert" }))).toBe(false);
+  });
+
+  // Cmd+C on macOS is the OS-level copy — the browser already handles it.
+  it("rejects meta-key combinations", () => {
+    expect(isTerminalCopyShortcut(event({ metaKey: true, ctrlKey: true, shiftKey: true, key: "C" }))).toBe(false);
+  });
+});
+
+describe("terminalSurfaceOrder", () => {
+  // Mirrors what Element.closest() gives the handler: the nearest ancestor carrying
+  // data-terminal-surface, or null when the event came from outside every xterm.
+  const target = (surface: string | null): EventTarget =>
+    ({
+      closest: (selector: string) =>
+        selector === "[data-terminal-surface]" && surface !== null
+          ? { getAttribute: () => surface }
+          : null,
+    }) as unknown as EventTarget;
+
+  it("returns the pane order of the xterm surface the event came from", () => {
+    expect(terminalSurfaceOrder(target("0"))).toBe(0);
+    expect(terminalSurfaceOrder(target("3"))).toBe(3);
+  });
+
+  // The blocking case: a stale terminal selection must not let Ctrl+Shift+C in the
+  // composer or the rename field copy old terminal output instead of the field's text.
+  it("returns null for events outside any terminal surface", () => {
+    expect(terminalSurfaceOrder(target(null))).toBeNull();
+    expect(terminalSurfaceOrder(null)).toBeNull();
+    expect(terminalSurfaceOrder({} as EventTarget)).toBeNull();
+  });
+
+  it("returns null for a malformed pane order", () => {
+    expect(terminalSurfaceOrder(target(""))).toBeNull();
+    expect(terminalSurfaceOrder(target("pane"))).toBeNull();
+    expect(terminalSurfaceOrder(target("-1"))).toBeNull();
   });
 });

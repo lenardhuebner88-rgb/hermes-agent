@@ -149,7 +149,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let disposed = false;
     manualCloseRef.current = false;
     reconnectAttemptRef.current = 0;
-    termRef.current?.clear();
+    // reset(), not clear(): clear() leaves the previous session's modes (alternate
+    // buffer, scroll region, SGR) in place, mixing the old frame into the new target.
+    termRef.current?.reset();
     termRef.current?.writeln(`Attaching ${target.session}:${target.window} …`);
 
     const clearReconnect = () => {
@@ -288,6 +290,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     <div
       ref={hostRef}
       data-testid={`terminal-pane-host-${paneOrder}`}
+      // Marks this host as an xterm surface: the view's copy chord only fires for
+      // events originating inside one, and copies exactly this pane's selection.
+      data-terminal-surface={String(paneOrder)}
       data-ready={connection.ready ? "true" : "false"}
       className={`h-full min-h-0 min-w-0 overflow-hidden bg-surface-0 ${className}`}
       onMouseDown={onActivate}
