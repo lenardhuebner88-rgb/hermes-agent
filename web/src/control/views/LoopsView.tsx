@@ -163,6 +163,17 @@ function ageFromIso(iso: string, nowMs: number): string {
   return fmtAge(Math.floor(ms / 1000), Math.floor(nowMs / 1000));
 }
 
+/** Live clock for elapsed labels. It deliberately does not depend on the 5s API poll:
+ * a slow or failed poll must not freeze a phase counter that still looks live. */
+export function useLoopNowMs(intervalMs = 1_000): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return nowMs;
+}
+
 /** Pro Phase gebaute overrides — nur Felder, die vom Manifest-Default abweichen. */
 function buildPhaseOverrides(
   pack: LoopPackSummary,
@@ -1813,6 +1824,7 @@ export function LoopsGrid({
 export function LoopsView() {
   const loops = useLoops();
   const models = useLoopModels();
+  const nowMs = useLoopNowMs();
   const [selectedPack, setSelectedPack] = useState<string | null>(null);
   const [startOpenPack, setStartOpenPack] = useState<string | null>(null);
   const [pendingStopPack, setPendingStopPack] = useState<string | null>(null);
@@ -1991,6 +2003,7 @@ export function LoopsView() {
         fileSaveError={fileSaveError}
         duplicateBusy={duplicateBusy}
         duplicateError={duplicateError}
+        nowMs={nowMs}
         onSetPendingStop={setPendingStopPack}
         onSetPendingLand={setPendingLandPack}
         onToggleDetail={handleToggleDetail}

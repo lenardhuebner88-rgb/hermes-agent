@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { LoopsGrid, useLoopNowMs, type LoopsGridProps } from "./LoopsView";
 // Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
 import loopsViewSource from "./LoopsView.tsx?raw";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
@@ -16,7 +16,24 @@ const t = de.loops;
 // (screen/within) im selben Testfile den DOM — belegt beim Hinzufügen der
 // W3-5-Touch-Target-Tests unten (Cross-Test-Kollision auf "Planung
 // überspringen"). Etabliertes Muster in diesem Repo, s. leitstand.test.tsx.
-afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
+
+describe("Loops live clock", () => {
+  it("advances independently of API polling", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-13T01:00:00Z"));
+    const { result } = renderHook(() => useLoopNowMs());
+    const before = result.current;
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(result.current).toBe(before + 2_000);
+    vi.useRealTimers();
+  });
+});
 
 // Manifest-Felder (phases/stop/params/description/stability/type) sind aus dem
 // ECHTEN Payload geerntet — via TestClient(app).get("/api/loops") gegen die
