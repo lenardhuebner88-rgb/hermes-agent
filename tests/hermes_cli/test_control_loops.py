@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 
 from hermes_cli import control_loops
 
+_REAL_SYSTEMCTL = control_loops._systemctl
+
 
 def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path) -> None:
     d = packs_dir / name
@@ -240,6 +242,30 @@ def test_timer_toggle_calls_systemctl(api):
     assert ("enable", "--now", "hermes-loop@nacht.timer") in calls
     resp = client.post("/api/loops/nacht/timer", json={"enabled": False})
     assert ("disable", "--now", "hermes-loop@nacht.timer") in calls
+
+
+def test_missing_systemctl_binary_degrades_list_and_returns_defined_mutation_error(api, monkeypatch):
+    client, _calls, _tmp = api
+    real_run = control_loops.subprocess.run
+
+    def missing_systemctl(*args, **kwargs):
+        if args[0][0] == "systemctl":
+            raise FileNotFoundError(2, "No such file or directory", "systemctl")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(control_loops, "_systemctl", _REAL_SYSTEMCTL)
+    monkeypatch.setattr(control_loops.subprocess, "run", missing_systemctl)
+
+    resp = client.get("/api/loops")
+    assert resp.status_code == 200, resp.text
+    nacht = next(pack for pack in resp.json()["packs"] if pack["name"] == "nacht")
+    assert nacht["timer_enabled"] is False
+    assert nacht["timer_schedule"] == "23:37"
+    assert nacht["timer_next_run"] is None
+
+    resp = client.post("/api/loops/nacht/timer", json={"enabled": True})
+    assert resp.status_code == 502
+    assert "systemctl" in resp.json()["detail"]
 
 
 def test_timer_schedule_persists_for_disabled_timer_without_starting_it(api):

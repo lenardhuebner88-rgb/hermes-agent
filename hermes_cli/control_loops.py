@@ -105,11 +105,15 @@ def _models_path() -> Path:
 
 def _systemctl(*args: str) -> subprocess.CompletedProcess:
     """Seam für systemd-Aufrufe (Tests monkeypatchen genau diese Funktion)."""
-    return subprocess.run(
-        ["systemctl", "--user", *args],
-        capture_output=True, encoding="utf-8", errors="replace",
-        timeout=30, check=False,
-    )
+    command = ["systemctl", "--user", *args]
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, stdout="", stderr=str(exc))
 
 
 def _systemd_user_dir() -> Path:
