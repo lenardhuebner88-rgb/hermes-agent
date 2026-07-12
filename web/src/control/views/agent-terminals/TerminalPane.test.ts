@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildAttachQuery, canFitTerminal, formatPtyResize, reconnectDelayMs } from "./terminalPaneModel";
+import { buildAttachQuery, canFitTerminal, reconnectDelayMs } from "./terminalPaneModel";
 
 describe("TerminalPane helpers", () => {
   it("builds one isolated attachment identity per pane", () => {
@@ -28,9 +28,5 @@ describe("TerminalPane helpers", () => {
     expect(reconnectDelayMs(0)).toBe(1000);
     expect(reconnectDelayMs(4)).toBe(15000);
     expect(reconnectDelayMs(20)).toBe(15000);
-  });
-
-  it("formats resize messages for the server PTY protocol", () => {
-    expect(formatPtyResize(101.9, 31.8)).toBe("\x1b[RESIZE:101;31]");
   });
 });

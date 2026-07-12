@@ -11,12 +11,6 @@ export function canFitTerminal(host: Pick<HTMLElement, "clientWidth" | "clientHe
   return host.clientWidth > 0 && host.clientHeight > 0;
 }
 
-export function formatPtyResize(cols: number, rows: number): string {
-  const c = Math.max(2, Number.isFinite(cols) ? Math.floor(cols) : 0);
-  const r = Math.max(2, Number.isFinite(rows) ? Math.floor(rows) : 0);
-  return `\x1b[RESIZE:${c};${r}]`;
-}
-
 export function buildAttachQuery(
   target: TerminalTarget,
   paneOrder: number,
