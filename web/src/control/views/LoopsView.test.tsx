@@ -743,8 +743,12 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
     fireEvent.click(screen.getByRole("button", { name: t.submitStart }));
 
     expect(onSubmitStart).toHaveBeenCalledWith(idlePipeline.name, {
+      PHASE_PLAN_ENGINE: "claude",
+      PHASE_PLAN_MODEL: "claude-fable-5",
       PHASE_BUILD_ENGINE: "neuralwatt",
       PHASE_BUILD_MODEL: "kimi-k2.7-code",
+      PHASE_VERIFY_ENGINE: "claude",
+      PHASE_VERIFY_MODEL: "claude-fable-5",
     });
   });
 
@@ -840,7 +844,16 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
     const submitButtons = screen.getAllByRole("button", { name: t.submitStart });
     fireEvent.click(submitButtons[submitButtons.length - 1]);
 
-    expect(onSubmitStart).toHaveBeenCalledWith(pack.name, { MAX_ROUNDS: "15", MAX_HOURS: "4" });
+    expect(onSubmitStart).toHaveBeenCalledWith(pack.name, {
+      MAX_ROUNDS: "15",
+      MAX_HOURS: "4",
+      PHASE_PLAN_ENGINE: "claude",
+      PHASE_PLAN_MODEL: "claude-fable-5",
+      PHASE_BUILD_ENGINE: "claude",
+      PHASE_BUILD_MODEL: "claude-sonnet-5",
+      PHASE_VERIFY_ENGINE: "claude",
+      PHASE_VERIFY_MODEL: "claude-fable-5",
+    });
   });
 
   it("setzt SKIP_PLAN=1 in overrides, wenn die Checkbox angehakt ist", () => {

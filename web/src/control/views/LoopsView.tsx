@@ -196,12 +196,12 @@ function buildPhaseOverrides(
   phaseValues: Record<string, { engine: string; model: string }>,
 ): Record<string, string> {
   const overrides: Record<string, string> = {};
-  for (const [phase, original] of Object.entries(pack.phases)) {
+  for (const phase of Object.keys(pack.phases)) {
     const current = phaseValues[phase];
     if (!current) continue;
     const upper = phase.toUpperCase();
-    if (current.engine !== original.engine) overrides[`PHASE_${upper}_ENGINE`] = current.engine;
-    if (current.model !== original.model) overrides[`PHASE_${upper}_MODEL`] = current.model;
+    overrides[`PHASE_${upper}_ENGINE`] = current.engine;
+    overrides[`PHASE_${upper}_MODEL`] = current.model;
   }
   return overrides;
 }
