@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 
 DEFAULT_BASE = "http://127.0.0.1:9119"
@@ -23,14 +25,33 @@ class ShotError(RuntimeError):
     """User-facing failure."""
 
 
-def _close_quietly(resource: object | None) -> None:
-    """Best-effort close on the calling thread for Playwright sync API safety."""
+class _CloseTimeout(BaseException):
+    """Internal signal used to interrupt a hung synchronous Playwright close."""
+
+
+def _close_quietly(resource: object | None, *, timeout_seconds: float = 2.0) -> None:
+    """Bounded best-effort close on the Playwright sync API's calling thread."""
     if resource is None:
         return
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Playwright sync resources must close on the main thread")
+
+    def interrupt_close(_signum: int, _frame: object) -> None:
+        raise _CloseTimeout
+
+    previous_handler = signal.signal(signal.SIGALRM, interrupt_close)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
     try:
+        # SIGALRM bounds the call without moving thread-affine Playwright sync
+        # objects into the incompatible worker thread used by the first fix.
         resource.close()  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 - teardown must preserve the original outcome
+    except (_CloseTimeout, Exception):  # noqa: BLE001 - preserve the original outcome
         pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
