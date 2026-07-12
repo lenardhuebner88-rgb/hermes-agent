@@ -70,6 +70,40 @@ def _read_proc_cmdline(pid: int) -> Optional[str]:
     return data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
 
 
+def _meminfo_kb(line: str) -> Optional[int]:
+    """Parse a '/proc/meminfo' value line ('MemTotal:  16305064 kB') to KiB."""
+    try:
+        return int(line.split(":", 1)[1].strip().split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def read_mem_available_ratio() -> Optional[float]:
+    """MemAvailable / MemTotal from /proc/meminfo, or None off-Linux/unreadable.
+
+    Cheap (<1ms), pure stdlib, never raises.  This is the sole OOM-adjacency
+    signal the exit classifier is allowed to key on: a low ratio is concrete
+    memory-pressure evidence, and its absence means we simply do NOT claim
+    ``oom_near`` (fail closed) rather than guessing.
+    """
+    try:
+        total: Optional[int] = None
+        avail: Optional[int] = None
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    total = _meminfo_kb(line)
+                elif line.startswith("MemAvailable:"):
+                    avail = _meminfo_kb(line)
+                if total is not None and avail is not None:
+                    break
+        if not total or avail is None:
+            return None
+        return avail / total
+    except (OSError, ValueError):
+        return None
+
+
 def _proc_summary(pid: int) -> Dict[str, Any]:
     """Compact /proc/<pid> snapshot: pid, ppid, state, uid, cmdline.
 
@@ -148,6 +182,14 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
         ctx["loadavg_1m"] = os.getloadavg()[0]
     except (OSError, AttributeError):
         pass
+
+    # MemAvailable ratio — the OOM-adjacency evidence consumed by
+    # classify_exit_category().  Captured here (not inferred later) so an
+    # "oom_near" verdict always rests on a number that was true at signal
+    # time.  Omitted (not zeroed) when /proc/meminfo is unreadable.
+    mem_ratio = read_mem_available_ratio()
+    if mem_ratio is not None:
+        ctx["mem_available_ratio"] = mem_ratio
 
     # /proc/self/status TracerPid: nonzero means a debugger / strace is
     # attached.  Useful when "phantom SIGKILL" turns out to be a manual
@@ -317,6 +359,121 @@ def context_as_json(ctx: Dict[str, Any]) -> str:
         return json.dumps(ctx, default=str, sort_keys=True)
     except (TypeError, ValueError):
         return "{}"
+
+
+# ---------------------------------------------------------------------------
+# Exit-category classification
+#
+# When the gateway process ends we want a single, bounded, greppable verdict
+# for WHY — so "the gateway keeps dying" tickets can be triaged by category
+# instead of re-reading raw logs each time.  The vocabulary is deliberately
+# small and closed; anything we can't evidence collapses to ``unknown``.
+# ---------------------------------------------------------------------------
+
+EXIT_CATEGORY_REGULAR = "regular"
+EXIT_CATEGORY_API_INTERRUPT = "api_interrupt"
+EXIT_CATEGORY_COMPRESSION_RELATED = "compression_related"
+EXIT_CATEGORY_OOM_NEAR = "oom_near"
+EXIT_CATEGORY_UNKNOWN = "unknown"
+
+EXIT_CATEGORIES = frozenset(
+    {
+        EXIT_CATEGORY_REGULAR,
+        EXIT_CATEGORY_API_INTERRUPT,
+        EXIT_CATEGORY_COMPRESSION_RELATED,
+        EXIT_CATEGORY_OOM_NEAR,
+        EXIT_CATEGORY_UNKNOWN,
+    }
+)
+
+# Exit codes that denote an intentional, healthy teardown: 0 (clean) and 75
+# (GATEWAY_SERVICE_RESTART_EXIT_CODE / EX_TEMPFAIL — a planned service-manager
+# restart).  Hard-coded here rather than imported so this signal-path module
+# stays import-light (gateway.restart pulls in far more).
+_REGULAR_EXIT_CODES = frozenset({0, 75})
+
+# MemAvailable/MemTotal at or below this fraction counts as OOM-adjacent.  A
+# fresh box sits well above 0.05; crossing it means the kernel is one bad
+# allocation away from invoking the OOM killer.
+_OOM_NEAR_MEM_RATIO = 0.05
+
+
+def _has_oom_evidence(ctx: Dict[str, Any]) -> bool:
+    """True only when the snapshot carries concrete low-memory evidence."""
+    ratio = ctx.get("mem_available_ratio")
+    return isinstance(ratio, (int, float)) and ratio <= _OOM_NEAR_MEM_RATIO
+
+
+def classify_exit_category(
+    exit_code: int, *, breadcrumb: Optional[Dict[str, Any]] = None
+) -> str:
+    """Map a gateway process exit to exactly one member of EXIT_CATEGORIES.
+
+    Pure, total, and never raises.  ``breadcrumb`` is the record the shutdown
+    signal handler leaves behind (``planned`` / ``signal_initiated`` flags, an
+    optional activity ``hint``, and the ``ctx`` snapshot); it is ``None`` on
+    early-exit paths that never saw a signal.
+
+    Fails closed to ``unknown``.  In particular it NEVER returns ``oom_near``
+    without an explicit low-memory number in the snapshot — an unexplained
+    signal death is reported as ``unknown``, not guessed as OOM.
+
+    Precedence (first match wins):
+
+    1. ``planned`` — operator/takeover/planned stop → ``regular``.
+    2. concrete OOM evidence → ``oom_near`` (highest-signal incident; must not
+       be masked by a softer category).
+    3. explicit activity ``hint`` — ``compression`` / ``api_interrupt``.
+    4. an unexpected signal with no further evidence → ``unknown``.
+    5. no breadcrumb / plain teardown → ``regular`` for a clean exit code,
+       else ``unknown``.
+    """
+    bc = breadcrumb or {}
+    ctx = bc.get("ctx") or {}
+
+    if bc.get("planned"):
+        return EXIT_CATEGORY_REGULAR
+
+    if _has_oom_evidence(ctx):
+        return EXIT_CATEGORY_OOM_NEAR
+
+    hint = bc.get("hint")
+    if hint == "compression":
+        return EXIT_CATEGORY_COMPRESSION_RELATED
+    if hint in ("api_interrupt", "api"):
+        return EXIT_CATEGORY_API_INTERRUPT
+
+    if bc.get("signal_initiated"):
+        # A signal killed us but nothing above explains why — fail closed.
+        return EXIT_CATEGORY_UNKNOWN
+
+    # No adverse breadcrumb: treat known-clean exit codes as a regular
+    # teardown, everything else as unexplained.
+    if exit_code in _REGULAR_EXIT_CODES:
+        return EXIT_CATEGORY_REGULAR
+    return EXIT_CATEGORY_UNKNOWN
+
+
+def format_exit_category_for_log(
+    category: str,
+    exit_code: int,
+    *,
+    breadcrumb: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render the exit verdict as a single scannable key=value line."""
+    bc = breadcrumb or {}
+    ctx = bc.get("ctx") or {}
+    sig = ctx.get("signal", "?") if ctx else "?"
+    mem = ctx.get("mem_available_ratio")
+    mem_str = f"{mem:.3f}" if isinstance(mem, (int, float)) else "?"
+    planned = "yes" if bc.get("planned") else "no"
+    sig_init = "yes" if bc.get("signal_initiated") else "no"
+    hint = bc.get("hint") or "-"
+    return (
+        f"category={category} exit_code={exit_code} signal={sig} "
+        f"planned={planned} signal_initiated={sig_init} "
+        f"hint={hint} mem_available_ratio={mem_str}"
+    )
 
 
 def check_systemd_timing_alignment(drain_timeout: float) -> Optional[Dict[str, Any]]:
