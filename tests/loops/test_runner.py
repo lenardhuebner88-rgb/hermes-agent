@@ -2367,6 +2367,83 @@ def test_night_refreshes_stale_worktree_base(tmp_path, fake_engine):
     assert "BASE-REFRESH" in runner.ledger_path.read_text(encoding="utf-8")
 
 
+def test_night_base_refresh_collapses_net_zero_revert_history(
+    tmp_path, fake_engine, monkeypatch
+):
+    """A verifier failure's build+revert pair must not poison later autoland.
+
+    BASE-REFRESH may discard the pair only when the branch is clean, has no
+    building/verified queue item, and contributes no net diff to the base.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "netzero", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "netzero")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+
+    prehead = runner.rev_parse()
+    commit_in(runner.wt, "verify-fail")
+    assert runner.revert_range(prehead)
+    assert g(
+        repo, "rev-list", "--count", f"main..{pack.branch}"
+    ).stdout.strip() == "2"
+    assert g(repo, "diff", "--quiet", f"main...{pack.branch}").returncode == 0
+
+    # Prove the collapse also advances the loop branch to the latest base.
+    (repo / "new_on_main.py").write_text("fresh = True\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "main advances after verify-fail")
+
+    observed = {}
+
+    def capture_after_refresh(fresh=False):
+        observed["ahead"] = g(
+            repo, "rev-list", "--count", f"main..{pack.branch}"
+        ).stdout.strip()
+        observed["same_tip"] = (
+            g(repo, "rev-parse", "main").stdout
+            == g(repo, "rev-parse", pack.branch).stdout
+        )
+
+    monkeypatch.setattr(runner, "cmd_run", capture_after_refresh)
+
+    assert runner.cmd_night(skip_plan=True) is True
+    assert observed == {"ahead": "0", "same_tip": True}
+    assert g(repo, "tag", "-l", "loop-rebase/netzero/*").stdout.strip()
+    assert "netto-null" in runner.ledger_path.read_text(encoding="utf-8").lower()
+
+
+@pytest.mark.parametrize("stage", ["10-building", "20-verified"])
+def test_night_base_refresh_preserves_net_zero_history_with_live_queue_stage(
+    tmp_path, fake_engine, monkeypatch, stage
+):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "netzero-guard", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "netzero-guard")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+
+    prehead = runner.rev_parse()
+    commit_in(runner.wt, "verify-fail")
+    assert runner.revert_range(prehead)
+    (runner.queue / stage / "P1-live.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    observed = {}
+
+    def capture_after_refresh(fresh=False):
+        observed["ahead"] = g(
+            repo, "rev-list", "--count", f"main..{pack.branch}"
+        ).stdout.strip()
+
+    monkeypatch.setattr(runner, "cmd_run", capture_after_refresh)
+
+    assert runner.cmd_night(skip_plan=True) is True
+    assert observed["ahead"] == "2"
+    assert "netto-null" not in runner.ledger_path.read_text(encoding="utf-8").lower()
+
+
 def test_night_base_refresh_override_skips(tmp_path, fake_engine):
     repo, runner, seen = _night_refresh_setup(
         tmp_path, fake_engine, "keinrefresh",

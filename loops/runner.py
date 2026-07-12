@@ -1482,7 +1482,9 @@ class LoopRunner:
             and self.overrides.get("SKIP_BASE_REFRESH", "").strip().lower()
             not in ("1", "true", "yes")
         ):
-            reb_ok, reb_msg = self._auto_rebase(self.pack.repo)
+            reb_ok, reb_msg = self._auto_rebase(
+                self.pack.repo, collapse_net_zero=True
+            )
             first_line = reb_msg.splitlines()[0] if reb_msg else ""
             if reb_ok:
                 self.ledger(f"BASE-REFRESH: {first_line}")
@@ -1598,7 +1600,9 @@ class LoopRunner:
             return False, f"reset --keep fehlgeschlagen: {reset.stderr.strip()}"
         return True, f"rollback auf {base[:9]}"
 
-    def _auto_rebase(self, repo: Path) -> tuple[bool, str]:
+    def _auto_rebase(
+        self, repo: Path, *, collapse_net_zero: bool = False
+    ) -> tuple[bool, str]:
         """Loop-Branch im Pack-Worktree auf main rebasen — nur wenn sicher.
 
         Sicher heißt: Worktree existiert, steht auf dem Loop-Branch, ist clean,
@@ -1607,6 +1611,13 @@ class LoopRunner:
         Erfolg als Tag loop-rebase/<pack>/<ts> erreichbar (Rollback-Anker,
         gleiche Konvention wie loop-land/…). NIEMALS ensure_wt(fresh=True)
         hier — das würde den Branch auf main resetten.
+
+        Beim BASE-REFRESH darf ``collapse_net_zero`` zusätzlich eine reine
+        Build+Revert-Historie auf die aktuelle Basis kollabieren. Das ist nur
+        erlaubt, wenn keine laufende oder verifizierte Queue-Arbeit existiert
+        und ``base...branch`` wirklich leer ist. Der Anker-Tag erhält den alten
+        Tip; ``reset --keep`` ist nach dem Clean-Guard ausreichend und vermeidet
+        einen destruktiven Hard-Reset.
         """
         if not self.wt.is_dir():
             return False, f"Pack-Worktree fehlt ({self.wt}) — manuell rebasen"
@@ -1615,9 +1626,41 @@ class LoopRunner:
             return False, f"Worktree steht auf {head!r}, nicht {self.pack.branch!r}"
         if self.git("status", "--porcelain", cwd=self.wt).stdout.strip():
             return False, "Pack-Worktree ist dirty — manuell klären"
+        net_zero = False
+        if (
+            collapse_net_zero
+            and self.qcount("10-building") == 0
+            and self.qcount("20-verified") == 0
+        ):
+            ahead = self.git(
+                "rev-list", "--count",
+                f"{self.pack.base_branch}..{self.pack.branch}", cwd=repo,
+            )
+            try:
+                has_branch_commits = int(ahead.stdout.strip()) > 0
+            except ValueError:
+                has_branch_commits = False
+            if ahead.returncode == 0 and has_branch_commits:
+                net = self.git(
+                    "diff", "--quiet",
+                    f"{self.pack.base_branch}...{self.pack.branch}", cwd=repo,
+                )
+                net_zero = net.returncode == 0
         anchor = f"loop-rebase/{self.pack.name}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         if self.git("tag", anchor, self.pack.branch, cwd=repo).returncode != 0:
             return False, "Rebase-Anker-Tag ließ sich nicht setzen"
+        if net_zero:
+            reset = self.git("reset", "--keep", self.pack.base_branch, cwd=self.wt)
+            if reset.returncode != 0:
+                self.git("tag", "-d", anchor, cwd=repo)
+                return False, (
+                    "Netto-null-Kollaps fehlgeschlagen — Branch unverändert: "
+                    f"{reset.stderr.strip()}"
+                )
+            return True, (
+                f"netto-null kollabiert auf {self.pack.base_branch} "
+                f"(Anker {anchor})"
+            )
         res = self.git("rebase", self.pack.base_branch, cwd=self.wt)
         if res.returncode != 0:
             self.git("rebase", "--abort", cwd=self.wt)
