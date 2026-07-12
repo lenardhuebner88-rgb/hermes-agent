@@ -96,6 +96,22 @@ const runningWithCommits: LoopPack = {
   commits_ahead: 2,
 };
 
+// Real failure shape captured from ht-ux-polish after PASS_ID_MISMATCH:
+// history-only fix+revert commits remain ahead, but no plan reached 20-verified.
+const bouncedPipelineWithHistoryOnlyCommits: LoopPack = {
+  ...runningPipeline,
+  name: "bounced-history-only",
+  running: false,
+  heartbeat: {
+    current: null,
+    last: [
+      { phase: "verify", engine: "codex", model: "gpt-5.6-sol", secs: 583, rc: 0, at: "2026-07-13T00:56:17" },
+    ],
+  },
+  queue: { "00-planned": 0, "10-building": 0, "20-verified": 0, "30-landed": 0, "90-bounced": 1 },
+  commits_ahead: 2,
+};
+
 // Idle, aber ohne Commits — Land darf nicht auftauchen.
 const idleNoCommits: LoopPack = {
   ...idleSweepWithCommits,
@@ -431,6 +447,13 @@ describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
   it("hides Land for an idle pack without commits_ahead", () => {
     const html = renderGrid([idleNoCommits]);
     expect(html).not.toContain(t.actions.land);
+  });
+
+  it("hides Land for a pipeline whose ahead commits have no verified plan", () => {
+    const html = renderGrid([bouncedPipelineWithHistoryOnlyCommits]);
+    expect(html).not.toContain(t.actions.land);
+    expect(html).not.toContain(t.commitsAhead(2));
+    expect(html).toContain(t.commitsUnverified(2));
   });
 });
 

@@ -1239,7 +1239,8 @@ function LoopCard({
 }: LoopCardProps) {
   const isStable = pack.stability === "stable";
   const statusLabel = pack.stop_requested ? t.stopRequested : pack.running ? t.statusRunning : t.statusIdle;
-  const canLand = !pack.running && pack.commits_ahead > 0;
+  const hasVerifiedPipelinePlan = pack.type !== "pipeline" || (pack.queue?.["20-verified"] ?? 0) > 0;
+  const canLand = !pack.running && pack.commits_ahead > 0 && hasVerifiedPipelinePlan;
   const ringState: "running" | "idle" = pack.running ? "running" : "idle";
   const ringSegments = pack.type === "pipeline" && pack.running ? deriveRingSegments(pack, nowMs) : undefined;
   const ringTicks = pack.type === "sweep" && pack.running ? deriveRingTicks(pack) : undefined;
@@ -1266,8 +1267,11 @@ function LoopCard({
       {pack.heartbeat?.last.length ? <PhaseHistoryBars last={pack.heartbeat.last} /> : null}
       {pack.queue ? <LoopQueueStepper queue={pack.queue} /> : null}
       {pack.commits_ahead > 0 ? (
-        <div className="mt-2" title={t.commitsAheadHint}>
-          <NightPill tone="sodium"><Anchor aria-hidden className="h-3.5 w-3.5" />{t.commitsAhead(pack.commits_ahead)}</NightPill>
+        <div className="mt-2" title={hasVerifiedPipelinePlan ? t.commitsAheadHint : t.commitsUnverifiedHint}>
+          <NightPill tone={hasVerifiedPipelinePlan ? "sodium" : "warn"}>
+            <Anchor aria-hidden className="h-3.5 w-3.5" />
+            {hasVerifiedPipelinePlan ? t.commitsAhead(pack.commits_ahead) : t.commitsUnverified(pack.commits_ahead)}
+          </NightPill>
         </div>
       ) : null}
 

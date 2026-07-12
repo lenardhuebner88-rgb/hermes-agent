@@ -746,6 +746,8 @@ export const de = {
     // Action-Button-Text ("Landen") als Teilstring enthält (Testkollision).
     commitsAhead: (n: number) => `${n} ${n === 1 ? "Commit" : "Commits"} bereit zur Landung`,
     commitsAheadHint: "Wartet auf Morgen-Review, bevor gemergt wird.",
+    commitsUnverified: (n: number) => `${n} ${n === 1 ? "Commit" : "Commits"} nicht verifiziert`,
+    commitsUnverifiedHint: "Kein verifizierter Pipeline-Plan — Landung ist gesperrt.",
     queuePlanned: "Geplant",
     queueBuilding: "Gebaut",
     queueVerified: "Verifiziert",
