@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PendingItem } from "../../lib/fleetHub";
@@ -9,7 +10,44 @@ import type { Worker } from "../../lib/types";
 import { HeuteTab } from "./HeuteTab";
 import type { PlanSpecRecord } from "./shared";
 
-vi.mock("./LaneQuickSwitch", () => ({ LaneQuickSwitch: () => null }));
+// Zählt echte (Re-)Mounts des Disclosure-Kindes. Ein Remount setzt den lokalen
+// open-Zustand zurück und ersetzt den Button-DOM-Knoten — genau das darf ein
+// Live-Poll-Rerender NICHT auslösen (siehe Disclosure-Stabilitäts-Test unten).
+let laneSwitchMounts = 0;
+
+// Zustandsbehaftetes Double für LaneQuickSwitch: ein Disclosure mit lokalem
+// open-Zustand, aria-expanded und zwei Selects im offenen Panel. Steht
+// stellvertretend für den realen Schnellschalter; sein Zustand überlebt genau
+// dann, wenn HeuteTab den Knoten über Rerender hinweg wiederverwendet.
+vi.mock("./LaneQuickSwitch", () => ({
+  LaneQuickSwitch: () => {
+    const [open, setOpen] = useState(false);
+    useEffect(() => {
+      laneSwitchMounts += 1;
+    }, []);
+    return (
+      <section aria-label="Lane-Modell-Schnellschalter">
+        <button
+          data-testid="lane-disclosure-toggle"
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((prev) => !prev)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") setOpen((prev) => !prev);
+          }}
+        >
+          Lane &amp; Modell
+        </button>
+        {open ? (
+          <div data-testid="lane-disclosure-panel">
+            <select aria-label="Profil" />
+            <select aria-label="Modell" />
+          </div>
+        ) : null}
+      </section>
+    );
+  },
+}));
 
 afterEach(cleanup);
 
@@ -226,5 +264,70 @@ describe("HeuteTab PlanSpec relevance ordering", () => {
 
     const { container } = renderHeute({ plans: [a, b] });
     expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta"]);
+  });
+});
+
+describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
+  it("behält denselben Disclosure-Knoten und offenen Zustand, wenn Live-Daten davor einfügen", () => {
+    laneSwitchMounts = 0;
+
+    // Initial: keine PlanSpecs, kein aktiver Worker, keine Handlungszeile —
+    // die konditionalen Geschwister vor dem Disclosure fehlen alle.
+    const { rerender } = render(
+      <HeuteTab
+        allWorkers={[]}
+        activeWorkers={[]}
+        blockedCount={0}
+        pendingApprovals={0}
+        allPlanspecs={[]}
+        costs={null}
+        daily={null}
+        now={100}
+        pendingItems={[]}
+        onWorkerClick={() => undefined}
+        onPlanSpecClick={() => undefined}
+        onNavigate={() => undefined}
+      />,
+    );
+
+    const toggle = screen.getByTestId("lane-disclosure-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("lane-disclosure-panel")).toBeTruthy();
+    expect(screen.getAllByRole("combobox")).toHaveLength(2);
+
+    // Live-Poll-Rerender: aktive Worker, laufende PlanSpecs und eine
+    // Handlungszeile erscheinen — alle als Geschwister VOR dem Disclosure.
+    rerender(
+      <HeuteTab
+        allWorkers={[worker("1", "coder"), worker("2", "premium")]}
+        activeWorkers={[worker("1", "coder"), worker("2", "premium")]}
+        blockedCount={1}
+        pendingApprovals={1}
+        allPlanspecs={[planSpec("running")]}
+        costs={costs()}
+        daily={null}
+        now={200}
+        pendingItems={[{ kind: "approval", topic: "Cockpit-Umbau", targetSubtab: "plan" }]}
+        onWorkerClick={() => undefined}
+        onPlanSpecClick={() => undefined}
+        onNavigate={() => undefined}
+      />,
+    );
+
+    const toggleAfter = screen.getByTestId("lane-disclosure-toggle");
+    // Kein Remount: derselbe DOM-Knoten, kein zusätzlicher Mount, Zustand hält.
+    expect(laneSwitchMounts).toBe(1);
+    expect(toggleAfter).toBe(toggle);
+    expect(toggleAfter.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("lane-disclosure-panel")).toBeTruthy();
+    expect(screen.getAllByRole("combobox")).toHaveLength(2);
+
+    // Enter auf dem Toggle schließt den Disclosure wieder (false).
+    fireEvent.keyDown(toggleAfter, { key: "Enter" });
+    expect(toggleAfter.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("lane-disclosure-panel")).toBeNull();
   });
 });

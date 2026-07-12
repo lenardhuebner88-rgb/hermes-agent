@@ -202,8 +202,15 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
         </>
       ) : null}
 
-      {/* 5. Sekundäre Lane-/Modellkonfiguration — zuletzt, initial eingeklappt. */}
-      <LaneQuickSwitch />
+      {/* 5. Sekundäre Lane-/Modellkonfiguration — zuletzt, initial eingeklappt.
+          Stabiler Anker: Der Disclosure hält seinen lokalen open/aria-expanded-Zustand
+          nur, solange React diesen Knoten über Live-Poll-Rerender hinweg wiederverwendet.
+          Der explizite Key macht die Reconciliation key- statt index-basiert, sodass ein
+          Einfügen/Entfernen konditionaler Geschwister davor (Worker-Karten, PlanSpecs,
+          Handlungszeilen) den Knoten selbst dann nicht remountet, wenn sich die Slot-Zahl
+          durch spätere Umbauten ändert. Invariante ist per Regressionstest gesichert
+          (HeuteTab.test.tsx → "Disclosure-Stabilität bei Live-Polling"). */}
+      <LaneQuickSwitch key="lane-config" />
     </>
   );
 }
