@@ -3311,6 +3311,26 @@ def list_active_workers(
         conn.close()
 
 
+@router.get("/dispatch/holds")
+def get_dispatch_holds(
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return the same read-only dispatch-hold report as the Kanban CLI."""
+    board = _resolve_board(board)
+    dispatch_kwargs = kanban_db.dispatch_kwargs_from_config(
+        _read_root_kanban_cfg()
+    )
+    conn = _conn(board=board)
+    try:
+        return kanban_db.list_dispatch_holds(
+            conn,
+            board=board,
+            **dispatch_kwargs,
+        )
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # B2 — Task activity timeline (read-only)
 # ---------------------------------------------------------------------------
