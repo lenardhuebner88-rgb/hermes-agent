@@ -209,6 +209,47 @@ def test_cross_tick_sibling_in_review_deferred(
     )
 
 
+def test_chain_root_lookup_error_defers_candidate_and_logs(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch, caplog,
+):
+    """A chain-root lookup failure must fail closed for this dispatch tick."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned: dict = {}
+
+    with kb.connect() as conn:
+        _root, child_ids = _make_decompose_chain(conn, repo, n_dir_siblings=2)
+        s2, s3 = child_ids
+
+        claimed = kb.claim_task(conn, s2)
+        assert claimed is not None
+
+        real_chain_root_id = kwt.chain_root_id
+
+        def _chain_root_id(conn_arg, task_id):
+            if task_id == s3:
+                raise RuntimeError("forced candidate chain-root lookup failure")
+            return real_chain_root_id(conn_arg, task_id)
+
+        monkeypatch.setattr(kwt, "chain_root_id", _chain_root_id)
+        caplog.set_level("WARNING", logger=kb.__name__)
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn_recorder(spawned),
+            serialize_by_repo=True,
+            max_concurrent_per_repo=10,
+        )
+
+    assert s3 not in spawned
+    skipped_ids = [
+        task_id
+        for task_id, _root_id in res.skipped_chain_worktree_serialized
+    ]
+    assert s3 in skipped_ids
+    assert "chain-root lookup failed for task" in caplog.text
+    assert "forced candidate chain-root lookup failure" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Test 3 — scratch sibling not blocked: dir + scratch dispatchable in same tick
 # ---------------------------------------------------------------------------

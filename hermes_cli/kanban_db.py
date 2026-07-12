@@ -21252,12 +21252,22 @@ def _dispatch_once_locked(
     # across all in-flight dir tasks; per-candidate check is a dict lookup.
     # Always active (no config key) — chain siblings share a provisioned git
     # worktree and MUST NOT run concurrently inside it.
+    _CHAIN_ROOT_LOOKUP_FAILED = "chain_root_lookup_failed"
+    _chain_root_lookup_failed: set[str] = set()
+
     def _chain_root_for_task(task_id: str) -> Optional[str]:
         try:
             from hermes_cli import kanban_worktrees as _kwt
 
             return _kwt.chain_root_id(conn, task_id)
         except Exception:
+            _chain_root_lookup_failed.add(task_id)
+            _log.warning(
+                "kanban dispatch: chain-root lookup failed for task %s; "
+                "deferring for this tick",
+                task_id,
+                exc_info=True,
+            )
             return None
 
     _chain_count: dict[str, int] = _dispatch_policy.chain_worktree_inflight_counts(
@@ -21643,6 +21653,12 @@ def _dispatch_once_locked(
         # queries) ONLY for dir candidates that pass the repo guard above.
         if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
             _cand_chain_root = _chain_root_for_task(row["id"])
+            if row["id"] in _chain_root_lookup_failed:
+                result.skipped_chain_worktree_serialized.append((
+                    row["id"],
+                    _CHAIN_ROOT_LOOKUP_FAILED,
+                ))
+                continue
             if (
                 _cand_chain_root is not None
                 and _chain_count.get(_cand_chain_root, 0) >= 1
@@ -22029,6 +22045,12 @@ def _dispatch_once_locked(
         )
         if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
             _cand_chain_root = _chain_root_for_task(row["id"])
+            if row["id"] in _chain_root_lookup_failed:
+                result.skipped_chain_worktree_serialized.append((
+                    row["id"],
+                    _CHAIN_ROOT_LOOKUP_FAILED,
+                ))
+                continue
             if (
                 _cand_chain_root is not None
                 and _chain_count.get(_cand_chain_root, 0) >= 1
