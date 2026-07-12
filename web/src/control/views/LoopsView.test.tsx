@@ -383,6 +383,17 @@ describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
     expect(html).toContain(t.actions.land);
   });
 
+  it("uses action styling instead of status green for Land and its confirmation", () => {
+    const { unmount } = renderInteractiveGrid([idleSweepWithCommits]);
+    const landButton = screen.getByRole("button", { name: t.actions.land });
+    expect(landButton.getAttribute("style") ?? "").not.toContain("var(--ln-ok)");
+    unmount();
+
+    renderInteractiveGrid([idleSweepWithCommits], { pendingLandPack: idleSweepWithCommits.name });
+    const confirmButton = screen.getByRole("button", { name: t.confirmYes });
+    expect(confirmButton.getAttribute("style") ?? "").not.toContain("var(--ln-ok)");
+  });
+
   it("hides Land while the pack is running, even with commits_ahead > 0", () => {
     const html = renderGrid([runningWithCommits]);
     expect(html).not.toContain(t.actions.land);

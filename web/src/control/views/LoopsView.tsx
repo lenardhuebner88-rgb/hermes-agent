@@ -1169,13 +1169,13 @@ function LoopCard({
                 pendingLand ? (
                   <span className="inline-flex flex-wrap items-center gap-2">
                     <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmLand}</span>
-                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-ok)", color: "var(--ln-sodium-ink)" }}>
+                    <Button size="xs" disabled={busy} onClick={() => onLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}>
                       {busy ? "…" : t.confirmYes}
                     </Button>
                     <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
                   </span>
                 ) : (
-                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ok)", borderColor: "var(--ln-ok)" }}>
+                  <Button size="xs" ghost disabled={busy} onClick={() => onSetPendingLand(pack.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-sodium)", borderColor: "var(--ln-sodium)" }}>
                     <Anchor className="h-3.5 w-3.5" />{t.actions.land}
                   </Button>
                 )
