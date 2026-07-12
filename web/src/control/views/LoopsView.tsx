@@ -1272,7 +1272,14 @@ function LoopCard({
   onDuplicate,
 }: LoopCardProps) {
   const isStable = pack.stability === "stable";
-  const statusLabel = pack.stop_requested ? t.stopRequested : pack.running ? t.statusRunning : t.statusIdle;
+  const hasStrandedBuild = !pack.running && (pack.queue?.["10-building"] ?? 0) > 0;
+  const statusLabel = pack.stop_requested
+    ? t.stopRequested
+    : pack.running
+      ? t.statusRunning
+      : hasStrandedBuild
+        ? t.statusInterrupted
+        : t.statusIdle;
   const hasVerifiedPipelinePlan = pack.type !== "pipeline" || (pack.queue?.["20-verified"] ?? 0) > 0;
   const canLand = !pack.running && pack.commits_ahead > 0 && hasVerifiedPipelinePlan;
   const ringState: "running" | "idle" = pack.running ? "running" : "idle";

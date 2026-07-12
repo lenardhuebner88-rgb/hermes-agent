@@ -741,6 +741,7 @@ export const de = {
     stabilityStable: "Stabil",
     statusRunning: "läuft",
     statusIdle: "im Leerlauf",
+    statusInterrupted: "unterbrochen — Plan im Build festgesetzt",
     stopRequested: "Stop angefordert — greift vor der nächsten Phase",
     // "zur Landung" statt "zum Landen": vermeidet, dass die Info-Chip-Kopie den
     // Action-Button-Text ("Landen") als Teilstring enthält (Testkollision).
@@ -749,7 +750,7 @@ export const de = {
     commitsUnverified: (n: number) => `${n} ${n === 1 ? "Commit" : "Commits"} nicht verifiziert`,
     commitsUnverifiedHint: "Kein verifizierter Pipeline-Plan — Landung ist gesperrt.",
     queuePlanned: "Geplant",
-    queueBuilding: "Gebaut",
+    queueBuilding: "Im Build",
     queueVerified: "Verifiziert",
     queueLanded: "Gelandet",
     queueBounced: "abgeprallt",

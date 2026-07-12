@@ -482,6 +482,18 @@ describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
     expect(html).not.toContain(t.commitsAhead(2));
     expect(html).toContain(t.commitsUnverified(2));
   });
+
+  it("labels an idle pipeline with a stranded building plan as interrupted", () => {
+    const stranded = {
+      ...bouncedPipelineWithHistoryOnlyCommits,
+      name: "stranded-build",
+      queue: { "00-planned": 0, "10-building": 1, "20-verified": 0, "30-landed": 0, "90-bounced": 0 },
+      commits_ahead: 0,
+    };
+    const html = renderGrid([stranded]);
+    expect(html).toContain(t.statusInterrupted);
+    expect(html).not.toContain(t.statusIdle);
+  });
 });
 
 describe("LoopsGrid — Werkstatt-Panel", () => {
