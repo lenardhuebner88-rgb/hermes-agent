@@ -21976,13 +21976,29 @@ def _dispatch_once_locked(
             # skipped when reading `hermes kanban tail` — without
             # this the task appears stuck in ready with no diagnosis.
             if not dry_run:
-                with write_txn(conn):
-                    _append_event(
-                        conn,
-                        row["id"],
-                        "respawn_guarded",
-                        {"reason": guard_reason},
-                    )
+                latest = conn.execute(
+                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                same_reason = False
+                if latest is not None and latest["kind"] == "respawn_guarded":
+                    try:
+                        latest_payload = json.loads(latest["payload"] or "{}")
+                        same_reason = (
+                            isinstance(latest_payload, dict)
+                            and latest_payload.get("reason") == guard_reason
+                        )
+                    except Exception:
+                        pass
+                if not same_reason:
+                    with write_txn(conn):
+                        _append_event(
+                            conn,
+                            row["id"],
+                            "respawn_guarded",
+                            {"reason": guard_reason},
+                        )
             continue
         # K3 role-fit preflight: hold a reviewer task that asks the
         # verdict-only reviewer lane to run repo gates instead of spawning a
