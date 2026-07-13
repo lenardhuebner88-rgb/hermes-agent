@@ -5852,7 +5852,7 @@ def test_dispatch_auto_retry_result_comment_does_not_wait_for_backoff(
         assert "complete answer" in (task.result or "")
 
 
-def test_dispatch_auto_retry_needs_input_result_comment_completes_immediately(
+def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediately(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
     base = 1_800_000_000
@@ -5866,6 +5866,15 @@ def test_dispatch_auto_retry_needs_input_result_comment_completes_immediately(
             reason="waiting for clarification",
             kind="needs_input",
         )
+        first_dispatch = kb.dispatch_once(
+            conn, auto_retry_blocked=True, max_spawn=0
+        )
+        sweep = kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        assert first_dispatch.auto_retried_blocked == []
+        assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
+        assert len(_operator_escalations(conn, t)) == 1
+
         monkeypatch.setattr(kb.time, "time", lambda: base + 60)
         kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
 

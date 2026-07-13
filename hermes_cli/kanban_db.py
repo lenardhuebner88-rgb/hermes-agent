@@ -21276,7 +21276,14 @@ def auto_retry_blocked_tasks(
         task_id = row["id"]
         if _is_funnel_root_task(conn, row):
             continue
-        if _operator_escalation_is_active(conn, task_id):
+        blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
+        if blocked_run is None:
+            continue
+        explicit_block_kind = row["block_kind"]
+        if (
+            _operator_escalation_is_active(conn, task_id)
+            and explicit_block_kind != "needs_input"
+        ):
             # Operator-review hold (autoresearch ``_escalate`` born blocked, or a
             # budget-runaway / circuit-breaker escalation): the operator must
             # decide what happens next. Never auto-retry behind the hold — the
@@ -21285,12 +21292,10 @@ def auto_retry_blocked_tasks(
             # Latest-state-aware via ``_operator_escalation_is_active`` (NOT the
             # permanent ``_has_operator_escalation``): an escalation the operator
             # already resolved (a newer ``"unblocked"`` event) falls through and
-            # retries normally.
+            # retries normally. Explicit ``needs_input`` is the narrow exception:
+            # its silent-block escalation may precede a late worker RESULT, which
+            # must still be consumed below without bypassing other operator holds.
             continue
-        blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
-        if blocked_run is None:
-            continue
-        explicit_block_kind = row["block_kind"]
         ended_at = int(blocked_run["ended_at"] or 0)
         reason = (blocked_run["summary"] or "").strip() or (
             blocked_run["error"] or ""
