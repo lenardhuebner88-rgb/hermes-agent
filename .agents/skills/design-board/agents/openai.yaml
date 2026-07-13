@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Design Board"
+  short_description: "Use the canonical Hermes design workflow"
+  default_prompt: "Use $design-board for this Hermes Design Board task."

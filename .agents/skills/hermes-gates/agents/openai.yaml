@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Gates"
+  short_description: "Select and run Hermes verification gates"
+  default_prompt: "Use $hermes-gates to verify this Hermes change."

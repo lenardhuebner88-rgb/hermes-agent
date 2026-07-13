@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Worktree Startup"
+  short_description: "Start isolated Hermes work safely"
+  default_prompt: "Use $hermes-worktree-startup to prepare this isolated Hermes task."

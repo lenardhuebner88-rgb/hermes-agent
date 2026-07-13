@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes UI Preview"
+  short_description: "Preview and verify Hermes UI changes"
+  default_prompt: "Use $hermes-ui-preview to verify this Hermes UI task."
