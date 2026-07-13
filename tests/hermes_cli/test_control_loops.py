@@ -8,6 +8,7 @@ tmp, systemd hinter dem _systemctl-Seam gefaked. Kein echtes systemctl/git-Repo.
 from __future__ import annotations
 
 import fcntl
+import json
 import subprocess
 from pathlib import Path
 
@@ -106,60 +107,59 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
 
 
-def test_list_and_detail_report_next_timer_fire_from_systemctl(api, monkeypatch):
-    client, calls, _tmp = api
-    enabled_units = {
-        "hermes-loop@nacht.timer",
-        "hermes-loop@fliessband.timer",
-    }
+def test_real_phase_usage_ledger_flows_to_summary_and_detail(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True)
+    rows = [
+        {"ts": "2026-07-13T01:00:00", "pack": "fliessband", "event": "phase_usage", "round": 1,
+         "phase": "build", "engine": "xai", "model": "grok-4.5", "total_tokens": 270,
+         "input_tokens": 220, "cached_input_tokens": 180, "output_tokens": 50,
+         "reasoning_tokens": 40, "billing": "subscription", "metered_cost_eur": 0.0},
+        {"ts": "2026-07-13T01:01:00", "pack": "fliessband", "event": "phase_usage", "round": 1,
+         "phase": "verify", "engine": "codex", "model": "gpt-5.6-sol", "total_tokens": 100,
+         "billing": "subscription", "metered_cost_eur": 0.0},
+    ]
+    (state / "ledger.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
+    )
 
-    def timer_systemctl(*args: str) -> subprocess.CompletedProcess:
+    pack = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "fliessband")
+    assert pack["token_usage"] == {
+        "total_tokens": 370,
+        "metered_cost_eur": 0.0,
+        "billing": "subscription",
+    }
+    detail = client.get("/api/loops/fliessband/detail").json()
+    assert detail["phase_usage"] == rows
+
+
+def test_list_loops_batches_timer_systemctl_for_all_packs(api, monkeypatch):
+    client, _calls, _tmp = api
+    calls: list[tuple[str, ...]] = []
+
+    def batched_systemctl(*args: str) -> subprocess.CompletedProcess:
         calls.append(args)
-        unit = args[-1]
-        if args[0] == "is-enabled":
-            enabled = unit in enabled_units
+        if args[0] == "show":
             return subprocess.CompletedProcess(
                 args,
-                0 if enabled else 1,
-                stdout="enabled\n" if enabled else "disabled\n",
+                0,
+                stdout=(
+                    "TimersCalendar={ OnCalendar=*-*-* 23:37:00 ; next_elapse=(null) }\n"
+                    "Id=hermes-loop@fliessband.timer\nUnitFileState=disabled\n\n"
+                    "TimersCalendar={ OnCalendar=*-*-* 23:37:00 ; next_elapse=(null) }\n"
+                    "Id=hermes-loop@nacht.timer\nUnitFileState=disabled\n"
+                ),
                 stderr="",
             )
         if args[0] == "list-timers":
-            stdout = ""
-            if unit == "hermes-loop@nacht.timer":
-                stdout = (
-                    "NEXT                         LEFT LAST                               PASSED "
-                    "UNIT                       ACTIVATES\n"
-                    "Mon 2026-07-13 00:52:00 CEST  20h Sun 2026-07-12 00:52:09 CEST "
-                    "3h 42min ago hermes-loop@nacht.timer hermes-loop@nacht.service\n"
-                    "\n1 timers listed.\n"
-                )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="[]\n", stderr="")
+        raise AssertionError(f"unexpected per-pack systemctl: {args}")
 
-    monkeypatch.setattr(control_loops, "_systemctl", timer_systemctl)
+    monkeypatch.setattr(control_loops, "_systemctl", batched_systemctl)
+    assert client.get("/api/loops").status_code == 200
+    assert [call[0] for call in calls] == ["show", "list-timers"]
 
-    packs = client.get("/api/loops").json()["packs"]
-    nacht = next(pack for pack in packs if pack["name"] == "nacht")
-    assert nacht["next_timer_fire"] == "2026-07-13T00:52:00"
-    assert nacht["running"] is False
-    assert nacht["queue"] is None
-    assert nacht["commits_ahead"] == 0
-    assert nacht["timer_enabled"] is True
-
-    fliessband = next(pack for pack in packs if pack["name"] == "fliessband")
-    assert fliessband["next_timer_fire"] is None
-
-    detail = client.get("/api/loops/nacht/detail").json()
-    assert detail["next_timer_fire"] == nacht["next_timer_fire"]
-    assert ("list-timers", "--no-pager", "hermes-loop@nacht.timer") in calls
-
-    enabled_units.clear()
-    disabled = next(
-        pack for pack in client.get("/api/loops").json()["packs"]
-        if pack["name"] == "nacht"
-    )
-    assert disabled["next_timer_fire"] is None
 
 
 def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
@@ -369,6 +369,10 @@ def test_timer_schedule_rearms_enabled_timer_and_reports_next_run(api, monkeypat
         calls.append(args)
         if args[0] == "is-enabled":
             return subprocess.CompletedProcess(args, 0, stdout="enabled\n", stderr="")
+        if args[0] == "list-timers":
+            return subprocess.CompletedProcess(
+                args, 0, stdout='[{"next":1783642500000000,"unit":"hermes-loop@nacht.timer"}]\n', stderr="",
+            )
         if args[0] == "show":
             return subprocess.CompletedProcess(
                 args, 0, stdout="Fri 2026-07-10 02:15:00 CEST\n", stderr="",
@@ -379,7 +383,7 @@ def test_timer_schedule_rearms_enabled_timer_and_reports_next_run(api, monkeypat
     resp = client.put("/api/loops/nacht/timer/schedule", json={"time": "02:15"})
     assert resp.status_code == 200, resp.text
     assert ("restart", "hermes-loop@nacht.timer") in calls
-    assert resp.json()["timer_next_run"] == "Fri 2026-07-10 02:15:00 CEST"
+    assert resp.json()["timer_next_run"] == "2026-07-10T00:15:00Z"
 
 
 def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disabled_timer(api, monkeypatch):
@@ -395,6 +399,10 @@ def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disab
                 stdout="{ OnCalendar=*-*-* 04:50:00 ; next_elapse=Fri 2026-07-10 04:50:00 CEST }\n",
                 stderr="",
             )
+        if args[0] == "list-timers":
+            return subprocess.CompletedProcess(
+                args, 0, stdout='[{"next":1783651800000000,"unit":"hermes-loop@nacht.timer"}]\n', stderr="",
+            )
         if "--property=NextElapseUSecRealtime" in args:
             return subprocess.CompletedProcess(
                 args, 0, stdout="Fri 2026-07-10 04:50:00 CEST\n", stderr="",
@@ -405,7 +413,7 @@ def test_timer_summary_uses_effective_systemd_schedule_and_reports_running_disab
     nacht = next(p for p in client.get("/api/loops").json()["packs"] if p["name"] == "nacht")
     assert nacht["timer_enabled"] is False
     assert nacht["timer_schedule"] == "04:50"
-    assert nacht["timer_next_run"] == "Fri 2026-07-10 04:50:00 CEST"
+    assert nacht["timer_next_run"] == "2026-07-10T02:50:00Z"
 
 
 @pytest.mark.parametrize(

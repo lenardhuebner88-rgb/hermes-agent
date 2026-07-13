@@ -1918,6 +1918,11 @@ export const LoopPackSummarySchema = z.object({
   timer_enabled: z.boolean().catch(false),
   timer_schedule: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).catch("23:37"),
   timer_next_run: z.string().nullable().catch(null),
+  token_usage: z.object({
+    total_tokens: z.coerce.number().nullable().catch(null),
+    metered_cost_eur: z.coerce.number().nullable().catch(null),
+    billing: z.enum(["subscription", "mixed", "unknown"]).catch("unknown"),
+  }).optional(),
 });
 
 // Reihenfolge irrelevant für die Auflösung (Summary verlangt "type", Error hat
@@ -1942,6 +1947,20 @@ export const LoopDetailResponseSchema = LoopPackSummarySchema.extend({
   queue_entries: z.record(z.string(), z.array(z.string())).nullable().catch(null),
   commits: z.array(z.string()).catch([]),
   overrides: z.record(z.string(), z.string()).catch({}),
+  phase_usage: z.array(z.object({
+    ts: z.string(),
+    round: z.coerce.number().int().positive().optional(),
+    phase: z.string(),
+    engine: z.string(),
+    model: z.string(),
+    total_tokens: z.coerce.number().optional(),
+    input_tokens: z.coerce.number().optional(),
+    cached_input_tokens: z.coerce.number().optional(),
+    output_tokens: z.coerce.number().optional(),
+    reasoning_tokens: z.coerce.number().optional(),
+    billing: z.enum(["subscription", "unknown"]).catch("unknown"),
+    metered_cost_eur: z.coerce.number().optional(),
+  })).catch([]),
 });
 
 // Werkstatt: Pack-Dateien lesen/schreiben + Pack duplizieren + landen.

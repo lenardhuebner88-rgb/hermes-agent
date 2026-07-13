@@ -1720,6 +1720,16 @@ def get_board_archive(
                            (SELECT MAX(e.created_at) FROM task_events e
                             WHERE e.task_id = t.id AND e.kind = 'archived'),
                            t.completed_at,
+                           -- Not every archive path stamps an 'archived' event: a
+                           -- freigabe root vetoed/completed via its hold, and a task
+                           -- merged away on the Flow tab, go straight to archived
+                           -- (emitting only freigabe_vetoed/-completed, or nothing at
+                           -- all on the merged-away row) and never get completed_at.
+                           -- Their newest event is the closest honest proxy for when
+                           -- they left the board; created_at would date them by their
+                           -- birth, which is a visible lie in the Archive view.
+                           (SELECT MAX(e.created_at) FROM task_events e
+                            WHERE e.task_id = t.id),
                            t.created_at,
                            0
                        ) AS archived_at

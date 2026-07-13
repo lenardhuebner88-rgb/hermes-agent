@@ -744,13 +744,18 @@ export const de = {
     stabilityStable: "Stabil",
     statusRunning: "läuft",
     statusIdle: "im Leerlauf",
+    statusInterrupted: "unterbrochen — Plan im Build festgesetzt",
     stopRequested: "Stop angefordert — greift vor der nächsten Phase",
     // "zur Landung" statt "zum Landen": vermeidet, dass die Info-Chip-Kopie den
     // Action-Button-Text ("Landen") als Teilstring enthält (Testkollision).
     commitsAhead: (n: number) => `${n} ${n === 1 ? "Commit" : "Commits"} bereit zur Landung`,
     commitsAheadHint: "Wartet auf Morgen-Review, bevor gemergt wird.",
+    commitsUnverified: (n: number) => `${n} ${n === 1 ? "Commit" : "Commits"} nicht verifiziert`,
+    commitsUnverifiedHint: "Kein verifizierter Pipeline-Plan — Landung ist gesperrt.",
+    tokenUsage: (n: number) => `${n.toLocaleString("de-DE")} Tokens`,
+    subscriptionZeroMetered: "Abo · €0 gemessen",
     queuePlanned: "Geplant",
-    queueBuilding: "Gebaut",
+    queueBuilding: "Im Build",
     queueVerified: "Verifiziert",
     queueLanded: "Gelandet",
     queueBounced: "abgeprallt",
@@ -799,6 +804,8 @@ export const de = {
     detailLedger: "Logbuch",
     detailQueue: "Queue-Dateien",
     detailCommits: "Commits (main..loop/<pack>)",
+    detailTokens: "Tokens je Phase/Runde",
+    detailNoTokens: "Noch keine Token-Telemetrie",
     detailOverrides: "Aktive Overrides",
     detailNoLedger: "Noch kein Lauf protokolliert.",
     detailNoCommits: "Noch keine Commits.",
@@ -808,6 +815,8 @@ export const de = {
     // Live-Phase (heartbeat.json — Telemetrie, best effort).
     heartbeatBetweenPhases: "zwischen Phasen",
     heartbeatCurrent: (phase: string, model: string, dur: string) => `${phase} · ${model} · seit ${dur}`,
+    heartbeatStale: (age: string) => `Letztes Telemetrie-Signal vor ${age}; Phase nicht live bestätigt.`,
+    heartbeatInvalid: "Zeitstempel ungültig; Phase nicht zeitlich bestätigt.",
     telemetryIdleLast: (phase: string, ok: boolean, secs: number, age: string) =>
       `zuletzt: ${phase} ${ok ? "✓" : "✗"} ${secs}s · vor ${age}`,
     // Lagebild-Hero: die Crew (laufende Packs) bzw. ihre Ruhe (nichts läuft).

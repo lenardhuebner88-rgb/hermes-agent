@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
+import { formatLoopTimestamp, useLoopNowMs } from "../lib/loopTime";
 // Vite ?raw: Quelltext der Komponente für den Zero-Network-Font-Guard (W3-5).
 import loopsViewSource from "./LoopsView.tsx?raw";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
@@ -16,7 +17,24 @@ const t = de.loops;
 // (screen/within) im selben Testfile den DOM — belegt beim Hinzufügen der
 // W3-5-Touch-Target-Tests unten (Cross-Test-Kollision auf "Planung
 // überspringen"). Etabliertes Muster in diesem Repo, s. leitstand.test.tsx.
-afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
+
+describe("Loops live clock", () => {
+  it("advances independently of API polling", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-13T01:00:00Z"));
+    const { result } = renderHook(() => useLoopNowMs());
+    const before = result.current;
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(result.current).toBe(before + 2_000);
+    vi.useRealTimers();
+  });
+});
 
 // Manifest-Felder (phases/stop/params/description/stability/type) sind aus dem
 // ECHTEN Payload geerntet — via TestClient(app).get("/api/loops") gegen die
@@ -45,10 +63,10 @@ const runningPipeline: LoopPack = {
   params: { max_plans: "8", focus: "Hermes-Board/Kanban-Robustheit" },
   running: true,
   heartbeat: {
-    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00", timeout: 3600, round: 1 },
+    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00Z", timeout: 3600, round: 1 },
     last: [
-      { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00" },
-      { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00" },
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00Z" },
+      { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00Z" },
     ],
   },
   stop_requested: false,
@@ -56,7 +74,8 @@ const runningPipeline: LoopPack = {
   commits_ahead: 0,
   timer_enabled: true,
   timer_schedule: "23:37",
-  timer_next_run: "Thu 2026-07-09 23:37:00 CEST",
+  timer_next_run: "2026-07-09T21:37:00Z",
+  token_usage: { total_tokens: 370, metered_cost_eur: 0, billing: "subscription" },
 };
 
 // Gleiches Manifest, aber zwischen zwei Phasen (heartbeat.current == null,
@@ -93,6 +112,22 @@ const idleSweepWithCommits: LoopPack = {
 const runningWithCommits: LoopPack = {
   ...runningPipeline,
   name: "running-with-commits",
+  commits_ahead: 2,
+};
+
+// Real failure shape captured from ht-ux-polish after PASS_ID_MISMATCH:
+// history-only fix+revert commits remain ahead, but no plan reached 20-verified.
+const bouncedPipelineWithHistoryOnlyCommits: LoopPack = {
+  ...runningPipeline,
+  name: "bounced-history-only",
+  running: false,
+  heartbeat: {
+    current: null,
+    last: [
+      { phase: "verify", engine: "codex", model: "gpt-5.6-sol", secs: 583, rc: 0, at: "2026-07-13T00:56:17Z" },
+    ],
+  },
+  queue: { "00-planned": 0, "10-building": 0, "20-verified": 0, "30-landed": 0, "90-bounced": 1 },
   commits_ahead: 2,
 };
 
@@ -200,6 +235,11 @@ function renderInteractiveGrid(packs: LoopPack[], overrides: Partial<LoopsGridPr
 }
 
 describe("LoopsGrid", () => {
+  it("renders aggregate tokens and honest zero metered subscription spend from the real ledger shape", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain(t.tokenUsage(370));
+    expect(html).toContain(t.subscriptionZeroMetered);
+  });
   it("groups packs by repository and shows the bound base branch", () => {
     const healthTrack: LoopPack = {
       ...idleSweepWithCommits,
@@ -215,7 +255,7 @@ describe("LoopsGrid", () => {
   });
 
   it("shows state-based mobile progress with round and phases but no invented percentage", () => {
-    renderInteractiveGrid([runningPipeline], { nowMs: Date.parse("2026-07-02T23:14:30") });
+    renderInteractiveGrid([runningPipeline], { nowMs: Date.parse("2026-07-02T23:14:30Z") });
     const progress = screen.getByTestId("loop-mobile-progress");
 
     expect(progress.textContent).toContain("Runde 1 / 12");
@@ -347,12 +387,16 @@ describe("LoopsGrid — Mono-Konsolidierung (W3-5)", () => {
 });
 
 describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
+  it("formats the backend ISO instant in the operator timezone", () => {
+    expect(formatLoopTimestamp("2026-07-09T21:37:00Z", "Europe/Berlin")).toBe("Do., 09.07., 23:37 MESZ");
+  });
+
   it("zeigt gespeicherte lokale Uhrzeit und den echten nächsten Lauf", () => {
     const { container } = renderInteractiveGrid([runningPipeline]);
     const view = within(container);
     const input = view.getByLabelText(`${t.timerTimeLabel} builder-reviewer`) as HTMLInputElement;
     expect(input.value).toBe("23:37");
-    expect(view.getByText(t.timerNextRun("Thu 2026-07-09 23:37:00 CEST"))).toBeTruthy();
+    expect(container.textContent).not.toContain("2026-07-09T21:37:00Z");
   });
 
   it("aktiviert Speichern erst nach einer gültigen Änderung und reicht die Uhrzeit weiter", () => {
@@ -386,6 +430,30 @@ describe("LoopsGrid — Live-Phase-Chip (heartbeat)", () => {
     const nowMs = startedMs + 8 * 60_000; // 8 Minuten seit Phasenstart
     const html = renderGrid([runningPipeline], { nowMs });
     expect(html).toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "8m"));
+  });
+
+  it("discloses a current heartbeat older than 30 seconds as last-known telemetry", () => {
+    const startedMs = Date.parse(runningPipeline.heartbeat!.current!.started_at);
+    const html = renderGrid([runningPipeline], { nowMs: startedMs + 31_000 });
+    expect(html.split(t.heartbeatStale("31s")).length - 1).toBe(2); // hero + card
+  });
+
+  it.each([
+    ["garbage", "not-a-date"],
+    ["missing timezone", "2026-07-13T08:00:00"],
+    ["millisecond number", Date.parse("2026-07-13T08:00:00Z")],
+    ["future", "2026-07-13T09:00:00Z"],
+  ])("discloses an invalid %s phase timestamp instead of claiming seit 0s", (_label, startedAt) => {
+    const malformed = {
+      ...runningPipeline,
+      heartbeat: {
+        ...runningPipeline.heartbeat!,
+        current: { ...runningPipeline.heartbeat!.current!, started_at: startedAt },
+      },
+    } as unknown as LoopPack;
+    const html = renderGrid([malformed], { nowMs: Date.parse("2026-07-13T08:00:00Z") });
+    expect(html).toContain("Zeitstempel ungültig");
+    expect(html).not.toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "0s"));
   });
 
   it("shows 'zwischen Phasen' when running but heartbeat.current is null", () => {
@@ -431,6 +499,25 @@ describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
   it("hides Land for an idle pack without commits_ahead", () => {
     const html = renderGrid([idleNoCommits]);
     expect(html).not.toContain(t.actions.land);
+  });
+
+  it("hides Land for a pipeline whose ahead commits have no verified plan", () => {
+    const html = renderGrid([bouncedPipelineWithHistoryOnlyCommits]);
+    expect(html).not.toContain(t.actions.land);
+    expect(html).not.toContain(t.commitsAhead(2));
+    expect(html).toContain(t.commitsUnverified(2));
+  });
+
+  it("labels an idle pipeline with a stranded building plan as interrupted", () => {
+    const stranded = {
+      ...bouncedPipelineWithHistoryOnlyCommits,
+      name: "stranded-build",
+      queue: { "00-planned": 0, "10-building": 1, "20-verified": 0, "30-landed": 0, "90-bounced": 0 },
+      commits_ahead: 0,
+    };
+    const html = renderGrid([stranded]);
+    expect(html).toContain(t.statusInterrupted);
+    expect(html).not.toContain(t.statusIdle);
   });
 });
 
@@ -551,6 +638,9 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
     queue_entries: null,
     commits: [],
     overrides: {},
+    phase_usage: [
+      { ts: "2026-07-13T01:00:00Z", round: 1, phase: "build", engine: "xai", model: "grok-4.5", total_tokens: 270, input_tokens: 220, cached_input_tokens: 180, output_tokens: 50, reasoning_tokens: 40, billing: "subscription", metered_cost_eur: 0 },
+    ],
   };
 
   it("renders a parsed ledger line's raw text and round/phase chips inside the open Logbuch disclosure", () => {
@@ -563,6 +653,11 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
   it("renders an unparsable ledger line verbatim instead of crashing", () => {
     const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
     expect(html).toContain("# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf");
+  });
+
+  it("renders per-round phase tokens in detail", () => {
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).toContain("R1 · build · grok-4.5 · 270 Tokens · Abo · €0 gemessen");
   });
 });
 
@@ -579,18 +674,18 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
     heartbeat: { current, last },
   });
 
-  const NOW = Date.parse("2026-07-03T08:00:00");
+  const NOW = Date.parse("2026-07-03T08:00:00Z");
 
   it("zählt verify der VORHERIGEN Runde nicht als done, wenn Runde 2 in build steht", () => {
     const pack = withHeartbeat(
-      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00", timeout: 3600 },
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00Z", timeout: 3600 },
       [
         // Runde 1 (komplett, alles grün):
-        hbEntry("plan", 0, "2026-07-03T06:00:00"),
-        hbEntry("build", 0, "2026-07-03T06:20:00"),
-        hbEntry("verify", 0, "2026-07-03T06:40:00"),
+        hbEntry("plan", 0, "2026-07-03T06:00:00Z"),
+        hbEntry("build", 0, "2026-07-03T06:20:00Z"),
+        hbEntry("verify", 0, "2026-07-03T06:40:00Z"),
         // Runde 2 (nur plan bisher):
-        hbEntry("plan", 0, "2026-07-03T07:50:00"),
+        hbEntry("plan", 0, "2026-07-03T07:50:00Z"),
       ],
     );
     const segs = deriveRingSegments(pack, NOW);
@@ -601,8 +696,8 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
   it("startet mit leerem Ring, wenn gerade eine neue Runde plant (History = Vergangenheit)", () => {
     const pack = withHeartbeat(
-      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00", timeout: 2400 },
-      [hbEntry("plan", 0, "2026-07-03T06:00:00"), hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")],
+      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00Z", timeout: 2400 },
+      [hbEntry("plan", 0, "2026-07-03T06:00:00Z"), hbEntry("build", 0, "2026-07-03T06:20:00Z"), hbEntry("verify", 0, "2026-07-03T06:40:00Z")],
     );
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.find((s) => s.key === "plan")?.state).toBe("current");
@@ -612,17 +707,17 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
   it("zeigt im Leerlauf das Ergebnis der LETZTEN Runde (Fenster ab letztem plan)", () => {
     const pack = withHeartbeat(null, [
-      hbEntry("verify", 1, "2026-07-03T05:00:00"), // ältere, rote Runde — zählt nicht
-      hbEntry("plan", 0, "2026-07-03T06:00:00"),
-      hbEntry("build", 0, "2026-07-03T06:20:00"),
-      hbEntry("verify", 0, "2026-07-03T06:40:00"),
+      hbEntry("verify", 1, "2026-07-03T05:00:00Z"), // ältere, rote Runde — zählt nicht
+      hbEntry("plan", 0, "2026-07-03T06:00:00Z"),
+      hbEntry("build", 0, "2026-07-03T06:20:00Z"),
+      hbEntry("verify", 0, "2026-07-03T06:40:00Z"),
     ]);
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.every((s) => s.state === "done")).toBe(true);
   });
 
   it("bleibt konservativ pending, wenn kein plan-Eintrag im Fenster liegt", () => {
-    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")]);
+    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00Z"), hbEntry("verify", 0, "2026-07-03T06:40:00Z")]);
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.every((s) => s.state === "pending")).toBe(true);
   });
@@ -630,7 +725,7 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
 describe("deriveRingTicks — nur der hintere zusammenhängende round-Block", () => {
   const hbEntry = (phase: string, rc: number) =>
-    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00" });
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00Z" });
 
   it("zählt rounds vor einer Pipeline-Phase nicht mit", () => {
     const pack: LoopPackSummary = {
@@ -681,8 +776,12 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
     fireEvent.click(screen.getByRole("button", { name: t.submitStart }));
 
     expect(onSubmitStart).toHaveBeenCalledWith(idlePipeline.name, {
+      PHASE_PLAN_ENGINE: "claude",
+      PHASE_PLAN_MODEL: "claude-fable-5",
       PHASE_BUILD_ENGINE: "neuralwatt",
       PHASE_BUILD_MODEL: "kimi-k2.7-code",
+      PHASE_VERIFY_ENGINE: "claude",
+      PHASE_VERIFY_MODEL: "claude-fable-5",
     });
   });
 
@@ -778,7 +877,16 @@ describe("LoopStartForm — SKIP_PLAN-Override", () => {
     const submitButtons = screen.getAllByRole("button", { name: t.submitStart });
     fireEvent.click(submitButtons[submitButtons.length - 1]);
 
-    expect(onSubmitStart).toHaveBeenCalledWith(pack.name, { MAX_ROUNDS: "15", MAX_HOURS: "4" });
+    expect(onSubmitStart).toHaveBeenCalledWith(pack.name, {
+      MAX_ROUNDS: "15",
+      MAX_HOURS: "4",
+      PHASE_PLAN_ENGINE: "claude",
+      PHASE_PLAN_MODEL: "claude-fable-5",
+      PHASE_BUILD_ENGINE: "claude",
+      PHASE_BUILD_MODEL: "claude-sonnet-5",
+      PHASE_VERIFY_ENGINE: "claude",
+      PHASE_VERIFY_MODEL: "claude-fable-5",
+    });
   });
 
   it("setzt SKIP_PLAN=1 in overrides, wenn die Checkbox angehakt ist", () => {

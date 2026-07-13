@@ -1001,7 +1001,7 @@ export interface LoopHeartbeatCurrent {
   phase: string;
   engine: string;
   model: string;
-  /** lokale ISO-Zeit ohne Zone (Runner-Host = Backend-Host). */
+  /** Eindeutiger UTC-ISO-Instant (`...Z`); ältere/kaputte Werte werden im UI abgelehnt. */
   started_at: string;
   timeout: number;
   /** Echte Runner-Runde; fehlt bei älteren Heartbeats und der Plan-Phase. */
@@ -1022,6 +1022,27 @@ export interface LoopHeartbeatHistoryEntry {
 export interface LoopHeartbeat {
   current: LoopHeartbeatCurrent | null;
   last: LoopHeartbeatHistoryEntry[];
+}
+
+export interface LoopTokenUsageSummary {
+  total_tokens: number | null;
+  metered_cost_eur: number | null;
+  billing: "subscription" | "mixed" | "unknown";
+}
+
+export interface LoopPhaseUsage {
+  ts: string;
+  round?: number;
+  phase: string;
+  engine: string;
+  model: string;
+  total_tokens?: number;
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+  billing: "subscription" | "unknown";
+  metered_cost_eur?: number;
 }
 
 export interface LoopPackSummary {
@@ -1051,6 +1072,7 @@ export interface LoopPackSummary {
   timer_schedule: string;
   /** Von systemd gemeldeter nächster Lauf; null bei deaktiviertem/unbekanntem Timer. */
   timer_next_run: string | null;
+  token_usage?: LoopTokenUsageSummary;
 }
 
 export type LoopPack = LoopPackSummary | LoopPackError;
@@ -1077,6 +1099,7 @@ export interface LoopDetailResponse extends LoopPackSummary {
   queue_entries: Record<string, string[]> | null;
   commits: string[];
   overrides: Record<string, string>;
+  phase_usage: LoopPhaseUsage[];
 }
 
 /** Werkstatt: eine Pack-Datei (pack.yaml oder ein Prompt-*.md). */

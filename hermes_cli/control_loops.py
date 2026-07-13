@@ -25,7 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -162,13 +162,65 @@ def _timer_schedule(name: str) -> str:
 
 
 def _timer_next_run(name: str) -> str | None:
-    res = _systemctl(
-        "show", "--property=NextElapseUSecRealtime", "--value", _timer_unit(name),
-    )
+    res = _systemctl("list-timers", _timer_unit(name), "--output=json", "--no-legend")
     if res.returncode != 0:
         return None
-    value = res.stdout.strip()
-    return value if value and value.lower() != "n/a" else None
+    try:
+        rows = json.loads(res.stdout)
+        next_usec = rows[0]["next"]
+        if not isinstance(next_usec, int) or next_usec <= 0:
+            return None
+        next_run = datetime.fromtimestamp(next_usec / 1_000_000, tz=timezone.utc)
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        return None
+    return next_run.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _timer_snapshot(names: list[str]) -> dict[str, dict[str, Any]]:
+    """Read all timer facts with two systemctl processes instead of three per pack."""
+    if not names:
+        return {}
+    units = [_timer_unit(name) for name in names]
+    show = _systemctl(
+        "show",
+        *units,
+        "--property=Id",
+        "--property=UnitFileState",
+        "--property=TimersCalendar",
+    )
+    snapshot: dict[str, dict[str, Any]] = {}
+    if show.returncode == 0:
+        for block in re.split(r"\n\s*\n", show.stdout.strip()):
+            fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            unit = fields.get("Id", "")
+            if not unit.startswith("hermes-loop@") or not unit.endswith(".timer"):
+                continue
+            name = unit.removeprefix("hermes-loop@").removesuffix(".timer")
+            schedule_match = _TIMER_ON_CALENDAR_RE.search(fields.get("TimersCalendar", ""))
+            snapshot[name] = {
+                "timer_enabled": fields.get("UnitFileState") == "enabled",
+                "timer_schedule": schedule_match.group(1) if schedule_match else DEFAULT_TIMER_SCHEDULE,
+                "timer_next_run": None,
+            }
+    timers = _systemctl("list-timers", "--all", "--output=json", "--no-legend")
+    try:
+        rows = json.loads(timers.stdout) if timers.returncode == 0 else []
+    except (TypeError, ValueError):
+        rows = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        unit = row.get("unit")
+        next_usec = row.get("next")
+        if not isinstance(unit, str) or not unit.startswith("hermes-loop@") or not unit.endswith(".timer"):
+            continue
+        if not isinstance(next_usec, int) or next_usec <= 0:
+            continue
+        name = unit.removeprefix("hermes-loop@").removesuffix(".timer")
+        if name in snapshot:
+            next_run = datetime.fromtimestamp(next_usec / 1_000_000, tz=timezone.utc)
+            snapshot[name]["timer_next_run"] = next_run.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return snapshot
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -321,6 +373,31 @@ def _heartbeat(state: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _phase_usage(state: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    path = state / "ledger.jsonl"
+    events: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "phase_usage":
+            events.append(event)
+    token_values = [event["total_tokens"] for event in events if isinstance(event.get("total_tokens"), int)]
+    costs = [float(event["metered_cost_eur"]) for event in events if isinstance(event.get("metered_cost_eur"), (int, float))]
+    billings = {event.get("billing") for event in events if isinstance(event.get("billing"), str)}
+    billing = next(iter(billings)) if len(billings) == 1 else "mixed" if billings else "unknown"
+    return {
+        "total_tokens": sum(token_values) if token_values else None,
+        "metered_cost_eur": sum(costs) if costs else None,
+        "billing": billing,
+    }, events
+
+
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -362,25 +439,6 @@ def _timer_enabled(name: str) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "enabled"
 
 
-def _next_timer_fire(name: str) -> str | None:
-    unit = _timer_unit(name)
-    res = _systemctl("list-timers", "--no-pager", unit)
-    if res.returncode != 0:
-        return None
-    for line in res.stdout.splitlines():
-        if unit not in line:
-            continue
-        match = re.search(r"\b(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\b", line)
-        if not match:
-            return None
-        try:
-            parsed = datetime.strptime(" ".join(match.groups()), "%Y-%m-%d %H:%M:%S")
-            return parsed.isoformat()
-        except ValueError:
-            return None
-    return None
-
-
 def _unit_failed_fast(unit: str, probe: float = 0.6) -> bool:
     """True, wenn die Unit unmittelbar nach dem Start bereits 'failed' ist (Sofort-Fail
     wie 203/EXEC). 'activating'/'active' = ordentlich angelaufen → False. Seam für Tests."""
@@ -390,7 +448,11 @@ def _unit_failed_fast(unit: str, probe: float = 0.6) -> bool:
     return _systemctl("is-active", unit).stdout.strip() == "failed"
 
 
-def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
+def _pack_summary(
+    name: str,
+    source: str = "repo",
+    timer_snapshot: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     try:
         pack = loop_runner.load_pack(_dir_for(name), name)
     except loop_runner.ManifestError as exc:
@@ -401,7 +463,9 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         if (state / "queue" / stage).is_dir() else 0
         for stage in loop_runner.QUEUE_STAGES
     }
-    timer_enabled = _timer_enabled(pack.name)
+    timer = timer_snapshot.get(pack.name) if timer_snapshot else None
+    timer_enabled = timer["timer_enabled"] if timer else _timer_enabled(pack.name)
+    token_usage, _phase_events = _phase_usage(state)
     return {
         "name": pack.name,
         "type": pack.type,
@@ -423,9 +487,9 @@ def _pack_summary(name: str, source: str = "repo") -> dict[str, Any]:
         "queue": qcounts if pack.type == "pipeline" else None,
         "commits_ahead": len(_commits_ahead(pack)),
         "timer_enabled": timer_enabled,
-        "next_timer_fire": _next_timer_fire(pack.name) if timer_enabled else None,
-        "timer_schedule": _timer_schedule(pack.name),
-        "timer_next_run": _timer_next_run(pack.name),
+        "timer_schedule": timer["timer_schedule"] if timer else _timer_schedule(pack.name),
+        "timer_next_run": timer["timer_next_run"] if timer else _timer_next_run(pack.name),
+        "token_usage": token_usage,
     }
 
 
@@ -455,7 +519,9 @@ def register_loops_routes(app: FastAPI) -> None:
 
     @app.get("/api/loops")
     def list_loops() -> dict[str, Any]:
-        return {"packs": [_pack_summary(name, source) for name, source in _all_pack_names()]}
+        packs = _all_pack_names()
+        timers = _timer_snapshot([name for name, _source in packs])
+        return {"packs": [_pack_summary(name, source, timers) for name, source in packs]}
 
     @app.get("/api/loops/models")
     def loop_models() -> dict[str, Any]:
@@ -482,12 +548,14 @@ def register_loops_routes(app: FastAPI) -> None:
             for stage in loop_runner.QUEUE_STAGES
         }
         overrides_path = state / "overrides.env"
+        _token_usage, phase_usage = _phase_usage(state)
         return {
             **_pack_summary(loaded.name, source),
             "ledger_tail": ledger_tail,
             "queue_entries": queue_entries if loaded.type == "pipeline" else None,
             "commits": _commits_ahead(loaded),
             "overrides": loop_runner.parse_overrides(overrides_path),
+            "phase_usage": phase_usage,
         }
 
     @app.post("/api/loops/{pack}/start")

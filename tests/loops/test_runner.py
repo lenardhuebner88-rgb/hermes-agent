@@ -160,6 +160,7 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
             lines.append("PLAN={{PLAN_PATH}}")
         if pname == "verify":
             lines.append("RANGE={{RANGE}}")
+            lines.append("BUILD_PROVENANCE={{BUILD_PROVENANCE}}")
         prompt.write_text("\n".join(lines) + "\n", encoding="utf-8")
         phases[pname] = {"engine": "fake", "model": "fake-1", "timeout": 60, "prompt": f"{pname}.md"}
     manifest = {
@@ -1187,6 +1188,9 @@ def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
     assert len(hb["last"]) == 2 and hb["last"][0]["phase"] == "round"
     assert {"secs", "rc", "at", "engine", "model", "round"} <= set(hb["last"][0])
     assert [entry["round"] for entry in hb["last"]] == [1, 2]
+    assert all(entry["at"].endswith("Z") for entry in hb["last"]), (
+        "wire timestamps must identify UTC instead of relying on the browser timezone"
+    )
 
 
 def test_sweep_stops_on_usage_limit(tmp_path, fake_engine):
@@ -2253,6 +2257,7 @@ def test_ledger_event_appends_valid_jsonl(tmp_path, fake_engine):
     assert "reason" not in events[0]
     assert events[1]["fail_kind"] == "verify_fail"
     assert "ts" in events[0] and "ts" in events[1]
+    assert events[0]["ts"].endswith("Z") and events[1]["ts"].endswith("Z")
     # LEDGER.md selbst bleibt unangetastet (kein Text-Format-Drift)
     assert not runner.ledger_path.exists() or "verdict" not in runner.ledger_path.read_text(encoding="utf-8")
 
@@ -2287,20 +2292,42 @@ def test_pipeline_happy_path_writes_structured_verified_event(tmp_path, fake_eng
     def build_phase(kv, cwd):
         commit_in(cwd, "t1")
         (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
-        return engines.EngineResult(rc=0, output="", usage_limit=False)
+        return engines.EngineResult(
+            rc=0,
+            output="",
+            usage_limit=False,
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=23,
+            reasoning_tokens=20,
+            total_tokens=123,
+            provenance_path="/tmp/real-builder-updates.jsonl",
+        )
+
+    def verify_phase(kv, cwd):
+        assert kv["BUILD_PROVENANCE"] == "/tmp/real-builder-updates.jsonl"
+        return ok("PASS fl-20260702-beispiel")(kv, cwd)
 
     behaviors["plan"] = plan_phase
     behaviors["build"] = build_phase
-    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    behaviors["verify"] = verify_phase
 
     runner.cmd_night()
 
     jsonl = runner.ledger_path.parent / "ledger.jsonl"
     events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
-    verified = [e for e in events if e["phase"] == "verify" and e["verdict"] == "ok"]
+    verified = [e for e in events if e["phase"] == "verify" and e.get("verdict") == "ok"]
     assert len(verified) == 1
     assert verified[0]["build_secs"] is not None
     assert verified[0]["verify_secs"] is not None
+    usage = [e for e in events if e.get("event") == "phase_usage"]
+    build_usage = next(e for e in usage if e["phase"] == "build")
+    assert build_usage["engine"] == "fake"
+    assert build_usage["total_tokens"] == 123
+    assert build_usage["cached_input_tokens"] == 80
+    assert build_usage["provenance_path"] == "/tmp/real-builder-updates.jsonl"
+    assert build_usage["billing"] == "unknown"
+    assert "metered_cost_eur" not in build_usage
 
 
 def test_pipeline_verify_fail_writes_fail_and_bounced_events(tmp_path, fake_engine):
@@ -2324,8 +2351,8 @@ def test_pipeline_verify_fail_writes_fail_and_bounced_events(tmp_path, fake_engi
 
     jsonl = runner.ledger_path.parent / "ledger.jsonl"
     events = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
-    fails = [e for e in events if e["verdict"] == "fail" and e["phase"] == "verify"]
-    bounced = [e for e in events if e["verdict"] == "bounced"]
+    fails = [e for e in events if e.get("verdict") == "fail" and e["phase"] == "verify"]
+    bounced = [e for e in events if e.get("verdict") == "bounced"]
     stopped = [e for e in events if e["phase"] == "stop"]
     assert len(fails) == 2
     assert all(e["fail_kind"] == "verify_fail" for e in fails)

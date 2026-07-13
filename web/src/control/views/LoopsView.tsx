@@ -50,6 +50,7 @@ import {
 import { parseLedgerLine } from "../lib/loopLedger";
 import type { LedgerVerdict } from "../lib/loopLedger";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
+import { formatLoopTimestamp, loopElapsedSeconds, parseLoopTimestamp, useLoopNowMs } from "../lib/loopTime";
 import type { LoopRingSegment, LoopRingTicks } from "../lib/loopRing";
 import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 
@@ -158,8 +159,8 @@ const QUEUE_STAGE_LABEL: Record<(typeof QUEUE_STAGE_KEYS)[number], string> = {
 /** Kurzes Alter aus einer lokalen ISO-Zeit (heartbeat/ledger `at`-Feld) —
  *  wrap um `fmtAge` (das nur epoch-Sekunden kennt). Ungültige Zeiten → "—". */
 function ageFromIso(iso: string, nowMs: number): string {
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return "—";
+  const ms = parseLoopTimestamp(iso);
+  if (ms === null) return "—";
   return fmtAge(Math.floor(ms / 1000), Math.floor(nowMs / 1000));
 }
 
@@ -169,12 +170,12 @@ function buildPhaseOverrides(
   phaseValues: Record<string, { engine: string; model: string }>,
 ): Record<string, string> {
   const overrides: Record<string, string> = {};
-  for (const [phase, original] of Object.entries(pack.phases)) {
+  for (const phase of Object.keys(pack.phases)) {
     const current = phaseValues[phase];
     if (!current) continue;
     const upper = phase.toUpperCase();
-    if (current.engine !== original.engine) overrides[`PHASE_${upper}_ENGINE`] = current.engine;
-    if (current.model !== original.model) overrides[`PHASE_${upper}_MODEL`] = current.model;
+    overrides[`PHASE_${upper}_ENGINE`] = current.engine;
+    overrides[`PHASE_${upper}_MODEL`] = current.model;
   }
   return overrides;
 }
@@ -400,17 +401,30 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
         </p>
       );
     }
-    const startedMs = Date.parse(current.started_at);
-    const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
+    const elapsedSec = loopElapsedSeconds(current.started_at, nowMs);
+    if (elapsedSec === null) {
+      return (
+        <p className="mt-2 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+          {current.phase} · {current.model} · {t.heartbeatInvalid}
+        </p>
+      );
+    }
     return (
-      <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
-        <span
-          aria-hidden
-          className={cn("inline-block h-1.5 w-1.5 rounded-full", !reduceMotion && "animate-pulse")}
-          style={{ background: "var(--ln-sodium)" }}
-        />
-        {t.heartbeatCurrent(current.phase, current.model, fmtDur(elapsedSec))}
-      </p>
+      <>
+        <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
+          <span
+            aria-hidden
+            className={cn("inline-block h-1.5 w-1.5 rounded-full", !reduceMotion && elapsedSec <= 30 && "animate-pulse")}
+            style={{ background: elapsedSec > 30 ? "var(--ln-warn)" : "var(--ln-sodium)" }}
+          />
+          {t.heartbeatCurrent(current.phase, current.model, fmtDur(elapsedSec))}
+        </p>
+        {elapsedSec > 30 ? (
+          <p className="mt-1 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+            {t.heartbeatStale(fmtDur(elapsedSec))}
+          </p>
+        ) : null}
+      </>
     );
   }
   const last = pack.heartbeat?.last ?? [];
@@ -566,6 +580,21 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
           </ul>
         </div>
       ) : null}
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailTokens}</p>
+        {detail.phase_usage.length > 0 ? (
+          <ul className="mt-1 space-y-1 font-data" style={{ color: "var(--ln-ink-soft)" }}>
+            {detail.phase_usage.map((usage, index) => (
+              <li key={`${usage.ts}-${usage.phase}-${index}`}>
+                {usage.round ? `R${usage.round} · ` : ""}{usage.phase} · {usage.model} · {usage.total_tokens != null ? t.tokenUsage(usage.total_tokens) : "Tokens —"}
+                {usage.billing === "subscription" && usage.metered_cost_eur === 0 ? ` · ${t.subscriptionZeroMetered}` : ""}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoTokens}</p>
+        )}
+      </div>
       <div>
         <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailCommits}</p>
         {detail.commits.length > 0 ? (
@@ -1193,7 +1222,7 @@ function TimerScheduleControl({
       <p className="mt-1 text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
         {pack.timer_enabled
           ? pack.timer_next_run
-            ? t.timerNextRun(pack.timer_next_run)
+            ? t.timerNextRun(formatLoopTimestamp(pack.timer_next_run))
             : t.timerNextRunPending
           : t.timerDisabledHint(valid ? time : pack.timer_schedule)}
       </p>
@@ -1238,8 +1267,16 @@ function LoopCard({
   onDuplicate,
 }: LoopCardProps) {
   const isStable = pack.stability === "stable";
-  const statusLabel = pack.stop_requested ? t.stopRequested : pack.running ? t.statusRunning : t.statusIdle;
-  const canLand = !pack.running && pack.commits_ahead > 0;
+  const hasStrandedBuild = !pack.running && (pack.queue?.["10-building"] ?? 0) > 0;
+  const statusLabel = pack.stop_requested
+    ? t.stopRequested
+    : pack.running
+      ? t.statusRunning
+      : hasStrandedBuild
+        ? t.statusInterrupted
+        : t.statusIdle;
+  const hasVerifiedPipelinePlan = pack.type !== "pipeline" || (pack.queue?.["20-verified"] ?? 0) > 0;
+  const canLand = !pack.running && pack.commits_ahead > 0 && hasVerifiedPipelinePlan;
   const ringState: "running" | "idle" = pack.running ? "running" : "idle";
   const ringSegments = pack.type === "pipeline" && pack.running ? deriveRingSegments(pack, nowMs) : undefined;
   const ringTicks = pack.type === "sweep" && pack.running ? deriveRingTicks(pack) : undefined;
@@ -1265,9 +1302,20 @@ function LoopCard({
       <CardTelemetryLine pack={pack} nowMs={nowMs} />
       {pack.heartbeat?.last.length ? <PhaseHistoryBars last={pack.heartbeat.last} /> : null}
       {pack.queue ? <LoopQueueStepper queue={pack.queue} /> : null}
+      {pack.token_usage?.total_tokens != null ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <NightPill tone="sodium">{t.tokenUsage(pack.token_usage.total_tokens)}</NightPill>
+          {pack.token_usage.billing === "subscription" && pack.token_usage.metered_cost_eur === 0 ? (
+            <NightPill tone="ok">{t.subscriptionZeroMetered}</NightPill>
+          ) : null}
+        </div>
+      ) : null}
       {pack.commits_ahead > 0 ? (
-        <div className="mt-2" title={t.commitsAheadHint}>
-          <NightPill tone="sodium"><Anchor aria-hidden className="h-3.5 w-3.5" />{t.commitsAhead(pack.commits_ahead)}</NightPill>
+        <div className="mt-2" title={hasVerifiedPipelinePlan ? t.commitsAheadHint : t.commitsUnverifiedHint}>
+          <NightPill tone={hasVerifiedPipelinePlan ? "sodium" : "warn"}>
+            <Anchor aria-hidden className="h-3.5 w-3.5" />
+            {hasVerifiedPipelinePlan ? t.commitsAhead(pack.commits_ahead) : t.commitsUnverified(pack.commits_ahead)}
+          </NightPill>
         </div>
       ) : null}
 
@@ -1385,8 +1433,8 @@ function newestGlobalEvent(packs: LoopPackSummary[]): LoopHeartbeatHistoryEntry 
     const last = p.heartbeat?.last ?? [];
     const newest = last[last.length - 1];
     if (!newest) continue;
-    const ms = Date.parse(newest.at);
-    if (Number.isFinite(ms) && ms > bestMs) {
+    const ms = parseLoopTimestamp(newest.at);
+    if (ms !== null && ms > bestMs) {
       bestMs = ms;
       best = newest;
     }
@@ -1427,9 +1475,8 @@ function LoopPipelineProgress({ pack, nowMs }: { pack: LoopPackSummary; nowMs: n
         {segments.map((segment, index) => {
           const active = segment.state === "current";
           const done = segment.state === "done";
-          const startedMs = active && current ? Date.parse(current.started_at) : Number.NaN;
-          const elapsed = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
-          const status = done ? t.phaseStateDone : active ? t.phaseStateActive(fmtDur(elapsed)) : t.phaseStateWaiting;
+          const elapsed = active && current ? loopElapsedSeconds(current.started_at, nowMs) : null;
+          const status = done ? t.phaseStateDone : active ? (elapsed === null ? t.heartbeatInvalid : t.phaseStateActive(fmtDur(elapsed))) : t.phaseStateWaiting;
           return (
             <li
               key={segment.key}
@@ -1480,6 +1527,9 @@ function LoopsHero({
 }) {
   const running = packs.filter((p) => p.running);
   const hero = running[0] ?? null;
+  const heroElapsedSec = hero?.heartbeat?.current
+    ? loopElapsedSeconds(hero.heartbeat.current.started_at, nowMs)
+    : null;
 
   return (
     <section
@@ -1515,17 +1565,18 @@ function LoopsHero({
                     hero.heartbeat.current.phase,
                     hero.heartbeat.current.engine,
                     hero.heartbeat.current.model,
-                    fmtDur(
-                      Number.isFinite(Date.parse(hero.heartbeat.current.started_at))
-                        ? Math.max(0, Math.floor((nowMs - Date.parse(hero.heartbeat.current.started_at)) / 1000))
-                        : 0,
-                    ),
+                    heroElapsedSec === null ? t.heartbeatInvalid : fmtDur(heroElapsedSec),
                   )}
                 </>
               ) : (
                 t.heartbeatBetweenPhases
               )}
             </p>
+            {hero.heartbeat?.current && heroElapsedSec !== null && heroElapsedSec > 30 ? (
+              <p className="mt-1 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+                {t.heartbeatStale(fmtDur(heroElapsedSec))}
+              </p>
+            ) : null}
             <div className="mt-3 hidden sm:block">
               {pendingStopPack === hero.name ? (
                 <span className="inline-flex flex-wrap items-center gap-2">
@@ -1809,6 +1860,7 @@ export function LoopsGrid({
 export function LoopsView() {
   const loops = useLoops();
   const models = useLoopModels();
+  const nowMs = useLoopNowMs();
   const [selectedPack, setSelectedPack] = useState<string | null>(null);
   const [startOpenPack, setStartOpenPack] = useState<string | null>(null);
   const [pendingStopPack, setPendingStopPack] = useState<string | null>(null);
@@ -1987,6 +2039,7 @@ export function LoopsView() {
         fileSaveError={fileSaveError}
         duplicateBusy={duplicateBusy}
         duplicateError={duplicateError}
+        nowMs={nowMs}
         onSetPendingStop={setPendingStopPack}
         onSetPendingLand={setPendingLandPack}
         onToggleDetail={handleToggleDetail}

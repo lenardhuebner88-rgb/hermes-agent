@@ -8490,6 +8490,43 @@ def test_board_verifier_question_is_not_an_operator_question(client):
     assert detail.json()["task"]["operator_question"] is False
 
 
+def test_archive_dates_a_vetoed_freigabe_root_by_its_veto_not_its_birth(client):
+    """An archive path that stamps no 'archived' event must not date by created_at.
+
+    A freigabe root vetoed via its hold goes straight to archived, emitting only
+    ``freigabe_vetoed`` and never getting ``completed_at``. Falling back to
+    ``created_at`` would show and sort it in the Archive by the day it was born.
+    On the live board 111 of 4213 archived tasks (2.6%) have this shape.
+    """
+    conn = kb.connect()
+    try:
+        born = 1_780_000_000
+        vetoed = born + 86_400 * 30
+        task_id = kb.create_task(conn, title="freigabe root")
+        conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (born, task_id))
+        # Exactly the real shape: archived, no 'archived' event, no completed_at.
+        conn.execute(
+            "UPDATE tasks SET status = 'archived', completed_at = NULL WHERE id = ?",
+            (task_id,),
+        )
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'freigabe_vetoed', '{}', ?)",
+            (task_id, vetoed),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    page = client.get("/api/plugins/kanban/board/archive", params={"limit": 50}).json()
+    card = next(t for t in page["tasks"] if t["id"] == task_id)
+    assert card["archived_at"] == vetoed, (
+        "vetoed freigabe root must be dated by its veto, not its creation; "
+        f"got {card['archived_at']} (created_at={born}, vetoed={vetoed})"
+    )
+
+
 def test_answer_operator_question_starts_a_fresh_retry_episode(client):
     """Answering must reset ``auto_retry_count`` like every other unblock path.
 

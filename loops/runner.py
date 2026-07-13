@@ -40,7 +40,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -61,6 +61,11 @@ NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
 DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
+
+
+def _utc_iso() -> str:
+    """Unambiguous wire timestamp for dashboard/state consumers."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 # Operator-Entscheid 2026-07-09 (Modell-Update 2026-07-12: Fable raus, Opus 4.8
 # plant + verifiziert): genau dieser kuratierte Opus→Sol→Opus-Loop darf
@@ -558,7 +563,7 @@ class LoopRunner:
         decision. Consumed by the strategist/dashboard via ``read_ledger_stats``.
         """
         try:
-            payload = {"ts": datetime.now().isoformat(timespec="seconds"), "pack": self.pack.name}
+            payload = {"ts": _utc_iso(), "pack": self.pack.name}
             payload.update({k: v for k, v in fields.items() if v is not None})
             path = self.ledger_path.parent / "ledger.jsonl"
             with path.open("a", encoding="utf-8") as fh:
@@ -829,7 +834,7 @@ class LoopRunner:
         self.status_path.write_text("", encoding="utf-8")
         prompt = self.render_prompt(phase, **extra)
         started = time.time()
-        started_iso = datetime.now().strftime("%FT%T")
+        started_iso = _utc_iso()
         current = {"phase": phase, "engine": cfg.engine, "model": cfg.model,
                    "started_at": started_iso, "timeout": cfg.timeout}
         if round_ is not None:
@@ -846,6 +851,24 @@ class LoopRunner:
         self._heartbeat(None, done=done)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
+        subscription_engine = cfg.engine in {"claude", "codex", "kimi", "neuralwatt", "xai"}
+        self.ledger_event(
+            event="phase_usage",
+            round=round_,
+            phase=phase,
+            engine=cfg.engine,
+            model=cfg.model,
+            secs=self.phase_secs[phase],
+            rc=result.rc,
+            input_tokens=result.input_tokens,
+            cached_input_tokens=result.cached_input_tokens,
+            output_tokens=result.output_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+            total_tokens=result.total_tokens,
+            provenance_path=result.provenance_path,
+            billing="subscription" if subscription_engine else "unknown",
+            metered_cost_eur=0.0 if subscription_engine else None,
+        )
         self.say(f"Phase {phase} fertig in {self.phase_secs[phase]}s (rc={result.rc})")
         return result
 
@@ -1179,7 +1202,7 @@ class LoopRunner:
             "commit": expected_commit,
             "evidence_dir": str(evidence_dir.resolve()),
             "evidence_sha256": digest,
-            "recorded_at": datetime.now().strftime("%FT%T"),
+            "recorded_at": _utc_iso(),
         }
         tmp = self.visual_attestation_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -1278,7 +1301,11 @@ class LoopRunner:
 
             evidence_before = self._verifier_evidence_dirs()
             verify = self.run_phase(
-                "verify", round_=rnd, PLAN_PATH=str(building), RANGE=f"{prehead}..HEAD"
+                "verify",
+                round_=rnd,
+                PLAN_PATH=str(building),
+                RANGE=f"{prehead}..HEAD",
+                BUILD_PROVENANCE=build.provenance_path or "",
             )
             if verify.usage_limit:
                 self.say("Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT (Plan in 10-building/).")
