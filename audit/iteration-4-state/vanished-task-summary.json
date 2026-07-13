@@ -1,0 +1,23 @@
+{
+  "base": "http://127.0.0.1:9123",
+  "board": "audit-scratch",
+  "dom_retained_body_count": 1,
+  "dom_source_disclosure": "Task-Detail\nDaten von vor 8s",
+  "expected_404_console_errors": 1,
+  "post_delete_detail": {
+    "body": {
+      "detail": "task t_e8837403 not found"
+    },
+    "status": 404
+  },
+  "screenshot": "audit/iteration-4-state/vanished-task-retained-truth-1440x900.png",
+  "second_tab_delete": {
+    "body": {
+      "deleted": true,
+      "task_id": "t_e8837403"
+    },
+    "status": 200
+  },
+  "task_id": "t_e8837403",
+  "unexpected_console_errors": []
+}

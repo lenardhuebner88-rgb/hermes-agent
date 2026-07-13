@@ -19,7 +19,10 @@ const { fetchJSONMock, hookState } = vi.hoisted(() => ({
         runs: [],
       },
       loading: false,
-      error: null,
+      error: null as string | null,
+      errorObj: null,
+      isStale: false,
+      lastUpdated: 1782508000,
     },
     lanesCatalog: {
       data: {
@@ -185,6 +188,19 @@ describe("NodeDetailDrawer Reassign", () => {
       />,
     );
   }
+
+  it("discloses a vanished task refresh while retaining the last detail", () => {
+    hookState.taskBody.error = "404: task t_reassign not found";
+    hookState.taskBody.isStale = true;
+    renderDrawer();
+
+    expect(screen.getByText("Task-Detail")).toBeTruthy();
+    expect(screen.getByTitle("404: task t_reassign not found")).toBeTruthy();
+    expect(screen.getByText("Task falsch profiliert")).toBeTruthy();
+
+    hookState.taskBody.error = null;
+    hookState.taskBody.isStale = false;
+  });
 
   it("nutzt DrawerShell mit Dialog-Semantik und schließt per Escape", () => {
     const onClose = vi.fn();

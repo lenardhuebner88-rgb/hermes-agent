@@ -28,6 +28,7 @@ import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TaskReassignResponseSchema, parseOrThrow } from "../../lib/schemas";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -157,6 +158,14 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
             </span>
           </div>
         </div>
+
+        <FleetSourceFreshness sources={[{
+          label: "Task-Detail",
+          error: taskBody.error,
+          errorObj: taskBody.errorObj,
+          isStale: taskBody.isStale,
+          lastUpdated: taskBody.lastUpdated,
+        }]} />
 
         {/* Tab-Leiste */}
         <div className="fleet-detail-tabs">
