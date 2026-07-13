@@ -129,7 +129,7 @@ class TestDumpSubagentTimeoutDiagnostic:
         # Child config
         assert "model: 'test/model'" in content
         assert "provider: 'testprov'" in content
-        assert "base_url: 'https://example.test/v1'" in content
+        assert "base_url: 'https://example.test/<path redacted>'" in content
         assert "max_iterations: 30" in content
         # Toolsets
         assert "enabled_toolsets:  ['web', 'terminal']" in content
@@ -144,6 +144,28 @@ class TestDumpSubagentTimeoutDiagnostic:
         assert "Worker thread stack at timeout" in content
         # The thread is parked inside _hang.wait → cond.wait → waiter.acquire
         assert "acquire" in content or "wait" in content
+
+    def test_redacts_base_url_credentials(self, hermes_home):
+        from tools.delegate_tool import _dump_subagent_timeout_diagnostic
+        child = _StubChild()
+        child.base_url = "https://user:tok@host.test/v1?api_key=SECRET"
+
+        path = _dump_subagent_timeout_diagnostic(
+            child=child,
+            task_index=0,
+            timeout_seconds=300.0,
+            duration_seconds=300.0,
+            worker_thread=None,
+            goal="x",
+        )
+        child.interrupt()
+
+        assert path is not None
+        content = Path(path).read_text()
+        assert "tok" not in content
+        assert "SECRET" not in content
+        assert "user:" not in content
+        assert "base_url: 'https://host.test/<path redacted>'" in content
 
     def test_truncates_very_long_goal(self, hermes_home):
         from tools.delegate_tool import _dump_subagent_timeout_diagnostic
