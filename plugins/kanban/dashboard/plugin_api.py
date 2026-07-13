@@ -8362,29 +8362,42 @@ def _merge_flow_children(
 ) -> dict[str, Any]:
     if keep_id == merge_id:
         raise HTTPException(status_code=400, detail="merge requires two distinct child ids")
-    child_ids = set(_flow_gate_child_ids(conn, root_id))
-    if keep_id not in child_ids or merge_id not in child_ids:
-        raise HTTPException(status_code=400, detail="both merge ids must be children of the flow root")
-    keep = kanban_db.get_task(conn, keep_id)
-    merged = kanban_db.get_task(conn, merge_id)
-    if keep is None or merged is None:
-        raise HTTPException(status_code=404, detail="merge child not found")
-    if keep.status != "scheduled" or merged.status != "scheduled":
-        raise HTTPException(status_code=409, detail="only scheduled flow children can be merged")
-    keep_body = keep.body or ""
-    merged_body = merged.body or ""
-    next_body = (
-        keep_body.rstrip()
-        + "\n\n---\nMerged from "
-        + merge_id
-        + "\n\n"
-        + merged_body.lstrip()
-    ).strip()
+    # Membership, existence and status are read INSIDE the IMMEDIATE txn and every
+    # write is CAS-guarded on status = 'scheduled'. A pre-txn read would be a TOCTOU:
+    # a concurrent claim between check and write would be silently overwritten and
+    # still logged as `archived`. On a lost CAS we raise 409 -> write_txn rolls the
+    # whole merge back, so no archive event survives a failed transition.
     with kanban_db.write_txn(conn):
-        conn.execute(
-            "UPDATE tasks SET title = ?, body = ? WHERE id = ?",
+        child_ids = set(_flow_gate_child_ids(conn, root_id))
+        if keep_id not in child_ids or merge_id not in child_ids:
+            raise HTTPException(
+                status_code=400, detail="both merge ids must be children of the flow root"
+            )
+        keep = kanban_db.get_task(conn, keep_id)
+        merged = kanban_db.get_task(conn, merge_id)
+        if keep is None or merged is None:
+            raise HTTPException(status_code=404, detail="merge child not found")
+        if keep.status != "scheduled" or merged.status != "scheduled":
+            raise HTTPException(
+                status_code=409, detail="only scheduled flow children can be merged"
+            )
+        keep_body = keep.body or ""
+        merged_body = merged.body or ""
+        next_body = (
+            keep_body.rstrip()
+            + "\n\n---\nMerged from "
+            + merge_id
+            + "\n\n"
+            + merged_body.lstrip()
+        ).strip()
+        cur = conn.execute(
+            "UPDATE tasks SET title = ?, body = ? WHERE id = ? AND status = 'scheduled'",
             (f"{keep.title} + {merged.title}"[:_SHORT_TEXT_MAX_LENGTH], next_body, keep_id),
         )
+        if cur.rowcount != 1:
+            raise HTTPException(
+                status_code=409, detail=f"flow child {keep_id} changed state during merge"
+            )
         for row in conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
             (merge_id,),
@@ -8409,10 +8422,15 @@ def _merge_flow_children(
             "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
             (merge_id, merge_id),
         )
-        conn.execute(
-            "UPDATE tasks SET status = 'archived', claim_lock = NULL, claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL WHERE id = ? AND status = 'scheduled'",
             (merge_id,),
         )
+        if cur.rowcount != 1:
+            raise HTTPException(
+                status_code=409, detail=f"flow child {merge_id} changed state during merge"
+            )
         kanban_db._append_event(
             conn,
             merge_id,
