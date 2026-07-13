@@ -525,17 +525,42 @@ class TestVisionRequirements:
 
     def test_check_requirements_accepts_codex_auth(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        (codex_home / "models_cache.json").write_text(
+            json.dumps(
+                {
+                    "fetched_at": "2026-07-13T00:00:00Z",
+                    "etag": "fixture-etag",
+                    "client_version": "fixture",
+                    "models": [
+                        {
+                            "slug": "gpt-5.6-sol",
+                            "display_name": "GPT-5.6-Sol",
+                            "description": "Codex OAuth fixture model",
+                            "visibility": "list",
+                            "supported_in_api": True,
+                            "priority": 1,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         (tmp_path / "auth.json").write_text(
             '{"active_provider":"openai-codex","providers":{"openai-codex":{"tokens":{"access_token":"codex-access-token","refresh_token":"codex-refresh-token"}}}}'
         )
         # config.yaml must reference the codex provider so vision auto-detect
         # falls back to the active provider via _read_main_provider().
         (tmp_path / "config.yaml").write_text(
-            'model:\n  default: gpt-4o\n  provider: openai-codex\n'
+            'model:\n  default: gpt-5.6-sol\n  provider: openai-codex\n'
         )
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("NOUS_API_KEY", raising=False)
 
         assert check_vision_requirements() is True
 
