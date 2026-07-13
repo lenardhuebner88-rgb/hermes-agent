@@ -396,6 +396,7 @@ def test_reflect_reads_approved_and_vetoed(board_home, tmp_path):
         # operator actions
         assert kb.release_freigabe_hold(conn, approved_root, author="operator") is True
         assert kb.dismiss_freigabe_hold(conn, vetoed_root, author="operator") is True
+        assert any(event.kind == "archived" for event in kb.list_events(conn, vetoed_root))
 
     notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
     with kb.connect() as conn:
@@ -439,6 +440,7 @@ def test_reflect_records_autoresearch_veto_signal(board_home, tmp_path):
             reason="operator review required",
         )
         assert kb.veto_operator_escalation(conn, task_id, author="operator") is True
+        assert any(event.kind == "archived" for event in kb.list_events(conn, task_id))
 
     notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
     with kb.connect() as conn:

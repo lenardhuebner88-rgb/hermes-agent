@@ -8415,6 +8415,12 @@ def _merge_flow_children(
         )
         kanban_db._append_event(
             conn,
+            merge_id,
+            "archived",
+            {"via": "flow_gate_merge", "root_id": root_id, "merged_into": keep_id},
+        )
+        kanban_db._append_event(
+            conn,
             keep_id,
             "flow_gate_sizing",
             {"action": "merge", "root_id": root_id, "merged_id": merge_id},

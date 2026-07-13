@@ -6522,6 +6522,7 @@ def test_flow_gate_sizing_merge_and_split_before_release(client):
 
     with kb.connect() as conn:
         assert kb.get_task(conn, child_ids[1]).status == "archived"
+        assert any(event.kind == "archived" for event in kb.list_events(conn, child_ids[1]))
         assert child_ids[1] not in kb.parent_ids(conn, child_ids[2])
         assert child_ids[0] in kb.parent_ids(conn, child_ids[2])
 
