@@ -152,6 +152,20 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
 
     expect(html).toContain("Dauer ungültig");
   });
+
+  it("names the lossless latest run state instead of inventing running or done", () => {
+    const html = renderToStaticMarkup(
+      <UebersichtTab
+        task={{ id: "t1", title: "T", status: "review", assignee: "verifier", body: null }}
+        latestRun={{ profile: "verifier", status: "completed", runtime_seconds: 60 }}
+        elapsedSec={60}
+        deliverables={[]}
+      />,
+    );
+
+    expect(html).toContain("Laufstatus");
+    expect(html).toContain("Abgeschlossen (completed)");
+  });
 });
 
 describe("NodeDetailDrawer Reassign", () => {

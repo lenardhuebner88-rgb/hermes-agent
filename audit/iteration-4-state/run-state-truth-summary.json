@@ -1,0 +1,64 @@
+{
+  "api_detail_http": 200,
+  "api_detail_run_status": "completed",
+  "api_detail_run_statuses_oldest_first": [
+    "blocked",
+    "completed"
+  ],
+  "api_graph_http": 200,
+  "api_graph_run_status": "completed",
+  "base": "http://127.0.0.1:9122",
+  "board": "default",
+  "db_run_outcome_counts": {
+    "blocked": 353,
+    "completed": 3610,
+    "crashed": 97,
+    "deliverable_posted_not_completed": 10,
+    "gave_up": 124,
+    "integration_parked": 22,
+    "iteration_budget_exhausted": 1,
+    "reclaimed": 2083,
+    "scheduled": 274,
+    "spawn_failed": 98,
+    "timed_out": 62,
+    "transient_retry": 27
+  },
+  "db_run_status_counts": {
+    "blocked": 402,
+    "completed": 204,
+    "crashed": 97,
+    "deliverable_posted_not_completed": 10,
+    "done": 2268,
+    "gave_up": 124,
+    "iteration_budget_exhausted": 1,
+    "ready": 2,
+    "reclaimed": 2083,
+    "review": 1107,
+    "scheduled": 274,
+    "spawn_failed": 98,
+    "timed_out": 62,
+    "todo": 1,
+    "transient_retry": 27,
+    "triage": 1
+  },
+  "dom_run_state": "LAUFSTATUS\nAbgeschlossen (completed)",
+  "legacy_ui_run_statuses": [
+    "blocked",
+    "crashed",
+    "done",
+    "failed",
+    "released",
+    "running",
+    "timed_out"
+  ],
+  "screenshot": "audit/iteration-4-state/run-state-truth-1440x900.png",
+  "selected": {
+    "id": "t_26c016df",
+    "run_id": 6754,
+    "run_outcome": "completed",
+    "run_status": "completed",
+    "task_status": "done",
+    "title": "Routing-Smoke research: Grok 4.5"
+  },
+  "unexpected_console_errors": []
+}

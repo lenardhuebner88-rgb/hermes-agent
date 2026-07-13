@@ -16,6 +16,7 @@ import {
   premiumLaneMarker,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
+import { runStatusLabel } from "../../lib/tones";
 import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
 import { DrawerShell } from "../../components/leitstand";
 import { WorkerLogTail } from "../../components/WorkerCard";
@@ -105,7 +106,11 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
     verifier_verdict: v.verifier_verdict ?? null,
   }));
 
-  const latestRun = runs[0] ?? null;
+  // GET /tasks/:id intentionally returns attempt history oldest-first
+  // (kanban_db.list_runs start order). The drawer needs the newest attempt,
+  // so selecting index 0 silently showed stale blocked/review state after a
+  // successful retry.
+  const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
   const elapsedSec = latestRun?.runtime_seconds ?? (
     latestRun?.started_at != null
       ? (elapsedSeconds(latestRun.started_at, now) ?? Number.NaN)
@@ -455,6 +460,12 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
           <div className="fleet-kv-k">{de.fleet.detailLabelLaufzeit}</div>
           <div className="fleet-kv-v">{elapsedSec != null ? fmtSeconds(elapsedSec) : "—"}</div>
         </div>
+        {latestRun?.status ? (
+          <div className="fleet-kv">
+            <div className="fleet-kv-k">Laufstatus</div>
+            <div className="fleet-kv-v" title={latestRun.status}>{runStatusLabel(latestRun.status)}</div>
+          </div>
+        ) : null}
         {(latestRun?.input_tokens != null || latestRun?.output_tokens != null) ? (
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.detailLabelTokens}</div>

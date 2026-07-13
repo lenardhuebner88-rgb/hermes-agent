@@ -24,6 +24,12 @@ const ResultQualityBadgeSchema = z.object({
 });
 const RunRoleSchema = z.enum(["implementation", "verification", "legacy_unknown"]);
 const RunRoleSourceSchema = z.enum(["claimed_event", "missing_claim_event"]);
+// task_runs.status/outcome are open lifecycle vocabularies. The live DB carries
+// states beyond the old seven-value UI enum (review, reclaimed, spawn_failed,
+// integration_parked, transient_retry, ...). Preserve every non-empty backend
+// value; only malformed/empty input becomes an explicit unknown/null.
+const RunStatusSchema = z.string().trim().min(1).catch("unknown");
+const RunOutcomeSchema = z.string().trim().min(1).nullable().catch(null);
 
 export const RunInspectSchema = z.object({
   cpu_percent: z.coerce.number().catch(0),
@@ -71,8 +77,8 @@ export const WorkerSchema = z.object({
   claim_expires: epochSeconds,
   last_heartbeat_at: epochSeconds,
   max_runtime_seconds: z.coerce.number().catch(0),
-  run_status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("running"),
-  run_outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
+  run_status: RunStatusSchema,
+  run_outcome: RunOutcomeSchema,
   block_reason: z.string().nullable().optional(),
   inspect: RunInspectSchema.nullable().optional(),
   // Phase A (Fortschritt): Tätigkeits-Note + ehrliche ETA (p50/p90).
@@ -360,8 +366,8 @@ export const FlowTimeoutSweepResponseSchema = z.object({
 const ChainGraphRunSchema = z.object({
   id: z.coerce.number().catch(0),
   profile: z.string().nullable().catch(null),
-  status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("running"),
-  outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
+  status: RunStatusSchema,
+  outcome: RunOutcomeSchema,
   started_at: nullableEpochSeconds,
   ended_at: nullableEpochSeconds,
   last_heartbeat_at: nullableEpochSeconds,
@@ -687,8 +693,8 @@ export const KanbanResultSchema = z.object({
   run_role: RunRoleSchema.catch("legacy_unknown"),
   run_role_label: z.string().catch("Unknown / legacy run"),
   run_role_source: RunRoleSourceSchema.catch("missing_claim_event"),
-  status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("done"),
-  outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch("completed"),
+  status: RunStatusSchema,
+  outcome: RunOutcomeSchema,
   started_at: epochSeconds,
   ended_at: epochSeconds,
   duration_seconds: z.coerce.number().catch(0),

@@ -24,6 +24,35 @@ export const taskStatusLabel: Record<string, string> = {
   running: 'Läuft', blocked: 'Blockiert', review: 'In Prüfung', done: 'Fertig', archived: 'Archiv',
 };
 
+const runStatusLabels: Record<string, string> = {
+  running: 'Läuft',
+  done: 'Fertig',
+  blocked: 'Blockiert',
+  crashed: 'Abgestürzt',
+  timed_out: 'Zeitlimit erreicht',
+  failed: 'Fehlgeschlagen',
+  released: 'Freigegeben',
+  completed: 'Abgeschlossen',
+  review: 'In Prüfung',
+  reclaimed: 'Zurückgeholt',
+  spawn_failed: 'Start fehlgeschlagen',
+  gave_up: 'Aufgegeben',
+  iteration_budget_exhausted: 'Iterationsbudget erschöpft',
+  ready: 'Startklar',
+  scheduled: 'Geplant',
+  todo: 'Offen',
+  triage: 'Triage',
+  transient_retry: 'Temporärer Retry',
+  deliverable_posted_not_completed: 'Ergebnis abgelegt, nicht abgeschlossen',
+  unknown: 'Unbekannt',
+};
+
+/** Human label plus the exact persisted value, so translation never hides truth. */
+export function runStatusLabel(status?: string | null): string {
+  const raw = status?.trim() || 'unknown';
+  return `${runStatusLabels[raw] ?? 'Unbekannter Laufzustand'} (${raw})`;
+}
+
 /** Profil-Rollen in Klartext. Unbekannte Profile zeigen ihren Rohnamen
  *  (Lookup-Fallback `?? profile` an den Call-Sites). */
 export const profileLabel: Record<string, string> = {

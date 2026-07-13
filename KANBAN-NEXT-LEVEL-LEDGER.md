@@ -182,7 +182,21 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Add one batched DB classifier that reuses the dispatcher's exact verdict, retry-count, task-body-hash, explicit block-kind, and auto-retry-history contract; expose additive `operator_question` booleans on board and detail APIs; make schemas fail closed for older payloads; remove every client-side prose inference from Risiko, drawer, and pending-item derivation.
 - After:       Exact production candidate on port 9122 captured the verifier task as `operator_question=false` in both APIs and the real hold as `true`; Risiko rendered zero verifier cards, one operator card, and exactly one answer form. Both fixtures were archived and the browser recorded zero console errors. Evidence: `audit/iteration-4-state/operator-question-summary.json` and screenshot.
 - Gates:       Focused frontend 306 passed, exit 0; backend plugin 269 passed, exit 0; Ruff exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate harness exit 0. React quality review found no new effect/state coupling, prop mirroring, accessibility regression, or unstable render identity.
-- Commit:      this N-42 commit
+- Commit:      `f7c538207`
+- Status:      CONFIRMED
+
+### N-43  Run status is lossless and the drawer selects the newest attempt
+- Source:      Loop-4 DB status census and candidate DB/API/DOM comparison
+- Class:       DATA
+- Severity:    S1
+- Invariant:   Every non-empty persisted `task_runs.status`/`outcome` survives frontend parsing unchanged, and a surface labelled as the latest run selects the actual newest row from chronological attempt history.
+- Repro:       Read the default DB through a read-only SQLite URI; enumerate all distinct run statuses/outcomes; select the newest done task whose latest run lies outside the UI's old seven-value enum; compare detail API, chain-graph API, and production-candidate drawer.
+- Before:      The live DB had 16 distinct run statuses and 12 outcomes, but Worker/chain/result schemas accepted only seven statuses and silently rewrote real values such as `completed`, `review`, `reclaimed`, `spawn_failed`, and `transient_retry` to `running` or `done`. Additionally, detail history is intentionally oldest-first while NodeDetail selected `runs[0]`, so task `t_26c016df` displayed its older `blocked` attempt instead of latest run 6754 `completed`. Fail-first: 13/98 focused assertions failed; first browser harness run showed DB/graph `completed` versus DOM `blocked`.
+- Test:        Table-driven schema matrix covers all 16 status values currently present in the live DB plus a real non-legacy outcome; drawer regression requires an explicit human label with raw persisted state.
+- Change:      Replace closed run status/outcome enums with lossless non-empty string schemas and open TypeScript vocabulary; add explicit German+raw run-state labels; expose latest run status in the drawer; select the last row from the documented oldest-first detail history.
+- After:       Read-only census recorded 16 status values and 12 outcomes. Candidate task `t_26c016df` matched as `completed` in DB, detail API's final history row, and chain graph; DOM rendered `Abgeschlossen (completed)` with zero console errors. Evidence: `audit/iteration-4-state/run-state-truth-summary.json` and screenshot.
+- Gates:       Focused frontend 98 passed, exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate DB/API/DOM harness exit 0. React quality review found no new effect/state coupling or unstable identity; the only render addition is a guarded scalar KV row.
+- Commit:      this N-43 commit
 - Status:      CONFIRMED
 
 ## Later iterations

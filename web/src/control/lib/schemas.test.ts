@@ -896,6 +896,90 @@ describe("RecentResultsResponseSchema", () => {
     expect(parsed.results[0].result_quality.state).toBe("unknown_legacy");
     expect(parsed.results[0].result_quality.tone).toBe("zinc");
   });
+
+  it("preserves real DB run states instead of relabeling them as done", () => {
+    const parsed = parseOrThrow(RecentResultsResponseSchema, {
+      count: 1,
+      checked_at: 100,
+      results: [{
+        run_id: 409,
+        task_id: "t_review",
+        task_title: "Intermediate review handoff",
+        task_status: "review",
+        task_assignee: "verifier",
+        profile: "verifier",
+        run_role: "verification",
+        run_role_label: "Verifier / review run",
+        run_role_source: "claimed_event",
+        status: "review",
+        outcome: "integration_parked",
+        started_at: 10,
+        ended_at: 25,
+        duration_seconds: 15,
+        summary: "parked",
+        summary_preview: "parked",
+        followups: [],
+        artifacts: [],
+        verification: [],
+        result_quality: {
+          state: "unknown_legacy",
+          label: "Unknown legacy",
+          tone: "zinc",
+          description: "Legacy run",
+        },
+      }],
+    }, "recent-results-real-run-state");
+
+    expect(parsed.results[0].status).toBe("review");
+    expect(parsed.results[0].outcome).toBe("integration_parked");
+  });
+});
+
+describe("ChainGraphResponseSchema run-state truth", () => {
+  const liveRunStatuses = [
+    "blocked", "completed", "crashed", "deliverable_posted_not_completed",
+    "done", "gave_up", "iteration_budget_exhausted", "ready", "reclaimed",
+    "review", "scheduled", "spawn_failed", "timed_out", "todo", "transient_retry",
+  ];
+
+  it.each(liveRunStatuses)("preserves live task_runs.status %s", (status) => {
+    const parsed = parseOrThrow(ChainGraphResponseSchema, {
+      schema: "kanban-chain-graph-v1",
+      root_id: "t_root",
+      checked_at: 100,
+      count: 1,
+      edges: [],
+      nodes: [{
+        id: "t_root",
+        title: "Run truth",
+        status: "done",
+        assignee: "coder",
+        level: 0,
+        parents: [],
+        children: [],
+        created_at: 10,
+        started_at: 11,
+        completed_at: 12,
+        last_heartbeat_at: null,
+        runtime_seconds: 1,
+        progress: null,
+        latest_run: {
+          id: 1,
+          profile: "coder",
+          status,
+          outcome: "completed",
+          started_at: 11,
+          ended_at: 12,
+          last_heartbeat_at: null,
+          runtime_seconds: 1,
+          heartbeat_age_seconds: null,
+          run_progress: null,
+        },
+      }],
+    }, `chain-graph-run-state/${status}`);
+
+    expect(parsed.nodes[0].latest_run?.status).toBe(status);
+  });
 });
 
 describe("SystemHealthResponseSchema", () => {

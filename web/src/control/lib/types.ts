@@ -7,12 +7,17 @@ export type TaskStatus =
   | "triage" | "todo" | "scheduled" | "ready" | "running"
   | "blocked" | "review" | "done" | "archived";
 
-export type RunStatus =
+export type KnownRunStatus =
   | "running" | "done" | "blocked" | "crashed" | "timed_out" | "failed" | "released";
 
-export type RunOutcome =
+/** Open DB vocabulary. Known values aid autocomplete; unknown values stay lossless. */
+export type RunStatus = KnownRunStatus | (string & {});
+
+export type KnownRunOutcome =
   | "completed" | "blocked" | "crashed" | "timed_out" | "spawn_failed"
   | "gave_up" | "reclaimed" | "iteration_budget_exhausted";
+
+export type RunOutcome = KnownRunOutcome | (string & {});
 
 export interface RunInspect {
   cpu_percent: number;
