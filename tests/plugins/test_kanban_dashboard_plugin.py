@@ -6525,6 +6525,11 @@ def test_flow_gate_sizing_merge_and_split_before_release(client):
         assert any(event.kind == "archived" for event in kb.list_events(conn, child_ids[1]))
         assert child_ids[1] not in kb.parent_ids(conn, child_ids[2])
         assert child_ids[0] in kb.parent_ids(conn, child_ids[2])
+        # The status-CAS'd UPDATE still lands on the happy path: kept child carries
+        # the merged title and body.
+        kept = kb.get_task(conn, child_ids[0])
+        assert kept.title == "a + b"
+        assert f"Merged from {child_ids[1]}" in kept.body
 
     r = client.post(
         f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
@@ -6545,6 +6550,97 @@ def test_flow_gate_sizing_merge_and_split_before_release(client):
         assert new_task.status == "scheduled"
         assert new_task.title == "a follow-up split"
         assert new_id in kb.parent_ids(conn, root)
+
+
+def _patch_stale_scheduled_read(monkeypatch, target_id, actual_status="in_progress"):
+    """Simulate a concurrent claim landing between the merge's state read and its
+    writes: the first ``get_task(target_id)`` moves the real row out of
+    ``scheduled`` but still hands back the pre-change (stale) ``scheduled``
+    snapshot — exactly the view the old pre-txn read had. Only the status CAS on
+    the UPDATEs can catch this."""
+    real_get_task = kb.get_task
+    fired: list[str] = []
+
+    def fake_get_task(conn, task_id, *args, **kwargs):
+        task = real_get_task(conn, task_id, *args, **kwargs)
+        if task_id == target_id and not fired and task is not None and task.status == "scheduled":
+            fired.append(task_id)
+            conn.execute(
+                "UPDATE tasks SET status = ? WHERE id = ?", (actual_status, target_id)
+            )
+        return task
+
+    monkeypatch.setattr(kb, "get_task", fake_get_task)
+    return fired
+
+
+@pytest.mark.parametrize("racing", ["keep", "merged"])
+def test_flow_gate_merge_409s_when_child_status_changes_before_write(
+    client, monkeypatch, racing
+):
+    """TOCTOU guard: if a child leaves ``scheduled`` between the state read and the
+    writes, the status CAS must lose, the request must 409, and the whole merge —
+    including the ``archived`` event — must roll back. Regression for the reviewer
+    finding on 328509e50/abd67f9d7, where the pre-txn read plus unconditional
+    UPDATEs could overwrite a concurrent claim and still log it as ``archived``."""
+    root, child_ids = _setup_gated_root()
+    keep_id, merge_id = child_ids[0], child_ids[1]
+    target = keep_id if racing == "keep" else merge_id
+
+    with kb.connect() as conn:
+        keep_before = kb.get_task(conn, keep_id)
+
+    fired = _patch_stale_scheduled_read(monkeypatch, target)
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "merge", "task_ids": [keep_id, merge_id]},
+    )
+    assert fired == [target], "the stale-read simulation never triggered"
+    assert r.status_code == 409, r.text
+    assert "changed state during merge" in r.json()["detail"]
+
+    # NOTE: no monkeypatch.undo() here — it would also revert the kanban_home
+    # fixture's HERMES_HOME patch and point the asserts at another board. The fake
+    # is one-shot (see `fired`), so it delegates to the real get_task from here on.
+    with kb.connect() as conn:
+        # No archive event may survive a transition that did not happen ...
+        assert not any(
+            event.kind == "archived" for event in kb.list_events(conn, merge_id)
+        )
+        assert not any(
+            event.kind == "flow_gate_sizing" for event in kb.list_events(conn, root)
+        )
+        # ... and the rollback left keep's title/body and the link graph untouched.
+        keep_after = kb.get_task(conn, keep_id)
+        assert keep_after.title == keep_before.title
+        assert keep_after.body == keep_before.body
+        assert kb.get_task(conn, merge_id).status != "archived"
+        assert merge_id in kb.parent_ids(conn, child_ids[2])
+
+
+def test_flow_gate_merge_409s_when_child_already_claimed(client):
+    """The plain (non-racing) guard still holds: a child that is no longer
+    ``scheduled`` when the merge starts is rejected before any write."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='in_progress' WHERE id=?", (child_ids[1],)
+            )
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "merge", "task_ids": child_ids[:2]},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "only scheduled flow children can be merged"
+
+    with kb.connect() as conn:
+        assert not any(
+            event.kind == "archived" for event in kb.list_events(conn, child_ids[1])
+        )
+        assert kb.get_task(conn, child_ids[1]).status == "in_progress"
 
 
 def test_flow_gate_timeout_sweep_releases_old_roots(client):
