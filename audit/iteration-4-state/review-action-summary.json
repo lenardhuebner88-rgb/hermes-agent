@@ -1,0 +1,25 @@
+{
+  "base": "http://127.0.0.1:9121",
+  "board": "audit-scratch",
+  "captured_task_status": "review",
+  "dom_rework_buttons": 0,
+  "dom_ship_buttons": 0,
+  "dom_valid_cancel_buttons": 1,
+  "expected_409_console_errors": 2,
+  "fixture_archived_after_capture": true,
+  "patch_blocked": {
+    "body": {
+      "detail": "status transition to 'blocked' not valid from current state"
+    },
+    "status": 409
+  },
+  "patch_done": {
+    "body": {
+      "detail": "status transition to 'done' not valid from current state"
+    },
+    "status": 409
+  },
+  "screenshot": "audit/iteration-4-state/review-action-truth-1440x900.png",
+  "task_id": "t_575b0c9a",
+  "unexpected_console_errors": []
+}

@@ -88,11 +88,9 @@ describe("stageActions", () => {
     expect(stageActions("todo")[0]).toMatchObject({ key: "dispatch", target: "ready" });
     expect(stageActions("scheduled")[0]).toMatchObject({ key: "dispatch", target: "ready" });
   });
-  it("offers Ship + Rework from review", () => {
-    const keys = stageActions("review").map((a) => a.key);
-    expect(keys).toEqual(["ship", "rework"]);
-    expect(stageActions("review").find((a) => a.key === "ship")?.target).toBe("done");
-    expect(stageActions("review").find((a) => a.key === "rework")?.target).toBe("blocked");
+  it("offers no manual review transition because both PATCH targets are backend-invalid", () => {
+    expect(stageActions("review")).toEqual([]);
+    expect(stageGuard("review")).toContain("Verifier");
   });
   it("offers Reopen from blocked (→ ready)", () => {
     expect(stageActions("blocked")[0]).toMatchObject({ key: "reopen", target: "ready" });
@@ -158,15 +156,14 @@ describe("stageGuard", () => {
   it("returns null for operator-actionable statuses", () => {
     expect(stageGuard("triage")).toBeNull();
     expect(stageGuard("todo")).toBeNull();
-    expect(stageGuard("review")).toBeNull();
     expect(stageGuard("blocked")).toBeNull();
   });
 });
 
 describe("isActionableStatus", () => {
   it("is true exactly for operator-decidable + blocked", () => {
-    const yes: TaskStatus[] = ["triage", "todo", "scheduled", "blocked", "review"];
-    const no: TaskStatus[] = ["ready", "running", "done", "archived"];
+    const yes: TaskStatus[] = ["triage", "todo", "scheduled", "blocked"];
+    const no: TaskStatus[] = ["ready", "running", "review", "done", "archived"];
     yes.forEach((s) => expect(isActionableStatus(s)).toBe(true));
     no.forEach((s) => expect(isActionableStatus(s)).toBe(false));
   });
@@ -204,12 +201,12 @@ describe("buildPipeline", () => {
     expect(p.actionable.map((a) => a.id).sort()).toEqual(["x", "y"]);
   });
 
-  it("orders actionable review → blocked → triage → todo, then by priority", () => {
+  it("orders actionable blocked → triage → todo, excludes review, then uses priority", () => {
     const tasks = [t("todo1", "todo", 1), t("review1", "review"), t("blocked1", "blocked"), t("triage1", "triage"), t("todo2", "todo", 5)];
     const order = buildPipeline(tasks).actionable.map((a) => a.id);
-    expect(order[0]).toBe("review1");
-    expect(order[1]).toBe("blocked1");
-    expect(order[2]).toBe("triage1");
+    expect(order).not.toContain("review1");
+    expect(order[0]).toBe("blocked1");
+    expect(order[1]).toBe("triage1");
     // todo2 (priority 5) before todo1 (priority 1)
     expect(order.indexOf("todo2")).toBeLessThan(order.indexOf("todo1"));
   });

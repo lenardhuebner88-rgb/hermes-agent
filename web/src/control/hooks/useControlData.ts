@@ -1063,8 +1063,8 @@ export function useRosterCount() {
 
 // Operator stage transitions. Wraps PATCH /tasks/{id} (the same endpoint the
 // kanban drawer uses) so a Fleet stage button has a REAL effect: Plan
-// (triage→todo), Dispatch (todo→ready, auto-dispatches), Ship (review→done),
-// Rework (review→blocked), Reopen (blocked→ready). The 409 "blocked by
+// (triage→todo), Dispatch (todo→ready, auto-dispatches), Reopen
+// (blocked→ready). Review completion stays worker/verdict-owned. The 409 "blocked by
 // parent(s)" detail is surfaced verbatim so the guard is honest, not silent.
 export interface TaskActionExtra {
   block_reason?: string;

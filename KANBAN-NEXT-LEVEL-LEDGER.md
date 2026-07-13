@@ -138,7 +138,23 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Add one `inspectEpochSeconds` contract plus guarded elapsed/relative/clock/duration helpers; preserve contaminated numeric timestamps as NaN while keeping true absence null; remove local-`Date.now()` freshness invention from Fleet response schemas; validate chronology and Worker geometry; use explicit Europe/Berlin formatting; bind Fleet to the shared 10-second client clock and refresh it synchronously on visibility; render invalid Activity/runtime values explicitly.
 - After:       Exact production build at 1440×900 and 390×844 shows invalid Board fields and Worker duration explicitly, marks a future due date and chronology violation, emits no NaN geometry, has zero body overflow and zero console errors (`audit/iteration-3-timestamps/summary.json`). Two independent real 300-second freezes passed; the final recorded run waited 301.29 seconds, first refocus frame showed `5 min` and retained-data staleness, then successful recovery removed the completed worker with zero unexpected console errors (`background-summary.json` plus before/after screenshots). Europe/Berlin unit cases cover both 2026 DST transitions.
 - Gates:       Focused 312 passed, exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh` exit 0 on the final source (127 files / 1,884 tests plus production build). One preceding loaded full-suite attempt exposed an unrelated Knowledge deep-link timing flake; its isolated rerun was 19/19 and the complete gate rerun was green without a code change.
-- Commit:      this N-30 commit
+- Commit:      `d7163f191`
+- Status:      CONFIRMED
+
+## Iteration 4 — State-machine and action honesty
+
+### N-40  Review cards expose no deterministically invalid manual transition
+- Source:      new live repro against backend transition contract
+- Class:       DEFECT
+- Severity:    S1
+- Invariant:   Fleet never offers a status action whose exact current-state request is guaranteed to fail; review completion and rejection remain owned by the verifier worker's machine-readable verdict path.
+- Repro:       On `audit-scratch`, create → claim → `complete_task(review_gate=True)` a short-lived code task; while its authenticated API payload still says `review`, PATCH the same task to `done` and `blocked`; render that captured payload in the exact production candidate drawer and count offered actions; archive the fixture immediately.
+- Before:      `stageActions("review")` advertised `Ausliefern` (`PATCH done`) and `Nacharbeit` (`PATCH blocked`), and the NodeDetail drawer deliberately opted into both. Backend regression `test_patch_status_done_rejected_from_review_without_review_done_affordance` and `block_task`'s legal source set prove both targets invalid. Fail-first frontend: 2 failures / 57 tests, with both actions returned instead of `[]` and both buttons present.
+- Test:        `vitest ...fleet.test.ts ...TaskActions.test.tsx` failed 2/57 before the change and passed with NodeDetail coverage as 67/67 after it; `tsc -b --noEmit` exit 0.
+- Change:      Remove Ship/Rework from the pure stage action model and its drawer escape hatch; add an explicit Verifier-owned guard for `review`; remove review cards from the operator-actionable queue while preserving the valid archive/cancel management action; align hook comments and public props with the backend contract.
+- After:       Authenticated candidate proof used short-lived `audit-scratch` task `t_575b0c9a`: captured API status `review`; PATCH `done` returned 409 `not valid from current state`; PATCH `blocked` returned the same 409 class; DOM rendered zero Ship and zero Rework buttons, retained exactly one valid `Abbrechen` action, and had zero unexpected console errors. Fixture was archived immediately. Evidence: `audit/iteration-4-state/review-action-summary.json` and screenshot.
+- Gates:       Focused 67 passed, exit 0; `tsc -b --noEmit` exit 0; production `npm run build` exit 0; candidate harness exit 0.
+- Commit:      this N-40 commit
 - Status:      CONFIRMED
 
 ## Later iterations
