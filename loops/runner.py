@@ -332,10 +332,35 @@ def parse_plan_id(plan_text: str) -> str:
     return plan_id
 
 
-def pass_status_matches_plan(status: str, plan_text: str) -> bool:
+def pass_status_matches_plan(
+    status: str, plan_text: str, plan_path: Path | str | None = None
+) -> bool:
+    """PASS-Status muss an die Plan-ID binden — sonst kein Auto-Land.
+
+    Baseline: exakte YAML-`id`. Zusätzlich toleriert (belegter Vorfall
+    2026-07-13): Builder/Verifier melden trotz Prompt-Anweisung den
+    Dateinamen-Stamm statt der YAML-ID (`PASS P1-settings-controls-first`
+    statt `PASS HT-UX-P1-SETTINGS-CONTROLS-FIRST`). Ein Stamm-Treffer zählt
+    nur, wenn `plan_path` übergeben ist UND die YAML-ID selbst eine
+    präfigierte Form dieses Stamms ist (`<präfix>-<stamm>`, casefolded) —
+    kein beliebiger Substring-Match, sonst würde ein PASS für einen anderen
+    Plan mit zufällig gleichem Stamm durchrutschen.
+    """
     plan_id = parse_plan_id(plan_text)
+    if not plan_id:
+        return False
     match = PASS_STATUS_RE.fullmatch(status)
-    return bool(plan_id and match and match.group(1) == plan_id)
+    if not match:
+        return False
+    status_id = match.group(1)
+    if status_id == plan_id:
+        return True
+    if plan_path is None:
+        return False
+    stem = Path(plan_path).stem
+    if status_id.casefold() != stem.casefold():
+        return False
+    return plan_id.casefold().endswith("-" + stem.casefold())
 
 
 def bump_retry(plan_path: Path) -> int:
@@ -1269,7 +1294,7 @@ class LoopRunner:
                 plan_text = building.read_text(encoding="utf-8")
             except OSError:
                 plan_text = ""
-            pass_matches = pass_status_matches_plan(status, plan_text)
+            pass_matches = pass_status_matches_plan(status, plan_text, building)
             visual_ok = not self.pack.autoland
             visual_report = "für Review-only-Pack nicht erforderlich"
             if verify.rc == 0 and pass_matches and self.pack.autoland:
@@ -1408,7 +1433,7 @@ class LoopRunner:
         if not plan_id:
             return False, "verifizierter Plan hat keine sichere Frontmatter-ID"
         status = self.last_status()
-        if not pass_status_matches_plan(status, plan_text):
+        if not pass_status_matches_plan(status, plan_text, verified_plans[0]):
             return False, (
                 f"Verifier-Status passt nicht exakt zum Plan {plan_id}: {status or '?'}"
             )
@@ -1849,6 +1874,97 @@ class LoopRunner:
                 print(f"  {line}")
 
 
+# ── systemd-Cgroup-Eskalation (Nachtlauf-Vorfall 2026-07-13) ────────────────
+# Ein Loop-Lauf, als Kind des Codex-Remote-Control-Daemons gestartet, erbte
+# dessen Härtung (codex-remote.service: TasksMax=512/MemoryMax=6G/
+# OOMPolicy=kill — bewusst, NICHT ändern) für alles, was der Loop spawnt
+# (next dev, headless chromium, vitest-Worker) → `pthread_create: resource
+# temporarily unavailable`, Worker-Forks starben, Prozesse wurden gekillt.
+# `hermes-loop@<pack>.service`-Units haben TasksMax=18633 und keinen
+# Memory-Cap. Fix: beim echten CLI-Start in einen eigenen transienten
+# systemd-Scope re-execen, wenn wir in einem FREMDEN *.service-Cgroup laufen.
+LOOP_SCOPE_MARKER_ENV = "HERMES_LOOP_SCOPED"
+LOOP_SCOPE_OPT_OUT_ENV = "HERMES_LOOP_NO_SCOPE"
+
+
+def _cgroup_leaf(cgroup_text: str) -> str:
+    """Letztes Pfadsegment der `0::`-Zeile (cgroup v2, single hierarchy)."""
+    for line in cgroup_text.splitlines():
+        line = line.strip()
+        if line.startswith("0::"):
+            path = line[len("0::"):]
+            return path.rstrip("/").rsplit("/", 1)[-1]
+    return ""
+
+
+def should_reexec_into_scope(
+    cgroup_text: str, *, marker_set: bool, systemd_run_available: bool
+) -> bool:
+    """Reine Entscheidung — kein systemd-Aufruf, kein echtes /proc, testbar.
+
+    Inline (False) bleibt es bei: Marker schon gesetzt (Rekursionsschutz),
+    kein `systemd-run` auf dem PATH, Cgroup-Blatt ist ein `.scope`
+    (Terminal/tmux) oder die Slice-Wurzel, oder das Blatt IST bereits
+    `hermes-loop@*.service`. Nur ein FREMDES `*.service`-Blatt löst den
+    Re-Exec aus.
+    """
+    if marker_set or not systemd_run_available:
+        return False
+    leaf = _cgroup_leaf(cgroup_text)
+    if not leaf.endswith(".service"):
+        return False
+    if leaf.startswith("hermes-loop@"):
+        return False
+    return True
+
+
+def build_scope_command(systemd_run: str, orig_argv: list[str]) -> list[str]:
+    """Baut den systemd-run-Aufruf aus `sys.orig_argv` — NICHT aus `sys.argv`.
+
+    `sys.argv[0]` ist bei `python -m loops.runner` der aufgelöste Dateipfad
+    (…/loops/runner.py). Ein Re-Exec als Script setzt `sys.path[0]` auf
+    …/loops statt aufs Repo-Root — `from loops import engines` (Zeile 49)
+    stirbt dann mit ModuleNotFoundError, weil `loops/` bewusst nicht
+    paketiert ist (siehe loops/shim.sh). `sys.orig_argv` erhält die
+    ursprüngliche `-m`-Form und damit den Modul-Suchpfad.
+    """
+    return [
+        systemd_run, "--user", "--scope", "--quiet", "--collect",
+        f"--setenv={LOOP_SCOPE_MARKER_ENV}=1",
+        *orig_argv,
+    ]
+
+
+def _reexec_into_own_scope() -> None:
+    """CLI-Entrypoint-Hook (NUR aus dem `__main__`-Guard aufrufen — niemals
+    beim Import, das würde `main()` aus Tests heraus kapern: Tests rufen
+    `main(argv)` direkt in-process auf, ohne über diesen Guard zu laufen).
+
+    Escaped ein fremdes Service-Cgroup via `systemd-run --user --scope`
+    (Umgebung + Exitcode + stdout/stderr bleiben erhalten, os.execvp ersetzt
+    den aktuellen Prozess); sonst No-Op.
+    """
+    if os.environ.get(LOOP_SCOPE_OPT_OUT_ENV):
+        return
+    marker_set = bool(os.environ.get(LOOP_SCOPE_MARKER_ENV))
+    systemd_run = shutil.which("systemd-run")
+    try:
+        cgroup_text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not should_reexec_into_scope(
+        cgroup_text, marker_set=marker_set, systemd_run_available=bool(systemd_run)
+    ):
+        return
+    leaf = _cgroup_leaf(cgroup_text)
+    logger.warning(
+        "[loops] re-exec into own systemd scope (escaping %s cgroup: TasksMax/Memory-Cap)",
+        leaf,
+    )
+    cmd = build_scope_command(systemd_run, sys.orig_argv)
+    os.execvp(cmd[0], cmd)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Loop-Runner (pipeline|sweep Packs)")
     parser.add_argument("--pack", required=True)
@@ -1899,4 +2015,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _reexec_into_own_scope()
     sys.exit(main())
