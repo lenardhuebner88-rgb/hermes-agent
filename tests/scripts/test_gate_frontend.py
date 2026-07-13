@@ -57,6 +57,16 @@ fi
 exit 0
 """
 
+_TOOL_STUB = """#!/usr/bin/env bash
+printf '%s:%s\\n' "$(basename "$0")" "$*" >> "$GATE_TEST_TOOL_SENTINEL"
+exit 0
+"""
+
+_NPX_FAIL_STUB = """#!/usr/bin/env bash
+echo "npx must not be used by gate-frontend.sh" >&2
+exit 97
+"""
+
 
 def _write_exec(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,3 +227,37 @@ def test_preflight_passes_with_healthy_worktree_local_toolchain(tmp_path: Path) 
     assert r.returncode == 0, r.stdout + r.stderr
     assert "FRONTEND-PREFLIGHT OK" in r.stdout
     assert not sentinel.exists(), "healthy worktree-local toolchain needs no npm ci"
+
+
+def test_full_gate_uses_local_bins_and_bounded_vitest_workers(tmp_path: Path) -> None:
+    """The release gate must not ask npx to discover tools or let Vitest fan
+    out to every host CPU. Both make the atomic gate depend on ambient host
+    state under concurrent operator workloads."""
+    repo, npm_sentinel, npm_dir = _make_repo(tmp_path, tsc="healthy")
+    (repo / "web" / "src" / "control").mkdir(parents=True)
+    (repo / "web" / "package.json").write_text('{"scripts":{"lint:control":"true"}}\n')
+    (repo / "scripts" / "design-token-baseline.txt").write_text("0\n")
+
+    tool_sentinel = tmp_path / "_tool_called"
+    _write_exec(repo / "node_modules" / ".bin" / "tsc", _TOOL_STUB)
+    _write_exec(repo / "node_modules" / ".bin" / "vitest", _TOOL_STUB)
+    _write_exec(npm_dir / "npx", _NPX_FAIL_STUB)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{npm_dir}{os.pathsep}{env['PATH']}"
+    env["GATE_FRONTEND_AUTO_INSTALL"] = "0"
+    env["GATE_FRONTEND_MAX_WORKERS"] = "3"
+    env["GATE_TEST_NPM_SENTINEL"] = str(npm_sentinel)
+    env["GATE_TEST_TOOL_SENTINEL"] = str(tool_sentinel)
+    r = subprocess.run(
+        [str(repo / "scripts" / "gate-frontend.sh"), "--skip-build"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = tool_sentinel.read_text().splitlines()
+    assert "tsc:-b --noEmit" in calls
+    assert "vitest:run --maxWorkers=3" in calls

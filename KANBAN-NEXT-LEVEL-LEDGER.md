@@ -1,8 +1,8 @@
 # Kanban Next-Level Evidence Ledger
 
-Goal started: 2026-07-12T20:34:25Z  
-Branch: `codex/kanban-next-level-20260712`  
-Starting commit: `d0c79390c731afbc06a2d07d85fc15eaeee3a946` (`piet-fork/main`)  
+Goal started: 2026-07-12T20:34:25Z
+Branch: `codex/kanban-next-level-20260713`
+Starting commit: `42bbf39bde1b8eaba5a02f5dd81af9c94b66ab14` (`piet-fork/main`)
 Prior audit: `/home/piet/.hermes/worktrees/codex-kanban-adversarial-audit-20260712/KANBAN-AUDIT-LEDGER.md`
 
 This ledger is updated after every iteration. `FIXED` requires the original live repro against the deployed runtime, not only a passing test.
@@ -15,11 +15,11 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Severity:    S1
 - Invariant:   The isolated candidate starts from current `piet-fork/main`, the deployed commit is identified, and all required baseline gates are green before feature work.
 - Repro:       Fetch `piet-fork/main`; compare branch ancestry, live checkout HEAD, service process, and served runtime; run the Loop 0 gates.
-- Before:      Live checkout HEAD and fetched `piet-fork/main` both `d0c79390c`; `hermes-dashboard.service` active since 2026-07-12 21:54:38 CEST. Prior full Python gate: 42,778 passed / 2 failed.
+- Before:      Original worktree started at `d0c79390c`; overnight `piet-fork/main` advanced through terminal integration `626f09f5b` and Dictate changes to `42bbf39bd`. A later Hermes claim still names one dirty terminal test in the original worktree, so that worktree is frozen rather than overwritten.
 - Test:        Pending current gate run.
 - Change:      NONE
-- After:       Branch ancestry and starting commit match `piet-fork/main`; dependency install and collection/Ruff gates completed. Baseline remains red pending the two known Python repairs and one frontend timeout recheck.
-- Gates:       `npm ci` exit 0; collection 43,036 selected / 43,095 collected, exit 0; Ruff exit 0; targeted Python 90 passed / 2 failed, exit 1; frontend 1,805 passed / 1 timed out, exit 1.
+- After:       Resume worktree starts exactly at current `piet-fork/main` `42bbf39bd`; N-01/N-02 were replayed as isolated commits and `npm ci` completed. Full current baseline recapture remains pending.
+- Gates:       Resume `npm ci` exit 0; prior collection 43,036 selected / 43,095 collected, exit 0; prior Ruff exit 0; prior targeted Python 90 passed / 2 failed, exit 1; prior frontend 1,805 passed / 1 timed out, exit 1.
 - Commit:      NONE
 - Status:      OPEN
 
@@ -34,7 +34,7 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Align the regression with the security contract and add a negative assertion that the full path is absent.
 - After:       Diagnostic contains `https://example.test/<path redacted>` and does not contain `https://example.test/v1`.
 - Gates:       Targeted file 7 passed / 0 failed, exit 0; Ruff on the changed test exit 0.
-- Commit:      `4b4235836`
+- Commit:      `1c21a84dc` (replayed from `4b4235836`)
 - Status:      FIXED
 
 ### N-02  Valid Codex auth satisfies vision requirements
@@ -48,6 +48,20 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Use catalog-valid, vision-capable `gpt-5.4` so the test isolates the promised Codex-auth requirement instead of contradicting the model-routing guard.
 - After:       The fixture uses catalog-valid, vision-capable `gpt-5.4`; Codex OAuth client resolution succeeds without weakening the non-Codex-model guard.
 - Gates:       Targeted file 85 passed / 0 failed, exit 0; Ruff on the changed test exit 0.
+- Commit:      `c846656a9` (replayed from `8acd1eb69`)
+- Status:      FIXED
+
+### N-03  Frontend release gate uses deterministic local tooling
+- Source:      baseline gate repro
+- Class:       RELEASE
+- Severity:    S1
+- Invariant:   The atomic frontend gate runs the installed worktree `tsc` and `vitest` binaries and bounds Vitest fan-out, independent of ambient `npx` discovery and host CPU count.
+- Repro:       `scripts/run_tests.sh tests/scripts/test_gate_frontend.py`; then `scripts/gate-frontend.sh --skip-build`.
+- Before:      Fail-first current-main rerun: 6 passed / 1 failed, exit 1; the fake `npx` exited 97 at `npx tsc -b --noEmit`. Prior full-suite attempts also hit EPIPE/SIGTERM and host cgroup PID pressure when Vitest used ambient fan-out.
+- Test:        `test_full_gate_uses_local_bins_and_bounded_vitest_workers` replaces `npx` with a fail stub and asserts local `tsc` plus `vitest run --maxWorkers=3` invocations.
+- Change:      Resolve required binaries from root/web `node_modules/.bin`; default `GATE_FRONTEND_MAX_WORKERS=4`; execute both binaries directly.
+- After:       Targeted gate-script suite 7 passed / 0 failed, exit 0. Full frontend candidate gate completed with 125 files and 1,826 tests passing.
+- Gates:       `scripts/run_tests.sh tests/scripts/test_gate_frontend.py` exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (`125` files, `1,826` tests).
 - Commit:      NONE
 - Status:      FIXED
 
