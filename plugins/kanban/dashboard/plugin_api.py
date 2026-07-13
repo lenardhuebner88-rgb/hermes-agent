@@ -2985,6 +2985,39 @@ class CommentBody(BaseModel):
     author: Optional[ShortText] = "dashboard"
 
 
+class AnswerTaskBody(BaseModel):
+    answer: FreeText
+
+
+@router.post("/tasks/{task_id}/answer")
+def answer_task_question(
+    task_id: str,
+    payload: AnswerTaskBody,
+    board: Optional[str] = Query(None),
+):
+    if not payload.answer.strip():
+        raise HTTPException(status_code=400, detail="answer is required")
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if kanban_db.get_task(conn, task_id) is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        status = kanban_db.answer_operator_question(
+            conn,
+            task_id,
+            answer=payload.answer,
+            author="operator",
+        )
+        if status is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Task ist keine aktuelle Operator-Frage",
+            )
+        return {"ok": True, "task_id": task_id, "status": status}
+    finally:
+        conn.close()
+
+
 @router.post("/tasks/{task_id}/comments")
 def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query(None)):
     if not payload.body.strip():

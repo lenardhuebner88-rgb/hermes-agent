@@ -1097,12 +1097,10 @@ export function useTaskAction(onDone?: () => void | Promise<void>) {
   return { busyId, errorById, run, clearError };
 }
 
-// S6: Answer an operator-question hold. Komposition aus drei Schritten (kein
-// atomarer Endpoint — bewusst als Hook, nicht als Backend-POST /answer, das
-// Phase 4 vorbehalten bleibt):
-//   1. POST /tasks/{id}/comments  — Antwort als Kommentar ablegen (author: operator)
-//   2. PATCH /tasks/{id}          — Status → ready (der Server mappt auf unblock_task)
-//   3. POST /workers/0/action      — Dispatcher-Tick, damit der Worker sofort startet
+// S6: Answer an operator-question hold. Kommentar + Unblock sind eine atomare
+// Backend-Transition; nur der sofortige Dispatcher-Tick folgt best-effort:
+//   1. POST /tasks/{id}/answer    — Kommentar + eligibility-CAS + Unblock
+//   2. POST /workers/0/action     — Dispatcher-Tick, damit der Worker sofort startet
 // Der Retry-Worker liest den Kommentar über build_worker_context. `doneIds`
 // hält erfolgreich beantwortete Tasks fest, bis der Board-Poll die Zeile
 // fallen lässt.
@@ -1123,18 +1121,13 @@ export function useAnswerQuestion() {
     setBusyId(taskId);
     setErrorById((prev) => ({ ...prev, [taskId]: "" }));
     try {
-      // 1. Antwort als Kommentar ablegen (author: operator — der Retry-Worker
-      //    liest Kommentare über build_worker_context in seinen Kontext ein).
+      // 1. Antwort + Entblockung atomar. Ein zweiter Tab kann zwischen diesen
+      //    beiden Writes keinen verwaisten Kommentar mehr erzeugen.
       await fetchJSON<{ ok?: boolean }>(
-        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/comments`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: text, author: "operator" }) },
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/answer`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: text }) },
       );
-      // 2. Task entblocken (PATCH ready; der Server mappt das auf unblock_task).
-      await fetchJSON<{ task?: unknown }>(
-        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
-        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "ready" }) },
-      );
-      // 3. Dispatcher-Tick (run_id 0 als Platzhalter, reiner Tick ohne Run-Bezug).
+      // 2. Dispatcher-Tick (run_id 0 als Platzhalter, reiner Tick ohne Run-Bezug).
       await fetchJSON<{ ok?: boolean; detail?: string }>(
         "/api/plugins/kanban/workers/0/action",
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dispatch", confirm: true, reason: "Operator-Antwort auf Blockgrund — Worker neu gestartet (FleetAnswerQuestion)" }) },

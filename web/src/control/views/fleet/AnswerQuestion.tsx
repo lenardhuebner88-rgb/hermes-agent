@@ -2,12 +2,10 @@
  * AnswerQuestion (S6) — Inline-Form zum Beantworten einer Operator-Frage.
  *
  * Ein Task mit operator_question-Blockgrund (siehe isOperatorQuestion in
- * fleet.ts) kann hier direkt beantwortet werden: Antwort als Kommentar
- * ablegen (author: operator), Task auf ready setzen, Dispatcher-Tick.
+ * fleet.ts) kann hier direkt beantwortet werden: Antwort + Unblock atomar
+ * schreiben und danach einen best-effort Dispatcher-Tick auslösen.
  *
- * Bewusst als Komposition aus drei Fetches im useAnswerQuestion-Hook
- * umgesetzt (kein atomarer /answer-Endpoint — Phase 4 vorbehalten).
- * Das Muster folgt useFixRedispatch in useControlData.ts.
+ * Die atomare /answer-Transition verhindert Teilwrites bei Zweit-Tab-Races.
  */
 import { useState, type FormEvent } from "react";
 import { de } from "../../i18n/de";

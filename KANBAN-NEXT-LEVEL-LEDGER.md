@@ -196,7 +196,21 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Replace closed run status/outcome enums with lossless non-empty string schemas and open TypeScript vocabulary; add explicit German+raw run-state labels; expose latest run status in the drawer; select the last row from the documented oldest-first detail history.
 - After:       Read-only census recorded 16 status values and 12 outcomes. Candidate task `t_26c016df` matched as `completed` in DB, detail API's final history row, and chain graph; DOM rendered `Abgeschlossen (completed)` with zero console errors. Evidence: `audit/iteration-4-state/run-state-truth-summary.json` and screenshot.
 - Gates:       Focused frontend 98 passed, exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate DB/API/DOM harness exit 0. React quality review found no new effect/state coupling or unstable identity; the only render addition is a guarded scalar KV row.
-- Commit:      this N-43 commit
+- Commit:      `9b5137de8`
+- Status:      CONFIRMED
+
+### N-44  Operator answer and unblock are one atomic transition
+- Source:      Loop-4 answer semantics and real two-tab mutation race
+- Class:       RACE
+- Severity:    S1
+- Invariant:   Answering an operator question either persists the operator comment and releases the current hold together, or writes neither; stale/verifier/archived state never receives a partial answer.
+- Repro:       Create two sanctioned operator holds on `audit-scratch`; answer the first through the production DOM; archive the second from another authenticated browser tab after the answer form is already open, then submit the stale form; verify DB/API/DOM and comments.
+- Before:      `useAnswerQuestion` issued POST comment → PATCH ready → POST dispatch as three requests. A second-tab state change between the first two left an operator comment on a task that was never successfully answered/unblocked. Fail-first: frontend still made three calls; all three new backend endpoint tests returned 404.
+- Test:        Backend covers successful answer, verifier `REQUEST_CHANGES` prose rejection with zero comments, and archived second-tab loss with zero comments. Frontend locks one atomic POST followed only by the best-effort dispatch tick.
+- Change:      Add a single `BEGIN IMMEDIATE` DB transition that rechecks verdict-aware eligibility, clears a defensive stale run pointer, dependency-gates the resulting status, writes the operator comment, and emits comment/unblock events atomically; expose POST `/tasks/{id}/answer`; reduce the hook to this transition plus a subsequent dispatch tick.
+- After:       Exact candidate on port 9123 returned 200/`ready` and persisted exactly one operator comment for `t_58e2ac22`. A second tab archived `t_8754c1c7`; its stale submit returned 409 visibly, left status `archived`, and wrote zero comments. One expected 409 console line, zero unexpected console errors. Both fixtures ended archived. Evidence: `audit/iteration-4-state/atomic-answer-summary.json` and screenshot.
+- Gates:       Frontend AnswerQuestion 3 passed, exit 0; backend plugin 272 passed, exit 0; Ruff exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate two-tab harness exit 0.
+- Commit:      this N-44 commit
 - Status:      CONFIRMED
 
 ## Later iterations

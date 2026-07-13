@@ -2,9 +2,8 @@
 //
 // S6 End-to-End-Test für useAnswerQuestion / AnswerQuestion.
 //
-// Beweist AC-1 und AC-2: Das Absenden der Antwort führt die drei-Schritt-
-// Komposition aus (POST comment → PATCH ready → POST dispatch) in der
-// richtigen Reihenfolge mit der richtigen Payload aus, und der Erfolg
+// Beweist AC-1 und AC-2: Das Absenden der Antwort führt die atomare
+// Antwort+Unblock-Transition und danach den best-effort Dispatch aus, und der Erfolg
 // wird in der UI sichtbar (doneIds). Ein Fehler im zweiten Schritt bricht
 // die Kette ab und zeigt die Server-Detailmeldung per extractDetail.
 //
@@ -31,8 +30,8 @@ afterEach(() => {
 // Echte Fixture-Tasks mit operator_question-Blockgründen, wie sie das Board liefert.
 const FIXTURE_TASK_ID = "t_abc123";
 
-describe("AnswerQuestion — drei-Schritt-Komposition (S6 AC-1+2)", () => {
-  it("POST comment (author: operator) → PATCH ready → POST dispatch in Order", async () => {
+describe("AnswerQuestion — atomare Transition (S6 AC-1+2)", () => {
+  it("POST answer (Kommentar + Unblock atomar) → POST dispatch in Order", async () => {
     fetchJSONMock.mockResolvedValue({ ok: true });
 
     render(<AnswerQuestion taskId={FIXTURE_TASK_ID} />);
@@ -48,26 +47,17 @@ describe("AnswerQuestion — drei-Schritt-Komposition (S6 AC-1+2)", () => {
     fireEvent.click(submit);
 
     await waitFor(() => {
-      expect(fetchJSONMock).toHaveBeenCalledTimes(3);
+      expect(fetchJSONMock).toHaveBeenCalledTimes(2);
     });
 
-    // 1. POST /tasks/{id}/comments
-    const [cUrl, cOpts] = fetchJSONMock.mock.calls[0];
-    expect(cUrl).toBe(`/api/plugins/kanban/tasks/${FIXTURE_TASK_ID}/comments`);
-    expect(cOpts.method).toBe("POST");
-    expect(JSON.parse(cOpts.body)).toEqual({
-      body: "Ja, Credentials sind in ~/.env",
-      author: "operator",
-    });
+    // 1. Atomarer Backend-Übergang: Kommentar + unblock in EINER Transaktion.
+    const [aUrl, aOpts] = fetchJSONMock.mock.calls[0];
+    expect(aUrl).toBe(`/api/plugins/kanban/tasks/${FIXTURE_TASK_ID}/answer`);
+    expect(aOpts.method).toBe("POST");
+    expect(JSON.parse(aOpts.body)).toEqual({ answer: "Ja, Credentials sind in ~/.env" });
 
-    // 2. PATCH /tasks/{id} — status ready
-    const [pUrl, pOpts] = fetchJSONMock.mock.calls[1];
-    expect(pUrl).toBe(`/api/plugins/kanban/tasks/${FIXTURE_TASK_ID}`);
-    expect(pOpts.method).toBe("PATCH");
-    expect(JSON.parse(pOpts.body)).toEqual({ status: "ready" });
-
-    // 3. POST /workers/0/action — dispatch tick
-    const [dUrl, dOpts] = fetchJSONMock.mock.calls[2];
+    // 2. POST /workers/0/action — best-effort dispatch tick
+    const [dUrl, dOpts] = fetchJSONMock.mock.calls[1];
     expect(dUrl).toBe("/api/plugins/kanban/workers/0/action");
     expect(dOpts.method).toBe("POST");
     const dBody = JSON.parse(dOpts.body);
@@ -91,11 +81,8 @@ describe("AnswerQuestion — drei-Schritt-Komposition (S6 AC-1+2)", () => {
     expect(fetchJSONMock).not.toHaveBeenCalled();
   });
 
-  it("Fehler im zweiten Schritt (PATCH) bricht Kette ab und zeigt Detail", async () => {
-    // Comment-POST ok, PATCH schlägt fehl mit HTTP 409
-    fetchJSONMock
-      .mockResolvedValueOnce({ ok: true })
-      .mockRejectedValueOnce(new Error("409: {\"detail\":\"Task nicht blockiert\"}"));
+  it("atomarer 409 bricht vor dem Dispatch ab und zeigt Detail", async () => {
+    fetchJSONMock.mockRejectedValueOnce(new Error("409: {\"detail\":\"Task ist keine aktuelle Operator-Frage\"}"));
 
     render(<AnswerQuestion taskId={FIXTURE_TASK_ID} />);
 
@@ -103,9 +90,9 @@ describe("AnswerQuestion — drei-Schritt-Komposition (S6 AC-1+2)", () => {
     fireEvent.change(input, { target: { value: "Test-Antwort" } });
     fireEvent.click(screen.getByRole("button", { name: "Antworten" }));
 
-    // Nur zwei Aufrufe (comment + fehlschlagender PATCH) — dispatch nie erreicht
+    // Nur der atomare Answer-Aufruf — Dispatch nie erreicht.
     await waitFor(() => {
-      expect(fetchJSONMock).toHaveBeenCalledTimes(2);
+      expect(fetchJSONMock).toHaveBeenCalledTimes(1);
     });
 
     // Fehler wird per extractDetail angezeigt (AC-2: Fehler sichtbar)
@@ -113,7 +100,7 @@ describe("AnswerQuestion — drei-Schritt-Komposition (S6 AC-1+2)", () => {
     await waitFor(() => {
       const err = screen.queryByRole("alert");
       expect(err).toBeTruthy();
-      expect(err?.textContent).toContain("Task nicht blockiert");
+      expect(err?.textContent).toContain("Task ist keine aktuelle Operator-Frage");
     });
 
     // Keine Erfolgsmeldung

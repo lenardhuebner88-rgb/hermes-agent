@@ -20816,6 +20816,95 @@ def blocked_task_operator_questions(
     return result
 
 
+def answer_operator_question(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    answer: str,
+    author: str = "operator",
+) -> Optional[str]:
+    """Atomically persist an operator answer and release its current hold.
+
+    Returns ``ready`` or dependency-gated ``todo``. ``None`` means the task is
+    absent or no longer a blocked operator question. Eligibility, comment, and
+    status CAS share one transaction, so a second-tab change cannot leave a
+    partial answer comment behind.
+    """
+    text = str(answer or "").strip()
+    clean_author = str(author or "").strip()
+    if not text:
+        raise ValueError("answer is required")
+    if not clean_author:
+        raise ValueError("author is required")
+
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        task = Task.from_row(row)
+        if task.status != "blocked":
+            return None
+        if not blocked_task_operator_questions(conn, [task]).get(task_id, False):
+            return None
+
+        if task.current_run_id:
+            conn.execute(
+                """
+                UPDATE task_runs
+                   SET status = 'reclaimed', outcome = 'reclaimed',
+                       summary = COALESCE(summary, 'invariant recovery on operator answer'),
+                       ended_at = ?, claim_lock = NULL, claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ? AND ended_at IS NULL
+                """,
+                (now, int(task.current_run_id)),
+            )
+
+        undone_parent = conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        new_status = "todo" if undone_parent else "ready"
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = ?, current_run_id = NULL,
+                   claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
+                   consecutive_failures = 0, transient_retry_count = 0,
+                   last_failure_error = NULL, block_kind = NULL,
+                   block_recurrences = 0
+             WHERE id = ? AND status = 'blocked'
+            """,
+            (new_status, task_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        comment = conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+            "VALUES (?, ?, ?, ?, 'comment')",
+            (task_id, clean_author, text, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "commented",
+            {"author": clean_author, "len": len(text), "kind": "comment"},
+        )
+        _append_event(
+            conn,
+            task_id,
+            "unblocked",
+            {
+                "status": new_status,
+                "source": "operator_answer",
+                "comment_id": int(comment.lastrowid or 0),
+            },
+        )
+        return new_status
+
+
 def _latest_blocked_run_for_auto_retry(
     conn: sqlite3.Connection,
     task_id: str,

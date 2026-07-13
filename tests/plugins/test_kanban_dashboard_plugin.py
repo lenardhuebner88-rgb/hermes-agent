@@ -8490,6 +8490,79 @@ def test_board_verifier_question_is_not_an_operator_question(client):
     assert detail.json()["task"]["operator_question"] is False
 
 
+def test_answer_operator_question_atomically_comments_and_unblocks(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "operator answer", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.hold_task(conn, tid, reason="operator hold: which credential?")
+
+    answered = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer",
+        json={"answer": "Use the scoped audit credential."},
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == {"ok": True, "task_id": tid, "status": "ready"}
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    assert payload["task"]["status"] == "ready"
+    assert payload["task"]["operator_question"] is False
+    assert [(c["author"], c["body"]) for c in payload["comments"]] == [
+        ("operator", "Use the scoped audit credential."),
+    ]
+
+
+def test_answer_rejects_verifier_prose_without_writing_comment(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "review answer guard", "assignee": "coder", "body": "AC v1"},
+    )
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="Verifier asks: why is this missing?")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (tid,),
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer", json={"answer": "stray answer"},
+    )
+    assert response.status_code == 409, response.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.list_comments(conn, tid) == []
+
+
+def test_answer_loses_second_tab_race_without_partial_comment(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "answer race", "assignee": "coder"},
+    )
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.hold_task(conn, tid, reason="operator hold: choose?")
+        assert kb.archive_task(conn, tid)
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer", json={"answer": "too late"},
+    )
+    assert response.status_code == 409, response.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "archived"
+        assert kb.list_comments(conn, tid) == []
+
+
 def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client, monkeypatch):
     conn = kb.connect()
     try:

@@ -1,0 +1,31 @@
+{
+  "base": "http://127.0.0.1:9123",
+  "board": "audit-scratch",
+  "expected_409_console_errors": 1,
+  "race_answer_body": {
+    "detail": "Task ist keine aktuelle Operator-Frage"
+  },
+  "race_answer_http": 409,
+  "race_comments": [],
+  "race_dom_error": "Task ist keine aktuelle Operator-Frage",
+  "race_status": "archived",
+  "race_task_id": "t_8754c1c7",
+  "screenshot": "audit/iteration-4-state/atomic-answer-two-tab-1440x900.png",
+  "second_tab_archive_http": 200,
+  "success_answer_body": {
+    "ok": true,
+    "status": "ready",
+    "task_id": "t_58e2ac22"
+  },
+  "success_answer_http": 200,
+  "success_comments": [
+    {
+      "author": "operator",
+      "body": "Use scoped credential A."
+    }
+  ],
+  "success_detail_http": 200,
+  "success_status": "ready",
+  "success_task_id": "t_58e2ac22",
+  "unexpected_console_errors": []
+}
