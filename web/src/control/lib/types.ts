@@ -7,12 +7,17 @@ export type TaskStatus =
   | "triage" | "todo" | "scheduled" | "ready" | "running"
   | "blocked" | "review" | "done" | "archived";
 
-export type RunStatus =
+export type KnownRunStatus =
   | "running" | "done" | "blocked" | "crashed" | "timed_out" | "failed" | "released";
 
-export type RunOutcome =
+/** Open DB vocabulary. Known values aid autocomplete; unknown values stay lossless. */
+export type RunStatus = KnownRunStatus | (string & {});
+
+export type KnownRunOutcome =
   | "completed" | "blocked" | "crashed" | "timed_out" | "spawn_failed"
   | "gave_up" | "reclaimed" | "iteration_budget_exhausted";
+
+export type RunOutcome = KnownRunOutcome | (string & {});
 
 export interface RunInspect {
   cpu_percent: number;
@@ -549,11 +554,16 @@ export interface BoardTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  archived_at?: number | null;
+  due_at?: number | null;
+  last_heartbeat_at?: number | null;
   branch_name: string | null;
   latest_summary: string | null;
   vault_memory_links?: VaultMemoryLink[];
   /** Round D: block reason for blocked tasks (latest task_run summary). "operator hold" marks an operator hold. Older payloads → undefined/null. */
   block_reason?: string | null;
+  /** Dispatcher-owned classification; never infer this from block_reason prose. */
+  operator_question?: boolean;
   auto_retry_count?: number;
   link_counts: { parents: number; children: number };
   comment_count: number;
@@ -619,6 +629,21 @@ export interface BoardResponse {
   assignees: string[];
   latest_event_id: number;
   source_errors: BoardSourceError[];
+  now: number;
+}
+
+export interface BoardArchiveResponse {
+  tasks: BoardTask[];
+  total_count: number;
+  filtered_count: number;
+  loaded_count: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  query: string;
+  assignee: string | null;
+  assignees: string[];
+  latest_event_id: number;
   now: number;
 }
 

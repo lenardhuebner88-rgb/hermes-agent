@@ -20930,6 +20930,185 @@ def _blocked_kind_for_auto_retry(
     return "retryable"
 
 
+def blocked_task_operator_questions(
+    conn: sqlite3.Connection,
+    tasks: Sequence[Task],
+) -> dict[str, bool]:
+    """Return the dispatcher's authoritative operator-input state per task.
+
+    Dashboard clients must not reproduce ``_AUTO_RETRY_QUESTION_RE`` from prose:
+    a first-pass ``REQUEST_CHANGES`` summary can contain a question mark while
+    still being explicitly retryable.  This batch helper reuses the exact
+    verdict/body-hash classifier used by :func:`auto_retry_blocked_tasks` and
+    keeps the board endpoint free of per-card queries.
+    """
+    blocked = [task for task in tasks if task.status == "blocked"]
+    if not blocked:
+        return {}
+    task_by_id = {task.id: task for task in blocked}
+    task_ids = list(task_by_id)
+    placeholders = ",".join("?" for _ in task_ids)
+
+    latest_runs: dict[str, sqlite3.Row] = {}
+    for row in conn.execute(
+        f"""
+        WITH candidates AS (
+            SELECT task_id, summary, error, verdict,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY task_id
+                       ORDER BY CASE WHEN outcome = 'blocked' THEN 0 ELSE 1 END,
+                                ended_at DESC, id DESC
+                   ) AS rank
+              FROM task_runs
+             WHERE task_id IN ({placeholders})
+               AND ended_at IS NOT NULL
+               AND (
+                   outcome = 'blocked'
+                   OR (outcome = 'completed' AND verdict = 'REQUEST_CHANGES')
+               )
+        )
+        SELECT task_id, summary, error, verdict
+          FROM candidates
+         WHERE rank = 1
+        """,
+        task_ids,
+    ).fetchall():
+        latest_runs[str(row["task_id"])] = row
+
+    retry_hashes: dict[str, str] = {}
+    for row in conn.execute(
+        f"""
+        SELECT task_id, payload
+          FROM task_events
+         WHERE task_id IN ({placeholders})
+           AND kind = 'auto_retried'
+         ORDER BY task_id, id DESC
+        """,
+        task_ids,
+    ).fetchall():
+        task_id = str(row["task_id"])
+        if task_id in retry_hashes:
+            continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        body_hash = payload.get("body_hash") if isinstance(payload, dict) else None
+        if isinstance(body_hash, str) and body_hash:
+            retry_hashes[task_id] = body_hash
+
+    result: dict[str, bool] = {}
+    for task_id, task in task_by_id.items():
+        if task.block_kind == "needs_input":
+            result[task_id] = True
+            continue
+        if task.block_kind in {"dependency", "transient"}:
+            result[task_id] = False
+            continue
+        run = latest_runs.get(task_id)
+        if run is None:
+            result[task_id] = False
+            continue
+        reason = (run["summary"] or "").strip() or (run["error"] or "").strip()
+        result[task_id] = _blocked_kind_for_auto_retry(
+            reason,
+            verdict=run["verdict"],
+            auto_retry_count=task.auto_retry_count,
+            body_hash=_task_body_hash(task.body),
+            last_auto_retry_body_hash=retry_hashes.get(task_id),
+        ) in {"operator_question", "needs_operator"}
+    return result
+
+
+def answer_operator_question(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    answer: str,
+    author: str = "operator",
+) -> Optional[str]:
+    """Atomically persist an operator answer and release its current hold.
+
+    Returns ``ready`` or dependency-gated ``todo``. ``None`` means the task is
+    absent or no longer a blocked operator question. Eligibility, comment, and
+    status CAS share one transaction, so a second-tab change cannot leave a
+    partial answer comment behind.
+    """
+    text = str(answer or "").strip()
+    clean_author = str(author or "").strip()
+    if not text:
+        raise ValueError("answer is required")
+    if not clean_author:
+        raise ValueError("author is required")
+
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        task = Task.from_row(row)
+        if task.status != "blocked":
+            return None
+        if not blocked_task_operator_questions(conn, [task]).get(task_id, False):
+            return None
+
+        if task.current_run_id:
+            conn.execute(
+                """
+                UPDATE task_runs
+                   SET status = 'reclaimed', outcome = 'reclaimed',
+                       summary = COALESCE(summary, 'invariant recovery on operator answer'),
+                       ended_at = ?, claim_lock = NULL, claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ? AND ended_at IS NULL
+                """,
+                (now, int(task.current_run_id)),
+            )
+
+        undone_parent = conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        new_status = "todo" if undone_parent else "ready"
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = ?, current_run_id = NULL,
+                   claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
+                   consecutive_failures = 0, transient_retry_count = 0,
+                   last_failure_error = NULL, block_kind = NULL,
+                   block_recurrences = 0
+             WHERE id = ? AND status = 'blocked'
+            """,
+            (new_status, task_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        comment = conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+            "VALUES (?, ?, ?, ?, 'comment')",
+            (task_id, clean_author, text, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "commented",
+            {"author": clean_author, "len": len(text), "kind": "comment"},
+        )
+        _append_event(
+            conn,
+            task_id,
+            "unblocked",
+            {
+                "status": new_status,
+                "source": "operator_answer",
+                "comment_id": int(comment.lastrowid or 0),
+            },
+        )
+        return new_status
+
+
 def _latest_blocked_run_for_auto_retry(
     conn: sqlite3.Connection,
     task_id: str,

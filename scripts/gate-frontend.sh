@@ -42,6 +42,7 @@
 # Env-Schalter (Default = sicheres, deterministisches Verhalten):
 #   GATE_FRONTEND_AUTO_INSTALL=0   Kein Auto-`npm ci`; stale Toolchain → schnell blocken.
 #   GATE_FRONTEND_PREFLIGHT_ONLY=1 Nur den Preflight ausführen (Selbsttest), dann exit.
+#   GATE_FRONTEND_MAX_WORKERS=4     Vitest-Forks begrenzen; überschreibbar für CI/starke Hosts.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +74,19 @@ _gate_bin_ok() {
   local b="$1"
   [[ -x "$repo_root/node_modules/.bin/$b" ]] && return 0
   [[ -x "$repo_root/web/node_modules/.bin/$b" ]] && return 0
+  return 1
+}
+
+_gate_bin_path() {
+  local b="$1"
+  if [[ -x "$repo_root/node_modules/.bin/$b" ]]; then
+    printf '%s\n' "$repo_root/node_modules/.bin/$b"
+    return 0
+  fi
+  if [[ -x "$repo_root/web/node_modules/.bin/$b" ]]; then
+    printf '%s\n' "$repo_root/web/node_modules/.bin/$b"
+    return 0
+  fi
   return 1
 }
 
@@ -209,6 +223,10 @@ if [[ "${GATE_FRONTEND_PREFLIGHT_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+tsc_bin="$(_gate_bin_path tsc)"
+vitest_bin="$(_gate_bin_path vitest)"
+vitest_max_workers="${GATE_FRONTEND_MAX_WORKERS:-4}"
+
 cd "$repo_root/web"
 
 step "design-tokens ratchet"
@@ -234,11 +252,11 @@ fi
 step "npm run lint:control"
 npm run lint:control
 
-step "npx tsc -b --noEmit"
-npx tsc -b --noEmit
+step "tsc -b --noEmit (worktree-local)"
+"$tsc_bin" -b --noEmit
 
-step "npx vitest run"
-npx vitest run
+step "vitest run (worktree-local, maxWorkers=$vitest_max_workers)"
+"$vitest_bin" run --maxWorkers="$vitest_max_workers"
 
 if [[ $skip_build -eq 1 ]]; then
   step "build ÜBERSPRUNGEN (--skip-build)"

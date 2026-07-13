@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
-  formatEffectiveCost,
+  elapsedSeconds, formatEffectiveCost, fmtRelativeTime, inspectEpochSeconds, validateChronology,
 } from './derive';
 import type { Worker, Proposal } from './types';
 
@@ -46,6 +46,9 @@ describe('workerHealth', () => {
   });
   it('stuck bei abgelaufenem claim_expires (trotz frischem Heartbeat)', () => {
     expect(workerHealth(mkWorker({ claim_expires: NOW - 1 }), NOW).key).toBe('stuck');
+  });
+  it('stuck bei millisekundenförmigem claim_expires statt plausibel gesund', () => {
+    expect(workerHealth(mkWorker({ claim_expires: NOW * 1000 }), NOW).key).toBe('stuck');
   });
   it('Heartbeat genau auf der Schwelle ist NICHT stuck', () => {
     expect(workerHealth(mkWorker({ last_heartbeat_at: NOW - STUCK_HEARTBEAT_S }), NOW).key).toBe('healthy');
@@ -97,6 +100,42 @@ describe('Formatierung', () => {
     expect(fmtDur(52)).toBe('52s');
     expect(fmtDur(240)).toBe('4m');
     expect(fmtDur(8040)).toBe('2h 14m');
+  });
+  it.each([null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, NOW * 1000, 'bad'])(
+    'rejects invalid epoch-seconds input %s', (value) => {
+    expect(inspectEpochSeconds(value, NOW).valid).toBe(false);
+    expect(fmtClock(value)).toBe('Zeit ungültig');
+    expect(fmtRelativeTime(value, NOW)).toBe('Zeit ungültig');
+    },
+  );
+  it('keeps old seconds valid and labels future seconds truthfully', () => {
+    expect(fmtAge(NOW - 400 * 86400, NOW)).toBe('400d');
+    expect(fmtAge(NOW + 86400, NOW)).toBe('in 1d');
+    expect(fmtRelativeTime(NOW - 5, NOW)).toBe('vor 5s');
+    expect(fmtRelativeTime(NOW + 86400, NOW)).toBe('in 1d');
+    expect(elapsedSeconds(NOW + 86400, NOW)).toBeNull();
+  });
+  it('never makes invalid or negative durations look like zero seconds', () => {
+    expect(fmtDur(-1)).toBe('Dauer ungültig');
+    expect(fmtDur(Number.NaN)).toBe('Dauer ungültig');
+    expect(fmtDur(Number.POSITIVE_INFINITY)).toBe('Dauer ungültig');
+  });
+  it('renders Europe/Berlin clocks correctly across both DST boundaries', () => {
+    expect(fmtClock(Date.parse('2026-03-29T00:30:00Z') / 1000)).toContain('01:30');
+    expect(fmtClock(Date.parse('2026-03-29T01:30:00Z') / 1000)).toContain('03:30');
+    expect(fmtClock(Date.parse('2026-10-25T00:30:00Z') / 1000)).toContain('02:30');
+    expect(fmtClock(Date.parse('2026-10-25T01:30:00Z') / 1000)).toContain('02:30');
+  });
+  it('rejects impossible task chronology instead of absolving it with Math.abs/clamping', () => {
+    expect(validateChronology({ createdAt: NOW - 20, startedAt: NOW - 10, completedAt: NOW })).toEqual({ valid: true, reason: null });
+    expect(validateChronology({ createdAt: NOW - 20, startedAt: NOW - 10, completedAt: NOW - 15 })).toEqual({
+      valid: false,
+      reason: 'Abschluss liegt vor Start',
+    });
+    expect(validateChronology({ createdAt: NOW - 10, startedAt: NOW - 20, completedAt: null })).toEqual({
+      valid: false,
+      reason: 'Start liegt vor Anlage',
+    });
   });
   it('fmtMB', () => {
     expect(fmtMB(536870912)).toBe('512 MB');

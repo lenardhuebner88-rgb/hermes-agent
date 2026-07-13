@@ -700,6 +700,77 @@ def test_board_empty(client):
     assert data["latest_event_id"] == 0
 
 
+def test_archive_board_is_cursor_paginated_searchable_and_separate_from_active_poll(client):
+    conn = kb.connect()
+    try:
+        archived_ids = []
+        for index, title in enumerate(
+            ["old alpha", "old beta", "needle archive", "old delta", "old epsilon"],
+            start=1,
+        ):
+            task_id = kb.create_task(conn, title=title, assignee="alice" if index % 2 else "bob")
+            assert kb.archive_task(conn, task_id) is True
+            conn.execute(
+                "UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = 'archived'",
+                (1_780_000_000 + index, task_id),
+            )
+            archived_ids.append(task_id)
+    finally:
+        conn.close()
+
+    active = client.get(
+        "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"
+    ).json()
+    assert all(
+        task["status"] != "archived"
+        for column in active["columns"]
+        for task in column["tasks"]
+    )
+    assert "archive" not in active
+
+    seen: list[str] = []
+    cursor = None
+    while True:
+        params = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = client.get("/api/plugins/kanban/board/archive", params=params)
+        assert response.status_code == 200
+        page = response.json()
+        assert page["total_count"] == 5
+        assert page["filtered_count"] == 5
+        assert page["loaded_count"] == len(page["tasks"])
+        assert page["limit"] == 2
+        assert all(task["status"] == "archived" for task in page["tasks"])
+        assert all(task["archived_at"] > 0 for task in page["tasks"])
+        seen.extend(task["id"] for task in page["tasks"])
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+        assert cursor
+
+    assert seen == list(reversed(archived_ids))
+    assert len(seen) == len(set(seen)) == 5
+
+    filtered = client.get(
+        "/api/plugins/kanban/board/archive",
+        params={"q": "needle", "assignee": "alice", "limit": 50},
+    ).json()
+    assert filtered["total_count"] == 5
+    assert filtered["filtered_count"] == 1
+    assert filtered["loaded_count"] == 1
+    assert filtered["tasks"][0]["title"] == "needle archive"
+    assert filtered["query"] == "needle"
+    assert filtered["assignee"] == "alice"
+
+    invalid = client.get(
+        "/api/plugins/kanban/board/archive", params={"cursor": "not-a-cursor"}
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "invalid archive cursor"
+
+
 # ---------------------------------------------------------------------------
 # POST /tasks then GET /board sees it
 # ---------------------------------------------------------------------------
@@ -1413,10 +1484,16 @@ def test_task_detail_includes_links_and_events(client):
     data = r.json()
     assert data["task"]["id"] == child["id"]
     assert parent["id"] in data["links"]["parents"]
+    assert data["links"]["parent_states"] == [
+        {"id": parent["id"], "title": "parent", "status": parent["status"]}
+    ]
 
     # Detail for the parent shows the child.
     r = client.get(f"/api/plugins/kanban/tasks/{parent['id']}")
     assert child["id"] in r.json()["links"]["children"]
+    assert r.json()["links"]["child_states"] == [
+        {"id": child["id"], "title": "child", "status": "todo"}
+    ]
 
     # Events exist from creation.
     assert len(data["events"]) >= 1
@@ -8340,6 +8417,11 @@ def test_board_block_reason_operator_hold(client):
     assert task_card["block_reason"] == "operator hold", (
         f"expected 'operator hold', got {task_card.get('block_reason')!r}"
     )
+    assert task_card["operator_question"] is True
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["operator_question"] is True
 
 
 def test_board_block_reason_null_for_non_hold(client):
@@ -8371,6 +8453,114 @@ def test_board_block_reason_null_for_non_hold(client):
     assert "operator hold" not in reason.lower(), (
         f"non-hold blocked task must not have operator-hold block_reason, got {reason!r}"
     )
+
+
+def test_board_verifier_question_is_not_an_operator_question(client):
+    """A question mark in first-pass REQUEST_CHANGES prose stays retryable.
+
+    The dashboard must consume the dispatcher's verdict-aware classification,
+    not independently infer an operator action from punctuation.
+    """
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "review feedback", "assignee": "coder", "body": "AC v1"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="Verifier asks: why is this assertion missing?")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (tid,),
+        )
+        conn.commit()
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200, r.text
+    blocked_col = next(c for c in r.json()["columns"] if c["name"] == "blocked")
+    task_card = next(t for t in blocked_col["tasks"] if t["id"] == tid)
+    assert task_card["block_reason"] == "Verifier asks: why is this assertion missing?"
+    assert task_card["operator_question"] is False
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["operator_question"] is False
+
+
+def test_answer_operator_question_atomically_comments_and_unblocks(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "operator answer", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.hold_task(conn, tid, reason="operator hold: which credential?")
+
+    answered = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer",
+        json={"answer": "Use the scoped audit credential."},
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == {"ok": True, "task_id": tid, "status": "ready"}
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    assert payload["task"]["status"] == "ready"
+    assert payload["task"]["operator_question"] is False
+    assert [(c["author"], c["body"]) for c in payload["comments"]] == [
+        ("operator", "Use the scoped audit credential."),
+    ]
+
+
+def test_answer_rejects_verifier_prose_without_writing_comment(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "review answer guard", "assignee": "coder", "body": "AC v1"},
+    )
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="Verifier asks: why is this missing?")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (tid,),
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer", json={"answer": "stray answer"},
+    )
+    assert response.status_code == 409, response.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.list_comments(conn, tid) == []
+
+
+def test_answer_loses_second_tab_race_without_partial_comment(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "answer race", "assignee": "coder"},
+    )
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.hold_task(conn, tid, reason="operator hold: choose?")
+        assert kb.archive_task(conn, tid)
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer", json={"answer": "too late"},
+    )
+    assert response.status_code == 409, response.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "archived"
+        assert kb.list_comments(conn, tid) == []
 
 
 def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client, monkeypatch):

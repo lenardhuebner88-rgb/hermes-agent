@@ -19,7 +19,10 @@ const { fetchJSONMock, hookState } = vi.hoisted(() => ({
         runs: [],
       },
       loading: false,
-      error: null,
+      error: null as string | null,
+      errorObj: null,
+      isStale: false,
+      lastUpdated: 1782508000,
     },
     lanesCatalog: {
       data: {
@@ -90,6 +93,12 @@ describe("AktivitaetTab (NodeDetailDrawer)", () => {
 
     expect(screen.getByText("claimed")).toBeTruthy();
   });
+
+  it("names a contaminated event timestamp instead of rendering a plausible dash", () => {
+    render(<AktivitaetTab events={[{ id: 9, kind: "claimed", note: null, at: Number.NaN }]} now={1782508100} loading={false} />);
+
+    expect(screen.getByText("Zeit ungültig")).toBeTruthy();
+  });
 });
 
 
@@ -133,6 +142,33 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).toContain("ENDE");
     expect(html).not.toContain("mask-image");
   });
+
+  it("names a contaminated runtime explicitly", () => {
+    const html = renderToStaticMarkup(
+      <UebersichtTab
+        task={{ id: "t1", title: "T", status: "running", assignee: "coder", body: null }}
+        latestRun={{ profile: "coder", status: "running", runtime_seconds: Number.NaN }}
+        elapsedSec={Number.NaN}
+        deliverables={[]}
+      />,
+    );
+
+    expect(html).toContain("Dauer ungültig");
+  });
+
+  it("names the lossless latest run state instead of inventing running or done", () => {
+    const html = renderToStaticMarkup(
+      <UebersichtTab
+        task={{ id: "t1", title: "T", status: "review", assignee: "verifier", body: null }}
+        latestRun={{ profile: "verifier", status: "completed", runtime_seconds: 60 }}
+        elapsedSec={60}
+        deliverables={[]}
+      />,
+    );
+
+    expect(html).toContain("Laufstatus");
+    expect(html).toContain("Abgeschlossen (completed)");
+  });
 });
 
 describe("NodeDetailDrawer Reassign", () => {
@@ -153,6 +189,19 @@ describe("NodeDetailDrawer Reassign", () => {
     );
   }
 
+  it("discloses a vanished task refresh while retaining the last detail", () => {
+    hookState.taskBody.error = "404: task t_reassign not found";
+    hookState.taskBody.isStale = true;
+    renderDrawer();
+
+    expect(screen.getByText("Task-Detail")).toBeTruthy();
+    expect(screen.getByTitle("404: task t_reassign not found")).toBeTruthy();
+    expect(screen.getByText("Task falsch profiliert")).toBeTruthy();
+
+    hookState.taskBody.error = null;
+    hookState.taskBody.isStale = false;
+  });
+
   it("nutzt DrawerShell mit Dialog-Semantik und schließt per Escape", () => {
     const onClose = vi.fn();
     render(
@@ -168,6 +217,19 @@ describe("NodeDetailDrawer Reassign", () => {
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("bietet für einen laufenden Task keine deterministisch abgelehnte Profiländerung an", () => {
+    const original = hookState.taskBody.data.task.status;
+    hookState.taskBody.data.task.status = "running";
+    try {
+      renderDrawer();
+
+      expect(screen.queryByLabelText("Zielprofil")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Profil ändern" })).toBeNull();
+    } finally {
+      hookState.taskBody.data.task.status = original;
+    }
   });
 
   it("armt Reassign und POSTet das echte Payload-Format", async () => {
@@ -205,5 +267,35 @@ describe("NodeDetailDrawer Reassign", () => {
     fireEvent.click(screen.getByRole("button", { name: "Bestätigen" }));
 
     expect(await screen.findByText("cannot reassign t_reassign: unknown id, or still running")).toBeTruthy();
+  });
+});
+
+describe("NodeDetailDrawer dependency action guard", () => {
+  it("derives the Starten guard from authoritative parent states", () => {
+    const original = hookState.taskBody.data;
+    (hookState.taskBody as { data: unknown }).data = {
+      task: { id: "t_child", title: "Child", status: "todo", assignee: "coder", body: null },
+      runs: [],
+      links: {
+        parents: ["t_parent"],
+        children: [],
+        parent_states: [{ id: "t_parent", title: "Blocking parent", status: "running" }],
+        child_states: [],
+      },
+    };
+    try {
+      render(
+        <NodeDetailDrawer
+          taskId="t_child"
+          chainNodes={[]}
+          now={1782508100}
+          onClose={() => undefined}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: "Starten" })).toBeNull();
+      expect(screen.getByText(/Blocking parent.*running/)).toBeTruthy();
+    } finally {
+      (hookState.taskBody as { data: unknown }).data = original;
+    }
   });
 });

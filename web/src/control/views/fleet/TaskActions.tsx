@@ -38,13 +38,12 @@ export interface FleetTaskActionsProps {
   onChanged?: () => void | Promise<void>;
   /** Nach erfolgreichem Abbrechen/Ketten-Abbruch aufgerufen (z. B. Drawer schließen). */
   onCancelled?: () => void;
-  /** Opt-in: zeigt Ship/Rework auch für `status === "review"`. Default bleibt
-   *  versteckt (siehe Kommentar unten) — nur der NodeDetailDrawer setzt dies,
-   *  weil er die Verifier-Urteile (Ergebnis-Tab) direkt neben den Buttons zeigt. */
-  allowReviewStage?: boolean;
+  /** Current-state reason why the stage advance is impossible. Management
+   * actions remain available; the invalid stage request is never submitted. */
+  stageBlockReason?: string | null;
 }
 
-export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCancelled, allowReviewStage }: FleetTaskActionsProps) {
+export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCancelled, stageBlockReason }: FleetTaskActionsProps) {
   const [armed, setArmed] = useState<string | null>(null);
   const [chainNote, setChainNote] = useState<string>("");
   const task = useTaskAction(onChanged);
@@ -60,13 +59,9 @@ export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCan
 
   const actions: UiAction[] = [];
   // (1) Stage-Übergänge — stageActions wiederverwenden (Reopen = Unblock/PATCH
-  // ready). Für `review` ist die Abnahme (Ship) bzw. Rückweisung (Rework) eines
-  // Verifier-Gates standardmäßig VERSTECKT — kein ungeschütztes Blind-Approve
-  // ohne den Verifier-Kontext im Blick. `allowReviewStage` ist der bewusste
-  // Opt-in dafür: nur der NodeDetailDrawer setzt ihn, weil er die Verifier-
-  // Urteile (Ergebnis-Tab) direkt neben diesen Buttons zeigt — RisikoTabs
-  // blockierte Zeilen lassen den Default unangetastet.
-  const stage = st === "review" ? (allowReviewStage ? stageActions("review") : []) : stageActions(st);
+  // ready). Review bleibt absichtlich ohne manuellen Status-Button: das Backend
+  // akzeptiert weder review→done noch review→blocked über diesen PATCH-Pfad.
+  const stage = stageBlockReason && (st === "todo" || st === "scheduled") ? [] : stageActions(st);
   for (const a of stage) {
     actions.push({
       key: `stage:${a.key}`,
@@ -175,6 +170,7 @@ export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCan
         </div>
       )}
       {errorText ? <p className="fleet-ta-error">{errorText}</p> : null}
+      {stageBlockReason ? <p className="fleet-ta-error" role="status">{stageBlockReason}</p> : null}
       {chainNote ? <p className="fleet-ta-note">{chainNote}</p> : null}
       {retryDone && !chainNote ? <p className="fleet-ta-note">{de.fleet.actionRetryDone}</p> : null}
     </div>

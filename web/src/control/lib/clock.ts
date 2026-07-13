@@ -10,20 +10,27 @@ let clockNowSeconds = Math.floor(Date.now() / 1000);
 const clockListeners = new Set<() => void>();
 let clockTimer: number | null = null;
 
+function refreshClock(): void {
+  clockNowSeconds = Math.floor(Date.now() / 1000);
+  for (const listener of clockListeners) listener();
+}
+
 export function subscribeClock(listener: () => void): () => void {
   clockListeners.add(listener);
   if (clockTimer == null) {
     clockNowSeconds = Math.floor(Date.now() / 1000);
-    clockTimer = window.setInterval(() => {
-      clockNowSeconds = Math.floor(Date.now() / 1000);
-      for (const l of clockListeners) l();
-    }, CLOCK_TICK_MS);
+    clockTimer = window.setInterval(refreshClock, CLOCK_TICK_MS);
+    // Hidden tabs may throttle the interval for minutes. Refresh synchronously
+    // when the document returns so the first visible frame cannot show a
+    // frozen heartbeat or worker age as current.
+    document.addEventListener("visibilitychange", refreshClock);
   }
   return () => {
     clockListeners.delete(listener);
     if (clockListeners.size === 0 && clockTimer != null) {
       window.clearInterval(clockTimer);
       clockTimer = null;
+      document.removeEventListener("visibilitychange", refreshClock);
     }
   };
 }

@@ -1,7 +1,140 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import {
+  AccountUsageResponseSchema, BacklogDetailSchema, BacklogResponseSchema,
+  BlockedCompletionsResponseSchema, BoardArchiveResponseSchema, BoardResponseSchema,
+  ChainCostsResponseSchema, ChainGraphResponseSchema, CronObservabilityResponseSchema,
+  DecisionQueueResponseSchema, FlowReleaseResponseSchema, LanesCatalogResponseSchema,
+  LiveEventsResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema,
+  LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema,
+  MetricsLiteResponseSchema, OperatorInventoryResponseSchema,
+  OrchestrationBacklogResponseSchema, PlanSpecDetailResponseSchema,
+  PlanSpecsResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema,
+  RecentResultsResponseSchema, ReliabilityResponseSchema, ReleaseModeResponseSchema,
+  ReleaseStatusResponseSchema, ReviewVerdictsResponseSchema, RunsCostsResponseSchema,
+  RunsDailyResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema,
+  TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema,
+  TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema,
+  parseOrThrow,
+} from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
+
+describe("Fleet source response contracts", () => {
+  it.each([
+    ["workers", WorkersResponseSchema],
+    ["planspec list", PlanSpecsResponseSchema],
+    ["planspec detail", PlanSpecDetailResponseSchema],
+    ["chain graph", ChainGraphResponseSchema],
+    ["chain costs", ChainCostsResponseSchema],
+    ["run costs", RunsCostsResponseSchema],
+    ["daily metrics", RunsDailyResponseSchema],
+    ["reliability", ReliabilityResponseSchema],
+    ["live events", LiveEventsResponseSchema],
+    ["decision queue", DecisionQueueResponseSchema],
+    ["release status", ReleaseStatusResponseSchema],
+    ["release mode", ReleaseModeResponseSchema],
+    ["lanes", LanesCatalogResponseSchema],
+    ["system health", SystemHealthResponseSchema],
+    ["pressure", PressureStatusResponseSchema],
+    ["account usage", AccountUsageResponseSchema],
+    ["review verdicts", ReviewVerdictsResponseSchema],
+  ])("rejects an empty-object response from %s", (_name, schema) => {
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("BoardResponseSchema", () => {
+  it("preserves malformed timestamp contamination as invalid instead of absent/zero", () => {
+    const parsed = parseOrThrow(BoardResponseSchema, {
+      columns: [{
+        name: "running",
+        tasks: [{
+          id: "t_badtime",
+          title: "Bad time",
+          status: "running",
+          created_at: "not-a-time",
+          started_at: {},
+          completed_at: null,
+          last_heartbeat_at: "also-bad",
+        }],
+      }],
+      tenants: [],
+      assignees: [],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    }, "board");
+
+    expect(Number.isNaN(parsed.columns[0].tasks[0].created_at)).toBe(true);
+    expect(Number.isNaN(parsed.columns[0].tasks[0].started_at)).toBe(true);
+    expect(Number.isNaN(parsed.columns[0].tasks[0].last_heartbeat_at)).toBe(true);
+    expect(parsed.columns[0].tasks[0].completed_at).toBeNull();
+  });
+
+  it("preserves due and heartbeat timestamps needed by the card disclosure", () => {
+    const parsed = parseOrThrow(BoardResponseSchema, {
+      columns: [{
+        name: "running",
+        tasks: [{
+          id: "t_truth01",
+          title: "Truth card",
+          status: "running",
+          assignee: "premium",
+          priority: 7,
+          created_at: 1_783_800_000,
+          started_at: 1_783_800_100,
+          completed_at: null,
+          due_at: 1_783_900_000,
+          last_heartbeat_at: 1_783_800_150,
+          link_counts: { parents: 0, children: 0 },
+          comment_count: 0,
+          progress: null,
+        }],
+      }],
+      tenants: [],
+      assignees: ["premium"],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    }, "board");
+
+    const parsedTask = parsed.columns[0].tasks[0];
+    expect(parsedTask.due_at).toBe(1_783_900_000);
+    expect(parsedTask.last_heartbeat_at).toBe(1_783_800_150);
+  });
+});
+
+describe("BoardArchiveResponseSchema", () => {
+  it("preserves explicit archive paging truth and archive time", () => {
+    const parsed = parseOrThrow(BoardArchiveResponseSchema, {
+      tasks: [{
+        id: "t_arch01",
+        title: "Archived truth card",
+        status: "archived",
+        assignee: "reviewer",
+        priority: 0,
+        created_at: 1_783_800_000,
+        archived_at: 1_783_900_000,
+      }],
+      total_count: 4213,
+      filtered_count: 1,
+      loaded_count: 1,
+      limit: 50,
+      has_more: false,
+      next_cursor: null,
+      query: "truth",
+      assignee: null,
+      assignees: ["reviewer"],
+      latest_event_id: 99,
+      now: 1_783_900_001,
+    }, "board/archive");
+
+    expect(parsed.tasks[0].archived_at).toBe(1_783_900_000);
+    expect(parsed.total_count).toBe(4213);
+    expect(parsed.filtered_count).toBe(1);
+    expect(parsed.loaded_count).toBe(1);
+  });
+});
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -763,6 +896,90 @@ describe("RecentResultsResponseSchema", () => {
     expect(parsed.results[0].result_quality.state).toBe("unknown_legacy");
     expect(parsed.results[0].result_quality.tone).toBe("zinc");
   });
+
+  it("preserves real DB run states instead of relabeling them as done", () => {
+    const parsed = parseOrThrow(RecentResultsResponseSchema, {
+      count: 1,
+      checked_at: 100,
+      results: [{
+        run_id: 409,
+        task_id: "t_review",
+        task_title: "Intermediate review handoff",
+        task_status: "review",
+        task_assignee: "verifier",
+        profile: "verifier",
+        run_role: "verification",
+        run_role_label: "Verifier / review run",
+        run_role_source: "claimed_event",
+        status: "review",
+        outcome: "integration_parked",
+        started_at: 10,
+        ended_at: 25,
+        duration_seconds: 15,
+        summary: "parked",
+        summary_preview: "parked",
+        followups: [],
+        artifacts: [],
+        verification: [],
+        result_quality: {
+          state: "unknown_legacy",
+          label: "Unknown legacy",
+          tone: "zinc",
+          description: "Legacy run",
+        },
+      }],
+    }, "recent-results-real-run-state");
+
+    expect(parsed.results[0].status).toBe("review");
+    expect(parsed.results[0].outcome).toBe("integration_parked");
+  });
+});
+
+describe("ChainGraphResponseSchema run-state truth", () => {
+  const liveRunStatuses = [
+    "blocked", "completed", "crashed", "deliverable_posted_not_completed",
+    "done", "gave_up", "iteration_budget_exhausted", "ready", "reclaimed",
+    "review", "scheduled", "spawn_failed", "timed_out", "todo", "transient_retry",
+  ];
+
+  it.each(liveRunStatuses)("preserves live task_runs.status %s", (status) => {
+    const parsed = parseOrThrow(ChainGraphResponseSchema, {
+      schema: "kanban-chain-graph-v1",
+      root_id: "t_root",
+      checked_at: 100,
+      count: 1,
+      edges: [],
+      nodes: [{
+        id: "t_root",
+        title: "Run truth",
+        status: "done",
+        assignee: "coder",
+        level: 0,
+        parents: [],
+        children: [],
+        created_at: 10,
+        started_at: 11,
+        completed_at: 12,
+        last_heartbeat_at: null,
+        runtime_seconds: 1,
+        progress: null,
+        latest_run: {
+          id: 1,
+          profile: "coder",
+          status,
+          outcome: "completed",
+          started_at: 11,
+          ended_at: 12,
+          last_heartbeat_at: null,
+          runtime_seconds: 1,
+          heartbeat_age_seconds: null,
+          run_progress: null,
+        },
+      }],
+    }, `chain-graph-run-state/${status}`);
+
+    expect(parsed.nodes[0].latest_run?.status).toBe(status);
+  });
 });
 
 describe("SystemHealthResponseSchema", () => {
@@ -856,7 +1073,15 @@ describe("TaskDetailResponseSchema", () => {
   it("keeps dependency links from /tasks/:id so Flow can explain the selected chain", () => {
     const parsed = parseOrThrow(TaskDetailResponseSchema, {
       task: { id: "t_child", title: "Dependent", status: "todo", assignee: "coder", latest_summary: null },
-      links: { parents: ["t_parent_a", "t_parent_b"], children: ["t_next"] },
+      links: {
+        parents: ["t_parent_a", "t_parent_b"],
+        children: ["t_next"],
+        parent_states: [
+          { id: "t_parent_a", title: "First parent", status: "done" },
+          { id: "t_parent_b", title: "Blocking parent", status: "running" },
+        ],
+        child_states: [{ id: "t_next", title: "Next", status: "todo" }],
+      },
       comments: [],
       runs: [],
       events: [],
@@ -865,6 +1090,8 @@ describe("TaskDetailResponseSchema", () => {
 
     expect(parsed.links.parents).toEqual(["t_parent_a", "t_parent_b"]);
     expect(parsed.links.children).toEqual(["t_next"]);
+    expect(parsed.links.parent_states[1]).toMatchObject({ id: "t_parent_b", status: "running" });
+    expect(parsed.links.child_states[0]).toMatchObject({ id: "t_next", status: "todo" });
   });
 
   it("defaults missing links to empty arrays for older task-detail payloads", () => {
@@ -877,6 +1104,8 @@ describe("TaskDetailResponseSchema", () => {
 
     expect(parsed.links.parents).toEqual([]);
     expect(parsed.links.children).toEqual([]);
+    expect(parsed.links.parent_states).toEqual([]);
+    expect(parsed.links.child_states).toEqual([]);
     expect(parsed.comments).toEqual([]);
   });
 
@@ -887,6 +1116,7 @@ describe("TaskDetailResponseSchema", () => {
         title: "Blocked detail",
         status: "blocked",
         block_reason: "needs operator input",
+        operator_question: true,
         diagnostics: [{
           kind: "superseded_blocked_review_artifact",
           severity: "warning",
@@ -907,6 +1137,7 @@ describe("TaskDetailResponseSchema", () => {
     }, "kanban/task-detail-diagnostics");
 
     expect(parsed.task?.block_reason).toBe("needs operator input");
+    expect(parsed.task?.operator_question).toBe(true);
     expect(parsed.task?.diagnostics?.[0]?.actions[0].payload).toMatchObject({ command: "hermes kanban show t_blocked" });
   });
 });
@@ -1234,6 +1465,32 @@ describe("TaskBodySchema — workspace_kind/workspace_path (Fleet Karten-Detail-
     const parsed = parseOrThrow(TaskBodySchema, { task: null, runs: [], deliverables: [] }, "task-body/null");
     expect(parsed.task).toBeNull();
     expect(parsed.deliverables).toEqual([]);
+  });
+
+  it("preserves contaminated task and run timestamps for explicit invalid rendering", () => {
+    const parsed = parseOrThrow(TaskBodySchema, {
+      task: {
+        id: "t_bad_time",
+        title: "Bad time",
+        status: "running",
+        created_at: "not-an-epoch",
+        started_at: "not-an-epoch",
+        completed_at: 1782990000 * 1000,
+      },
+      runs: [{
+        id: 99,
+        status: "running",
+        started_at: "not-an-epoch",
+        ended_at: 1782990000 * 1000,
+      }],
+      deliverables: [],
+    }, "task-body/bad-time");
+
+    expect(Number.isNaN(parsed.task?.created_at)).toBe(true);
+    expect(Number.isNaN(parsed.task?.started_at)).toBe(true);
+    expect(parsed.task?.completed_at).toBe(1782990000 * 1000);
+    expect(Number.isNaN(parsed.runs[0].started_at)).toBe(true);
+    expect(parsed.runs[0].ended_at).toBe(1782990000 * 1000);
   });
 });
 

@@ -33,6 +33,7 @@ import { LaneQuickSwitch } from "./LaneQuickSwitch";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
 import { Led } from "../../components/atoms";
 import { profileLabel } from "../../lib/tones";
+import { elapsedSeconds } from "../../lib/derive";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
 
 /** Ziel-Subtabs, zu denen der Heute-Handlungsblock und Karten navigieren. */
@@ -521,7 +522,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const fraction = runProgressFraction(w, now);
   const isEstimated = w.run_progress == null && fraction != null;
-  const elapsedSec = Math.max(0, now - w.started_at);
+  const elapsedSec = elapsedSeconds(w.started_at, now) ?? Number.NaN;
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);
   const isLive = w.run_status === "running";
@@ -550,11 +551,11 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
       </div>
 
       {/* Task-Titel */}
-      <div className="fleet-wk-task">{w.task_title}</div>
+      <div className="fleet-wk-task" title={w.task_title}>{w.task_title}</div>
 
       {/* Heartbeat-Notiz */}
       {w.last_heartbeat_note ? (
-        <div className="fleet-wk-note">{w.last_heartbeat_note}</div>
+        <div className="fleet-wk-note" title={w.last_heartbeat_note}>{w.last_heartbeat_note}</div>
       ) : null}
 
       {/* Progress-Rail — S2: run_progress wenn vorhanden, sonst ETA-Heuristik (~) */}
@@ -570,7 +571,7 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
         <span>{fmtTokens(w.input_tokens)} → {fmtTokens(w.output_tokens)} tok</span>
         <span>seit {fmtSeconds(elapsedSec)}</span>
         {w.eta_p50_seconds ? (
-          <span className="fleet-meta-right">ETA ~{fmtSeconds(w.eta_p50_seconds - elapsedSec > 0 ? w.eta_p50_seconds - elapsedSec : 0)}</span>
+          <span className="fleet-meta-right">ETA ~{fmtSeconds(Number.isFinite(elapsedSec) ? Math.max(0, w.eta_p50_seconds - elapsedSec) : Number.NaN)}</span>
         ) : null}
       </div>
     </button>
@@ -601,7 +602,7 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   return (
     <button type="button" className="fleet-ps" onClick={onClick}>
       <div className="fleet-ps-top">
-        <span className="fleet-ps-name">{ps.topic || ps.filename}</span>
+        <span className="fleet-ps-name" title={ps.topic || ps.filename}>{ps.topic || ps.filename}</span>
         <SignalChip
           tone={badgeTone}
           label={badgeLabel}

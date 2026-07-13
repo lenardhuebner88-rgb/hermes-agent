@@ -24,6 +24,7 @@ import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
 // Antwort der /planspecs/ingest-Route (plugin_api.ingest_planspec →
 // planspecs.ingest_planspec): root_task_id der neu erzeugten, gehaltenen Kette.
@@ -290,6 +291,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
 
   return (
     <>
+      <FleetSourceFreshness sources={[{ label: "PlanSpec-Detail", ...detail }]} />
       {/* Kopfkarte (amber) */}
       <div className="fleet-plan-kopf">
         <div className="fleet-plan-kopf-n">
@@ -329,7 +331,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
             return (
               <div key={lane} className="fleet-lane-row">
                 <span className="fleet-lane-ln">{lane}</span>
-                <span className="fleet-lane-ld">{description.length > 30 ? description.slice(0, 30) + "…" : description}</span>
+                <span className="fleet-lane-ld" title={description}>{description.length > 30 ? description.slice(0, 30) + "…" : description}</span>
                 <ProfileSelect
                   lane={lane}
                   value={currentAssignee}
@@ -578,6 +580,7 @@ function TokenBudgetBlock({
               {group.windows.map((w, i) => {
                 const pct = w.used_percent ?? 0;
                 const tone = budgetTone(w.used_percent);
+                const windowLabel = normalizeUsageWindowLabel(w.label, w.window_key);
                 const barColor = tone === "danger"
                   ? "linear-gradient(90deg,color-mix(in srgb, var(--fleet-rot) 50%, transparent),var(--fleet-rot))"
                   : tone === "warn"
@@ -586,7 +589,7 @@ function TokenBudgetBlock({
 
                 return (
                   <div key={i} className="fleet-bg-row">
-                    <span className="fleet-bg-bl">{normalizeUsageWindowLabel(w.label, w.window_key)}</span>
+                    <span className="fleet-bg-bl" title={windowLabel}>{windowLabel}</span>
                     <div className="fleet-bg-bar">
                       <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
                     </div>

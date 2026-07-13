@@ -21,7 +21,7 @@ import { ArrowRight } from "lucide-react";
 import { useHermesWorkers, useAllBoardWorkers, useBoardCatalog, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
 import { useFleetBoardSelection } from "../hooks/useFleetBoardSelection";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
-import { nowSec } from "../lib/derive";
+import { useClientNowSeconds } from "../lib/clock";
 import { de } from "../i18n/de";
 import type { Worker, ChainGraphResponse, PlanSpecRecord } from "../lib/types";
 import { HeuteTab } from "./fleet/HeuteTab";
@@ -35,6 +35,7 @@ import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips, TwoPane } from "../components/leitstand";
 import { Led, StaleBadge } from "../components/atoms";
 import { BoardSwitcher } from "../components/fleet/BoardIdentity";
+import { FleetSourceFreshness } from "./fleet/FleetSourceFreshness";
 import "./fleet/fleet.css";
 
 // ─── Viewport-Hook ───────────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ export function FleetView() {
     return () => window.clearTimeout(reset);
   }, [selectedBoard]);
 
-  const now = nowSec();
+  const now = useClientNowSeconds();
 
   // Abgeleitete Daten
   const fleetWorkerData = fleetWorkers.data ?? workers.data;
@@ -146,7 +147,7 @@ export function FleetView() {
   const pendingItems = useMemo(
     () => derivePendingItems(
       allPlanspecs.map((ps) => ({ freigabe: ps.freigabe, kanban_state: ps.kanban_state, topic: ps.topic, filename: ps.filename })),
-      blockedTasks.map((t) => ({ id: t.id, title: t.title, block_reason: t.block_reason ?? null })),
+      blockedTasks.map((t) => ({ id: t.id, title: t.title, operator_question: t.operator_question })),
     ),
     [allPlanspecs, blockedTasks],
   );
@@ -320,40 +321,56 @@ export function FleetView() {
           {/* Scrollbarer Inhalt */}
           <div className="fleet-tablet-main-scroll">
             {subtab === "heute" && (
-              <HeuteTab
-                allWorkers={allWorkers}
-                activeWorkers={activeWorkers}
-                blockedCount={blockedCount}
-                pendingApprovals={pendingApprovals}
-                allPlanspecs={allPlanspecs}
-                costs={costs.data}
-                daily={daily.data}
-                now={now}
-                pendingItems={pendingItems}
-                onWorkerClick={(w) => {
-                  setDrawerWorker(w);
-                  setSubtab("worker");
-                }}
-                onPlanSpecClick={openPlanSpecDetail}
-                onNavigate={setSubtab}
-              />
+              <>
+                <FleetSourceFreshness sources={[
+                  { label: "Worker (alle Boards)", ...fleetWorkers },
+                  { label: "PlanSpecs", ...planspecs },
+                  { label: "Kosten", ...costs },
+                  { label: "Tagesmetriken", ...daily },
+                ]} />
+                <HeuteTab
+                  allWorkers={allWorkers}
+                  activeWorkers={activeWorkers}
+                  blockedCount={blockedCount}
+                  pendingApprovals={pendingApprovals}
+                  allPlanspecs={allPlanspecs}
+                  costs={costs.data}
+                  daily={daily.data}
+                  now={now}
+                  pendingItems={pendingItems}
+                  onWorkerClick={(w) => {
+                    setDrawerWorker(w);
+                    setSubtab("worker");
+                  }}
+                  onPlanSpecClick={openPlanSpecDetail}
+                  onNavigate={setSubtab}
+                />
+              </>
             )}
             {subtab === "worker" && (
-              <WorkerTab
-                activeWorkers={activeWorkers}
-                board={board.data}
-                reliability={reliability.data}
-                now={now}
-                cap={workers.data?.cap ?? null}
-                doneToday={costs.data?.today.runs ?? null}
-                currentBoard={boardCatalog.data?.current ?? "default"}
-                initialOpen={drawerWorker}
-                onOpenChain={(rootId: string) => {
-                  setKettenRootId(rootId);
-                  setDrawerWorker(null);
-                  setSubtab("ketten");
-                }}
-              />
+              <>
+                <FleetSourceFreshness sources={[
+                  { label: "Worker (alle Boards)", ...fleetWorkers },
+                  { label: "Worker (aktuelles Board)", ...workers },
+                  { label: "Verlässlichkeit", ...reliability },
+                  { label: "Kosten", ...costs },
+                ]} />
+                <WorkerTab
+                  activeWorkers={activeWorkers}
+                  board={board.data}
+                  reliability={reliability.data}
+                  now={now}
+                  cap={workers.data?.cap ?? null}
+                  doneToday={costs.data?.today.runs ?? null}
+                  currentBoard={boardCatalog.data?.current ?? "default"}
+                  initialOpen={drawerWorker}
+                  onOpenChain={(rootId: string) => {
+                    setKettenRootId(rootId);
+                    setDrawerWorker(null);
+                    setSubtab("ketten");
+                  }}
+                />
+              </>
             )}
             {subtab === "ketten" && (
               <>
@@ -379,6 +396,12 @@ export function FleetView() {
                 {boardCatalog.data ? (
                   <BoardSwitcher boards={boardCatalog.data.boards} current={boardCatalog.data.current} selected={selectedBoard} onSelect={selectBoard} />
                 ) : null}
+                <FleetSourceFreshness sources={[
+                  { label: "PlanSpecs", ...(selectedBoard ? selectedPlanspecs : planspecs) },
+                  { label: "Kosten", ...costs },
+                  { label: "Lanes", ...lanesCatalog },
+                  { label: "Account-Nutzung", ...accountUsage },
+                ]} />
                 <PlanTab
                   allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : allPlanspecs}
                   costs={costs.data}
@@ -400,6 +423,7 @@ export function FleetView() {
                 ) : null}
                 <BoardTab
                   board={activeBoardData}
+                  boardSlug={selectedBoard}
                   readOnly={selectedBoard != null}
                   selectedNodeId={selectedBoard ? null : nodeDetailId}
                   detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
@@ -408,19 +432,31 @@ export function FleetView() {
               </>
             )}
             {subtab === "risiko" && (
-              <RisikoTab
-                blockedTasks={blockedTasks}
-                reliability={reliability.data}
-                systemHealth={systemHealth.data}
-                pressureStatus={pressureStatus.data}
-                activeWorkers={defaultActiveWorkers}
-                lanesCatalog={lanesCatalog.data}
-                releaseGateDecisions={releaseGateDecisions}
-                releaseMode={releaseMode.data}
-                onReleaseModeChanged={releaseMode.reload}
-                releaseStatus={releaseStatus.data}
-                onTaskChanged={board.reload}
-              />
+              <>
+                <FleetSourceFreshness sources={[
+                  { label: "Worker (aktuelles Board)", ...workers },
+                  { label: "Verlässlichkeit", ...reliability },
+                  { label: "Entscheidungsqueue", ...decisionQueue },
+                  { label: "Release-Status", ...releaseStatus },
+                  { label: "Release-Modus", ...releaseMode },
+                  { label: "Lanes", ...lanesCatalog },
+                  { label: "Systemzustand", ...systemHealth },
+                  { label: "Systemdruck", ...pressureStatus },
+                ]} />
+                <RisikoTab
+                  blockedTasks={blockedTasks}
+                  reliability={reliability.data}
+                  systemHealth={systemHealth.data}
+                  pressureStatus={pressureStatus.data}
+                  activeWorkers={defaultActiveWorkers}
+                  lanesCatalog={lanesCatalog.data}
+                  releaseGateDecisions={releaseGateDecisions}
+                  releaseMode={releaseMode.data}
+                  onReleaseModeChanged={releaseMode.reload}
+                  releaseStatus={releaseStatus.data}
+                  onTaskChanged={board.reload}
+                />
+              </>
             )}
           </div>
         </div>

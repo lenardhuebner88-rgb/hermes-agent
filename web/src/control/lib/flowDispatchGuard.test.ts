@@ -32,7 +32,7 @@ function detailWithRoot(rootId: string): TaskDetailResponse {
     runs: [],
     events: [{ id: 1, kind: "created", created_at: 1, run_id: null, payload: { from_decompose_of: rootId } }],
     deliverables: [],
-    links: { parents: [], children: [rootId] },
+    links: { parents: [], children: [rootId], parent_states: [], child_states: [] },
   };
 }
 
@@ -43,7 +43,7 @@ function rootDetail(childIds: string[]): TaskDetailResponse {
     runs: [],
     events: [{ id: 9, kind: "decomposed", created_at: 2, run_id: null, payload: { child_ids: childIds } }],
     deliverables: [],
-    links: { parents: childIds, children: [] },
+    links: { parents: childIds, children: [], parent_states: [], child_states: [] },
   };
 }
 
@@ -76,7 +76,7 @@ describe("getHeldFlowDispatchGuard", () => {
     const selected = task("t_plain", "scheduled");
     const guard = getHeldFlowDispatchGuard(
       selected,
-      { task: null, comments: [], runs: [], events: [], deliverables: [], links: { parents: [], children: [] } },
+      { task: null, comments: [], runs: [], events: [], deliverables: [], links: { parents: [], children: [], parent_states: [], child_states: [] } },
       null,
       [selected],
     );

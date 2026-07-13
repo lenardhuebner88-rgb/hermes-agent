@@ -11,6 +11,9 @@ export const de = {
   },
   staleBadge: {
     stale: (age: string) => `Daten von vor ${age}`,
+    staleRelative: (relative: string) => relative === "Zeit ungültig"
+      ? "Datenzeit ungültig"
+      : relative.startsWith("vor ") ? `Daten von ${relative}` : `Daten ${relative}`,
     staleUnknown: "Daten nicht frisch",
     error: "Quelle meldet Fehler",
   },

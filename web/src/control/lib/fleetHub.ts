@@ -4,6 +4,7 @@
  */
 import type { Worker, ChainGraphResponse } from "./types";
 import type { RunsDailyResponse, RunsDailyPoint } from "./schemas";
+import { elapsedSeconds, inspectEpochSeconds } from "./derive";
 
 export type { RunsDailyPoint, RunsDailyResponse };
 
@@ -57,7 +58,8 @@ export function buildLagezeile(input: LagezeileInput): string {
  */
 export function etaFraction(startedAt: number, etaP50Seconds: number | null | undefined, now: number): number | null {
   if (!etaP50Seconds || etaP50Seconds <= 0) return null;
-  const elapsed = Math.max(0, now - startedAt);
+  const elapsed = elapsedSeconds(startedAt, now);
+  if (elapsed == null) return null;
   return Math.min(0.95, elapsed / etaP50Seconds);
 }
 
@@ -88,11 +90,12 @@ export function runProgressFraction(
  */
 export function heartbeatAge(lastHeartbeatAt: number | null | undefined, now: number): number | null {
   if (!lastHeartbeatAt) return null;
-  return Math.max(0, now - lastHeartbeatAt);
+  return elapsedSeconds(lastHeartbeatAt, now);
 }
 
 /** Formatiert Sekunden als kurzes deutsches Label: "9 s", "2 min", "1 h". */
 export function fmtSeconds(secs: number): string {
+  if (!Number.isFinite(secs) || secs < 0) return "Dauer ungültig";
   if (secs < 60) return `${Math.round(secs)} s`;
   if (secs < 3600) return `${Math.round(secs / 60)} min`;
   return `${Math.round(secs / 3600)} h`;
@@ -586,7 +589,7 @@ export interface PendingItem {
  * zu einer geordneten Liste kombiniert.
  *
  * - Freigaben (freigabe: operator + Wartezustand) → je Item, zuerst
- * - Blockierte Tasks (status "blocked", block_reason enthält "operator hold") →
+ * - Blockierte Tasks mit backend-bestätigtem ``operator_question`` →
  *   als Operator-Halts ans Ende
  *
  * @param planspecs  Alle PlanSpecs (aus usePlanSpecs)
@@ -594,7 +597,7 @@ export interface PendingItem {
  */
 export function derivePendingItems(
   planspecs: Array<PlanSpecActionState & { topic?: string | null; filename?: string }>,
-  blockedTasks: Array<{ id: string; title: string; block_reason?: string | null }>,
+  blockedTasks: Array<{ id: string; title: string; operator_question?: boolean }>,
 ): PendingItem[] {
   const items: PendingItem[] = [];
 
@@ -611,11 +614,7 @@ export function derivePendingItems(
 
   // Operator-Halts (Risiko-Subtab)
   for (const t of blockedTasks) {
-    const reason = t.block_reason ?? "";
-    const isOperatorHold =
-      reason.toLowerCase().includes("operator") ||
-      reason.toLowerCase().includes("operator hold");
-    if (isOperatorHold) {
+    if (t.operator_question === true) {
       items.push({
         kind: "blocked",
         topic: t.title,
@@ -744,7 +743,8 @@ export function bandWindowSeconds(w: BandWorker, now: number): { seconds: number
   if (w.eta_p90_seconds && w.eta_p90_seconds > 0) return { seconds: w.eta_p90_seconds, grounded: true };
   if (w.max_runtime_seconds && w.max_runtime_seconds > 0) return { seconds: w.max_runtime_seconds, grounded: true };
   if (w.eta_p50_seconds && w.eta_p50_seconds > 0) return { seconds: w.eta_p50_seconds * 1.6, grounded: true };
-  const elapsed = Math.max(1, now - w.started_at);
+  const elapsed = elapsedSeconds(w.started_at, now);
+  if (elapsed == null) return { seconds: 1, grounded: false };
   return { seconds: elapsed * 1.3, grounded: false };
 }
 
@@ -754,7 +754,10 @@ export function bandWindowSeconds(w: BandWorker, now: number): { seconds: number
  * Heartbeat-Ticks als Positionen im Fenster. `now` injizierbar für Tests.
  */
 export function computeBandGeometry(w: BandWorker, now: number): BandGeometry {
-  const elapsed = Math.max(0, now - w.started_at);
+  const elapsed = elapsedSeconds(w.started_at, now);
+  if (elapsed == null) {
+    return { fillFraction: 0, p50Fraction: null, tickFractions: [], grounded: false };
+  }
   const win = bandWindowSeconds(w, now);
   const windowSec = win.seconds > 0 ? win.seconds : 1;
 
@@ -771,6 +774,7 @@ export function computeBandGeometry(w: BandWorker, now: number): BandGeometry {
     w.eta_p50_seconds && w.eta_p50_seconds > 0 ? clamp01(w.eta_p50_seconds / windowSec) : null;
 
   const tickFractions = (w.heartbeat_ticks ?? [])
+    .filter((timestamp) => inspectEpochSeconds(timestamp, now).valid && timestamp <= now)
     .map((t) => (t - w.started_at) / windowSec)
     .filter((f) => f >= 0 && f <= 1)
     .map((f) => clamp01(f));
@@ -783,7 +787,8 @@ export function computeBandGeometry(w: BandWorker, now: number): BandGeometry {
  * (im Gegensatz zum groben fmtSeconds „7 min"). Für Band-Meta + ETA-Chips.
  */
 export function fmtDurationClock(secs: number | null | undefined): string {
-  if (secs == null || !Number.isFinite(secs) || secs < 0) return "—";
+  if (secs == null) return "—";
+  if (!Number.isFinite(secs) || secs < 0) return "Dauer ungültig";
   const s = Math.round(secs);
   if (s < 60) return `${s}s`;
   if (s < 3600) {
@@ -798,18 +803,14 @@ export function fmtDurationClock(secs: number | null | undefined): string {
 
 /** „23:59:02" — Uhrzeit eines Unix-Sekunden-Zeitstempels (Europe/Berlin). */
 export function fmtClockTime(epochSec: number | null | undefined): string {
-  if (!epochSec || !Number.isFinite(epochSec)) return "";
-  try {
-    return new Date(epochSec * 1000).toLocaleTimeString("de-DE", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      timeZone: "Europe/Berlin",
-    });
-  } catch {
-    return "";
-  }
+  if (!inspectEpochSeconds(epochSec).valid || epochSec == null) return "Zeit ungültig";
+  return new Date(epochSec * 1000).toLocaleTimeString("de-DE", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "Europe/Berlin",
+  });
 }
 
 // ─── Puls-Leitstand: Lane-Rolle → Farbton ─────────────────────────────────────

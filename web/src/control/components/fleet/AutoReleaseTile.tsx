@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchJSON } from "../../../lib/api";
-import { fmtAge } from "../../lib/derive";
+import { fmtRelativeTime } from "../../lib/derive";
 
 const POLL_MS = 30_000;
 
@@ -90,8 +90,8 @@ export function AutoReleaseTile() {
             return (
               <div key={`${ev.task_id}-${index}`} className="flex min-w-0 items-center gap-2 text-[11px]">
                 <span className={`shrink-0 rounded-lg border px-2 py-0.5 ${toneClass}`}>{outcome}</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-ink-3">{ev.task_id}</span>
-                <span className="shrink-0 font-mono text-ink-3">{`vor ${fmtAge(ev.created_at)}`}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-ink-3" title={ev.task_id}>{ev.task_id}</span>
+                <span className="shrink-0 font-mono text-ink-3">{fmtRelativeTime(ev.created_at)}</span>
               </div>
             );
           })}
@@ -99,7 +99,7 @@ export function AutoReleaseTile() {
       )}
 
       {lastAnchor ? (
-        <p className="min-w-0 truncate font-mono text-[11px] text-ink-3">{`Anker: ${lastAnchor}`}</p>
+        <p className="min-w-0 truncate font-mono text-[11px] text-ink-3" title={`Anker: ${lastAnchor}`}>{`Anker: ${lastAnchor}`}</p>
       ) : null}
     </section>
   );

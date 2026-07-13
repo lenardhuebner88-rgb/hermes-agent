@@ -34,6 +34,7 @@ import {
 } from "../../hooks/useControlData";
 import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 import type { ChainCostsResponse } from "../../lib/schemas";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { type ChainNode } from "./shared";
 
 import "./ketten-v4.css";
@@ -98,14 +99,16 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const hiddenCompletedCount = completedChips.length - 3;
   const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
 
-  const { data: chainGraph, loading: chainLoading } = useChainGraph(validRootId, boardSlug);
+  const chainGraphState = useChainGraph(validRootId, boardSlug);
+  const { data: chainGraph, loading: chainLoading } = chainGraphState;
   const nodes = chainGraph?.nodes ?? [];
 
   const chainCosts = useHermesChainCosts(validRootId, boardSlug);
   const verdicts = useHermesReviewVerdicts(boardSlug);
 
   // === Worker-Join (v4): join ChainNode → Worker via task_id ===
-  const { data: workersData } = useHermesWorkers();
+  const workersState = useHermesWorkers();
+  const workersData = workersState.data;
   const workerByNodeId = useMemo(() => {
     const m = new Map<string, Worker>();
     const ws = workers ?? workersData?.workers ?? [];
@@ -115,9 +118,19 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
     return m;
   }, [workers, workersData]);
 
+  const freshness = (
+    <FleetSourceFreshness sources={[
+      { label: "Kettengraph", ...chainGraphState },
+      { label: "Kettenkosten", ...chainCosts },
+      { label: "Review-Signale", ...verdicts },
+      { label: "Worker (Kette)", ...workersState },
+    ]} />
+  );
+
   if (chips.length === 0) {
     return (
       <div className="ketten-v4">
+        {freshness}
         <div className="kt-empty">
           <p className="kt-empty-title">{de.fleet.kettenLeer}</p>
           <p className="kt-empty-sub">{de.fleet.kettenLeerDesc}</p>
@@ -128,6 +141,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
 
   return (
     <div className="ketten-v4">
+      {freshness}
       {/* ── SECTION 1: Ketten-Liste ───────────────────────────────────────── */}
       <div className="chain-list-header">
         <span className="section-title">Ketten</span>
@@ -151,7 +165,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
               </span>
               <div className="chain-content">
                 <div className="chain-title-row">
-                  <span className="chain-title">{chip.label}</span>
+                  <span className="chain-title" title={chip.label}>{chip.label}</span>
                   <span className={`chain-badge ${isActive ? "badge-running" : isDone ? "badge-done" : "badge-waiting"}`}>
                     {isActive ? "läuft" : isDone ? "fertig" : "wartet"}
                   </span>
@@ -418,7 +432,7 @@ function KettenGraphV4({
                       {roleLabel}
                     </div>
                     {showModelSub ? (
-                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`}>{nodeModel}</div>
+                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`} title={nodeModel}>{nodeModel}</div>
                     ) : null}
                   </div>
                 );
@@ -481,13 +495,13 @@ function KettenGraphV4({
             ) : null}
           </div>
 
-          <div className="detail-title">{focusNode.title}</div>
+          <div className="detail-title" title={focusNode.title}>{focusNode.title}</div>
 
           {/* === Model-Row with GGFM Override Badge (v4) === */}
           {focusEffectiveModel ? (
             <div className="model-row">
               <span className="model-icon">⚙</span>
-              <span className="model-label">{focusEffectiveModel}</span>
+              <span className="model-label" title={focusEffectiveModel}>{focusEffectiveModel}</span>
               {focusModelOverride ? (
                 <span className="model-override-badge" title={`Override: ${focusModelOverride}`}>
                   GGFM Override
@@ -565,7 +579,7 @@ function KettenGraphV4({
                       {hasOverride ? " · ⚠ override" : " · lane default"}
                     </div>
                   ) : null}
-                  <div className="utitle">{n.title}</div>
+                  <div className="utitle" title={n.title}>{n.title}</div>
                 </div>
                 <div className={`uwait${n.status === "blocked" ? " uwait-blocked" : ""}`}>
                   {n.status === "blocked" ? "blockiert" : "wartet"}
@@ -602,7 +616,7 @@ function KettenGraphV4({
             >
               <span className="davatar">✓</span>
               <div className="dcontent">
-                <div className="dtitle">{n.title}</div>
+                <div className="dtitle" title={n.title}>{n.title}</div>
                 <div className="dtime">
                   {n.cost_usd > 0 ? fmtUsd(n.cost_usd) : null}
                   {n.cost_usd > 0 && n.latest_run?.runtime_seconds != null ? " · " : ""}

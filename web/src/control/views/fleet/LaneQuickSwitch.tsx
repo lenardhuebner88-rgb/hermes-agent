@@ -210,8 +210,8 @@ export function LaneQuickSwitch() {
       >
         <span className="fleet-lane-switch__summary">
           <span className="fleet-lane-switch__eyebrow">Lane &amp; Modell</span>
-          <span className="fleet-lane-switch__summary-lane">{lane.name}</span>
-          {summaryFacts ? <span className="fleet-lane-switch__summary-facts">{summaryFacts}</span> : null}
+          <span className="fleet-lane-switch__summary-lane" title={lane.name}>{lane.name}</span>
+          {summaryFacts ? <span className="fleet-lane-switch__summary-facts" title={summaryFacts}>{summaryFacts}</span> : null}
         </span>
         <ChevronDown className="fleet-lane-switch__chevron" aria-hidden="true" />
       </button>

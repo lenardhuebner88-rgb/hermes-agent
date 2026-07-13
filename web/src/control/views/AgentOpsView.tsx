@@ -27,7 +27,7 @@ import {
   type DispatchCandidate,
   type ProjectLane,
 } from "../lib/agentOps";
-import { fmtAge, fmtDur, nowSec } from "../lib/derive";
+import { fmtDur, fmtRelativeTime, nowSec } from "../lib/derive";
 import { buildCommissionPrompt } from "../lib/orchestration";
 import type { KanbanResult, ToneName } from "../lib/types";
 import type { DotKind } from "../lib/tones";
@@ -147,7 +147,7 @@ function RecentResultRow({ result, now }: { result: KanbanResult; now: number })
     <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <SignalChip tone="ok" label="Done" />
-        <span className="font-data text-sec tabular-nums text-ink-2">{fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)}</span>
+        <span className="font-data text-sec tabular-nums text-ink-2">{fmtDur(result.duration_seconds)} · {fmtRelativeTime(result.ended_at, now)}</span>
         <a
           href={`/control/runs/${result.run_id}`}
           className="ml-auto inline-flex min-h-12 items-center text-sec text-live underline-offset-2 hover:text-bronze-hi hover:underline"

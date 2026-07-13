@@ -26,11 +26,11 @@ export function SlotLane({ worker, now, onOpen }: { worker: Worker; now: number;
     >
       <div className={`fleet-lav fleet-lav-${tint}`}>
         <span className="fleet-lav-a">{profileInitial(worker.profile)}</span>
-        <span className="fleet-lav-n">{worker.profile}</span>
+        <span className="fleet-lav-n" title={worker.profile}>{worker.profile}</span>
       </div>
       <div className="fleet-lbody">
         <div className="fleet-lhead">
-          <span className="fleet-lhead-t">{worker.task_title}</span>
+          <span className="fleet-lhead-t" title={worker.task_title}>{worker.task_title}</span>
           <BoardBadge slug={worker.board_slug} />
           {hbAge != null ? <span className="fleet-lhead-hb">♥ {fmtSeconds(hbAge)}</span> : null}
         </div>
@@ -66,7 +66,7 @@ export function MiniLane({ worker, now, onOpen }: { worker: Worker; now: number;
     >
       <div className={`fleet-lav fleet-lav-${tint}`}>
         <span className="fleet-lav-a">{profileInitial(worker.profile)}</span>
-        <span className="fleet-lav-n">{worker.profile}</span>
+        <span className="fleet-lav-n" title={worker.profile}>{worker.profile}</span>
       </div>
       <div className="fleet-lbody">
         <BoardBadge slug={worker.board_slug} />

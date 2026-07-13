@@ -130,6 +130,7 @@ class TestDumpSubagentTimeoutDiagnostic:
         assert "model: 'test/model'" in content
         assert "provider: 'testprov'" in content
         assert "base_url: 'https://example.test/<path redacted>'" in content
+        assert "https://example.test/v1" not in content
         assert "max_iterations: 30" in content
         # Toolsets
         assert "enabled_toolsets:  ['web', 'terminal']" in content

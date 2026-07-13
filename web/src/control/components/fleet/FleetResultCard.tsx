@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { ChevronRight, ExternalLink, FileText, Quote, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fmtAge, fmtDur } from "../../lib/derive";
+import { fmtDur, fmtRelativeTime } from "../../lib/derive";
 import { roleChip } from "../../lib/fleet";
 import { de } from "../../i18n/de";
 import type { KanbanResult } from "../../lib/types";
@@ -52,9 +52,9 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
         </button>
       </div>
 
-      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-ink">{result.task_title}</h3>
+      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-ink" title={result.task_title}>{result.task_title}</h3>
       <p className="mt-1.5 font-data text-micro text-ink-3">
-        ⏱ {fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)} · {receiptLabel(result)}
+        ⏱ {fmtDur(result.duration_seconds)} · {fmtRelativeTime(result.ended_at, now)} · {receiptLabel(result)}
       </p>
 
       {open ? (
@@ -68,7 +68,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
               {result.verification.map((item) => (
                 <span key={item} className="inline-flex max-w-full items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 py-1 text-xs text-ink-2">
                   <FileText className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{item}</span>
+                  <span className="truncate" title={item}>{item}</span>
                 </span>
               ))}
             </div>
@@ -78,7 +78,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
               {deliverables.map((item) => (
                 <li key={item.relative_path} className="flex items-center justify-between gap-2 rounded-card border border-line bg-surface-2 px-3 py-1.5">
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-ink">{item.relative_path}</span>
+                    <span className="block truncate text-sm font-medium text-ink" title={item.relative_path}>{item.relative_path}</span>
                     <span className="font-data text-micro text-ink-3">{item.content_type} · {formatBytes(item.size)}</span>
                   </span>
                   <a className="inline-flex shrink-0 items-center gap-1 rounded-card border border-live/30 px-2 py-1 text-xs text-bronze-hi hover:bg-live/10" href={item.url} target="_blank" rel="noreferrer">

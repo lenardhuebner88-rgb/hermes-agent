@@ -51,7 +51,7 @@ export function statusToStage(status: TaskStatus): FleetStage | null {
 // real PATCH target status. `intent` colours the button; `guard` (below) covers
 // the stages where the action is deliberately worker/gate-driven, not manual.
 
-export type StageActionKey = "plan" | "dispatch" | "ship" | "rework" | "reopen";
+export type StageActionKey = "plan" | "dispatch" | "reopen";
 
 export interface StageAction {
   key: StageActionKey;
@@ -67,8 +67,6 @@ export interface StageAction {
 const ACTION: Record<StageActionKey, StageAction> = {
   plan: { key: "plan", label: "Plan", target: "todo", tone: "sky", intent: "advance", confirm: "Aufgabe spezifizieren (Triage → Plan)?" },
   dispatch: { key: "dispatch", label: "Starten", target: "ready", tone: "amber", intent: "advance", confirm: "Operator-Freigabe setzen — danach übernimmt der Dispatcher automatisch?" },
-  ship: { key: "ship", label: "Ausliefern", target: "done", tone: "emerald", intent: "advance", confirm: "Prüfung abnehmen und auf Fertig setzen?" },
-  rework: { key: "rework", label: "Nacharbeit", target: "blocked", tone: "red", intent: "danger", confirm: "Zurück in Nacharbeit (Prüfung → Blockiert)?" },
   reopen: { key: "reopen", label: "Reopen", target: "ready", tone: "sky", intent: "advance", confirm: "Blockade lösen und neu einreihen?" },
 };
 
@@ -80,7 +78,6 @@ export function stageActions(status: TaskStatus): StageAction[] {
     case "todo":
     case "scheduled": return [ACTION.dispatch];
     case "blocked": return [ACTION.reopen];
-    case "review": return [ACTION.ship, ACTION.rework];
     default: return [];
   }
 }
@@ -89,6 +86,7 @@ export function stageActions(status: TaskStatus): StageAction[] {
 export function stageGuard(status: TaskStatus): string | null {
   if (status === "ready") return "Freigegeben — der Dispatcher übernimmt automatisch (~60 s).";
   if (status === "running") return "Worker läuft — schließt selbst ab; das Verifier-Gate routet danach automatisch.";
+  if (status === "review") return "Verifier-Gate läuft — nur ein maschinenlesbares Verifier-Urteil darf den Status ändern.";
   if (status === "done") return "Abgenommen — Lauf ist terminal.";
   return null;
 }
@@ -97,7 +95,7 @@ export function stageGuard(status: TaskStatus): string | null {
  *  or it is blocked (needs rework). These are the rows the Fleet surfaces with
  *  buttons. */
 export function isActionableStatus(status: TaskStatus): boolean {
-  return status === "triage" || status === "todo" || status === "scheduled" || status === "blocked" || status === "review";
+  return status === "triage" || status === "todo" || status === "scheduled" || status === "blocked";
 }
 
 // ── Management actions (S3) ──────────────────────────────────────────────────
@@ -125,18 +123,11 @@ export function manageActions(status: TaskStatus, opts: { hasChain: boolean }): 
 }
 
 // ── Operator-question classification (S6) ────────────────────────────────────
-// Mirrors the backend _AUTO_RETRY_QUESTION_RE classification: a blocked task
-// whose block_reason signals a non-retryable operator hold — e.g. "operator
-// hold", "missing credentials", "human approval needed", "?" etc. The auto-retry
-// sweep skips these; the operator must answer them. The RisikoTab previously
-// filtered with a bare `includes("operator")` — this captures the same set plus
-// the other auto-retry-question markers for consistency.
-const OPERATOR_QUESTION_RE =
-  /\?|\boperator\b|\bhuman\b|\bcredentials?\b|\bsecret\b|\btoken\b|\bapproval\b|\bfreigabe\b/i;
-
-export function isOperatorQuestion(blockReason?: string | null): boolean {
-  if (!blockReason) return false;
-  return OPERATOR_QUESTION_RE.test(blockReason);
+// Backend-owned truth: the dispatcher includes verdict + retry history in this
+// decision.  Inferring from prose here made a verifier's innocent "why?" look
+// like a human escalation even though the same block was auto-retryable.
+export function isOperatorQuestion(operatorQuestion?: boolean | null): boolean {
+  return operatorQuestion === true;
 }
 
 // ── Role chips ───────────────────────────────────────────────────────────────
@@ -209,7 +200,7 @@ export interface PipelineModel {
   total: number;
 }
 
-const ACTIONABLE_ORDER: TaskStatus[] = ["review", "blocked", "triage", "todo", "scheduled"];
+const ACTIONABLE_ORDER: TaskStatus[] = ["blocked", "triage", "todo", "scheduled"];
 const ACTIVE_ORDER: TaskStatus[] = ["blocked", "running", "review", "ready", "scheduled", "todo", "triage"];
 
 export function buildPipeline(tasks: BoardTaskLite[]): PipelineModel {

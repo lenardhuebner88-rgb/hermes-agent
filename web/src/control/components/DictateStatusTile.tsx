@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Download, Mic2 } from "lucide-react";
 import { openAuthedApiFile } from "@/lib/api";
 import type { DictateStatusResponse } from "../lib/schemas";
-import { fmtAge, nowSec } from "../lib/derive";
+import { fmtRelativeTime, nowSec } from "../lib/derive";
 import { KpiTile, SignalChip } from "./leitstand";
 import { Eyebrow } from "./primitives";
 
@@ -32,7 +32,7 @@ export function DictateStatusTile({
   const connected = Boolean(status?.connected && status.last_contact_at);
   const permissionOk = status?.microphone_permission === true && status.service_enabled === true;
   const tone = error || status?.last_error ? "alert" : connected ? (permissionOk ? "ok" : "warn") : "neutral";
-  const contact = status?.last_contact_at ? `vor ${fmtAge(status.last_contact_at, nowSec())}` : "kein Bericht";
+  const contact = status?.last_contact_at ? fmtRelativeTime(status.last_contact_at, nowSec()) : "kein Bericht";
 
   return (
     <section aria-label="Hermes Diktat Status" className="ch-panel space-y-3 p-3">

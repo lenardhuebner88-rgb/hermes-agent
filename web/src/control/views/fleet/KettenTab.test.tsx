@@ -238,6 +238,17 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(screen.getByText("Critic aktiv")).toBeTruthy();
   });
 
+  it("keeps clipped chain and node titles recoverable", async () => {
+    render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    const chainTitle = await screen.findByText("Ketten v4 Fixes", { selector: ".chain-title" });
+    expect(chainTitle.getAttribute("title")).toBe("Ketten v4 Fixes");
+    const focusTitle = await screen.findByText("Slice B — running", { selector: ".detail-title" });
+    expect(focusTitle.getAttribute("title")).toBe("Slice B — running");
+  });
+
   it("adds the selected board to every chain graph and chain costs request", async () => {
     render(
       <KettenTab

@@ -1,7 +1,7 @@
 import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { type PulseEvent, type PulseKind, type PulseSummary } from "../../lib/pulse";
-import { fmtAge, fmtClockTime } from "../../lib/derive";
+import { fmtClockTime, fmtRelativeTime } from "../../lib/derive";
 import { FleetPanel, FleetEmptyState, KpiTile, SignalLabel, signalToneFromLegacy } from "../../components/leitstand";
 import { SkeletonCard } from "../../components/primitives";
 import { type PulseData } from "../../hooks/usePulseData";
@@ -88,7 +88,7 @@ function EventRow({ event, now, onOpen }: { event: PulseEvent; now: number; onOp
         </span>
         <span className="shrink-0 text-right">
           <span className="block font-data text-sec tabular-nums text-ink">{fmtClockTime(event.at)}</span>
-          <span className="block font-data text-micro tabular-nums text-ink-3">{de.pulse.ago(fmtAge(event.at, now))}</span>
+          <span className="block font-data text-micro tabular-nums text-ink-3">{fmtRelativeTime(event.at, now)}</span>
         </span>
       </button>
     </li>

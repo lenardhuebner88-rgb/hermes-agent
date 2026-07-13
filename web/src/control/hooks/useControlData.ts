@@ -717,6 +717,8 @@ export interface RunLiveEventsState {
   events: LiveEvent[];
   loading: boolean;
   error: string | null;
+  lastUpdated: number | null;
+  isStale: boolean;
 }
 
 /**
@@ -735,6 +737,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const sinceIdRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -764,6 +767,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
         if (stopped) return;
         setError(null);
         setLoading(false);
+        setLastUpdated(nowSec());
         if (parsed.events.length > 0) {
           setEvents((prev) => mergeLiveEvents(prev, parsed.events, cap));
         }
@@ -787,7 +791,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
     };
   }, [enabled, cap]);
 
-  return { events, loading, error };
+  return { events, loading, error, lastUpdated, isStale: error != null && events.length > 0 };
 }
 
 // F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).
@@ -1059,8 +1063,8 @@ export function useRosterCount() {
 
 // Operator stage transitions. Wraps PATCH /tasks/{id} (the same endpoint the
 // kanban drawer uses) so a Fleet stage button has a REAL effect: Plan
-// (triage→todo), Dispatch (todo→ready, auto-dispatches), Ship (review→done),
-// Rework (review→blocked), Reopen (blocked→ready). The 409 "blocked by
+// (triage→todo), Dispatch (todo→ready, auto-dispatches), Reopen
+// (blocked→ready). Review completion stays worker/verdict-owned. The 409 "blocked by
 // parent(s)" detail is surfaced verbatim so the guard is honest, not silent.
 export interface TaskActionExtra {
   block_reason?: string;
@@ -1093,12 +1097,10 @@ export function useTaskAction(onDone?: () => void | Promise<void>) {
   return { busyId, errorById, run, clearError };
 }
 
-// S6: Answer an operator-question hold. Komposition aus drei Schritten (kein
-// atomarer Endpoint — bewusst als Hook, nicht als Backend-POST /answer, das
-// Phase 4 vorbehalten bleibt):
-//   1. POST /tasks/{id}/comments  — Antwort als Kommentar ablegen (author: operator)
-//   2. PATCH /tasks/{id}          — Status → ready (der Server mappt auf unblock_task)
-//   3. POST /workers/0/action      — Dispatcher-Tick, damit der Worker sofort startet
+// S6: Answer an operator-question hold. Kommentar + Unblock sind eine atomare
+// Backend-Transition; nur der sofortige Dispatcher-Tick folgt best-effort:
+//   1. POST /tasks/{id}/answer    — Kommentar + eligibility-CAS + Unblock
+//   2. POST /workers/0/action     — Dispatcher-Tick, damit der Worker sofort startet
 // Der Retry-Worker liest den Kommentar über build_worker_context. `doneIds`
 // hält erfolgreich beantwortete Tasks fest, bis der Board-Poll die Zeile
 // fallen lässt.
@@ -1119,18 +1121,13 @@ export function useAnswerQuestion() {
     setBusyId(taskId);
     setErrorById((prev) => ({ ...prev, [taskId]: "" }));
     try {
-      // 1. Antwort als Kommentar ablegen (author: operator — der Retry-Worker
-      //    liest Kommentare über build_worker_context in seinen Kontext ein).
+      // 1. Antwort + Entblockung atomar. Ein zweiter Tab kann zwischen diesen
+      //    beiden Writes keinen verwaisten Kommentar mehr erzeugen.
       await fetchJSON<{ ok?: boolean }>(
-        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/comments`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: text, author: "operator" }) },
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/answer`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: text }) },
       );
-      // 2. Task entblocken (PATCH ready; der Server mappt das auf unblock_task).
-      await fetchJSON<{ task?: unknown }>(
-        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
-        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "ready" }) },
-      );
-      // 3. Dispatcher-Tick (run_id 0 als Platzhalter, reiner Tick ohne Run-Bezug).
+      // 2. Dispatcher-Tick (run_id 0 als Platzhalter, reiner Tick ohne Run-Bezug).
       await fetchJSON<{ ok?: boolean; detail?: string }>(
         "/api/plugins/kanban/workers/0/action",
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dispatch", confirm: true, reason: "Operator-Antwort auf Blockgrund — Worker neu gestartet (FleetAnswerQuestion)" }) },
@@ -1742,6 +1739,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
   const [data, setData] = useState<ChainGraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
   const paramsRef = useRef({ rootId, board });
@@ -1765,6 +1763,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
       if (aliveRef.current && paramsRef.current.rootId === startParams.rootId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
+        setLastUpdated(nowSec());
       }
       return parsed;
     } catch (e) {
@@ -1789,7 +1788,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
       window.clearInterval(interval);
     };
   }, [rootId, reload]);
-  return { data, loading, error, reload };
+  return { data, loading, error, lastUpdated, isStale: Boolean(error && data), reload };
 }
 
 export interface ChainCancelResult {
@@ -2103,6 +2102,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
   const [data, setData] = useState<ChainCostsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
   const paramsRef = useRef({ taskId, board });
@@ -2126,6 +2126,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
       if (aliveRef.current && paramsRef.current.taskId === startParams.taskId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
+        setLastUpdated(nowSec());
       }
       return parsed;
     } catch (e) {
@@ -2148,7 +2149,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
       window.clearInterval(interval);
     };
   }, [taskId, reload]);
-  return { data, loading, error, reload };
+  return { data, loading, error, lastUpdated, isStale: Boolean(error && data), reload };
 }
 
 // ST4 (Statistik-Broadsheet): wiederkehrende Fehler für die Fehler-Taxonomie —
@@ -2691,52 +2692,34 @@ export function usePromptForgeCatalog(): PromptForgeCatalogState {
   return { data, error, loading, lastUpdated };
 }
 
-// On-demand PlanSpec detail (E2 drawer): fetches
-// GET /planspecs/detail?path=<encoded> only when `path` is non-null.
-// Returns { data, loading, error } — same shape as the minimal LoadState
-// used by useFlowGate / useChainGraph for on-demand endpoints.
-// Refetches whenever `path` changes (new drawer open). Idle when path is null.
-export function usePlanSpecDetail(path: string | null): { data: PlanSpecDetailResponse | null; loading: boolean; error: string | null } {
-  const [data, setData] = useState<PlanSpecDetailResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const aliveRef = useRef(true);
-  useEffect(() => () => { aliveRef.current = false; }, []);
-  // State transitions live in an async callback (not directly in the effect) so
-  // the on-demand fetch follows the same shape as useChainGraph/useFlowGate.
-  const load = useCallback(async (): Promise<void> => {
-    if (!path) {
-      if (aliveRef.current) {
-        setData(null);
-        setError(null);
-        setLoading(false);
-      }
-      return;
-    }
-    if (aliveRef.current) {
-      setLoading(true);
-      setData(null);
-      setError(null);
-    }
-    try {
-      const parsed = parseOrThrow(
-        PlanSpecDetailResponseSchema,
-        await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`),
-        "planspecs/detail",
-      );
-      if (aliveRef.current) setData(parsed);
-    } catch (e) {
-      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (aliveRef.current) setLoading(false);
-    }
+// On-demand PlanSpec detail. The path is part of the polling key so a switch
+// can never flash another PlanSpec's retained payload. For the same path we do
+// retain the last good detail across transient failures and disclose staleness.
+export function usePlanSpecDetail(path: string | null) {
+  const loader = useCallback(async (): Promise<PlanSpecDetailResponse | null> => {
+    if (!path) return null;
+    return parseOrThrow(
+      PlanSpecDetailResponseSchema,
+      await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`),
+      "planspecs/detail",
+    );
   }, [path]);
-  useEffect(() => {
-    const initial = window.setTimeout(() => { void load(); }, 0);
-    return () => window.clearTimeout(initial);
-  }, [load]);
+  const detail = usePolling<PlanSpecDetailResponse | null>(
+    `planspec/detail:${path ?? "__idle__"}`,
+    loader,
+    path ? 60_000 : 600_000,
+  );
 
-  return { data, loading, error };
+  if (path) return detail;
+  return {
+    ...detail,
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: false,
+    lastUpdated: null,
+    isStale: false,
+  };
 }
 
 export function useStrategistCount() {
@@ -3025,15 +3008,22 @@ export async function duplicateLoop(source: string, name: string): Promise<LoopD
 // useTaskBodyOnDemand pollt alle 8s WENN taskId != null (= Drawer offen), ansonsten pausiert.
 // Pattern analog zu useWorkerActivity (Null-Guard + leerer Fallback).
 
+const EMPTY_TASK_BODY_RESPONSE: TaskBodyResponse = {
+  task: null,
+  runs: [],
+  deliverables: [],
+  links: { parents: [], children: [], parent_states: [], child_states: [] },
+};
+
 export function useTaskBodyOnDemand(taskId: string | null) {
   const key = taskId ? `task-body-on-demand/${taskId}` : "task-body-on-demand/__none__";
   const loader = useCallback(async (): Promise<TaskBodyResponse> => {
-    if (!taskId) return { task: null, runs: [], deliverables: [] };
+    if (!taskId) return EMPTY_TASK_BODY_RESPONSE;
     const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
     return parseOrThrow(TaskBodySchema, raw, `task-body/${taskId}`);
   }, [taskId]);
   const result = usePolling<TaskBodyResponse>(key, loader, taskId ? 8000 : 600_000);
-  if (!taskId) return { ...result, data: { task: null, runs: [], deliverables: [] } as TaskBodyResponse };
+  if (!taskId) return { ...result, data: EMPTY_TASK_BODY_RESPONSE };
   return result;
 }
 

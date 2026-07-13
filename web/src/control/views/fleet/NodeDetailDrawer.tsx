@@ -16,16 +16,19 @@ import {
   premiumLaneMarker,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
+import { runStatusLabel } from "../../lib/tones";
 import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
 import { DrawerShell } from "../../components/leitstand";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
+import { elapsedSeconds } from "../../lib/derive";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TaskReassignResponseSchema, parseOrThrow } from "../../lib/schemas";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -74,6 +77,20 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
 
   const task = taskBody.data?.task ?? null;
   const runs = taskBody.data?.runs ?? [];
+  const links = taskBody.data?.links;
+  const stageBlockReason = (() => {
+    if (task?.status !== "todo" && task?.status !== "scheduled") return null;
+    const parentIds = links?.parents ?? [];
+    const states = new Map((links?.parent_states ?? []).map((parent) => [parent.id, parent]));
+    const blockers = parentIds.flatMap((parentId) => {
+      const parent = states.get(parentId);
+      if (!parent) return [`${parentId} (Status unbekannt)`];
+      return parent.status === "done" ? [] : [`${parent.title} (${parent.status}) ist nicht fertig`];
+    });
+    return blockers.length > 0
+      ? `Starten nicht verfügbar — Vorgänger ${blockers.join(", ")}.`
+      : null;
+  })();
   // Ketten-Root für "Kette abbrechen": min-level Node, nur bei echter Mehr-Node-Kette.
   const chainRootId = chainNodes.length > 1
     ? ([...chainNodes].sort((a, b) => a.level - b.level)[0]?.id ?? null)
@@ -90,8 +107,16 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
     verifier_verdict: v.verifier_verdict ?? null,
   }));
 
-  const latestRun = runs[0] ?? null;
-  const elapsedSec = latestRun?.runtime_seconds ?? (latestRun?.started_at ? Math.max(0, now - latestRun.started_at) : null);
+  // GET /tasks/:id intentionally returns attempt history oldest-first
+  // (kanban_db.list_runs start order). The drawer needs the newest attempt,
+  // so selecting index 0 silently showed stale blocked/review state after a
+  // successful retry.
+  const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
+  const elapsedSec = latestRun?.runtime_seconds ?? (
+    latestRun?.started_at != null
+      ? (elapsedSeconds(latestRun.started_at, now) ?? Number.NaN)
+      : null
+  );
 
   function handleCopy() {
     void navigator.clipboard.writeText(taskId).then(() => {
@@ -133,6 +158,14 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
             </span>
           </div>
         </div>
+
+        <FleetSourceFreshness sources={[{
+          label: "Task-Detail",
+          error: taskBody.error,
+          errorObj: taskBody.errorObj,
+          isStale: taskBody.isStale,
+          lastUpdated: taskBody.lastUpdated,
+        }]} />
 
         {/* Tab-Leiste */}
         <div className="fleet-detail-tabs">
@@ -189,10 +222,7 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
               chainRootId={chainRootId}
               onChanged={onChanged}
               onCancelled={onClose}
-              // Der Drawer zeigt die Verifier-Urteile im Ergebnis-Tab direkt
-              // daneben — hier ist Ship/Rework für `review` also kein blindes
-              // Approve, sondern eine informierte Operator-Entscheidung.
-              allowReviewStage
+              stageBlockReason={stageBlockReason}
             />
           </div>
         ) : null}
@@ -200,7 +230,10 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
   );
 }
 
-const TERMINAL_REASSIGN_STATUSES = new Set(["done", "archived"]);
+// The backend refuses a running reassign unless the caller explicitly opts
+// into reclaim_first. This control deliberately never reclaims a live worker,
+// so exposing it for running would be a deterministic 409 action.
+const NON_REASSIGNABLE_STATUSES = new Set(["running", "done", "archived"]);
 
 function TaskReassignControl({
   taskId,
@@ -233,7 +266,7 @@ function TaskReassignControl({
     : profiles[0] ?? "";
   const selectedProfile = profiles.includes(targetProfile) ? targetProfile : defaultProfile;
 
-  if (TERMINAL_REASSIGN_STATUSES.has(normalizedStatus) || profiles.length === 0) return null;
+  if (NON_REASSIGNABLE_STATUSES.has(normalizedStatus) || profiles.length === 0) return null;
 
   const changedProfile = selectedProfile && selectedProfile !== normalizedCurrentProfile;
   const disabled = busy || !changedProfile;
@@ -336,6 +369,7 @@ interface UebersichtTabProps {
     status?: string;
     assignee?: string | null;
     block_reason?: string | null;
+    operator_question?: boolean;
     review_tier?: string | null;
     branch_name?: string | null;
     model_override?: string | null;
@@ -414,7 +448,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
       ) : null}
 
       {/* Operator-Frage beantworten (S6) — nur wenn blockiert + operator_question */}
-      {task.status === "blocked" && isOperatorQuestion(task.block_reason) ? (
+      {task.status === "blocked" && isOperatorQuestion(task.operator_question) ? (
         <AnswerQuestion taskId={task.id ?? ""} />
       ) : null}
 
@@ -438,6 +472,12 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
           <div className="fleet-kv-k">{de.fleet.detailLabelLaufzeit}</div>
           <div className="fleet-kv-v">{elapsedSec != null ? fmtSeconds(elapsedSec) : "—"}</div>
         </div>
+        {latestRun?.status ? (
+          <div className="fleet-kv">
+            <div className="fleet-kv-k">Laufstatus</div>
+            <div className="fleet-kv-v" title={latestRun.status}>{runStatusLabel(latestRun.status)}</div>
+          </div>
+        ) : null}
         {(latestRun?.input_tokens != null || latestRun?.output_tokens != null) ? (
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.detailLabelTokens}</div>
@@ -489,7 +529,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span className="flex-1 truncate">
+              <span className="flex-1 truncate" title={d.filename}>
                 {d.filename}
               </span>
               <span className="font-data text-micro text-ink-3">
@@ -537,19 +577,21 @@ export function AktivitaetTab({
   return (
     <div className="flex flex-col gap-0.5">
       {events.slice(0, 20).map((ev) => {
-        const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
+        const age = elapsedSeconds(ev.at, now);
+        const ageLabel = age != null ? fmtSeconds(age) : "Zeit ungültig";
         const kindMeta = REVIEW_ECONOMY_KIND_META[ev.kind];
         return (
           <div key={ev.id} className="fleet-activity-row">
-            <span className="fleet-activity-time">{age != null ? fmtSeconds(age) : "—"}</span>
+            <span className="fleet-activity-time">{ageLabel}</span>
             <span
               className="fleet-activity-kind"
+              title={kindMeta?.label ?? ev.kind}
               style={kindMeta?.tone === "ok" ? { color: "var(--color-status-ok)", borderColor: "color-mix(in oklab, var(--color-status-ok) 35%, transparent)" } : undefined}
             >
               {kindMeta?.label ?? ev.kind}
             </span>
             {ev.note ? (
-              <span className="fleet-activity-note">{ev.note}</span>
+              <span className="fleet-activity-note" title={ev.note}>{ev.note}</span>
             ) : null}
           </div>
         );
@@ -613,7 +655,7 @@ function ErgebnisTab({
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span className="flex-1 truncate">
+              <span className="flex-1 truncate" title={d.filename}>
                 {d.filename}
               </span>
               <span className="font-data text-micro text-ink-3">

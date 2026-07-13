@@ -25,6 +25,9 @@ const hooks = vi.hoisted(() => ({
   useKanbanDecisionQueue: vi.fn(),
   useReleaseStatus: vi.fn(),
   useReleaseMode: vi.fn(),
+  useReleaseGateExecute: vi.fn(),
+  useReleaseModeWrite: vi.fn(),
+  useReleaseConcurrencyWrite: vi.fn(),
   useChainGraph: vi.fn(),
   useHermesChainCosts: vi.fn(),
   useHermesReviewVerdicts: vi.fn(),
@@ -190,6 +193,9 @@ function setHookDefaults() {
   hooks.useKanbanDecisionQueue.mockReturnValue({ data: { decisions: [], count: 0, checked_at: 0 }, loading: false, error: null, reload });
   hooks.useReleaseStatus.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useReleaseMode.mockReturnValue({ data: null, loading: false, error: null, reload });
+  hooks.useReleaseGateExecute.mockReturnValue({ busyId: null, activatingIds: {}, doneIds: {}, errorById: {}, run: vi.fn() });
+  hooks.useReleaseModeWrite.mockReturnValue({ run: vi.fn(), busy: false, error: null });
+  hooks.useReleaseConcurrencyWrite.mockReturnValue({ run: vi.fn(), busy: false, error: null });
   hooks.useChainGraph.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useHermesChainCosts.mockReturnValue({ data: null, loading: false, error: null, reload });
   hooks.useHermesReviewVerdicts.mockReturnValue({ data: null, loading: false, error: null, reload });
@@ -271,6 +277,89 @@ describe("FleetView PlanSpec detail drawer", () => {
 
     expect(screen.getByText(/Daten von vor/)).toBeTruthy();
     expect(screen.getByText("Default aktive Kette")).toBeTruthy();
+  });
+
+  it("discloses each failed retained source beside the subtab that consumes it", () => {
+    const failed = <T,>(data: T, source: string) => ({
+      data,
+      loading: false,
+      error: `500: ${source} audit failure`,
+      errorObj: { code: "500", message: `500: ${source} audit failure` },
+      isStale: data != null,
+      lastUpdated: Math.floor(Date.now() / 1000) - 15,
+      reload,
+    });
+    hooks.useHermesWorkers.mockReturnValue(failed({ workers: [] }, "workers"));
+    hooks.useAllBoardWorkers.mockReturnValue(failed({ workers: [] }, "all workers"));
+    hooks.usePlanSpecs.mockReturnValue(failed({ planspecs: [planSpec], count: 1 }, "planspecs"));
+    hooks.useHermesRunsCosts.mockReturnValue(failed(null, "costs"));
+    hooks.useHermesRunsDaily.mockReturnValue(failed(null, "daily"));
+    hooks.useHermesReliability.mockReturnValue(failed(null, "reliability"));
+    hooks.useLanesCatalog.mockReturnValue(failed({ lanes: [] }, "lanes"));
+    hooks.useAccountUsage.mockReturnValue(failed(null, "account usage"));
+    hooks.useSystemHealth.mockReturnValue(failed(null, "health"));
+    hooks.usePressureStatus.mockReturnValue(failed(null, "pressure"));
+    hooks.useKanbanDecisionQueue.mockReturnValue(failed({ decisions: [], count: 0, checked_at: 0 }, "decision queue"));
+    hooks.useReleaseStatus.mockReturnValue(failed(null, "release status"));
+    hooks.useReleaseMode.mockReturnValue(failed(null, "release mode"));
+    hooks.useRunLiveEvents.mockReturnValue({
+      events: [{ id: 7, kind: "heartbeat", at: 10 }],
+      loading: false,
+      error: "network: websocket dropped",
+      isStale: true,
+      lastUpdated: Math.floor(Date.now() / 1000) - 15,
+    });
+    hooks.useChainGraph.mockReturnValue(failed(null, "chain graph"));
+    hooks.useHermesChainCosts.mockReturnValue(failed(null, "chain costs"));
+    hooks.useHermesReviewVerdicts.mockReturnValue(failed(null, "review verdicts"));
+    hooks.usePlanSpecDetail.mockImplementation((path: string | null) => ({
+      ...failed(path ? {
+        path,
+        filename: "alpha.md",
+        topic: "Alpha Volltext Plan",
+        goal: "Retained PlanSpec detail",
+        freigabe: "operator",
+        live_test_depth: "smoke",
+        acceptance_criteria: [],
+        anti_scope: [],
+        subtasks: [],
+      } : null, "planspec detail"),
+    }));
+
+    renderFleetView();
+
+    for (const label of ["Worker (alle Boards)", "PlanSpecs", "Kosten", "Tagesmetriken"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Worker" }));
+    for (const label of ["Worker (alle Boards)", "Worker (aktuelles Board)", "Verlässlichkeit", "Kosten", "Live-Ereignisse"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
+    for (const label of ["Kettengraph", "Kettenkosten", "Review-Signale", "Worker (Kette)"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    for (const label of ["PlanSpecs", "PlanSpec-Detail", "Kosten", "Lanes", "Account-Nutzung"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: /Subtab Risiko/ }));
+    for (const label of [
+      "Worker (aktuelles Board)",
+      "Verlässlichkeit",
+      "Entscheidungsqueue",
+      "Release-Status",
+      "Release-Modus",
+      "Lanes",
+      "Systemzustand",
+      "Systemdruck",
+    ]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
   });
 
   it("mounts PlanSpec detail beside the list without an overlay at lg", () => {
