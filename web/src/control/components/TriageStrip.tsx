@@ -155,13 +155,13 @@ export function TriageStrip() {
               <li key={f.task_id} className="rounded-card border border-status-alert/30 bg-surface-2 px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-alert" />
-                  <span className="min-w-0 flex-1 basis-56 truncate text-sec font-medium text-ink">{f.title}</span>
+                  <span title={f.title} className="min-w-0 flex-1 basis-56 truncate text-sec font-medium text-ink">{f.title}</span>
                   <SignalChip tone="alert" label={f.outcome} className="shrink-0 font-data" />
                   <span className="shrink-0 font-data text-micro text-ink-2">{f.profile ? (profileLabel[f.profile] ?? f.profile) : "—"}</span>
                   {(f.auto_retry_count ?? 0) > 0 ? <SignalChip tone="warn" label={`Auto ${Math.min(f.auto_retry_count ?? 0, f.auto_retry_limit ?? 2)}/${f.auto_retry_limit ?? 2}`} className="shrink-0 font-data" /> : null}
                   <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">{fmtClock(f.ended_at)}</span>
                 </div>
-                {f.reason ? <p className="mt-1 line-clamp-2 text-sec text-ink-3">{f.reason}</p> : null}
+                {f.reason ? <p title={f.reason} className="mt-1 line-clamp-2 text-sec text-ink-3">{f.reason}</p> : null}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {requeue.requeued ? (
                     <SignalChip tone="ok" label={requeue.label ?? "eingereiht"} className="min-h-12 font-data" />

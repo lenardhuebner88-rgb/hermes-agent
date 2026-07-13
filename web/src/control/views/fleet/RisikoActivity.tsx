@@ -62,7 +62,7 @@ export function RisikoActivity({ releaseStatus }: RisikoActivityProps) {
                     <span className={`rk-rail-badge rk-rb-${tone}`}>{outcome}</span>
                     <span className="rk-rail-age">{`vor ${fmtAge(ev.created_at)}`}</span>
                   </div>
-                  <div className="rk-rail-desc">{detailOf(ev) ?? ev.task_id}</div>
+                  <div className="rk-rail-desc" title={detailOf(ev) ?? ev.task_id}>{detailOf(ev) ?? ev.task_id}</div>
                 </div>
               </div>
             );

@@ -45,6 +45,19 @@ function board(tasks: BoardTask[]): BoardResponse {
 }
 
 describe("BoardTab operator information", () => {
+  it.each([
+    ["long", "L".repeat(400)],
+    ["rtl", "مرحبا بالعالم ".repeat(30)],
+    ["combining", "e\u0301".repeat(200)],
+    ["emoji", "👩🏽‍💻🚀".repeat(80)],
+  ])("keeps the complete %s title recoverable", (_kind, title) => {
+    render(<BoardTab board={board([task({ title })])} onOpenNodeDetail={vi.fn()} />);
+
+    const titleNode = document.querySelector(".fleet-boardtab-title");
+    expect(titleNode?.textContent).toBe(title);
+    expect(titleNode?.getAttribute("title")).toBe(title);
+  });
+
   it("keeps all material card fields discoverable on a read-only board", () => {
     render(
       <BoardTab
@@ -63,6 +76,11 @@ describe("BoardTab operator information", () => {
     expect(rowQueries.getByText("2 Vorgänger")).toBeTruthy();
     expect(rowQueries.getByText("4 Nachfolger")).toBeTruthy();
     expect(rowQueries.getByText("1/4")).toBeTruthy();
+
+    const meta = row?.querySelector(".fleet-boardtab-meta");
+    expect(meta?.getAttribute("title")).toBe(
+      "t_truth0 · premium-reviewer · Prio 7 · 3 Kommentare · 2 Vorgänger · 4 Nachfolger · 1/4",
+    );
 
     const summary = screen.getByLabelText("Weitere Informationen zu Operator truth card");
     expect(summary.tagName).toBe("SUMMARY");

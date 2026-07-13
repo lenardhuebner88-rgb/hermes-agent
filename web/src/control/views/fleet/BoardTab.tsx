@@ -172,6 +172,17 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
               <span className="fleet-boardtab-count">{tasks.length}</span>
             </header>
             {tasks.map((t) => {
+              const metaTitle = [
+                t.id.slice(0, 8),
+                t.assignee,
+                t.priority !== 0 ? `Prio ${t.priority}` : null,
+                t.comment_count > 0 ? `${t.comment_count} Kommentare` : null,
+                t.link_counts.parents > 0 ? `${t.link_counts.parents} Vorgänger` : null,
+                t.link_counts.children > 0 ? `${t.link_counts.children} Nachfolger` : null,
+                t.root_id && t.root_id !== t.id && t.link_counts.children === 0 ? `→ ${(t.root_id ?? "").slice(0, 8)}` : null,
+                t.cost_effective_usd != null && t.cost_effective_usd > 0 ? fmtUsd(t.cost_effective_usd) : null,
+                t.progress && t.progress.total > 0 ? `${t.progress.done}/${t.progress.total}` : null,
+              ].filter(Boolean).join(" · ");
               const content = (
                 <>
                 <span
@@ -182,8 +193,8 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
                   {t.assignee ? profileInitial(t.assignee) : "?"}
                 </span>
                 <span className="fleet-boardtab-row-main">
-                  <span className="fleet-boardtab-title">{t.title || t.id}</span>
-                  <span className="fleet-boardtab-meta">
+                  <span className="fleet-boardtab-title" title={t.title || t.id}>{t.title || t.id}</span>
+                  <span className="fleet-boardtab-meta" title={metaTitle}>
                     <span className="fleet-boardtab-id">{t.id.slice(0, 8)}</span>
                     {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}
                     {t.priority !== 0 && <span className="fleet-boardtab-priority">Prio {t.priority}</span>}

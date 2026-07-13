@@ -489,7 +489,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span className="flex-1 truncate">
+              <span className="flex-1 truncate" title={d.filename}>
                 {d.filename}
               </span>
               <span className="font-data text-micro text-ink-3">
@@ -544,12 +544,13 @@ export function AktivitaetTab({
             <span className="fleet-activity-time">{age != null ? fmtSeconds(age) : "—"}</span>
             <span
               className="fleet-activity-kind"
+              title={kindMeta?.label ?? ev.kind}
               style={kindMeta?.tone === "ok" ? { color: "var(--color-status-ok)", borderColor: "color-mix(in oklab, var(--color-status-ok) 35%, transparent)" } : undefined}
             >
               {kindMeta?.label ?? ev.kind}
             </span>
             {ev.note ? (
-              <span className="fleet-activity-note">{ev.note}</span>
+              <span className="fleet-activity-note" title={ev.note}>{ev.note}</span>
             ) : null}
           </div>
         );
@@ -613,7 +614,7 @@ function ErgebnisTab({
               onClick={() => void openAuthedApiFile(d.url, d.filename)}
               className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
             >
-              <span className="flex-1 truncate">
+              <span className="flex-1 truncate" title={d.filename}>
                 {d.filename}
               </span>
               <span className="font-data text-micro text-ink-3">

@@ -550,11 +550,11 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
       </div>
 
       {/* Task-Titel */}
-      <div className="fleet-wk-task">{w.task_title}</div>
+      <div className="fleet-wk-task" title={w.task_title}>{w.task_title}</div>
 
       {/* Heartbeat-Notiz */}
       {w.last_heartbeat_note ? (
-        <div className="fleet-wk-note">{w.last_heartbeat_note}</div>
+        <div className="fleet-wk-note" title={w.last_heartbeat_note}>{w.last_heartbeat_note}</div>
       ) : null}
 
       {/* Progress-Rail — S2: run_progress wenn vorhanden, sonst ETA-Heuristik (~) */}
@@ -601,7 +601,7 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   return (
     <button type="button" className="fleet-ps" onClick={onClick}>
       <div className="fleet-ps-top">
-        <span className="fleet-ps-name">{ps.topic || ps.filename}</span>
+        <span className="fleet-ps-name" title={ps.topic || ps.filename}>{ps.topic || ps.filename}</span>
         <SignalChip
           tone={badgeTone}
           label={badgeLabel}

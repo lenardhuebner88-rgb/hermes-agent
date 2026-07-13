@@ -121,7 +121,7 @@ export function RisikoTab({
               <div className="rk-nc-glyph rk-glyph-gate" aria-hidden="true">⇧</div>
               <div className="rk-nc-body">
                 <div className="rk-nc-titlerow">
-                  <span className="rk-nc-title">{d.title}</span>
+                  <span className="rk-nc-title" title={d.title}>{d.title}</span>
                   <span className="rk-nc-badge rk-badge-gate">gate</span>
                 </div>
                 {context ? <div className="rk-nc-meta">{context}</div> : null}
@@ -140,7 +140,7 @@ export function RisikoTab({
             <div className="rk-nc-glyph rk-glyph-op" aria-hidden="true">!</div>
             <div className="rk-nc-body">
               <div className="rk-nc-titlerow">
-                <span className="rk-nc-title">{t.title}</span>
+                <span className="rk-nc-title" title={t.title}>{t.title}</span>
                 <span className="rk-nc-badge rk-badge-op">operator</span>
               </div>
               {t.block_reason ? <div className="rk-nc-meta">{t.block_reason}</div> : null}

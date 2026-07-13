@@ -59,7 +59,7 @@ export function WorkerBand({
           ))}
         </div>
       ) : null}
-      <span className="fleet-band-step">{step}</span>
+      <span className="fleet-band-step" title={step}>{step}</span>
       <span className="fleet-band-meta">{meta}</span>
     </div>
   );

@@ -173,7 +173,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
             <div className="grid min-w-0 gap-1.5">
               {preview.children.map((child, index) => (
                 <div key={`${child.title}-${index}`} className="grid min-w-0 gap-1 border-b border-line-soft pb-2 last:border-b-0 last:pb-0">
-                  <div className="min-w-0 truncate text-sm font-medium text-ink">{child.title}</div>
+                  <div className="min-w-0 truncate text-sm font-medium text-ink" title={child.title}>{child.title}</div>
                   <div className="flex min-w-0 flex-wrap gap-1.5 text-[11px] text-ink-3">
                     <span className="rounded-card border border-line px-2 py-0.5">{de.fleet.planChildLane}: {child.assignee || "coder"}</span>
                     <span className="rounded-card border border-line px-2 py-0.5">{de.fleet.planChildParents}: {(child.parents ?? []).join(", ") || de.fleet.planChildNone}</span>

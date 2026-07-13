@@ -1,0 +1,68 @@
+{
+  "base": "http://127.0.0.1:4173",
+  "body_width": {
+    "client": 390,
+    "scroll": 390
+  },
+  "clipped_count": 352,
+  "console_errors": [],
+  "fixture_results": [
+    {
+      "count": 1,
+      "kind": "long",
+      "text_matches": true,
+      "title_matches": true
+    },
+    {
+      "count": 1,
+      "kind": "rtl",
+      "text_matches": true,
+      "title_matches": true
+    },
+    {
+      "count": 1,
+      "kind": "combining",
+      "text_matches": true,
+      "title_matches": true
+    },
+    {
+      "count": 1,
+      "kind": "emoji",
+      "text_matches": true,
+      "title_matches": true
+    }
+  ],
+  "fixtures": [
+    {
+      "expected_title": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL",
+      "kind": "long",
+      "status": 200,
+      "task_id": "t_093acdd4"
+    },
+    {
+      "expected_title": "مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم",
+      "kind": "rtl",
+      "status": 200,
+      "task_id": "t_69089d12"
+    },
+    {
+      "expected_title": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "kind": "combining",
+      "status": 200,
+      "task_id": "t_d94cd698"
+    },
+    {
+      "expected_title": "👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀👩🏽‍💻🚀",
+      "kind": "emoji",
+      "status": 200,
+      "task_id": "t_563b9f66"
+    }
+  ],
+  "missing_recovery": [],
+  "network_errors": [],
+  "screenshot": "audit/iteration-1-f02/hostile-titles-390x844.png",
+  "viewport": {
+    "height": 844,
+    "width": 390
+  }
+}

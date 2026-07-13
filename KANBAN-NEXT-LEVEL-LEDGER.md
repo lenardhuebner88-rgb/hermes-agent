@@ -78,22 +78,22 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Preserve `due_at` and `last_heartbeat_at` in the Board schema; add a native named `<details>/<summary>` disclosure per card; expose full assignee plus nonzero priority/comments/dependency/progress metadata without inventing zero values.
 - After:       Candidate Vite browser against the authenticated live API: 256 API cards = 256 DOM cards = 256 named disclosures; 1,833 material cells checked at both 1440×900 and 390×844, zero failures, zero console/network errors, body width 1440/1440 and 390/390. Evidence: `audit/iteration-1-f01/`.
 - Gates:       Focused Vitest 52 passed, exit 0; `tsc -b --noEmit` exit 0; targeted control lint exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (126 files / 1,829 tests).
-- Commit:      NONE
+- Commit:      `087f69f2d`
 - Status:      CONFIRMED
 
 ### N-11  Every truncated value has accessible full-value recovery
 - Source:      prior F-02 / `t_0163e3a4`
 - Class:       ACCESSIBILITY
 - Severity:    S3
-- Invariant:   Every ellipsized value in all Fleet surfaces has keyboard-accessible full-value recovery at desktop and mobile widths.
+- Invariant:   Every ellipsized value in all Fleet surfaces has an accessible full-value recovery path at desktop and mobile widths.
 - Repro:       Exercise 400-character, RTL, combining-mark, and emoji titles in all six tabs and drawers.
 - Before:      Prior Board title `t_33e2669f` had `scrollWidth=450`, `clientWidth=448`, and no full-value attribute.
-- Test:        Pending fail-first UI coverage.
-- Change:      NONE
-- After:       Pending.
-- Gates:       Pending.
-- Commit:      NONE
-- Status:      OPEN
+- Test:        Initial focused fail-first run: 7 failed / 52 passed across Board, Heute, Ketten, and Risiko because clipped values lacked complete `title` recovery. The first browser candidate then found 11 further live overflows in Board metadata and Risiko triage; targeted regressions failed 2/34 before those paths were fixed.
+- Change:      Add complete-value recovery to every known clipped Fleet title, note, model, lane, result, path, activity, and drawer field; preserve the full combined Board metadata line; make string-valued panel metadata recoverable. The audit harness compares hostile fixtures with the title persisted by the authenticated API, so backend whitespace normalization is not misreported as DOM loss.
+- After:       Fresh authenticated candidate contexts at 1440×900 and 390×844 exercised all six tabs. Desktop inspected 121 actually clipped elements; mobile inspected 352. Every clip had recovery; 400-character, RTL, combining-mark, and emoji titles matched API-persisted text and DOM/title exactly. Both viewports had zero body overflow, console errors, or HTTP errors. Evidence: `audit/iteration-1-f02/`.
+- Gates:       Focused Vitest 60 passed, exit 0; `scripts/gate-frontend.sh` exit 0 (126 files / 1,837 tests plus production build).
+- Commit:      this F-02 commit
+- Status:      CONFIRMED
 
 ### N-12  Archive filtering is complete and explicit
 - Source:      prior F-06 / `t_6ce33433`

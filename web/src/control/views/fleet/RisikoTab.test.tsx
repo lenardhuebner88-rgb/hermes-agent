@@ -130,6 +130,56 @@ function renderRisikoTab(overrides: {
 }
 
 describe("RisikoTab — Release-Gate needcard", () => {
+  it("keeps clipped risk-card titles recoverable", () => {
+    const title = "Risiko ".repeat(80);
+    renderRisikoTab({
+      releaseGateDecisions: [{ ...RELEASE_GATE_DECISION, title }],
+    });
+
+    const titleNode = document.querySelector(".rk-nc-title");
+    expect(titleNode?.textContent).toBe(title);
+    expect(titleNode?.getAttribute("title")).toBe(title);
+  });
+
+  it("keeps clipped triage titles and reasons fully recoverable", async () => {
+    const title = "Risk title ".repeat(60);
+    const reason = "REQUEST_CHANGES — evidence detail ".repeat(60);
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (String(url).includes("/runs/failures")) {
+        return Promise.resolve({
+          hours: 48,
+          count: 1,
+          truncated: false,
+          failures: [{
+            run_id: 42,
+            task_id: TASK_ID,
+            title,
+            profile: "reviewer",
+            outcome: "blocked",
+            reason,
+            ended_at: 1_783_800_000,
+            task_status: "blocked",
+            model_override: null,
+          }],
+        });
+      }
+      return defaultFetchImpl(url);
+    });
+
+    renderRisikoTab();
+
+    const byExactText = (selector: string, text: string) =>
+      Array.from(document.querySelectorAll<HTMLElement>(selector)).find((node) => node.textContent === text);
+    await waitFor(() => expect(byExactText("span", title)).toBeTruthy());
+    const titleNode = byExactText("span", title) as HTMLElement;
+    const reasonNode = byExactText("p", reason) as HTMLElement;
+    expect(reasonNode).toBeTruthy();
+    expect(titleNode.getAttribute("title")).toBe(title);
+    expect(reasonNode.getAttribute("title")).toBe(reason);
+    expect(screen.getByText("failed/blocked · letzte 48h · jüngster Run pro Task").getAttribute("title"))
+      .toBe("failed/blocked · letzte 48h · jüngster Run pro Task");
+  });
+
   it("renders the empty state when nothing needs the operator", () => {
     renderRisikoTab();
     expect(screen.getByText(de.fleet.risikoLeerState)).toBeTruthy();
