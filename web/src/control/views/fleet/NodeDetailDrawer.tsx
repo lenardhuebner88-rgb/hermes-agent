@@ -75,6 +75,20 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
 
   const task = taskBody.data?.task ?? null;
   const runs = taskBody.data?.runs ?? [];
+  const links = taskBody.data?.links;
+  const stageBlockReason = (() => {
+    if (task?.status !== "todo" && task?.status !== "scheduled") return null;
+    const parentIds = links?.parents ?? [];
+    const states = new Map((links?.parent_states ?? []).map((parent) => [parent.id, parent]));
+    const blockers = parentIds.flatMap((parentId) => {
+      const parent = states.get(parentId);
+      if (!parent) return [`${parentId} (Status unbekannt)`];
+      return parent.status === "done" ? [] : [`${parent.title} (${parent.status}) ist nicht fertig`];
+    });
+    return blockers.length > 0
+      ? `Starten nicht verfügbar — Vorgänger ${blockers.join(", ")}.`
+      : null;
+  })();
   // Ketten-Root für "Kette abbrechen": min-level Node, nur bei echter Mehr-Node-Kette.
   const chainRootId = chainNodes.length > 1
     ? ([...chainNodes].sort((a, b) => a.level - b.level)[0]?.id ?? null)
@@ -194,6 +208,7 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
               chainRootId={chainRootId}
               onChanged={onChanged}
               onCancelled={onClose}
+              stageBlockReason={stageBlockReason}
             />
           </div>
         ) : null}

@@ -38,9 +38,12 @@ export interface FleetTaskActionsProps {
   onChanged?: () => void | Promise<void>;
   /** Nach erfolgreichem Abbrechen/Ketten-Abbruch aufgerufen (z. B. Drawer schließen). */
   onCancelled?: () => void;
+  /** Current-state reason why the stage advance is impossible. Management
+   * actions remain available; the invalid stage request is never submitted. */
+  stageBlockReason?: string | null;
 }
 
-export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCancelled }: FleetTaskActionsProps) {
+export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCancelled, stageBlockReason }: FleetTaskActionsProps) {
   const [armed, setArmed] = useState<string | null>(null);
   const [chainNote, setChainNote] = useState<string>("");
   const task = useTaskAction(onChanged);
@@ -58,7 +61,7 @@ export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCan
   // (1) Stage-Übergänge — stageActions wiederverwenden (Reopen = Unblock/PATCH
   // ready). Review bleibt absichtlich ohne manuellen Status-Button: das Backend
   // akzeptiert weder review→done noch review→blocked über diesen PATCH-Pfad.
-  const stage = stageActions(st);
+  const stage = stageBlockReason && (st === "todo" || st === "scheduled") ? [] : stageActions(st);
   for (const a of stage) {
     actions.push({
       key: `stage:${a.key}`,
@@ -167,6 +170,7 @@ export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCan
         </div>
       )}
       {errorText ? <p className="fleet-ta-error">{errorText}</p> : null}
+      {stageBlockReason ? <p className="fleet-ta-error" role="status">{stageBlockReason}</p> : null}
       {chainNote ? <p className="fleet-ta-note">{chainNote}</p> : null}
       {retryDone && !chainNote ? <p className="fleet-ta-note">{de.fleet.actionRetryDone}</p> : null}
     </div>

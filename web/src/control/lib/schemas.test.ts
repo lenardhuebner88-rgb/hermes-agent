@@ -989,7 +989,15 @@ describe("TaskDetailResponseSchema", () => {
   it("keeps dependency links from /tasks/:id so Flow can explain the selected chain", () => {
     const parsed = parseOrThrow(TaskDetailResponseSchema, {
       task: { id: "t_child", title: "Dependent", status: "todo", assignee: "coder", latest_summary: null },
-      links: { parents: ["t_parent_a", "t_parent_b"], children: ["t_next"] },
+      links: {
+        parents: ["t_parent_a", "t_parent_b"],
+        children: ["t_next"],
+        parent_states: [
+          { id: "t_parent_a", title: "First parent", status: "done" },
+          { id: "t_parent_b", title: "Blocking parent", status: "running" },
+        ],
+        child_states: [{ id: "t_next", title: "Next", status: "todo" }],
+      },
       comments: [],
       runs: [],
       events: [],
@@ -998,6 +1006,8 @@ describe("TaskDetailResponseSchema", () => {
 
     expect(parsed.links.parents).toEqual(["t_parent_a", "t_parent_b"]);
     expect(parsed.links.children).toEqual(["t_next"]);
+    expect(parsed.links.parent_states[1]).toMatchObject({ id: "t_parent_b", status: "running" });
+    expect(parsed.links.child_states[0]).toMatchObject({ id: "t_next", status: "todo" });
   });
 
   it("defaults missing links to empty arrays for older task-detail payloads", () => {
@@ -1010,6 +1020,8 @@ describe("TaskDetailResponseSchema", () => {
 
     expect(parsed.links.parents).toEqual([]);
     expect(parsed.links.children).toEqual([]);
+    expect(parsed.links.parent_states).toEqual([]);
+    expect(parsed.links.child_states).toEqual([]);
     expect(parsed.comments).toEqual([]);
   });
 

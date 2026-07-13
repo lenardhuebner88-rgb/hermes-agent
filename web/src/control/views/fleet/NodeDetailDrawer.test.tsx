@@ -226,3 +226,33 @@ describe("NodeDetailDrawer Reassign", () => {
     expect(await screen.findByText("cannot reassign t_reassign: unknown id, or still running")).toBeTruthy();
   });
 });
+
+describe("NodeDetailDrawer dependency action guard", () => {
+  it("derives the Starten guard from authoritative parent states", () => {
+    const original = hookState.taskBody.data;
+    (hookState.taskBody as { data: unknown }).data = {
+      task: { id: "t_child", title: "Child", status: "todo", assignee: "coder", body: null },
+      runs: [],
+      links: {
+        parents: ["t_parent"],
+        children: [],
+        parent_states: [{ id: "t_parent", title: "Blocking parent", status: "running" }],
+        child_states: [],
+      },
+    };
+    try {
+      render(
+        <NodeDetailDrawer
+          taskId="t_child"
+          chainNodes={[]}
+          now={1782508100}
+          onClose={() => undefined}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: "Starten" })).toBeNull();
+      expect(screen.getByText(/Blocking parent.*running/)).toBeTruthy();
+    } finally {
+      (hookState.taskBody as { data: unknown }).data = original;
+    }
+  });
+});

@@ -1,0 +1,27 @@
+{
+  "base": "http://127.0.0.1:9122",
+  "board": "audit-scratch",
+  "captured_child_status": "todo",
+  "captured_parent_states": [
+    {
+      "id": "t_6da86a6e",
+      "status": "blocked",
+      "title": "AUDIT BLOCKING PARENT"
+    }
+  ],
+  "child_id": "t_df095ea9",
+  "dom_explanation": "Starten nicht verf\u00fcgbar \u2014 Vorg\u00e4nger AUDIT BLOCKING PARENT (blocked) ist nicht fertig.",
+  "dom_start_buttons": 0,
+  "dom_valid_cancel_buttons": 1,
+  "expected_409_console_errors": 1,
+  "fixtures_archived_after_capture": true,
+  "parent_id": "t_6da86a6e",
+  "patch_ready": {
+    "body": {
+      "detail": "Cannot move to 'ready': blocked by parent(s) not done \u2014 'AUDIT BLOCKING PARENT' (t_6da86a6e, status=blocked)"
+    },
+    "status": 409
+  },
+  "screenshot": "audit/iteration-4-state/dependency-action-truth-1440x900.png",
+  "unexpected_console_errors": []
+}

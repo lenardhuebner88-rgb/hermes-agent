@@ -38,4 +38,18 @@ describe("FleetTaskActions — review-status stage buttons (default vs. allowRev
     expect(screen.queryByRole("button", { name: "Nacharbeit" })).toBeNull();
     expect(fetchJSONMock).not.toHaveBeenCalled();
   });
+
+  it("withholds Starten and explains known unsatisfied parents before submission", () => {
+    render(
+      <FleetTaskActions
+        taskId="t_child"
+        status="todo"
+        stageBlockReason="Starten nicht verfügbar — Vorgänger Blocking parent (running) ist nicht fertig."
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Starten" })).toBeNull();
+    expect(screen.getByText(/Blocking parent.*running/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Abbrechen" })).toBeTruthy();
+  });
 });

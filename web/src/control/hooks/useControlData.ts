@@ -3015,15 +3015,22 @@ export async function duplicateLoop(source: string, name: string): Promise<LoopD
 // useTaskBodyOnDemand pollt alle 8s WENN taskId != null (= Drawer offen), ansonsten pausiert.
 // Pattern analog zu useWorkerActivity (Null-Guard + leerer Fallback).
 
+const EMPTY_TASK_BODY_RESPONSE: TaskBodyResponse = {
+  task: null,
+  runs: [],
+  deliverables: [],
+  links: { parents: [], children: [], parent_states: [], child_states: [] },
+};
+
 export function useTaskBodyOnDemand(taskId: string | null) {
   const key = taskId ? `task-body-on-demand/${taskId}` : "task-body-on-demand/__none__";
   const loader = useCallback(async (): Promise<TaskBodyResponse> => {
-    if (!taskId) return { task: null, runs: [], deliverables: [] };
+    if (!taskId) return EMPTY_TASK_BODY_RESPONSE;
     const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
     return parseOrThrow(TaskBodySchema, raw, `task-body/${taskId}`);
   }, [taskId]);
   const result = usePolling<TaskBodyResponse>(key, loader, taskId ? 8000 : 600_000);
-  if (!taskId) return { ...result, data: { task: null, runs: [], deliverables: [] } as TaskBodyResponse };
+  if (!taskId) return { ...result, data: EMPTY_TASK_BODY_RESPONSE };
   return result;
 }
 

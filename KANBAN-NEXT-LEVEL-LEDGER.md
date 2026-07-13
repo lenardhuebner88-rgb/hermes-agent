@@ -154,7 +154,21 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Remove Ship/Rework from the pure stage action model and its drawer escape hatch; add an explicit Verifier-owned guard for `review`; remove review cards from the operator-actionable queue while preserving the valid archive/cancel management action; align hook comments and public props with the backend contract.
 - After:       Authenticated candidate proof used short-lived `audit-scratch` task `t_575b0c9a`: captured API status `review`; PATCH `done` returned 409 `not valid from current state`; PATCH `blocked` returned the same 409 class; DOM rendered zero Ship and zero Rework buttons, retained exactly one valid `Abbrechen` action, and had zero unexpected console errors. Fixture was archived immediately. Evidence: `audit/iteration-4-state/review-action-summary.json` and screenshot.
 - Gates:       Focused 67 passed, exit 0; `tsc -b --noEmit` exit 0; production `npm run build` exit 0; candidate harness exit 0.
-- Commit:      this N-40 commit
+- Commit:      `4211dd6dd`
+- Status:      CONFIRMED
+
+### N-41  Unsatisfied dependencies disable Starten before a guaranteed 409
+- Source:      new live repro against a blocked parent/child pair
+- Class:       DEFECT
+- Severity:    S1
+- Invariant:   A `todo` or `scheduled` child with any current parent state other than `done` never offers Starten; the drawer names each blocker before submission and fails closed when a link target is missing.
+- Repro:       Create a blocked parent and dependent child through `kanban_db.create_task` on `audit-scratch`; fetch authenticated detail/board payloads; attempt `PATCH ready`; render the captured child in the exact production candidate drawer; archive both fixtures.
+- Before:      Board/detail exposed only parent IDs/counts. Fleet always rendered Starten for `todo`/`scheduled`, so the known blocked child submitted a request guaranteed to return the backend's 409 `Cannot move to 'ready'`. Fail-first: frontend 4 failures / 84 tests (parent states stripped, Starten still present in direct component and drawer); backend detail expectation lacked `parent_states`.
+- Test:        Frontend schema/action/drawer/flow-guard group 89/89, exit 0; backend plugin file 268/268, exit 0.
+- Change:      Extend the on-demand detail link contract additively with current `{id,title,status}` states for parents and children; preserve empty defaults for older payloads; derive a fail-closed blocker explanation in NodeDetail; withhold only the invalid stage advance while retaining valid management actions.
+- After:       Exact production candidate on port 9122 captured child `t_df095ea9` as `todo` and parent `t_6da86a6e` as `blocked`; authenticated `PATCH ready` returned 409 naming the exact parent; DOM rendered zero Starten buttons, one valid Abbrechen button, and `Starten nicht verfügbar — Vorgänger AUDIT BLOCKING PARENT (blocked) ist nicht fertig.` Zero unexpected console errors; both fixtures archived. Evidence: `audit/iteration-4-state/dependency-action-summary.json` and screenshot.
+- Gates:       Focused frontend 89 passed, exit 0; `tsc -b --noEmit` exit 0; backend plugin 268 passed, exit 0; Ruff exit 0; production build exit 0; candidate harness exit 0.
+- Commit:      this N-41 commit
 - Status:      CONFIRMED
 
 ## Later iterations

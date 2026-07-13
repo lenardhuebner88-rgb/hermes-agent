@@ -1533,23 +1533,34 @@ def _warnings_summary_from_diagnostics(
     }
 
 
-def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
-    """Return {'parents': [...], 'children': [...]} for a task."""
-    parents = [
-        r["parent_id"]
-        for r in conn.execute(
-            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-            (task_id,),
-        )
-    ]
-    children = [
-        r["child_id"]
-        for r in conn.execute(
-            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-            (task_id,),
-        )
-    ]
-    return {"parents": parents, "children": children}
+def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """Return link ids plus current endpoint state for honest UI guards."""
+    parent_rows = conn.execute(
+        "SELECT l.parent_id AS id, t.title, t.status FROM task_links l "
+        "LEFT JOIN tasks t ON t.id = l.parent_id "
+        "WHERE l.child_id = ? ORDER BY l.parent_id",
+        (task_id,),
+    ).fetchall()
+    child_rows = conn.execute(
+        "SELECT l.child_id AS id, t.title, t.status FROM task_links l "
+        "LEFT JOIN tasks t ON t.id = l.child_id "
+        "WHERE l.parent_id = ? ORDER BY l.child_id",
+        (task_id,),
+    ).fetchall()
+
+    def states(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
+        return [
+            {"id": row["id"], "title": row["title"], "status": row["status"]}
+            for row in rows
+            if row["title"] is not None and row["status"] is not None
+        ]
+
+    return {
+        "parents": [row["id"] for row in parent_rows],
+        "children": [row["id"] for row in child_rows],
+        "parent_states": states(parent_rows),
+        "child_states": states(child_rows),
+    }
 
 
 # ---------------------------------------------------------------------------

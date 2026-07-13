@@ -1504,17 +1504,24 @@ const TaskDetailTaskSchema = z.object({
   warnings: TaskDiagnosticWarningsSchema.nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
 }).partial().catch({});
+const LinkedTaskStateSchema = z.object({
+  id: z.coerce.string(),
+  title: z.string().catch("Ohne Titel"),
+  status: TaskStatusSchema,
+});
 const TaskLinksSchema = z.object({
   parents: z.array(z.coerce.string()).catch([]),
   children: z.array(z.coerce.string()).catch([]),
-}).catch({ parents: [], children: [] });
+  parent_states: z.array(LinkedTaskStateSchema).catch([]),
+  child_states: z.array(LinkedTaskStateSchema).catch([]),
+}).catch({ parents: [], children: [], parent_states: [], child_states: [] });
 export const TaskDetailResponseSchema = z.object({
   task: TaskDetailTaskSchema.nullable().catch(null),
   comments: z.array(TaskCommentSchema).catch([]),
   runs: z.array(TaskRunSchema).catch([]),
   events: z.array(TaskEventSchema).catch([]),
   deliverables: z.array(TaskDeliverableSchema).catch([]),
-  links: TaskLinksSchema.default({ parents: [], children: [] }),
+  links: TaskLinksSchema.default({ parents: [], children: [], parent_states: [], child_states: [] }),
 });
 export type TaskRun = z.infer<typeof TaskRunSchema>;
 export type TaskEvent = z.infer<typeof TaskEventSchema>;
@@ -2008,7 +2015,13 @@ export const TaskBodySchema = z.object({
     cost_usd: z.coerce.number().nullable().catch(null),
   })).catch([]),
   deliverables: z.array(TaskDeliverableSchema).catch([]),
-}).passthrough().catch({ task: null, runs: [], deliverables: [] });
+  links: TaskLinksSchema.default({ parents: [], children: [], parent_states: [], child_states: [] }),
+}).passthrough().catch({
+  task: null,
+  runs: [],
+  deliverables: [],
+  links: { parents: [], children: [], parent_states: [], child_states: [] },
+});
 export type TaskBodyResponse = z.infer<typeof TaskBodySchema>;
 
 // POST /api/plugins/kanban/tasks/{id}/reassign.

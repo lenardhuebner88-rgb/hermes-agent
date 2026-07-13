@@ -1484,10 +1484,16 @@ def test_task_detail_includes_links_and_events(client):
     data = r.json()
     assert data["task"]["id"] == child["id"]
     assert parent["id"] in data["links"]["parents"]
+    assert data["links"]["parent_states"] == [
+        {"id": parent["id"], "title": "parent", "status": parent["status"]}
+    ]
 
     # Detail for the parent shows the child.
     r = client.get(f"/api/plugins/kanban/tasks/{parent['id']}")
     assert child["id"] in r.json()["links"]["children"]
+    assert r.json()["links"]["child_states"] == [
+        {"id": child["id"], "title": "child", "status": "todo"}
+    ]
 
     # Events exist from creation.
     assert len(data["events"]) >= 1
