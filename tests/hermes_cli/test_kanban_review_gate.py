@@ -2050,6 +2050,7 @@ def test_complete_freigabe_hold_archives_root_and_children(kanban_home):
             ).fetchall()
         ]
         assert "freigabe_completed" in kinds
+        assert "archived" in kinds
         comments = kb.list_comments(conn, root)
         assert any("Superseded" in c.body for c in comments)
 

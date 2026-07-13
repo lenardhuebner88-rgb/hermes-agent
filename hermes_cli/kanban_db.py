@@ -13279,6 +13279,12 @@ def dismiss_freigabe_hold(
         _append_event(
             conn,
             task_id,
+            "archived",
+            {"by": author, "via": "freigabe_vetoed"},
+        )
+        _append_event(
+            conn,
+            task_id,
             "freigabe_vetoed",
             {"author": author, "archived_children": archived_children},
         )
@@ -13353,6 +13359,9 @@ def complete_freigabe_hold(
         if cur.rowcount != 1:
             return False
         _append_event(
+            conn, task_id, "archived", {"by": author, "via": "freigabe_completed"}
+        )
+        _append_event(
             conn, task_id, "freigabe_completed",
             {"author": author, "archived_children": archived_children, "note": note},
         )
@@ -13410,6 +13419,12 @@ def veto_operator_escalation(
         )
         if cur.rowcount != 1:
             return False
+        _append_event(
+            conn,
+            task_id,
+            "archived",
+            {"by": author, "via": "freigabe_vetoed"},
+        )
         _append_event(
             conn,
             task_id,
