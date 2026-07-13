@@ -34,6 +34,8 @@ from loops.runner import (
     read_all_ledger_stats,
     read_ledger_stats,
     resolve_packs_dir,
+    build_scope_command,
+    should_reexec_into_scope,
 )
 
 # ── Helfer ───────────────────────────────────────────────────────────────────
@@ -95,6 +97,35 @@ QUOTED_TITLE_PLAN = BROKEN_TITLE_PLAN.replace(
     'title: "Landen"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)',
     'title: "\\"Landen\\"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)"',
 )
+
+# Belegter Vorfall (2026-07-13 Nachtlauf): wortgleich geerntet aus
+# /home/piet/.hermes/loops/ht-ux-polish/queue/90-bounced/P1-settings-controls-first.md
+# (Dateiname-Stamm P1-settings-controls-first). Builder (grok) und Verifier
+# (codex) meldeten trotz Prompt-Anweisung `... P1-settings-controls-first`
+# statt der YAML-`id` — ein grüner, screenshot-belegter Round wurde dadurch
+# als PASS_ID_MISMATCH revertiert.
+REAL_HT_SETTINGS_PLAN = """---
+id: HT-UX-P1-SETTINGS-CONTROLS-FIRST
+title: "Alltägliche Einstellungen vor den Verbindungs-Erklärblock ziehen"
+priority: P1
+retry: 2
+route: /einstellungen
+done_when:
+  - "Bei 390×844 erscheinen Darstellung und Familie in Hell und Dunkel vor Apple Health; der Dunkelmodus-Schalter und der Familienrezepte-Schalter sind im ersten Viewport vollständig sichtbar und werden nicht vom festen Dock verdeckt."
+  - "Apple Health, Withings, Abmelden und Datenschutz bleiben mit unveränderter Funktion, Copy und Ziel-Links erreichbar; #withings scrollt weiterhin zum Withings-Abschnitt."
+  - "Die Änderung besteht ausschließlich aus der Reihenfolge vorhandener Settings-Sections und erzeugt keinen horizontalen Overflow, Konsolenfehler oder Fokusfehler."
+tests:
+  - "npm test -- src/app/einstellungen/AppleHealthSettings.test.tsx"
+  - "npm run gate"
+  - "Authentifizierter Mobile-Verify auf /einstellungen bei exakt 390×844 in light und dark: scrollY=0, nach Hydration Darstellung und Familie vor Apple Health im DOM und visuell oberhalb des festen Docks; overflow=0, console_errors=0, page_errors=0, focus_failures=0."
+files_hint:
+  - src/app/einstellungen/page.tsx
+---
+
+## Before evidence
+
+- Exakte vorhandene Hell-Aufnahme: `/home/piet/projects/health-track/.ui-verify/current-audit/2026-07-12/mobile/light/einstellungen.png`.
+"""
 
 
 def g(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -507,6 +538,36 @@ def test_pass_status_must_match_frontmatter_plan_id_exactly():
     assert not pass_status_matches_plan("PASS fremder-plan", PLAN_BODY)
     assert not pass_status_matches_plan("PASS fl-20260702-beispiel extra", PLAN_BODY)
     assert parse_plan_id(PLAN_BODY.replace("id: fl-20260702-beispiel", "id: [kaputt]")) == ""
+
+
+def test_pass_status_tolerates_filename_stem_on_real_bounced_plan():
+    """Belegter Vorfall 2026-07-13: Builder/Verifier melden trotz Prompt den
+    Dateinamen-Stamm statt der YAML-`id` — der Stamm-Treffer muss zählen,
+    solange die YAML-`id` selbst eine präfigierte Form des Stamms ist. Ein
+    fremder Plan (anderer Stamm) und ein Plan ohne gültige `id` dürfen weiter
+    nie matchen."""
+    plan_path = Path("P1-settings-controls-first.md")
+    assert parse_plan_id(REAL_HT_SETTINGS_PLAN) == "HT-UX-P1-SETTINGS-CONTROLS-FIRST"
+    # Exakte YAML-ID weiterhin gültig.
+    assert pass_status_matches_plan(
+        "PASS HT-UX-P1-SETTINGS-CONTROLS-FIRST", REAL_HT_SETTINGS_PLAN, plan_path
+    )
+    # Dateiname-Stamm (das reale Builder/Verifier-Fehlverhalten) jetzt auch.
+    assert pass_status_matches_plan(
+        "PASS P1-settings-controls-first", REAL_HT_SETTINGS_PLAN, plan_path
+    )
+    # Ohne plan_path bleibt nur die exakte YAML-ID gültig (Rückwärtskompat.).
+    assert not pass_status_matches_plan("PASS P1-settings-controls-first", REAL_HT_SETTINGS_PLAN)
+    # Ein Status für einen ANDEREN Plan matcht weiterhin nicht.
+    assert not pass_status_matches_plan("PASS unrelated-plan", REAL_HT_SETTINGS_PLAN, plan_path)
+    # Ein Plan ohne (gültige) YAML-`id` matcht nie, egal was der Status sagt.
+    no_id_plan = REAL_HT_SETTINGS_PLAN.replace(
+        "id: HT-UX-P1-SETTINGS-CONTROLS-FIRST\n", ""
+    )
+    assert parse_plan_id(no_id_plan) == ""
+    assert not pass_status_matches_plan(
+        "PASS P1-settings-controls-first", no_id_plan, plan_path
+    )
 
 
 def test_broken_title_frontmatter_from_real_bounced_plan_is_unparseable():
@@ -1997,6 +2058,102 @@ def test_cli_unknown_pack_exits_2(tmp_path, capsys):
     rc = main(["--pack", "nope", "--cmd", "status", "--state-root", str(tmp_path)])
     assert rc == 2
     assert "MANIFEST-FEHLER" in capsys.readouterr().err
+
+
+# ── systemd-Cgroup-Eskalation (Nachtlauf-Vorfall 2026-07-13) ─────────────────
+# Reale /proc/self/cgroup-Strings dieses Hosts (cgroup v2, single `0::`-Zeile).
+
+CGROUP_UNDER_CODEX_REMOTE = (
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/codex-remote.service\n"
+)
+CGROUP_UNDER_OWN_LOOP_UNIT = (
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    "hermes-loop@ht-ux-polish.service\n"
+)
+CGROUP_UNDER_TERMINAL_SCOPE = (
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u4711.scope\n"
+)
+
+
+def test_reexec_true_for_foreign_service_cgroup():
+    assert should_reexec_into_scope(
+        CGROUP_UNDER_CODEX_REMOTE, marker_set=False, systemd_run_available=True
+    )
+
+
+def test_reexec_false_for_own_hermes_loop_unit():
+    assert not should_reexec_into_scope(
+        CGROUP_UNDER_OWN_LOOP_UNIT, marker_set=False, systemd_run_available=True
+    )
+
+
+def test_reexec_false_for_terminal_scope():
+    assert not should_reexec_into_scope(
+        CGROUP_UNDER_TERMINAL_SCOPE, marker_set=False, systemd_run_available=True
+    )
+
+
+def test_reexec_false_when_marker_already_set():
+    """Rekursionsschutz: egal wie fremd das Cgroup, ein gesetzter Marker
+    (zweiter, bereits re-execter Lauf) heißt immer inline weiterlaufen."""
+    assert not should_reexec_into_scope(
+        CGROUP_UNDER_CODEX_REMOTE, marker_set=True, systemd_run_available=True
+    )
+
+
+def test_reexec_false_when_systemd_run_missing():
+    assert not should_reexec_into_scope(
+        CGROUP_UNDER_CODEX_REMOTE, marker_set=False, systemd_run_available=False
+    )
+
+
+def test_scope_command_preserves_module_invocation():
+    """Der Re-Exec MUSS `sys.orig_argv` spiegeln, nicht `sys.argv`.
+
+    Belegter Fehlschlag (Repro 2026-07-13): aus `[sys.executable, *sys.argv]`
+    gebaut, wird aus `python -m loops.runner` ein Script-Aufruf
+    `python /…/loops/runner.py` — `sys.path[0]` ist dann …/loops statt Repo-Root
+    und `from loops import engines` stirbt mit ModuleNotFoundError. Genau der
+    Codex-/Agent-Aufruf ohne PYTHONPATH, den der Scope-Escape retten soll.
+    """
+    orig_argv = [
+        "/home/piet/.hermes/hermes-agent/venv/bin/python",
+        "-m",
+        "loops.runner",
+        "--pack",
+        "ht-ux-polish",
+        "--cmd",
+        "night",
+    ]
+    cmd = build_scope_command("/usr/bin/systemd-run", orig_argv)
+
+    assert cmd[0] == "/usr/bin/systemd-run"
+    assert "--scope" in cmd
+    assert f"--setenv={runner_module.LOOP_SCOPE_MARKER_ENV}=1" in cmd
+    # Die ursprüngliche Interpreter-Kommandozeile bleibt Byte für Byte erhalten …
+    assert cmd[-len(orig_argv):] == orig_argv
+    # … insbesondere die `-m`-Form (sonst kippt der Modul-Suchpfad).
+    assert "-m" in cmd and "loops.runner" in cmd
+    assert not any(arg.endswith("runner.py") for arg in cmd)
+
+
+def test_reexec_helper_not_invoked_on_module_import(monkeypatch):
+    """`_reexec_into_own_scope` darf ausschließlich aus dem `__main__`-Guard
+    laufen — Tests rufen `main(argv)` direkt in-process auf (siehe
+    test_cli_status_is_readonly_on_fresh_state); würde der Re-Exec-Check beim
+    Import oder in main() selbst feuern, würde os.execvp den laufenden
+    pytest-Prozess ersetzen. Reload des Moduls darf ihn nicht auslösen."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(os, "execvp", lambda *a: calls.append(list(a)))
+    import importlib
+
+    importlib.reload(runner_module)
+    assert calls == []
+    # main() selbst (ohne den __main__-Guard) darf ihn ebenfalls nicht
+    # auslösen, sonst würde jeder direkte Testaufruf von main() kapern.
+    rc = runner_module.main(["--pack", "nope", "--cmd", "status"])
+    assert rc == 2
+    assert calls == []
 
 
 # ── Profile-/Pfad-Konsistenz ─────────────────────────────────────────────────
