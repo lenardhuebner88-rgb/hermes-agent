@@ -976,7 +976,7 @@ export interface LoopHeartbeatCurrent {
   phase: string;
   engine: string;
   model: string;
-  /** lokale ISO-Zeit ohne Zone (Runner-Host = Backend-Host). */
+  /** Eindeutiger UTC-ISO-Instant (`...Z`); ältere/kaputte Werte werden im UI abgelehnt. */
   started_at: string;
   timeout: number;
   /** Echte Runner-Runde; fehlt bei älteren Heartbeats und der Plan-Phase. */
