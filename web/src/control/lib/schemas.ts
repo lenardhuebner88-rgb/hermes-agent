@@ -540,6 +540,7 @@ export const BoardTaskSchema = z.object({
   created_at: z.coerce.number().catch(0),
   started_at: z.coerce.number().nullable().catch(null),
   completed_at: z.coerce.number().nullable().catch(null),
+  archived_at: z.coerce.number().nullable().catch(null),
   due_at: z.coerce.number().nullable().catch(null),
   last_heartbeat_at: z.coerce.number().nullable().catch(null),
   branch_name: z.string().nullable().catch(null),
@@ -599,6 +600,22 @@ export const BoardResponseSchema = z.object({
 });
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
 export type BoardResponse = z.infer<typeof BoardResponseSchema>;
+
+export const BoardArchiveResponseSchema = z.object({
+  tasks: z.array(BoardTaskSchema).catch([]),
+  total_count: z.coerce.number().int().nonnegative().catch(0),
+  filtered_count: z.coerce.number().int().nonnegative().catch(0),
+  loaded_count: z.coerce.number().int().nonnegative().catch(0),
+  limit: z.coerce.number().int().positive().catch(50),
+  has_more: z.boolean().catch(false),
+  next_cursor: z.string().nullable().catch(null),
+  query: z.string().catch(""),
+  assignee: z.string().nullable().catch(null),
+  assignees: z.array(z.string()).catch([]),
+  latest_event_id: z.coerce.number().catch(0),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+});
+export type BoardArchiveResponse = z.infer<typeof BoardArchiveResponseSchema>;
 
 export const BoardsResponseSchema = z.object({
   boards: z.array(z.object({

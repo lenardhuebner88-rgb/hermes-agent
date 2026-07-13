@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, BoardResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, BoardArchiveResponseSchema, BoardResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
 
@@ -34,6 +34,38 @@ describe("BoardResponseSchema", () => {
     const parsedTask = parsed.columns[0].tasks[0];
     expect(parsedTask.due_at).toBe(1_783_900_000);
     expect(parsedTask.last_heartbeat_at).toBe(1_783_800_150);
+  });
+});
+
+describe("BoardArchiveResponseSchema", () => {
+  it("preserves explicit archive paging truth and archive time", () => {
+    const parsed = parseOrThrow(BoardArchiveResponseSchema, {
+      tasks: [{
+        id: "t_arch01",
+        title: "Archived truth card",
+        status: "archived",
+        assignee: "reviewer",
+        priority: 0,
+        created_at: 1_783_800_000,
+        archived_at: 1_783_900_000,
+      }],
+      total_count: 4213,
+      filtered_count: 1,
+      loaded_count: 1,
+      limit: 50,
+      has_more: false,
+      next_cursor: null,
+      query: "truth",
+      assignee: null,
+      assignees: ["reviewer"],
+      latest_event_id: 99,
+      now: 1_783_900_001,
+    }, "board/archive");
+
+    expect(parsed.tasks[0].archived_at).toBe(1_783_900_000);
+    expect(parsed.total_count).toBe(4213);
+    expect(parsed.filtered_count).toBe(1);
+    expect(parsed.loaded_count).toBe(1);
   });
 });
 

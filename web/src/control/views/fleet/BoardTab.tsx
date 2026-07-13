@@ -7,14 +7,18 @@
  *
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
-import { useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
+import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
 import { taskStatusLabel } from "../../lib/tones";
-import type { BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
+import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
 import { type ChainNode } from "./shared";
 
 interface BoardTabProps {
   board: BoardResponse | null;
+  boardSlug?: string | null;
+  loadArchivePage?: ArchivePageLoader;
   /** Foreign boards are visibility-only in Stufe 3. */
   readOnly?: boolean;
   /** Callback: öffnet den Karten-Detail-Drawer. */
@@ -22,6 +26,32 @@ interface BoardTabProps {
   selectedNodeId?: string | null;
   detailControlsId?: string;
 }
+
+interface ArchivePageQuery {
+  board: string | null;
+  q: string;
+  assignee: string | null;
+  limit: number;
+  cursor: string | null;
+}
+
+type ArchivePageLoader = (
+  query: ArchivePageQuery,
+  signal: AbortSignal,
+) => Promise<BoardArchiveResponse>;
+
+const fetchArchivePage: ArchivePageLoader = async (query, signal) => {
+  const params = new URLSearchParams({ limit: String(query.limit) });
+  if (query.board) params.set("board", query.board);
+  if (query.q) params.set("q", query.q);
+  if (query.assignee) params.set("assignee", query.assignee);
+  if (query.cursor) params.set("cursor", query.cursor);
+  return parseOrThrow(
+    BoardArchiveResponseSchema,
+    await fetchJSON<unknown>(`/api/plugins/kanban/board/archive?${params.toString()}`, { signal }),
+    "kanban/board/archive",
+  );
+};
 
 // Reihenfolge der Status-Spalten für die Gruppierung (wie das Board).
 const STATUS_ORDER: TaskStatus[] = [
@@ -48,6 +78,7 @@ function TaskInformation({ task }: { task: BoardTask }) {
     ["Erstellt", task.created_at],
     ["Gestartet", task.started_at],
     ["Fertig", task.completed_at],
+    ["Archiviert", task.archived_at],
     ["Fällig", task.due_at],
     ["Heartbeat", task.last_heartbeat_at],
   ] as const;
@@ -76,20 +107,89 @@ function TaskInformation({ task }: { task: BoardTask }) {
   );
 }
 
-export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: BoardTabProps) {
+export function BoardTab({
+  board,
+  boardSlug = null,
+  loadArchivePage = fetchArchivePage,
+  readOnly = false,
+  onOpenNodeDetail,
+  selectedNodeId = null,
+  detailControlsId,
+}: BoardTabProps) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
+  const [archiveTasks, setArchiveTasks] = useState<BoardTask[]>([]);
+  const [archivePage, setArchivePage] = useState<BoardArchiveResponse | null>(null);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const archiveRequestRef = useRef<{ serial: number; controller: AbortController } | null>(null);
+  const archiveSerialRef = useRef(0);
+  const isArchive = statusFilter === "archived";
+
+  const runArchiveLoad = useCallback(async (cursor: string | null, append: boolean) => {
+    archiveRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const serial = ++archiveSerialRef.current;
+    archiveRequestRef.current = { serial, controller };
+    setArchiveLoading(true);
+    setArchiveError(null);
+    if (!append) {
+      setArchivePage(null);
+      setArchiveTasks([]);
+    }
+    try {
+      const result = await loadArchivePage({
+        board: boardSlug,
+        q: q.trim(),
+        assignee: assigneeFilter === "all" ? null : assigneeFilter,
+        limit: 50,
+        cursor,
+      }, controller.signal);
+      if (controller.signal.aborted || archiveSerialRef.current !== serial) return;
+      setArchivePage(result);
+      setArchiveTasks((current) => {
+        if (!append) return result.tasks;
+        const byId = new Map(current.map((task) => [task.id, task]));
+        for (const task of result.tasks) byId.set(task.id, task);
+        return Array.from(byId.values());
+      });
+    } catch (error) {
+      if (controller.signal.aborted || archiveSerialRef.current !== serial) return;
+      setArchiveError(error instanceof Error ? error.message : String(error));
+      if (!append) {
+        setArchivePage(null);
+        setArchiveTasks([]);
+      }
+    } finally {
+      if (!controller.signal.aborted && archiveSerialRef.current === serial) {
+        setArchiveLoading(false);
+      }
+    }
+  }, [assigneeFilter, boardSlug, loadArchivePage, q]);
+
+  useEffect(() => {
+    if (!isArchive) {
+      archiveRequestRef.current?.controller.abort();
+      return;
+    }
+    const timer = window.setTimeout(() => void runArchiveLoad(null, false), 0);
+    return () => {
+      window.clearTimeout(timer);
+      archiveRequestRef.current?.controller.abort();
+    };
+  }, [isArchive, runArchiveLoad]);
 
   // Alle Assignees aus dem Board extrahieren (für Filter-Dropdown).
   const allAssignees = useMemo(() => {
     const set = new Set<string>();
-    for (const t of board?.assignees ?? []) set.add(t);
+    for (const assignee of isArchive ? (archivePage?.assignees ?? []) : (board?.assignees ?? [])) set.add(assignee);
     return Array.from(set).sort();
-  }, [board]);
+  }, [archivePage?.assignees, board?.assignees, isArchive]);
 
   // Alle Tasks flach, dann filtern.
   const allTasks = useMemo(() => {
+    if (isArchive) return archiveTasks;
     const flat: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
     const ql = q.trim().toLowerCase();
     return flat.filter((t) => {
@@ -101,7 +201,7 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
       }
       return true;
     });
-  }, [board, q, statusFilter, assigneeFilter]);
+  }, [archiveTasks, assigneeFilter, board, isArchive, q, statusFilter]);
 
   // Filtergebnis nach Status gruppieren (nur Status mit sichtbaren Tasks).
   const grouped = useMemo(() => {
@@ -116,7 +216,9 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
       .map((s) => ({ status: s, tasks: map.get(s)! }));
   }, [allTasks]);
 
-  const totalCount = (board?.columns ?? []).reduce((n, c) => n + c.tasks.length, 0);
+  const totalCount = isArchive
+    ? (archivePage?.filtered_count ?? 0)
+    : (board?.columns ?? []).reduce((n, c) => n + c.tasks.length, 0);
 
   return (
     <div className="fleet-boardtab">
@@ -154,12 +256,38 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
         </select>
       </div>
 
+      {isArchive && archivePage ? (
+        <div className="fleet-boardtab-archive-state" role="status" aria-live="polite">
+          <span>{archiveTasks.length} von {archivePage.filtered_count} Archivkarten geladen</span>
+          {archivePage.filtered_count !== archivePage.total_count ? (
+            <span>{archivePage.total_count} insgesamt</span>
+          ) : null}
+        </div>
+      ) : null}
+      {isArchive && archiveError ? (
+        <div className="fleet-boardtab-archive-error" role="alert">
+          <strong>Archiv konnte nicht geladen werden.</strong>
+          <span>{archiveError}</span>
+        </div>
+      ) : null}
+
       {/* Status-Gruppen */}
-      {grouped.length === 0 ? (
+      {isArchive && archiveLoading && archiveTasks.length === 0 ? (
+        <div className="fleet-empty" aria-live="polite">
+          <div className="fleet-empty-title">Archiv wird geladen …</div>
+          <div className="fleet-empty-sub">Die aktive Board-Abfrage bleibt dabei klein.</div>
+        </div>
+      ) : grouped.length === 0 ? (
         <div className="fleet-empty">
-          <div className="fleet-empty-title">{totalCount === 0 ? "Keine Tasks" : "Keine Treffer"}</div>
+          <div className="fleet-empty-title">
+            {isArchive
+              ? (archivePage?.total_count === 0 ? "Archiv ist leer" : "Keine Archivtreffer")
+              : (totalCount === 0 ? "Keine Tasks" : "Keine Treffer")}
+          </div>
           <div className="fleet-empty-sub">
-            {totalCount === 0 ? "Das Board ist leer." : "Filter anpassen."}
+            {isArchive
+              ? (archivePage?.total_count === 0 ? "Es sind keine archivierten Karten vorhanden." : "Suche oder Assignee-Filter anpassen.")
+              : (totalCount === 0 ? "Das Board ist leer." : "Filter anpassen.")}
           </div>
         </div>
       ) : (
@@ -237,6 +365,17 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
           </section>
         ))
       )}
+      {isArchive && archivePage?.has_more ? (
+        <button
+          type="button"
+          className="fleet-boardtab-load-more"
+          disabled={archiveLoading || !archivePage.next_cursor}
+          onClick={() => void runArchiveLoad(archivePage.next_cursor, true)}
+          aria-label="Weitere Archivkarten laden"
+        >
+          {archiveLoading ? "Lädt …" : "Mehr laden"}
+        </button>
+      ) : null}
     </div>
   );
 }

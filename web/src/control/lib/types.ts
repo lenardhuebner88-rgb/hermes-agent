@@ -549,6 +549,7 @@ export interface BoardTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  archived_at?: number | null;
   due_at?: number | null;
   last_heartbeat_at?: number | null;
   branch_name: string | null;
@@ -621,6 +622,21 @@ export interface BoardResponse {
   assignees: string[];
   latest_event_id: number;
   source_errors: BoardSourceError[];
+  now: number;
+}
+
+export interface BoardArchiveResponse {
+  tasks: BoardTask[];
+  total_count: number;
+  filtered_count: number;
+  loaded_count: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  query: string;
+  assignee: string | null;
+  assignees: string[];
+  latest_event_id: number;
   now: number;
 }
 

@@ -700,6 +700,77 @@ def test_board_empty(client):
     assert data["latest_event_id"] == 0
 
 
+def test_archive_board_is_cursor_paginated_searchable_and_separate_from_active_poll(client):
+    conn = kb.connect()
+    try:
+        archived_ids = []
+        for index, title in enumerate(
+            ["old alpha", "old beta", "needle archive", "old delta", "old epsilon"],
+            start=1,
+        ):
+            task_id = kb.create_task(conn, title=title, assignee="alice" if index % 2 else "bob")
+            assert kb.archive_task(conn, task_id) is True
+            conn.execute(
+                "UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = 'archived'",
+                (1_780_000_000 + index, task_id),
+            )
+            archived_ids.append(task_id)
+    finally:
+        conn.close()
+
+    active = client.get(
+        "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"
+    ).json()
+    assert all(
+        task["status"] != "archived"
+        for column in active["columns"]
+        for task in column["tasks"]
+    )
+    assert "archive" not in active
+
+    seen: list[str] = []
+    cursor = None
+    while True:
+        params = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = client.get("/api/plugins/kanban/board/archive", params=params)
+        assert response.status_code == 200
+        page = response.json()
+        assert page["total_count"] == 5
+        assert page["filtered_count"] == 5
+        assert page["loaded_count"] == len(page["tasks"])
+        assert page["limit"] == 2
+        assert all(task["status"] == "archived" for task in page["tasks"])
+        assert all(task["archived_at"] > 0 for task in page["tasks"])
+        seen.extend(task["id"] for task in page["tasks"])
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+        assert cursor
+
+    assert seen == list(reversed(archived_ids))
+    assert len(seen) == len(set(seen)) == 5
+
+    filtered = client.get(
+        "/api/plugins/kanban/board/archive",
+        params={"q": "needle", "assignee": "alice", "limit": 50},
+    ).json()
+    assert filtered["total_count"] == 5
+    assert filtered["filtered_count"] == 1
+    assert filtered["loaded_count"] == 1
+    assert filtered["tasks"][0]["title"] == "needle archive"
+    assert filtered["query"] == "needle"
+    assert filtered["assignee"] == "alice"
+
+    invalid = client.get(
+        "/api/plugins/kanban/board/archive", params={"cursor": "not-a-cursor"}
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "invalid archive cursor"
+
+
 # ---------------------------------------------------------------------------
 # POST /tasks then GET /board sees it
 # ---------------------------------------------------------------------------

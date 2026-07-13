@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { BoardResponse, BoardTask } from "../../lib/types";
+import type { BoardArchiveResponse, BoardResponse, BoardTask } from "../../lib/types";
 import { BoardTab } from "./BoardTab";
 
 afterEach(cleanup);
@@ -45,6 +45,55 @@ function board(tasks: BoardTask[]): BoardResponse {
 }
 
 describe("BoardTab operator information", () => {
+  it("loads the archive separately, reports counts, and follows the cursor", async () => {
+    const archivedOne = task({ id: "t_archive1", title: "Archive one", status: "archived", archived_at: 1_783_900_003 });
+    const archivedTwo = task({ id: "t_archive2", title: "Archive two", status: "archived", archived_at: 1_783_900_002 });
+    const archivedThree = task({ id: "t_archive3", title: "Archive three", status: "archived", archived_at: 1_783_900_001 });
+    const page = (items: BoardTask[], nextCursor: string | null): BoardArchiveResponse => ({
+      tasks: items,
+      total_count: 3,
+      filtered_count: 3,
+      loaded_count: items.length,
+      limit: 2,
+      has_more: nextCursor !== null,
+      next_cursor: nextCursor,
+      query: "",
+      assignee: null,
+      assignees: ["premium-reviewer"],
+      latest_event_id: 4,
+      now: 1_783_900_004,
+    });
+    const loadArchivePage = vi.fn()
+      .mockResolvedValueOnce(page([archivedOne, archivedTwo], "1783900002:t_archive2"))
+      .mockResolvedValueOnce(page([archivedThree], null));
+    render(
+      <BoardTab
+        board={board([task()])}
+        boardSlug="default"
+        loadArchivePage={loadArchivePage}
+        onOpenNodeDetail={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Nach Status filtern"), { target: { value: "archived" } });
+
+    expect(await screen.findByText("Archive one")).toBeTruthy();
+    expect(screen.queryByText("Operator truth card")).toBeNull();
+    expect(screen.getByText("2 von 3 Archivkarten geladen")).toBeTruthy();
+    expect(loadArchivePage).toHaveBeenCalledWith(
+      { board: "default", q: "", assignee: null, limit: 50, cursor: null },
+      expect.any(AbortSignal),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Weitere Archivkarten laden" }));
+    expect(await screen.findByText("Archive three")).toBeTruthy();
+    expect(screen.getByText("3 von 3 Archivkarten geladen")).toBeTruthy();
+    await waitFor(() => expect(loadArchivePage).toHaveBeenLastCalledWith(
+      { board: "default", q: "", assignee: null, limit: 50, cursor: "1783900002:t_archive2" },
+      expect.any(AbortSignal),
+    ));
+  });
+
   it.each([
     ["long", "L".repeat(400)],
     ["rtl", "مرحبا بالعالم ".repeat(30)],

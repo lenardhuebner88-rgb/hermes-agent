@@ -1,0 +1,36 @@
+{
+  "active_poll": {
+    "archived_ids": [],
+    "bytes": 521056,
+    "elapsed_ms": 18.1,
+    "has_archive_metadata": false,
+    "task_count": 256
+  },
+  "archive_enumeration": null,
+  "archive_unique_ids": null,
+  "base": "http://127.0.0.1:9121",
+  "body_width": {
+    "client": 390,
+    "scroll": 390
+  },
+  "console_errors": [],
+  "db_archive_count": 4213,
+  "dom": {
+    "after_load_more_count": 100,
+    "initial_count": 50,
+    "search_count": 1,
+    "search_id_prefix": "t_41ade1"
+  },
+  "elapsed_seconds": 6.37,
+  "network_errors": [],
+  "screenshot": "audit/iteration-1-f06/archive-search-390x844.png",
+  "search_api": {
+    "filtered_count": 1,
+    "id": "t_41ade16d",
+    "loaded_count": 1
+  },
+  "viewport": {
+    "height": 844,
+    "width": 390
+  }
+}

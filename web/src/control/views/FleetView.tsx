@@ -400,6 +400,7 @@ export function FleetView() {
                 ) : null}
                 <BoardTab
                   board={activeBoardData}
+                  boardSlug={selectedBoard}
                   readOnly={selectedBoard != null}
                   selectedNodeId={selectedBoard ? null : nodeDetailId}
                   detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}

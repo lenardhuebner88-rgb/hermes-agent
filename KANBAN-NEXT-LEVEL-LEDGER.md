@@ -92,7 +92,7 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Add complete-value recovery to every known clipped Fleet title, note, model, lane, result, path, activity, and drawer field; preserve the full combined Board metadata line; make string-valued panel metadata recoverable. The audit harness compares hostile fixtures with the title persisted by the authenticated API, so backend whitespace normalization is not misreported as DOM loss.
 - After:       Fresh authenticated candidate contexts at 1440×900 and 390×844 exercised all six tabs. Desktop inspected 121 actually clipped elements; mobile inspected 352. Every clip had recovery; 400-character, RTL, combining-mark, and emoji titles matched API-persisted text and DOM/title exactly. Both viewports had zero body overflow, console errors, or HTTP errors. Evidence: `audit/iteration-1-f02/`.
 - Gates:       Focused Vitest 60 passed, exit 0; `scripts/gate-frontend.sh` exit 0 (126 files / 1,837 tests plus production build).
-- Commit:      this F-02 commit
+- Commit:      `6197d170d`
 - Status:      CONFIRMED
 
 ### N-12  Archive filtering is complete and explicit
@@ -102,12 +102,12 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Invariant:   Archive views expose total count, loaded count, deterministic paging/search, and truthful empty/partial states without bloating active polling.
 - Repro:       Compare read-only DB archive totals with authenticated archive API metadata and rendered DOM.
 - Before:      Prior DB had 4,213 archived tasks while Fleet offered `Archiv` and rendered `Keine Treffer` from an active-only response.
-- Test:        Pending fail-first API and UI coverage.
-- Change:      NONE
-- After:       Pending.
-- Gates:       Pending.
-- Commit:      NONE
-- Status:      OPEN
+- Test:        Backend fail-first returned HTTP 404 for `/board/archive`; frontend/schema fail-first produced 2 failures / 56 passes because archive paging had no schema and selecting `Archiv` only filtered the active payload into `Keine Treffer`.
+- Change:      Add a dedicated on-demand `/board/archive` endpoint with literal search, assignee filter, total/filtered/loaded counts, archive timestamps, bounded page size, invalid-cursor rejection, and deterministic `(archived_at, task_id)` keyset cursors. BoardTab fetches it only when `Archiv` is selected, aborts superseded requests, exposes truthful loading/error/empty/count states, and appends unique pages through `Mehr laden`; active `GET /board` polling is unchanged.
+- After:       Read-only live DB count was 4,213 archived. The authenticated candidate API returned exactly 4,213 unique ids over 22 cursor pages; first 200-card page was 335,914 bytes / 111.7 ms and the full walk 6,255,372 bytes / 2,536.3 ms. The separate active poll remained 256 cards / 521,056 bytes with zero archived ids and no archive metadata. Candidate DOM rendered 50 then 100 cards, exact task-id search rendered 1/1 while retaining `4,213 insgesamt`, at 1440×900 and 390×844 with no body overflow, console error, or HTTP error. Evidence: `audit/iteration-1-f06/`.
+- Gates:       Backend plugin file 268 passed, exit 0; focused frontend/schema 58 passed, exit 0; Ruff exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh` exit 0 (126 files / 1,839 tests plus production build).
+- Commit:      this F-06 commit
+- Status:      CONFIRMED
 
 ## Later iterations
 

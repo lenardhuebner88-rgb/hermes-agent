@@ -2089,6 +2089,39 @@ body:has([data-fleet-theme]) [data-control] {
   cursor: pointer;
 }
 
+.fleet-boardtab-archive-state,
+.fleet-boardtab-archive-error {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  border: 1px solid var(--fleet-linie);
+  border-radius: 8px;
+  background: var(--fleet-karte-hi);
+  padding: 8px 10px;
+  font: 500 10.5px/1.35 var(--hc-font-mono);
+  color: var(--fleet-t2);
+}
+
+.fleet-boardtab-archive-error {
+  flex-direction: column;
+  border-color: color-mix(in srgb, var(--fleet-red) 45%, transparent);
+  color: var(--fleet-red);
+}
+
+.fleet-boardtab-load-more {
+  min-height: 44px;
+  border: 1px solid var(--fleet-linie-stark);
+  border-radius: 8px;
+  background: var(--fleet-karte-hi);
+  color: var(--fleet-t1);
+  font: 600 11px/1 var(--hc-font-sans);
+  cursor: pointer;
+}
+
+.fleet-boardtab-load-more:hover:not(:disabled) { border-color: var(--fleet-puls); }
+.fleet-boardtab-load-more:disabled { cursor: wait; opacity: 0.65; }
+
 .fleet-boardtab-group {
   border: 1px solid var(--fleet-linie);
   border-radius: 10px;
