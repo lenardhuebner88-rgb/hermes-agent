@@ -241,6 +241,20 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Commit:      `7e7ae92e8`
 - Status:      CONFIRMED
 
+### N-47  Complete task/run matrix preserves DB, API, and DOM truth
+- Source:      Loop-4 production-lifecycle matrix on `audit-scratch`
+- Class:       DATA
+- Severity:    S1
+- Invariant:   Every current task state and every run status written by a production lifecycle primitive is visible without coercion; each task state exposes only currently legal actions, empty scopes are explicit, unknown/deleted lane names remain legible, and all six Fleet surfaces remain usable without horizontal page overflow.
+- Repro:       Materialise all nine task states plus eleven currently written run statuses through `kanban_db` lifecycle functions; read matching rows, authenticated board/detail APIs, status groups, drawer raw labels, action controls, active/archive empty states, unknown-lane Worker DOM, all six subtabs, computed colors, overflow, screenshots, and console errors.
+- Before:      The audit initially encoded one wrong distinction: a claimed completion writes run status `done` with outcome `completed`, while only the zero-duration/manual completion path synthesizes run status `completed`. A fixture-build failure also showed that outer cleanup cannot rely on a return value that was never reached; 14 owned `audit-scratch` remnants were identified and archived through the production primitive.
+- Test:        `audit/verify_state_status_matrix_candidate.py` checks exact status order/labels/counts, exact action sets and dependency guard, DB/API/DOM run equality, dedicated archive scope, explicit empty states, unknown lane visibility, six non-empty subtabs, computed status colors, zero body/document overflow, and zero unexpected console errors.
+- Change:      No product change. Add the reusable matrix harness, model `completed` through its actual writer, reload between archive and active detail scopes, accept the truthful Risiko warning accessible name, and retain fixture handles early enough that cleanup also runs after construction errors.
+- After:       Candidate port 9123 matched all nine task states and eleven production-written run values (`running`, `done`, `blocked`, `scheduled`, `completed`, `spawn_failed`, `reclaimed`, `timed_out`, `transient_retry`, `crashed`, `gave_up`) across DB/API/DOM. All action sets, blocker explanation, empty states, raw unknown lane, six subtabs, colors, and overflow checks passed; console errors were empty. `failed` and `released` remain documented legacy frontend hints without a current writer and were not fabricated. Final read-only cleanup census: zero active matrix fixtures.
+- Gates:       Final candidate harness exit 0; repeat after cleanup hardening exit 0. Evidence: `audit/iteration-4-state/state-status-matrix-summary.json` and eight 1440x900 screenshots.
+- Commit:      this N-47 audit commit
+- Status:      CONFIRMED
+
 ## Later iterations
 
-Operator-directed stopping point on 2026-07-13: the branch is a clean local checkpoint after N-46. Loop 4's complete nine-status/action matrix and Loops 5-8 (live-event races, scale/query measurements, hostile states, and three fresh red-team passes) remain intentionally open. The atomic final release gate was not run, so this branch was not pushed or deployed and the three default-board tracking cards remain open.
+Loop 4's static nine-state/action-visibility matrix is complete through N-47. Real click-through transition proofs still precede Loops 5-8 (live-event races, scale/query measurements, hostile states, and three fresh red-team passes). The atomic final release gate has not run, so this branch is not pushed or deployed and the three default-board tracking cards remain open.

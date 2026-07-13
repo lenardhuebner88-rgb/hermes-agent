@@ -1,0 +1,397 @@
+{
+  "action_matrix": {
+    "archived": {
+      "actions": [],
+      "expected": [],
+      "guard": []
+    },
+    "blocked": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Reopen",
+        "Wiederholen",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Reopen",
+        "Wiederholen",
+        "Abbrechen"
+      ],
+      "guard": []
+    },
+    "done": {
+      "actions": [],
+      "expected": [],
+      "guard": []
+    },
+    "ready": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "guard": []
+    },
+    "review": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "guard": []
+    },
+    "running": {
+      "actions": [],
+      "expected": [],
+      "guard": []
+    },
+    "scheduled": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Starten",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Starten",
+        "Abbrechen"
+      ],
+      "guard": []
+    },
+    "todo": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Abbrechen"
+      ],
+      "guard": [
+        "Starten nicht verf\u00fcgbar \u2014 Vorg\u00e4nger AUDIT HELPER MATRIX 1783919531433560771 todo-parent (blocked) ist nicht fertig."
+      ]
+    },
+    "triage": {
+      "actions": [
+        "Profil \u00e4ndern",
+        "Plan",
+        "Abbrechen"
+      ],
+      "expected": [
+        "Profil \u00e4ndern",
+        "Plan",
+        "Abbrechen"
+      ],
+      "guard": []
+    }
+  },
+  "active_status_groups": [
+    {
+      "color": "rgb(235, 231, 222)",
+      "count": 1,
+      "index": 0,
+      "label": "Triage",
+      "status": "triage"
+    },
+    {
+      "color": "rgb(235, 231, 222)",
+      "count": 1,
+      "index": 1,
+      "label": "Offen",
+      "status": "todo"
+    },
+    {
+      "color": "rgb(235, 231, 222)",
+      "count": 1,
+      "index": 2,
+      "label": "Geplant",
+      "status": "scheduled"
+    },
+    {
+      "color": "rgb(235, 231, 222)",
+      "count": 1,
+      "index": 3,
+      "label": "Startklar",
+      "status": "ready"
+    },
+    {
+      "color": "rgb(201, 136, 74)",
+      "count": 1,
+      "index": 4,
+      "label": "L\u00e4uft",
+      "status": "running"
+    },
+    {
+      "color": "rgb(235, 231, 222)",
+      "count": 1,
+      "index": 5,
+      "label": "Blockiert",
+      "status": "blocked"
+    },
+    {
+      "color": "rgb(134, 185, 126)",
+      "count": 1,
+      "index": 6,
+      "label": "In Pr\u00fcfung",
+      "status": "review"
+    },
+    {
+      "color": "rgb(134, 185, 126)",
+      "count": 1,
+      "index": 7,
+      "label": "Fertig",
+      "status": "done"
+    }
+  ],
+  "api_latest_runs": {
+    "blocked": "blocked",
+    "completed": "completed",
+    "crashed": "crashed",
+    "done": "done",
+    "gave_up": "gave_up",
+    "reclaimed": "reclaimed",
+    "running": "running",
+    "scheduled": "scheduled",
+    "spawn_failed": "spawn_failed",
+    "timed_out": "timed_out",
+    "transient_retry": "transient_retry"
+  },
+  "api_task_states": {
+    "archived": "archived",
+    "blocked": "blocked",
+    "done": "done",
+    "ready": "ready",
+    "review": "review",
+    "running": "running",
+    "scheduled": "scheduled",
+    "todo": "todo",
+    "triage": "triage"
+  },
+  "archive_status_group": {
+    "color": "rgb(117, 113, 102)",
+    "count": 1,
+    "label": "Archiv",
+    "status": "archived"
+  },
+  "base": "http://127.0.0.1:9123",
+  "board": "audit-scratch",
+  "board_api_http": 200,
+  "db_run_histories": {
+    "blocked": [
+      {
+        "id": 168,
+        "outcome": "blocked",
+        "status": "blocked"
+      }
+    ],
+    "completed": [
+      {
+        "id": 171,
+        "outcome": "completed",
+        "status": "completed"
+      }
+    ],
+    "crashed": [
+      {
+        "id": 176,
+        "outcome": "transient_retry",
+        "status": "transient_retry"
+      },
+      {
+        "id": 177,
+        "outcome": "transient_retry",
+        "status": "transient_retry"
+      },
+      {
+        "id": 178,
+        "outcome": "crashed",
+        "status": "crashed"
+      }
+    ],
+    "done": [
+      {
+        "id": 170,
+        "outcome": "completed",
+        "status": "done"
+      }
+    ],
+    "gave_up": [
+      {
+        "id": 179,
+        "outcome": "gave_up",
+        "status": "gave_up"
+      }
+    ],
+    "reclaimed": [
+      {
+        "id": 173,
+        "outcome": "reclaimed",
+        "status": "reclaimed"
+      }
+    ],
+    "running": [
+      {
+        "id": 167,
+        "outcome": null,
+        "status": "running"
+      }
+    ],
+    "scheduled": [
+      {
+        "id": 166,
+        "outcome": "scheduled",
+        "status": "scheduled"
+      }
+    ],
+    "spawn_failed": [
+      {
+        "id": 172,
+        "outcome": "spawn_failed",
+        "status": "spawn_failed"
+      }
+    ],
+    "timed_out": [
+      {
+        "id": 174,
+        "outcome": "timed_out",
+        "status": "timed_out"
+      }
+    ],
+    "transient_retry": [
+      {
+        "id": 175,
+        "outcome": "transient_retry",
+        "status": "transient_retry"
+      }
+    ]
+  },
+  "db_task_states": {
+    "t_08e684de": {
+      "assignee": null,
+      "status": "archived"
+    },
+    "t_0f299db7": {
+      "assignee": "coder",
+      "status": "review"
+    },
+    "t_25fa7491": {
+      "assignee": null,
+      "status": "blocked"
+    },
+    "t_5bb097ae": {
+      "assignee": null,
+      "status": "ready"
+    },
+    "t_6ad19a86": {
+      "assignee": null,
+      "status": "scheduled"
+    },
+    "t_83ba7766": {
+      "assignee": null,
+      "status": "todo"
+    },
+    "t_994d3f2e": {
+      "assignee": null,
+      "status": "triage"
+    },
+    "t_e85343ec": {
+      "assignee": "audit-deleted-lane",
+      "status": "running"
+    },
+    "t_fdd3226e": {
+      "assignee": null,
+      "status": "done"
+    }
+  },
+  "deleted_lane_dom_matches": 2,
+  "dom_run_statuses": {
+    "blocked": true,
+    "completed": true,
+    "crashed": true,
+    "done": true,
+    "gave_up": true,
+    "reclaimed": true,
+    "running": true,
+    "scheduled": true,
+    "spawn_failed": true,
+    "timed_out": true,
+    "transient_retry": true
+  },
+  "empty_states": {
+    "active": "Keine Treffer\nFilter anpassen.",
+    "archive": "Keine Archivtreffer\nSuche oder Assignee-Filter anpassen."
+  },
+  "fixture_suffix": "1783919531433560771",
+  "legacy_without_current_writer": [
+    "failed",
+    "released"
+  ],
+  "screenshots": [
+    "audit/iteration-4-state/status-matrix-active-1440x900.png",
+    "audit/iteration-4-state/status-matrix-archive-1440x900.png"
+  ],
+  "subtabs": {
+    "Board": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-board-1440x900.png",
+      "text_excerpt": "BOARD\nAudit Scratch \u00b7 aktuell\nDefault\nAutonomy Dogfood 2026-07-09\nHealth Track\nMemSearch Operations\nAlle Status\nTriage\nOffen\nGeplant\nStartklar\nL\u00e4uft\nBlockiert\nIn Pr\u00fcfung\nFertig\nArchiv\nAlle Assignees\nadmin\naudit-deleted-lane\ncoder\ndefault\npremium\nOFFEN\n2\n?\nAudit fixture: todo\nt_3b9a56\n1 Vorg\u00e4nger\nDetails\n?\nAUDIT STATUS MATRIX 1783919531433560771 todo\nt_83ba77\n1 Vorg\u00e4nger\nDetails\nGEPLANT\n1\n?\nAUDIT STATUS MATRIX 1783919531433560771 scheduled\nt_6ad19a\nDetails\nSTARTKLAR\n5\n?\nAUDIT RUN MATRIX 1783919531433560771 spawn-failed\nt_198be6\nDetails\n?\nAUDIT RUN MATRIX 1783919531433560771 reclaimed\nt_d5e4f9\nDetails\n?\nAUDIT RUN MATRIX 1783919531433560771 timed-out\nt_309446\nDetails\n?\nAUDIT RUN MATRIX 1783919531433560771 transient-retry\nt_8f68c1\nDetails\n?\nAUDIT RUN MATRIX 1783919531433560771 crashed\nt_56dfa2\nDetails\nL\u00c4UFT\n3\nD\nRecord the Loop-4 triage truth for the status matrix\nt_994d3f\ndefault\n1 Kommentare\nDetails\nC\nAUDIT STATUS MATRIX 1783919531433560771 ready\nt_5bb097\ncoder\nDetails\nA\nAUDIT STATUS MATRIX 1783919531433560771 running\nt_e85343\naudit-deleted-lane\nDetails\nBLOCKIERT\n6\n?\nAudit baseline mutation endpoint capture\nt_d1262e\nPrio 7\nDetails\n?\nAudit fixture: blocked\nt_d78ecc\n1 Nachfolger\n0/1\nDetails\nC\nAudit fixture: scheduled\nt_d9d9bc\ncoder\n1 Kommentare\nDetails\n?\nAUDIT HELPER MATRIX 1783919531433560771 todo-parent\nt_07ff54\n1 Nachfolger\n0/1\nDetails\n?\nAUDIT STATUS MATRIX 1783919531433560771 blocked\nt_25fa74\nDetails\n?\nAUDIT RUN MATRIX 1783919531433560771 gave-up\nt_fc560f\nDetails\nIN PR\u00dcFUNG\n1\n",
+      "text_length": 3985
+    },
+    "Heute": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-heute-1440x900.png",
+      "text_excerpt": "BLOCKADE\nEin Worker l\u00e4uft \u2014 6 Aufgaben blockiert \u2014 3 Pl\u00e4ne warten auf deine Freigabe.\nIm Risiko-Tab l\u00f6sen\nFreigabe wartet: PlanSpec: Briefings auf dem Handy lesbar machen\nFreigabe wartet: PlanSpec: Gateway-Resilienz \u2014 persistente Haupt-Modell-Fallback-Route + Crash-Beobachtbarkeit\nFreigabe wartet: PlanSpec: Homeserver-Kapazit\u00e4t & Browser-/Artefakt-Lifecycle\n6 Aufgaben blockiert \u2014 im Risiko-Tab l\u00f6sen\n\nJETZT\n\nA\naudit-deleted-lanet_e85343ec\naudit-scratch\nAUDIT STATUS MATRIX 1783919531433560771 running\n\u2014 \u2192 \u2014 tok\nseit 29 s\n1\nAKTIV\naudit-deleted-lane 1\n6\nBLOCKIERT\n156\nFERTIG 24H\n\nPLANUNG\n\nPlanSpec: Briefings auf dem Handy lesbar machen\nwartet auf dich\noperator\nsmoke\nPlanSpec: Gateway-Resilienz \u2014 persistente Haupt-Modell-Fallback-Route + Crash-Beobachtbarkeit\nwartet auf dich\noperator\ncontract\nPlanSpec: Homeserver-Kapazit\u00e4t & Browser-/Artefakt-Lifecycle\nwartet auf dich\noperator\nsmoke\nHeute als operatives Fleet-Cockpit strukturieren\ncomplete\nui-real\nPlanSpec: MemSearch langfristige Selbstheilung\nready-for-ingest\ncomplete\ncontract\nLane & Modell\napi-standard\nadmin \u00b7 openai-codex \u00b7 gpt-5.6-luna",
+      "text_length": 1099
+    },
+    "Ketten": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-ketten-1440x900.png",
+      "text_excerpt": "BOARD\nAudit Scratch \u00b7 aktuell\nDefault\nAutonomy Dogfood 2026-07-09\nHealth Track\nMemSearch Operations\nKETTEN\n2\n\u25b6\nAudit fixture: todo\nl\u00e4uft\n0/2\n\u25b6\nAUDIT STATUS MATRIX 1783919531433560771 todo\nl\u00e4uft\n0/2\n0\n% \u00b7 0 / 2 Steps\nwartet\nBlockaden\nkein Reviewer\nkein Critic\nPIPELINE\n0 / 2 STEPS\n1\n\u2014\n2\n\u2014\nREVIEW (AKTIVER SLICE)\nreviewer \u2013\n\u00b7\ncritic \u2013\n\u00b7\nverifier \u2013\n\u00b7\nintegrator \u2013\n?\n\u2014\nt_3b9a566f\nAudit fixture: todo\n0%\nUPCOMING\n1\n?\n\u2014\nAudit fixture: blocked\nblockiert\nRelease-Gate\nwartet",
+      "text_length": 466
+    },
+    "Plan": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-plan-1440x900.png",
+      "text_excerpt": "BOARD\nAudit Scratch \u00b7 aktuell\nDefault\nAutonomy Dogfood 2026-07-09\nHealth Track\nMemSearch Operations\nPlan-Text\nVorschau kompilieren\nStartmodus\nmit Freigabe\nsofort starten\nPlan \u00fcbernehmen\nAuto-Release\nAUTONOM (\u2264 review)\n\nNoch keine autonomen Releases\n\nAnker: release/pre-deploy/20260713T014742\n\nPlanSpec: Briefings au\u2026\nPlanSpec: Gateway-Resi\u2026\nPlanSpec: Homeserver-K\u2026\nPlanSpec: Briefings auf dem Handy lesbar machen\nfreigabe: operator\nPlanSpec: Briefings auf dem Handy lesbar machen\n1 Karte geplant\nbinding\nfreigabe: operator\nVolltext\ncoder\nMarkdown-Code im Control-Reade\u2026\nadmin\ncoder\ncritic\nfamily-ui\nfo-brain\npremium\nresearch\nreviewer\nscout\nverifier\nScout vorab\nKontext sammeln vor dem Bau\nLive-Test\nTiefe der echten Abnahme\nsmoke\nToken-Budget\n\nACCOUNT LIMITS\n\nReset: Mo., 08:00\nSitzung\n10 %\nWoche\n90 %\n\nACCOUNT LIMITS \u00b7 Pro\n\nReset: So., 21:00\nSitzung\n51 %\n\nKIMI \u00b7 Basic \u00b7 Purchase\n\nReset: Di., 19:55\nDiese Woche\n52 %\nHEUTE\n$0,00\nDIESE WOCHE\n$0,00\nPlan ingestieren\nHalten\n\nPlan muss ingestiert werden, um freigeben zu k\u00f6nnen.",
+      "text_length": 1024
+    },
+    "Risiko": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-risiko-1440x900.png",
+      "text_excerpt": "AUTONOM\ndeployt gr\u00fcne Arbeit selbst \u00b7 Guards aktiv\nReichweite\nwie weit Autonomie reicht, bevor sie eskaliert\nstandard\nreview\ncritical\nMax. Worker gesamt\nwie viele Profile gleichzeitig arbeiten d\u00fcrfen\n\u2212\n3\n+\nParallele Worker pro Profil\nwie viele Worker desselben Profils gleichzeitig laufen d\u00fcrfen \u2014 auch am selben Repo\n\u2212\n2\n+\n\n\u22652 l\u00e4sst gleiche Profile am selben Repo parallel branchen (stale-main-Risiko).\n\n\ud83d\udee1\nAuto-Stopp nach 3 roten in Folge \u00b7 Streak 4/3\n\nReine Deklaration \u00b7 Rollback ist das Netz \u00b7 kein Pre-Gate\n\nBRAUCHT DICH\n\nNichts h\u00e4ngt \u2014 alles l\u00e4uft autonom durch\n\nFEHLER-TRIAGE\n\nfailed/blocked \u00b7 letzte 48h \u00b7 j\u00fcngster Run pro Task\nAUDIT RUN MATRIX 1783919531433560771 gave-up\ngave_up\n\u2014\n13/07/2026, 07:12\n\naudit breaker exhaustion\n\nNochmal\nNochmal st\u00e4rker\nAUDIT RUN MATRIX 1783919531433560771 timed-out\ntimed_out\n\u2014\n13/07/2026, 07:12\n\nelapsed 2s > limit 1s\n\nwieder eingereiht \u2014 wartet auf Dispatcher-Tick + freie Lane\nNochmal st\u00e4rker\neskaliert die schon eingereihte Karte, bevor der Dispatcher sie zieht\nAUDIT RUN MATRIX 1783919531433560771 crashed\ncrashed\n\u2014\n13/07/2026, 07:12\n\npid 987654402 not alive\n\nwieder eingereiht \u2014 wartet auf Dispatcher-Tick + freie Lane\nNochmal st\u00e4rker\neskaliert die schon eingereihte Karte, bevor der Dispatcher sie zieht\nAUDIT RUN MATRIX 1783919531433560771 spawn-failed\nspawn_failed\n\u2014\n13/07/2026, 07:12\n\naudit deterministic spawn failure\n\nwieder eingereiht \u2014 wartet auf Dispatcher-Tick + freie Lane\nNochmal st\u00e4rker\neskaliert die schon eingereihte Karte, bevor der Disp",
+      "text_length": 2032
+    },
+    "Worker": {
+      "overflow": {
+        "body": 0,
+        "document": 0
+      },
+      "screenshot": "audit/iteration-4-state/status-matrix-worker-1440x900.png",
+      "text_excerpt": "SLOTS\n1/3 +6 Queue\nHEUTE FERTIG\n156 \u2713 \u00b7 6 \u25fc\nTOKEN\n0\n0\n25%\n50%\n75%\np90-Fenster\nA\naudit-deleted-lane\nAUDIT STATUS MATRIX 1783919531433560771 running\naudit-scratch\nl\u00e4uft\n29s\nLIVE-TICKER \u00b7 HEARTBEAT-NOTIZEN\n07:12:43 coder Slot geclaimt \u2192 t_5bb097ae\n07:12:43 default Slot geclaimt \u2192 t_994d3f2e\n07:12:15 \u2014 \u2717 aufgegeben \u00b7 AUDIT RUN MATRIX 1783919531433560771 gave-up\n07:12:15 \u2014 Slot geclaimt \u2192 t_fc560f18\n07:12:15 \u2014 \u2717 Crash \u00b7 AUDIT RUN MATRIX 1783919531433560771 crashed\n07:12:15 \u2014 Slot geclaimt \u2192 t_56dfa2e0\n07:12:15 \u2014 Slot geclaimt \u2192 t_56dfa2e0\n07:12:15 \u2014 Slot geclaimt \u2192 t_56dfa2e0\n07:12:15 \u2014 Slot geclaimt \u2192 t_8f68c175\n07:12:15 \u2014 \u23f1 Timeout \u00b7 AUDIT RUN MATRIX 1783919531433560771 timed-out\n07:12:13 \u2014 Slot geclaimt \u2192 t_30944693\n07:12:13 \u2014 Slot geclaimt \u2192 t_d5e4f9ef\n07:12:13 \u2014 Slot geclaimt \u2192 t_198be6a6\n07:12:13 \u2014 \u2713 done \u00b7 AUDIT RUN MATRIX 1783919531433560771 completed\n07:12:12 \u2014 \u2713 done \u00b7 AUDIT STATUS MATRIX 1783919531433560771 done\n07:12:12 \u2014 Slot geclaimt \u2192 t_fdd3226e\n07:12:12 coder AUDIT STATUS MATRIX 1783919531433560771 review \u2192 Review\n07:12:12 coder Slot geclaimt \u2192 t_0f299db7\n07:12:12 \u2014 \u25fc blocked \u00b7 AUDIT STATUS MATRIX 1783919531433560771 blocked\n07:12:12 \u2014 Slot geclaimt \u2192 t_25fa7491\n07:12:11 audit-deleted-lane Slot geclaimt \u2192 t_e85343ec\n07:12:11 \u2014 \u25fc blocked \u00b7 AUDIT HELPER MATRIX 1783919531433560771 todo-parent\n07:11:44 coder AUDIT RUN MATRIX 1783918998862050441 timed-out \u2192 Review\n07:11:23 coder starting API call #1\n07:11:23 coder starting API call #1\n07:11:20 coder Slot geclaimt \u2192 t_06",
+      "text_length": 2200
+    }
+  },
+  "unexpected_console_errors": []
+}
