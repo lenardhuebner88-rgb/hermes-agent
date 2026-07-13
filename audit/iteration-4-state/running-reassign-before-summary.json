@@ -1,0 +1,26 @@
+{
+  "backend_reassign": {
+    "body": {
+      "detail": "cannot reassign t_bfbb4381: unknown id, or still running (pass reclaim_first=true to release the claim first)"
+    },
+    "status": 409
+  },
+  "base": "http://127.0.0.1:9123",
+  "board": "audit-scratch",
+  "db": {
+    "assignee": "coder",
+    "current_run_id": 61,
+    "status": "running"
+  },
+  "dom_profile_buttons": 1,
+  "dom_profile_selects": 1,
+  "expected_409_console_errors": 1,
+  "lanes": {
+    "profile_count": 10,
+    "status": 200
+  },
+  "phase": "before",
+  "screenshot": "audit/iteration-4-state/running-reassign-before-1440x900.png",
+  "task_id": "t_bfbb4381",
+  "unexpected_console_errors": []
+}

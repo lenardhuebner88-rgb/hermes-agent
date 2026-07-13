@@ -230,7 +230,10 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
   );
 }
 
-const TERMINAL_REASSIGN_STATUSES = new Set(["done", "archived"]);
+// The backend refuses a running reassign unless the caller explicitly opts
+// into reclaim_first. This control deliberately never reclaims a live worker,
+// so exposing it for running would be a deterministic 409 action.
+const NON_REASSIGNABLE_STATUSES = new Set(["running", "done", "archived"]);
 
 function TaskReassignControl({
   taskId,
@@ -263,7 +266,7 @@ function TaskReassignControl({
     : profiles[0] ?? "";
   const selectedProfile = profiles.includes(targetProfile) ? targetProfile : defaultProfile;
 
-  if (TERMINAL_REASSIGN_STATUSES.has(normalizedStatus) || profiles.length === 0) return null;
+  if (NON_REASSIGNABLE_STATUSES.has(normalizedStatus) || profiles.length === 0) return null;
 
   const changedProfile = selectedProfile && selectedProfile !== normalizedCurrentProfile;
   const disabled = busy || !changedProfile;

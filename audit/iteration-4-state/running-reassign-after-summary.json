@@ -1,0 +1,26 @@
+{
+  "backend_reassign": {
+    "body": {
+      "detail": "cannot reassign t_c1669a70: unknown id, or still running (pass reclaim_first=true to release the claim first)"
+    },
+    "status": 409
+  },
+  "base": "http://127.0.0.1:9123",
+  "board": "audit-scratch",
+  "db": {
+    "assignee": "coder",
+    "current_run_id": 62,
+    "status": "running"
+  },
+  "dom_profile_buttons": 0,
+  "dom_profile_selects": 0,
+  "expected_409_console_errors": 1,
+  "lanes": {
+    "profile_count": 10,
+    "status": 200
+  },
+  "phase": "after",
+  "screenshot": "audit/iteration-4-state/running-reassign-after-1440x900.png",
+  "task_id": "t_c1669a70",
+  "unexpected_console_errors": []
+}

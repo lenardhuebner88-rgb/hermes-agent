@@ -219,6 +219,19 @@ describe("NodeDetailDrawer Reassign", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("bietet für einen laufenden Task keine deterministisch abgelehnte Profiländerung an", () => {
+    const original = hookState.taskBody.data.task.status;
+    hookState.taskBody.data.task.status = "running";
+    try {
+      renderDrawer();
+
+      expect(screen.queryByLabelText("Zielprofil")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Profil ändern" })).toBeNull();
+    } finally {
+      hookState.taskBody.data.task.status = original;
+    }
+  });
+
   it("armt Reassign und POSTet das echte Payload-Format", async () => {
     const onChanged = vi.fn();
     fetchJSONMock.mockResolvedValueOnce({ ok: true, task_id: "t_reassign", assignee: "verifier" });
