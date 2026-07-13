@@ -224,9 +224,23 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Bind the existing small `FleetSourceFreshness` boundary to the Task-Detail polling source inside the drawer; no new fetch, timer, or duplicated state.
 - After:       Candidate task `t_e8837403` was deleted from a second tab (200), its next detail request returned 404, and the still-open drawer rendered the retained body only alongside `Task-Detail · Daten von vor 8s`. One expected 404 console line, zero unexpected errors. Evidence: `audit/iteration-4-state/vanished-task-summary.json` and screenshot.
 - Gates:       NodeDetail 13 passed, exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate vanished-task harness exit 0. React quality review confirms reuse of existing polling metadata and presentation boundary without new effects or mirrored state.
-- Commit:      this N-45 commit
+- Commit:      `dd9a4234f`
+- Status:      CONFIRMED
+
+### N-46  Running tasks never offer an impossible profile reassignment
+- Source:      Loop-4 offered-action matrix against backend transition guards
+- Class:       DEFECT
+- Severity:    S2
+- Invariant:   The drawer never offers a profile change for a task with an active run when its request contract deliberately sends `reclaim_first=false`; no visible button may deterministically return 409 in the current state.
+- Repro:       On `audit-scratch`, create and claim a real `running` task, attach the audit process as its worker PID, open the production candidate drawer, compare the offered controls with authenticated POST `/tasks/{id}/reassign` using the exact UI payload, then archive the fixture.
+- Before:      DB and detail DOM both showed `running`; the drawer exposed one `Zielprofil` select and one `Profil ändern` button. The exact UI payload returned HTTP 409: `still running (pass reclaim_first=true ...)`. Evidence: `audit/iteration-4-state/running-reassign-before-summary.json` and screenshot.
+- Test:        `npm run test -- --run src/control/views/fleet/NodeDetailDrawer.test.tsx` failed 1/14 before the change because the running drawer still rendered the select; the same file passed 14/14 after the change.
+- Change:      Treat `running` as non-reassignable in the existing drawer control boundary. The UI does not silently reclaim a live worker; explicit worker recovery remains on the worker control surface.
+- After:       On the rebuilt production candidate, the same DB/API state still returned the truthful backend 409 for a forced direct request, while the drawer rendered zero profile selects and zero reassign buttons. Lanes API exposed 10 profiles, proving the absence was state-driven rather than missing catalog data. Zero unexpected console errors. Evidence: `audit/iteration-4-state/running-reassign-after-summary.json` and screenshot.
+- Gates:       Targeted NodeDetail 14 passed, exit 0; complete frontend gate 127 files / 1,903 tests, TypeScript, lint, and production build exit 0; candidate DB/API/DOM harness before and after exit 0.
+- Commit:      `7e7ae92e8`
 - Status:      CONFIRMED
 
 ## Later iterations
 
-State-machine/action, live-event/race, scale/query, hostile-state, red-team, and final release items will be added with concrete evidence as each iteration begins.
+Operator-directed stopping point on 2026-07-13: the branch is a clean local checkpoint after N-46. Loop 4's complete nine-status/action matrix and Loops 5-8 (live-event races, scale/query measurements, hostile states, and three fresh red-team passes) remain intentionally open. The atomic final release gate was not run, so this branch was not pushed or deployed and the three default-board tracking cards remain open.
