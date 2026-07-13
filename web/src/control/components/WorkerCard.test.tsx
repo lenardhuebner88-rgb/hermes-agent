@@ -98,6 +98,12 @@ describe("WorkerCard error and status copy", () => {
 
 
 describe("WorkerCard time axis accessibility", () => {
+  it("discloses a future start as invalid runtime without NaN geometry", () => {
+    const html = renderWorker(mkWorker({ started_at: NOW + 86_400 }));
+    expect(html).toContain("Dauer ungültig");
+    expect(html).not.toContain("NaN");
+  });
+
   it("exposes the time axis as an img with a label summarizing now, p50, p90 and budget", () => {
     const html = renderWorker(mkWorker({
       started_at: NOW - 300,

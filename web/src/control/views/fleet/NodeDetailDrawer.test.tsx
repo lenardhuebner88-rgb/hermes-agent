@@ -90,6 +90,12 @@ describe("AktivitaetTab (NodeDetailDrawer)", () => {
 
     expect(screen.getByText("claimed")).toBeTruthy();
   });
+
+  it("names a contaminated event timestamp instead of rendering a plausible dash", () => {
+    render(<AktivitaetTab events={[{ id: 9, kind: "claimed", note: null, at: Number.NaN }]} now={1782508100} loading={false} />);
+
+    expect(screen.getByText("Zeit ungültig")).toBeTruthy();
+  });
 });
 
 
@@ -132,6 +138,19 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).toContain("whitespace-pre-wrap");
     expect(html).toContain("ENDE");
     expect(html).not.toContain("mask-image");
+  });
+
+  it("names a contaminated runtime explicitly", () => {
+    const html = renderToStaticMarkup(
+      <UebersichtTab
+        task={{ id: "t1", title: "T", status: "running", assignee: "coder", body: null }}
+        latestRun={{ profile: "coder", status: "running", runtime_seconds: Number.NaN }}
+        elapsedSec={Number.NaN}
+        deliverables={[]}
+      />,
+    );
+
+    expect(html).toContain("Dauer ungültig");
   });
 });
 

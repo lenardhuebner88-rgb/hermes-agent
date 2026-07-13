@@ -3,6 +3,7 @@ import { de } from "../i18n/de";
 import type { HealthStatus, MetricsLiteResponse, SubsystemHealth, SystemHealthResponse } from "../lib/types";
 import type { DotKind } from "../lib/tones";
 import { Led } from "./atoms";
+import { elapsedSeconds } from "../lib/derive";
 
 type SubsystemKey = keyof SystemHealthResponse["subsystems"];
 type HealthTone = "emerald" | "amber" | "red" | "zinc";
@@ -47,8 +48,10 @@ const unknownHealth: SubsystemHealth = { status: "offline", detail: de.systemHea
 export function SystemHealthStrip({ data, error, now, metrics }: Props) {
   const isUnknown = !data || Boolean(error);
   const overallTone = isUnknown ? "zinc" : statusTone[data.overall];
-  const checkedAge = data && now ? Math.max(0, Math.floor(now - data.checked_at)) : null;
-  const title = error ?? (checkedAge !== null ? `${de.systemHealth.title}: ${checkedAge}s` : de.systemHealth.title);
+  const checkedAge = data && now ? elapsedSeconds(data.checked_at, now) : null;
+  const title = error ?? (data && now && checkedAge == null
+    ? `${de.systemHealth.title}: Zeit ungültig`
+    : checkedAge !== null ? `${de.systemHealth.title}: ${checkedAge}s` : de.systemHealth.title);
 
   return (
     <section className={cn("hc-card border px-3 py-2", toneClass[overallTone])} title={title}>

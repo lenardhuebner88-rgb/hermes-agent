@@ -4,7 +4,7 @@ import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { diffStats, withLineNumbers } from "../lib/diff";
-import { fmtAge, nowSec } from "../lib/derive";
+import { fmtRelativeTime, nowSec } from "../lib/derive";
 import type { DiffLine } from "../lib/types";
 import type { DotKind } from "../lib/tones";
 import type { StructuredError } from "../hooks/pollingStore";
@@ -24,8 +24,8 @@ export function StaleBadge({ isStale, lastUpdated, errorObj, error, now = nowSec
 }) {
   const hasError = Boolean(errorObj || error);
   if (!isStale && !hasError) return null;
-  const ageLabel = lastUpdated != null ? fmtAge(lastUpdated, now) : null;
-  const label = isStale ? (ageLabel ? de.staleBadge.stale(ageLabel) : de.staleBadge.staleUnknown) : de.staleBadge.error;
+  const ageLabel = lastUpdated != null ? fmtRelativeTime(lastUpdated, now) : null;
+  const label = isStale ? (ageLabel ? de.staleBadge.staleRelative(ageLabel) : de.staleBadge.staleUnknown) : de.staleBadge.error;
   const title = errorObj?.message ?? error ?? label;
   const Icon = hasError ? AlertTriangle : Clock3;
   return (

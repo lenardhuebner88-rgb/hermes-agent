@@ -22,6 +22,7 @@ import { WorkerLogTail } from "../../components/WorkerCard";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
+import { elapsedSeconds } from "../../lib/derive";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
@@ -91,7 +92,11 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
   }));
 
   const latestRun = runs[0] ?? null;
-  const elapsedSec = latestRun?.runtime_seconds ?? (latestRun?.started_at ? Math.max(0, now - latestRun.started_at) : null);
+  const elapsedSec = latestRun?.runtime_seconds ?? (
+    latestRun?.started_at != null
+      ? (elapsedSeconds(latestRun.started_at, now) ?? Number.NaN)
+      : null
+  );
 
   function handleCopy() {
     void navigator.clipboard.writeText(taskId).then(() => {
@@ -537,11 +542,12 @@ export function AktivitaetTab({
   return (
     <div className="flex flex-col gap-0.5">
       {events.slice(0, 20).map((ev) => {
-        const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
+        const age = elapsedSeconds(ev.at, now);
+        const ageLabel = age != null ? fmtSeconds(age) : "Zeit ungültig";
         const kindMeta = REVIEW_ECONOMY_KIND_META[ev.kind];
         return (
           <div key={ev.id} className="fleet-activity-row">
-            <span className="fleet-activity-time">{age != null ? fmtSeconds(age) : "—"}</span>
+            <span className="fleet-activity-time">{ageLabel}</span>
             <span
               className="fleet-activity-kind"
               title={kindMeta?.label ?? ev.kind}

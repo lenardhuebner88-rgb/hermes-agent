@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { ChevronRight, ExternalLink, FileText, Quote, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fmtAge, fmtDur } from "../../lib/derive";
+import { fmtDur, fmtRelativeTime } from "../../lib/derive";
 import { roleChip } from "../../lib/fleet";
 import { de } from "../../i18n/de";
 import type { KanbanResult } from "../../lib/types";
@@ -54,7 +54,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
 
       <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-ink" title={result.task_title}>{result.task_title}</h3>
       <p className="mt-1.5 font-data text-micro text-ink-3">
-        ⏱ {fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)} · {receiptLabel(result)}
+        ⏱ {fmtDur(result.duration_seconds)} · {fmtRelativeTime(result.ended_at, now)} · {receiptLabel(result)}
       </p>
 
       {open ? (

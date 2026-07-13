@@ -188,8 +188,8 @@ describe("heartbeatAge", () => {
     expect(heartbeatAge(NOW - 9, NOW)).toBe(9);
   });
 
-  it("mindestens 0", () => {
-    expect(heartbeatAge(NOW + 5, NOW)).toBe(0);
+  it("meldet einen zukünftigen Heartbeat als ungültig statt 0s-frisch", () => {
+    expect(heartbeatAge(NOW + 5, NOW)).toBeNull();
   });
 });
 
@@ -1119,44 +1119,43 @@ describe("clamp01", () => {
 });
 
 describe("bandWindowSeconds", () => {
-  const base = { started_at: 1000 };
+  const base = { started_at: NOW - 100 };
   it("bevorzugt p90 (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, eta_p90_seconds: 840, eta_p50_seconds: 300 }, 1100)).toEqual({ seconds: 840, grounded: true });
+    expect(bandWindowSeconds({ ...base, eta_p90_seconds: 840, eta_p50_seconds: 300 }, NOW)).toEqual({ seconds: 840, grounded: true });
   });
   it("fällt auf max_runtime_seconds zurück (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, max_runtime_seconds: 1800 }, 1100)).toEqual({ seconds: 1800, grounded: true });
+    expect(bandWindowSeconds({ ...base, max_runtime_seconds: 1800 }, NOW)).toEqual({ seconds: 1800, grounded: true });
   });
   it("dann p50×1.6 (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, eta_p50_seconds: 100 }, 1100)).toEqual({ seconds: 160, grounded: true });
+    expect(bandWindowSeconds({ ...base, eta_p50_seconds: 100 }, NOW)).toEqual({ seconds: 160, grounded: true });
   });
   it("zuletzt elapsed×1.3 (nicht geerdet)", () => {
-    // elapsed = 1100 - 1000 = 100 → 130
-    expect(bandWindowSeconds(base, 1100)).toEqual({ seconds: 130, grounded: false });
+    expect(bandWindowSeconds(base, NOW)).toEqual({ seconds: 130, grounded: false });
   });
 });
 
 describe("computeBandGeometry", () => {
   it("füllt elapsed gegen das p90-Fenster und positioniert p50 + Ticks", () => {
     const w = {
-      started_at: 1000,
+      started_at: NOW - 400,
       eta_p50_seconds: 400,
       eta_p90_seconds: 800,
-      heartbeat_ticks: [1100, 1300, 1600], // +100,+300,+600 → 0.125, 0.375, 0.75
+      heartbeat_ticks: [NOW - 300, NOW - 100, NOW + 200],
     };
-    const geo = computeBandGeometry(w, 1400); // elapsed 400 / 800 = 0.5
+    const geo = computeBandGeometry(w, NOW); // elapsed 400 / 800 = 0.5
     expect(geo.fillFraction).toBeCloseTo(0.5);
     expect(geo.p50Fraction).toBeCloseTo(0.5); // 400/800
     expect(geo.grounded).toBe(true);
-    expect(geo.tickFractions.map((f) => Number(f.toFixed(3)))).toEqual([0.125, 0.375, 0.75]);
+    expect(geo.tickFractions.map((f) => Number(f.toFixed(3)))).toEqual([0.125, 0.375]);
   });
 
   it("deckelt die Füllung bei elapsed > Fenster auf 1", () => {
-    const geo = computeBandGeometry({ started_at: 0, eta_p90_seconds: 100 }, 500);
+    const geo = computeBandGeometry({ started_at: NOW - 500, eta_p90_seconds: 100 }, NOW);
     expect(geo.fillFraction).toBe(1);
   });
 
   it("ohne Perzentile/Cap: nutzt run_progress und markiert nicht-geerdet", () => {
-    const geo = computeBandGeometry({ started_at: 1000, run_progress: 0.3 }, 1100);
+    const geo = computeBandGeometry({ started_at: NOW - 100, run_progress: 0.3 }, NOW);
     expect(geo.grounded).toBe(false);
     expect(geo.fillFraction).toBeCloseTo(0.3);
     expect(geo.p50Fraction).toBeNull();
@@ -1164,8 +1163,8 @@ describe("computeBandGeometry", () => {
 
   it("verwirft Ticks außerhalb [0,1] (vor started_at oder jenseits des Fensters)", () => {
     const geo = computeBandGeometry(
-      { started_at: 1000, eta_p90_seconds: 100, heartbeat_ticks: [900, 1050, 5000] },
-      1100,
+      { started_at: NOW - 100, eta_p90_seconds: 100, heartbeat_ticks: [NOW - 200, NOW - 50, NOW + 5000] },
+      NOW,
     );
     expect(geo.tickFractions).toEqual([0.5]); // nur 1050
   });
@@ -1178,7 +1177,7 @@ describe("fmtDurationClock", () => {
     expect(fmtDurationClock(3860)).toBe("1h04m");
     expect(fmtDurationClock(7199)).toBe("2h00m");
     expect(fmtDurationClock(null)).toBe("—");
-    expect(fmtDurationClock(-5)).toBe("—");
+    expect(fmtDurationClock(-5)).toBe("Dauer ungültig");
   });
 });
 

@@ -106,7 +106,7 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Add a dedicated on-demand `/board/archive` endpoint with literal search, assignee filter, total/filtered/loaded counts, archive timestamps, bounded page size, invalid-cursor rejection, and deterministic `(archived_at, task_id)` keyset cursors. BoardTab fetches it only when `Archiv` is selected, aborts superseded requests, exposes truthful loading/error/empty/count states, and appends unique pages through `Mehr laden`; active `GET /board` polling is unchanged.
 - After:       Read-only live DB count was 4,213 archived. The authenticated candidate API returned exactly 4,213 unique ids over 22 cursor pages; first 200-card page was 335,914 bytes / 111.7 ms and the full walk 6,255,372 bytes / 2,536.3 ms. The separate active poll remained 256 cards / 521,056 bytes with zero archived ids and no archive metadata. Candidate DOM rendered 50 then 100 cards, exact task-id search rendered 1/1 while retaining `4,213 insgesamt`, at 1440×900 and 390×844 with no body overflow, console error, or HTTP error. Evidence: `audit/iteration-1-f06/`.
 - Gates:       Backend plugin file 268 passed, exit 0; focused frontend/schema 58 passed, exit 0; Ruff exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh` exit 0 (126 files / 1,839 tests plus production build).
-- Commit:      this F-06 commit
+- Commit:      `6fc1bded2`
 - Status:      CONFIRMED
 
 ## Iteration 2 — Stale-but-plausible data elimination
@@ -122,9 +122,25 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Add one small source-local freshness boundary and bind it to Heute, Worker, Ketten, Plan, Risiko, and PlanSpec cockpit; carry freshness through live-events, chain-graph, chain-cost, and PlanSpec-detail hooks; require one backend-owned identity field in every Fleet response schema instead of accepting an absent top-level payload.
 - After:       Authenticated production-build browser proof retained non-empty content while naming every injected source on Heute (4), Worker (5), Ketten (4), Plan (4), and Risiko (8). All five surfaces cleared naturally after recovery, including the selected-chain 30-second cadence. PlanSpec drawer kept the exact last-good goal beside the contract error and cleared it after recovery. Malformed JSON, `{}`, network reset, and a real 30-second hang all disclosed `Systemzustand` with age and recovered; auth expiry redirected to `/login?next=/control/fleet`. Zero unexpected console or HTTP errors. Evidence: `audit/iteration-2-stale/summary.json` plus five desktop screenshots.
 - Gates:       Focused Vitest 100 passed, exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (126 files / 1,864 tests); candidate browser harness exit 0.
-- Commit:      this N-20 commit
+- Commit:      `8a3348af7`
+- Status:      CONFIRMED
+
+## Iteration 3 — Timestamp integrity and live age
+
+### N-30  Kanban time never invents freshness, chronology, or duration
+- Source:      timestamp adversarial matrix and five-minute background proof
+- Class:       DATA
+- Severity:    S1
+- Invariant:   Every numeric Kanban timestamp is treated as guarded epoch seconds; invalid units/ranges and impossible chronology are explicit, future values are truthful, negative durations never look positive, Berlin clocks survive both DST boundaries, and retained worker age advances before refocus recovery.
+- Repro:       Parse absent, zero, future +1 day, old -400 days, millisecond-shaped, negative, NaN/infinite/non-number, and reversed chronology through the Fleet schemas/formatters; render Board, Worker, detail activity, results and release-event callers; run `audit/verify_timestamps_candidate.py`; freeze the real production-build page for 300 seconds with `audit/verify_background_age_candidate.py`, complete the synthetic worker while frozen, fail the first refocus request, then recover.
+- Before:      `fmtAge` clamped future/invalid values to plausible `0s`; negative durations were clamped positive; local-time rendering depended on the host timezone; Worker geometry accepted invalid starts; Activity rendered contaminated event time as `—`; Fleet schemas replaced malformed `checked_at` with local current time or collapsed malformed task/run times to null; Fleet `now` advanced only when unrelated data polls rerendered it. Fail-first tests included 11 derive failures, Board chronology/future failures, NaN Worker geometry, a schema contamination failure, refocus clock `expected 0 to be 300`, Activity missing `Zeit ungültig`, and task/run contamination reduced to null.
+- Test:        Focused final matrix: 7 files / 312 tests passed. The new client-clock regression fails without the visibility handler (`expected 0 to be 300`); the claim-expiry regression fails without epoch validation (`expected healthy to be stuck`); detail/schema regressions fail before preservation (`Zeit ungültig` absent and `Number.isNaN(...)` false).
+- Change:      Add one `inspectEpochSeconds` contract plus guarded elapsed/relative/clock/duration helpers; preserve contaminated numeric timestamps as NaN while keeping true absence null; remove local-`Date.now()` freshness invention from Fleet response schemas; validate chronology and Worker geometry; use explicit Europe/Berlin formatting; bind Fleet to the shared 10-second client clock and refresh it synchronously on visibility; render invalid Activity/runtime values explicitly.
+- After:       Exact production build at 1440×900 and 390×844 shows invalid Board fields and Worker duration explicitly, marks a future due date and chronology violation, emits no NaN geometry, has zero body overflow and zero console errors (`audit/iteration-3-timestamps/summary.json`). Two independent real 300-second freezes passed; the final recorded run waited 301.29 seconds, first refocus frame showed `5 min` and retained-data staleness, then successful recovery removed the completed worker with zero unexpected console errors (`background-summary.json` plus before/after screenshots). Europe/Berlin unit cases cover both 2026 DST transitions.
+- Gates:       Focused 312 passed, exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh` exit 0 on the final source (127 files / 1,884 tests plus production build). One preceding loaded full-suite attempt exposed an unrelated Knowledge deep-link timing flake; its isolated rerun was 19/19 and the complete gate rerun was green without a code change.
+- Commit:      this N-30 commit
 - Status:      CONFIRMED
 
 ## Later iterations
 
-Timestamp, state-machine/action, live-event/race, scale/query, hostile-state, red-team, and final release items will be added with concrete evidence as each iteration begins.
+State-machine/action, live-event/race, scale/query, hostile-state, red-team, and final release items will be added with concrete evidence as each iteration begins.

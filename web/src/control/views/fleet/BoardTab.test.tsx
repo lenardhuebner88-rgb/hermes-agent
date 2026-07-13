@@ -169,4 +169,27 @@ describe("BoardTab operator information", () => {
     expect(text).not.toContain("0 Vorgänger");
     expect(text).not.toContain("0 Nachfolger");
   });
+
+  it("renders invalid, future, and impossible chronology explicitly", () => {
+    render(
+      <BoardTab
+        board={board([task({
+          id: "t_timebad",
+          title: "Adversarial time card",
+          created_at: 1_783_800_200,
+          started_at: 1_783_800_100,
+          completed_at: 1_783_800_050,
+          due_at: 1_783_800_300 + 86_400,
+          last_heartbeat_at: 1_783_800_300 * 1000,
+        })])}
+        onOpenNodeDetail={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Weitere Informationen zu Adversarial time card"));
+    const disclosure = screen.getByLabelText("Weitere Informationen zu Adversarial time card").parentElement as HTMLElement;
+    expect(within(disclosure).getByText("Zeit ungültig")).toBeTruthy();
+    expect(within(disclosure).getByText(/zukünftig/)).toBeTruthy();
+    expect(within(disclosure).getByText("Start liegt vor Anlage")).toBeTruthy();
+  });
 });

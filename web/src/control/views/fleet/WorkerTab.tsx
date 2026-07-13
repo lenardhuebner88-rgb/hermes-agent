@@ -33,6 +33,7 @@ import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
+import { elapsedSeconds } from "../../lib/derive";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -324,7 +325,7 @@ function WorkerDrawer({
   onOpenChain,
   currentBoard,
 }: WorkerDrawerProps) {
-  const elapsedSec = Math.max(0, now - w.started_at);
+  const elapsedSec = elapsedSeconds(w.started_at, now) ?? Number.NaN;
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);

@@ -44,6 +44,33 @@ describe("Fleet source response contracts", () => {
 });
 
 describe("BoardResponseSchema", () => {
+  it("preserves malformed timestamp contamination as invalid instead of absent/zero", () => {
+    const parsed = parseOrThrow(BoardResponseSchema, {
+      columns: [{
+        name: "running",
+        tasks: [{
+          id: "t_badtime",
+          title: "Bad time",
+          status: "running",
+          created_at: "not-a-time",
+          started_at: {},
+          completed_at: null,
+          last_heartbeat_at: "also-bad",
+        }],
+      }],
+      tenants: [],
+      assignees: [],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    }, "board");
+
+    expect(Number.isNaN(parsed.columns[0].tasks[0].created_at)).toBe(true);
+    expect(Number.isNaN(parsed.columns[0].tasks[0].started_at)).toBe(true);
+    expect(Number.isNaN(parsed.columns[0].tasks[0].last_heartbeat_at)).toBe(true);
+    expect(parsed.columns[0].tasks[0].completed_at).toBeNull();
+  });
+
   it("preserves due and heartbeat timestamps needed by the card disclosure", () => {
     const parsed = parseOrThrow(BoardResponseSchema, {
       columns: [{
@@ -1340,6 +1367,32 @@ describe("TaskBodySchema — workspace_kind/workspace_path (Fleet Karten-Detail-
     const parsed = parseOrThrow(TaskBodySchema, { task: null, runs: [], deliverables: [] }, "task-body/null");
     expect(parsed.task).toBeNull();
     expect(parsed.deliverables).toEqual([]);
+  });
+
+  it("preserves contaminated task and run timestamps for explicit invalid rendering", () => {
+    const parsed = parseOrThrow(TaskBodySchema, {
+      task: {
+        id: "t_bad_time",
+        title: "Bad time",
+        status: "running",
+        created_at: "not-an-epoch",
+        started_at: "not-an-epoch",
+        completed_at: 1782990000 * 1000,
+      },
+      runs: [{
+        id: 99,
+        status: "running",
+        started_at: "not-an-epoch",
+        ended_at: 1782990000 * 1000,
+      }],
+      deliverables: [],
+    }, "task-body/bad-time");
+
+    expect(Number.isNaN(parsed.task?.created_at)).toBe(true);
+    expect(Number.isNaN(parsed.task?.started_at)).toBe(true);
+    expect(parsed.task?.completed_at).toBe(1782990000 * 1000);
+    expect(Number.isNaN(parsed.runs[0].started_at)).toBe(true);
+    expect(parsed.runs[0].ended_at).toBe(1782990000 * 1000);
   });
 });
 

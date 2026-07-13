@@ -2,6 +2,12 @@ import { z } from "zod";
 
 const nullableNumber = z.number().nullable().catch(null);
 const nullableString = z.string().nullable().catch(null);
+// A malformed timestamp is materially different from an absent timestamp.
+// Preserve contamination as NaN so guarded renderers can say "Zeit ungültig"
+// instead of inventing epoch zero or silently omitting the field.
+const invalidEpochSeconds = Number.NaN;
+const epochSeconds = z.coerce.number().catch(invalidEpochSeconds);
+const nullableEpochSeconds = z.coerce.number().nullable().default(null).catch(invalidEpochSeconds);
 const LastOutcomeSchema = z.enum(["applied", "reverted_no_improvement"]).nullable().catch(null);
 const VerifierVerdictSchema = z.enum(["APPROVED", "REQUEST_CHANGES"]);
 const VerificationStateSchema = z.enum(["approved", "request_changes", "pending", "ungated"]);
@@ -60,10 +66,10 @@ export const WorkerSchema = z.object({
   profile: z.string().catch("default"),
   // claude-cli-Lanes laufen ohne greifbaren Prozess — pid bleibt dort ehrlich null.
   worker_pid: z.coerce.number().nullable().catch(null),
-  started_at: z.coerce.number().catch(0),
+  started_at: epochSeconds,
   claim_lock: z.string().catch(""),
-  claim_expires: z.coerce.number().catch(0),
-  last_heartbeat_at: z.coerce.number().catch(0),
+  claim_expires: epochSeconds,
+  last_heartbeat_at: epochSeconds,
   max_runtime_seconds: z.coerce.number().catch(0),
   run_status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("running"),
   run_outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
@@ -71,7 +77,7 @@ export const WorkerSchema = z.object({
   inspect: RunInspectSchema.nullable().optional(),
   // Phase A (Fortschritt): Tätigkeits-Note + ehrliche ETA (p50/p90).
   last_heartbeat_note: z.string().nullable().catch(null),
-  last_heartbeat_note_at: z.coerce.number().nullable().catch(null),
+  last_heartbeat_note_at: nullableEpochSeconds,
   eta_p50_seconds: z.coerce.number().nullable().catch(null),
   eta_p90_seconds: z.coerce.number().nullable().catch(null),
   // Phase B (Live-Telemetrie): Schritt-Key, Modell-Override, effektives Modell,
@@ -86,7 +92,7 @@ export const WorkerSchema = z.object({
   run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
   // S1 (Puls-Leitstand): Heartbeat-Zeitstempel (Unix-Sek, chronologisch, Cap 20)
   // für die Swimlane-Band-Ticks. Tolerant: fehlt bei alten Payloads → [].
-  heartbeat_ticks: z.array(z.coerce.number()).catch([]),
+  heartbeat_ticks: z.array(z.coerce.number().catch(invalidEpochSeconds)).catch([]),
 });
 
 export const WorkersResponseSchema = z.object({
@@ -96,7 +102,7 @@ export const WorkersResponseSchema = z.object({
   count: z.coerce.number().catch(0),
   // Round C: kanban.max_in_progress — null when not configured.
   cap: z.coerce.number().nullable().catch(null),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
 });
 
 // ─── Live-Ereignis-Ticker (Puls-Leitstand S2) ────────────────────────────────
@@ -111,14 +117,14 @@ export const LiveEventSchema = z.object({
   profile: z.string().nullable().catch(null),
   kind: z.string().catch("unknown"),
   note: z.string().nullable().catch(null),
-  at: z.coerce.number().catch(0),
+  at: epochSeconds,
 });
 
 export const LiveEventsResponseSchema = z.object({
   events: z.array(LiveEventSchema),
   count: z.coerce.number().catch(0),
   latest_id: z.coerce.number().nullable().catch(null),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
 });
 
 export type LiveEvent = z.infer<typeof LiveEventSchema>;
@@ -153,7 +159,7 @@ export const WorkerActivityEventSchema = z.object({
   run_id: z.coerce.number().nullable().catch(null),
   kind: z.string().catch("unknown"),
   note: z.string().nullable().catch(null),
-  at: z.coerce.number().catch(0),
+  at: epochSeconds,
 });
 
 export const WorkerActivityResponseSchema = z.object({
@@ -243,7 +249,7 @@ export const PlanSpecRecordSchema = z.object({
   kanban_child_done: z.coerce.number().catch(0),
   kanban_child_blocked: z.coerce.number().catch(0),
   kanban_child_running: z.coerce.number().catch(0),
-  kanban_ingested_at: z.coerce.number().nullable().catch(null),
+  kanban_ingested_at: nullableEpochSeconds,
   ingest_disposition: z.string().catch("not_ingestable"),
   ingest_would_block: z.coerce.boolean().catch(true),
   ingest_findings: z.array(z.string()).catch([]),
@@ -274,7 +280,7 @@ const FlowGateChildSchema = z.object({
   assignee: z.string().nullable().catch(null),
   parents: z.array(z.string()).catch([]),
   risk: FlowGateRiskSchema,
-  created_at: z.coerce.number().catch(0),
+  created_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
 });
 
@@ -309,7 +315,7 @@ export const FlowGateResponseSchema = z.object({
   held_count: z.coerce.number().catch(0),
   release_levels: z.array(FlowGateReleaseLevelSchema).catch(["merge", "live"]),
   timeout_seconds: z.coerce.number().catch(1800),
-  timeout_at: z.coerce.number().nullable().catch(null),
+  timeout_at: nullableEpochSeconds,
   auto_dispatch_eligible: z.boolean().catch(false),
   lanes: z.array(FlowGateLaneSchema).catch([]),
   cost_estimate: FlowGateCostEstimateSchema,
@@ -356,9 +362,9 @@ const ChainGraphRunSchema = z.object({
   profile: z.string().nullable().catch(null),
   status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("running"),
   outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
-  started_at: z.coerce.number().nullable().catch(null),
-  ended_at: z.coerce.number().nullable().catch(null),
-  last_heartbeat_at: z.coerce.number().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
+  last_heartbeat_at: nullableEpochSeconds,
   runtime_seconds: z.coerce.number().nullable().catch(null),
   heartbeat_age_seconds: z.coerce.number().nullable().catch(null),
   // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime).
@@ -373,10 +379,10 @@ const ChainGraphNodeSchema = z.object({
   level: z.coerce.number().catch(0),
   parents: z.array(z.string()).catch([]),
   children: z.array(z.string()).catch([]),
-  created_at: z.coerce.number().catch(0),
-  started_at: z.coerce.number().nullable().catch(null),
-  completed_at: z.coerce.number().nullable().catch(null),
-  last_heartbeat_at: z.coerce.number().nullable().catch(null),
+  created_at: epochSeconds,
+  started_at: nullableEpochSeconds,
+  completed_at: nullableEpochSeconds,
+  last_heartbeat_at: nullableEpochSeconds,
   runtime_seconds: z.coerce.number().nullable().catch(null),
   progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
   latest_run: ChainGraphRunSchema.nullable().catch(null),
@@ -399,7 +405,7 @@ const ChainGraphNodeSchema = z.object({
 export const ChainGraphResponseSchema = z.object({
   schema: z.string().catch("kanban-chain-graph-v1"),
   root_id: z.string(),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   nodes: z.array(ChainGraphNodeSchema).catch([]),
   edges: z.array(z.object({ from: z.string().catch(""), to: z.string().catch("") })).catch([]),
 });
@@ -472,8 +478,8 @@ const WindowedRollupRunnerSchema = z.object({
   cost_effective_usd: nullableNumber,
   billing_mode: z.string().nullable().catch(null),
   neuralwatt: z.unknown().nullable().catch(null),
-  started_at: z.coerce.number().nullable().catch(null),
-  ended_at: z.coerce.number().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
   runtime_seconds: z.coerce.number().nullable().catch(null),
 });
 
@@ -482,10 +488,10 @@ const WindowedRollupRootSchema = z.object({
   title: z.string().nullable().catch(null),
   status: z.string().nullable().catch(null),
   assignee: z.string().nullable().catch(null),
-  created_at: z.coerce.number().nullable().catch(null),
-  started_at: z.coerce.number().nullable().catch(null),
-  completed_at: z.coerce.number().nullable().catch(null),
-  ended_at: z.coerce.number().nullable().catch(null),
+  created_at: nullableEpochSeconds,
+  started_at: nullableEpochSeconds,
+  completed_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
   providers: z.array(z.string()).catch([]),
   cost_usd: nullableNumber,
   cost_usd_equivalent: nullableNumber,
@@ -501,7 +507,7 @@ const WindowedRollupRootSchema = z.object({
 export const WindowedRollupResponseSchema = z.object({
   schema: z.string().catch("kanban-windowed-rollup-v1"),
   since_hours: z.coerce.number().catch(168),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   completed_roots: z.coerce.number().catch(0),
   roots: z.array(WindowedRollupRootSchema).catch([]),
 });
@@ -539,12 +545,12 @@ export const BoardTaskSchema = z.object({
   status: TaskStatusSchema,
   assignee: z.string().nullable().catch(null),
   priority: z.coerce.number().catch(0),
-  created_at: z.coerce.number().catch(0),
-  started_at: z.coerce.number().nullable().catch(null),
-  completed_at: z.coerce.number().nullable().catch(null),
-  archived_at: z.coerce.number().nullable().catch(null),
-  due_at: z.coerce.number().nullable().catch(null),
-  last_heartbeat_at: z.coerce.number().nullable().catch(null),
+  created_at: epochSeconds,
+  started_at: nullableEpochSeconds,
+  completed_at: nullableEpochSeconds,
+  archived_at: nullableEpochSeconds,
+  due_at: nullableEpochSeconds,
+  last_heartbeat_at: nullableEpochSeconds,
   branch_name: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
@@ -598,7 +604,7 @@ export const BoardResponseSchema = z.object({
   assignees: z.array(z.string()).catch([]),
   latest_event_id: z.coerce.number().catch(0),
   source_errors: z.array(BoardSourceErrorSchema).catch([]),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
 });
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
 export type BoardResponse = z.infer<typeof BoardResponseSchema>;
@@ -615,7 +621,7 @@ export const BoardArchiveResponseSchema = z.object({
   assignee: z.string().nullable().catch(null),
   assignees: z.array(z.string()).catch([]),
   latest_event_id: z.coerce.number().catch(0),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
 });
 export type BoardArchiveResponse = z.infer<typeof BoardArchiveResponseSchema>;
 
@@ -637,8 +643,8 @@ export const EpicSchema = z.object({
   title: z.string().catch(""),
   body: z.string().nullable().catch(null),
   status: z.enum(["open", "closed"]).catch("open"),
-  created_at: z.coerce.number().nullable().catch(null),
-  closed_at: z.coerce.number().nullable().catch(null),
+  created_at: nullableEpochSeconds,
+  closed_at: nullableEpochSeconds,
   task_count: z.coerce.number().catch(0),
   open_tasks: z.coerce.number().catch(0),
   done_tasks: z.coerce.number().catch(0),
@@ -681,8 +687,8 @@ export const KanbanResultSchema = z.object({
   run_role_source: RunRoleSourceSchema.catch("missing_claim_event"),
   status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("done"),
   outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch("completed"),
-  started_at: z.coerce.number().catch(0),
-  ended_at: z.coerce.number().catch(0),
+  started_at: epochSeconds,
+  ended_at: epochSeconds,
   duration_seconds: z.coerce.number().catch(0),
   summary: z.string().catch(""),
   summary_preview: z.string().catch(""),
@@ -703,7 +709,7 @@ export const TodayDigestItemSchema = z.object({
   task_id: z.string().catch(""),
   task_title: z.string().catch("Ohne Titel"),
   task_summary: z.string().catch(""),
-  ended_at: z.coerce.number().catch(0),
+  ended_at: epochSeconds,
   profile: z.string().nullable().catch(null),
   run_role: RunRoleSchema.catch("legacy_unknown"),
   run_role_label: z.string().catch("Unknown / legacy run"),
@@ -721,7 +727,7 @@ export const TodayDigestResponseSchema = z.object({
   schema: z.string().catch("kanban-today-digest-v1"),
   items: z.array(TodayDigestItemSchema).catch([]),
   count: z.coerce.number().catch(0),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   day_start: z.coerce.number().catch(0),
   timezone: z.string().catch("local"),
   limit: z.coerce.number().catch(12),
@@ -732,8 +738,8 @@ export const KanbanReviewSchema = z.object({
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("review"),
   task_assignee: z.string().catch("hermes"),
-  created_at: z.coerce.number().catch(0),
-  submitted_at: z.coerce.number().nullable().catch(null),
+  created_at: epochSeconds,
+  submitted_at: nullableEpochSeconds,
   run_id: z.coerce.string().nullable().catch(null),
   reviewer_profile: z.string().nullable().catch(null),
   summary_preview: z.string().catch(""),
@@ -749,7 +755,7 @@ export const KanbanReviewSchema = z.object({
 export const RecentResultsResponseSchema = z.object({
   results: z.array(KanbanResultSchema).catch([]),
   count: z.coerce.number().catch(0),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   limit: z.coerce.number().catch(12),
   since_hours: z.coerce.number().catch(48),
   outcome: z.string().catch("completed"),
@@ -818,7 +824,7 @@ export const KanbanDecisionSchema = z.object({
 export const DecisionQueueResponseSchema = z.object({
   decisions: z.array(KanbanDecisionSchema),
   count: z.coerce.number().catch(0),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
 });
 
 // GET /release-status (plugin_api.py get_release_status) — the auto-release
@@ -830,7 +836,7 @@ export const DecisionQueueResponseSchema = z.object({
 // not invented on the frontend).
 const ReleaseStatusEventSchema = z.object({
   task_id: z.string().catch(""),
-  created_at: z.coerce.number().catch(0),
+  created_at: epochSeconds,
   payload: z.record(z.string(), z.unknown()).catch({}),
 });
 export const ReleaseStatusResponseSchema = z.object({
@@ -869,7 +875,7 @@ export type ReleaseTier = ReleaseModeResponse["max_tier_autonomous"];
 export const ReviewVerdictsResponseSchema = z.object({
   reviews: z.array(KanbanReviewSchema),
   count: z.coerce.number().catch(0),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   limit: z.coerce.number().catch(12),
 });
 
@@ -881,7 +887,7 @@ export const BlockedCompletionSchema = z.object({
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("blocked"),
   assignee: z.string().catch("hermes"),
   kind: z.enum(["completion_blocked_hallucination", "suspected_hallucinated_references", "verifier_request_changes"]).catch("completion_blocked_hallucination"),
-  created_at: z.coerce.number().catch(0),
+  created_at: epochSeconds,
   summary_preview: z.string().nullable().catch(null),
   phantom: z.array(z.string()).catch([]),
   reviewer_profile: z.string().nullable().catch(null).optional(),
@@ -893,7 +899,7 @@ export const BlockedCompletionSchema = z.object({
 export const BlockedCompletionsResponseSchema = z.object({
   blocked: z.array(BlockedCompletionSchema).catch([]),
   count: z.coerce.number().catch(0),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   since_hours: z.coerce.number().catch(48),
 });
 
@@ -909,7 +915,7 @@ const defaultSubsystemHealth = { status: "offline" as const, detail: "", error: 
 
 export const SystemHealthResponseSchema = z.object({
   schema: z.string().catch("hermes-health-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   overall: HealthStatusSchema.catch("offline"),
   subsystems: z.object({
     gateway: SubsystemHealthSchema.catch(defaultSubsystemHealth),
@@ -980,7 +986,7 @@ export const CronJobSchema = z.object({
 
 export const CronObservabilityResponseSchema = z.object({
   schema: z.string().catch("hermes-cron-obs-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   gateway: z.object({
     running: z.boolean().catch(false),
     pids: z.array(z.coerce.number()).catch([]),
@@ -1001,7 +1007,7 @@ const MetricsGroupSchema = z.object({
 
 export const MetricsLiteResponseSchema = z.object({
   schema: z.string().catch("hermes-metrics-lite-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   uptime_seconds: z.coerce.number().catch(0),
   // A malformed group degrades to defaults rather than emptying the record.
   groups: z.record(z.string(), MetricsGroupSchema).catch({}),
@@ -1094,7 +1100,7 @@ const OperatorInventoryActorSchema = z.object({
 
 export const OperatorInventoryResponseSchema = z.object({
   schema: z.string().catch("hermes-operator-inventory-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   summary: OperatorInventorySummarySchema,
   next_lever: OperatorInventoryLeverSchema,
   levers: z.array(OperatorInventoryLeverSchema).catch([]),
@@ -1136,7 +1142,7 @@ const PressureRecommendationSchema = z.object({
 
 export const PressureStatusResponseSchema = z.object({
   schema: z.literal("hermes-pressure-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   overall: PressureOverallSchema.catch("unknown"),
   cause: z.string().catch("Pressure unbekannt"),
   recommendation: PressureRecommendationSchema,
@@ -1317,7 +1323,7 @@ export const BacklogContractHealthSchema = z.object({
 
 export const BacklogResponseSchema = z.object({
   schema: z.string().catch("fo-backlog-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   items: z.array(BacklogItemSchema).catch([]),
   counts: z.object({
     now: z.coerce.number().catch(0),
@@ -1405,7 +1411,7 @@ export const OrchestrationDetailSchema = z.object({
 
 export const OrchestrationBacklogResponseSchema = z.object({
   schema: z.string().catch("orchestration-backlog-v1"),
-  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  checked_at: epochSeconds,
   items: z.array(OrchestrationItemSchema).catch([]),
   counts: z.object({
     backlog: z.coerce.number().catch(0),
@@ -1437,15 +1443,15 @@ const TaskRunSchema = z.object({
   outcome: z.string().nullable().catch(null),
   summary: z.string().nullable().catch(null),
   error: z.string().nullable().catch(null),
-  started_at: z.coerce.number().nullable().catch(null),
-  ended_at: z.coerce.number().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
   run_role: z.string().nullable().catch(null),
   run_role_label: z.string().nullable().catch(null),
 });
 const TaskEventSchema = z.object({
   id: z.coerce.number().catch(0),
   kind: z.string().catch(""),
-  created_at: z.coerce.number().catch(0),
+  created_at: epochSeconds,
   run_id: z.coerce.string().nullable().catch(null),
   // Free-form event payload. The Flow rail reads `decomposed.child_ids`
   // (the subtask group) and `flow_plan.spec` (the Vault plan-spec link).
@@ -1456,7 +1462,7 @@ const TaskCommentSchema = z.object({
   task_id: z.coerce.string().catch(""),
   author: z.string().nullable().catch(null),
   body: z.string().catch(""),
-  created_at: z.coerce.number().catch(0),
+  created_at: epochSeconds,
   kind: z.string().nullable().catch(null),
 });
 const TaskDiagnosticActionSchema = z.object({
@@ -1471,8 +1477,8 @@ const TaskDiagnosticSchema = z.object({
   title: z.string().catch(""),
   detail: z.string().nullable().catch(null),
   actions: z.array(TaskDiagnosticActionSchema).catch([]),
-  first_seen_at: z.coerce.number().nullable().catch(null),
-  last_seen_at: z.coerce.number().nullable().catch(null),
+  first_seen_at: nullableEpochSeconds,
+  last_seen_at: nullableEpochSeconds,
   count: z.coerce.number().nullable().catch(null),
   run_id: z.coerce.string().nullable().catch(null),
   data: z.record(z.string(), z.unknown()).nullable().catch(null),
@@ -1480,7 +1486,7 @@ const TaskDiagnosticSchema = z.object({
 const TaskDiagnosticWarningsSchema = z.object({
   count: z.coerce.number().catch(0),
   kinds: z.record(z.string(), z.coerce.number()).catch({}),
-  latest_at: z.coerce.number().nullable().catch(null),
+  latest_at: nullableEpochSeconds,
   highest_severity: z.string().nullable().catch(null),
 }).passthrough();
 const TaskDetailTaskSchema = z.object({
@@ -1525,7 +1531,7 @@ const RunSummaryRootSchema = z.object({
   title: z.string().nullable().catch(null),
   status: z.string().nullable().catch(null),
   assignee: z.string().nullable().catch(null),
-  completed_at: nullableNumber,
+  completed_at: nullableEpochSeconds,
   cost_usd: nullableNumber,
   // Geschätzter API-Gegenwert + effektive Kosten (additiv; ältere Payloads → null via .catch).
   cost_effective_usd: nullableNumber,
@@ -1534,7 +1540,7 @@ const RunSummaryRootSchema = z.object({
 });
 export const RunSummaryResponseSchema = z.object({
   since_hours: z.coerce.number().catch(24),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   completed_roots: z.coerce.number().catch(0),
   total_cost_usd: nullableNumber,
   // Geschätzter API-Gegenwert Gesamt (additiv; ältere Payloads → null).
@@ -1567,7 +1573,7 @@ export const ReliabilityResponseSchema = z.object({
   since_hours: z.coerce.number().catch(168),
   baseline_hours: z.coerce.number().catch(720),
   min_n: z.coerce.number().catch(5),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   profiles: z.array(ReliabilityProfileSchema),
   baseline: z.array(ReliabilityProfileSchema).catch([]),
 });
@@ -1598,7 +1604,7 @@ const RunsDailyPointSchema = z.object({
 });
 export const RunsDailyResponseSchema = z.object({
   days: z.coerce.number().catch(30),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   series: z.array(RunsDailyPointSchema),
 });
 export type RunsDailyPoint = z.infer<typeof RunsDailyPointSchema>;
@@ -1652,7 +1658,7 @@ const ReviewValueRowSchema = z.object({
 });
 export const RunsCostsResponseSchema = z.object({
   days: z.coerce.number().catch(7),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   today: CostBucketSchema,
   window: CostBucketSchema,
   profiles: z.array(CostProfileRowSchema).catch([]),
@@ -1663,7 +1669,7 @@ export const RunsCostsSeriesPointSchema = CostBucketSchema.extend({
 });
 export const RunsCostsSeriesResponseSchema = z.object({
   days: z.coerce.number().catch(7),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   series: z.array(RunsCostsSeriesPointSchema).catch([]),
   field_sources: z.record(z.string(), z.string()).optional(),
 });
@@ -1698,7 +1704,7 @@ const SubscriptionBurnBucketSchema = SubscriptionBurnLaneSchema.extend({
 });
 export const SubscriptionTokenBurnResponseSchema = z.object({
   days: z.coerce.number().catch(7),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   window_start: z.coerce.number().catch(0),
   totals: TokenBurnBucketSchema,
   by_lane: z.array(SubscriptionBurnLaneSchema).catch([]),
@@ -1746,7 +1752,7 @@ const IssueGroupSchema = z.object({
 });
 export const RunsIssuesResponseSchema = z.object({
   days: z.coerce.number().catch(30),
-  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  now: epochSeconds,
   total_failed_runs: z.coerce.number().catch(0),
   group_count: z.coerce.number().catch(0),
   truncated: z.boolean().catch(false),
@@ -1973,9 +1979,9 @@ export const TaskBodySchema = z.object({
     status: z.string().catch(""),
     assignee: z.string().nullable().catch(null),
     block_reason: z.string().nullable().catch(null),
-    created_at: z.coerce.number().nullable().catch(null),
-    started_at: z.coerce.number().nullable().catch(null),
-    completed_at: z.coerce.number().nullable().catch(null),
+    created_at: nullableEpochSeconds,
+    started_at: nullableEpochSeconds,
+    completed_at: nullableEpochSeconds,
     review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
     branch_name: z.string().nullable().catch(null),
     model_override: z.string().nullable().catch(null),
@@ -1994,8 +2000,8 @@ export const TaskBodySchema = z.object({
     id: z.coerce.string(),
     profile: z.string().nullable().catch(null),
     status: z.string().catch(""),
-    started_at: z.coerce.number().nullable().catch(null),
-    ended_at: z.coerce.number().nullable().catch(null),
+    started_at: nullableEpochSeconds,
+    ended_at: nullableEpochSeconds,
     runtime_seconds: z.coerce.number().nullable().catch(null),
     input_tokens: z.coerce.number().nullable().catch(null),
     output_tokens: z.coerce.number().nullable().catch(null),

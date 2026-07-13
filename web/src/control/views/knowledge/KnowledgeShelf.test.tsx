@@ -99,6 +99,7 @@ describe("DocCard", () => {
 });
 
 describe("CollectionSection", () => {
+  const validEpoch = 1_780_041_720;
   const collection: KnowledgeCollection = {
     id: "kanon",
     title: "Kanon — Die geteilte Wahrheit",
@@ -106,12 +107,12 @@ describe("CollectionSection", () => {
     accent: "cyan",
     icon: "Landmark",
     doc_count: 2,
-    updated_ts: 1000,
+    updated_ts: validEpoch,
     docs: [doc({ id: "a", title: "Doc A" }), doc({ id: "b", title: "Doc B" })],
   };
 
   it("rendert Titel, Beschreibung, Doc-Zahl und beide Karten", () => {
-    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={1000} onOpen={() => {}} />);
+    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={validEpoch} onOpen={() => {}} />);
     expect(html).toContain("Kanon — Die geteilte Wahrheit");
     expect(html).toContain("Dauerhafte, agent-übergreifende Fakten.");
     expect(html).toContain("2 Dokumente");
@@ -120,13 +121,13 @@ describe("CollectionSection", () => {
   });
 
   it("zeigt einen „aktualisiert vor X“-Chip aus updated_ts/now", () => {
-    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={1000 + 3600} onOpen={() => {}} />);
+    const html = renderToStaticMarkup(<CollectionSection collection={collection} now={validEpoch + 3600} onOpen={() => {}} />);
     expect(html).toContain("aktualisiert vor 1h");
   });
 
   it("blendet den Chip aus, wenn updated_ts 0 ist (leere Sammlung)", () => {
     const html = renderToStaticMarkup(
-      <CollectionSection collection={{ ...collection, updated_ts: 0 }} now={1000} onOpen={() => {}} />,
+      <CollectionSection collection={{ ...collection, updated_ts: 0 }} now={validEpoch} onOpen={() => {}} />,
     );
     expect(html).not.toContain("aktualisiert vor");
   });

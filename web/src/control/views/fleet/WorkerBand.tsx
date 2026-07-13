@@ -10,6 +10,7 @@
  * step_key — beides „live", konform mit Regel 1.
  */
 import { computeBandGeometry, fmtDurationClock } from "../../lib/fleetHub";
+import { elapsedSeconds } from "../../lib/derive";
 import type { Worker } from "../../lib/types";
 
 type BandSize = "lane" | "big" | "mini";
@@ -24,7 +25,7 @@ export function WorkerBand({
   size?: BandSize;
 }) {
   const geo = computeBandGeometry(worker, now);
-  const elapsed = Math.max(0, now - worker.started_at);
+  const elapsed = elapsedSeconds(worker.started_at, now) ?? Number.NaN;
   const step = worker.step_key?.trim() || "läuft";
   const p50 = worker.eta_p50_seconds && worker.eta_p50_seconds > 0 ? worker.eta_p50_seconds : null;
   const p90 = worker.eta_p90_seconds && worker.eta_p90_seconds > 0 ? worker.eta_p90_seconds : null;

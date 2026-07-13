@@ -14,7 +14,7 @@
  * separat darunter (wie schon in AutoReleaseTile), statt eine Zuordnung zu
  * erfinden, die die API nicht hergibt.
  */
-import { fmtAge } from "../../lib/derive";
+import { fmtRelativeTime } from "../../lib/derive";
 import type { ReleaseStatusEvent, ReleaseStatusResponse } from "../../lib/schemas";
 
 type RailTone = "ok" | "alert" | "warn" | "neutral";
@@ -60,7 +60,7 @@ export function RisikoActivity({ releaseStatus }: RisikoActivityProps) {
                 <div className="rk-rail-body">
                   <div className="rk-rail-top">
                     <span className={`rk-rail-badge rk-rb-${tone}`}>{outcome}</span>
-                    <span className="rk-rail-age">{`vor ${fmtAge(ev.created_at)}`}</span>
+                    <span className="rk-rail-age">{fmtRelativeTime(ev.created_at)}</span>
                   </div>
                   <div className="rk-rail-desc" title={detailOf(ev) ?? ev.task_id}>{detailOf(ev) ?? ev.task_id}</div>
                 </div>

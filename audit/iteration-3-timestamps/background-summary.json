@@ -1,0 +1,17 @@
+{
+  "base": "http://127.0.0.1:9121",
+  "completed_while_frozen": true,
+  "expected_fault_console_errors": 0,
+  "first_frame_disclosed_age": true,
+  "first_frame_stale_source_disclosed": true,
+  "first_frame_text": "A\naudit\nAUDIT-BACKGROUND-WORKER\naudit-scratch\n\u2665 5 min\nbackground-proof\n5m06s / p50 15m00s",
+  "frozen_elapsed_seconds": 301.29,
+  "initial_text": "A\naudit\nAUDIT-BACKGROUND-WORKER\naudit-scratch\n\u2665 1 s\nbackground-proof\n1s / p50 15m00s",
+  "screenshots": [
+    "audit/iteration-3-timestamps/background-first-frame-1440x900.png",
+    "audit/iteration-3-timestamps/background-converged-1440x900.png"
+  ],
+  "successful_recovery_removed_worker": true,
+  "unexpected_console_errors": [],
+  "wait_requested_seconds": 300
+}

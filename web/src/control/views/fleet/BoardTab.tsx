@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
+import { inspectEpochSeconds, validateChronology } from "../../lib/derive";
 import { taskStatusLabel } from "../../lib/tones";
 import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
 import { type ChainNode } from "./shared";
@@ -59,21 +60,22 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
-function timestampValue(value: number | null | undefined): { dateTime: string; label: string } | null {
-  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+function timestampValue(value: number | null | undefined, now: number): { dateTime: string | null; label: string } | null {
+  if (value == null) return null;
+  const inspected = inspectEpochSeconds(value, now);
+  if (!inspected.valid) return { dateTime: null, label: "Zeit ungültig" };
   const date = new Date(value * 1000);
-  if (!Number.isFinite(date.getTime())) return null;
   return {
     dateTime: date.toISOString(),
     label: date.toLocaleString("de-DE", {
       dateStyle: "medium",
       timeStyle: "medium",
       timeZone: "Europe/Berlin",
-    }),
+    }) + (inspected.relation === "future" ? " · zukünftig" : ""),
   };
 }
 
-function TaskInformation({ task }: { task: BoardTask }) {
+function TaskInformation({ task, now }: { task: BoardTask; now: number }) {
   const timestamps = [
     ["Erstellt", task.created_at],
     ["Gestartet", task.started_at],
@@ -82,6 +84,11 @@ function TaskInformation({ task }: { task: BoardTask }) {
     ["Fällig", task.due_at],
     ["Heartbeat", task.last_heartbeat_at],
   ] as const;
+  const chronology = validateChronology({
+    createdAt: task.created_at,
+    startedAt: task.started_at,
+    completedAt: task.completed_at,
+  });
 
   return (
     <details className="fleet-boardtab-disclosure">
@@ -93,12 +100,13 @@ function TaskInformation({ task }: { task: BoardTask }) {
         {task.link_counts.parents > 0 && <><dt>Vorgänger</dt><dd>{task.link_counts.parents}</dd></>}
         {task.link_counts.children > 0 && <><dt>Nachfolger</dt><dd>{task.link_counts.children}</dd></>}
         {task.progress && task.progress.total > 0 && <><dt>Fortschritt</dt><dd>{task.progress.done}/{task.progress.total}</dd></>}
+        {!chronology.valid && <><dt>Zeitfolge</dt><dd>{chronology.reason}</dd></>}
         {timestamps.map(([label, value]) => {
-          const formatted = timestampValue(value);
+          const formatted = timestampValue(value, now);
           return formatted ? (
             <div className="fleet-boardtab-detail-pair" key={label}>
               <dt>{label}</dt>
-              <dd><time dateTime={formatted.dateTime}>{formatted.label}</time></dd>
+              <dd>{formatted.dateTime ? <time dateTime={formatted.dateTime}>{formatted.label}</time> : <span>{formatted.label}</span>}</dd>
             </div>
           ) : null;
         })}
@@ -358,7 +366,7 @@ export function BoardTab({
                       {content}
                     </button>
                   )}
-                  <TaskInformation task={t} />
+                  <TaskInformation task={t} now={board?.now ?? Math.floor(Date.now() / 1000)} />
                 </div>
               );
             })}

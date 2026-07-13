@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import {
   STUCK_HEARTBEAT_S,
+  elapsedSeconds,
   fmtDur,
   fmtMB,
   fmtTokens,
@@ -14,6 +15,7 @@ import {
   workerRemaining,
   workerRunaway,
   workerRuntime,
+  inspectEpochSeconds,
   workerTimeAxisState,
   timeAxisScaleMax,
 } from "../lib/derive";
@@ -227,7 +229,7 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
   }
 
   const latestAt = heartbeatNotes[0]?.at ?? 0;
-  const latestAge = latestAt > 0 ? Math.max(0, now - latestAt) : null;
+  const latestAge = latestAt > 0 ? elapsedSeconds(latestAt, now) : null;
   const latestStale = latestAge != null && latestAge > STUCK_HEARTBEAT_S;
 
   return (
@@ -238,11 +240,11 @@ function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number 
       ) : null}
       <ol className="space-y-1">
         {heartbeatNotes.map((ev) => {
-          const age = ev.at > 0 ? Math.max(0, now - ev.at) : null;
+          const age = ev.at > 0 ? elapsedSeconds(ev.at, now) : null;
           return (
             <li key={ev.id} className="flex items-start gap-2">
               <span className="mt-0.5 min-w-[3.5rem] shrink-0 text-right font-data text-micro text-ink-3">
-                {age != null ? de.worker.activityAgo(fmtDur(age)) : "—"}
+                {age != null ? de.worker.activityAgo(fmtDur(age)) : "Zeit ungültig"}
               </span>
               <span className="text-micro leading-snug text-ink-2">{ev.note}</span>
             </li>
@@ -269,19 +271,23 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   const inspect = worker.inspect ?? null;
   const remaining = workerRemaining(worker, now);
   const runtime = workerRuntime(worker, now);
+  const runtimeValid = Number.isFinite(runtime);
 
   // Phase A: Tätigkeits-Note + ehrliche ETA.
   const note = worker.last_heartbeat_note ?? null;
-  const noteAge = worker.last_heartbeat_note_at ? Math.max(0, now - worker.last_heartbeat_note_at) : null;
+  const noteAge = worker.last_heartbeat_note_at ? elapsedSeconds(worker.last_heartbeat_note_at, now) : null;
   const etaP50 = worker.eta_p50_seconds ?? null;
   const etaP90 = worker.eta_p90_seconds ?? null;
-  const hasHeartbeat = worker.last_heartbeat_at > 0;
+  const heartbeatProvided = worker.last_heartbeat_at !== 0;
+  const hasHeartbeat = heartbeatProvided && inspectEpochSeconds(worker.last_heartbeat_at, now).valid;
   const heartbeatAge = workerHeartbeatAge(worker, now);
 
   // Phase B: Zeit-Achse + Telemetrie-Chips.
   const budget = worker.max_runtime_seconds ?? 0;
-  const axisState = workerTimeAxisState(runtime, etaP50, etaP90, budget, heartbeatAge, hasHeartbeat);
-  const axisScaleMax = timeAxisScaleMax(runtime, etaP90, budget);
+  const axisState = runtimeValid
+    ? workerTimeAxisState(runtime, etaP50, etaP90, budget, heartbeatAge, hasHeartbeat)
+    : { key: "no_eta" as const, tone: "amber" as const, label: "Zeit ungültig", noEta: true };
+  const axisScaleMax = runtimeValid ? timeAxisScaleMax(runtime, etaP90, budget) : 1;
 
   // Telemetrie-Chips: effektives Modell + Schritt + Tokens.
   const effectiveModel = worker.effective_model ?? null;
@@ -306,10 +312,18 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
     : "dispatch";
   const orderedActions: WorkerActionKey[] = [primary, ...ACTION_ORDER.filter((a) => a !== primary)];
   const stuckReason = hasHeartbeat ? de.worker.stuckReason(fmtDur(heartbeatAge)) : de.worker.expiredReason;
-  const problemText = worker.block_reason || (health.key === "offline" ? de.worker.offlineReason : health.key === "stuck" ? stuckReason : null);
+  const problemText = worker.block_reason || (!runtimeValid
+    ? "Start-Zeitstempel ungültig"
+    : heartbeatProvided && !hasHeartbeat
+      ? "Heartbeat-Zeitstempel ungültig"
+      : health.key === "offline"
+        ? de.worker.offlineReason
+        : health.key === "stuck"
+          ? stuckReason
+          : null);
 
   // Mini-Balken der Kopfzeile: Budget-Anteil (bevorzugt), sonst ETA-Anteil.
-  const headerMeterPct = worker.max_runtime_seconds > 0
+  const headerMeterPct = runtimeValid && worker.max_runtime_seconds > 0
     ? Math.min(1, runtime / worker.max_runtime_seconds)
     : etaP50 != null && etaP50 > 0 ? Math.min(1, runtime / etaP50) : null;
 
@@ -404,13 +418,17 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {budget > 0 ? <span className="text-micro text-ink-3">/ {fmtDur(budget)}</span> : null}
         </div>
         {/* Zeit-Achsen-Track */}
-        <TimeAxisTrack
-          elapsed={runtime}
-          p50={etaP50}
-          p90={etaP90}
-          budget={budget}
-          scaleMax={axisScaleMax}
-        />
+        {runtimeValid ? (
+          <TimeAxisTrack
+            elapsed={runtime}
+            p50={etaP50}
+            p90={etaP90}
+            budget={budget}
+            scaleMax={axisScaleMax}
+          />
+        ) : (
+          <Text variant="label" className="text-status-warn">Zeitachse nicht verfügbar: Start-Zeitstempel ungültig.</Text>
+        )}
         {/* Kein ETA-Hinweis */}
         {axisState.noEta ? (
           <Text variant="label" className="text-ink-3">{de.worker.timeAxisNoEta}</Text>

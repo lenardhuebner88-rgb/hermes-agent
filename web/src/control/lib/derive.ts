@@ -13,6 +13,73 @@ import type {
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
 
+const MIN_EPOCH_SECONDS = 946_684_800; // 2000-01-01T00:00:00Z
+const MAX_FUTURE_EPOCH_SECONDS = 10 * 366 * 86_400;
+
+export interface EpochSecondsInspection {
+  valid: boolean;
+  relation: 'past' | 'present' | 'future' | 'invalid';
+  deltaSeconds: number | null;
+}
+
+/**
+ * One guarded epoch-seconds contract for Control/Kanban surfaces.
+ * Rejects missing/zero/negative/non-finite/millisecond-shaped values while
+ * keeping long-lived historical records and reasonable scheduled futures.
+ */
+export function inspectEpochSeconds(value: unknown, now: number = nowSec()): EpochSecondsInspection {
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || !Number.isFinite(now)
+    || value < MIN_EPOCH_SECONDS
+    || value > now + MAX_FUTURE_EPOCH_SECONDS
+  ) {
+    return { valid: false, relation: 'invalid', deltaSeconds: null };
+  }
+  const deltaSeconds = Math.floor(now - value);
+  return {
+    valid: true,
+    relation: deltaSeconds > 0 ? 'past' : deltaSeconds < 0 ? 'future' : 'present',
+    deltaSeconds,
+  };
+}
+
+/** Elapsed seconds only for a valid timestamp that is not in the future. */
+export function elapsedSeconds(value: unknown, now: number = nowSec()): number | null {
+  const inspected = inspectEpochSeconds(value, now);
+  if (!inspected.valid || inspected.deltaSeconds == null || inspected.deltaSeconds < 0) return null;
+  return inspected.deltaSeconds;
+}
+
+export function validateChronology({
+  createdAt,
+  startedAt,
+  completedAt,
+}: {
+  createdAt: unknown;
+  startedAt?: unknown | null;
+  completedAt?: unknown | null;
+}): { valid: boolean; reason: string | null } {
+  const fields = [
+    ['Anlage', createdAt],
+    ['Start', startedAt],
+    ['Abschluss', completedAt],
+  ] as const;
+  for (const [label, value] of fields) {
+    if (value != null && !inspectEpochSeconds(value).valid) {
+      return { valid: false, reason: `${label}-Zeitstempel ungültig` };
+    }
+  }
+  if (typeof createdAt === 'number' && typeof startedAt === 'number' && startedAt < createdAt) {
+    return { valid: false, reason: 'Start liegt vor Anlage' };
+  }
+  if (typeof startedAt === 'number' && typeof completedAt === 'number' && completedAt < startedAt) {
+    return { valid: false, reason: 'Abschluss liegt vor Start' };
+  }
+  return { valid: true, reason: null };
+}
+
 /**
  * Stuck-Schwelle: ein *tatsächlich getrackter* Heartbeat, der älter als das ist,
  * gilt als „stuck" (Sekunden). Bewusst nahe an der Backend-Reclaim-Schwelle
@@ -32,10 +99,16 @@ export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
   // Most workers never write a heartbeat (last_heartbeat_at stays NULL, coerced
   // to 0 here), so a missing heartbeat must NOT read as "ancient" — that made
   // healthy running workers show "Stuck". A heartbeat only counts when present.
-  const hasHeartbeat = w.last_heartbeat_at > 0;
-  const heartbeatStale = hasHeartbeat && (now - w.last_heartbeat_at) > STUCK_HEARTBEAT_S;
+  const heartbeatProvided = w.last_heartbeat_at !== 0;
+  const heartbeatAge = heartbeatProvided ? elapsedSeconds(w.last_heartbeat_at, now) : null;
+  const heartbeatInvalid = heartbeatProvided && heartbeatAge == null;
+  const heartbeatStale = heartbeatAge != null && heartbeatAge > STUCK_HEARTBEAT_S;
+  const startedInvalid = elapsedSeconds(w.started_at, now) == null;
   // Authoritative liveness signal (matches the dispatcher's TTL reclaim).
-  const expired = w.claim_expires > 0 && w.claim_expires < now;
+  const claimProvided = w.claim_expires !== 0;
+  const claimInspection = claimProvided ? inspectEpochSeconds(w.claim_expires, now) : null;
+  const claimInvalid = claimProvided && !claimInspection?.valid;
+  const expired = claimInspection?.valid === true && w.claim_expires < now;
 
   if (w.run_status === 'timed_out' || w.run_status === 'crashed' || (w.inspect ? !w.inspect.alive : false)) {
     return { key: 'offline', tone: 'zinc', label: 'Offline', dot: 'offline' };
@@ -43,7 +116,7 @@ export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
   if (w.run_status === 'blocked') {
     return { key: 'blocked', tone: 'red', label: 'Blockiert', dot: 'error' };
   }
-  if (expired || heartbeatStale) {
+  if (expired || claimInvalid || heartbeatStale || heartbeatInvalid || startedInvalid) {
     return { key: 'stuck', tone: 'amber', label: 'Hängt', dot: 'warn' };
   }
   return { key: 'healthy', tone: 'cyan', label: 'Läuft', dot: 'live' };
@@ -55,11 +128,11 @@ export function workerSortRank(w: Worker, now: number = nowSec()): number {
   return ({ stuck: 3, blocked: 3, offline: 2, healthy: 0 } as const)[k] ?? 0;
 }
 
-export const workerRuntime = (w: Worker, now: number = nowSec()) => now - w.started_at;
+export const workerRuntime = (w: Worker, now: number = nowSec()) => elapsedSeconds(w.started_at, now) ?? Number.NaN;
 export const workerRemaining = (w: Worker, now: number = nowSec()) =>
   w.max_runtime_seconds - workerRuntime(w, now);
 export const workerHeartbeatAge = (w: Worker, now: number = nowSec()) =>
-  now - w.last_heartbeat_at;
+  elapsedSeconds(w.last_heartbeat_at, now) ?? Number.NaN;
 
 /* ── Runaway-Erkennung (Zeitbomben-Läufe) ─────────────────────────────────
  * Ein Lauf gilt als Runaway-Kandidat, BEVOR er Budget verbrennt:
@@ -86,11 +159,13 @@ export function workerRunaway(w: Worker, now: number = nowSec()): RunawayState {
   const runtime = workerRuntime(w, now);
   const max = w.max_runtime_seconds > 0 ? w.max_runtime_seconds : null;
   const pct = max ? runtime / max : 0;
-  const hasHeartbeat = w.last_heartbeat_at > 0;
-  const hbAge = hasHeartbeat ? now - w.last_heartbeat_at : null;
+  const hbAge = w.last_heartbeat_at > 0 ? elapsedSeconds(w.last_heartbeat_at, now) : null;
 
   const reasons: string[] = [];
   let level: RunawayLevel = 'none';
+  if (!Number.isFinite(runtime)) {
+    return { level: 'warn', pct: 0, reasons: ['Start-Zeitstempel ungültig'] };
+  }
   if (max && runtime >= max) {
     level = 'critical';
     reasons.push(`Laufzeit ${fmtDur(runtime)} ≥ Limit ${fmtDur(max)}`);
@@ -217,18 +292,34 @@ export function buildOverview(
 
 /* ── Formatierung ──────────────────────────────────────────────────────── */
 
-/** Kurzes Alter aus epoch-Sekunden: "3s","4m","2h","4d". */
-export function fmtAge(epochSec: number, now: number = nowSec()): string {
-  const d = Math.max(0, now - epochSec);
+function fmtCompactSeconds(seconds: number): string {
+  const d = Math.floor(seconds);
   if (d < 60) return `${d}s`;
   if (d < 3600) return `${Math.floor(d / 60)}m`;
   if (d < 86400) return `${Math.floor(d / 3600)}h`;
   return `${Math.floor(d / 86400)}d`;
 }
 
+/** Kurzes Alter aus epoch-Sekunden; Zukunft und Fehler bleiben explizit. */
+export function fmtAge(epochSec: unknown, now: number = nowSec()): string {
+  const inspected = inspectEpochSeconds(epochSec, now);
+  if (!inspected.valid || inspected.deltaSeconds == null) return 'Zeit ungültig';
+  if (inspected.relation === 'future') return `in ${fmtCompactSeconds(Math.abs(inspected.deltaSeconds))}`;
+  return fmtCompactSeconds(inspected.deltaSeconds);
+}
+
+/** Vollständiges relatives Label, damit Aufrufer nie "vor in …" bauen. */
+export function fmtRelativeTime(epochSec: unknown, now: number = nowSec()): string {
+  const inspected = inspectEpochSeconds(epochSec, now);
+  if (!inspected.valid || inspected.deltaSeconds == null) return 'Zeit ungültig';
+  if (inspected.relation === 'future') return `in ${fmtCompactSeconds(Math.abs(inspected.deltaSeconds))}`;
+  return `vor ${fmtCompactSeconds(inspected.deltaSeconds)}`;
+}
+
 /** Dauer aus Sekunden: "2h 14m" / "4m" / "52s". */
 export function fmtDur(sec: number): string {
-  sec = Math.max(0, Math.floor(sec));
+  if (!Number.isFinite(sec) || sec < 0) return 'Dauer ungültig';
+  sec = Math.floor(sec);
   const hh = Math.floor(sec / 3600);
   const mm = Math.floor((sec % 3600) / 60);
   if (hh > 0) return `${hh}h ${String(mm).padStart(2, '0')}m`;
@@ -265,16 +356,27 @@ export function freshness(
   if (lastUpdated == null) {
     return { ageSec: null, stale: false, label: "noch nie" };
   }
-  const ageSec = Math.max(0, now - lastUpdated);
+  const inspected = inspectEpochSeconds(lastUpdated, now);
+  if (!inspected.valid || inspected.deltaSeconds == null) {
+    return { ageSec: null, stale: true, label: 'Zeit ungültig' };
+  }
+  const ageSec = Math.max(0, inspected.deltaSeconds);
   const threshold = Math.max(30, Math.floor((intervalMs / 1000) * 3));
-  return { ageSec, stale: ageSec > threshold, label: `vor ${fmtAge(lastUpdated, now)}` };
+  return { ageSec, stale: ageSec > threshold, label: fmtRelativeTime(lastUpdated, now) };
 }
 
 /** DD/MM/YYYY, HH:mm (Design-System-Format). */
-export function fmtClock(epochSec: number): string {
-  const d = new Date(epochSec * 1000);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
+export function fmtClock(epochSec: unknown): string {
+  if (!inspectEpochSeconds(epochSec).valid || typeof epochSec !== 'number') return 'Zeit ungültig';
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Berlin',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date(epochSec * 1000));
 }
 
 /* ── Kosten-Anzeige (geschätzte API-Äquivalente für Abo-Runs) ───────────────
@@ -348,7 +450,7 @@ export function workerBurnRate(
   budgetSec?: number,
 ): BurnInfo {
   const hasData = inputTokens != null || outputTokens != null;
-  if (!hasData || elapsedSec <= 0) {
+  if (!hasData || !Number.isFinite(elapsedSec) || elapsedSec <= 0) {
     return { ratePerMin: null, projectedTotal: null, noData: !hasData };
   }
   const total = (inputTokens ?? 0) + (outputTokens ?? 0);

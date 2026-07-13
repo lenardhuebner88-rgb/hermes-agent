@@ -21,7 +21,7 @@ import { ArrowRight } from "lucide-react";
 import { useHermesWorkers, useAllBoardWorkers, useBoardCatalog, useBoard, usePlanSpecs, useHermesRunsCosts, useHermesRunsDaily, useHermesReliability, useLanesCatalog, useAccountUsage, useSystemHealth, usePressureStatus, usePlanSpecDetail, useKanbanDecisionQueue, useReleaseStatus, useReleaseMode } from "../hooks/useControlData";
 import { useFleetBoardSelection } from "../hooks/useFleetBoardSelection";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
-import { nowSec } from "../lib/derive";
+import { useClientNowSeconds } from "../lib/clock";
 import { de } from "../i18n/de";
 import type { Worker, ChainGraphResponse, PlanSpecRecord } from "../lib/types";
 import { HeuteTab } from "./fleet/HeuteTab";
@@ -122,7 +122,7 @@ export function FleetView() {
     return () => window.clearTimeout(reset);
   }, [selectedBoard]);
 
-  const now = nowSec();
+  const now = useClientNowSeconds();
 
   // Abgeleitete Daten
   const fleetWorkerData = fleetWorkers.data ?? workers.data;

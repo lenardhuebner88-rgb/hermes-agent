@@ -45,7 +45,7 @@ import type { AccountUsageResponse, BoardTask, ToneName, Worker } from "../lib/t
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
-import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
+import { fmtDur, fmtRelativeTime, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge } from "../components/atoms";
 import { KpiTile, RoleChip, SignalChip, SignalLabel, type SignalTone } from "../components/leitstand";
 import { Eyebrow, Text } from "../components/primitives";
@@ -524,11 +524,11 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
                   <RoleChip role={role} />
                   <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.68rem] text-live">
                     <HeartPulse className="h-3 w-3 motion-safe:animate-pulse" aria-hidden />
-                    {fmtAge(w.last_heartbeat_at, now)}
+                    {fmtRelativeTime(w.last_heartbeat_at, now)}
                   </span>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-ink">{w.task_title}</p>
-                <p className="mt-1 font-data text-micro text-ink-3">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
+                <p className="mt-1 font-data text-micro text-ink-3">{w.task_id} · {fmtRelativeTime(w.started_at, now)}</p>
               </div>
             );
           })}

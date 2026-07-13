@@ -1,0 +1,32 @@
+{
+  "base": "http://127.0.0.1:9121",
+  "fixture_board": "audit-scratch",
+  "viewports": {
+    "1440x900": {
+      "body_width": {
+        "client": 1440,
+        "scroll": 1440
+      },
+      "chronology_disclosed": true,
+      "console_errors": [],
+      "future_disclosed": true,
+      "invalid_labels": 3,
+      "screenshot": "audit/iteration-3-timestamps/timestamp-matrix-1440x900.png",
+      "worker_has_nan_geometry": false,
+      "worker_invalid_duration": true
+    },
+    "390x844": {
+      "body_width": {
+        "client": 390,
+        "scroll": 390
+      },
+      "chronology_disclosed": true,
+      "console_errors": [],
+      "future_disclosed": true,
+      "invalid_labels": 3,
+      "screenshot": "audit/iteration-3-timestamps/timestamp-matrix-390x844.png",
+      "worker_has_nan_geometry": false,
+      "worker_invalid_duration": true
+    }
+  }
+}
