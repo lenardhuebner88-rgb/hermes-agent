@@ -21259,7 +21259,7 @@ def auto_retry_blocked_tasks(
     rows = conn.execute(
         """
         SELECT id, assignee, consecutive_failures, max_retries, body,
-               auto_retry_count, created_by
+               auto_retry_count, created_by, block_kind
           FROM tasks
          WHERE status = 'blocked'
          ORDER BY priority DESC, created_at ASC
@@ -21282,6 +21282,20 @@ def auto_retry_blocked_tasks(
             continue
         blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
         if blocked_run is None:
+            continue
+        explicit_block_kind = row["block_kind"]
+        if explicit_block_kind == "needs_input":
+            with write_txn(conn):
+                _append_auto_retry_event_once(
+                    conn,
+                    task_id,
+                    "auto_retry_skipped",
+                    {
+                        "reason": "blocked_kind",
+                        "blocked_kind": explicit_block_kind,
+                        "blocked_run_id": int(blocked_run["id"]),
+                    },
+                )
             continue
         ended_at = int(blocked_run["ended_at"] or 0)
         reason = (blocked_run["summary"] or "").strip() or (
@@ -21318,13 +21332,18 @@ def auto_retry_blocked_tasks(
             continue
         current_count = int(row["auto_retry_count"] or 0)
         body_hash = _task_body_hash(row["body"])
-        blocked_kind = _blocked_kind_for_auto_retry(
-            reason,
-            verdict=blocked_run["verdict"],
-            auto_retry_count=current_count,
-            body_hash=body_hash,
-            last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, task_id),
-        )
+        if explicit_block_kind is None:
+            blocked_kind = _blocked_kind_for_auto_retry(
+                reason,
+                verdict=blocked_run["verdict"],
+                auto_retry_count=current_count,
+                body_hash=body_hash,
+                last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, task_id),
+            )
+        else:
+            blocked_kind = (
+                "retryable" if explicit_block_kind == "transient" else explicit_block_kind
+            )
         if blocked_kind != "retryable":
             with write_txn(conn):
                 if blocked_kind == "needs_operator":

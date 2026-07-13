@@ -5650,6 +5650,55 @@ def test_dispatch_auto_retry_leaves_question_blocks_untouched(
         assert event.payload["blocked_kind"] == "operator_question"
 
 
+def test_dispatch_auto_retry_honors_explicit_needs_input_without_reason_keywords(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="tool crashed", kind="needs_input")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.block_kind == "needs_input"
+        assert task.auto_retry_count == 0
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["blocked_kind"] == "needs_input"
+
+
+def test_dispatch_auto_retry_honors_explicit_transient_over_reason_keywords(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="operator question while a temporary tool is unavailable?",
+            kind="transient",
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 1)]
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.block_kind is None
+        assert task.auto_retry_count == 1
+
+
 def test_dispatch_auto_retry_leaves_secret_and_irreversible_blocks_untouched(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
