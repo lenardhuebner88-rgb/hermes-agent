@@ -16591,7 +16591,12 @@ def _classify_failure(
             ev["outcome"] = outcome
         if stall_class:
             ev["stall_class"] = stall_class
-        excerpt = (reason or error or "").strip()
+        excerpt = (error or reason or "").strip()
+        if source == "text":
+            for candidate in (error, reason, outcome or "", stall_class or ""):
+                if matched in candidate.lower():
+                    excerpt = candidate.strip()
+                    break
         if excerpt:
             ev["excerpt"] = excerpt[:300]
         return ev
@@ -18926,6 +18931,11 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
         stall_class=str(stall_class) if stall_class else None,
         reason=why_now,
     )
+    if (
+        not last_error
+        and evidence.get("source") == SILENT_BLOCK_ESCALATION_SOURCE
+    ):
+        h_ev.pop("excerpt", None)
     # ESCALATION-CLASSIFY-RELEASE-GATE-PARK-S1: a pre-run "awaiting release-gate
     # GO" park is an operator gate (the operator must run
     # ``hermes kanban release-gate <id>`` — the recommended_human_action the
