@@ -1670,9 +1670,12 @@ def get_board_archive(
 ):
     """Return one deterministic archive page without bloating ``GET /board``.
 
-    Cursor ordering uses the latest durable ``archived`` event, then task id as
-    a stable tie-breaker. Newer archive writes therefore cannot duplicate or
-    skip rows while a caller walks older pages.
+    Keyset cursor: latest durable ``archived`` event, then task id as a stable
+    tie-breaker. Rows already archived when the walk starts are neither skipped
+    nor duplicated. A task archived *during* the walk lands above the cursor and
+    is therefore not seen by that walk — the standard keyset trade-off; it shows
+    up on the next refresh. ``total_count`` is read per page, so a mid-walk
+    archive can briefly make the loaded count trail the total.
     """
     board = _resolve_board(board)
     parsed_cursor = _parse_archive_cursor(cursor)

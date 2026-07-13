@@ -8490,6 +8490,42 @@ def test_board_verifier_question_is_not_an_operator_question(client):
     assert detail.json()["task"]["operator_question"] is False
 
 
+def test_answer_operator_question_starts_a_fresh_retry_episode(client):
+    """Answering must reset ``auto_retry_count`` like every other unblock path.
+
+    ``unblock_task`` treats an operator release as a fresh retry episode. The
+    answer endpoint is a second release path, so a stale budget carried across
+    it would make the very next retryable failure report ``auto_retry_exhausted``.
+    """
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "answer resets retry budget", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, tid)
+        assert kb.hold_task(conn, tid, reason="operator hold: which credential?")
+        # Two auto-retries already spent in the episode that led to the hold.
+        conn.execute("UPDATE tasks SET auto_retry_count = 2 WHERE id = ?", (tid,))
+        conn.commit()
+        assert kb.get_task(conn, tid).auto_retry_count == 2
+
+    answered = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/answer",
+        json={"answer": "Use the scoped audit credential."},
+    )
+    assert answered.status_code == 200, answered.text
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.auto_retry_count == 0, (
+            "operator answer must start a fresh retry episode, "
+            f"got auto_retry_count={task.auto_retry_count}"
+        )
+
+
 def test_answer_operator_question_atomically_comments_and_unblocks(client):
     r = client.post(
         "/api/plugins/kanban/tasks",
