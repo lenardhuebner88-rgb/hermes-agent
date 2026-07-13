@@ -40,6 +40,7 @@ interface RisikoBlockedTask {
   title: string;
   status: string;
   block_reason?: string | null;
+  operator_question?: boolean;
   root_id?: string | null;
 }
 
@@ -87,7 +88,7 @@ export function RisikoTab({
 
   // Operator-Halts — echte Klassifikation (mirrort backend _AUTO_RETRY_QUESTION_RE);
   // alles andere blockierte behandelt die Retry-Sweep selbst, gehört nicht hierher.
-  const operatorHalts = blockedTasks.filter((t) => isOperatorQuestion(t.block_reason));
+  const operatorHalts = blockedTasks.filter((t) => isOperatorQuestion(t.operator_question));
 
   const reliabilityModel = buildReliabilityRiskModel({
     reliability,
@@ -146,7 +147,7 @@ export function RisikoTab({
               {t.block_reason ? <div className="rk-nc-meta">{t.block_reason}</div> : null}
             </div>
           </div>
-          {isOperatorQuestion(t.block_reason) ? <AnswerQuestion taskId={t.id} /> : null}
+          {isOperatorQuestion(t.operator_question) ? <AnswerQuestion taskId={t.id} /> : null}
           <div className="rk-nc-actions">
             <FleetTaskActions
               taskId={t.id}

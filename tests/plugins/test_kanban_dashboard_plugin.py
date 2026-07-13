@@ -8417,6 +8417,11 @@ def test_board_block_reason_operator_hold(client):
     assert task_card["block_reason"] == "operator hold", (
         f"expected 'operator hold', got {task_card.get('block_reason')!r}"
     )
+    assert task_card["operator_question"] is True
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["operator_question"] is True
 
 
 def test_board_block_reason_null_for_non_hold(client):
@@ -8448,6 +8453,41 @@ def test_board_block_reason_null_for_non_hold(client):
     assert "operator hold" not in reason.lower(), (
         f"non-hold blocked task must not have operator-hold block_reason, got {reason!r}"
     )
+
+
+def test_board_verifier_question_is_not_an_operator_question(client):
+    """A question mark in first-pass REQUEST_CHANGES prose stays retryable.
+
+    The dashboard must consume the dispatcher's verdict-aware classification,
+    not independently infer an operator action from punctuation.
+    """
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "review feedback", "assignee": "coder", "body": "AC v1"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="Verifier asks: why is this assertion missing?")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (tid,),
+        )
+        conn.commit()
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200, r.text
+    blocked_col = next(c for c in r.json()["columns"] if c["name"] == "blocked")
+    task_card = next(t for t in blocked_col["tasks"] if t["id"] == tid)
+    assert task_card["block_reason"] == "Verifier asks: why is this assertion missing?"
+    assert task_card["operator_question"] is False
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["operator_question"] is False
 
 
 def test_release_gate_endpoint_requires_confirm_and_executes_blocked_gate(client, monkeypatch):

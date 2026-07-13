@@ -1032,6 +1032,7 @@ describe("TaskDetailResponseSchema", () => {
         title: "Blocked detail",
         status: "blocked",
         block_reason: "needs operator input",
+        operator_question: true,
         diagnostics: [{
           kind: "superseded_blocked_review_artifact",
           severity: "warning",
@@ -1052,6 +1053,7 @@ describe("TaskDetailResponseSchema", () => {
     }, "kanban/task-detail-diagnostics");
 
     expect(parsed.task?.block_reason).toBe("needs operator input");
+    expect(parsed.task?.operator_question).toBe(true);
     expect(parsed.task?.diagnostics?.[0]?.actions[0].payload).toMatchObject({ command: "hermes kanban show t_blocked" });
   });
 });

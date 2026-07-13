@@ -106,7 +106,7 @@ afterEach(() => {
 
 function renderRisikoTab(overrides: {
   releaseGateDecisions?: KanbanDecision[];
-  blockedTasks?: Array<{ id: string; title: string; status: string; block_reason?: string | null; root_id?: string | null }>;
+  blockedTasks?: Array<{ id: string; title: string; status: string; block_reason?: string | null; operator_question?: boolean; root_id?: string | null }>;
   releaseStatus?: ReleaseStatusResponse | null;
   releaseMode?: ReleaseModeResponse | null;
   onReleaseModeChanged?: () => void | Promise<void>;
@@ -325,7 +325,7 @@ describe("RisikoTab — S2-Fix: activation polling", () => {
 describe("RisikoTab — Operator-Halts", () => {
   it("renders an operator-question block reason with the inline AnswerQuestion form", () => {
     renderRisikoTab({
-      blockedTasks: [{ id: "t_op1", title: "state.db-Retention: Prune+VACUUM", status: "blocked", block_reason: "operator hold: needs credentials" }],
+      blockedTasks: [{ id: "t_op1", title: "state.db-Retention: Prune+VACUUM", status: "blocked", block_reason: "operator hold: needs credentials", operator_question: true }],
     });
     expect(screen.getByText("state.db-Retention: Prune+VACUUM")).toBeTruthy();
     expect(screen.getByText(de.fleet.answerTitle)).toBeTruthy();
@@ -333,7 +333,7 @@ describe("RisikoTab — Operator-Halts", () => {
 
   it("does not classify a plain retry-eligible block as an operator halt (mirrors backend auto-retry classification)", () => {
     renderRisikoTab({
-      blockedTasks: [{ id: "t_retry1", title: "transient network blip", status: "blocked", block_reason: "connection reset, retrying" }],
+      blockedTasks: [{ id: "t_retry1", title: "transient network blip", status: "blocked", block_reason: "Verifier asks: why did this fail?", operator_question: false }],
     });
     expect(screen.queryByText("transient network blip")).toBeNull();
     expect(screen.getByText(de.fleet.risikoLeerState)).toBeTruthy();

@@ -589,7 +589,7 @@ export interface PendingItem {
  * zu einer geordneten Liste kombiniert.
  *
  * - Freigaben (freigabe: operator + Wartezustand) → je Item, zuerst
- * - Blockierte Tasks (status "blocked", block_reason enthält "operator hold") →
+ * - Blockierte Tasks mit backend-bestätigtem ``operator_question`` →
  *   als Operator-Halts ans Ende
  *
  * @param planspecs  Alle PlanSpecs (aus usePlanSpecs)
@@ -597,7 +597,7 @@ export interface PendingItem {
  */
 export function derivePendingItems(
   planspecs: Array<PlanSpecActionState & { topic?: string | null; filename?: string }>,
-  blockedTasks: Array<{ id: string; title: string; block_reason?: string | null }>,
+  blockedTasks: Array<{ id: string; title: string; operator_question?: boolean }>,
 ): PendingItem[] {
   const items: PendingItem[] = [];
 
@@ -614,11 +614,7 @@ export function derivePendingItems(
 
   // Operator-Halts (Risiko-Subtab)
   for (const t of blockedTasks) {
-    const reason = t.block_reason ?? "";
-    const isOperatorHold =
-      reason.toLowerCase().includes("operator") ||
-      reason.toLowerCase().includes("operator hold");
-    if (isOperatorHold) {
+    if (t.operator_question === true) {
       items.push({
         kind: "blocked",
         topic: t.title,

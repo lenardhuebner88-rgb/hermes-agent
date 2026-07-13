@@ -147,7 +147,7 @@ export function FleetView() {
   const pendingItems = useMemo(
     () => derivePendingItems(
       allPlanspecs.map((ps) => ({ freigabe: ps.freigabe, kanban_state: ps.kanban_state, topic: ps.topic, filename: ps.filename })),
-      blockedTasks.map((t) => ({ id: t.id, title: t.title, block_reason: t.block_reason ?? null })),
+      blockedTasks.map((t) => ({ id: t.id, title: t.title, operator_question: t.operator_question })),
     ),
     [allPlanspecs, blockedTasks],
   );

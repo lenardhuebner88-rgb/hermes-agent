@@ -123,18 +123,11 @@ export function manageActions(status: TaskStatus, opts: { hasChain: boolean }): 
 }
 
 // ── Operator-question classification (S6) ────────────────────────────────────
-// Mirrors the backend _AUTO_RETRY_QUESTION_RE classification: a blocked task
-// whose block_reason signals a non-retryable operator hold — e.g. "operator
-// hold", "missing credentials", "human approval needed", "?" etc. The auto-retry
-// sweep skips these; the operator must answer them. The RisikoTab previously
-// filtered with a bare `includes("operator")` — this captures the same set plus
-// the other auto-retry-question markers for consistency.
-const OPERATOR_QUESTION_RE =
-  /\?|\boperator\b|\bhuman\b|\bcredentials?\b|\bsecret\b|\btoken\b|\bapproval\b|\bfreigabe\b/i;
-
-export function isOperatorQuestion(blockReason?: string | null): boolean {
-  if (!blockReason) return false;
-  return OPERATOR_QUESTION_RE.test(blockReason);
+// Backend-owned truth: the dispatcher includes verdict + retry history in this
+// decision.  Inferring from prose here made a verifier's innocent "why?" look
+// like a human escalation even though the same block was auto-retryable.
+export function isOperatorQuestion(operatorQuestion?: boolean | null): boolean {
+  return operatorQuestion === true;
 }
 
 // ── Role chips ───────────────────────────────────────────────────────────────

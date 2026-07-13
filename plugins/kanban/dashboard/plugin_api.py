@@ -2041,8 +2041,10 @@ def get_board(
         # blocked causes (circuit-breaker, dependency stall). One batch query.
         blocked_ids = [t.id for t in tasks if t.status == "blocked"]
         block_reason_map: dict[str, Optional[str]] = {}
+        operator_question_map: dict[str, bool] = {}
         if blocked_ids:
             block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
+            operator_question_map = kanban_db.blocked_task_operator_questions(conn, tasks)
         planspec_source_map: dict[str, str] = {}
         if tasks:
             placeholders = ",".join("?" for _ in tasks)
@@ -2070,6 +2072,7 @@ def get_board(
             # blocked states (circuit-breaker, review-required, etc.).
             # Non-blocked tasks carry null — additive, old clients skip the key.
             d["block_reason"] = block_reason_map.get(t.id) if t.status == "blocked" else None
+            d["operator_question"] = operator_question_map.get(t.id, False)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -2277,6 +2280,9 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        task_d["operator_question"] = kanban_db.blocked_task_operator_questions(
+            conn, [task]
+        ).get(task.id, False)
         # K6: per-task cost = sum of cost_usd across this task's runs.
         # None until K5a populates the column / a run records a cost.
         task_d["cost_usd"] = kanban_db.task_runs_cost_usd_sum(conn, task_id=task_id)

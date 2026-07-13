@@ -888,35 +888,35 @@ describe("derivePendingItems", () => {
     expect(items[0]?.topic).toBe("fallback.md");
   });
 
-  it("blockierter Task mit 'operator hold' → Risiko-Item", () => {
+  it("backend-bestätigte Operator-Frage → Risiko-Item", () => {
     const items = derivePendingItems(
       [],
-      [{ id: "t1", title: "Deploy halten", block_reason: "operator hold" }],
+      [{ id: "t1", title: "Deploy halten", operator_question: true }],
     );
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "blocked", topic: "Deploy halten", targetSubtab: "risiko" });
   });
 
-  it("blockierter Task mit 'Operator' (Groß) → Risiko-Item (case-insensitive)", () => {
+  it("Verifier-Prosa mit Fragezeichen und negativer Klassifikation → kein Item", () => {
     const items = derivePendingItems(
       [],
-      [{ id: "t2", title: "Live-Backfill", block_reason: "Operator-Freigabe erforderlich" }],
+      [{ id: "t2", title: "Live-Backfill", operator_question: false }],
     );
-    expect(items[0]?.kind).toBe("blocked");
+    expect(items).toHaveLength(0);
   });
 
   it("blockierter Task ohne operator-Grund → kein Item", () => {
     const items = derivePendingItems(
       [],
-      [{ id: "t3", title: "Hängt", block_reason: "dependency missing" }],
+      [{ id: "t3", title: "Hängt", operator_question: false }],
     );
     expect(items).toHaveLength(0);
   });
 
-  it("blockierter Task ohne block_reason → kein Item", () => {
+  it("alter Payload ohne Klassifikation → kein Item", () => {
     const items = derivePendingItems(
       [],
-      [{ id: "t4", title: "Unklar", block_reason: null }],
+      [{ id: "t4", title: "Unklar" }],
     );
     expect(items).toHaveLength(0);
   });
@@ -924,7 +924,7 @@ describe("derivePendingItems", () => {
   it("Reihenfolge: Freigaben vor blockierten Tasks", () => {
     const items = derivePendingItems(
       [{ freigabe: "operator", kanban_state: "queued", topic: "plan-a", filename: "a.md" }],
-      [{ id: "t5", title: "Halt", block_reason: "operator hold" }],
+      [{ id: "t5", title: "Halt", operator_question: true }],
     );
     expect(items).toHaveLength(2);
     expect(items[0].kind).toBe("approval");
@@ -953,7 +953,7 @@ describe("pendingCount", () => {
   it("n Items → n", () => {
     const items = derivePendingItems(
       [{ freigabe: "operator", kanban_state: "queued", topic: "x", filename: "x.md" }],
-      [{ id: "t1", title: "Halt", block_reason: "operator hold" }],
+      [{ id: "t1", title: "Halt", operator_question: true }],
     );
     expect(pendingCount(items)).toBe(2);
   });

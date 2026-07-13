@@ -20726,6 +20726,96 @@ def _blocked_kind_for_auto_retry(
     return "retryable"
 
 
+def blocked_task_operator_questions(
+    conn: sqlite3.Connection,
+    tasks: Sequence[Task],
+) -> dict[str, bool]:
+    """Return the dispatcher's authoritative operator-input state per task.
+
+    Dashboard clients must not reproduce ``_AUTO_RETRY_QUESTION_RE`` from prose:
+    a first-pass ``REQUEST_CHANGES`` summary can contain a question mark while
+    still being explicitly retryable.  This batch helper reuses the exact
+    verdict/body-hash classifier used by :func:`auto_retry_blocked_tasks` and
+    keeps the board endpoint free of per-card queries.
+    """
+    blocked = [task for task in tasks if task.status == "blocked"]
+    if not blocked:
+        return {}
+    task_by_id = {task.id: task for task in blocked}
+    task_ids = list(task_by_id)
+    placeholders = ",".join("?" for _ in task_ids)
+
+    latest_runs: dict[str, sqlite3.Row] = {}
+    for row in conn.execute(
+        f"""
+        WITH candidates AS (
+            SELECT task_id, summary, error, verdict,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY task_id
+                       ORDER BY CASE WHEN outcome = 'blocked' THEN 0 ELSE 1 END,
+                                ended_at DESC, id DESC
+                   ) AS rank
+              FROM task_runs
+             WHERE task_id IN ({placeholders})
+               AND ended_at IS NOT NULL
+               AND (
+                   outcome = 'blocked'
+                   OR (outcome = 'completed' AND verdict = 'REQUEST_CHANGES')
+               )
+        )
+        SELECT task_id, summary, error, verdict
+          FROM candidates
+         WHERE rank = 1
+        """,
+        task_ids,
+    ).fetchall():
+        latest_runs[str(row["task_id"])] = row
+
+    retry_hashes: dict[str, str] = {}
+    for row in conn.execute(
+        f"""
+        SELECT task_id, payload
+          FROM task_events
+         WHERE task_id IN ({placeholders})
+           AND kind = 'auto_retried'
+         ORDER BY task_id, id DESC
+        """,
+        task_ids,
+    ).fetchall():
+        task_id = str(row["task_id"])
+        if task_id in retry_hashes:
+            continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        body_hash = payload.get("body_hash") if isinstance(payload, dict) else None
+        if isinstance(body_hash, str) and body_hash:
+            retry_hashes[task_id] = body_hash
+
+    result: dict[str, bool] = {}
+    for task_id, task in task_by_id.items():
+        if task.block_kind == "needs_input":
+            result[task_id] = True
+            continue
+        if task.block_kind in {"dependency", "transient"}:
+            result[task_id] = False
+            continue
+        run = latest_runs.get(task_id)
+        if run is None:
+            result[task_id] = False
+            continue
+        reason = (run["summary"] or "").strip() or (run["error"] or "").strip()
+        result[task_id] = _blocked_kind_for_auto_retry(
+            reason,
+            verdict=run["verdict"],
+            auto_retry_count=task.auto_retry_count,
+            body_hash=_task_body_hash(task.body),
+            last_auto_retry_body_hash=retry_hashes.get(task_id),
+        ) in {"operator_question", "needs_operator"}
+    return result
+
+
 def _latest_blocked_run_for_auto_retry(
     conn: sqlite3.Connection,
     task_id: str,

@@ -168,7 +168,21 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Extend the on-demand detail link contract additively with current `{id,title,status}` states for parents and children; preserve empty defaults for older payloads; derive a fail-closed blocker explanation in NodeDetail; withhold only the invalid stage advance while retaining valid management actions.
 - After:       Exact production candidate on port 9122 captured child `t_df095ea9` as `todo` and parent `t_6da86a6e` as `blocked`; authenticated `PATCH ready` returned 409 naming the exact parent; DOM rendered zero Starten buttons, one valid Abbrechen button, and `Starten nicht verfügbar — Vorgänger AUDIT BLOCKING PARENT (blocked) ist nicht fertig.` Zero unexpected console errors; both fixtures archived. Evidence: `audit/iteration-4-state/dependency-action-summary.json` and screenshot.
 - Gates:       Focused frontend 89 passed, exit 0; `tsc -b --noEmit` exit 0; backend plugin 268 passed, exit 0; Ruff exit 0; production build exit 0; candidate harness exit 0.
-- Commit:      this N-41 commit
+- Commit:      `3927d107b`
+- Status:      CONFIRMED
+
+### N-42  Operator questions are verdict-aware API truth, never punctuation guesses
+- Source:      Loop-4 real operator-question versus verifier-prose repro
+- Class:       DEFECT
+- Severity:    S1
+- Invariant:   Fleet offers answer/unblock semantics only when the dispatcher's verdict/retry-aware state says human input is required; a question mark in first-pass verifier feedback never creates a false operator action.
+- Repro:       On `audit-scratch`, drive one task through coder handoff → review claim → `REQUEST_CHANGES` with a question-mark summary, and park a second task through the sanctioned atomic operator-hold path; compare authenticated board/detail API flags with Risiko DOM; archive both fixtures.
+- Before:      Fleet independently mirrored a reduced prose regex and treated every `?` as an operator question. The dispatcher simultaneously classifies first-pass `REQUEST_CHANGES` as retryable, so `Verifier asks: why is this assertion missing?` produced a false `Operator-Frage beantworten` action. Fail-first: 3 frontend assertions and 2 backend API assertions failed.
+- Test:        Frontend fleet/schema/Risiko regressions failed 3/152 before the change; backend plugin failed 2/269. Final focused frontend set passed 306/306 and backend plugin passed 269/269.
+- Change:      Add one batched DB classifier that reuses the dispatcher's exact verdict, retry-count, task-body-hash, explicit block-kind, and auto-retry-history contract; expose additive `operator_question` booleans on board and detail APIs; make schemas fail closed for older payloads; remove every client-side prose inference from Risiko, drawer, and pending-item derivation.
+- After:       Exact production candidate on port 9122 captured the verifier task as `operator_question=false` in both APIs and the real hold as `true`; Risiko rendered zero verifier cards, one operator card, and exactly one answer form. Both fixtures were archived and the browser recorded zero console errors. Evidence: `audit/iteration-4-state/operator-question-summary.json` and screenshot.
+- Gates:       Focused frontend 306 passed, exit 0; backend plugin 269 passed, exit 0; Ruff exit 0; `tsc -b --noEmit` exit 0; production build exit 0; candidate harness exit 0. React quality review found no new effect/state coupling, prop mirroring, accessibility regression, or unstable render identity.
+- Commit:      this N-42 commit
 - Status:      CONFIRMED
 
 ## Later iterations

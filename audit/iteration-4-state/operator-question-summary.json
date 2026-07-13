@@ -1,0 +1,16 @@
+{
+  "base": "http://127.0.0.1:9122",
+  "board": "audit-scratch",
+  "board_operator_operator_question": true,
+  "board_verifier_operator_question": false,
+  "detail_operator_operator_question": true,
+  "detail_verifier_operator_question": false,
+  "dom_answer_forms": 1,
+  "dom_operator_cards": 1,
+  "dom_verifier_cards": 0,
+  "fixtures_archived_after_capture": true,
+  "operator_task_id": "t_8dd3a8e1",
+  "screenshot": "audit/iteration-4-state/operator-question-truth-1440x900.png",
+  "unexpected_console_errors": [],
+  "verifier_task_id": "t_5efdbcdd"
+}

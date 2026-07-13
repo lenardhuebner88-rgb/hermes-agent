@@ -352,6 +352,7 @@ interface UebersichtTabProps {
     status?: string;
     assignee?: string | null;
     block_reason?: string | null;
+    operator_question?: boolean;
     review_tier?: string | null;
     branch_name?: string | null;
     model_override?: string | null;
@@ -430,7 +431,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
       ) : null}
 
       {/* Operator-Frage beantworten (S6) — nur wenn blockiert + operator_question */}
-      {task.status === "blocked" && isOperatorQuestion(task.block_reason) ? (
+      {task.status === "blocked" && isOperatorQuestion(task.operator_question) ? (
         <AnswerQuestion taskId={task.id ?? ""} />
       ) : null}
 

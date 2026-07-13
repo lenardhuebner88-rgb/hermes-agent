@@ -557,6 +557,8 @@ export interface BoardTask {
   vault_memory_links?: VaultMemoryLink[];
   /** Round D: block reason for blocked tasks (latest task_run summary). "operator hold" marks an operator hold. Older payloads → undefined/null. */
   block_reason?: string | null;
+  /** Dispatcher-owned classification; never infer this from block_reason prose. */
+  operator_question?: boolean;
   auto_retry_count?: number;
   link_counts: { parents: number; children: number };
   comment_count: number;

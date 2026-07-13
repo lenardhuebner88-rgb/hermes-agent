@@ -587,6 +587,8 @@ export const BoardTaskSchema = z.object({
   // Ältere Server / nicht-blocked Tasks liefern null.
   // Enthält „operator hold" → explizit vom Operator gestoppt (Resume-Button zeigen).
   block_reason: z.string().nullable().catch(null),
+  // Verdict/retry-aware backend truth. Missing on old servers fails closed.
+  operator_question: z.boolean().catch(false),
   // K8 Kosten/Tokens pro Run — additiv; nur Tasks mit echtem Run tragen sie,
   // sonst null (kein Kosten-Footer auf der Karte). Spiegelt die Chain-Graph-
   // Knotenfelder: cost_effective_usd = cost_usd (metered) + cost_usd_equivalent
@@ -1500,6 +1502,7 @@ const TaskDetailTaskSchema = z.object({
   summary: z.string().nullable().catch(null),
   closure: z.string().nullable().catch(null),
   block_reason: z.string().nullable().catch(null),
+  operator_question: z.boolean().catch(false),
   diagnostics: z.array(TaskDiagnosticSchema).catch([]),
   warnings: TaskDiagnosticWarningsSchema.nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
@@ -1986,6 +1989,7 @@ export const TaskBodySchema = z.object({
     status: z.string().catch(""),
     assignee: z.string().nullable().catch(null),
     block_reason: z.string().nullable().catch(null),
+    operator_question: z.boolean().catch(false),
     created_at: nullableEpochSeconds,
     started_at: nullableEpochSeconds,
     completed_at: nullableEpochSeconds,

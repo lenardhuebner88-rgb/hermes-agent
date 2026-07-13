@@ -123,25 +123,12 @@ describe("manageActions", () => {
 });
 
 describe("isOperatorQuestion", () => {
-  it("classifies operator holds and human/credential/approval blockers as questions", () => {
-    expect(isOperatorQuestion("operator hold")).toBe(true);
-    expect(isOperatorQuestion("Operator Hold")).toBe(true);
-    expect(isOperatorQuestion("missing credentials?")).toBe(true);
-    expect(isOperatorQuestion("human approval needed")).toBe(true);
-    expect(isOperatorQuestion("Freigabe: bitte bestätigen")).toBe(true);
-    expect(isOperatorQuestion("secret token missing")).toBe(true);
-    expect(isOperatorQuestion("?")).toBe(true);
+  it("trusts the backend-owned operator-question classification", () => {
+    expect(isOperatorQuestion(true)).toBe(true);
+    expect(isOperatorQuestion(false)).toBe(false);
   });
 
-  it("rejects non-question block reasons (infra, timeout, etc.)", () => {
-    expect(isOperatorQuestion("timeout")).toBe(false);
-    expect(isOperatorQuestion("connection refused")).toBe(false);
-    expect(isOperatorQuestion("OOM killed")).toBe(false);
-    expect(isOperatorQuestion("max iterations exceeded")).toBe(false);
-  });
-
-  it("rejects empty/null/undefined", () => {
-    expect(isOperatorQuestion("")).toBe(false);
+  it("fails closed for old payloads without the classification", () => {
     expect(isOperatorQuestion(null)).toBe(false);
     expect(isOperatorQuestion(undefined)).toBe(false);
   });
