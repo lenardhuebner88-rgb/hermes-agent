@@ -717,6 +717,8 @@ export interface RunLiveEventsState {
   events: LiveEvent[];
   loading: boolean;
   error: string | null;
+  lastUpdated: number | null;
+  isStale: boolean;
 }
 
 /**
@@ -735,6 +737,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const sinceIdRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -764,6 +767,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
         if (stopped) return;
         setError(null);
         setLoading(false);
+        setLastUpdated(nowSec());
         if (parsed.events.length > 0) {
           setEvents((prev) => mergeLiveEvents(prev, parsed.events, cap));
         }
@@ -787,7 +791,7 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
     };
   }, [enabled, cap]);
 
-  return { events, loading, error };
+  return { events, loading, error, lastUpdated, isStale: error != null && events.length > 0 };
 }
 
 // F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).
@@ -1742,6 +1746,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
   const [data, setData] = useState<ChainGraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
   const paramsRef = useRef({ rootId, board });
@@ -1765,6 +1770,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
       if (aliveRef.current && paramsRef.current.rootId === startParams.rootId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
+        setLastUpdated(nowSec());
       }
       return parsed;
     } catch (e) {
@@ -1789,7 +1795,7 @@ export function useChainGraph(rootId: string | null, board: string | null = null
       window.clearInterval(interval);
     };
   }, [rootId, reload]);
-  return { data, loading, error, reload };
+  return { data, loading, error, lastUpdated, isStale: Boolean(error && data), reload };
 }
 
 export interface ChainCancelResult {
@@ -2103,6 +2109,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
   const [data, setData] = useState<ChainCostsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
   const paramsRef = useRef({ taskId, board });
@@ -2126,6 +2133,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
       if (aliveRef.current && paramsRef.current.taskId === startParams.taskId && paramsRef.current.board === startParams.board) {
         setData(parsed);
         setError("");
+        setLastUpdated(nowSec());
       }
       return parsed;
     } catch (e) {
@@ -2148,7 +2156,7 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
       window.clearInterval(interval);
     };
   }, [taskId, reload]);
-  return { data, loading, error, reload };
+  return { data, loading, error, lastUpdated, isStale: Boolean(error && data), reload };
 }
 
 // ST4 (Statistik-Broadsheet): wiederkehrende Fehler für die Fehler-Taxonomie —
@@ -2691,52 +2699,34 @@ export function usePromptForgeCatalog(): PromptForgeCatalogState {
   return { data, error, loading, lastUpdated };
 }
 
-// On-demand PlanSpec detail (E2 drawer): fetches
-// GET /planspecs/detail?path=<encoded> only when `path` is non-null.
-// Returns { data, loading, error } — same shape as the minimal LoadState
-// used by useFlowGate / useChainGraph for on-demand endpoints.
-// Refetches whenever `path` changes (new drawer open). Idle when path is null.
-export function usePlanSpecDetail(path: string | null): { data: PlanSpecDetailResponse | null; loading: boolean; error: string | null } {
-  const [data, setData] = useState<PlanSpecDetailResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const aliveRef = useRef(true);
-  useEffect(() => () => { aliveRef.current = false; }, []);
-  // State transitions live in an async callback (not directly in the effect) so
-  // the on-demand fetch follows the same shape as useChainGraph/useFlowGate.
-  const load = useCallback(async (): Promise<void> => {
-    if (!path) {
-      if (aliveRef.current) {
-        setData(null);
-        setError(null);
-        setLoading(false);
-      }
-      return;
-    }
-    if (aliveRef.current) {
-      setLoading(true);
-      setData(null);
-      setError(null);
-    }
-    try {
-      const parsed = parseOrThrow(
-        PlanSpecDetailResponseSchema,
-        await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`),
-        "planspecs/detail",
-      );
-      if (aliveRef.current) setData(parsed);
-    } catch (e) {
-      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (aliveRef.current) setLoading(false);
-    }
+// On-demand PlanSpec detail. The path is part of the polling key so a switch
+// can never flash another PlanSpec's retained payload. For the same path we do
+// retain the last good detail across transient failures and disclose staleness.
+export function usePlanSpecDetail(path: string | null) {
+  const loader = useCallback(async (): Promise<PlanSpecDetailResponse | null> => {
+    if (!path) return null;
+    return parseOrThrow(
+      PlanSpecDetailResponseSchema,
+      await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`),
+      "planspecs/detail",
+    );
   }, [path]);
-  useEffect(() => {
-    const initial = window.setTimeout(() => { void load(); }, 0);
-    return () => window.clearTimeout(initial);
-  }, [load]);
+  const detail = usePolling<PlanSpecDetailResponse | null>(
+    `planspec/detail:${path ?? "__idle__"}`,
+    loader,
+    path ? 60_000 : 600_000,
+  );
 
-  return { data, loading, error };
+  if (path) return detail;
+  return {
+    ...detail,
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: false,
+    lastUpdated: null,
+    isStale: false,
+  };
 }
 
 export function useStrategistCount() {

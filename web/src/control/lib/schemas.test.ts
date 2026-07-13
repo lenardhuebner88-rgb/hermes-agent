@@ -1,7 +1,47 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, BoardArchiveResponseSchema, BoardResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import {
+  AccountUsageResponseSchema, BacklogDetailSchema, BacklogResponseSchema,
+  BlockedCompletionsResponseSchema, BoardArchiveResponseSchema, BoardResponseSchema,
+  ChainCostsResponseSchema, ChainGraphResponseSchema, CronObservabilityResponseSchema,
+  DecisionQueueResponseSchema, FlowReleaseResponseSchema, LanesCatalogResponseSchema,
+  LiveEventsResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema,
+  LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema,
+  MetricsLiteResponseSchema, OperatorInventoryResponseSchema,
+  OrchestrationBacklogResponseSchema, PlanSpecDetailResponseSchema,
+  PlanSpecsResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema,
+  RecentResultsResponseSchema, ReliabilityResponseSchema, ReleaseModeResponseSchema,
+  ReleaseStatusResponseSchema, ReviewVerdictsResponseSchema, RunsCostsResponseSchema,
+  RunsDailyResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema,
+  TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema,
+  TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema,
+  parseOrThrow,
+} from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
+
+describe("Fleet source response contracts", () => {
+  it.each([
+    ["workers", WorkersResponseSchema],
+    ["planspec list", PlanSpecsResponseSchema],
+    ["planspec detail", PlanSpecDetailResponseSchema],
+    ["chain graph", ChainGraphResponseSchema],
+    ["chain costs", ChainCostsResponseSchema],
+    ["run costs", RunsCostsResponseSchema],
+    ["daily metrics", RunsDailyResponseSchema],
+    ["reliability", ReliabilityResponseSchema],
+    ["live events", LiveEventsResponseSchema],
+    ["decision queue", DecisionQueueResponseSchema],
+    ["release status", ReleaseStatusResponseSchema],
+    ["release mode", ReleaseModeResponseSchema],
+    ["lanes", LanesCatalogResponseSchema],
+    ["system health", SystemHealthResponseSchema],
+    ["pressure", PressureStatusResponseSchema],
+    ["account usage", AccountUsageResponseSchema],
+    ["review verdicts", ReviewVerdictsResponseSchema],
+  ])("rejects an empty-object response from %s", (_name, schema) => {
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+});
 
 describe("BoardResponseSchema", () => {
   it("preserves due and heartbeat timestamps needed by the card disclosure", () => {

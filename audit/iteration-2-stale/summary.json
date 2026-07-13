@@ -1,0 +1,187 @@
+{
+  "auth_expiry": {
+    "redirected": true,
+    "url_path": "/login?next=/control/fleet"
+  },
+  "base": "http://127.0.0.1:9121",
+  "contract_faults": [
+    {
+      "fault": "malformed-json",
+      "recovery_cleared": true,
+      "visible": [
+        "Daten von vor 4s",
+        "Systemzustand"
+      ]
+    },
+    {
+      "fault": "schema-empty-object",
+      "recovery_cleared": true,
+      "visible": [
+        "Daten von vor 1s",
+        "Systemzustand"
+      ]
+    },
+    {
+      "fault": "network-drop",
+      "recovery_cleared": true,
+      "visible": [
+        "Daten von vor 1s",
+        "Systemzustand"
+      ]
+    },
+    {
+      "fault": "30-second-hang",
+      "recovery_cleared": true,
+      "visible": [
+        "Daten von vor 21s",
+        "Daten von vor 22s",
+        "Daten von vor 23s",
+        "Daten von vor 24s",
+        "Daten von vor 37s",
+        "Daten von vor 38s",
+        "Entscheidungsqueue",
+        "Lanes",
+        "Release-Modus",
+        "Release-Status",
+        "Systemdruck",
+        "Systemzustand",
+        "Verlässlichkeit"
+      ]
+    }
+  ],
+  "expected_fault_console_errors": 101,
+  "expected_fault_http_errors": 100,
+  "matrix_500": [
+    {
+      "expected": [
+        "Kosten",
+        "PlanSpecs",
+        "Tagesmetriken",
+        "Worker (alle Boards)"
+      ],
+      "recovery_cleared": true,
+      "retained_text_chars": 560,
+      "screenshot": "audit/iteration-2-stale/500-heute-1440x900.png",
+      "tab": "Heute",
+      "visible": [
+        "Daten von vor 5s",
+        "Daten von vor 7s",
+        "Daten von vor 9s",
+        "Kosten",
+        "PlanSpecs",
+        "Tagesmetriken",
+        "Worker (alle Boards)"
+      ]
+    },
+    {
+      "expected": [
+        "Kosten",
+        "Live-Ereignisse",
+        "Verlässlichkeit",
+        "Worker (aktuelles Board)",
+        "Worker (alle Boards)"
+      ],
+      "recovery_cleared": true,
+      "retained_text_chars": 3029,
+      "screenshot": "audit/iteration-2-stale/500-worker-1440x900.png",
+      "tab": "Worker",
+      "visible": [
+        "Daten von vor 4s",
+        "Daten von vor 6s",
+        "Daten von vor 8s",
+        "Kosten",
+        "Live-Ereignisse",
+        "Review-Signale",
+        "Verlässlichkeit",
+        "Worker (Kette)",
+        "Worker (aktuelles Board)",
+        "Worker (alle Boards)"
+      ]
+    },
+    {
+      "expected": [
+        "Kettengraph",
+        "Kettenkosten",
+        "Review-Signale",
+        "Worker (Kette)"
+      ],
+      "recovery_cleared": true,
+      "retained_text_chars": 1184,
+      "screenshot": "audit/iteration-2-stale/500-ketten-1440x900.png",
+      "tab": "Ketten",
+      "visible": [
+        "Daten von vor 30s",
+        "Daten von vor 34s",
+        "Kettengraph",
+        "Kettenkosten",
+        "Review-Signale",
+        "Worker (Kette)"
+      ]
+    },
+    {
+      "expected": [
+        "Account-Nutzung",
+        "Kosten",
+        "Lanes",
+        "PlanSpecs"
+      ],
+      "recovery_cleared": true,
+      "retained_text_chars": 589,
+      "screenshot": "audit/iteration-2-stale/500-plan-1440x900.png",
+      "tab": "Plan",
+      "visible": [
+        "Account-Nutzung",
+        "Daten von vor 28s",
+        "Daten von vor 29s",
+        "Daten von vor 33s",
+        "Daten von vor 3s",
+        "Daten von vor 8s",
+        "Kosten",
+        "Lanes",
+        "PlanSpecs",
+        "Review-Signale",
+        "Worker (Kette)"
+      ]
+    },
+    {
+      "expected": [
+        "Entscheidungsqueue",
+        "Lanes",
+        "Release-Modus",
+        "Release-Status",
+        "Systemdruck",
+        "Systemzustand",
+        "Verlässlichkeit",
+        "Worker (aktuelles Board)"
+      ],
+      "recovery_cleared": true,
+      "retained_text_chars": 7872,
+      "screenshot": "audit/iteration-2-stale/500-risiko-1440x900.png",
+      "tab": "Risiko",
+      "visible": [
+        "Daten von vor 4s",
+        "Daten von vor 5s",
+        "Daten von vor 7s",
+        "Daten von vor 8s",
+        "Entscheidungsqueue",
+        "Lanes",
+        "Release-Modus",
+        "Release-Status",
+        "Review-Signale",
+        "Systemdruck",
+        "Systemzustand",
+        "Verlässlichkeit",
+        "Worker (Kette)",
+        "Worker (aktuelles Board)"
+      ]
+    }
+  ],
+  "planspec_detail_empty_object": {
+    "error_disclosed": true,
+    "last_good_retained": true,
+    "recovery_cleared": true,
+    "tested": true
+  },
+  "unexpected_console_errors": [],
+  "unexpected_http": []
+}

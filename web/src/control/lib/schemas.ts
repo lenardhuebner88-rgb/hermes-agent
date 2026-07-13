@@ -90,7 +90,9 @@ export const WorkerSchema = z.object({
 });
 
 export const WorkersResponseSchema = z.object({
-  workers: z.array(WorkerSchema).catch([]),
+  // Top-level identity field is required: `{}` is a contract failure, not a
+  // truthful fresh response saying that no workers exist.
+  workers: z.array(WorkerSchema),
   count: z.coerce.number().catch(0),
   // Round C: kanban.max_in_progress — null when not configured.
   cap: z.coerce.number().nullable().catch(null),
@@ -113,7 +115,7 @@ export const LiveEventSchema = z.object({
 });
 
 export const LiveEventsResponseSchema = z.object({
-  events: z.array(LiveEventSchema).catch([]),
+  events: z.array(LiveEventSchema),
   count: z.coerce.number().catch(0),
   latest_id: z.coerce.number().nullable().catch(null),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
@@ -184,7 +186,7 @@ const AccountUsageProviderSchema = z.object({
 });
 
 export const AccountUsageResponseSchema = z.object({
-  providers: z.array(AccountUsageProviderSchema).catch([]),
+  providers: z.array(AccountUsageProviderSchema),
   cache_ttl_seconds: z.coerce.number().catch(60),
 });
 export type AccountUsageWindow = z.infer<typeof AccountUsageWindowSchema>;
@@ -249,7 +251,7 @@ export const PlanSpecRecordSchema = z.object({
 });
 
 export const PlanSpecsResponseSchema = z.object({
-  planspecs: z.array(PlanSpecRecordSchema).catch([]),
+  planspecs: z.array(PlanSpecRecordSchema),
   count: z.coerce.number().catch(0),
 });
 export type PlanSpecsResponse = z.infer<typeof PlanSpecsResponseSchema>;
@@ -396,7 +398,7 @@ const ChainGraphNodeSchema = z.object({
 
 export const ChainGraphResponseSchema = z.object({
   schema: z.string().catch("kanban-chain-graph-v1"),
-  root_id: z.string().catch(""),
+  root_id: z.string(),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
   nodes: z.array(ChainGraphNodeSchema).catch([]),
   edges: z.array(z.object({ from: z.string().catch(""), to: z.string().catch("") })).catch([]),
@@ -420,7 +422,7 @@ const ChainCostsLaneSchema = z.object({
 
 export const ChainCostsResponseSchema = z.object({
   schema: z.string().catch("kanban-chain-costs-v1"),
-  root_id: z.string().catch(""),
+  root_id: z.string(),
   totals: z.object({
     input_tokens: z.coerce.number().catch(0),
     output_tokens: z.coerce.number().catch(0),
@@ -814,7 +816,7 @@ export const KanbanDecisionSchema = z.object({
 });
 
 export const DecisionQueueResponseSchema = z.object({
-  decisions: z.array(KanbanDecisionSchema).catch([]),
+  decisions: z.array(KanbanDecisionSchema),
   count: z.coerce.number().catch(0),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
@@ -832,7 +834,7 @@ const ReleaseStatusEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()).catch({}),
 });
 export const ReleaseStatusResponseSchema = z.object({
-  autonomous: z.boolean().catch(false),
+  autonomous: z.boolean(),
   max_tier_autonomous: z.string().catch("review"),
   pause_on_red_streak: z.coerce.number().nullable().catch(null).optional(),
   recent: z.array(ReleaseStatusEventSchema).catch([]),
@@ -852,7 +854,7 @@ export type ReleaseStatusResponse = z.infer<typeof ReleaseStatusResponseSchema>;
 // Feeds the Hero cockpit; POST /release-mode + POST /release-concurrency
 // write it back.
 export const ReleaseModeResponseSchema = z.object({
-  autonomous: z.boolean().catch(false),
+  autonomous: z.boolean(),
   max_tier_autonomous: z.enum(["standard", "review", "critical"]).catch("review"),
   pause_on_red_streak: z.coerce.number().nullable().catch(null),
   red_streak: z.coerce.number().catch(0),
@@ -865,7 +867,7 @@ export type ReleaseModeResponse = z.infer<typeof ReleaseModeResponseSchema>;
 export type ReleaseTier = ReleaseModeResponse["max_tier_autonomous"];
 
 export const ReviewVerdictsResponseSchema = z.object({
-  reviews: z.array(KanbanReviewSchema).catch([]),
+  reviews: z.array(KanbanReviewSchema),
   count: z.coerce.number().catch(0),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
   limit: z.coerce.number().catch(12),
@@ -914,11 +916,6 @@ export const SystemHealthResponseSchema = z.object({
     autoresearch: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     kanban_db: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     kanban_dispatcher: SubsystemHealthSchema.catch(defaultSubsystemHealth),
-  }).catch({
-    gateway: defaultSubsystemHealth,
-    autoresearch: defaultSubsystemHealth,
-    kanban_db: defaultSubsystemHealth,
-    kanban_dispatcher: defaultSubsystemHealth,
   }),
 });
 
@@ -1138,7 +1135,7 @@ const PressureRecommendationSchema = z.object({
 });
 
 export const PressureStatusResponseSchema = z.object({
-  schema: z.string().catch("hermes-pressure-v1"),
+  schema: z.literal("hermes-pressure-v1"),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
   overall: PressureOverallSchema.catch("unknown"),
   cause: z.string().catch("Pressure unbekannt"),
@@ -1571,7 +1568,7 @@ export const ReliabilityResponseSchema = z.object({
   baseline_hours: z.coerce.number().catch(720),
   min_n: z.coerce.number().catch(5),
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
-  profiles: z.array(ReliabilityProfileSchema).catch([]),
+  profiles: z.array(ReliabilityProfileSchema),
   baseline: z.array(ReliabilityProfileSchema).catch([]),
 });
 export type ReliabilityProfile = z.infer<typeof ReliabilityProfileSchema>;
@@ -1602,7 +1599,7 @@ const RunsDailyPointSchema = z.object({
 export const RunsDailyResponseSchema = z.object({
   days: z.coerce.number().catch(30),
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
-  series: z.array(RunsDailyPointSchema).catch([]),
+  series: z.array(RunsDailyPointSchema),
 });
 export type RunsDailyPoint = z.infer<typeof RunsDailyPointSchema>;
 export type RunsDailyResponse = z.infer<typeof RunsDailyResponseSchema>;
@@ -1769,7 +1766,7 @@ const PlanSpecDetailSubtaskSchema = z.object({
 }).passthrough();
 
 export const PlanSpecDetailResponseSchema = z.object({
-  goal: z.string().catch(""),
+  goal: z.string(),
   acceptance_criteria: z.array(
     z.object({ id: z.string().optional(), statement: z.string().optional() })
       .passthrough()
@@ -2042,7 +2039,7 @@ const LaneCatalogProfileSchema = z.object({
 }).passthrough();
 
 export const LanesCatalogResponseSchema = z.object({
-  lanes: z.array(z.unknown()).catch([]),
+  lanes: z.array(z.unknown()),
   count: z.coerce.number().catch(0),
   active_id: z.string().nullable().catch(null),
   profiles: z.array(LaneCatalogProfileSchema).catch([]),

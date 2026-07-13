@@ -109,6 +109,22 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Commit:      this F-06 commit
 - Status:      CONFIRMED
 
+## Iteration 2 — Stale-but-plausible data elimination
+
+### N-20  Every retained Fleet source discloses its own freshness failure
+- Source:      Loop 2 source/fault matrix
+- Class:       DATA
+- Severity:    S1
+- Invariant:   A failed refresh may retain last-good data only when the consuming surface names the failed source and its age/error; malformed and semantically empty responses must not become plausible fresh defaults.
+- Repro:       Load the authenticated candidate, inject 500 across every visible Fleet source, then inject malformed JSON, `{}`, a network reset, a real 30-second hang, and auth expiry; recover each source without reloading. Independently parse `{}` through every Fleet response schema.
+- Before:      Fleet exposed one board-level stale badge while retained workers, PlanSpecs, costs, metrics, chain data, live events, release/risk inputs, health, pressure, lanes, and account data could remain visible without a source-local warning. Fail-first schema matrix: 16/17 listed response schemas accepted `{}` and synthesized current-looking empty/default data.
+- Test:        Table-driven pollingStore fault/recovery matrix covers 500, malformed JSON, `{}`, 30-second timeout, auth expiry, and WS/network drop. Consumer test binds every source to the subtab that renders it. Schema test asserts all 17 Fleet response contracts reject `{}`.
+- Change:      Add one small source-local freshness boundary and bind it to Heute, Worker, Ketten, Plan, Risiko, and PlanSpec cockpit; carry freshness through live-events, chain-graph, chain-cost, and PlanSpec-detail hooks; require one backend-owned identity field in every Fleet response schema instead of accepting an absent top-level payload.
+- After:       Authenticated production-build browser proof retained non-empty content while naming every injected source on Heute (4), Worker (5), Ketten (4), Plan (4), and Risiko (8). All five surfaces cleared naturally after recovery, including the selected-chain 30-second cadence. PlanSpec drawer kept the exact last-good goal beside the contract error and cleared it after recovery. Malformed JSON, `{}`, network reset, and a real 30-second hang all disclosed `Systemzustand` with age and recovered; auth expiry redirected to `/login?next=/control/fleet`. Zero unexpected console or HTTP errors. Evidence: `audit/iteration-2-stale/summary.json` plus five desktop screenshots.
+- Gates:       Focused Vitest 100 passed, exit 0; `tsc -b --noEmit` exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (126 files / 1,864 tests); candidate browser harness exit 0.
+- Commit:      this N-20 commit
+- Status:      CONFIRMED
+
 ## Later iterations
 
-Stale-source, timestamp, state-machine/action, live-event/race, scale/query, hostile-state, red-team, and final release items will be added with concrete evidence as each iteration begins.
+Timestamp, state-machine/action, live-event/race, scale/query, hostile-state, red-team, and final release items will be added with concrete evidence as each iteration begins.

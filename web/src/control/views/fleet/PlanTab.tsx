@@ -24,6 +24,7 @@ import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON } from "@/lib/api";
 import type { PlanSpecRecord } from "./shared";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
 // Antwort der /planspecs/ingest-Route (plugin_api.ingest_planspec →
 // planspecs.ingest_planspec): root_task_id der neu erzeugten, gehaltenen Kette.
@@ -290,6 +291,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
 
   return (
     <>
+      <FleetSourceFreshness sources={[{ label: "PlanSpec-Detail", ...detail }]} />
       {/* Kopfkarte (amber) */}
       <div className="fleet-plan-kopf">
         <div className="fleet-plan-kopf-n">

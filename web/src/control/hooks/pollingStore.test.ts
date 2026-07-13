@@ -76,6 +76,37 @@ describe("pollingStore", () => {
     expect(loader).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["HTTP 500", new Error("500: injected failure"), "500"],
+    ["malformed JSON", new SyntaxError("Unexpected token < in JSON"), "contract"],
+    ["schema-empty object", new Error("contract/workers: bad shape {}"), "contract"],
+    ["30-second hang timeout", new Error("network timeout after 30000ms"), "network"],
+    ["auth expiry", new Error('401: {"error":"session_expired"}'), "401"],
+    ["WS drop", new Error("WebSocket closed before recovery"), "contract"],
+  ])("retains last-good, discloses %s, and clears the warning after recovery", async (_name, failure, code) => {
+    const loader = vi.fn().mockResolvedValueOnce({ id: "last-good" });
+    const cb = vi.fn();
+    subscribe(`fault-${code}-${String(failure)}`, loader, 1000, cb);
+    await vi.advanceTimersByTimeAsync(0);
+
+    loader.mockRejectedValueOnce(failure);
+    await refresh(`fault-${code}-${String(failure)}`);
+    expect(cb).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: { id: "last-good" },
+      isStale: true,
+      errorObj: expect.objectContaining({ code }),
+    }));
+
+    loader.mockResolvedValueOnce({ id: "recovered" });
+    await refresh(`fault-${code}-${String(failure)}`);
+    expect(cb).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: { id: "recovered" },
+      isStale: false,
+      error: null,
+      errorObj: null,
+    }));
+  });
+
   it("stops the timer when the last subscriber unsubscribes (no leak)", async () => {
     const loader = vi.fn().mockResolvedValue(1);
     const un = subscribe("k", loader, 1000, vi.fn());

@@ -32,6 +32,7 @@ import { SlotLane, FreeSlotLane, MiniLane } from "./SlotLane";
 import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ export function WorkerTab({
 
   return (
     <div className="fleet-worker-tab">
+      <FleetSourceFreshness sources={[{ label: "Live-Ereignisse", ...liveEvents }]} />
       <PulseStrip pulse={pulse} />
 
       {activeWorkers.length > 0 ? (

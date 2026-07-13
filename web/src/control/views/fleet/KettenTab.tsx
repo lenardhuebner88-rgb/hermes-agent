@@ -34,6 +34,7 @@ import {
 } from "../../hooks/useControlData";
 import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 import type { ChainCostsResponse } from "../../lib/schemas";
+import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { type ChainNode } from "./shared";
 
 import "./ketten-v4.css";
@@ -98,14 +99,16 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const hiddenCompletedCount = completedChips.length - 3;
   const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
 
-  const { data: chainGraph, loading: chainLoading } = useChainGraph(validRootId, boardSlug);
+  const chainGraphState = useChainGraph(validRootId, boardSlug);
+  const { data: chainGraph, loading: chainLoading } = chainGraphState;
   const nodes = chainGraph?.nodes ?? [];
 
   const chainCosts = useHermesChainCosts(validRootId, boardSlug);
   const verdicts = useHermesReviewVerdicts(boardSlug);
 
   // === Worker-Join (v4): join ChainNode → Worker via task_id ===
-  const { data: workersData } = useHermesWorkers();
+  const workersState = useHermesWorkers();
+  const workersData = workersState.data;
   const workerByNodeId = useMemo(() => {
     const m = new Map<string, Worker>();
     const ws = workers ?? workersData?.workers ?? [];
@@ -115,9 +118,19 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
     return m;
   }, [workers, workersData]);
 
+  const freshness = (
+    <FleetSourceFreshness sources={[
+      { label: "Kettengraph", ...chainGraphState },
+      { label: "Kettenkosten", ...chainCosts },
+      { label: "Review-Signale", ...verdicts },
+      { label: "Worker (Kette)", ...workersState },
+    ]} />
+  );
+
   if (chips.length === 0) {
     return (
       <div className="ketten-v4">
+        {freshness}
         <div className="kt-empty">
           <p className="kt-empty-title">{de.fleet.kettenLeer}</p>
           <p className="kt-empty-sub">{de.fleet.kettenLeerDesc}</p>
@@ -128,6 +141,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
 
   return (
     <div className="ketten-v4">
+      {freshness}
       {/* ── SECTION 1: Ketten-Liste ───────────────────────────────────────── */}
       <div className="chain-list-header">
         <span className="section-title">Ketten</span>
