@@ -1,0 +1,29 @@
+{
+  "captured_at_unix": 1783907497,
+  "db": "/home/piet/.hermes/kanban.db",
+  "linked_chain_count": 1456,
+  "linked_task_count": 3458,
+  "max_chain_depth_edges": 6,
+  "newest_created_at": 1783892923,
+  "null_counts": {
+    "completed_at": 1948,
+    "due_at": 4465,
+    "last_heartbeat_at": 3286,
+    "started_at": 1924
+  },
+  "oldest_created_at": 1700000000,
+  "status_counts": {
+    "archived": 4213,
+    "blocked": 10,
+    "done": 244,
+    "ready": 0,
+    "review": 0,
+    "running": 0,
+    "scheduled": 2,
+    "todo": 0,
+    "triage": 0
+  },
+  "task_count": 4469,
+  "task_link_count": 3458,
+  "unexpected_status_counts": {}
+}

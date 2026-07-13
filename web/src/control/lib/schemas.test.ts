@@ -1,7 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, BoardResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema, LoopFileSaveResultSchema, LoopLandResultSchema, LoopsResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema, TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 import { isLoopPackError } from "./types";
 import { taskDetailRealPayloadFixture } from "./taskDetailFixture";
+
+describe("BoardResponseSchema", () => {
+  it("preserves due and heartbeat timestamps needed by the card disclosure", () => {
+    const parsed = parseOrThrow(BoardResponseSchema, {
+      columns: [{
+        name: "running",
+        tasks: [{
+          id: "t_truth01",
+          title: "Truth card",
+          status: "running",
+          assignee: "premium",
+          priority: 7,
+          created_at: 1_783_800_000,
+          started_at: 1_783_800_100,
+          completed_at: null,
+          due_at: 1_783_900_000,
+          last_heartbeat_at: 1_783_800_150,
+          link_counts: { parents: 0, children: 0 },
+          comment_count: 0,
+          progress: null,
+        }],
+      }],
+      tenants: [],
+      assignees: ["premium"],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    }, "board");
+
+    const parsedTask = parsed.columns[0].tasks[0];
+    expect(parsedTask.due_at).toBe(1_783_900_000);
+    expect(parsedTask.last_heartbeat_at).toBe(1_783_800_150);
+  });
+});
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {

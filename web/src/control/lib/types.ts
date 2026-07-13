@@ -549,6 +549,8 @@ export interface BoardTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  due_at?: number | null;
+  last_heartbeat_at?: number | null;
   branch_name: string | null;
   latest_summary: string | null;
   vault_memory_links?: VaultMemoryLink[];

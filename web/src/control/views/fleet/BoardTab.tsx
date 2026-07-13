@@ -29,6 +29,53 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
+function timestampValue(value: number | null | undefined): { dateTime: string; label: string } | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  const date = new Date(value * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+  return {
+    dateTime: date.toISOString(),
+    label: date.toLocaleString("de-DE", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+      timeZone: "Europe/Berlin",
+    }),
+  };
+}
+
+function TaskInformation({ task }: { task: BoardTask }) {
+  const timestamps = [
+    ["Erstellt", task.created_at],
+    ["Gestartet", task.started_at],
+    ["Fertig", task.completed_at],
+    ["Fällig", task.due_at],
+    ["Heartbeat", task.last_heartbeat_at],
+  ] as const;
+
+  return (
+    <details className="fleet-boardtab-disclosure">
+      <summary aria-label={`Weitere Informationen zu ${task.title || task.id}`}>Details</summary>
+      <dl className="fleet-boardtab-details">
+        {task.assignee && <><dt>Assignee</dt><dd>{task.assignee}</dd></>}
+        {task.priority !== 0 && <><dt>Priorität</dt><dd>{task.priority}</dd></>}
+        {task.comment_count > 0 && <><dt>Kommentare</dt><dd>{task.comment_count}</dd></>}
+        {task.link_counts.parents > 0 && <><dt>Vorgänger</dt><dd>{task.link_counts.parents}</dd></>}
+        {task.link_counts.children > 0 && <><dt>Nachfolger</dt><dd>{task.link_counts.children}</dd></>}
+        {task.progress && task.progress.total > 0 && <><dt>Fortschritt</dt><dd>{task.progress.done}/{task.progress.total}</dd></>}
+        {timestamps.map(([label, value]) => {
+          const formatted = timestampValue(value);
+          return formatted ? (
+            <div className="fleet-boardtab-detail-pair" key={label}>
+              <dt>{label}</dt>
+              <dd><time dateTime={formatted.dateTime}>{formatted.label}</time></dd>
+            </div>
+          ) : null;
+        })}
+      </dl>
+    </details>
+  );
+}
+
 export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: BoardTabProps) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
@@ -130,6 +177,7 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
                 <span
                   className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}
                   {...premiumLaneMarker(t.assignee)}
+                  aria-label={t.assignee ? `Assignee ${t.assignee}` : "Kein Assignee"}
                 >
                   {t.assignee ? profileInitial(t.assignee) : "?"}
                 </span>
@@ -137,8 +185,12 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
                   <span className="fleet-boardtab-title">{t.title || t.id}</span>
                   <span className="fleet-boardtab-meta">
                     <span className="fleet-boardtab-id">{t.id.slice(0, 8)}</span>
+                    {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}
+                    {t.priority !== 0 && <span className="fleet-boardtab-priority">Prio {t.priority}</span>}
+                    {t.comment_count > 0 && <span className="fleet-boardtab-comments">{t.comment_count} Kommentare</span>}
+                    {t.link_counts.parents > 0 && <span className="fleet-boardtab-parents">{t.link_counts.parents} Vorgänger</span>}
                     {t.link_counts.children > 0 && (
-                      <span className="fleet-boardtab-chain" title="Teil einer Kette">⛓ {t.link_counts.children}</span>
+                      <span className="fleet-boardtab-chain" title="Teil einer Kette">{t.link_counts.children} Nachfolger</span>
                     )}
                     {t.root_id && t.root_id !== t.id && t.link_counts.children === 0 && (
                       <span className="fleet-boardtab-inchain" title="Gehört zu einer Kette">→ {(t.root_id ?? "").slice(0, 8)}</span>
@@ -153,18 +205,22 @@ export function BoardTab({ board, readOnly = false, onOpenNodeDetail, selectedNo
                 </span>
                 </>
               );
-              return readOnly ? (
-                <div key={t.id} className="fleet-boardtab-row fleet-boardtab-row-readonly" title="Fremd-Board · nur lesen">{content}</div>
-              ) : (
-                <button
-                  key={t.id}
-                  className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
-                  onClick={() => onOpenNodeDetail(t.id)}
-                  aria-expanded={selectedNodeId === t.id}
-                  aria-controls={detailControlsId}
-                >
-                  {content}
-                </button>
+              return (
+                <div key={t.id} className="fleet-boardtab-card">
+                  {readOnly ? (
+                    <div className="fleet-boardtab-row fleet-boardtab-row-readonly" title="Fremd-Board · nur lesen">{content}</div>
+                  ) : (
+                    <button
+                      className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
+                      onClick={() => onOpenNodeDetail(t.id)}
+                      aria-expanded={selectedNodeId === t.id}
+                      aria-controls={detailControlsId}
+                    >
+                      {content}
+                    </button>
+                  )}
+                  <TaskInformation task={t} />
+                </div>
               );
             })}
           </section>

@@ -540,6 +540,8 @@ export const BoardTaskSchema = z.object({
   created_at: z.coerce.number().catch(0),
   started_at: z.coerce.number().nullable().catch(null),
   completed_at: z.coerce.number().nullable().catch(null),
+  due_at: z.coerce.number().nullable().catch(null),
+  last_heartbeat_at: z.coerce.number().nullable().catch(null),
   branch_name: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),

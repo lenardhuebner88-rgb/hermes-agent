@@ -1,0 +1,42 @@
+{
+  "api_task_count": 256,
+  "captured_at_unix": 1783907540,
+  "comparison_cell_count": 3840,
+  "console_errors": [],
+  "db_row_count": 256,
+  "dom_card_count": 256,
+  "network_errors": [],
+  "truncated_without_title": {
+    "assignee": "P",
+    "avatar_title": "Premium-Lane",
+    "comment_count": null,
+    "completed_at": null,
+    "cost_effective_usd": "$1,74",
+    "created_at": null,
+    "due_at": null,
+    "id_prefix": "t_33e266",
+    "lane": null,
+    "last_heartbeat_at": null,
+    "link_children": "1",
+    "link_parents": null,
+    "priority": null,
+    "progress": "0/1",
+    "started_at": null,
+    "status": "scheduled",
+    "title": "48h Beobachtung: Retention-/Browser-Reaper Dry-Run gegen Baseline auswerten",
+    "title_attr": null,
+    "title_client_width": 448,
+    "title_scroll_width": 450
+  },
+  "verdict_counts": {
+    "IMPLICIT_NULL": 499,
+    "IMPLICIT_ZERO": 449,
+    "IMPLICIT_ZERO_OR_NULL": 90,
+    "MATCH": 976,
+    "MATCH_NULL_MARKER": 35,
+    "N/A_NO_TASK_OR_API_FIELD": 256,
+    "OMITTED_NONZERO": 426,
+    "OMITTED_NON_NULL": 888,
+    "PARTIAL_INITIAL_ONLY": 221
+  }
+}

@@ -16,12 +16,12 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Invariant:   The isolated candidate starts from current `piet-fork/main`, the deployed commit is identified, and all required baseline gates are green before feature work.
 - Repro:       Fetch `piet-fork/main`; compare branch ancestry, live checkout HEAD, service process, and served runtime; run the Loop 0 gates.
 - Before:      Original worktree started at `d0c79390c`; overnight `piet-fork/main` advanced through terminal integration `626f09f5b` and Dictate changes to `42bbf39bd`. A later Hermes claim still names one dirty terminal test in the original worktree, so that worktree is frozen rather than overwritten.
-- Test:        Pending current gate run.
+- Test:        Loop-0 gate chain on the resume candidate.
 - Change:      NONE
-- After:       Resume worktree starts exactly at current `piet-fork/main` `42bbf39bd`; N-01/N-02 were replayed as isolated commits and `npm ci` completed. Full current baseline recapture remains pending.
-- Gates:       Resume `npm ci` exit 0; prior collection 43,036 selected / 43,095 collected, exit 0; prior Ruff exit 0; prior targeted Python 90 passed / 2 failed, exit 1; prior frontend 1,805 passed / 1 timed out, exit 1.
+- After:       Resume worktree starts exactly at current `piet-fork/main` `42bbf39bd`; N-01/N-02 were replayed as isolated commits. Current default DB/API census is captured under `audit/`: 4,469 DB tasks, 256 active API cards, 4,213 archived; all 20 authenticated endpoints returned HTTP 200.
+- Gates:       `npm ci` exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (125 files / 1,826 tests); targeted Python 92 passed, exit 0; `scripts/run-affected.sh` 99 passed, exit 0; Ruff exit 0; collection 43,048 selected / 43,107 collected, exit 0.
 - Commit:      NONE
-- Status:      OPEN
+- Status:      FIXED
 
 ### N-01  Timeout diagnostics preserve useful endpoint identity without secrets
 - Source:      prior final release gate
@@ -62,7 +62,7 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Change:      Resolve required binaries from root/web `node_modules/.bin`; default `GATE_FRONTEND_MAX_WORKERS=4`; execute both binaries directly.
 - After:       Targeted gate-script suite 7 passed / 0 failed, exit 0. Full frontend candidate gate completed with 125 files and 1,826 tests passing.
 - Gates:       `scripts/run_tests.sh tests/scripts/test_gate_frontend.py` exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (`125` files, `1,826` tests).
-- Commit:      NONE
+- Commit:      `9cb97d401`
 - Status:      FIXED
 
 ## Iteration 1 — Information completeness and archive truth
@@ -74,12 +74,12 @@ This ledger is updated after every iteration. `FIXED` requires the original live
 - Invariant:   Full assignee, priority, comment count, dependency counts, progress, and material timestamps are discoverable for every card without misleading zeroes or pointer-only access.
 - Repro:       Repeat the exhaustive DB/API/DOM card matrix at desktop and mobile widths.
 - Before:      Prior 249 × 15 matrix: 217 partial assignees, 417 omitted nonzero values, and 871 omitted non-null timestamps.
-- Test:        Pending fail-first UI coverage.
-- Change:      NONE
-- After:       Pending.
-- Gates:       Pending.
+- Test:        Fail-first `BoardTab.test.tsx` + `schemas.test.ts`: 2 failed / 50 passed because the card exposed only an initial and the schema stripped `due_at`; after the change 52/52 pass.
+- Change:      Preserve `due_at` and `last_heartbeat_at` in the Board schema; add a native named `<details>/<summary>` disclosure per card; expose full assignee plus nonzero priority/comments/dependency/progress metadata without inventing zero values.
+- After:       Candidate Vite browser against the authenticated live API: 256 API cards = 256 DOM cards = 256 named disclosures; 1,833 material cells checked at both 1440×900 and 390×844, zero failures, zero console/network errors, body width 1440/1440 and 390/390. Evidence: `audit/iteration-1-f01/`.
+- Gates:       Focused Vitest 52 passed, exit 0; `tsc -b --noEmit` exit 0; targeted control lint exit 0; `scripts/gate-frontend.sh --skip-build` exit 0 (126 files / 1,829 tests).
 - Commit:      NONE
-- Status:      OPEN
+- Status:      CONFIRMED
 
 ### N-11  Every truncated value has accessible full-value recovery
 - Source:      prior F-02 / `t_0163e3a4`

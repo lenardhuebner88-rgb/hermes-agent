@@ -1,0 +1,21 @@
+{
+  "api_task_count": 256,
+  "base": "http://127.0.0.1:4173",
+  "body_has_content": true,
+  "body_width": {
+    "client": 390,
+    "scroll": 390
+  },
+  "checked_cells": 1833,
+  "console_errors": [],
+  "disclosure_count": 256,
+  "dom_card_count": 256,
+  "error_overlay_count": 0,
+  "failures": [],
+  "network_errors": [],
+  "screenshot": "audit/iteration-1-f01/candidate-f01-disclosure-390x844.png",
+  "viewport": {
+    "height": 844,
+    "width": 390
+  }
+}
