@@ -13475,6 +13475,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
             "consecutive_failures = 0, transient_retry_count = 0, "
+            "auto_retry_count = 0, "
             "last_failure_error = NULL, block_kind = NULL, "
             "block_recurrences = 0 "
             "WHERE id = ? AND (status IN ('blocked', 'scheduled') "
