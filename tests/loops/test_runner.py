@@ -1127,6 +1127,9 @@ def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
     assert len(hb["last"]) == 2 and hb["last"][0]["phase"] == "round"
     assert {"secs", "rc", "at", "engine", "model", "round"} <= set(hb["last"][0])
     assert [entry["round"] for entry in hb["last"]] == [1, 2]
+    assert all(entry["at"].endswith("Z") for entry in hb["last"]), (
+        "wire timestamps must identify UTC instead of relying on the browser timezone"
+    )
 
 
 def test_sweep_stops_on_usage_limit(tmp_path, fake_engine):
@@ -2097,6 +2100,7 @@ def test_ledger_event_appends_valid_jsonl(tmp_path, fake_engine):
     assert "reason" not in events[0]
     assert events[1]["fail_kind"] == "verify_fail"
     assert "ts" in events[0] and "ts" in events[1]
+    assert events[0]["ts"].endswith("Z") and events[1]["ts"].endswith("Z")
     # LEDGER.md selbst bleibt unangetastet (kein Text-Format-Drift)
     assert not runner.ledger_path.exists() or "verdict" not in runner.ledger_path.read_text(encoding="utf-8")
 

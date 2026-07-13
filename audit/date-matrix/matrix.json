@@ -1,0 +1,970 @@
+[
+  {
+    "case": "absent",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/absent.png"
+  },
+  {
+    "case": "empty",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/empty.png"
+  },
+  {
+    "case": "garbage",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "not-a-date",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "not-a-date",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/garbage.png"
+  },
+  {
+    "case": "epoch-zero",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": 0,
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": 0,
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/epoch-zero.png"
+  },
+  {
+    "case": "future-one-hour",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "2026-07-13T07:15:48.944Z",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "2026-07-13T07:15:48.944Z",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/future-one-hour.png"
+  },
+  {
+    "case": "milliseconds-number",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": 1783923283944,
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": 1783923283944,
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 0s\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/milliseconds-number.png"
+  },
+  {
+    "case": "negative-duration",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "2026-07-13T06:14:43.944Z",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": -7,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "2026-07-13T06:14:43.944Z",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": -7,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 1m\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/negative-duration.png"
+  },
+  {
+    "case": "timezone-less",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "2026-07-13T06:14:43.944",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "2026-07-13T06:14:43.944",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 2h 01m\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/timezone-less.png"
+  },
+  {
+    "case": "utc-z",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "2026-07-13T06:14:43.944Z",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "2026-07-13T06:14:43.944Z",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 2m\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/utc-z.png"
+  },
+  {
+    "case": "plus-02",
+    "heartbeat": {
+      "current": {
+        "phase": "build",
+        "engine": "xai",
+        "model": "grok-4.5",
+        "started_at": "2026-07-13T08:14:43.944+02:00",
+        "timeout": 3600,
+        "round": 1
+      },
+      "last": [
+        {
+          "phase": "plan",
+          "engine": "codex",
+          "model": "gpt-5.6-sol",
+          "secs": 12,
+          "rc": 0,
+          "at": "2026-07-13T06:13:48.944Z",
+          "round": 1
+        }
+      ]
+    },
+    "api": {
+      "status": 200,
+      "pack": {
+        "name": "loops-date-audit",
+        "type": "pipeline",
+        "source": "custom",
+        "repo": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/xai-hard-gate-repo",
+        "base_branch": "main",
+        "description": "Disposable timestamp rendering fixture for the Loops audit",
+        "stability": "experimental",
+        "phases": {
+          "plan": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          },
+          "build": {
+            "engine": "xai",
+            "model": "grok-4.5",
+            "timeout": 60
+          },
+          "verify": {
+            "engine": "codex",
+            "model": "gpt-5.6-sol",
+            "timeout": 60
+          }
+        },
+        "stop": {
+          "max_rounds": 12,
+          "max_hours": 7,
+          "fail_streak": 2,
+          "dry_rounds": 2
+        },
+        "params": {},
+        "autoland": false,
+        "running": true,
+        "heartbeat": {
+          "current": {
+            "phase": "build",
+            "engine": "xai",
+            "model": "grok-4.5",
+            "started_at": "2026-07-13T08:14:43.944+02:00",
+            "timeout": 3600,
+            "round": 1
+          },
+          "last": [
+            {
+              "phase": "plan",
+              "engine": "codex",
+              "model": "gpt-5.6-sol",
+              "secs": 12,
+              "rc": 0,
+              "at": "2026-07-13T06:13:48.944Z",
+              "round": 1
+            }
+          ]
+        },
+        "stop_requested": false,
+        "queue": {
+          "00-planned": 0,
+          "10-building": 0,
+          "20-verified": 0,
+          "30-landed": 0,
+          "90-bounced": 0
+        },
+        "commits_ahead": 0,
+        "timer_enabled": false,
+        "timer_schedule": "23:37",
+        "timer_next_run": null
+      }
+    },
+    "dom": "loops-date-audit\nCUSTOM\nExperimentell\nPipeline\n\nLÄUFT\n\nDisposable timestamp rendering fixture for the Loops audit\n\nbuild · grok-4.5 · seit 2m\n\n0\nGEPLANT\n→\n0\nGEBAUT\n→\n0\nVERIFIZIERT\n→\n0\nGELANDET\nNachttimer: aus\nLokale Zeit\nZeit speichern\n\nBeim Aktivieren täglich um 23:37 Uhr\n\nStop\nWerkstatt\nLogbuch",
+    "screenshot": "/home/piet/.hermes/worktrees/codex-loops-health-track-audit-20260712/audit/date-matrix/plus-02.png"
+  }
+]
