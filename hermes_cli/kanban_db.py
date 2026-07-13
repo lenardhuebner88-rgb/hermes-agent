@@ -12935,6 +12935,12 @@ def block_task(
             "kind": block_kind,
             "recurrences": recurrences,
             "status": next_status,
+            "comment_id_watermark": int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+            ),
         }
         _append_event(conn, task_id, "blocked", blocked_payload, run_id=run_id)
         if next_status == "triage":
@@ -19169,6 +19175,9 @@ def _block_is_settled(
     if (
         _blocked_kind_for_auto_retry(
             reason,
+            explicit_block_kind=(
+                row["block_kind"] if "block_kind" in row.keys() else None
+            ),
             verdict=blocked_run["verdict"],
             auto_retry_count=auto_retry_count,
             body_hash=body_hash,
@@ -19227,7 +19236,7 @@ def silent_block_task_ids(
     }
     rows = conn.execute(
         "SELECT id, created_by, consecutive_failures, max_retries, body, "
-        "auto_retry_count FROM tasks WHERE status = 'blocked'"
+        "auto_retry_count, block_kind FROM tasks WHERE status = 'blocked'"
     ).fetchall()
     out: list[str] = []
     for row in rows:
@@ -19371,7 +19380,7 @@ def escalate_silent_blocks_sweep(
     with write_txn(conn):
         for tid in ids:
             row = conn.execute(
-                "SELECT id, title, status, assignee, body, auto_retry_count "
+                "SELECT id, title, status, assignee, body, auto_retry_count, block_kind "
                 "FROM tasks WHERE id = ?",
                 (tid,),
             ).fetchone()
@@ -19407,6 +19416,7 @@ def escalate_silent_blocks_sweep(
             body_hash = _task_body_hash(row["body"])
             blocked_kind = _blocked_kind_for_auto_retry(
                 reason,
+                explicit_block_kind=row["block_kind"],
                 verdict=(
                     blocked_run["verdict"]
                     if blocked_run is not None
@@ -20923,11 +20933,14 @@ def _add_auto_retry_needs_operator_comment_once(
 def _blocked_kind_for_auto_retry(
     reason: Optional[str],
     *,
+    explicit_block_kind: Optional[str] = None,
     verdict: Optional[str] = None,
     auto_retry_count: int = 0,
     body_hash: Optional[str] = None,
     last_auto_retry_body_hash: Optional[str] = None,
 ) -> str:
+    if explicit_block_kind is not None:
+        return "retryable" if explicit_block_kind == "transient" else explicit_block_kind
     text = (reason or "").strip()
     normalized_verdict = str(verdict or "").strip().upper()
     if (
@@ -21201,13 +21214,23 @@ def _latest_result_comment_after(
     conn: sqlite3.Connection,
     task_id: str,
     after_ts: int,
+    *,
+    after_comment_id: Optional[int] = None,
 ) -> Optional[sqlite3.Row]:
+    if after_comment_id is not None:
+        boundary_clause = "id > ?"
+        boundary = int(after_comment_id)
+    else:
+        # Compatibility fallback for block events created before the comment-ID
+        # watermark was recorded. New block episodes use the monotonic ID boundary.
+        boundary_clause = "created_at > ?"
+        boundary = int(after_ts)
     return conn.execute(
-        """
-        SELECT author, body, created_at
+        f"""
+        SELECT id, author, body, created_at
           FROM task_comments
          WHERE task_id = ?
-           AND created_at > ?
+           AND {boundary_clause}
            AND author NOT IN ('dispatcher', 'operator', 'dashboard', 'user')
            AND (
              body LIKE 'RESULT:%'
@@ -21220,8 +21243,33 @@ def _latest_result_comment_after(
          ORDER BY created_at DESC, id DESC
          LIMIT 1
         """,
-        (task_id, int(after_ts)),
+        (task_id, boundary),
     ).fetchone()
+
+
+def _blocked_comment_id_watermark(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: int,
+) -> Optional[int]:
+    row = conn.execute(
+        """
+        SELECT payload
+          FROM task_events
+         WHERE task_id = ? AND run_id = ? AND kind = 'blocked'
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (task_id, int(run_id)),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+        watermark = payload.get("comment_id_watermark")
+        return int(watermark) if watermark is not None else None
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _append_auto_retry_event_once(
@@ -21259,7 +21307,7 @@ def auto_retry_blocked_tasks(
     rows = conn.execute(
         """
         SELECT id, assignee, consecutive_failures, max_retries, body,
-               auto_retry_count, created_by
+               auto_retry_count, created_by, block_kind
           FROM tasks
          WHERE status = 'blocked'
          ORDER BY priority DESC, created_at ASC
@@ -21269,7 +21317,14 @@ def auto_retry_blocked_tasks(
         task_id = row["id"]
         if _is_funnel_root_task(conn, row):
             continue
-        if _operator_escalation_is_active(conn, task_id):
+        blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
+        if blocked_run is None:
+            continue
+        explicit_block_kind = row["block_kind"]
+        if (
+            _operator_escalation_is_active(conn, task_id)
+            and explicit_block_kind != "needs_input"
+        ):
             # Operator-review hold (autoresearch ``_escalate`` born blocked, or a
             # budget-runaway / circuit-breaker escalation): the operator must
             # decide what happens next. Never auto-retry behind the hold — the
@@ -21278,16 +21333,24 @@ def auto_retry_blocked_tasks(
             # Latest-state-aware via ``_operator_escalation_is_active`` (NOT the
             # permanent ``_has_operator_escalation``): an escalation the operator
             # already resolved (a newer ``"unblocked"`` event) falls through and
-            # retries normally.
-            continue
-        blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
-        if blocked_run is None:
+            # retries normally. Explicit ``needs_input`` is the narrow exception:
+            # its silent-block escalation may precede a late worker RESULT, which
+            # must still be consumed below without bypassing other operator holds.
             continue
         ended_at = int(blocked_run["ended_at"] or 0)
         reason = (blocked_run["summary"] or "").strip() or (
             blocked_run["error"] or ""
         ).strip()
-        result_comment = _latest_result_comment_after(conn, task_id, ended_at)
+        result_comment = _latest_result_comment_after(
+            conn,
+            task_id,
+            ended_at,
+            after_comment_id=_blocked_comment_id_watermark(
+                conn,
+                task_id,
+                int(blocked_run["id"]),
+            ),
+        )
         if result_comment is not None:
             body = str(result_comment["body"] or "")
             if complete_task(
@@ -21314,12 +21377,26 @@ def auto_retry_blocked_tasks(
                         },
                     )
             continue
+        if explicit_block_kind == "needs_input":
+            with write_txn(conn):
+                _append_auto_retry_event_once(
+                    conn,
+                    task_id,
+                    "auto_retry_skipped",
+                    {
+                        "reason": "blocked_kind",
+                        "blocked_kind": explicit_block_kind,
+                        "blocked_run_id": int(blocked_run["id"]),
+                    },
+                )
+            continue
         if ended_at + backoff_seconds > now:
             continue
         current_count = int(row["auto_retry_count"] or 0)
         body_hash = _task_body_hash(row["body"])
         blocked_kind = _blocked_kind_for_auto_retry(
             reason,
+            explicit_block_kind=explicit_block_kind,
             verdict=blocked_run["verdict"],
             auto_retry_count=current_count,
             body_hash=body_hash,

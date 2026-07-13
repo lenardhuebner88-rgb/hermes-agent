@@ -5650,6 +5650,108 @@ def test_dispatch_auto_retry_leaves_question_blocks_untouched(
         assert event.payload["blocked_kind"] == "operator_question"
 
 
+def test_dispatch_auto_retry_honors_explicit_needs_input_without_reason_keywords(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="tool crashed", kind="needs_input")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.block_kind == "needs_input"
+        assert task.auto_retry_count == 0
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["blocked_kind"] == "needs_input"
+
+
+def test_dispatch_auto_retry_honors_explicit_transient_over_reason_keywords(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="operator question while a temporary tool is unavailable?",
+            kind="transient",
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 1)]
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.block_kind is None
+        assert task.auto_retry_count == 1
+
+
+def test_dispatch_auto_retry_transient_survives_silent_sweep_before_backoff(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="Which credential should I use?",
+            kind="transient",
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 60)
+        before_backoff = kb.dispatch_once(
+            conn, auto_retry_blocked=True, max_spawn=0
+        )
+        sweep = kb.escalate_silent_blocks_sweep(conn, now=base + 60)
+
+        assert before_backoff.auto_retried_blocked == []
+        assert sweep["escalated"] == []
+        assert _operator_escalations(conn, t) == []
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        after_backoff = kb.dispatch_once(
+            conn, auto_retry_blocked=True, max_spawn=0
+        )
+
+        assert after_backoff.auto_retried_blocked == [(t, 1)]
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_silent_block_sweep_escalates_explicit_needs_input_immediately(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="tool crashed", kind="needs_input")
+
+        sweep = kb.escalate_silent_blocks_sweep(conn, now=base)
+        dispatch = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
+        assert len(_operator_escalations(conn, t)) == 1
+        assert dispatch.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+
+
 def test_dispatch_auto_retry_leaves_secret_and_irreversible_blocks_untouched(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
@@ -5750,6 +5852,69 @@ def test_dispatch_auto_retry_result_comment_does_not_wait_for_backoff(
         assert "complete answer" in (task.result or "")
 
 
+def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediately(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="waiting for clarification",
+            kind="needs_input",
+        )
+        first_dispatch = kb.dispatch_once(
+            conn, auto_retry_blocked=True, max_spawn=0
+        )
+        sweep = kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        assert first_dispatch.auto_retried_blocked == []
+        assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
+        assert len(_operator_escalations(conn, t)) == 1
+
+        kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
+
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "done"
+        assert "full answer" in (task.result or "")
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_completed"][-1]
+        assert event.payload is not None
+        assert event.payload["source"] == "result_comment"
+
+
+def test_dispatch_auto_retry_ignores_same_second_result_from_before_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.add_comment(conn, t, "research", "RESULT: stale answer from before block")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="waiting for clarification",
+            kind="needs_input",
+        )
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
 
 # ---------------------------------------------------------------------------
 # Silent-block guard (SILENT-BLOCK-GUARD-S1): escalate_silent_blocks_sweep +

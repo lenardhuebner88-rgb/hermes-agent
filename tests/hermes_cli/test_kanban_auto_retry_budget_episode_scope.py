@@ -25,8 +25,8 @@ def _claim(conn, task_id: str) -> None:
 
 def _use_full_auto_retry_budget(conn, task_id: str, clock: list[int]) -> None:
     causes = (
-        ("transient MCP unavailable", "capability"),
-        ("tool crashed", "needs_input"),
+        ("transient MCP unavailable", None),
+        ("tool crashed", "transient"),
     )
     for attempt, (reason, kind) in enumerate(causes, start=1):
         assert kb.block_task(conn, task_id, reason=reason, kind=kind)
@@ -88,7 +88,7 @@ def test_unblock_starts_fresh_auto_retry_budget_for_new_cause(
             conn,
             task_id,
             reason="transient input transport failure",
-            kind="needs_input",
+            kind="transient",
         )
         clock[0] += kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS + 1
 
