@@ -5875,7 +5875,6 @@ def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediatel
         assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
         assert len(_operator_escalations(conn, t)) == 1
 
-        monkeypatch.setattr(kb.time, "time", lambda: base + 60)
         kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
 
         res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
@@ -5888,6 +5887,34 @@ def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediatel
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_completed"][-1]
         assert event.payload is not None
         assert event.payload["source"] == "result_comment"
+
+
+def test_dispatch_auto_retry_ignores_same_second_result_from_before_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.add_comment(conn, t, "research", "RESULT: stale answer from before block")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="waiting for clarification",
+            kind="needs_input",
+        )
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
 
 # ---------------------------------------------------------------------------
 # Silent-block guard (SILENT-BLOCK-GUARD-S1): escalate_silent_blocks_sweep +
