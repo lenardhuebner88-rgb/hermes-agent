@@ -307,6 +307,22 @@ Repeated hard-gate verdict: **PASS — a real Grok-4.5-backed subscription CLI r
   now use explicit UTC `Z` in heartbeat history/current, structured ledger, and visual attestation.
 - Status: FIXED (fail-first runner suite 2 failures; post-fix 112/112 green; commit follows)
 
+### F-15  Invalid and future phase timestamps are silently presented as a live `seit 0s`
+- Class: DATA
+- Severity: S1
+- Surface: `web/src/control/lib/loopTime.ts` ⇄ `web/src/control/views/LoopsView.tsx`
+- Repro: while the scratch pack lock is held, write absent, empty, garbage, epoch `0`, a
+  millisecond number, or a one-hour-future value to `heartbeat.current.started_at` and wait for the
+  real five-second poll.
+- Evidence: payload: every injected wire value is preserved in `audit/date-matrix/matrix.json` |
+  state file: `/home/piet/.hermes/loops/loops-date-audit/heartbeat.json` was restored after capture |
+  screenshots: `audit/date-matrix/{absent,empty,garbage,epoch-zero,milliseconds-number,future-one-hour}.png`
+- Truth: disk/API contain no valid instant; DOM claims `build · grok-4.5 · seit 0s`, which looks
+  freshly live. A single guarded parser now requires a string with `Z`/numeric offset, rejects
+  invalid values and material future skew, and renders `Zeitstempel ungültig` in hero, card,
+  progress, ring and history-age paths.
+- Status: FIXED (fail-first component suite 4 failures; post-fix 69/69 green; commit follows)
+
 ## HARD-STOP SAFETY PROOF
 
 - Health-Track: `main...origin/main`, HEAD `330ec8b`; no tracked changes or new commits from this turn; existing untracked local audit/worktree files were left untouched.

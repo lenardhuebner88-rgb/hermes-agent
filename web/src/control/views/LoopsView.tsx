@@ -50,7 +50,7 @@ import {
 import { parseLedgerLine } from "../lib/loopLedger";
 import type { LedgerVerdict } from "../lib/loopLedger";
 import { deriveRingSegments, deriveRingTicks } from "../lib/loopRing";
-import { formatLoopTimestamp, useLoopNowMs } from "../lib/loopTime";
+import { formatLoopTimestamp, loopElapsedSeconds, parseLoopTimestamp, useLoopNowMs } from "../lib/loopTime";
 import type { LoopRingSegment, LoopRingTicks } from "../lib/loopRing";
 import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 
@@ -159,8 +159,8 @@ const QUEUE_STAGE_LABEL: Record<(typeof QUEUE_STAGE_KEYS)[number], string> = {
 /** Kurzes Alter aus einer lokalen ISO-Zeit (heartbeat/ledger `at`-Feld) —
  *  wrap um `fmtAge` (das nur epoch-Sekunden kennt). Ungültige Zeiten → "—". */
 function ageFromIso(iso: string, nowMs: number): string {
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return "—";
+  const ms = parseLoopTimestamp(iso);
+  if (ms === null) return "—";
   return fmtAge(Math.floor(ms / 1000), Math.floor(nowMs / 1000));
 }
 
@@ -401,8 +401,14 @@ function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: numb
         </p>
       );
     }
-    const startedMs = Date.parse(current.started_at);
-    const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
+    const elapsedSec = loopElapsedSeconds(current.started_at, nowMs);
+    if (elapsedSec === null) {
+      return (
+        <p className="mt-2 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
+          {current.phase} · {current.model} · {t.heartbeatInvalid}
+        </p>
+      );
+    }
     return (
       <>
         <p className="mt-2 inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--ln-ink)" }}>
@@ -1427,8 +1433,8 @@ function newestGlobalEvent(packs: LoopPackSummary[]): LoopHeartbeatHistoryEntry 
     const last = p.heartbeat?.last ?? [];
     const newest = last[last.length - 1];
     if (!newest) continue;
-    const ms = Date.parse(newest.at);
-    if (Number.isFinite(ms) && ms > bestMs) {
+    const ms = parseLoopTimestamp(newest.at);
+    if (ms !== null && ms > bestMs) {
       bestMs = ms;
       best = newest;
     }
@@ -1469,9 +1475,8 @@ function LoopPipelineProgress({ pack, nowMs }: { pack: LoopPackSummary; nowMs: n
         {segments.map((segment, index) => {
           const active = segment.state === "current";
           const done = segment.state === "done";
-          const startedMs = active && current ? Date.parse(current.started_at) : Number.NaN;
-          const elapsed = Number.isFinite(startedMs) ? Math.max(0, Math.floor((nowMs - startedMs) / 1000)) : 0;
-          const status = done ? t.phaseStateDone : active ? t.phaseStateActive(fmtDur(elapsed)) : t.phaseStateWaiting;
+          const elapsed = active && current ? loopElapsedSeconds(current.started_at, nowMs) : null;
+          const status = done ? t.phaseStateDone : active ? (elapsed === null ? t.heartbeatInvalid : t.phaseStateActive(fmtDur(elapsed))) : t.phaseStateWaiting;
           return (
             <li
               key={segment.key}
@@ -1522,10 +1527,9 @@ function LoopsHero({
 }) {
   const running = packs.filter((p) => p.running);
   const hero = running[0] ?? null;
-  const heroStartedMs = hero?.heartbeat?.current ? Date.parse(hero.heartbeat.current.started_at) : Number.NaN;
-  const heroElapsedSec = Number.isFinite(heroStartedMs)
-    ? Math.max(0, Math.floor((nowMs - heroStartedMs) / 1000))
-    : 0;
+  const heroElapsedSec = hero?.heartbeat?.current
+    ? loopElapsedSeconds(hero.heartbeat.current.started_at, nowMs)
+    : null;
 
   return (
     <section
@@ -1561,14 +1565,14 @@ function LoopsHero({
                     hero.heartbeat.current.phase,
                     hero.heartbeat.current.engine,
                     hero.heartbeat.current.model,
-                    fmtDur(heroElapsedSec),
+                    heroElapsedSec === null ? t.heartbeatInvalid : fmtDur(heroElapsedSec),
                   )}
                 </>
               ) : (
                 t.heartbeatBetweenPhases
               )}
             </p>
-            {hero.heartbeat?.current && heroElapsedSec > 30 ? (
+            {hero.heartbeat?.current && heroElapsedSec !== null && heroElapsedSec > 30 ? (
               <p className="mt-1 text-xs" role="status" style={{ color: "var(--ln-warn)" }}>
                 {t.heartbeatStale(fmtDur(heroElapsedSec))}
               </p>

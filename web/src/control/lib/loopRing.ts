@@ -5,6 +5,7 @@
  */
 
 import type { LoopHeartbeatHistoryEntry, LoopPackSummary } from "./types";
+import { loopElapsedSeconds } from "./loopTime";
 
 export interface LoopRingSegment {
   key: string;
@@ -48,9 +49,8 @@ export function deriveRingSegments(pack: LoopPackSummary, nowMs: number): LoopRi
   const windowed = currentRoundWindow(pack.heartbeat?.last ?? [], current?.phase ?? null);
   return PIPELINE_PHASE_ORDER.map((phase): LoopRingSegment => {
     if (current && current.phase === phase) {
-      const startedMs = Date.parse(current.started_at);
-      const elapsedSec = Number.isFinite(startedMs) ? Math.max(0, (nowMs - startedMs) / 1000) : 0;
-      const progress = current.timeout > 0 ? Math.min(1, elapsedSec / current.timeout) : null;
+      const elapsedSec = loopElapsedSeconds(current.started_at, nowMs);
+      const progress = elapsedSec !== null && current.timeout > 0 ? Math.min(1, elapsedSec / current.timeout) : null;
       return { key: phase, state: "current", progress };
     }
     const found = [...windowed].reverse().find((e) => e.phase === phase);

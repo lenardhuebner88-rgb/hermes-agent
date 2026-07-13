@@ -63,10 +63,10 @@ const runningPipeline: LoopPack = {
   params: { max_plans: "8", focus: "Hermes-Board/Kanban-Robustheit" },
   running: true,
   heartbeat: {
-    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00", timeout: 3600, round: 1 },
+    current: { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-02T23:00:00Z", timeout: 3600, round: 1 },
     last: [
-      { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00" },
-      { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00" },
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", secs: 512, rc: 0, at: "2026-07-02T22:00:00Z" },
+      { phase: "verify", engine: "claude", model: "claude-fable-5", secs: 178, rc: 1, at: "2026-07-02T22:10:00Z" },
     ],
   },
   stop_requested: false,
@@ -124,7 +124,7 @@ const bouncedPipelineWithHistoryOnlyCommits: LoopPack = {
   heartbeat: {
     current: null,
     last: [
-      { phase: "verify", engine: "codex", model: "gpt-5.6-sol", secs: 583, rc: 0, at: "2026-07-13T00:56:17" },
+      { phase: "verify", engine: "codex", model: "gpt-5.6-sol", secs: 583, rc: 0, at: "2026-07-13T00:56:17Z" },
     ],
   },
   queue: { "00-planned": 0, "10-building": 0, "20-verified": 0, "30-landed": 0, "90-bounced": 1 },
@@ -255,7 +255,7 @@ describe("LoopsGrid", () => {
   });
 
   it("shows state-based mobile progress with round and phases but no invented percentage", () => {
-    renderInteractiveGrid([runningPipeline], { nowMs: Date.parse("2026-07-02T23:14:30") });
+    renderInteractiveGrid([runningPipeline], { nowMs: Date.parse("2026-07-02T23:14:30Z") });
     const progress = screen.getByTestId("loop-mobile-progress");
 
     expect(progress.textContent).toContain("Runde 1 / 12");
@@ -436,6 +436,24 @@ describe("LoopsGrid — Live-Phase-Chip (heartbeat)", () => {
     const startedMs = Date.parse(runningPipeline.heartbeat!.current!.started_at);
     const html = renderGrid([runningPipeline], { nowMs: startedMs + 31_000 });
     expect(html.split(t.heartbeatStale("31s")).length - 1).toBe(2); // hero + card
+  });
+
+  it.each([
+    ["garbage", "not-a-date"],
+    ["missing timezone", "2026-07-13T08:00:00"],
+    ["millisecond number", Date.parse("2026-07-13T08:00:00Z")],
+    ["future", "2026-07-13T09:00:00Z"],
+  ])("discloses an invalid %s phase timestamp instead of claiming seit 0s", (_label, startedAt) => {
+    const malformed = {
+      ...runningPipeline,
+      heartbeat: {
+        ...runningPipeline.heartbeat!,
+        current: { ...runningPipeline.heartbeat!.current!, started_at: startedAt },
+      },
+    } as unknown as LoopPack;
+    const html = renderGrid([malformed], { nowMs: Date.parse("2026-07-13T08:00:00Z") });
+    expect(html).toContain("Zeitstempel ungültig");
+    expect(html).not.toContain(t.heartbeatCurrent("build", "claude-sonnet-5", "0s"));
   });
 
   it("shows 'zwischen Phasen' when running but heartbeat.current is null", () => {
@@ -621,7 +639,7 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
     commits: [],
     overrides: {},
     phase_usage: [
-      { ts: "2026-07-13T01:00:00", round: 1, phase: "build", engine: "xai", model: "grok-4.5", total_tokens: 270, input_tokens: 220, cached_input_tokens: 180, output_tokens: 50, reasoning_tokens: 40, billing: "subscription", metered_cost_eur: 0 },
+      { ts: "2026-07-13T01:00:00Z", round: 1, phase: "build", engine: "xai", model: "grok-4.5", total_tokens: 270, input_tokens: 220, cached_input_tokens: 180, output_tokens: 50, reasoning_tokens: 40, billing: "subscription", metered_cost_eur: 0 },
     ],
   };
 
@@ -656,18 +674,18 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
     heartbeat: { current, last },
   });
 
-  const NOW = Date.parse("2026-07-03T08:00:00");
+  const NOW = Date.parse("2026-07-03T08:00:00Z");
 
   it("zählt verify der VORHERIGEN Runde nicht als done, wenn Runde 2 in build steht", () => {
     const pack = withHeartbeat(
-      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00", timeout: 3600 },
+      { phase: "build", engine: "claude", model: "claude-sonnet-5", started_at: "2026-07-03T07:55:00Z", timeout: 3600 },
       [
         // Runde 1 (komplett, alles grün):
-        hbEntry("plan", 0, "2026-07-03T06:00:00"),
-        hbEntry("build", 0, "2026-07-03T06:20:00"),
-        hbEntry("verify", 0, "2026-07-03T06:40:00"),
+        hbEntry("plan", 0, "2026-07-03T06:00:00Z"),
+        hbEntry("build", 0, "2026-07-03T06:20:00Z"),
+        hbEntry("verify", 0, "2026-07-03T06:40:00Z"),
         // Runde 2 (nur plan bisher):
-        hbEntry("plan", 0, "2026-07-03T07:50:00"),
+        hbEntry("plan", 0, "2026-07-03T07:50:00Z"),
       ],
     );
     const segs = deriveRingSegments(pack, NOW);
@@ -678,8 +696,8 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
   it("startet mit leerem Ring, wenn gerade eine neue Runde plant (History = Vergangenheit)", () => {
     const pack = withHeartbeat(
-      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00", timeout: 2400 },
-      [hbEntry("plan", 0, "2026-07-03T06:00:00"), hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")],
+      { phase: "plan", engine: "claude", model: "claude-fable-5", started_at: "2026-07-03T07:59:00Z", timeout: 2400 },
+      [hbEntry("plan", 0, "2026-07-03T06:00:00Z"), hbEntry("build", 0, "2026-07-03T06:20:00Z"), hbEntry("verify", 0, "2026-07-03T06:40:00Z")],
     );
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.find((s) => s.key === "plan")?.state).toBe("current");
@@ -689,17 +707,17 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
   it("zeigt im Leerlauf das Ergebnis der LETZTEN Runde (Fenster ab letztem plan)", () => {
     const pack = withHeartbeat(null, [
-      hbEntry("verify", 1, "2026-07-03T05:00:00"), // ältere, rote Runde — zählt nicht
-      hbEntry("plan", 0, "2026-07-03T06:00:00"),
-      hbEntry("build", 0, "2026-07-03T06:20:00"),
-      hbEntry("verify", 0, "2026-07-03T06:40:00"),
+      hbEntry("verify", 1, "2026-07-03T05:00:00Z"), // ältere, rote Runde — zählt nicht
+      hbEntry("plan", 0, "2026-07-03T06:00:00Z"),
+      hbEntry("build", 0, "2026-07-03T06:20:00Z"),
+      hbEntry("verify", 0, "2026-07-03T06:40:00Z"),
     ]);
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.every((s) => s.state === "done")).toBe(true);
   });
 
   it("bleibt konservativ pending, wenn kein plan-Eintrag im Fenster liegt", () => {
-    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00"), hbEntry("verify", 0, "2026-07-03T06:40:00")]);
+    const pack = withHeartbeat(null, [hbEntry("build", 0, "2026-07-03T06:20:00Z"), hbEntry("verify", 0, "2026-07-03T06:40:00Z")]);
     const segs = deriveRingSegments(pack, NOW);
     expect(segs.every((s) => s.state === "pending")).toBe(true);
   });
@@ -707,7 +725,7 @@ describe("deriveRingSegments — nur die aktuelle Runde zählt", () => {
 
 describe("deriveRingTicks — nur der hintere zusammenhängende round-Block", () => {
   const hbEntry = (phase: string, rc: number) =>
-    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00" });
+    ({ phase, engine: "claude", model: "claude-sonnet-5", secs: 100, rc, at: "2026-07-03T06:00:00Z" });
 
   it("zählt rounds vor einer Pipeline-Phase nicht mit", () => {
     const pack: LoopPackSummary = {
