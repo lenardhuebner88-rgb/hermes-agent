@@ -9941,6 +9941,82 @@ def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
     assert markers[0].payload["action"] == "nudged"
 
 
+def test_4a_scheduled_future_due_is_not_treated_as_stall(kanban_home):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="wake at due time", assignee="coder")
+        assert kb.schedule_task(conn, tid, reason="timer") is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET due_at = ? WHERE id = ?",
+                (now + 3600, tid),
+            )
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = 'scheduled'",
+                (now - 7200, tid),
+            )
+
+        summary = kb.no_silent_stall_sweep(
+            conn, now=now, min_age_seconds=3600,
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task.status == "scheduled"
+    assert summary["self_healed"] == []
+
+
+def test_4a_scheduled_due_is_unblocked_without_stall_age(kanban_home):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="wake now", assignee="coder")
+        assert kb.schedule_task(conn, tid, reason="timer") is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET due_at = ? WHERE id = ?",
+                (now, tid),
+            )
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = 'scheduled'",
+                (now - 60, tid),
+            )
+
+        summary = kb.no_silent_stall_sweep(
+            conn, now=now, min_age_seconds=3600,
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task.status == "ready"
+    assert summary["self_healed"] == [
+        {"task_id": tid, "class": "scheduled_due", "action": "unblocked"}
+    ]
+
+
+def test_4a_scheduled_due_skips_funnel_root(kanban_home):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="operator funnel root",
+            assignee="research",
+            created_by="family",
+        )
+        assert kb.schedule_task(conn, tid, reason="funnel hold") is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET due_at = ? WHERE id = ?",
+                (now - 1, tid),
+            )
+
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+
+    assert task.status == "scheduled"
+    assert summary["skipped_funnel"] == [tid]
+    assert summary["self_healed"] == []
+
+
 def test_4a_scheduled_overdue_skips_operator_held_chain(kanban_home):
     # A freigabe:operator PlanSpec chain is held in 'scheduled' for explicit
     # operator release (propose-and-wait). The no-silent-stall sweep must NOT
@@ -9956,7 +10032,8 @@ def test_4a_scheduled_overdue_skips_operator_held_chain(kanban_home):
         )
         with kb.write_txn(conn):
             conn.execute(
-                "UPDATE tasks SET freigabe = 'operator' WHERE id = ?", (root,)
+                "UPDATE tasks SET freigabe = 'operator', due_at = ? WHERE id = ?",
+                (now - 1, root),
             )
         child_ids = kb.decompose_triage_task(
             conn, root, root_assignee="orchestrator",

@@ -18917,11 +18917,23 @@ def no_silent_stall_sweep(
         if root and root["status"] == "archived":
             summary["skipped_archived_chain"].append(row["id"])
             continue
-        stall_class = "scheduled_overdue"
-        reason = "scheduled task exceeded no-silent-stall age window"
+        due_at = row["due_at"]
+        if due_at is not None:
+            try:
+                due_at = int(due_at)
+            except (TypeError, ValueError):
+                # A malformed timer must never fall through to the age-based nudge.
+                continue
+            if due_at > ts:
+                continue
+            stall_class = "scheduled_due"
+            reason = "scheduled task reached its due time"
+        else:
+            stall_class = "scheduled_overdue"
+            reason = "scheduled task exceeded no-silent-stall age window"
+            if not _old_enough(row["id"], "scheduled", row["created_at"]):
+                continue
         if _has_stall_marker(conn, row["id"], stall_class):
-            continue
-        if not _old_enough(row["id"], "scheduled", row["created_at"]):
             continue
         if unblock_task(conn, row["id"]):
             with write_txn(conn):
