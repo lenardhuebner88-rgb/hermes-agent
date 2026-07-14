@@ -3858,6 +3858,17 @@ def _read_root_kanban_cfg() -> dict:
         return {}
 
 
+def _dispatch_kwargs_for_tick(
+    *, max_spawn_override: Optional[int] = None,
+) -> dict[str, Any]:
+    dispatch_kwargs = kanban_db.dispatch_kwargs_from_config(
+        _read_root_kanban_cfg()
+    )
+    if max_spawn_override is not None:
+        dispatch_kwargs["max_spawn"] = max_spawn_override
+    return dispatch_kwargs
+
+
 def _read_max_in_progress() -> int:
     """kanban.max_in_progress from the ROOT config.yaml. Default 3, the F4
     default already used by the /workers `cap` field."""
@@ -6619,7 +6630,11 @@ def worker_action_endpoint(
     conn = _conn(board=board)
     try:
         if action == "dispatch":
-            result = kanban_db.dispatch_once(conn, board=board)
+            result = kanban_db.dispatch_once(
+                conn,
+                board=board,
+                **_dispatch_kwargs_for_tick(),
+            )
             n = len(getattr(result, "spawned", []) or [])
             log.info("control worker-action=dispatch board=%s spawned=%d", board, n)
             return {
@@ -6692,7 +6707,11 @@ def worker_action_endpoint(
                     "UPDATE tasks SET assignee = ? WHERE id = ?",
                     (payload.assignee.strip() or None, task_id),
                 )
-        redispatch = kanban_db.dispatch_once(conn, board=board)
+        redispatch = kanban_db.dispatch_once(
+            conn,
+            board=board,
+            **_dispatch_kwargs_for_tick(),
+        )
         log.info("control worker-action=restart run=%s task=%s reclaimed=True", run_id, task_id)
         return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
                 "detail": "Worker zurückgeholt und neu eingeplant.",
@@ -7202,14 +7221,17 @@ def get_task_log(
 @router.post("/dispatch")
 def dispatch(
     dry_run: bool = Query(False),
-    max_n: int = Query(8, alias="max"),
+    max_n: int = Query(8, ge=1, le=32, alias="max"),
     board: Optional[str] = Query(None),
 ):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
         result = kanban_db.dispatch_once(
-            conn, dry_run=dry_run, max_spawn=max_n, board=board,
+            conn,
+            dry_run=dry_run,
+            board=board,
+            **_dispatch_kwargs_for_tick(max_spawn_override=max_n),
         )
         # DispatchResult is a dataclass.
         try:

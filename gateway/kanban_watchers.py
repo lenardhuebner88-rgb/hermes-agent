@@ -844,8 +844,8 @@ def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
     :func:`_release_singleton_lock` when done. ``(None, "contended")`` when
     another process holds the lock (caller must NOT dispatch). ``(None,
     "unavailable")`` when locking cannot be performed (non-POSIX filesystem
-    without flock, or the status.py helpers are unimportable) — caller falls
-    back to config-only control.
+    without flock, or the status.py helpers are unimportable) — caller must
+    not dispatch without single-owner proof.
     """
     try:
         from gateway.status import _try_acquire_file_lock  # deferred; same package
@@ -1993,14 +1993,14 @@ class GatewayKanbanWatchersMixin:
                 "lock (%s); this gateway will NOT dispatch.", _lock_path,
             )
             return
-        if _lock_state == "held":
-            self._kanban_dispatcher_lock_handle = _lock_handle  # hold for process lifetime
-            logger.info("kanban dispatcher: holding singleton dispatcher lock (%s)", _lock_path)
-        else:
+        if _lock_state != "held":
             logger.warning(
-                "kanban dispatcher: advisory lock unavailable at %s; proceeding "
-                "on config control alone.", _lock_path,
+                "kanban dispatcher: advisory lock unavailable at %s; this gateway "
+                "will NOT dispatch.", _lock_path,
             )
+            return
+        self._kanban_dispatcher_lock_handle = _lock_handle  # hold for process lifetime
+        logger.info("kanban dispatcher: holding singleton dispatcher lock (%s)", _lock_path)
 
         try:
             interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)

@@ -112,7 +112,10 @@ def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatc
             }
         },
     )
-    monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
+    lock_handle = object()
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: (lock_handle, "held")
+    )
     monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
@@ -142,3 +145,36 @@ def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatc
     asyncio.run(runner._kanban_dispatcher_watcher())
 
     assert closeout_calls == [("alpha", 10), ("beta", 10)]
+
+
+def test_dispatcher_watcher_skips_when_singleton_lock_unavailable(
+    tmp_path, monkeypatch,
+):
+    """An unavailable advisory lock must disable this dispatch owner."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import config as config_mod
+    from hermes_cli import kanban_db as _kb
+
+    runner = _make_runner()
+    monkeypatch.delenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", raising=False)
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"dispatch_in_gateway": True}},
+    )
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable")
+    )
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    list_boards = MagicMock(return_value=[])
+    monkeypatch.setattr(_kb, "list_boards", list_boards)
+
+    async def no_wait(_delay):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    list_boards.assert_not_called()
+    assert runner._kanban_dispatcher_lock_handle is None

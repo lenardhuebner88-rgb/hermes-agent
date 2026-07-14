@@ -391,6 +391,32 @@ def test_successful_release_is_explicit_and_delivered(kanban_home):
         assert closeout.CLOSEOUT_DELIVERED in kinds
 
 
+def test_release_runner_crash_emits_alert_event_and_is_ambiguous(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = _queue_done(conn)
+
+        def crash_release(_conn, _task_id):
+            raise RuntimeError("release boom")
+
+        result = closeout.process_closeout(
+            conn,
+            task_id,
+            release_runner=crash_release,
+        )
+
+        assert result.state == "ambiguous"
+        crash_event = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+            (task_id, "auto_release_hook_crashed"),
+        ).fetchone()
+        assert crash_event is not None
+        assert closeout._json_payload(crash_event["payload"]) == {
+            "error": "release boom",
+            "error_type": "RuntimeError",
+        }
+        assert closeout.CLOSEOUT_RELEASE_AMBIGUOUS in _event_kinds(conn, task_id)
+
+
 def test_auto_executed_release_gate_waits_then_completes_without_duplicate_runner(
     kanban_home,
 ):

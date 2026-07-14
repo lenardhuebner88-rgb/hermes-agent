@@ -3140,11 +3140,11 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
 def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
     kanban_home, monkeypatch,
 ):
-    """A stale-by-TTL claim whose worker PID is still alive should be
-    extended, not reclaimed (#23025). Slow models can spend longer than
-    ``DEFAULT_CLAIM_TTL_SECONDS`` inside a single tool-free LLM call;
-    killing those healthy workers produces a respawn loop with zero
-    progress."""
+    """A stale-by-TTL claim with a live PID and fresh heartbeat is extended.
+
+    Killing an observably active worker produces a respawn loop with zero
+    progress (#23025); KI-5 only changes the missing-heartbeat case.
+    """
     import hermes_cli.kanban_db as _kb
 
     with kb.connect_closing() as conn:
@@ -3155,8 +3155,9 @@ def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
 
         old_expires = int(time.time()) - 60
         conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (old_expires, t),
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? "
+            "WHERE id = ?",
+            (old_expires, int(time.time()), t),
         )
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
@@ -3180,6 +3181,59 @@ def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
         assert "reclaimed" not in kinds
 
 
+def test_stale_claim_with_null_heartbeat_reclaims_instead_of_extending(
+    kanban_home, monkeypatch,
+):
+    """An expired claim with no heartbeat has no observable progress.
+
+    A live PID therefore enters the terminate/reclaim path instead of getting
+    an indefinite TTL extension. The termination-success stub preserves the
+    separate invariant that a worker which survives termination keeps its
+    claim and cannot be duplicated.
+    """
+    import hermes_cli.kanban_db as _kb
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="missing heartbeat", assignee="a")
+        host = _kb._claimer_id().split(":", 1)[0]
+        kb.claim_task(conn, t, claimer=f"{host}:worker")
+        kb._set_worker_pid(conn, t, 12345)
+        old_expires = int(time.time()) - 60
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = NULL "
+            "WHERE id = ?",
+            (old_expires, t),
+        )
+
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+        termination_calls = []
+
+        def terminate(*args, **kwargs):
+            termination_calls.append((args, kwargs))
+            return {
+                "termination_attempted": True,
+                "host_local": True,
+                "terminated": True,
+            }
+
+        monkeypatch.setattr(_kb, "_terminate_reclaimed_worker", terminate)
+        reclaimed = kb.release_stale_claims(
+            conn, signal_fn=lambda _pid, _signal: None,
+        )
+
+        assert reclaimed == 1
+        assert termination_calls
+        assert kb.get_task(conn, t).status == "ready"
+        kinds = [
+            row["kind"]
+            for row in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (t,)
+            ).fetchall()
+        ]
+        assert "reclaimed" in kinds
+        assert "claim_extended" not in kinds
+
+
 def test_stale_claim_with_live_pid_uses_env_ttl_override(
     kanban_home, monkeypatch,
 ):
@@ -3193,8 +3247,9 @@ def test_stale_claim_with_live_pid_uses_env_ttl_override(
         kb.claim_task(conn, t, claimer=f"{host}:worker")
         kb._set_worker_pid(conn, t, 12345)
         conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (int(time.time()) - 60, t),
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? "
+            "WHERE id = ?",
+            (int(time.time()) - 60, int(time.time()), t),
         )
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)

@@ -101,3 +101,26 @@ def test_reentrant_same_path_lock_is_exclusive(conn):
         assert held_a is True
         with kb._dispatch_tick_lock(db_path) as held_b:
             assert held_b is False, "same-board lock must be exclusive"
+
+
+def test_unavailable_lock_file_skips_tick_without_writes(conn, monkeypatch):
+    """An unreadable lock path must fail closed, never run an unlocked tick."""
+    kb.create_task(conn, title="t", assignee="w")
+    real_open = Path.open
+
+    def deny_dispatch_lock(path, *args, **kwargs):
+        if str(path).endswith(".dispatch.lock"):
+            raise PermissionError("read-only lock directory")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_dispatch_lock)
+    spawn_calls = []
+
+    result = kb.dispatch_once(
+        conn,
+        spawn_fn=lambda *args, **kwargs: spawn_calls.append((args, kwargs)),
+    )
+
+    assert result.skipped_locked is True
+    assert result.spawned == []
+    assert spawn_calls == []

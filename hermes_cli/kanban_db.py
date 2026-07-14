@@ -2465,10 +2465,9 @@ def _dispatch_tick_lock(db_path: Path):
     again next interval.
 
     Board-scoped: the lock file is a ``.dispatch.lock`` sibling of the
-    board's ``kanban.db``, so unrelated boards tick independently. On
-    platforms without ``fcntl``/``msvcrt`` the guard degrades to a no-op
-    (yields ``True``) — single-writer enforcement is best-effort and the
-    orphan-dispatcher scenario is specific to POSIX service managers.
+    board's ``kanban.db``, so unrelated boards tick independently. Lock-file
+    setup or acquisition failure is not permission to write: the guard fails
+    closed (yields ``False``) when it cannot prove single-writer ownership.
     """
     lock_path = db_path.with_name(db_path.name + ".dispatch.lock")
     handle = None
@@ -2498,8 +2497,8 @@ def _dispatch_tick_lock(db_path: Path):
                 acquired = False
     except OSError:
         # Could not even open the lock file (permissions, read-only FS).
-        # Degrade to a no-op so a probe failure never blocks dispatch.
-        acquired = True
+        # Fail closed: without the lock we cannot prove single-writer safety.
+        acquired = False
         handle = None
     try:
         yield acquired
@@ -8884,25 +8883,22 @@ def release_stale_claims(
 ) -> int:
     """Reset any ``running`` task whose claim has expired.
 
-    A stale-by-TTL claim whose host-local worker PID is still alive is
-    *extended* (with a ``claim_extended`` event) instead of being
-    reclaimed. Reclaiming a live worker mid-flight produces the spawn-
-    then-immediately-reclaim loop seen on slow models that spend longer
-    than ``DEFAULT_CLAIM_TTL_SECONDS`` inside a single tool-free LLM
-    call (#23025): no tool calls means no ``kanban_heartbeat``, even
-    though the subprocess is healthy.
+    A stale-by-TTL claim whose host-local worker PID is still alive and whose
+    heartbeat remains fresh is *extended* (with a ``claim_extended`` event)
+    instead of being reclaimed. Reclaiming an observably active worker
+    mid-flight produces the spawn-then-immediately-reclaim loop seen on slow
+    models (#23025).
 
-    Backstop (#29747 gap 3): if the worker's PID is still alive but its
-    ``last_heartbeat_at`` is stale by more than
-    ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (1h), the worker has
-    been making no observable progress and we reclaim anyway — even if
-    ``_pid_alive`` is still true. This catches the wedged-in-a-logic-loop
-    case where the process is technically running but accomplishing
-    nothing. ``_touch_activity`` (run_agent.py) bridges chunk-level
-    liveness into ``last_heartbeat_at`` via #31752, so any genuinely
-    active worker keeps its heartbeat fresh as a side effect of normal
-    API traffic. ``enforce_max_runtime`` and ``detect_crashed_workers``
-    remain the upper bounds for genuinely wedged or dead workers.
+    Backstop (#29747 gap 3): if ``last_heartbeat_at`` is absent or stale by
+    more than ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (1h), the worker
+    has no observable progress and enters the terminate/reclaim path even if
+    ``_pid_alive`` is true. This catches processes that are technically alive
+    but accomplishing nothing. ``_touch_activity`` (run_agent.py) bridges
+    chunk-level liveness into ``last_heartbeat_at`` via #31752, so genuinely
+    active workers keep their heartbeat fresh through normal API traffic. A
+    worker that survives termination keeps its claim, preventing a duplicate.
+    ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper
+    bounds for genuinely wedged or dead workers.
 
     Returns the number of stale claims actually reclaimed (live-pid
     extensions don't count). Safe to call often.
@@ -8921,13 +8917,21 @@ def release_stale_claims(
         lock = row["claim_lock"] or ""
         host_local = lock.startswith(host_prefix)
         hb = row["last_heartbeat_at"]
-        # Heartbeat staleness backstop: if we have a heartbeat at all
-        # and it's older than the max-stale threshold, the worker is
-        # not making observable progress.  Reclaim instead of extending,
-        # even if the PID is still alive (it's likely in a logic loop).
+        # Heartbeat staleness backstop: an expired claim with no heartbeat, or
+        # a heartbeat older than the max-stale threshold, has no observable
+        # progress. Enter the terminate/reclaim path instead of extending even
+        # if the PID is alive. The later survived-termination guard still holds
+        # the claim if our live worker cannot actually be stopped.
         heartbeat_stale = (
-            hb is not None
-            and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+            (
+                hb is None
+                and row["claim_expires"] is not None
+                and int(row["claim_expires"]) < now
+            )
+            or (
+                hb is not None
+                and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+            )
         )
         if (
             host_local
@@ -11618,10 +11622,11 @@ def complete_task(
     # same status set, same expected_run_id match. Without this, a stale
     # worker (claim expired, task re-claimed) or a CLI complete on a task
     # parked in 'review' would merge an unreviewed/abandoned chain.
-    # Fail-open on unexpected hook errors — completion semantics for
-    # non-isolated tasks must never depend on this module. (Git-level
-    # failures are converted to a 'parked' outcome inside the module.)
+    # Unexpected hook errors fail closed for eligible isolated tasks;
+    # completion semantics for non-isolated tasks never depend on this module.
+    # Git-level failures become a 'parked' outcome inside the module.
     _wt_outcome: Optional[dict] = None
+    _wt_eligible = False
     try:
         _wt_row = conn.execute(
             "SELECT status, current_run_id, workspace_path FROM tasks WHERE id = ?",
@@ -11646,6 +11651,13 @@ def complete_task(
             task_id,
             exc_info=True,
         )
+        if _wt_eligible:
+            return _park_integration(
+                conn,
+                task_id,
+                {"reason": "integration_hook_failed"},
+                expected_run_id=expected_run_id,
+            )
     if _wt_outcome and _wt_outcome.get("action") == "rebase_conflict":
         return _route_rebase_conflict_to_coder(
             conn,
@@ -18250,6 +18262,7 @@ def no_silent_stall_sweep(
         "parked": [],
         "skipped_funnel": [],
         "skipped_held": [],
+        "skipped_archived_chain": [],
         "integration_retried": [],
         "transient_retried": [],
         "conflict_fixer_dispatched": [],
@@ -18271,6 +18284,15 @@ def no_silent_stall_sweep(
         if _is_operator_held(conn, row):
             # Intentional propose-and-wait / ui-real hold — not a stall.
             summary["skipped_held"].append(row["id"])
+            continue
+        from hermes_cli import kanban_worktrees as _kwt
+
+        root_id = _kwt.chain_root_id(conn, row["id"])
+        root = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (root_id,)
+        ).fetchone()
+        if root and root["status"] == "archived":
+            summary["skipped_archived_chain"].append(row["id"])
             continue
         stall_class = "scheduled_overdue"
         reason = "scheduled task exceeded no-silent-stall age window"

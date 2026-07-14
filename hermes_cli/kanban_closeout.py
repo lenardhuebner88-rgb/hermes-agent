@@ -939,6 +939,13 @@ def _drive_release(
     try:
         result = release_runner(conn, claim.task_id)
     except Exception as exc:
+        with _kb().write_txn(conn):
+            _kb()._append_event(
+                conn,
+                claim.task_id,
+                "auto_release_hook_crashed",
+                {"error": str(exc), "error_type": type(exc).__name__},
+            )
         _record_ambiguous(
             conn,
             claim.task_id,

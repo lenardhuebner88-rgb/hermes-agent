@@ -2041,6 +2041,54 @@ def _provisioned_task(conn, repo, *, title="iso task"):
     return tid, ws
 
 
+def test_complete_task_blocks_when_isolated_integration_hook_crashes(
+    kanban_home, tmp_path, monkeypatch
+):
+    def crash_hook(conn, task_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(kwt, "maybe_integrate_on_complete", crash_hook)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="isolated hook crash",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path / "isolated"),
+        )
+        assert kb.claim_task(conn, task_id) is not None
+
+        assert kb.complete_task(conn, task_id, result="done")
+
+        task = kb.get_task(conn, task_id)
+        blocked_events = _events(conn, task_id, "blocked")
+    assert task is not None and task.status == "blocked"
+    assert blocked_events[-1]["reason"] == (
+        "integration parked: integration_hook_failed"
+    )
+
+
+def test_complete_task_nonisolated_ignores_integration_hook(
+    kanban_home, monkeypatch
+):
+    def crash_hook(conn, task_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(kwt, "maybe_integrate_on_complete", crash_hook)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="non-isolated completion",
+            assignee="coder",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+
+        assert kb.complete_task(conn, task_id, result="done")
+
+        task = kb.get_task(conn, task_id)
+    assert task is not None and task.status == "done"
+
+
 def test_complete_task_integrates_then_done(kanban_home, repo, monkeypatch):
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     with kb.connect() as conn:

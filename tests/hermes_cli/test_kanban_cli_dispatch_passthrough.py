@@ -128,6 +128,37 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
     )
 
 
+def test_cli_dispatch_passes_repo_caps_from_config(
+    isolated_kanban_home, monkeypatch
+):
+    from hermes_cli import kanban as kb_cli
+    from hermes_cli import kanban_db
+
+    fake_config = {
+        "kanban": {
+            "serialize_by_repo": False,
+            "max_concurrent_per_repo": 3,
+        }
+    }
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: fake_config)
+
+    captured = {}
+    monkeypatch.setattr(
+        kanban_db,
+        "dispatch_once",
+        lambda conn, **kwargs: (
+            captured.update(kwargs),
+            kanban_db.DispatchResult(),
+        )[1],
+    )
+
+    args = argparse.Namespace(dry_run=True, max=None, failure_limit=2, json=False)
+    kb_cli._cmd_dispatch(args)
+
+    assert captured["serialize_by_repo"] is False
+    assert captured["max_concurrent_per_repo"] == 3
+
+
 def test_cli_invalid_max_in_progress_silently_disables(isolated_kanban_home, monkeypatch):
     """Invalid kanban.max_in_progress values (0, negative, non-int) should
     silently fall through to None — no crash, no surprise behavior."""
