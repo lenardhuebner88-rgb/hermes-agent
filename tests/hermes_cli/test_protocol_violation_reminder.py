@@ -326,8 +326,10 @@ def test_terminalization_nudge_rebuilds_missing_runtime_tool_schemas(
             self.valid_tool_names: set[str] = set()
             self.max_iterations = 30
             self.session_id = "same-session"
+            self._skip_mcp_refresh = False
 
         def run_conversation(self, **_kwargs) -> str:
+            assert self._skip_mcp_refresh is True
             seen.extend(
                 str(tool.get("function", {}).get("name") or "")
                 for tool in self.tools
@@ -359,6 +361,43 @@ def test_terminalization_nudge_rebuilds_missing_runtime_tool_schemas(
     assert result == "terminalized"
     assert seen == ["kanban_complete", "kanban_block"]
     assert agent.tools is original_tools
+    assert agent._skip_mcp_refresh is False
+
+
+def test_terminalization_nudge_restores_global_names_when_resolution_fails(
+    kanban_home: Path,
+    monkeypatch,
+) -> None:
+    import model_tools
+
+    class FakeAgent:
+        tools: list[dict[str, object]] = []
+        valid_tool_names: set[str] = set()
+        max_iterations = 30
+        session_id = "same-session"
+
+    original_global_names = ["terminal", "kanban_comment"]
+    model_tools._last_resolved_tool_names = list(original_global_names)
+
+    def _broken_resolver(**_kwargs):
+        model_tools._last_resolved_tool_names = ["leaked_resolution"]
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(model_tools, "get_tool_definitions", _broken_resolver)
+    with kb.connect_closing() as conn:
+        task_id = _running_task_with_deliverable(conn)
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        cli_module._run_kanban_finalize_nudge_q(
+            SimpleNamespace(
+                agent=FakeAgent(),
+                conversation_history=[],
+                session_id="same-session",
+            ),
+            task_id=task_id,
+        )
+
+    assert model_tools._last_resolved_tool_names == original_global_names
 
 
 def test_terminalization_nudge_ignores_deliverable_from_before_current_run(

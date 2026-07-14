@@ -15745,6 +15745,8 @@ def _run_kanban_finalize_nudge_q(
     original_valid_names = getattr(agent, "valid_tool_names", None)
     had_max_iterations = hasattr(agent, "max_iterations")
     original_max_iterations = getattr(agent, "max_iterations", None)
+    had_skip_mcp_refresh = hasattr(agent, "_skip_mcp_refresh")
+    original_skip_mcp_refresh = getattr(agent, "_skip_mcp_refresh", None)
     import model_tools as _model_tools
 
     original_global_tool_names = list(_model_tools._last_resolved_tool_names)
@@ -15755,11 +15757,9 @@ def _run_kanban_finalize_nudge_q(
         function = tool.get("function")
         if isinstance(function, dict):
             return str(function.get("name") or "")
-        # AIAgent keeps its resolved runtime tools in the registry's flat
-        # schema (``{"name": ..., "parameters": ...}``); API adapters wrap
-        # that shape only when serializing a provider request.  Preserve both
-        # representations so the live continuation does not accidentally
-        # expose an empty tool list while wrapper-shaped unit doubles pass.
+        # Some runtime adapters and test doubles carry the registry's flat
+        # schema (``{"name": ..., "parameters": ...}``) while AIAgent usually
+        # keeps provider wrappers. Preserve both representations.
         return str(tool.get("name") or "")
 
     # Re-resolve the canonical schemas at the turn boundary instead of trusting
@@ -15769,36 +15769,39 @@ def _run_kanban_finalize_nudge_q(
     # tools and converted the one allowed recovery turn into another protocol
     # miss.  The raw catalog bypasses progressive disclosure, then the strict
     # two-name filter keeps the continuation lifecycle-only.
-    resolved_tools = _model_tools.get_tool_definitions(
-        enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-        disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-        quiet_mode=True,
-        skip_tool_search_assembly=True,
-    )
-    selected_tools = {
-        _tool_name(tool): tool
-        for tool in (resolved_tools or [])
-        if _tool_name(tool) in lifecycle_tools
-    }
-    if set(selected_tools) != lifecycle_tools:
-        # A prebuilt agent/test double may carry schemas that are not present in
-        # the process registry.  Preserve that compatible path, but never call
-        # the model with a partial lifecycle surface.
-        selected_tools.update({
-            _tool_name(tool): tool
-            for tool in (original_tools or [])
-            if _tool_name(tool) in lifecycle_tools
-        })
-    if set(selected_tools) != lifecycle_tools:
-        raise RuntimeError("terminal lifecycle tool schemas are unavailable")
-    agent.tools = [selected_tools[name] for name in lifecycle_tool_order]
-    active_tool_names = [
-        _tool_name(tool) for tool in agent.tools if _tool_name(tool)
-    ]
-    agent.valid_tool_names = set(active_tool_names)
-    agent.max_iterations = 1
-    _model_tools._last_resolved_tool_names = list(active_tool_names)
     try:
+        resolved_tools = _model_tools.get_tool_definitions(
+            enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+            disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        selected_tools = {
+            _tool_name(tool): tool
+            for tool in (resolved_tools or [])
+            if _tool_name(tool) in lifecycle_tools
+        }
+        if set(selected_tools) != lifecycle_tools:
+            # A prebuilt agent/test double may carry schemas that are not present
+            # in the process registry. Preserve that compatible path, but never
+            # call the model with a partial lifecycle surface.
+            selected_tools.update({
+                _tool_name(tool): tool
+                for tool in (original_tools or [])
+                if _tool_name(tool) in lifecycle_tools
+            })
+        if set(selected_tools) != lifecycle_tools:
+            raise RuntimeError("terminal lifecycle tool schemas are unavailable")
+        agent.tools = [selected_tools[name] for name in lifecycle_tool_order]
+        active_tool_names = [
+            _tool_name(tool) for tool in agent.tools if _tool_name(tool)
+        ]
+        agent.valid_tool_names = set(active_tool_names)
+        agent.max_iterations = 1
+        # The per-turn MCP refresh is additive by design. Disable it only for
+        # this constrained turn or it can repopulate the full agent toolset.
+        agent._skip_mcp_refresh = True
+        _model_tools._last_resolved_tool_names = list(active_tool_names)
         result = agent.run_conversation(
             user_message=prompt,
             conversation_history=getattr(cli, "conversation_history", []),
@@ -15819,6 +15822,13 @@ def _run_kanban_finalize_nudge_q(
         else:
             try:
                 delattr(agent, "max_iterations")
+            except AttributeError:
+                pass
+        if had_skip_mcp_refresh:
+            agent._skip_mcp_refresh = original_skip_mcp_refresh
+        else:
+            try:
+                delattr(agent, "_skip_mcp_refresh")
             except AttributeError:
                 pass
         _model_tools._last_resolved_tool_names = original_global_tool_names
