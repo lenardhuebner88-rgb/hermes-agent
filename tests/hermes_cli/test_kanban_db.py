@@ -11263,6 +11263,177 @@ def test_4a_auto_retry_skips_funnel_root_but_not_funnel_child(
     assert child_task.status == "ready"
 
 
+def _block_as_review_revision(conn, task_id, *, reason="review needs changes"):
+    # Enter through the real review-run completion path. Direct callers are
+    # deliberately forbidden from forging the internal review_revision kind.
+    with kb.write_txn(conn):
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'review',
+                   claim_lock = NULL,
+                   claim_expires = NULL
+             WHERE id = ?
+            """,
+            (task_id,),
+        )
+    claimed = kb.claim_review_task(
+        conn,
+        task_id,
+        reviewer_profile="reviewer",
+    )
+    assert claimed is not None
+    assert claimed.current_run_id is not None
+    assert kb.complete_task(
+        conn,
+        task_id,
+        summary=reason,
+        metadata={"verdict": "REQUEST_CHANGES"},
+        expected_run_id=claimed.current_run_id,
+        review_gate=True,
+    )
+
+
+def test_review_revision_first_block_auto_retries_once(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="review revision retry",
+            body="acceptance contract v1",
+            assignee="coder",
+        )
+        _block_as_review_revision(conn, task_id)
+
+        retried = kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert retried == [(task_id, 1)]
+    assert task is not None
+    assert task.status == "ready"
+    assert task.auto_retry_count == 1
+    assert task.block_kind is None
+
+
+def test_review_revision_same_body_after_retry_needs_operator(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="repeated review revision",
+            body="acceptance contract unchanged",
+            assignee="coder",
+        )
+        _block_as_review_revision(conn, task_id, reason="first review revision")
+        assert kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        ) == [(task_id, 1)]
+
+        _block_as_review_revision(conn, task_id, reason="same review revision")
+        blocked = kb.get_task(conn, task_id)
+        assert blocked is not None
+        assert blocked.status == "blocked"
+        assert kb.blocked_task_operator_questions(conn, [blocked]) == {task_id: True}
+
+        retried = kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        )
+        task = kb.get_task(conn, task_id)
+        skipped = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "auto_retry_skipped"
+        ]
+
+    assert retried == []
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.auto_retry_count == 1
+    assert any(payload.get("blocked_kind") == "needs_operator" for payload in skipped)
+
+
+def test_review_revision_changed_body_honors_global_retry_limit(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="bounded review revisions",
+            body="acceptance contract v1",
+            assignee="coder",
+        )
+        _block_as_review_revision(conn, task_id, reason="revision one")
+        assert kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        ) == [(task_id, 1)]
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET body = ? WHERE id = ?",
+                ("acceptance contract v2", task_id),
+            )
+        _block_as_review_revision(conn, task_id, reason="revision two")
+        assert kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        ) == [(task_id, 2)]
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET body = ? WHERE id = ?",
+                ("acceptance contract v3", task_id),
+            )
+        _block_as_review_revision(conn, task_id, reason="revision three")
+        retried = kb.auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=0,
+            retry_limit=2,
+            failure_limit=5,
+        )
+        task = kb.get_task(conn, task_id)
+        exhausted = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "auto_retry_exhausted"
+        ]
+
+    assert retried == []
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.auto_retry_count == 2
+    assert exhausted[-1] == {"attempts": 2, "limit": 2}
+
+
+def test_review_revision_recurrence_does_not_enter_generic_triage(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="review revision recurrence",
+            body="same contract",
+            assignee="coder",
+        )
+        _block_as_review_revision(conn, task_id, reason="first revision")
+        assert kb.unblock_task(conn, task_id)
+        _block_as_review_revision(conn, task_id, reason="second revision")
+        task = kb.get_task(conn, task_id)
+
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.block_kind == "review_revision"
+    assert task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+
 def test_4a_dispatcher_heartbeat_file_written(kanban_home):
     now = 1_900_000_000
     with kb.connect_closing() as conn:

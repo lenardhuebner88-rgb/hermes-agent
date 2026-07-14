@@ -13517,9 +13517,15 @@ def block_task(
                 if previous_recurrences > 0 and previous_kind == block_kind
                 else 1
             )
-            if recurrences >= BLOCK_RECURRENCE_LIMIT:
+            if (
+                recurrences >= BLOCK_RECURRENCE_LIMIT
+                and block_kind != "review_revision"
+            ):
                 next_status = "triage"
             else:
+                # Review revisions have their own bounded retry/operator path.
+                # They must never leak into the generic repeated-failure triage
+                # lane merely because the same reviewer verdict recurred.
                 next_status = "blocked"
         if expected_run_id is None:
             cur = conn.execute(
