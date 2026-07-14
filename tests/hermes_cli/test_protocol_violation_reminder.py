@@ -336,3 +336,45 @@ def test_terminalization_nudge_requires_successful_initial_turn(
     )
 
     assert result is None
+
+
+def test_terminalization_nudge_restores_absent_agent_attributes(
+    kanban_home: Path,
+) -> None:
+    import model_tools
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.tools = [
+                {"type": "function", "function": {"name": "kanban_complete"}},
+                {"type": "function", "function": {"name": "kanban_block"}},
+                object(),
+            ]
+            self.session_id = "same-session"
+
+        def run_conversation(self, **_kwargs) -> str:
+            assert self.max_iterations == 1
+            assert self.valid_tool_names == {"kanban_complete", "kanban_block"}
+            return "no lifecycle call"
+
+    agent = FakeAgent()
+    original_tools = agent.tools
+    original_global_names = ["terminal"]
+    model_tools._last_resolved_tool_names = list(original_global_names)
+    with kb.connect_closing() as conn:
+        task_id = _running_task_with_deliverable(conn)
+
+    result = cli_module._run_kanban_finalize_nudge_q(
+        SimpleNamespace(
+            agent=agent,
+            conversation_history=[],
+            session_id="same-session",
+        ),
+        task_id=task_id,
+    )
+
+    assert result == "no lifecycle call"
+    assert agent.tools is original_tools
+    assert not hasattr(agent, "valid_tool_names")
+    assert not hasattr(agent, "max_iterations")
+    assert model_tools._last_resolved_tool_names == original_global_names
