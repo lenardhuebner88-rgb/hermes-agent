@@ -15673,38 +15673,61 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
 
 
 def _run_kanban_finalize_nudge_q(
-    cli: "HermesCLI", first_response: str = "", *, task_id: str | None = None
-) -> None:
-    """Give one deliverable-producing worker a lifecycle-only final turn."""
+    cli: "HermesCLI",
+    first_response: str = "",
+    *,
+    task_id: str | None = None,
+    initial_run_succeeded: bool = True,
+) -> str | None:
+    """Give one successful, deliverable-producing run a lifecycle-only turn.
+
+    The continuation stays in the existing agent/session, is capped at one
+    iteration, and temporarily exposes only ``kanban_complete`` and
+    ``kanban_block``.  Every mutable tool-resolution surface is restored even
+    when the continuation raises.
+    """
     import asyncio as _asyncio
     import inspect as _inspect
     import os as _os
 
     task_id = (task_id or _os.environ.get("HERMES_KANBAN_TASK") or "").strip()
-    if not task_id:
+    if not task_id or not initial_run_succeeded:
         return
 
     from hermes_cli import kanban_db as _kb
     from hermes_cli.goals import KANBAN_GOAL_FINALIZE_TEMPLATE as _FINALIZE
 
-    def _state() -> tuple[str | None, bool]:
+    def _state() -> tuple[str | None, int | None, bool]:
         c = _kb.connect()
         try:
-            task = _kb.get_task(c, task_id)
-            has_deliverable = bool(
-                task is not None
-                and task.status == "running"
-                and _kb._deliverable_evidence_for_protocol_miss(c, task_id)
+            row = c.execute(
+                "SELECT status, current_run_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            status = row["status"] if row is not None else None
+            run_id = (
+                int(row["current_run_id"])
+                if row is not None and row["current_run_id"] is not None
+                else None
             )
-            return (task.status if task is not None else None, has_deliverable)
+            has_deliverable = bool(
+                status == "running"
+                and run_id is not None
+                and _kb._deliverable_evidence_for_protocol_miss(
+                    c,
+                    task_id,
+                    expected_run_id=run_id,
+                )
+            )
+            return status, run_id, has_deliverable
         finally:
             try:
                 c.close()
             except Exception:
                 pass
 
-    status, has_deliverable = _state()
-    if status != "running" or not has_deliverable:
+    status, run_id, has_deliverable = _state()
+    if status != "running" or run_id is None or not has_deliverable:
         return
 
     prompt = _FINALIZE.format(
@@ -15717,8 +15740,13 @@ def _run_kanban_finalize_nudge_q(
     lifecycle_tools = {"kanban_complete", "kanban_block"}
     agent = cli.agent
     original_tools = agent.tools
+    had_valid_names = hasattr(agent, "valid_tool_names")
     original_valid_names = getattr(agent, "valid_tool_names", None)
+    had_max_iterations = hasattr(agent, "max_iterations")
     original_max_iterations = getattr(agent, "max_iterations", None)
+    import model_tools as _model_tools
+
+    original_global_tool_names = list(_model_tools._last_resolved_tool_names)
 
     def _tool_name(tool: object) -> str:
         if not isinstance(tool, dict):
@@ -15726,28 +15754,44 @@ def _run_kanban_finalize_nudge_q(
         function = tool.get("function")
         return function.get("name", "") if isinstance(function, dict) else ""
 
-    agent.tools = [tool for tool in original_tools if _tool_name(tool) in lifecycle_tools]
-    if original_valid_names is not None:
-        agent.valid_tool_names = set(original_valid_names) & lifecycle_tools
-    if original_max_iterations is not None:
-        agent.max_iterations = 1
+    agent.tools = [
+        tool for tool in (original_tools or [])
+        if _tool_name(tool) in lifecycle_tools
+    ]
+    active_tool_names = [
+        _tool_name(tool) for tool in agent.tools if _tool_name(tool)
+    ]
+    agent.valid_tool_names = set(active_tool_names)
+    agent.max_iterations = 1
+    _model_tools._last_resolved_tool_names = list(active_tool_names)
     try:
         result = agent.run_conversation(
             user_message=prompt,
-            conversation_history=cli.conversation_history,
+            conversation_history=getattr(cli, "conversation_history", []),
         )
         if _inspect.isawaitable(result):
             result = _asyncio.run(result)
     finally:
         agent.tools = original_tools
-        if original_valid_names is not None:
+        if had_valid_names:
             agent.valid_tool_names = original_valid_names
-        if original_max_iterations is not None:
+        else:
+            try:
+                delattr(agent, "valid_tool_names")
+            except AttributeError:
+                pass
+        if had_max_iterations:
             agent.max_iterations = original_max_iterations
+        else:
+            try:
+                delattr(agent, "max_iterations")
+            except AttributeError:
+                pass
+        _model_tools._last_resolved_tool_names = original_global_tool_names
 
     if (
         getattr(agent, "session_id", None)
-        and agent.session_id != cli.session_id
+        and agent.session_id != getattr(cli, "session_id", None)
     ):
         cli.session_id = agent.session_id
     resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
@@ -15757,6 +15801,7 @@ def _run_kanban_finalize_nudge_q(
         logger.info("kanban finalize nudge: task %s now %s", task_id, _state()[0])
     except Exception:
         pass
+    return resp or ""
 
 
 
@@ -16220,7 +16265,14 @@ def main(
                             # Give it exactly ONE re-prompt to finalize. No judge
                             # call, so at most one extra turn, only when it forgot.
                             try:
-                                _run_kanban_finalize_nudge_q(cli, response)
+                                _run_kanban_finalize_nudge_q(
+                                    cli,
+                                    response,
+                                    initial_run_succeeded=not (
+                                        isinstance(result, dict)
+                                        and bool(result.get("failed"))
+                                    ),
+                                )
                             except Exception as _nudge_exc:
                                 logger.debug("kanban finalize nudge failed: %s", _nudge_exc)
 

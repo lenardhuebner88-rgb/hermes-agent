@@ -9080,7 +9080,18 @@ def claim_task(
             conn,
             task_id,
             "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
+            {
+                "lock": lock,
+                "expires": expires,
+                "run_id": run_id,
+                "comment_id_watermark": int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) FROM task_comments "
+                        "WHERE task_id = ?",
+                        (task_id,),
+                    ).fetchone()[0]
+                ),
+            },
             run_id=run_id,
         )
         claimed = get_task(conn, task_id)
@@ -11176,6 +11187,8 @@ def _submit_for_review(
     stage: int = 0,
     effective_tier: Optional[str] = None,
     target_profile: Optional[str] = None,
+    diff_run_id: Optional[int] = None,
+    blocked_only: bool = False,
 ) -> bool:
     """Park a code-bearing completion in ``review`` instead of ``done``.
 
@@ -11188,7 +11201,9 @@ def _submit_for_review(
     # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
     # must not run under the txn). Empty dict when no/non-git workspace.
     diff_snapshot = _capture_review_diff_snapshot(
-        conn, task_id, expected_run_id=expected_run_id
+        conn,
+        task_id,
+        expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
     )
     if diff_snapshot:
         run_metadata = (
@@ -11206,7 +11221,21 @@ def _submit_for_review(
     # commands => {"configured": False}; RED command => WorkerGateError).
     _wg_stamp = _run_worker_gate(conn, task_id)
     with write_txn(conn):
-        if expected_run_id is None:
+        if blocked_only:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       result       = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status = 'blocked'
+                """,
+                (result, task_id),
+            )
+        elif expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
@@ -15757,19 +15786,43 @@ def _title_terms(title: Optional[str]) -> set[str]:
 def _deliverable_evidence_for_protocol_miss(
     conn: sqlite3.Connection,
     task_id: str,
+    *,
+    expected_run_id: Optional[int] = None,
 ) -> Optional[dict[str, Any]]:
     row = conn.execute(
-        "SELECT title, assignee FROM tasks WHERE id = ?",
+        "SELECT title, assignee, status, current_run_id FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
+        return None
+    run_id = expected_run_id
+    if run_id is None and row["current_run_id"] is not None:
+        run_id = int(row["current_run_id"])
+    if run_id is None:
+        return None
+    if row["current_run_id"] is None or int(row["current_run_id"]) != int(run_id):
+        return None
+    claimed = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, int(run_id)),
+    ).fetchone()
+    if claimed is None or not claimed["payload"]:
+        return None
+    try:
+        claimed_payload = json.loads(claimed["payload"])
+    except (TypeError, ValueError):
+        return None
+    watermark = _validated_comment_id_watermark(claimed_payload)
+    if watermark is None:
         return None
     terms = _title_terms(row["title"])
     assignee = (row["assignee"] or "").strip().lower()
     rows = conn.execute(
         "SELECT id, author, body, created_at FROM task_comments "
-        "WHERE task_id = ? ORDER BY id DESC LIMIT 10",
-        (task_id,),
+        "WHERE task_id = ? AND id > ? ORDER BY id DESC LIMIT 10",
+        (task_id, watermark),
     ).fetchall()
     for comment in rows:
         body = (comment["body"] or "").strip()
@@ -15791,6 +15844,7 @@ def _deliverable_evidence_for_protocol_miss(
             continue
         return {
             "comment_id": int(comment["id"]),
+            "run_id": int(run_id),
             "author": comment["author"],
             "created_at": int(comment["created_at"]),
             "preview": body[:400],
@@ -16680,6 +16734,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 evidence = _deliverable_evidence_for_protocol_miss(
                     conn,
                     row["id"],
+                    expected_run_id=row["current_run_id"],
                 )
                 if evidence is not None:
                     protocol_violation = False
@@ -16900,11 +16955,13 @@ def repair_deliverable_posted_not_completed(
     *,
     actor: str = "operator",
 ) -> bool:
-    """Terminalize a recoverable deliverable/protocol miss without approval.
+    """Repair a recoverable deliverable/protocol miss without approval.
 
     This closes only the missing ``kanban_complete`` protocol step when a
     ``deliverable_posted_not_completed`` event from the current task cycle
-    carries clear evidence. It does not write a review verdict.
+    carries clear evidence. Code/worktree tasks re-enter normal review;
+    proven non-code deliverables may terminalize directly. No review verdict
+    is synthesized.
     """
     now = int(time.time())
     actor = (actor or "operator").strip() or "operator"
@@ -16914,7 +16971,7 @@ def repair_deliverable_posted_not_completed(
     with write_txn(conn):
         row = conn.execute(
             """
-            SELECT evidence.payload
+            SELECT evidence.payload, evidence.run_id
               FROM task_events AS evidence
              WHERE evidence.task_id = ?
                AND evidence.kind = ?
@@ -16950,6 +17007,55 @@ def repair_deliverable_posted_not_completed(
         if not isinstance(evidence, dict):
             return False
 
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND status = 'blocked'",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            return False
+
+    code_bearing = (
+        _is_code_task_row(task_row)
+        or str(task_row["workspace_kind"] or "").strip().lower() == "worktree"
+    )
+    source_run_id = int(row["run_id"]) if row["run_id"] is not None else None
+    if code_bearing:
+        delivered = str(evidence.get("preview") or "").strip()
+        metadata = {
+            "repair": DELIVERABLE_POSTED_NOT_COMPLETED,
+            "actor": actor,
+            "evidence": evidence,
+            "source_run_id": source_run_id,
+        }
+        submitted = _submit_for_review(
+            conn,
+            task_id,
+            result=delivered or summary,
+            summary=summary,
+            metadata=metadata,
+            verified_cards=[],
+            expected_run_id=None,
+            diff_run_id=source_run_id,
+            blocked_only=True,
+        )
+        if not submitted:
+            return False
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "deliverable_protocol_repaired",
+                {
+                    "actor": actor,
+                    "terminalized": False,
+                    "routed_to_review": True,
+                    "evidence": evidence,
+                    "source_run_id": source_run_id,
+                },
+            )
+        return True
+
+    with write_txn(conn):
         with _review_done_terminal_authority():
             cur = conn.execute(
                 """
@@ -23112,6 +23218,27 @@ def _dispatch_once_locked(
                 )
                 if auto:
                     result.auto_blocked.append(claimed.id)
+            continue
+        try:
+            _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
+        except _kwt.WorktreeError as exc:
+            reason = f"worker base preparation: {exc}"
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    claimed.id,
+                    "worker_base_rejected",
+                    {"reason": str(exc)},
+                    run_id=_current_run_id(conn, claimed.id),
+                )
+            auto = _record_spawn_failure(
+                conn,
+                claimed.id,
+                reason,
+                failure_limit=1,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
             continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn

@@ -4713,19 +4713,30 @@ def test_reclaim_endpoint_409_for_non_running_task(client):
 # R1 (P1-repair-action): POST /tasks/<id>/repair — operator nachschließen des
 # fehlenden kanban_complete-Schritts für ein deliverable_posted_not_completed.
 # ---------------------------------------------------------------------------
-def _seed_deliverable_miss(monkeypatch, *, title="repair me"):
+def _seed_deliverable_miss(
+    monkeypatch,
+    *,
+    title="repair me",
+    assignee="coder",
+    kind=None,
+):
     """Drive a task into the blocked ``deliverable_posted_not_completed`` state
     (worker posted a deliverable, exited rc=0 without ``kanban_complete``)."""
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title=title, assignee="coder")
+        tid = kb.create_task(
+            conn,
+            title=title,
+            assignee=assignee,
+            kind=kind,
+        )
         kb.claim_task(conn, tid)
         kb.add_comment(
             conn,
             tid,
-            "coder",
+            assignee,
             (
                 "# Deliverable: " + title + "\n\n"
                 "The work is complete and mapped to the requested objective. "
@@ -4763,9 +4774,8 @@ def test_repair_endpoint_requires_confirm(client, monkeypatch):
         conn.close()
 
 
-def test_repair_endpoint_closes_deliverable_miss(client, monkeypatch):
-    """With confirm:true the missing kanban_complete is closed: blocked→done,
-    a deliverable_protocol_repaired event is emitted, ready is recomputed."""
+def test_repair_endpoint_routes_code_deliverable_through_review(client, monkeypatch):
+    """A code repair re-enters the normal review/integration lifecycle."""
     tid = _seed_deliverable_miss(monkeypatch, title="repairable")
 
     r = client.post(
@@ -4780,7 +4790,7 @@ def test_repair_endpoint_closes_deliverable_miss(client, monkeypatch):
     conn = kb.connect()
     try:
         t = kb.get_task(conn, tid)
-        assert t.status == "done"
+        assert t.status == "review"
         repair_events = [
             e
             for e in kb.list_events(conn, tid)
@@ -4794,6 +4804,34 @@ def test_repair_endpoint_closes_deliverable_miss(client, monkeypatch):
             (tid,),
         ).fetchall()
         assert all(row["verdict"] is None for row in verdicts)
+    finally:
+        conn.close()
+
+
+def test_repair_endpoint_closes_safe_non_code_deliverable(client, monkeypatch):
+    """A proven non-code deliverable retains the direct repair path."""
+    tid = _seed_deliverable_miss(
+        monkeypatch,
+        title="quarterly narrative",
+        assignee="default",
+        kind="text",
+    )
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/repair",
+        json={"confirm": True, "actor": "operator-test"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, tid).status == "done"
+        repair = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "deliverable_protocol_repaired"
+        ][-1]
+        assert repair.payload["terminalized"] is True
     finally:
         conn.close()
 

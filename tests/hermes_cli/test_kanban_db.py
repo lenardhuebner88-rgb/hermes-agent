@@ -9578,12 +9578,17 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
     with kb.connect_closing() as conn:
-        tid = kb.create_task(conn, title="render quarterly report", assignee="coder")
+        tid = kb.create_task(
+            conn,
+            title="render quarterly report",
+            assignee="default",
+            kind="text",
+        )
         kb.claim_task(conn, tid)
         kb.add_comment(
             conn,
             tid,
-            "coder",
+            "default",
             (
                 "# Deliverable: render quarterly report\n\n"
                 "The quarterly report is complete and mapped to the requested "
@@ -9628,7 +9633,11 @@ def test_code_deliverable_protocol_repair_routes_through_review(
 ):
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
-    monkeypatch.setattr(kb, "_run_worker_gate", lambda _task: None)
+    monkeypatch.setattr(
+        kb,
+        "_run_worker_gate",
+        lambda *_args, **_kwargs: {"configured": False},
+    )
 
     with kb.connect_closing() as conn:
         tid = kb.create_task(
@@ -9642,7 +9651,8 @@ def test_code_deliverable_protocol_repair_routes_through_review(
             conn,
             tid,
             "coder",
-            "# RESULT\n\nImplementation and focused tests complete. " + "x" * 160,
+            "# RESULT: implement lifecycle guard\n\n"
+            "Implementation and focused tests complete. " + "x" * 160,
         )
         pid = 525252
         kb._set_worker_pid(conn, tid, pid)
@@ -9661,6 +9671,7 @@ def test_code_deliverable_protocol_repair_routes_through_review(
     assert repaired.status == "review"
     assert "submitted_for_review" in kinds
     assert "completed" not in kinds
+    assert "deliverable_protocol_repaired" in kinds
 
 
 def test_stale_deliverable_event_does_not_repair_later_failure_cycle(
