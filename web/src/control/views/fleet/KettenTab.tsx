@@ -5,10 +5,10 @@
  * Active-Step-Detail (mit Model-Row + GGFM-Override-Badge), Upcoming-Steps,
  * Done + Gate-Teaser.
  *
- * Join: useHermesWorkers() → worker.task_id === node.id für effective_model,
- * model_override, heartbeat_age, run_progress, eta_p50_seconds.
+ * Join: useHermesWorkers() → worker.task_id === node.id für persistierte
+ * Modellroute, Override-Hinweis, Heartbeat, Run-Fortschritt und ETA.
  *
- * Reines Frontend-Redesign — keine Backend-Änderung, keine Logik-Änderung.
+ * Die Modellroute stammt ausschließlich aus dem konkreten task_runs-Datensatz.
  */
 import { useState, useCallback, useMemo } from "react";
 import {
@@ -36,6 +36,7 @@ import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 import type { ChainCostsResponse } from "../../lib/schemas";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { type ChainNode } from "./shared";
+import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 
 import "./ketten-v4.css";
 
@@ -310,7 +311,7 @@ function KettenGraphV4({
 
   // === Focus node worker join ===
   const focusWorker = focusNode ? workerByNodeId.get(focusNode.id) ?? null : null;
-  const focusEffectiveModel = focusWorker?.effective_model ?? focusNode?.latest_run?.profile ?? null;
+  const focusRoute = focusWorker ?? focusNode?.latest_run ?? null;
   const focusModelOverride = focusWorker?.model_override ?? null;
   const focusHbAge = focusWorker
     ? heartbeatAge(focusWorker.last_heartbeat_at, now)
@@ -403,10 +404,9 @@ function KettenGraphV4({
                 const isRunning = node.status === "running";
                 const worker = workerByNodeId.get(node.id);
                 // FIX-3: Label = Rolle (nicht strippen); Sub = Modell, nur wenn
-                // bekannt UND verschieden von der Rolle.
+                // run-spezifische Telemetrie; niemals Rollenname als Modell.
                 const roleLabel = node.assignee ?? node.latest_run?.profile ?? "—";
-                const nodeModel = worker?.effective_model ?? null;
-                const showModelSub = nodeModel != null && nodeModel !== roleLabel;
+                const nodeRoute = worker ?? node.latest_run;
 
                 // Connector class (between this node and the next)
                 let connectorClass = "pc-open";
@@ -431,9 +431,21 @@ function KettenGraphV4({
                     <div className={`pstep-label ${isRunning ? "pstep-label-active" : isDone ? "pstep-label-done" : ""}`} title={roleLabel}>
                       {roleLabel}
                     </div>
-                    {showModelSub ? (
-                      <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`} title={nodeModel}>{nodeModel}</div>
-                    ) : null}
+                    <div className={`pstep-sub ${isRunning ? "pstep-sub-active" : ""}`}>
+                      {nodeRoute ? (
+                        <ModelRouteBadge
+                          requestedProvider={nodeRoute.requested_provider}
+                          requestedModel={nodeRoute.requested_model}
+                          activeProvider={nodeRoute.active_provider}
+                          activeModel={nodeRoute.active_model}
+                          modelState={nodeRoute.model_state}
+                          modelSource={nodeRoute.model_source}
+                          observedAt={nodeRoute.model_observed_at}
+                        />
+                      ) : (
+                        <span className="text-micro text-ink-3">{de.worker.modelRouteNotStarted}</span>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -482,7 +494,6 @@ function KettenGraphV4({
             <div className="detail-meta">
               <div className="detail-role">
                 {focusNode.assignee ?? "—"}
-                {focusEffectiveModel ? <span className="detail-role-tier">· {focusEffectiveModel}</span> : null}
               </div>
               <div className="detail-task-id">{focusNode.id.slice(0, 12)}</div>
             </div>
@@ -498,17 +509,27 @@ function KettenGraphV4({
           <div className="detail-title" title={focusNode.title}>{focusNode.title}</div>
 
           {/* === Model-Row with GGFM Override Badge (v4) === */}
-          {focusEffectiveModel ? (
-            <div className="model-row">
-              <span className="model-icon">⚙</span>
-              <span className="model-label" title={focusEffectiveModel}>{focusEffectiveModel}</span>
-              {focusModelOverride ? (
-                <span className="model-override-badge" title={`Override: ${focusModelOverride}`}>
-                  GGFM Override
-                </span>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="model-row">
+            <span className="model-icon">⚙</span>
+            {focusRoute ? (
+              <ModelRouteBadge
+                requestedProvider={focusRoute.requested_provider}
+                requestedModel={focusRoute.requested_model}
+                activeProvider={focusRoute.active_provider}
+                activeModel={focusRoute.active_model}
+                modelState={focusRoute.model_state}
+                modelSource={focusRoute.model_source}
+                observedAt={focusRoute.model_observed_at}
+              />
+            ) : (
+              <span className="text-micro text-ink-3">{de.worker.modelRouteNotStarted}</span>
+            )}
+            {focusModelOverride ? (
+              <span className="model-override-badge" title={`Override: ${focusModelOverride}`}>
+                GGFM Override
+              </span>
+            ) : null}
+          </div>
 
           {/* Progress ring + values */}
           <div className="detail-bottom">
@@ -553,7 +574,7 @@ function KettenGraphV4({
           </div>
           {upcomingNodes.map((n) => {
             const worker = workerByNodeId.get(n.id);
-            const model = worker?.effective_model ?? n.latest_run?.profile ?? null;
+            const route = worker ?? n.latest_run;
             const hasOverride = worker?.model_override != null;
             return (
               <button
@@ -573,12 +594,21 @@ function KettenGraphV4({
                   <div className={`urole ${n.assignee && /reviewer/i.test(n.assignee) ? "urole-reviewer" : n.assignee && /critic/i.test(n.assignee) ? "urole-critic" : n.assignee && /coder/i.test(n.assignee) ? "urole-coder" : ""}`}>
                     {n.assignee ?? "—"}
                   </div>
-                  {model ? (
-                    <div className={`umodel ${hasOverride ? "umodel-override" : ""}`}>
-                      {model}
-                      {hasOverride ? " · ⚠ override" : " · lane default"}
-                    </div>
-                  ) : null}
+                  <div className={`umodel ${hasOverride ? "umodel-override" : ""}`}>
+                    {route ? (
+                      <ModelRouteBadge
+                        requestedProvider={route.requested_provider}
+                        requestedModel={route.requested_model}
+                        activeProvider={route.active_provider}
+                        activeModel={route.active_model}
+                        modelState={route.model_state}
+                        modelSource={route.model_source}
+                        observedAt={route.model_observed_at}
+                      />
+                    ) : (
+                      <span className="text-micro text-ink-3">{de.worker.modelRouteNotStarted}</span>
+                    )}
+                  </div>
                   <div className="utitle" title={n.title}>{n.title}</div>
                 </div>
                 <div className={`uwait${n.status === "blocked" ? " uwait-blocked" : ""}`}>

@@ -58,6 +58,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import funnel as kanban_funnel
 from hermes_cli import kanban_db
+from hermes_cli import projects_db
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli import strategist_surface
 
@@ -630,7 +631,154 @@ def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
     }
 
 
-def _run_dict(conn: sqlite3.Connection, r: kanban_db.Run) -> dict[str, Any]:
+def _run_value(run: Any, key: str) -> Any:
+    if isinstance(run, sqlite3.Row):
+        return run[key] if key in run.keys() else None
+    if isinstance(run, dict):
+        return run.get(key)
+    return getattr(run, key, None)
+
+
+def _run_metadata_dict(run: Any) -> dict[str, Any]:
+    raw_metadata = _run_value(run, "metadata")
+    if isinstance(raw_metadata, dict):
+        return raw_metadata
+    try:
+        metadata = json.loads(raw_metadata or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+class _LegacyModelRouteResolver:
+    """Request-scoped cache/batch for explicitly legacy-only inference."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        runs: Optional[list[Any]] = None,
+        *,
+        board: Optional[str] = None,
+    ) -> None:
+        self.conn = conn
+        self.board = board or kanban_db.board_slug_for_conn(conn)
+        self._identity_by_profile: dict[str, dict[str, Any]] = {}
+        requests: list[tuple[str, Optional[str]]] = []
+        for run in runs or []:
+            metadata = _run_metadata_dict(run)
+            session_id = metadata.get("worker_session_id")
+            if session_id:
+                requests.append((str(session_id), _run_value(run, "profile")))
+        self._usage_by_session = kanban_db._backfill_usage_batch_from_state_db(requests)
+
+    def usage(self, session_id: str, profile: Optional[str]) -> dict[str, Any]:
+        key = (str(session_id), str(profile or "").strip() or None)
+        if key not in self._usage_by_session:
+            self._usage_by_session[key] = kanban_db._backfill_usage_from_state_db(
+                key[0], profile=key[1]
+            )
+        return self._usage_by_session[key]
+
+    def identity(self, profile: Optional[str]) -> dict[str, Any]:
+        key = str(profile or "").strip()
+        if not key:
+            return {}
+        if key not in self._identity_by_profile:
+            lane_entry = kanban_db._active_lane_entry_for_profile_from_conn(
+                self.conn, key
+            )
+            self._identity_by_profile[key] = kanban_db._spawn_identity_metadata(
+                key,
+                board=self.board,
+                # Empty dict is intentional: it tells the resolver there is no
+                # active lane without making it open another board connection.
+                lane_entry=lane_entry or {},
+            ) or {}
+        return self._identity_by_profile[key]
+
+
+def _run_model_route_fields(
+    conn: sqlite3.Connection,
+    run: Any,
+    *,
+    board: Optional[str] = None,
+    legacy_resolver: Optional[_LegacyModelRouteResolver] = None,
+) -> dict[str, Any]:
+    """Return honest run-bound model fields with explicit legacy inference.
+
+    Persisted columns always win. Old runs may be inferred from their immutable
+    metadata/session record, and only then from current profile configuration;
+    inferred values remain ``unknown``/``legacy_inferred`` and are never
+    presented as provider-confirmed telemetry.
+    """
+    metadata = _run_metadata_dict(run)
+
+    requested_provider = _run_value(run, "requested_provider") or None
+    requested_model = _run_value(run, "requested_model") or None
+    active_provider = _run_value(run, "active_provider") or requested_provider
+    active_model = _run_value(run, "active_model") or requested_model
+    model_state = _run_value(run, "model_state") or None
+    model_source = _run_value(run, "model_source") or None
+    observed_at = _run_value(run, "model_observed_at") or None
+
+    inferred_provider = metadata.get("route_provider") or metadata.get("provider")
+    inferred_model = metadata.get("model")
+    if metadata.get("worker_runtime") == "claude-cli":
+        inferred_provider = "claude-cli"
+
+    session_id = metadata.get("worker_session_id")
+    if session_id and (not inferred_provider or not inferred_model):
+        resolver = legacy_resolver or _LegacyModelRouteResolver(conn, board=board)
+        usage = resolver.usage(str(session_id), _run_value(run, "profile"))
+        inferred_provider = inferred_provider or usage.get("billing_provider")
+        inferred_model = inferred_model or usage.get("model")
+
+    if not inferred_provider or not inferred_model:
+        try:
+            resolver = legacy_resolver or _LegacyModelRouteResolver(conn, board=board)
+            identity = resolver.identity(_run_value(run, "profile"))
+        except Exception:
+            identity = {}
+        inferred_provider = inferred_provider or identity.get("route_provider")
+        inferred_model = inferred_model or identity.get("model")
+
+    inferred = False
+    if not active_provider and inferred_provider:
+        active_provider = inferred_provider
+        inferred = True
+    if not active_model and inferred_model:
+        active_model = inferred_model
+        inferred = True
+    if inferred:
+        model_state = "unknown"
+        model_source = "legacy_inferred"
+        observed_at = observed_at or _run_value(run, "started_at")
+    if not active_provider or not active_model:
+        model_state = "unknown"
+    elif not model_state:
+        model_state = "unknown"
+    if not model_source:
+        model_source = "legacy_inferred" if (active_provider or active_model) else None
+
+    return {
+        "requested_provider": requested_provider,
+        "requested_model": requested_model,
+        "active_provider": active_provider,
+        "active_model": active_model,
+        "model_state": model_state,
+        "model_source": model_source,
+        "model_observed_at": observed_at,
+        # Compatibility alias, now derived exclusively from this run.
+        "effective_model": active_model or requested_model,
+    }
+
+
+def _run_dict(
+    conn: sqlite3.Connection,
+    r: kanban_db.Run,
+    *,
+    legacy_resolver: Optional[_LegacyModelRouteResolver] = None,
+) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
     d = {
         "id": r.id,
@@ -654,6 +802,7 @@ def _run_dict(conn: sqlite3.Connection, r: kanban_db.Run) -> dict[str, Any]:
         "output_tokens": r.output_tokens,
         "cost_usd": r.cost_usd,
     }
+    d.update(_run_model_route_fields(conn, r, legacy_resolver=legacy_resolver))
     d.update(_run_lineage_fields(conn, r.task_id, r.id))
     return d
 
@@ -2322,6 +2471,13 @@ def get_task(
                 events=events,
             )
         )
+        runs = kanban_db.list_runs(
+            conn,
+            task_id,
+            state_type=run_state_type,
+            state_name=run_state_name,
+        )
+        legacy_resolver = _LegacyModelRouteResolver(conn, list(runs), board=board)
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in comments],
@@ -2330,13 +2486,8 @@ def get_task(
             "deliverables": _list_task_deliverables(task_id),
             "links": _links_for(conn, task_id),
             "runs": [
-                _run_dict(conn, r)
-                for r in kanban_db.list_runs(
-                    conn,
-                    task_id,
-                    state_type=run_state_type,
-                    state_name=run_state_name,
-                )
+                _run_dict(conn, r, legacy_resolver=legacy_resolver)
+                for r in runs
             ],
         }
     finally:
@@ -3437,6 +3588,14 @@ def list_active_workers(
                 t.result       AS block_reason,
                 r.step_key,
                 t.model_override AS model_override,
+                r.metadata,
+                r.requested_provider,
+                r.requested_model,
+                r.active_provider,
+                r.active_model,
+                r.model_state,
+                r.model_source,
+                r.model_observed_at,
                 r.input_tokens,
                 r.output_tokens
             FROM task_runs r
@@ -3496,14 +3655,8 @@ def list_active_workers(
         eta = kanban_db.run_duration_percentiles(
             conn, [row["profile"] for row in rows],
         )
-        # B1: batch lane-model lookup — one call per distinct (profile, board)
-        # pair, not one per worker row.
-        distinct_profiles = list({(row["profile"] or "").strip() for row in rows})
-        lane_models: dict[str, Optional[str]] = {}
-        for prof in distinct_profiles:
-            _, lm = kanban_db._lane_provider_model_for_profile(prof, board=board)
-            lane_models[prof] = lm
         workers = []
+        legacy_resolver = _LegacyModelRouteResolver(conn, list(rows), board=board)
         # S2: run_progress is the additive, honest 0..1 run-progress signal.
         # Derived from ALREADY-persisted columns (started_at + max_runtime_seconds)
         # — no new migration, no guessed values. null when max_runtime_seconds is
@@ -3514,8 +3667,12 @@ def list_active_workers(
             note = notes.get(int(row["run_id"]), {})
             prof_eta = eta.get((row["profile"] or "").strip(), {})
             model_override = row["model_override"] or None
-            lane_model = lane_models.get((row["profile"] or "").strip())
-            effective_model = model_override or lane_model
+            model_route = _run_model_route_fields(
+                conn,
+                row,
+                board=board,
+                legacy_resolver=legacy_resolver,
+            )
             has_input_tokens = row["input_tokens"] is not None
             has_output_tokens = row["output_tokens"] is not None
             if has_input_tokens and has_output_tokens:
@@ -3558,10 +3715,10 @@ def list_active_workers(
                 # B1: step progress + model resolution
                 "step_key": row["step_key"],
                 "model_override": model_override,
-                "effective_model": effective_model,
                 # S2: additives Run-Fortschritt 0..1 (elapsed/max_runtime).
                 # null wenn kein Cap → UI fällt auf etaFraction-Heuristik zurück.
                 "run_progress": run_progress_value(row, now_ts),
+                **model_route,
             })
         # F4: expose the live concurrency cap (kanban.max_in_progress) so the UI
         # can show capacity/Engpass honestly — "3 von 3 Worker, warum dispatcht
@@ -7285,10 +7442,34 @@ def list_boards(include_archived: bool = Query(False)):
     """Return every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
     current = kanban_db.get_current_board()
+    project_by_board: dict[str, Any] = {}
+    project_conn: Optional[sqlite3.Connection] = None
+    try:
+        project_conn = projects_db.connect()
+        for project in projects_db.list_projects(
+            project_conn, include_archived=False
+        ):
+            if project.board_slug and project.board_slug not in project_by_board:
+                project_by_board[project.board_slug] = project
+    except Exception:
+        # Board navigation remains available if projects.db is missing, locked,
+        # or temporarily unreadable; such boards are explicitly unbound.
+        project_by_board = {}
+    finally:
+        if project_conn is not None:
+            try:
+                project_conn.close()
+            except Exception:
+                pass
     for b in boards:
+        project = project_by_board.get(b["slug"])
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
+        b["project_id"] = project.id if project else None
+        b["project_slug"] = project.slug if project else None
+        b["project_name"] = project.name if project else None
+        b["project_bound"] = project is not None
     return {"boards": boards, "current": current}
 
 
@@ -8156,22 +8337,6 @@ def _append_flow_gate_event(
         kanban_db._append_event(conn, task_id, kind, payload)
 
 
-def _latest_run_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
-    try:
-        return conn.execute(
-            """
-            SELECT *
-              FROM task_runs
-             WHERE task_id = ?
-             ORDER BY started_at DESC, id DESC
-             LIMIT 1
-            """,
-            (task_id,),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-
-
 def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
     if kanban_db.get_task(conn, root_id) is None:
         raise HTTPException(status_code=404, detail=f"task {root_id} not found")
@@ -8307,12 +8472,39 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
         except sqlite3.OperationalError:
             pass  # pre-review-gate DBs: task_runs.verdict column absent
 
+    latest_runs_by_task: dict[str, sqlite3.Row] = {}
+    if nodes:
+        placeholders = ",".join("?" for _ in nodes)
+        try:
+            for row in conn.execute(
+                f"""
+                SELECT r.*
+                  FROM task_runs AS r
+                 WHERE r.task_id IN ({placeholders})
+                   AND r.id = (
+                       SELECT r2.id
+                         FROM task_runs AS r2
+                        WHERE r2.task_id = r.task_id
+                        ORDER BY r2.started_at DESC, r2.id DESC
+                        LIMIT 1
+                   )
+                """,
+                tuple(nodes),
+            ).fetchall():
+                latest_runs_by_task[row["task_id"]] = row
+        except sqlite3.OperationalError:
+            pass
+    legacy_resolver = _LegacyModelRouteResolver(
+        conn,
+        list(latest_runs_by_task.values()),
+    )
+
     out_nodes: list[dict[str, Any]] = []
     for node_id in sorted(nodes, key=lambda item: (depth(item), item)):
         task = kanban_db.get_task(conn, node_id)
         if task is None:
             continue
-        run = _latest_run_for_task(conn, node_id)
+        run = latest_runs_by_task.get(node_id)
         run_payload = None
         if run is not None:
             started = run["started_at"]
@@ -8338,6 +8530,13 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
                 # null bei fehlendem Cap → FleetView-Fokus-Rail nutzt DAG-fallback.
                 "run_progress": run_progress_value(run, now),
             }
+            run_payload.update(
+                _run_model_route_fields(
+                    conn,
+                    run,
+                    legacy_resolver=legacy_resolver,
+                )
+            )
         costs = node_costs.get(node_id, _zero_costs)
         out_nodes.append({
             "id": task.id,

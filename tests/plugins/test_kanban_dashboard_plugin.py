@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import projects_db
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,62 @@ def client(kanban_home, kanban_app):
         mod._board_cache.clear()
     app = kanban_app
     return TestClient(app)
+
+
+def test_boards_endpoint_enriches_active_project_bindings(client):
+    kb.create_board("health-track", name="Health Track")
+    kb.create_board("internal-test", name="Internal Test")
+    with projects_db.connect() as conn:
+        hermes_id = projects_db.create_project(
+            conn,
+            name="Hermes Agent",
+            slug="hermes-agent",
+            primary_path="/srv/hermes-agent",
+            board_slug="default",
+        )
+        health_id = projects_db.create_project(
+            conn,
+            name="Health Track",
+            slug="health-track",
+            primary_path="/srv/health-track",
+            board_slug="health-track",
+        )
+
+    response = client.get("/api/plugins/kanban/boards")
+
+    assert response.status_code == 200
+    boards = {board["slug"]: board for board in response.json()["boards"]}
+    assert boards["default"] | {
+        "project_id": hermes_id,
+        "project_slug": "hermes-agent",
+        "project_name": "Hermes Agent",
+        "project_bound": True,
+    } == boards["default"]
+    assert boards["health-track"] | {
+        "project_id": health_id,
+        "project_slug": "health-track",
+        "project_name": "Health Track",
+        "project_bound": True,
+    } == boards["health-track"]
+    assert boards["internal-test"]["project_bound"] is False
+    assert boards["internal-test"]["project_id"] is None
+
+
+def test_boards_endpoint_fails_soft_when_projects_db_is_unreadable(
+    client, monkeypatch,
+):
+    kb.create_board("internal-test", name="Internal Test")
+    monkeypatch.setattr(
+        projects_db,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broken projects db")),
+    )
+
+    response = client.get("/api/plugins/kanban/boards")
+
+    assert response.status_code == 200
+    assert response.json()["boards"]
+    assert all(board["project_bound"] is False for board in response.json()["boards"])
 
 
 def _push_rows():

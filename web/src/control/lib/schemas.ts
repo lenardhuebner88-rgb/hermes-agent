@@ -30,6 +30,7 @@ const RunRoleSourceSchema = z.enum(["claimed_event", "missing_claim_event"]);
 // value; only malformed/empty input becomes an explicit unknown/null.
 const RunStatusSchema = z.string().trim().min(1).catch("unknown");
 const RunOutcomeSchema = z.string().trim().min(1).nullable().catch(null);
+const ModelRouteStateSchema = z.enum(["planned", "in_flight", "confirmed", "unknown"]).nullable().catch(null);
 
 export const RunInspectSchema = z.object({
   cpu_percent: z.coerce.number().catch(0),
@@ -91,6 +92,13 @@ export const WorkerSchema = z.object({
   step_key: z.string().nullable().catch(null),
   model_override: z.string().nullable().catch(null),
   effective_model: z.string().nullable().catch(null),
+  requested_provider: z.string().nullable().catch(null),
+  requested_model: z.string().nullable().catch(null),
+  active_provider: z.string().nullable().catch(null),
+  active_model: z.string().nullable().catch(null),
+  model_state: ModelRouteStateSchema,
+  model_source: z.string().nullable().catch(null),
+  model_observed_at: nullableEpochSeconds,
   input_tokens: z.coerce.number().nullable().catch(null),
   output_tokens: z.coerce.number().nullable().catch(null),
   // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime_seconds).
@@ -117,6 +125,7 @@ export const WorkersResponseSchema = z.object({
 // neuen/fehlenden Feldern: ein einzelnes kaputtes Event darf nie die Liste leeren.
 export const LiveEventSchema = z.object({
   id: z.coerce.number().catch(0),
+  board_slug: z.string().nullable().catch(null),
   run_id: z.coerce.number().nullable().catch(null),
   task_id: z.string().nullable().catch(null),
   task_title: z.string().nullable().catch(null),
@@ -375,6 +384,14 @@ const ChainGraphRunSchema = z.object({
   heartbeat_age_seconds: z.coerce.number().nullable().catch(null),
   // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime).
   run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
+  requested_provider: z.string().nullable().catch(null),
+  requested_model: z.string().nullable().catch(null),
+  active_provider: z.string().nullable().catch(null),
+  active_model: z.string().nullable().catch(null),
+  model_state: ModelRouteStateSchema,
+  model_source: z.string().nullable().catch(null),
+  model_observed_at: nullableEpochSeconds,
+  effective_model: z.string().nullable().catch(null),
 });
 
 const ChainGraphNodeSchema = z.object({
@@ -639,6 +656,10 @@ export const BoardsResponseSchema = z.object({
     name: z.string().catch(""),
     archived: z.boolean().catch(false),
     is_current: z.boolean().catch(false),
+    project_id: z.string().nullable().catch(null),
+    project_slug: z.string().nullable().catch(null),
+    project_name: z.string().nullable().catch(null),
+    project_bound: z.boolean().catch(false),
   })).catch([]),
   current: z.string().catch("default"),
 });
@@ -1455,6 +1476,14 @@ const TaskRunSchema = z.object({
   ended_at: nullableEpochSeconds,
   run_role: z.string().nullable().catch(null),
   run_role_label: z.string().nullable().catch(null),
+  requested_provider: z.string().nullable().catch(null),
+  requested_model: z.string().nullable().catch(null),
+  active_provider: z.string().nullable().catch(null),
+  active_model: z.string().nullable().catch(null),
+  model_state: ModelRouteStateSchema,
+  model_source: z.string().nullable().catch(null),
+  model_observed_at: nullableEpochSeconds,
+  effective_model: z.string().nullable().catch(null),
 });
 const TaskEventSchema = z.object({
   id: z.coerce.number().catch(0),

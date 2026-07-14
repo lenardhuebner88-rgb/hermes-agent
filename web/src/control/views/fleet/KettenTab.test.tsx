@@ -20,11 +20,13 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(css).toMatch(/button:focus-visible/);
   });
 
-  it("joins worker data via task_id for model + override", () => {
+  it("joins worker data via task_id for run-bound model route + override", () => {
     expect(src).toContain("useHermesWorkers");
     expect(src).toContain("workerByNodeId");
-    expect(src).toContain("effective_model");
+    expect(src).toContain("active_model");
+    expect(src).toContain("model_state");
     expect(src).toContain("model_override");
+    expect(src).not.toContain("latest_run?.profile ?? null");
   });
 
   it("renders model-row with GGFM Override badge when override is present", () => {
@@ -70,6 +72,7 @@ describe("KettenTab v4 — redesign checks", () => {
   it("shows inline model for upcoming steps", () => {
     expect(src).toMatch(/umodel/);
     expect(src).toMatch(/umodel-override/);
+    expect(src).toContain("de.worker.modelRouteNotStarted");
   });
 
   it("FIX-1: chain-list fraction uses done/total (not the 0..1 progress ratio)", () => {
@@ -86,7 +89,8 @@ describe("KettenTab v4 — redesign checks", () => {
   it("FIX-3: pipeline label is the role (not stripped/sliced), model only as sub when different", () => {
     expect(src).not.toMatch(/\.replace\(\/\^\(coder/);
     expect(src).toContain('node.assignee ?? node.latest_run?.profile ?? "—"');
-    expect(src).toContain("nodeModel !== roleLabel");
+    expect(src).toContain("const nodeRoute = worker ?? node.latest_run");
+    expect(src).toContain("<ModelRouteBadge");
   });
 });
 
@@ -236,6 +240,7 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     // FIX-4: Header-Chips widersprechen dem Rollen-Track/der Pipeline nicht mehr.
     expect(screen.getByText("Reviewer zugewiesen")).toBeTruthy();
     expect(screen.getByText("Critic aktiv")).toBeTruthy();
+    expect(screen.getAllByText("noch nicht gestartet").length).toBeGreaterThan(0);
   });
 
   it("keeps clipped chain and node titles recoverable", async () => {

@@ -29,6 +29,8 @@ import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TaskReassignResponseSchema, parseOrThrow } from "../../lib/schemas";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
+import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
+import type { ModelRouteState } from "../../lib/types";
 
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
@@ -386,6 +388,13 @@ interface UebersichtTabProps {
     input_tokens?: number | null;
     output_tokens?: number | null;
     cost_usd?: number | null;
+    requested_provider?: string | null;
+    requested_model?: string | null;
+    active_provider?: string | null;
+    active_model?: string | null;
+    model_state?: ModelRouteState | null;
+    model_source?: string | null;
+    model_observed_at?: number | null;
   } | null;
   elapsedSec: number | null;
   deliverables: Array<{ filename: string; url: string; size: number }>;
@@ -460,7 +469,21 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
         </div>
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelModell}</div>
-          <div className="fleet-kv-v" style={{ fontSize: 11 }}>{latestRun?.profile ?? task.model_override ?? "—"}</div>
+          <div className="fleet-kv-v">{latestRun?.profile ?? "—"}</div>
+        </div>
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.detailLabelModelRoute}</div>
+          <div className="fleet-kv-v" style={{ fontSize: 11 }}>
+            <ModelRouteBadge
+              requestedProvider={latestRun?.requested_provider}
+              requestedModel={latestRun?.requested_model}
+              activeProvider={latestRun?.active_provider}
+              activeModel={latestRun?.active_model}
+              modelState={latestRun?.model_state}
+              modelSource={latestRun?.model_source}
+              observedAt={latestRun?.model_observed_at}
+            />
+          </div>
         </div>
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelBranch}</div>

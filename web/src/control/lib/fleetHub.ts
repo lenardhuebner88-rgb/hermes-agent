@@ -924,12 +924,16 @@ export function formatLiveEvent(e: {
 
 /**
  * mergeLiveEvents: fügt neu gepollte (newest-first) Events in den bestehenden
- * (newest-first) Puffer ein — dedupliziert nach id, sortiert absteigend nach id
- * und deckelt auf `cap`. Reine Funktion für den since_id-Inkrement-Poll.
+ * (newest-first) Puffer ein — dedupliziert nach Board + id, sortiert nach
+ * Ereigniszeit und deckelt auf `cap`. Event-IDs sind nur innerhalb eines
+ * Board-DBs eindeutig; ein reines id-Dedup würde Fremd-Board-Ereignisse
+ * verschlucken.
  */
-export function mergeLiveEvents<T extends { id: number }>(prev: T[], incoming: T[], cap: number): T[] {
-  const byId = new Map<number, T>();
-  for (const e of prev) byId.set(e.id, e);
-  for (const e of incoming) byId.set(e.id, e);
-  return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, Math.max(0, cap));
+export function mergeLiveEvents<T extends { id: number; at?: number; board_slug?: string | null }>(prev: T[], incoming: T[], cap: number): T[] {
+  const byBoardAndId = new Map<string, T>();
+  for (const e of prev) byBoardAndId.set(`${e.board_slug ?? "current"}:${e.id}`, e);
+  for (const e of incoming) byBoardAndId.set(`${e.board_slug ?? "current"}:${e.id}`, e);
+  return [...byBoardAndId.values()]
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || b.id - a.id)
+    .slice(0, Math.max(0, cap));
 }

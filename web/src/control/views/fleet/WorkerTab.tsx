@@ -32,6 +32,7 @@ import { SlotLane, FreeSlotLane, MiniLane } from "./SlotLane";
 import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
+import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { elapsedSeconds } from "../../lib/derive";
 
@@ -49,6 +50,7 @@ interface WorkerTabProps {
   /** Heute abgeschlossene Läufe (costs.today.runs) für den Pulse-Strip. */
   doneToday?: number | null;
   currentBoard?: string;
+  eventBoards?: string[];
 }
 
 interface WorkerSelection {
@@ -77,11 +79,12 @@ export function WorkerTab({
   cap = null,
   doneToday = null,
   currentBoard = "default",
+  eventBoards = [currentBoard],
 }: WorkerTabProps) {
   const [selection, setSelection] = useState<WorkerSelection | null>(
     () => (initialOpen ? { key: workerIdentity(initialOpen), snapshot: initialOpen } : null),
   );
-  const liveEvents = useRunLiveEvents(true);
+  const liveEvents = useRunLiveEvents(true, 40, eventBoards);
 
   const selectedWorker = selection ? activeWorkers.find((w) => workerIdentity(w) === selection.key) ?? null : null;
   const drawerWorker = selectedWorker ?? selection?.snapshot ?? null;
@@ -270,8 +273,8 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
 // Per-Lane Heartbeat-Notiz-Verlauf aus GET /tasks/{task_id}/activity — nur wenn
 // der Drawer offen und der Worker aktiv ist (der Hook pausiert bei null-taskId).
 
-function WorkerNotesHistory({ taskId }: { taskId: string }) {
-  const activity = useWorkerActivity(taskId);
+function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string | null }) {
+  const activity = useWorkerActivity(taskId, board);
   const notes = (activity.data?.events ?? []).filter((e) => e.note && e.note.trim());
 
   return (
@@ -329,7 +332,8 @@ function WorkerDrawer({
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);
-  const foreignBoard = Boolean(w.board_slug && w.board_slug !== currentBoard);
+  const workerBoard = w.board_slug ?? currentBoard;
+  const foreignBoard = workerBoard !== currentBoard;
 
   // Profil-Verlässlichkeit aus Reliability-Daten (ReliabilityResponse aus lib/schemas)
   const relProfile = reliability?.profiles?.find((p) => p.profile === w.profile);
@@ -388,7 +392,17 @@ function WorkerDrawer({
         <div className="fleet-grid2">
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.drawerModell}</div>
-            <div className="fleet-kv-v">{w.effective_model ?? w.model_override ?? "—"}</div>
+            <div className="fleet-kv-v">
+              <ModelRouteBadge
+                requestedProvider={w.requested_provider}
+                requestedModel={w.requested_model}
+                activeProvider={w.active_provider}
+                activeModel={w.active_model}
+                modelState={w.model_state}
+                modelSource={w.model_source}
+                observedAt={w.model_observed_at}
+              />
+            </div>
           </div>
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.drawerHeartbeat}</div>
@@ -439,7 +453,7 @@ function WorkerDrawer({
         ) : null}
 
         {/* Notiz-Historie (AC-3) — nur bei laufendem Worker. */}
-        {active && !foreignBoard ? <WorkerNotesHistory taskId={w.task_id} /> : null}
+        {active ? <WorkerNotesHistory taskId={w.task_id} board={workerBoard} /> : null}
 
         {active ? null : (
           <div className="fleet-kv" role="status">
@@ -465,7 +479,7 @@ function WorkerDrawer({
               {de.fleet.drawerKetteOeffnen}
             </button>
           ) : null}
-          {active && !foreignBoard ? (
+          {active ? (
             <button
               type="button"
               className="fleet-btn"
@@ -480,7 +494,7 @@ function WorkerDrawer({
         </div>
 
         {/* Log-Tail (nur bei offenem Drawer pollend, wie WorkerCard/NodeDetailDrawer) */}
-        {active && !foreignBoard && logOpen ? <WorkerLogTail taskId={w.task_id} /> : null}
+        {active && logOpen ? <WorkerLogTail taskId={w.task_id} board={workerBoard} /> : null}
 
         {/* Andere Lanes: schneller Sprung zu den übrigen aktiven Workern. */}
         {otherWorkers.length > 0 ? (

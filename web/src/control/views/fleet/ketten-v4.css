@@ -257,7 +257,10 @@
 
 .ketten-v4 .pstep {
   display: flex; flex-direction: column; align-items: center;
-  min-width: 52px; flex-shrink: 0; position: relative;
+  /* Route truth must remain readable. The pipeline already owns horizontal
+     scrolling, so give each step enough room to show (or wrap) the complete
+     provider/model badge instead of clipping it to the legacy 52px slot. */
+  min-width: 208px; flex-shrink: 0; position: relative;
 }
 .ketten-v4 .pstep-connector {
   position: absolute; top: 11px; left: 50%; width: 100%; height: 2px;
@@ -307,13 +310,14 @@
 .ketten-v4 .pstep-label {
   font-size: 8px; font-weight: 600; color: var(--kt-ink-3);
   margin-top: 5px; text-align: center; letter-spacing: 0.2px;
-  max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 196px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ketten-v4 .pstep-label-active { color: var(--kt-live); }
 .ketten-v4 .pstep-label-done { color: var(--kt-ok); }
 .ketten-v4 .pstep-sub {
   font-size: 7px; color: var(--kt-ink-4); margin-top: 1px;
-  max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  width: 196px; max-width: 196px; display: flex; justify-content: center;
+  overflow: visible; text-overflow: clip; white-space: normal;
 }
 .ketten-v4 .pstep-sub-active { color: var(--kt-live); }
 

@@ -26,6 +26,8 @@ import type { Worker, WorkerHealth } from "../lib/types";
 import { SignalChip, signalToneFromLegacy } from "./leitstand";
 import { Stat, Text } from "./primitives";
 import { useWorkerActivity } from "../hooks/useControlData";
+import { ModelRouteBadge } from "./fleet/ModelRouteBadge";
+import { withBoardParam } from "../lib/multiBoard";
 
 interface Props {
   worker: Worker;
@@ -85,7 +87,7 @@ function WorkerCallout({ tone, children }: { tone: "warn" | "alert"; children: R
 
 // A3: Live-Log-Tail über den existierenden GET /tasks/{id}/log — gepollt NUR
 // solange das Panel offen ist, letzte ~100 Zeilen, monospace.
-export function WorkerLogTail({ taskId }: { taskId: string }) {
+export function WorkerLogTail({ taskId, board }: { taskId: string; board?: string | null }) {
   const [log, setLog] = useState<TaskLogResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,9 +95,10 @@ export function WorkerLogTail({ taskId }: { taskId: string }) {
     let cancelled = false;
     const load = async () => {
       try {
-        const data = await fetchJSON<TaskLogResponse>(
+        const data = await fetchJSON<TaskLogResponse>(withBoardParam(
           `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/log?tail=${LOG_TAIL_BYTES}`,
-        );
+          board ?? null,
+        ));
         if (!cancelled) { setLog(data); setError(null); }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -104,7 +107,7 @@ export function WorkerLogTail({ taskId }: { taskId: string }) {
     void load();
     const id = window.setInterval(() => void load(), LOG_POLL_MS);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, [taskId]);
+  }, [taskId, board]);
 
   if (error) return <WorkerCallout tone="alert">{error}</WorkerCallout>;
   if (log === null) return <Text variant="label" className="text-ink-3">…</Text>;
@@ -215,8 +218,8 @@ function TimeAxisTrack({
 
 // F1: Aktivitäts-Timeline — letzte ~10 Heartbeat-Notizen.
 // taskId=null → kein Poll (Karte eingeklappt); hook pausiert automatisch.
-function ActivityTimeline({ taskId, now }: { taskId: string | null; now: number }) {
-  const { data, loading } = useWorkerActivity(taskId);
+function ActivityTimeline({ taskId, board, now }: { taskId: string | null; board?: string | null; now: number }) {
+  const { data, loading } = useWorkerActivity(taskId, board ?? null);
   const heartbeatNotes = (data?.events ?? [])
     .filter((e) => e.kind === "heartbeat" && e.note != null)
     .slice(0, 10);
@@ -290,8 +293,6 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   const axisScaleMax = runtimeValid ? timeAxisScaleMax(runtime, etaP90, budget) : 1;
 
   // Telemetrie-Chips: effektives Modell + Schritt + Tokens.
-  const effectiveModel = worker.effective_model ?? null;
-  const modelOverride = worker.model_override ?? null;
   const stepKey = worker.step_key ?? null;
   const inputTokens = worker.input_tokens ?? null;
   const outputTokens = worker.output_tokens ?? null;
@@ -438,13 +439,15 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       {/* Phase B: Telemetrie-Chips (Modell, Schritt, Tokens). */}
       <div className="flex flex-wrap gap-2">
         {/* Modell-Chip */}
-        {effectiveModel ? (
-          <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs">
-            <span className="text-ink-3">{de.worker.chipModel}:</span>
-            <span className="font-data text-ink">{effectiveModel}</span>
-            {modelOverride == null ? <span className="text-ink-3">{de.worker.chipModelFromLane}</span> : null}
-          </div>
-        ) : null}
+        <ModelRouteBadge
+          requestedProvider={worker.requested_provider}
+          requestedModel={worker.requested_model}
+          activeProvider={worker.active_provider}
+          activeModel={worker.active_model}
+          modelState={worker.model_state}
+          modelSource={worker.model_source}
+          observedAt={worker.model_observed_at}
+        />
         {/* Schritt-Chip */}
         {stepKey ? (
           <div className="inline-flex items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs">
@@ -507,7 +510,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       </div>
 
       {/* F1: Aktivitäts-Timeline (Heartbeat-Notizen). Poll NUR wenn expandiert. */}
-      <ActivityTimeline taskId={expanded ? worker.task_id : null} now={now} />
+      <ActivityTimeline taskId={expanded ? worker.task_id : null} board={worker.board_slug} now={now} />
 
       {confirming ? (
         <div className="space-y-2">
@@ -585,7 +588,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
             : de.worker.confirmHint}
         </Text>
       ) : null}
-      {logOpen ? <WorkerLogTail taskId={worker.task_id} /> : null}
+      {logOpen ? <WorkerLogTail taskId={worker.task_id} board={worker.board_slug} /> : null}
       </>
       )}
     </article>

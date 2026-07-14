@@ -1335,6 +1335,13 @@ class Run:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
+    requested_provider: Optional[str] = None
+    requested_model: Optional[str] = None
+    active_provider: Optional[str] = None
+    active_model: Optional[str] = None
+    model_state: Optional[str] = None
+    model_source: Optional[str] = None
+    model_observed_at: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -1370,6 +1377,13 @@ class Run:
             input_tokens=_coerce_int(_opt("input_tokens")),
             output_tokens=_coerce_int(_opt("output_tokens")),
             cost_usd=_coerce_float(_opt("cost_usd")),
+            requested_provider=_opt("requested_provider"),
+            requested_model=_opt("requested_model"),
+            active_provider=_opt("active_provider"),
+            active_model=_opt("active_model"),
+            model_state=_opt("model_state"),
+            model_source=_opt("model_source"),
+            model_observed_at=_coerce_int(_opt("model_observed_at")),
         )
 
 
@@ -2035,7 +2049,19 @@ CREATE TABLE IF NOT EXISTS task_runs (
     error               TEXT,
     -- Git HEAD captured at claim time so review diff sentinels compare
     -- against the actual pre-run baseline, including commit-then-complete.
-    pre_run_commit_sha  TEXT
+    pre_run_commit_sha  TEXT,
+    -- Immutable-at-claim request route plus the latest route observed for
+    -- this exact run.  These columns deliberately live on task_runs: mutable
+    -- task/lane/profile configuration must never rewrite historical truth.
+    requested_provider  TEXT,
+    requested_model     TEXT,
+    active_provider     TEXT,
+    active_model        TEXT,
+    model_state         TEXT CHECK (
+        model_state IN ('planned','in_flight','confirmed','unknown')
+    ),
+    model_source        TEXT,
+    model_observed_at   INTEGER
 );
 
 CREATE TRIGGER IF NOT EXISTS trg_review_gated_done_terminal_authority
@@ -2209,7 +2235,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 6  # B: tasks.ui_impact added to the migration pass only
+_SCHEMA_GENERATION = 7  # Run-bound provider/model route telemetry
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -3259,6 +3285,42 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "task_runs", "pre_run_commit_sha", "pre_run_commit_sha TEXT"
             )
+        # Run-bound model truth. Keep this order identical to SCHEMA_SQL and
+        # _REBUILD_SPECS so fresh and rebuilt legacy DBs remain structurally
+        # identical. Existing modern DBs receive the same nullable columns
+        # additively at the tail, which is SQLite's only non-destructive path.
+        if "requested_provider" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "requested_provider", "requested_provider TEXT"
+            )
+        if "requested_model" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "requested_model", "requested_model TEXT"
+            )
+        if "active_provider" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "active_provider", "active_provider TEXT"
+            )
+        if "active_model" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "active_model", "active_model TEXT"
+            )
+        if "model_state" not in run_cols:
+            _add_column_if_missing(
+                conn,
+                "task_runs",
+                "model_state",
+                "model_state TEXT CHECK (model_state IN "
+                "('planned','in_flight','confirmed','unknown'))",
+            )
+        if "model_source" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "model_source", "model_source TEXT"
+            )
+        if "model_observed_at" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "model_observed_at", "model_observed_at INTEGER"
+            )
         if "input_tokens" not in run_cols:
             _add_column_if_missing(
                 conn, "task_runs", "input_tokens", "input_tokens INTEGER"
@@ -3443,6 +3505,11 @@ _REBUILD_SPECS = {
         # rebuilt legacy task_runs stays byte-identical to fresh and does not
         # silently drop the review baseline, budget columns, or verdict.
         " error TEXT, pre_run_commit_sha TEXT,"
+        " requested_provider TEXT, requested_model TEXT,"
+        " active_provider TEXT, active_model TEXT,"
+        " model_state TEXT CHECK (model_state IN "
+        "('planned','in_flight','confirmed','unknown')),"
+        " model_source TEXT, model_observed_at INTEGER,"
         " input_tokens INTEGER, output_tokens INTEGER,"
         " cost_usd REAL,"
         " cost_status TEXT CHECK (cost_status IN ('actual','estimated')),"
@@ -5773,6 +5840,120 @@ def _backfill_usage_from_state_db(
     return out
 
 
+def _backfill_usage_batch_from_state_db(
+    requests: Iterable[tuple[str, Optional[str]]],
+) -> dict[tuple[str, Optional[str]], dict[str, Any]]:
+    """Batch the legacy session-model lookup with one read per state DB.
+
+    Dashboard payloads may contain many legacy runs. Opening a profile state
+    DB once per row made each Fleet poll scale with the chain length. Group by
+    resolved DB path, fetch every requested session in bounded ``IN`` chunks,
+    and preserve the same fail-soft result shape as the scalar helper.
+    """
+    normalized: list[tuple[str, Optional[str]]] = []
+    seen: set[tuple[str, Optional[str]]] = set()
+    for session_id, profile in requests:
+        clean_session = str(session_id or "").strip()
+        clean_profile = str(profile or "").strip() or None
+        key = (clean_session, clean_profile)
+        if clean_session and key not in seen:
+            normalized.append(key)
+            seen.add(key)
+    if not normalized:
+        return {}
+
+    def empty_usage() -> dict[str, Any]:
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "actual_cost_usd": None,
+            "estimated_cost_usd": None,
+            "cost_status": None,
+            "model": None,
+            "billing_provider": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+        }
+
+    result = {key: empty_usage() for key in normalized}
+    path_by_profile: dict[Optional[str], Optional[Path]] = {}
+    grouped: dict[Path, list[tuple[str, Optional[str]]]] = {}
+    for key in normalized:
+        session_id, profile = key
+        if profile not in path_by_profile:
+            path: Optional[Path] = None
+            if profile:
+                try:
+                    from hermes_cli.profiles import resolve_profile_env
+
+                    candidate = Path(resolve_profile_env(profile)) / "state.db"
+                    if candidate.exists():
+                        path = candidate
+                except Exception:
+                    path = None
+            if path is None:
+                try:
+                    candidate = _state_db_path()
+                    path = candidate if candidate.exists() else None
+                except Exception:
+                    path = None
+            path_by_profile[profile] = path
+        resolved = path_by_profile[profile]
+        if resolved is not None:
+            grouped.setdefault(resolved, []).append((session_id, profile))
+
+    for path, keys in grouped.items():
+        state_conn: Optional[sqlite3.Connection] = None
+        try:
+            state_conn = sqlite3.connect(
+                f"file:{path}?mode=ro",
+                uri=True,
+                timeout=0.5,
+            )
+            state_conn.row_factory = sqlite3.Row
+            state_conn.execute("PRAGMA busy_timeout=200")
+            session_ids = list(dict.fromkeys(session_id for session_id, _ in keys))
+            rows_by_id: dict[str, sqlite3.Row] = {}
+            for offset in range(0, len(session_ids), 400):
+                chunk = session_ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                for row in state_conn.execute(
+                    f"SELECT * FROM sessions WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    rows_by_id[str(row["id"])] = row
+            for key in keys:
+                row = rows_by_id.get(key[0])
+                if row is None:
+                    continue
+                keys_in_row = set(row.keys())
+                usage = empty_usage()
+                for field in usage:
+                    if field in keys_in_row:
+                        usage[field] = row[field]
+                usage["input_tokens"] = _coerce_int(usage["input_tokens"])
+                usage["output_tokens"] = _coerce_int(usage["output_tokens"])
+                usage["cache_read_tokens"] = _coerce_int(usage["cache_read_tokens"])
+                usage["cache_write_tokens"] = _coerce_int(usage["cache_write_tokens"])
+                usage["actual_cost_usd"] = _coerce_float(usage["actual_cost_usd"])
+                usage["estimated_cost_usd"] = _coerce_float(usage["estimated_cost_usd"])
+                usage["cost_status"] = _normalize_cost_status(
+                    usage.get("cost_status"),
+                    actual_cost_usd=usage.get("actual_cost_usd"),
+                    estimated_cost_usd=usage.get("estimated_cost_usd"),
+                )
+                result[key] = usage
+        except Exception:
+            continue
+        finally:
+            if state_conn is not None:
+                try:
+                    state_conn.close()
+                except Exception:
+                    pass
+    return result
+
+
 def _backfill_cost_from_state_db(
     session_id: str,
     *,
@@ -5962,22 +6143,66 @@ def _run_metadata_is_claude_cli(
     return _run_is_claude_cli(profile, board=board)
 
 
-def _claude_cli_spawn_identity_metadata(
+def _profile_model_provider_for_spawn(
+    profile_home: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return ``(provider, model, worker_runtime)`` from one profile config.
+
+    The CLI accepts both ``model.name`` and the older ``model.default`` key.
+    Reading them here keeps claim-time stamping and subprocess argv resolution
+    on one precedence implementation. Fail-soft values are intentional: an
+    unresolved route is persisted as ``unknown`` and the real dispatcher spawn
+    then refuses to start it with an opaque provider default.
+    """
+    if not profile_home:
+        return None, None, None
+    try:
+        import yaml
+
+        cfg_path = os.path.join(profile_home, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            return None, None, None
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if not isinstance(cfg, dict):
+            return None, None, None
+        model_cfg = cfg.get("model")
+        provider: Optional[str] = None
+        model: Optional[str] = None
+        if isinstance(model_cfg, dict):
+            raw_provider = model_cfg.get("provider")
+            raw_model = model_cfg.get("name") or model_cfg.get("default")
+            if isinstance(raw_provider, str) and raw_provider.strip():
+                provider = raw_provider.strip()
+            if isinstance(raw_model, str) and raw_model.strip():
+                model = raw_model.strip()
+        runtime_raw = cfg.get("worker_runtime")
+        runtime = (
+            runtime_raw.strip()
+            if isinstance(runtime_raw, str) and runtime_raw.strip()
+            else None
+        )
+        return provider, model, runtime
+    except Exception:
+        return None, None, None
+
+
+def _spawn_identity_metadata(
     profile: Optional[str],
     *,
     model_override: Optional[str] = None,
     board: Optional[str] = None,
     lane_entry: Optional[dict] = None,
 ) -> Optional[dict[str, Any]]:
-    """Return spawn-time identity metadata for a claimed run.
+    """Resolve and return the single spawn-time identity for a claimed run.
 
     Active lanes are mutable. Cost consumers may run long after dispatch, so the
     backfill path must not re-read the then-active lane to decide whether a
-    historical run was launched through ``claude`` or which model it used. This
-    helper mirrors the spawn-time runtime resolution and returns a small,
-    auditable metadata snapshot to persist on ``task_runs`` when the run is
-    claimed. Fail-soft: unknown/broken config returns None rather than blocking
-    dispatch.
+    historical run was launched through ``claude`` or which model it used. The
+    returned dict is persisted on ``task_runs`` and is also the source used
+    by the actual subprocess spawn. ``route_provider`` is the honest display
+    route (``claude-cli`` for subscription CLI workers); ``provider`` keeps the
+    older billing metadata contract where Claude CLI has no API provider.
     """
     if not profile:
         return None
@@ -5986,59 +6211,99 @@ def _claude_cli_spawn_identity_metadata(
             lane_entry = _active_lane_entry_for_profile(profile, board=board)
         lane_runtime = (lane_entry or {}).get("worker_runtime")
         profile_home = _profile_home_for_metadata(profile)
+        profile_provider, profile_model, profile_runtime = (
+            _profile_model_provider_for_spawn(profile_home)
+        )
         if lane_runtime == "claude-cli":
             is_claude_cli = True
         elif lane_runtime is None:
             is_claude_cli = _is_claude_cli_runtime(profile)
         else:
             is_claude_cli = False
-        runtime = "claude-cli" if is_claude_cli else (lane_runtime or "hermes")
+        runtime = (
+            "claude-cli"
+            if is_claude_cli
+            else (lane_runtime or profile_runtime or "hermes")
+        )
 
-        provider: Optional[str] = None
+        lane_provider: Optional[str] = None
+        lane_model: Optional[str] = None
         if isinstance(lane_entry, dict):
-            lane_provider = lane_entry.get("provider")
-            if isinstance(lane_provider, str) and lane_provider.strip():
-                provider = lane_provider.strip()
-        if not provider and not is_claude_cli:
-            provider = _read_profile_provider(profile_home)
+            raw_lane_provider = lane_entry.get("provider")
+            raw_lane_model = lane_entry.get("model")
+            if isinstance(raw_lane_provider, str) and raw_lane_provider.strip():
+                lane_provider = raw_lane_provider.strip()
+            if isinstance(raw_lane_model, str) and raw_lane_model.strip():
+                lane_model = raw_lane_model.strip()
 
         model: Optional[str] = None
+        model_source: Optional[str] = None
         if isinstance(model_override, str) and model_override.strip():
             model = model_override.strip()
-        if not model and isinstance(lane_entry, dict):
-            lane_model = lane_entry.get("model")
-            if isinstance(lane_model, str) and lane_model.strip():
-                model = lane_model.strip()
+            model_source = "task_override"
+        if not model and lane_model:
+            model = lane_model
+            model_source = "lane"
         if not model:
             try:
-                model = _claude_profile_model(profile_home) if is_claude_cli else None
+                model = (
+                    _claude_profile_model(profile_home)
+                    if is_claude_cli
+                    else profile_model
+                )
             except Exception:
                 model = None
+            if model:
+                model_source = "profile"
+
+        # Preserve the existing task-override routing contract: a model-only
+        # task override stays on the profile provider instead of silently
+        # adopting a mutable lane provider. Otherwise each independently pinned
+        # lane component wins: a provider-only lane combines with the concrete
+        # profile model, while a model-only lane combines with profile provider.
+        if is_claude_cli:
+            route_provider: Optional[str] = "claude-cli"
+        elif model_source != "task_override" and (lane_provider or model_source == "lane"):
+            route_provider = lane_provider or profile_provider
+            if lane_provider:
+                model_source = "lane"
+        else:
+            route_provider = profile_provider
 
         metadata: dict[str, Any] = {
             "worker_runtime": runtime,
+            "route_provider": route_provider,
+            "model_source": model_source or "unknown",
         }
         # The claude CLI uses the subscription account, not a Hermes API provider.
         # Keep this explicitly null so later lane provider changes cannot be
         # mistaken for this run's provider.
-        metadata["provider"] = None if is_claude_cli else provider
+        metadata["provider"] = None if is_claude_cli else route_provider
         if model:
             metadata["model"] = model
+        fallback_providers = (lane_entry or {}).get("fallback_providers") or []
+        if isinstance(fallback_providers, list) and fallback_providers:
+            metadata["fallback_providers"] = fallback_providers
         subscription = _subscription_for_spawn_identity(
             profile,
             worker_runtime=runtime,
-            provider=provider,
+            provider=route_provider,
         )
         if subscription:
             metadata["subscription"] = subscription
             metadata["billing_mode"] = "subscription_included"
             metadata["cost_source"] = "dispatch_subscription_stamp"
-        elif provider:
+        elif route_provider:
             metadata["billing_mode"] = "metered"
             metadata["cost_source"] = "dispatch_metered_stamp"
         return metadata
     except Exception:
         return None
+
+
+# Compatibility alias for older imports/tests while the resolver's name now
+# reflects that it is shared by Hermes and Claude-CLI workers.
+_claude_cli_spawn_identity_metadata = _spawn_identity_metadata
 
 
 def _metadata_marks_claude_cli(metadata: Optional[dict]) -> bool:
@@ -8686,19 +8951,34 @@ def claim_task(
             else None
         )
         lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
-        spawn_metadata = _claude_cli_spawn_identity_metadata(
+        spawn_metadata = _spawn_identity_metadata(
             run_profile,
             model_override=trow["model_override"] if trow else None,
-            board=get_current_board(),
+            board=board_slug_for_conn(conn) or get_current_board(),
             lane_entry=lane_entry,
+        )
+        requested_provider = (
+            spawn_metadata.get("route_provider") if spawn_metadata else None
+        )
+        requested_model = spawn_metadata.get("model") if spawn_metadata else None
+        model_source = (
+            spawn_metadata.get("model_source", "unknown")
+            if spawn_metadata
+            else "unknown"
+        )
+        model_state = (
+            "planned" if requested_provider and requested_model else "unknown"
         )
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at, metadata, pre_run_commit_sha
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                started_at, metadata, pre_run_commit_sha,
+                requested_provider, requested_model,
+                active_provider, active_model,
+                model_state, model_source, model_observed_at
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -8712,6 +8992,13 @@ def claim_task(
                 if spawn_metadata
                 else None,
                 pre_run_commit_sha,
+                requested_provider,
+                requested_model,
+                requested_provider,
+                requested_model,
+                model_state,
+                model_source,
+                now,
             ),
         )
         run_id = run_cur.lastrowid
@@ -8798,21 +9085,37 @@ def claim_review_task(
             or (trow["assignee"] if trow else None)
         )
         lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
-        spawn_metadata = _claude_cli_spawn_identity_metadata(
+        spawn_metadata = _spawn_identity_metadata(
             run_profile,
             model_override=trow["model_override"] if trow else None,
+            board=board_slug_for_conn(conn) or get_current_board(),
             lane_entry=lane_entry,
         )
         metadata_json = (
             json.dumps(spawn_metadata, sort_keys=True) if spawn_metadata else None
+        )
+        requested_provider = (
+            spawn_metadata.get("route_provider") if spawn_metadata else None
+        )
+        requested_model = spawn_metadata.get("model") if spawn_metadata else None
+        model_source = (
+            spawn_metadata.get("model_source", "unknown")
+            if spawn_metadata
+            else "unknown"
+        )
+        model_state = (
+            "planned" if requested_provider and requested_model else "unknown"
         )
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at, metadata
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                started_at, metadata,
+                requested_provider, requested_model,
+                active_provider, active_model,
+                model_state, model_source, model_observed_at
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -8823,6 +9126,13 @@ def claim_review_task(
                 trow["max_runtime_seconds"] if trow else None,
                 now,
                 metadata_json,
+                requested_provider,
+                requested_model,
+                requested_provider,
+                requested_model,
+                model_state,
+                model_source,
+                now,
             ),
         )
         run_id = run_cur.lastrowid
@@ -8874,6 +9184,251 @@ def heartbeat_claim(
                 )
             return True
         return False
+
+
+_MODEL_ROUTE_STATES = frozenset({"planned", "in_flight", "confirmed", "unknown"})
+
+
+def _provider_model_is_refinement(requested: Optional[str], confirmed: Optional[str]) -> bool:
+    """Return whether a provider-confirmed id is a versioned request alias.
+
+    Providers commonly echo a dated/revision-qualified id for a stable request
+    alias (for example ``gpt-5.6-sol`` -> ``gpt-5.6-sol-20260713``). That is
+    stronger evidence for the same route, not a fallback or operator route
+    change. Keep the predicate deliberately narrow: a genuinely different
+    model must still surface as a route change.
+    """
+    req = str(requested or "").strip().lower()
+    got = str(confirmed or "").strip().lower()
+    if not req or not got or req == got:
+        return False
+    return any(got.startswith(f"{req}{separator}") for separator in ("-", ".", ":", "@"))
+
+
+def _known_confirmed_refinement(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: int,
+    *,
+    provider: Optional[str],
+    requested_model: Optional[str],
+    confirmed_model: Optional[str],
+) -> bool:
+    """Recognise a previously confirmed alias pair for this exact run."""
+    if not provider or not requested_model or not confirmed_model:
+        return False
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'model_confirmed'",
+        (task_id, run_id),
+    ).fetchall()
+    for event_row in rows:
+        try:
+            event_payload = json.loads(event_row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        old = event_payload.get("old") or {}
+        new = event_payload.get("new") or {}
+        if (
+            old.get("provider") == provider
+            and old.get("model") == requested_model
+            and new.get("provider") == provider
+            and new.get("model") == confirmed_model
+        ):
+            return True
+    return False
+
+
+def update_run_model_route(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: int,
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    state: str,
+    source: str,
+    observed_at: Optional[int] = None,
+    api_request_id: Optional[str] = None,
+) -> bool:
+    """CAS-update the provider/model route observed for one active run.
+
+    Both the task's ``current_run_id`` and the open ``task_runs`` row must still
+    match. Late provider responses from an ended or superseded worker therefore
+    cannot rewrite a newer attempt. Route-change and first-confirmation events
+    are run-scoped and deduplicated to keep multi-turn workers low-noise.
+    """
+    if state not in _MODEL_ROUTE_STATES:
+        raise ValueError(f"invalid model route state: {state!r}")
+    clean_provider = provider.strip() if isinstance(provider, str) else None
+    clean_model = model.strip() if isinstance(model, str) else None
+    clean_source = source.strip() if isinstance(source, str) else ""
+    clean_provider = clean_provider or None
+    clean_model = clean_model or None
+    clean_source = clean_source or "unknown"
+    if state != "unknown" and (not clean_provider or not clean_model):
+        raise ValueError(f"{state} model route requires provider and model")
+    observed = int(observed_at if observed_at is not None else time.time())
+    run_id = int(expected_run_id)
+
+    with write_txn(conn):
+        row = conn.execute(
+            """
+            SELECT r.active_provider, r.active_model, r.model_state
+              FROM task_runs AS r
+              JOIN tasks AS t ON t.id = r.task_id
+             WHERE r.id = ?
+               AND r.task_id = ?
+               AND r.status = 'running'
+               AND r.ended_at IS NULL
+               AND t.status = 'running'
+               AND t.current_run_id = r.id
+            """,
+            (run_id, task_id),
+        ).fetchone()
+        if row is None:
+            return False
+
+        old_route = {
+            "provider": row["active_provider"],
+            "model": row["active_model"],
+            "state": row["model_state"],
+        }
+        effective_model = clean_model
+        # After a provider has confirmed a revision-qualified id, the next
+        # request still uses the stable input alias. Preserve the stronger
+        # confirmed identity while marking the call in-flight; otherwise every
+        # turn oscillates alias <-> revision and emits two bogus route changes.
+        if (
+            state == "in_flight"
+            and old_route["state"] == "confirmed"
+            and old_route["provider"] == clean_provider
+            and old_route["model"] != clean_model
+            and _known_confirmed_refinement(
+                conn,
+                task_id,
+                run_id,
+                provider=clean_provider,
+                requested_model=clean_model,
+                confirmed_model=old_route["model"],
+            )
+        ):
+            effective_model = old_route["model"]
+        new_route = {
+            "provider": clean_provider,
+            "model": effective_model,
+            "state": state,
+        }
+        updated = conn.execute(
+            """
+            UPDATE task_runs
+               SET active_provider = ?,
+                   active_model = ?,
+                   model_state = ?,
+                   model_source = ?,
+                   model_observed_at = ?
+             WHERE id = ?
+               AND task_id = ?
+               AND status = 'running'
+               AND ended_at IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM tasks
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND current_run_id = ?
+               )
+            """,
+            (
+                clean_provider,
+                effective_model,
+                state,
+                clean_source,
+                observed,
+                run_id,
+                task_id,
+                task_id,
+                run_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            return False
+
+        payload = {
+            "old": old_route,
+            "new": new_route,
+            "source": clean_source,
+            "observed_at": observed,
+        }
+        if api_request_id:
+            payload["api_request_id"] = api_request_id
+
+        confirmation_refines_request = (
+            state == "confirmed"
+            and old_route["state"] == "in_flight"
+            and old_route["provider"] == clean_provider
+            and _provider_model_is_refinement(old_route["model"], effective_model)
+        )
+        route_changed = old_route["provider"] != clean_provider or (
+            old_route["model"] != effective_model and not confirmation_refines_request
+        )
+        state_transition_new = False
+        if not route_changed and state != "confirmed" and old_route["state"] != state:
+            prior_transitions = conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = 'model_route_changed'",
+                (task_id, run_id),
+            ).fetchall()
+            state_transition_new = True
+            for event_row in prior_transitions:
+                try:
+                    event_payload = json.loads(event_row["payload"] or "{}")
+                    transitioned_route = event_payload.get("new") or {}
+                    if (
+                        transitioned_route.get("provider") == clean_provider
+                        and transitioned_route.get("model") == effective_model
+                        and transitioned_route.get("state") == state
+                    ):
+                        state_transition_new = False
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if route_changed or state_transition_new:
+            _append_event(
+                conn,
+                task_id,
+                "model_route_changed",
+                payload,
+                run_id=run_id,
+            )
+
+        if state == "confirmed" and clean_provider and effective_model:
+            already_confirmed = False
+            prior = conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = 'model_confirmed'",
+                (task_id, run_id),
+            ).fetchall()
+            for event_row in prior:
+                try:
+                    event_payload = json.loads(event_row["payload"] or "{}")
+                    confirmed_route = event_payload.get("new") or {}
+                    if (
+                        confirmed_route.get("provider") == clean_provider
+                        and confirmed_route.get("model") == effective_model
+                    ):
+                        already_confirmed = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if not already_confirmed:
+                _append_event(
+                    conn,
+                    task_id,
+                    "model_confirmed",
+                    payload,
+                    run_id=run_id,
+                )
+        return True
 
 
 def release_stale_claims(
@@ -22495,6 +23050,18 @@ def _dispatch_once_locked(
                 _ctr = _chain_root_for_task(claimed.id)
                 if _ctr is not None:
                     _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
+        except ModelRouteConfigurationError as exc:
+            # Deterministic configuration defects cannot heal through the
+            # transient fork/exec retry lane. Block on the first attempt with
+            # the concrete route error so the operator can repair the config.
+            auto = _record_spawn_failure(
+                conn,
+                claimed.id,
+                str(exc),
+                failure_limit=1,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
         except Exception as exc:
             # spawn_fn raised (fork/exec blip) — transient infra class: bounded
             # transient retry before escalating (HEILER-TRANSIENT-RETRY-BUDGET-S1).
@@ -22700,6 +23267,15 @@ def _dispatch_once_locked(
                 _ctr = _chain_root_for_task(claimed.id)
                 if _ctr is not None:
                     _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
+        except ModelRouteConfigurationError as exc:
+            auto = _record_spawn_failure(
+                conn,
+                claimed.id,
+                str(exc),
+                failure_limit=1,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn,
@@ -23176,6 +23752,7 @@ def _spawn_claude_worker(
     env: dict,
     board: Optional[str] = None,
     lane_model: Optional[str] = None,
+    resolved_model: Optional[str] = None,
     read_only_verdict_lane: bool = False,
 ) -> Optional[int]:
     """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
@@ -23428,7 +24005,7 @@ def _spawn_claude_worker(
     # to a fast/cheap tier (e.g. claude-fable-5) while hard tasks escalate via
     # model_override; the lane sits between the two as the operator-switchable
     # fleet-wide preset.
-    worker_model = (
+    worker_model = resolved_model or (
         task.model_override
         or lane_model
         or _claude_profile_model(env.get("HERMES_HOME"))
@@ -23567,6 +24144,75 @@ def _resolve_worker_cli_toolsets(
         return None
 
 
+class ModelRouteConfigurationError(RuntimeError):
+    """A claimed run has no concrete immutable provider/model route."""
+
+
+def _persisted_spawn_identity(
+    task: Task,
+    *,
+    board: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Return the immutable claim-time route for a real persisted task.
+
+    A handful of low-level spawn tests construct ``Task`` objects with dummy
+    run ids and no database row; those continue through the legacy direct-call
+    resolver. Once a task exists in the board DB, however, a missing run or an
+    unresolved provider/model is an integrity error and spawning fails closed.
+    """
+    if task.current_run_id is None:
+        return None
+    try:
+        with connect_closing(board=board) as conn:
+            task_row = conn.execute(
+                "SELECT current_run_id FROM tasks WHERE id = ?", (task.id,)
+            ).fetchone()
+            if task_row is None:
+                return None
+            run_row = conn.execute(
+                """
+                SELECT requested_provider, requested_model, model_source, metadata
+                  FROM task_runs
+                 WHERE id = ? AND task_id = ?
+                """,
+                (int(task.current_run_id), task.id),
+            ).fetchone()
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot load persisted model route for task {task.id}: {exc}"
+        ) from exc
+
+    if task_row["current_run_id"] != int(task.current_run_id) or run_row is None:
+        raise RuntimeError(
+            f"task {task.id} has no matching persisted run identity for "
+            f"run {task.current_run_id}"
+        )
+    try:
+        metadata = json.loads(run_row["metadata"] or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    provider = str(run_row["requested_provider"] or "").strip()
+    model = str(run_row["requested_model"] or "").strip()
+    if not provider or not model:
+        raise ModelRouteConfigurationError(
+            f"task {task.id} run {task.current_run_id} has no concrete model "
+            "route; refusing provider-default spawn"
+        )
+    identity = dict(metadata)
+    identity.update(
+        {
+            "route_provider": provider,
+            "model": model,
+            "model_source": run_row["model_source"] or "unknown",
+        }
+    )
+    return identity
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -23693,19 +24339,38 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
-    # Lane hot-read (F1): the active lane may pin this profile's runtime and
-    # model for THIS spawn. Ordinary worker dispatch stays fail-soft, but
-    # verdict lanes fail closed so a resolver/runtime error cannot silently
-    # bypass their constrained argv/cage.
-    lane_entry = _active_lane_entry_for_profile(
-        profile_arg,
-        board=board,
-        strict=profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES,
-    )
-    lane_runtime = (lane_entry or {}).get("worker_runtime")
-    lane_provider = (lane_entry or {}).get("provider")
-    lane_model = (lane_entry or {}).get("model")
-    lane_fallback_providers = (lane_entry or {}).get("fallback_providers") or []
+    # A real claimed task already owns an immutable spawn identity. Resolve it
+    # BEFORE consulting the mutable lane so a lane edit between claim and
+    # subprocess launch cannot alter the argv (or trip a verdict-lane strict
+    # resolver against configuration this run never claimed).
+    persisted_identity = _persisted_spawn_identity(task, board=board)
+    route_is_frozen = persisted_identity is not None
+    if persisted_identity:
+        lane_runtime = persisted_identity.get("worker_runtime") or "hermes"
+        lane_provider = persisted_identity.get("route_provider")
+        lane_model = persisted_identity.get("model")
+        lane_fallback_providers = persisted_identity.get("fallback_providers") or []
+        # Verdict-cage classification must inspect the same immutable runtime
+        # route that the subprocess uses, not a lane edited after claim.
+        lane_entry = {
+            "worker_runtime": lane_runtime,
+            "provider": lane_provider,
+            "model": lane_model,
+            "fallback_providers": lane_fallback_providers,
+        }
+    else:
+        # Synthetic/direct-call tasks have no persisted run. Preserve the
+        # existing hot-read seam for those callers and fail closed on verdict
+        # lanes whose constrained runtime cannot be resolved.
+        lane_entry = _active_lane_entry_for_profile(
+            profile_arg,
+            board=board,
+            strict=profile_arg in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES,
+        )
+        lane_runtime = (lane_entry or {}).get("worker_runtime")
+        lane_provider = (lane_entry or {}).get("provider")
+        lane_model = (lane_entry or {}).get("model")
+        lane_fallback_providers = (lane_entry or {}).get("fallback_providers") or []
 
     # Early branch for claude-CLI worker profiles: launch the `claude` CLI
     # instead of `hermes -p <profile> chat`. The lane's worker_runtime (when
@@ -23739,6 +24404,7 @@ def _default_spawn(
             env=env,
             board=board,
             lane_model=lane_model,
+            resolved_model=lane_model if route_is_frozen else None,
             read_only_verdict_lane=_verdict_lane,
         )
 
@@ -23791,10 +24457,10 @@ def _default_spawn(
     # the chat subparser (same reasoning as `--max-turns` below).
     # Lane (F1) sits below the per-task override: override > lane > profile
     # config default (no -m flag at all).
-    hermes_model = task.model_override or lane_model
+    hermes_model = lane_model if route_is_frozen else (task.model_override or lane_model)
     if hermes_model:
         cmd.extend(["-m", hermes_model])
-    if lane_provider and not task.model_override:
+    if lane_provider and (route_is_frozen or not task.model_override):
         cmd.extend(["--provider", lane_provider])
     if lane_fallback_providers:
         for fallback in lane_fallback_providers:

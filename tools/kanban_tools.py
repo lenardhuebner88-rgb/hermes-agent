@@ -274,6 +274,57 @@ def heartbeat_current_worker_from_env(note: Optional[str] = None) -> bool:
         return False
 
 
+def record_current_worker_model_route_from_env(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    state: str,
+    source: str,
+    observed_at: Optional[int] = None,
+    api_request_id: Optional[str] = None,
+) -> bool:
+    """Best-effort runtime model telemetry for the current kanban run.
+
+    Unlike the activity heartbeat this is intentionally not rate-limited: the
+    provider may fall back between two adjacent API requests, and the board
+    must reflect that route change immediately. The DB writer owns stale-run
+    rejection and event deduplication. This bridge never raises into the model
+    loop.
+    """
+    tid = os.environ.get("HERMES_KANBAN_TASK")
+    run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID")
+    if not tid or not run_id_raw:
+        return False
+    try:
+        run_id = int(run_id_raw)
+    except (TypeError, ValueError):
+        return False
+    try:
+        kb, conn = _connect()
+        try:
+            return bool(
+                kb.update_run_model_route(
+                    conn,
+                    tid,
+                    run_id,
+                    provider=provider,
+                    model=model,
+                    state=state,
+                    source=source,
+                    observed_at=observed_at,
+                    api_request_id=api_request_id,
+                )
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.debug("model-route bridge failed", exc_info=True)
+        return False
+
+
 def _ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields})
 

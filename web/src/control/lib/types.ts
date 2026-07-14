@@ -18,6 +18,7 @@ export type KnownRunOutcome =
   | "gave_up" | "reclaimed" | "iteration_budget_exhausted";
 
 export type RunOutcome = KnownRunOutcome | (string & {});
+export type ModelRouteState = "planned" | "in_flight" | "confirmed" | "unknown";
 
 export interface RunInspect {
   cpu_percent: number;
@@ -62,8 +63,15 @@ export interface Worker {
   step_key?: string | null;
   /** Phase B: Modell-Override falls gesetzt (sonst null = aus Lane geerbt). */
   model_override?: string | null;
-  /** Phase B: effektiv verwendetes Modell (override ?? lane-Modell). */
+  /** Compatibility alias derived only from persisted run telemetry. */
   effective_model?: string | null;
+  requested_provider?: string | null;
+  requested_model?: string | null;
+  active_provider?: string | null;
+  active_model?: string | null;
+  model_state?: ModelRouteState | null;
+  model_source?: string | null;
+  model_observed_at?: number | null;
   /** Phase B: Live-Input-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
   input_tokens?: number | null;
   /** Phase B: Live-Output-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
@@ -89,6 +97,8 @@ export interface WorkersResponse {
 /** Ein Cross-Worker-Ereignis aus GET /runs/live-events (Puls-Leitstand-Ticker). */
 export interface LiveEvent {
   id: number;
+  /** Board owning this event when Fleet aggregates multiple board DBs. */
+  board_slug?: string | null;
   run_id: number | null;
   task_id: string | null;
   task_title: string | null;
@@ -304,6 +314,14 @@ export interface ChainGraphRun {
   heartbeat_age_seconds: number | null;
   /** S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime). null → DAG/ETA-Fallback. */
   run_progress?: number | null;
+  requested_provider?: string | null;
+  requested_model?: string | null;
+  active_provider?: string | null;
+  active_model?: string | null;
+  model_state?: ModelRouteState | null;
+  model_source?: string | null;
+  model_observed_at?: number | null;
+  effective_model?: string | null;
 }
 
 export interface ChainGraphNode {

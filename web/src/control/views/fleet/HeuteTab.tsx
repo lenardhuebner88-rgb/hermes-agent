@@ -35,6 +35,7 @@ import { Led } from "../../components/atoms";
 import { profileLabel } from "../../lib/tones";
 import { elapsedSeconds } from "../../lib/derive";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
+import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 
 /** Ziel-Subtabs, zu denen der Heute-Handlungsblock und Karten navigieren. */
 type HeuteNavTarget = "worker" | "plan" | "risiko";
@@ -565,9 +566,20 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
         </div>
       ) : null}
 
+      <div className="mt-2 flex min-w-0">
+        <ModelRouteBadge
+          requestedProvider={w.requested_provider}
+          requestedModel={w.requested_model}
+          activeProvider={w.active_provider}
+          activeModel={w.active_model}
+          modelState={w.model_state}
+          modelSource={w.model_source}
+          observedAt={w.model_observed_at}
+        />
+      </div>
+
       {/* Meta-Zeile */}
       <div className="fleet-wk-meta">
-        {w.effective_model ? <b>{w.effective_model.replace(/^claude-/, "").split("-").slice(0, 1).join("")}</b> : null}
         <span>{fmtTokens(w.input_tokens)} → {fmtTokens(w.output_tokens)} tok</span>
         <span>seit {fmtSeconds(elapsedSec)}</span>
         {w.eta_p50_seconds ? (

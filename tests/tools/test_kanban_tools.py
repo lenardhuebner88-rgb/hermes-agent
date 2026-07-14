@@ -216,6 +216,39 @@ def review_worker_env(monkeypatch, worker_env):
     return worker_env
 
 
+def test_model_route_bridge_is_noop_outside_kanban_worker(monkeypatch):
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+
+    assert not kt.record_current_worker_model_route_from_env(
+        provider="openai-codex",
+        model="gpt-5.6-sol",
+        state="in_flight",
+        source="runtime_request",
+    )
+
+
+def test_model_route_bridge_never_raises_on_telemetry_failure(monkeypatch):
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_canary")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+
+    def _broken_connect():
+        raise OSError("telemetry store unavailable")
+
+    monkeypatch.setattr(kt, "_connect", _broken_connect)
+
+    assert not kt.record_current_worker_model_route_from_env(
+        provider="openrouter",
+        model="anthropic/claude-opus-4.8",
+        state="confirmed",
+        source="provider_response",
+    )
+
+
 def test_show_defaults_to_env_task_id(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_show({})

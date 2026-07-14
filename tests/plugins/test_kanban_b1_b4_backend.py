@@ -81,7 +81,13 @@ def _insert_run(conn, task_id, *, worker_pid=None, ended_at=None, profile=None, 
     return cur.lastrowid
 
 
-def _make_running_task(*, title="test-task", assignee="coder", model_override=None):
+def _make_running_task(
+    *,
+    title="test-task",
+    assignee="coder",
+    model_override=None,
+    route: dict | None = None,
+):
     """Create a task, set it running, and insert a run. Return (task_id, run_id)."""
     conn = kb.connect()
     try:
@@ -91,6 +97,23 @@ def _make_running_task(*, title="test-task", assignee="coder", model_override=No
         conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
         conn.commit()
         run_id = _insert_run(conn, task_id, worker_pid=9999, profile=assignee, step_key="step-build")
+        if route:
+            conn.execute(
+                "UPDATE task_runs SET requested_provider=?, requested_model=?, "
+                "active_provider=?, active_model=?, model_state=?, model_source=?, "
+                "model_observed_at=? WHERE id=?",
+                (
+                    route.get("requested_provider"),
+                    route.get("requested_model"),
+                    route.get("active_provider"),
+                    route.get("active_model"),
+                    route.get("model_state"),
+                    route.get("model_source"),
+                    route.get("model_observed_at"),
+                    run_id,
+                ),
+            )
+            conn.commit()
     finally:
         conn.close()
     return task_id, run_id
@@ -152,7 +175,7 @@ def _dead_signal_recorder(calls: list[tuple[int, signal.Signals]]):
 # ---------------------------------------------------------------------------
 
 def test_workers_active_b1_fields_present(client):
-    """B1: workers/active includes step_key, model_override, effective_model keys."""
+    """B1: workers/active includes the complete run-bound model contract."""
     task_id, run_id = _make_running_task(title="b1-worker")
     r = client.get("/api/plugins/kanban/workers/active")
     assert r.status_code == 200
@@ -162,6 +185,13 @@ def test_workers_active_b1_fields_present(client):
     assert "step_key" in w
     assert "model_override" in w
     assert "effective_model" in w
+    assert "requested_provider" in w
+    assert "requested_model" in w
+    assert "active_provider" in w
+    assert "active_model" in w
+    assert "model_state" in w
+    assert "model_source" in w
+    assert "model_observed_at" in w
 
 
 def test_workers_active_b1_step_key_value(client):
@@ -174,25 +204,154 @@ def test_workers_active_b1_step_key_value(client):
 
 
 def test_workers_active_b1_model_override(client):
-    """B1: model_override from tasks.model_override is passed through; effective_model matches."""
-    task_id, run_id = _make_running_task(title="b1-model", model_override="claude-opus-4")
+    """B1: effective_model aliases persisted run truth, not mutable task state."""
+    task_id, run_id = _make_running_task(
+        title="b1-model",
+        model_override="later-mutated-task-value",
+        route={
+            "requested_provider": "openai-codex",
+            "requested_model": "gpt-5.6-sol",
+            "active_provider": "openai-codex",
+            "active_model": "gpt-5.6-sol-20260713",
+            "model_state": "confirmed",
+            "model_source": "provider_response",
+            "model_observed_at": 1_783_960_000,
+        },
+    )
     r = client.get("/api/plugins/kanban/workers/active")
     assert r.status_code == 200
     w = r.json()["workers"][0]
-    assert w["model_override"] == "claude-opus-4"
-    # effective_model = model_override when set
-    assert w["effective_model"] == "claude-opus-4"
+    assert w["model_override"] == "later-mutated-task-value"
+    assert w["effective_model"] == "gpt-5.6-sol-20260713"
+    assert w["requested_model"] == "gpt-5.6-sol"
+    assert w["active_provider"] == "openai-codex"
+    assert w["model_state"] == "confirmed"
+    assert w["model_source"] == "provider_response"
 
 
 def test_workers_active_b1_no_model_override(client):
-    """B1: when model_override is NULL, effective_model falls back to lane model (may be None in test env)."""
+    """A legacy metadata stamp is inferred honestly, never called confirmed."""
     task_id, run_id = _make_running_task(title="b1-nomodel")
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE task_runs SET metadata=? WHERE id=?",
+            (json.dumps({"provider": "openrouter", "model": "legacy/model"}), run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     r = client.get("/api/plugins/kanban/workers/active")
     assert r.status_code == 200
     w = r.json()["workers"][0]
     assert w["model_override"] is None
-    # effective_model is None or a string — must be present as key
-    assert "effective_model" in w
+    assert w["active_provider"] == "openrouter"
+    assert w["active_model"] == "legacy/model"
+    assert w["effective_model"] == "legacy/model"
+    assert w["model_state"] == "unknown"
+    assert w["model_source"] == "legacy_inferred"
+
+
+def test_legacy_route_resolver_batches_sessions_and_caches_profile_identity(client):
+    plugin = _load_plugin_module()
+    runs = [
+        {
+            "profile": "coder",
+            "metadata": json.dumps({"worker_session_id": session_id}),
+            "started_at": 100,
+        }
+        for session_id in ("session-a", "session-b")
+    ]
+    empty_usage = {
+        ("session-a", "coder"): {"model": None, "billing_provider": None},
+        ("session-b", "coder"): {"model": None, "billing_provider": None},
+    }
+    conn = kb.connect()
+    try:
+        with (
+            patch.object(
+                kb,
+                "_backfill_usage_batch_from_state_db",
+                return_value=empty_usage,
+            ) as batch,
+            patch.object(
+                kb,
+                "_backfill_usage_from_state_db",
+                side_effect=AssertionError("scalar state lookup must stay unused"),
+            ),
+            patch.object(
+                kb,
+                "_spawn_identity_metadata",
+                return_value={
+                    "route_provider": "openai-codex",
+                    "model": "gpt-5.6-sol",
+                },
+            ) as identity,
+        ):
+            resolver = plugin._LegacyModelRouteResolver(conn, runs)
+            fields = [
+                plugin._run_model_route_fields(
+                    conn,
+                    run,
+                    legacy_resolver=resolver,
+                )
+                for run in runs
+            ]
+        batch.assert_called_once()
+        assert identity.call_count == 1
+        assert [field["active_model"] for field in fields] == [
+            "gpt-5.6-sol",
+            "gpt-5.6-sol",
+        ]
+    finally:
+        conn.close()
+
+
+def test_task_detail_run_carries_persisted_model_route(client):
+    task_id, _ = _make_running_task(
+        title="task-detail-route",
+        route={
+            "requested_provider": "openai-codex",
+            "requested_model": "gpt-5.6-sol",
+            "active_provider": "kimi-coding",
+            "active_model": "kimi-k2.7-code",
+            "model_state": "confirmed",
+            "model_source": "provider_response",
+            "model_observed_at": 1_783_960_000,
+        },
+    )
+
+    response = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["requested_model"] == "gpt-5.6-sol"
+    assert run["active_provider"] == "kimi-coding"
+    assert run["active_model"] == "kimi-k2.7-code"
+    assert run["model_state"] == "confirmed"
+
+
+def test_chain_graph_latest_run_carries_persisted_model_route(client):
+    task_id, _ = _make_running_task(
+        title="chain-route",
+        route={
+            "requested_provider": "openai-codex",
+            "requested_model": "gpt-5.6-sol",
+            "active_provider": "openai-codex",
+            "active_model": "gpt-5.6-sol-20260713",
+            "model_state": "confirmed",
+            "model_source": "provider_response",
+            "model_observed_at": 1_783_960_000,
+        },
+    )
+
+    response = client.get(f"/api/plugins/kanban/tasks/{task_id}/chain-graph")
+
+    assert response.status_code == 200
+    latest = response.json()["nodes"][0]["latest_run"]
+    assert latest["active_provider"] == "openai-codex"
+    assert latest["active_model"] == "gpt-5.6-sol-20260713"
+    assert latest["model_state"] == "confirmed"
 
 
 def test_workers_active_token_status_no_live_sample(client):

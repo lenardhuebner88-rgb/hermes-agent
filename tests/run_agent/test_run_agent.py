@@ -4041,6 +4041,42 @@ class TestRunConversation:
         assert all("usage" in c and "response" in c for c in post_request_calls)
         assert all("assistant_message" in c["response"] for c in post_request_calls)
 
+    def test_provider_call_stamps_in_flight_and_confirmed_kanban_route(self, agent):
+        self._setup_agent(agent)
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.6-sol"
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="route confirmed",
+            finish_reason="stop",
+        )
+
+        with (
+            patch(
+                "tools.kanban_tools.record_current_worker_model_route_from_env"
+            ) as record_route,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "route confirmed"
+        assert record_route.call_count == 2
+        in_flight, confirmed = [call.kwargs for call in record_route.call_args_list]
+        assert in_flight | {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-sol",
+            "state": "in_flight",
+            "source": "runtime_request",
+        } == in_flight
+        assert confirmed | {
+            "provider": "openai-codex",
+            "model": "test/model",
+            "state": "confirmed",
+            "source": "provider_response",
+        } == confirmed
+        assert in_flight["api_request_id"] == confirmed["api_request_id"]
+
     def test_api_request_error_hook_skips_payload_work_without_listener(self, agent, monkeypatch):
         payload_built = False
         hook_called = False
@@ -4329,6 +4365,9 @@ class TestRunConversation:
             return True
 
         with (
+            patch(
+                "tools.kanban_tools.record_current_worker_model_route_from_env"
+            ) as record_route,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
@@ -4338,6 +4377,18 @@ class TestRunConversation:
         assert fallback_called["called"], "Fallback should have been triggered"
         assert result["completed"] is True
         assert result["final_response"] == "Fallback answer."
+        route_calls = [call.kwargs for call in record_route.call_args_list]
+        assert any(
+            call["state"] == "in_flight"
+            and call["provider"] == "openrouter"
+            and call["model"] == "anthropic/claude-sonnet-4"
+            for call in route_calls
+        )
+        assert any(
+            call["state"] == "confirmed"
+            and call["provider"] == "openrouter"
+            for call in route_calls
+        )
 
     def test_empty_response_fallback_also_empty_returns_empty(self, agent):
         """If fallback also returns empty, final response is (empty)."""

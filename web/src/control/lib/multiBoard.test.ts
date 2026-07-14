@@ -53,9 +53,10 @@ describe("Fleet board selector state", () => {
   const catalog: BoardsResponse = {
     current: "default",
     boards: [
-      { slug: "default", name: "Standard", archived: false, is_current: true },
-      { slug: "health-track", name: "Health Track", archived: false, is_current: false },
-      { slug: "old", name: "Alt", archived: true, is_current: false },
+      { slug: "default", name: "Hermes Agent", archived: false, is_current: true, project_bound: true },
+      { slug: "health-track", name: "Health Track", archived: false, is_current: false, project_bound: true },
+      { slug: "internal-test", name: "Internal Test", archived: false, is_current: false, project_bound: false },
+      { slug: "old", name: "Alt", archived: true, is_current: false, project_bound: true },
     ],
   };
 
@@ -73,10 +74,34 @@ describe("Fleet board selector state", () => {
     expect(readFleetBoard(storage)).toBeNull();
   });
 
-  it("rejects current, archived, and missing stored boards", () => {
+  it("rejects current, internal, archived, and missing stored boards", () => {
     expect(validateFleetBoard("health-track", catalog)).toBe("health-track");
     expect(validateFleetBoard("default", catalog)).toBeNull();
+    expect(validateFleetBoard("internal-test", catalog)).toBeNull();
     expect(validateFleetBoard("old", catalog)).toBeNull();
     expect(validateFleetBoard("missing", catalog)).toBeNull();
+  });
+
+  it("falls back to a project board when the global current board is internal", () => {
+    const internalCurrent: BoardsResponse = {
+      ...catalog,
+      current: "internal-test",
+    };
+
+    expect(validateFleetBoard(null, internalCurrent)).toBe("default");
+    expect(validateFleetBoard("internal-test", internalCurrent)).toBe("default");
+  });
+
+  it("keeps active boards selectable when project metadata is unavailable", () => {
+    const missingProjects: BoardsResponse = {
+      ...catalog,
+      boards: catalog.boards.map((board) => ({ ...board, project_bound: false })),
+    };
+
+    expect(validateFleetBoard(null, missingProjects)).toBeNull();
+    expect(validateFleetBoard("default", missingProjects)).toBeNull();
+    expect(validateFleetBoard("health-track", missingProjects)).toBe("health-track");
+    expect(validateFleetBoard("internal-test", missingProjects)).toBe("internal-test");
+    expect(validateFleetBoard("old", missingProjects)).toBeNull();
   });
 });

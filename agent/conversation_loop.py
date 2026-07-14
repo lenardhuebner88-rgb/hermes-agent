@@ -1321,7 +1321,32 @@ def run_conversation(
                     if isinstance(getattr(agent, "client", None), Mock):
                         _use_streaming = False
 
+                _request_model_route: dict[str, Optional[str]] = {
+                    "provider": None,
+                    "model": None,
+                }
+
                 def _perform_api_call(next_api_kwargs):
+                    # Stamp immediately before the provider call so a retry or
+                    # fallback records the route that is actually being sent,
+                    # not the profile/lane route from conversation startup.
+                    _request_model_route["provider"] = agent.provider
+                    _request_model_route["model"] = agent.model
+                    try:
+                        from tools.kanban_tools import (
+                            record_current_worker_model_route_from_env,
+                        )
+
+                        record_current_worker_model_route_from_env(
+                            provider=agent.provider,
+                            model=agent.model,
+                            state="in_flight",
+                            source="runtime_request",
+                            observed_at=int(time.time()),
+                            api_request_id=api_request_id,
+                        )
+                    except Exception:
+                        pass
                     if _use_streaming:
                         return agent._interruptible_streaming_api_call(
                             next_api_kwargs, on_first_delta=_stop_spinner
@@ -4200,6 +4225,24 @@ def run_conversation(
             normalized = _transport.normalize_response(response, **_normalize_kwargs)
             assistant_message = normalized
             finish_reason = normalized.finish_reason
+
+            response_model = getattr(response, "model", None)
+            if isinstance(response_model, str) and response_model.strip():
+                try:
+                    from tools.kanban_tools import (
+                        record_current_worker_model_route_from_env,
+                    )
+
+                    record_current_worker_model_route_from_env(
+                        provider=_request_model_route.get("provider") or agent.provider,
+                        model=response_model.strip(),
+                        state="confirmed",
+                        source="provider_response",
+                        observed_at=int(time.time()),
+                        api_request_id=api_request_id,
+                    )
+                except Exception:
+                    pass
             
             # Normalize content to string — some OpenAI-compatible servers
             # (llama-server, etc.) return content as a dict or list instead

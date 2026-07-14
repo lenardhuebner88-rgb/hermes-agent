@@ -7,6 +7,8 @@ export interface BoardSummary {
   name: string;
   archived: boolean;
   is_current: boolean;
+  project_bound?: boolean;
+  project_name?: string | null;
 }
 
 export interface BoardsResponse {
@@ -17,6 +19,14 @@ export interface BoardsResponse {
 export interface BoardWorkersResponse {
   board: string;
   response: WorkersResponse;
+}
+
+export function selectableFleetBoards<
+  T extends Pick<BoardSummary, "archived" | "project_bound">,
+>(boards: readonly T[]): T[] {
+  const active = boards.filter((board) => !board.archived);
+  const projectBound = active.filter((board) => board.project_bound === true);
+  return projectBound.length > 0 ? projectBound : active;
 }
 
 export function withBoardParam(url: string, board: string | null): string {
@@ -58,9 +68,13 @@ export function persistFleetBoard(storage: Pick<Storage, "setItem" | "removeItem
 }
 
 export function validateFleetBoard(board: string | null, catalog: BoardsResponse | null): string | null {
-  if (!board || !catalog) return board;
-  const available = catalog.boards.some((entry) => !entry.archived && entry.slug === board && entry.slug !== catalog.current);
-  return available ? board : null;
+  if (!catalog) return board;
+  const availableBoards = selectableFleetBoards(catalog.boards);
+  const currentIsAvailable = availableBoards.some((entry) => entry.slug === catalog.current);
+  const safeDefault = currentIsAvailable ? null : availableBoards[0]?.slug ?? null;
+  if (!board) return safeDefault;
+  const available = availableBoards.some((entry) => entry.slug === board && entry.slug !== catalog.current);
+  return available ? board : safeDefault;
 }
 
 export function boardDataColor(slug: string): string {

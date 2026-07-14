@@ -122,7 +122,8 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).toContain("Laufprofil");
     expect(html).toContain("premium");
     expect(html).not.toContain("Assignee");
-    expect(html).not.toContain("Modell");
+    expect(html).toContain("Modell");
+    expect(html).toContain("Modell unbekannt – Telemetrie fehlt");
   });
 
   it("rendert lange Taskbeschreibungen mit Wortumbruch und eigener Scrollfläche statt hartem Abschneiden", () => {

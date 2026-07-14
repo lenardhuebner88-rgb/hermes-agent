@@ -363,6 +363,9 @@ export function FleetView() {
                   cap={workers.data?.cap ?? null}
                   doneToday={costs.data?.today.runs ?? null}
                   currentBoard={boardCatalog.data?.current ?? "default"}
+                  eventBoards={(boardCatalog.data?.boards ?? [])
+                    .filter((catalogBoard) => !catalogBoard.archived)
+                    .map((catalogBoard) => catalogBoard.slug)}
                   initialOpen={drawerWorker}
                   onOpenChain={(rootId: string) => {
                     setKettenRootId(rootId);

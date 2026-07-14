@@ -208,6 +208,49 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
     expect(document.body.textContent).toContain("Tokens");
     expect(document.body.textContent).toContain("noch keine Live-Tokens");
   });
+
+  it("lädt Ereignisse, Aktivität und Logs eines Fremd-Board-Workers aus dessen Board", async () => {
+    const foreignWorker: Worker = {
+      ...FIXTURE_WORKER,
+      board_slug: "health-track",
+    };
+    routeFetch((url) => {
+      if (url.includes("/log")) {
+        return Promise.resolve({ exists: true, content: "health-track canary log", truncated: false });
+      }
+      return Promise.resolve({ ok: true });
+    });
+
+    render(
+      <WorkerTab
+        activeWorkers={[foreignWorker]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={foreignWorker}
+        onOpenChain={() => {}}
+        currentBoard="default"
+        eventBoards={["default", "health-track"]}
+      />,
+    );
+
+    await waitFor(() => {
+      const urls = fetchJSONMock.mock.calls.map(([url]) => String(url));
+      expect(urls.some((url) => url === "/api/plugins/kanban/runs/live-events?board=default")).toBe(true);
+      expect(urls.some((url) => url === "/api/plugins/kanban/runs/live-events?board=health-track")).toBe(true);
+      expect(urls.some((url) => url.includes("/activity?limit=12&board=health-track"))).toBe(true);
+    });
+
+    expect(screen.queryByRole("button", { name: "Anstoßen" })).toBeNull();
+    expect(screen.getByText(/Fremd-Board · Worker nur beobachten/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Log" }));
+
+    await waitFor(() => {
+      const urls = fetchJSONMock.mock.calls.map(([url]) => String(url));
+      expect(urls.some((url) => url.includes("/log?tail=16384&board=health-track"))).toBe(true);
+      expect(screen.getByText("health-track canary log")).toBeTruthy();
+    });
+  });
 });
 
 describe("Worker-Drawer-Steuerung (Gap 1)", () => {

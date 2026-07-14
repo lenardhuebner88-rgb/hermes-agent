@@ -531,8 +531,8 @@ describe("FleetView PlanSpec detail drawer", () => {
       data: {
         current: "default",
         boards: [
-          { slug: "default", name: "Default", archived: false },
-          { slug: "health-track", name: "Health Track", archived: false },
+          { slug: "default", name: "Hermes Agent", archived: false, project_bound: true },
+          { slug: "health-track", name: "Health Track", archived: false, project_bound: true },
         ],
       },
       loading: false,
@@ -568,8 +568,8 @@ describe("FleetView PlanSpec detail drawer", () => {
       data: {
         current: "default",
         boards: [
-          { slug: "default", name: "Default", archived: false },
-          { slug: "health-track", name: "Health Track", archived: false },
+          { slug: "default", name: "Hermes Agent", archived: false, project_bound: true },
+          { slug: "health-track", name: "Health Track", archived: false, project_bound: true },
         ],
       },
       loading: false,

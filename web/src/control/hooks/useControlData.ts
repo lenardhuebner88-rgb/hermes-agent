@@ -723,27 +723,35 @@ export interface RunLiveEventsState {
 
 /**
  * useRunLiveEvents — Puls-Leitstand-Ticker (S2). Pollt GET
- * /runs/live-events alle 4000ms und akkumuliert die Events inkrementell:
- * nach dem ersten Voll-Fetch trägt jeder Poll `since_id=<latest>` und liefert
- * nur neue Events, die client-seitig in einen nach id absteigend sortierten,
- * auf `cap` gedeckelten Puffer gemischt werden (mergeLiveEvents).
+ * /runs/live-events alle 4000ms und akkumuliert die Events inkrementell. Fleet
+ * kann mehrere Board-DBs gleichzeitig lesen; deshalb besitzt jedes Board einen
+ * eigenen since_id-Cursor und jedes Event wird mit board_slug angereichert.
  *
  * Bewusst KEIN usePolling: der Store ersetzt seinen Snapshot pro Poll, hier
  * brauchen wir das Merge über since_id. Pausiert bei document.hidden (wie
  * usePolling) und stoppt sauber beim Unmount — nur montiert (Worker-Subtab
  * sichtbar) läuft der Poll, sonst schläft der Ticker.
  */
-export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
+export function useRunLiveEvents(
+  enabled = true,
+  cap = 40,
+  boardSlugs: readonly string[] = [],
+): RunLiveEventsState {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const sinceIdRef = useRef<number | null>(null);
+  const sinceIdByBoardRef = useRef<Record<string, number>>({});
+  const boardKey = [...new Set(boardSlugs.map((slug) => slug.trim()).filter(Boolean))]
+    .sort()
+    .join("\u0000");
 
   useEffect(() => {
     if (!enabled) return;
     let stopped = false;
     let timer: number | null = null;
+    const boards = boardKey ? boardKey.split("\u0000") : [null];
+    const boardSet = new Set(boards);
 
     const schedule = () => {
       if (stopped) return;
@@ -758,21 +766,49 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
         return;
       }
       try {
-        const since = sinceIdRef.current;
-        const url =
-          since != null
+        const results = await Promise.allSettled(boards.map(async (board) => {
+          const cursorKey = board ?? "current";
+          const since = sinceIdByBoardRef.current[cursorKey];
+          const baseUrl = since != null
             ? `/api/plugins/kanban/runs/live-events?since_id=${since}`
             : "/api/plugins/kanban/runs/live-events";
-        const parsed = parseOrThrow(LiveEventsResponseSchema, await fetchJSON<unknown>(url), "runs/live-events");
+          const url = withBoardParam(baseUrl, board);
+          const parsed = parseOrThrow(
+            LiveEventsResponseSchema,
+            await fetchJSON<unknown>(url),
+            `runs/live-events:${cursorKey}`,
+          );
+          return { board, cursorKey, parsed };
+        }));
         if (stopped) return;
-        setError(null);
+        const fulfilled = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        const failed = results.length - fulfilled.length;
+        if (fulfilled.length === 0) {
+          const firstFailure = results.find((result) => result.status === "rejected");
+          throw firstFailure && firstFailure.status === "rejected"
+            ? firstFailure.reason
+            : new Error("Keine Board-Ereignisse erreichbar");
+        }
+        setError(failed > 0 ? `${failed} Board-Ereignisquelle${failed === 1 ? "" : "n"} nicht erreichbar` : null);
         setLoading(false);
         setLastUpdated(nowSec());
-        if (parsed.events.length > 0) {
-          setEvents((prev) => mergeLiveEvents(prev, parsed.events, cap));
+        const incoming = fulfilled.flatMap(({ board, parsed }) =>
+          parsed.events.map((event) => ({ ...event, board_slug: board })),
+        );
+        if (incoming.length > 0) {
+          setEvents((prev) => mergeLiveEvents(
+            prev.filter((event) => boardSet.has(event.board_slug ?? null)),
+            incoming,
+            cap,
+          ));
         }
-        if (parsed.latest_id != null) {
-          sinceIdRef.current = Math.max(sinceIdRef.current ?? 0, parsed.latest_id);
+        for (const { cursorKey, parsed } of fulfilled) {
+          if (parsed.latest_id != null) {
+            sinceIdByBoardRef.current[cursorKey] = Math.max(
+              sinceIdByBoardRef.current[cursorKey] ?? 0,
+              parsed.latest_id,
+            );
+          }
         }
       } catch (e) {
         if (!stopped) {
@@ -789,23 +825,35 @@ export function useRunLiveEvents(enabled = true, cap = 40): RunLiveEventsState {
       stopped = true;
       if (timer != null) window.clearTimeout(timer);
     };
-  }, [enabled, cap]);
+  }, [enabled, cap, boardKey]);
 
-  return { events, loading, error, lastUpdated, isStale: error != null && events.length > 0 };
+  const visibleBoards = new Set(boardKey ? boardKey.split("\u0000") : [null]);
+  const visibleEvents = events.filter((event) => visibleBoards.has(event.board_slug ?? null));
+  return {
+    events: visibleEvents,
+    loading,
+    error,
+    lastUpdated,
+    isStale: error != null && visibleEvents.length > 0,
+  };
 }
 
 // F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).
 // Interval ~8000ms; pausiert automatisch wenn taskId null.
-export function useWorkerActivity(taskId: string | null) {
-  const key = taskId ? `worker-activity/${taskId}` : "worker-activity/__none__";
+export function useWorkerActivity(taskId: string | null, board: string | null = null) {
+  const key = taskId ? `worker-activity/${taskId}:${board ?? "current"}` : "worker-activity/__none__";
   const loader = useCallback(async (): Promise<WorkerActivityResponse> => {
     if (!taskId) return { task_id: "", events: [] };
+    const url = withBoardParam(
+      `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activity?limit=12`,
+      board,
+    );
     return parseOrThrow(
       WorkerActivityResponseSchema,
-      await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activity?limit=12`),
+      await fetchJSON<unknown>(url),
       `worker-activity/${taskId}`,
     );
-  }, [taskId]);
+  }, [taskId, board]);
   // Null-taskId → Intervall auf sehr groß setzen + leeren Snapshot zurückgeben
   // (usePolling pausiert nicht von sich aus; Loader gibt sofort leeres Objekt zurück)
   const result = usePolling<WorkerActivityResponse>(key, loader, taskId ? 8000 : 600_000);

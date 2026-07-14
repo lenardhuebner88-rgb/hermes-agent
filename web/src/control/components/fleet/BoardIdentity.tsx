@@ -1,4 +1,4 @@
-import { boardDataColor } from "../../lib/multiBoard";
+import { boardDataColor, selectableFleetBoards } from "../../lib/multiBoard";
 
 export function BoardBadge({ slug }: { slug?: string | null }) {
   if (!slug || slug === "default") return null;
@@ -19,12 +19,21 @@ export function BoardSwitcher({
   selected,
   onSelect,
 }: {
-  boards: Array<{ slug: string; name: string; archived: boolean }>;
+  boards: Array<{
+    slug: string;
+    name: string;
+    archived: boolean;
+    project_bound?: boolean;
+    project_name?: string | null;
+  }>;
   current: string;
   selected: string | null;
   onSelect: (board: string | null) => void;
 }) {
-  const available = boards.filter((board) => !board.archived);
+  // projects.db is fail-soft in the API. If it is temporarily unavailable,
+  // keep navigation usable without pretending that any board is bound.
+  const available = selectableFleetBoards(boards);
+  const currentProject = available.find((board) => board.slug === current);
   return (
     <label className="mb-3 flex min-h-12 items-center gap-2 rounded-panel border border-line bg-surface-1 px-3 text-sec text-ink-2">
       <span className="font-display text-micro uppercase tracking-[0.12em] text-ink-3">Board</span>
@@ -35,9 +44,11 @@ export function BoardSwitcher({
         onChange={(event) => onSelect(event.target.value || null)}
         aria-label="Board auswählen"
       >
-        <option value="">{available.find((board) => board.slug === current)?.name ?? current} · aktuell</option>
+        {currentProject ? (
+          <option value="">{currentProject.project_name ?? currentProject.name} · aktuell</option>
+        ) : null}
         {available.filter((board) => board.slug !== current).map((board) => (
-          <option key={board.slug} value={board.slug}>{board.name || board.slug}</option>
+          <option key={board.slug} value={board.slug}>{board.project_name || board.name || board.slug}</option>
         ))}
       </select>
       {selected ? <span className="hidden text-micro text-ink-3 tab:inline">nur lesen</span> : null}

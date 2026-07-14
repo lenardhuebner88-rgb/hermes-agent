@@ -1250,4 +1250,15 @@ describe("mergeLiveEvents", () => {
   it("leeres incoming lässt den Puffer unverändert (bis auf Sortierung/Cap)", () => {
     expect(mergeLiveEvents([{ id: 2 }, { id: 1 }], [], 10).map((e) => e.id)).toEqual([2, 1]);
   });
+  it("behält kollidierende Event-IDs aus verschiedenen Boards", () => {
+    const merged = mergeLiveEvents(
+      [{ id: 7, board_slug: "default", at: 10 }],
+      [{ id: 7, board_slug: "health-track", at: 11 }],
+      10,
+    );
+    expect(merged.map((e) => [e.board_slug, e.id])).toEqual([
+      ["health-track", 7],
+      ["default", 7],
+    ]);
+  });
 });
