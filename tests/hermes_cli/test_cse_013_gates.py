@@ -483,6 +483,142 @@ def test_render_review_verifier_section_gate_passed(kanban_home, tmp_path, monke
     assert "Coder worker_gate: PASSED" in text
 
 
+def test_render_review_stage_keeps_coder_gate_after_verifier_handoff(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Reviewer context must not lose the coder gate at stage advancement.
+
+    The verifier's ``submitted_for_review`` event intentionally carries only
+    stage-transition data.  The authoritative worker-gate stamp remains on the
+    earlier coder submit event and must still be rendered for the reviewer.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "tester")
+    (repo / "a.py").write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+
+    wg_config = {
+        "enabled": True,
+        "repos": {str(repo.resolve()): ["true"]},
+        "default": [],
+        "timeout": 60,
+        "code_roles": frozenset({"coder"}),
+    }
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="two-stage review",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="review",
+        )
+        kb.claim_task(conn, tid)
+        kb._submit_for_review(
+            conn,
+            tid,
+            result="done",
+            summary="coder done",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.add_event(
+            conn,
+            tid,
+            "submitted_for_review",
+            {
+                "advanced_from_stage": 0,
+                "review_stage": 1,
+                "review_tier": "review",
+                "target_profile": "reviewer",
+            },
+        )
+
+        lines = kb._render_review_verifier_section(conn, tid)
+
+    text = "\n".join(str(line) for line in lines)
+    assert "Coder worker_gate: PASSED" in text
+    assert "not configured" not in text
+
+
+def test_render_review_stage_uses_latest_revision_gate_and_malformed_fails_closed(
+    kanban_home, repo, monkeypatch,
+):
+    wg_config = {
+        "enabled": True,
+        "repos": {str(repo.resolve()): ["true"]},
+        "default": [],
+        "timeout": 60,
+        "code_roles": frozenset({"coder"}),
+    }
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: wg_config)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="review revision gate",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="review",
+        )
+        kb.claim_task(conn, tid)
+        kb._submit_for_review(
+            conn,
+            tid,
+            result="done",
+            summary="coder done",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.add_event(
+            conn,
+            tid,
+            "submitted_for_review",
+            {
+                "review_stage": 0,
+                "worker_gate": {
+                    "passed": False,
+                    "commands": ["pytest -q"],
+                    "exit_codes": [2],
+                    "ts": "2026-07-15T00:00:00Z",
+                    "commit": "deadbeef",
+                },
+            },
+        )
+
+        revision_text = "\n".join(
+            str(line) for line in kb._render_review_verifier_section(conn, tid)
+        )
+        assert "Coder worker_gate: FAILED (pytest -q exit 2)" in revision_text
+        assert "Coder worker_gate: PASSED" not in revision_text
+
+        # A corrupt newer submit might be the replacement revision stamp.  Do
+        # not revive any older green/failing stamp when its authority is
+        # unknowable; render the conservative N/A line instead of crashing.
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'submitted_for_review', ?, 0)",
+            (tid, "{not-json"),
+        )
+        conn.commit()
+        malformed_text = "\n".join(
+            str(line) for line in kb._render_review_verifier_section(conn, tid)
+        )
+
+    assert "not configured" in malformed_text
+    assert "Coder worker_gate: PASSED" not in malformed_text
+    assert "Coder worker_gate: FAILED" not in malformed_text
+
+
 def test_render_review_verifier_section_gate_not_configured(kanban_home, monkeypatch):
     """Verifier context must say 'not configured' when no gate ran."""
     wg_config = {

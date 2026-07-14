@@ -25074,6 +25074,7 @@ def run_daemon(
 # A2 (N-A2): caps for the verifier-only review section.
 _CTX_REVIEW_MAX_CHANGED_FILES = 50
 _CTX_REVIEW_MAX_DIFF_STAT = 2000
+_CTX_REVIEW_MAX_GATE_EVENTS = 64
 
 # A1-classaware: a task EXPLICITLY marked ``kind='analysis'`` is read-only,
 # conclusion-from-pasted-evidence work (e.g. a latency probe that reports a
@@ -25228,17 +25229,26 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
     #   FAILED:  "Coder worker_gate: FAILED (<cmd> exit <n>)"
     #   N/A:     "Coder worker_gate: not configured for this repo (no coder-side gate ran)"
     try:
-        _wg_ev_row = conn.execute(
+        _wg_ev_rows = conn.execute(
             "SELECT payload FROM task_events "
             "WHERE task_id = ? AND kind = 'submitted_for_review' "
-            "ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
+            "ORDER BY id DESC LIMIT ?",
+            (task_id, _CTX_REVIEW_MAX_GATE_EVENTS),
+        ).fetchall()
         _wg_ev: dict = {}
-        if _wg_ev_row and _wg_ev_row["payload"]:
+        # Later review-stage handoffs intentionally carry only transition
+        # metadata.  Walk back to the newest submit event that actually owns a
+        # worker-gate stamp (normally the coder submit, or a later revision)
+        # instead of misreporting the gate as unconfigured to the reviewer.
+        for _wg_ev_row in _wg_ev_rows:
+            if not _wg_ev_row["payload"]:
+                continue
             _parsed = json.loads(_wg_ev_row["payload"])
-            if isinstance(_parsed, dict):
-                _wg_ev = _parsed.get("worker_gate") or {}
+            if not isinstance(_parsed, dict) or "worker_gate" not in _parsed:
+                continue
+            _candidate = _parsed.get("worker_gate")
+            _wg_ev = _candidate if isinstance(_candidate, dict) else {}
+            break
     except Exception:
         _wg_ev = {}
     lines.append("")
