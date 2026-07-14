@@ -7,7 +7,16 @@ set -euo pipefail
 APPLY=0
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-6}"
 PRUNE_REPOS="${PRUNE_REPOS:-$HOME/.hermes/hermes-agent $HOME/family-organizer}"
-KANBAN_DB_PATH="${KANBAN_DB_PATH:-${HERMES_KANBAN_DB:-${HERMES_HOME:-$HOME/.hermes}/kanban.db}}"
+if [[ -n "${HERMES_KANBAN_HOME:-}" ]]; then
+  KANBAN_ROOT="$HERMES_KANBAN_HOME"
+elif [[ -z "${HERMES_HOME:-}" || "$HERMES_HOME" == "$HOME/.hermes" || "$HERMES_HOME" == "$HOME/.hermes/"* ]]; then
+  KANBAN_ROOT="$HOME/.hermes"
+elif [[ "$(basename -- "$(dirname -- "$HERMES_HOME")")" == "profiles" ]]; then
+  KANBAN_ROOT="$(dirname -- "$(dirname -- "$HERMES_HOME")")"
+else
+  KANBAN_ROOT="$HERMES_HOME"
+fi
+KANBAN_DB_PATH="${KANBAN_DB_PATH:-${HERMES_KANBAN_DB:-$KANBAN_ROOT/kanban.db}}"
 
 if [[ "${1:-}" == "--apply" ]]; then
   APPLY=1
@@ -35,40 +44,60 @@ is_session_holder() {
 # 11 = board/path lookup failed (fail closed).
 kanban_lifecycle_guard() {
   local wt="$1"
-  python3 - "$KANBAN_DB_PATH" "$wt" <<'PY'
+  python3 - "$KANBAN_DB_PATH" "$KANBAN_ROOT" "$wt" <<'PY'
 import os
 import sqlite3
 import sys
 from urllib.parse import quote
 
 TERMINAL_STATUSES = {"done", "archived", "failed", "cancelled"}
-db_path, workspace = sys.argv[1:]
+selected_db, kanban_root, workspace = sys.argv[1:]
+
+
+def require_db(path):
+    real = os.path.realpath(path)
+    if not os.path.isfile(real):
+        raise FileNotFoundError(real)
+    return real
+
 
 try:
-    db_real = os.path.realpath(db_path)
     workspace_real = os.path.realpath(workspace)
-    if not os.path.isfile(db_real):
-        raise FileNotFoundError(db_real)
     task_id = os.path.basename(workspace_real)
-    uri = f"file:{quote(db_real)}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as conn:
-        rows = conn.execute(
-            "SELECT id, status, workspace_path FROM tasks "
-            "WHERE workspace_path IS NOT NULL OR id = ?",
-            (task_id,),
-        ).fetchall()
+    db_paths = [require_db(selected_db)]
+
+    default_db = os.path.join(kanban_root, "kanban.db")
+    if os.path.lexists(default_db):
+        db_paths.append(require_db(default_db))
+
+    boards_dir = os.path.join(kanban_root, "kanban", "boards")
+    if os.path.lexists(boards_dir):
+        if not os.path.isdir(boards_dir):
+            raise NotADirectoryError(boards_dir)
+        with os.scandir(boards_dir) as entries:
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                candidate = os.path.join(entry.path, "kanban.db")
+                if os.path.lexists(candidate):
+                    db_paths.append(require_db(candidate))
+
+    associated = []
+    for db_real in dict.fromkeys(db_paths):
+        uri = f"file:{quote(db_real)}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            rows = conn.execute(
+                "SELECT id, status, workspace_path FROM tasks "
+                "WHERE workspace_path IS NOT NULL OR id = ?",
+                (task_id,),
+            ).fetchall()
+        for row_task_id, status, row_workspace in rows:
+            same_id = row_task_id == task_id and task_id.startswith("t_")
+            same_workspace = bool(row_workspace) and os.path.realpath(row_workspace) == workspace_real
+            if same_id or same_workspace:
+                associated.append(str(status))
 except Exception:
     raise SystemExit(11)
-
-associated = []
-for row_task_id, status, row_workspace in rows:
-    same_id = row_task_id == task_id and task_id.startswith("t_")
-    try:
-        same_workspace = bool(row_workspace) and os.path.realpath(row_workspace) == workspace_real
-    except (OSError, TypeError, ValueError):
-        raise SystemExit(11)
-    if same_id or same_workspace:
-        associated.append(str(status))
 
 if any(status not in TERMINAL_STATUSES for status in associated):
     raise SystemExit(10)
