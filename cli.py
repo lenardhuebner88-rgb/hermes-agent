@@ -15752,7 +15752,14 @@ def _run_kanban_finalize_nudge_q(
         if not isinstance(tool, dict):
             return ""
         function = tool.get("function")
-        return function.get("name", "") if isinstance(function, dict) else ""
+        if isinstance(function, dict):
+            return str(function.get("name") or "")
+        # AIAgent keeps its resolved runtime tools in the registry's flat
+        # schema (``{"name": ..., "parameters": ...}``); API adapters wrap
+        # that shape only when serializing a provider request.  Preserve both
+        # representations so the live continuation does not accidentally
+        # expose an empty tool list while wrapper-shaped unit doubles pass.
+        return str(tool.get("name") or "")
 
     agent.tools = [
         tool for tool in (original_tools or [])

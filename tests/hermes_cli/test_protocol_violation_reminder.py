@@ -271,6 +271,48 @@ def test_terminalization_nudge_is_single_bounded_turn_when_lifecycle_call_is_mis
         assert kb.get_task(conn, task_id).status == "running"
 
 
+def test_terminalization_nudge_filters_flat_runtime_tool_schemas(
+    kanban_home: Path,
+) -> None:
+    """Live AIAgent stores resolved tools as flat schemas, not API wrappers."""
+    seen: list[str] = []
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.tools = [
+                {"name": "kanban_complete", "parameters": {"type": "object"}},
+                {"name": "kanban_block", "parameters": {"type": "object"}},
+                {"name": "kanban_comment", "parameters": {"type": "object"}},
+            ]
+            self.valid_tool_names = {
+                "kanban_complete", "kanban_block", "kanban_comment",
+            }
+            self.max_iterations = 30
+            self.session_id = "same-session"
+
+        def run_conversation(self, **_kwargs) -> str:
+            seen.extend(str(tool.get("name") or "") for tool in self.tools)
+            return "terminalized"
+
+    agent = FakeAgent()
+    original_tools = agent.tools
+    with kb.connect_closing() as conn:
+        task_id = _running_task_with_deliverable(conn)
+
+    result = cli_module._run_kanban_finalize_nudge_q(
+        SimpleNamespace(
+            agent=agent,
+            conversation_history=[],
+            session_id="same-session",
+        ),
+        task_id=task_id,
+    )
+
+    assert result == "terminalized"
+    assert seen == ["kanban_complete", "kanban_block"]
+    assert agent.tools is original_tools
+
+
 def test_terminalization_nudge_ignores_deliverable_from_before_current_run(
     kanban_home: Path,
 ) -> None:
