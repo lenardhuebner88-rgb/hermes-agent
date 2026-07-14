@@ -293,6 +293,69 @@ def test_pruner_scans_shared_root_when_hermes_home_is_a_profile(
     assert f"kept(nonterminal task): {worktree}" in result.stdout
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses EACCES permission checks")
+def test_pruner_fails_closed_when_named_board_directory_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    task_id = "t_multiboard_eacces"
+    repo, worktree = _make_repo(tmp_path, task_id)
+    hermes_home = tmp_path / "hermes"
+    selected_db = tmp_path / "selected" / "kanban.db"
+    selected_db.parent.mkdir(parents=True)
+    _write_board(selected_db, task_id=task_id, status="done", workspace_path=worktree)
+    named_db = hermes_home / "kanban" / "boards" / "ops" / "kanban.db"
+    named_db.parent.mkdir(parents=True)
+    _write_board(named_db, task_id=task_id, status="running", workspace_path=worktree)
+    named_db.parent.chmod(0)
+
+    try:
+        result = _prune(repo, selected_db, hermes_home=hermes_home)
+    finally:
+        named_db.parent.chmod(0o700)
+
+    assert worktree.exists()
+    assert f"kept(board unavailable): {worktree}" in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses EACCES permission checks")
+def test_pruner_fails_closed_when_default_board_path_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    task_id = "t_default_eacces"
+    repo, worktree = _make_repo(tmp_path, task_id)
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    default_db = hermes_home / "kanban.db"
+    _write_board(default_db, task_id=task_id, status="running", workspace_path=worktree)
+    selected_db = tmp_path / "selected" / "kanban.db"
+    selected_db.parent.mkdir(parents=True)
+    _write_board(selected_db, task_id=task_id, status="done", workspace_path=worktree)
+    hermes_home.chmod(0)
+
+    try:
+        result = _prune(repo, selected_db, hermes_home=hermes_home)
+    finally:
+        hermes_home.chmod(0o700)
+
+    assert worktree.exists()
+    assert f"kept(board unavailable): {worktree}" in result.stdout
+
+
+def test_pruner_skips_truly_missing_optional_named_board_db(tmp_path: Path) -> None:
+    task_id = "t_multiboard_missing_optional"
+    repo, worktree = _make_repo(tmp_path, task_id)
+    hermes_home = tmp_path / "hermes"
+    default_db = hermes_home / "kanban.db"
+    default_db.parent.mkdir(parents=True)
+    _write_board(default_db, task_id=task_id, status="done", workspace_path=worktree)
+    (hermes_home / "kanban" / "boards" / "empty").mkdir(parents=True)
+
+    result = _prune(repo, default_db, hermes_home=hermes_home)
+
+    assert not worktree.exists()
+    assert f"removed: {worktree}" in result.stdout
+
+
 def test_pruner_fails_closed_when_named_board_schema_is_unavailable(
     tmp_path: Path,
 ) -> None:

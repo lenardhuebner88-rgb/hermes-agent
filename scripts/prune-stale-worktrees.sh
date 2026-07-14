@@ -45,8 +45,10 @@ is_session_holder() {
 kanban_lifecycle_guard() {
   local wt="$1"
   python3 - "$KANBAN_DB_PATH" "$KANBAN_ROOT" "$wt" <<'PY'
+import errno
 import os
 import sqlite3
+import stat
 import sys
 from urllib.parse import quote
 
@@ -54,11 +56,21 @@ TERMINAL_STATUSES = {"done", "archived", "failed", "cancelled"}
 selected_db, kanban_root, workspace = sys.argv[1:]
 
 
-def require_db(path):
-    real = os.path.realpath(path)
-    if not os.path.isfile(real):
-        raise FileNotFoundError(real)
+def resolve_db(path, *, optional):
+    try:
+        real = os.path.realpath(path, strict=True)
+        mode = os.stat(real).st_mode
+    except FileNotFoundError as exc:
+        if optional and exc.errno == errno.ENOENT:
+            return None
+        raise
+    if not stat.S_ISREG(mode):
+        raise OSError(errno.EINVAL, "board DB is not a regular file", real)
     return real
+
+
+def require_db(path):
+    return resolve_db(path, optional=False)
 
 
 try:
@@ -66,21 +78,40 @@ try:
     task_id = os.path.basename(workspace_real)
     db_paths = [require_db(selected_db)]
 
-    default_db = os.path.join(kanban_root, "kanban.db")
-    if os.path.lexists(default_db):
-        db_paths.append(require_db(default_db))
+    default_db = resolve_db(
+        os.path.join(kanban_root, "kanban.db"),
+        optional=True,
+    )
+    if default_db is not None:
+        db_paths.append(default_db)
 
-    boards_dir = os.path.join(kanban_root, "kanban", "boards")
-    if os.path.lexists(boards_dir):
-        if not os.path.isdir(boards_dir):
-            raise NotADirectoryError(boards_dir)
+    boards_dir_path = os.path.join(kanban_root, "kanban", "boards")
+    try:
+        boards_dir = os.path.realpath(boards_dir_path, strict=True)
+        boards_mode = os.stat(boards_dir).st_mode
+    except FileNotFoundError as exc:
+        if exc.errno != errno.ENOENT:
+            raise
+        boards_dir = None
+    if boards_dir is not None:
+        if not stat.S_ISDIR(boards_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", boards_dir)
         with os.scandir(boards_dir) as entries:
             for entry in entries:
-                if not entry.is_dir():
+                try:
+                    entry_mode = entry.stat(follow_symlinks=True).st_mode
+                except FileNotFoundError as exc:
+                    if exc.errno == errno.ENOENT:
+                        continue
+                    raise
+                if not stat.S_ISDIR(entry_mode):
                     continue
-                candidate = os.path.join(entry.path, "kanban.db")
-                if os.path.lexists(candidate):
-                    db_paths.append(require_db(candidate))
+                candidate = resolve_db(
+                    os.path.join(entry.path, "kanban.db"),
+                    optional=True,
+                )
+                if candidate is not None:
+                    db_paths.append(candidate)
 
     associated = []
     for db_real in dict.fromkeys(db_paths):
