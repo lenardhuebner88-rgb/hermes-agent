@@ -200,6 +200,78 @@ def test_human_single_query_main_finalizes_after_query(monkeypatch):
     ]
 
 
+def test_human_single_query_kanban_worker_runs_terminalization_continuation(
+    monkeypatch,
+):
+    calls = []
+
+    import cli as cli_mod
+
+    class _Console:
+        def print(self, *_args, **_kwargs):
+            return None
+
+    class FakeCLI:
+        def __init__(self, **_kwargs):
+            self.console = _Console()
+            self.session_id = "kanban-worker-session"
+            self.conversation_history = []
+            self.agent = SimpleNamespace(
+                session_id="kanban-worker-session",
+                platform="cli",
+            )
+            self._last_chat_result = None
+
+        def _claim_active_session(self, _surface, *, stderr=False):
+            return True
+
+        def _show_security_advisories(self):
+            return None
+
+        def chat(self, query, images=None):
+            calls.append(("chat", query, images))
+            self._last_chat_result = {
+                "final_response": "deliverable posted",
+                "failed": False,
+                "interrupted": False,
+            }
+            return "deliverable posted"
+
+        def _print_exit_summary(self):
+            calls.append("summary")
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
+    monkeypatch.setattr(cli_mod, "HermesCLI", FakeCLI)
+    monkeypatch.setattr(cli_mod.atexit, "register", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli_mod, "_finalize_single_query", lambda _cli: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "_run_kanban_finalize_nudge_q",
+        lambda worker, response, *, initial_run_succeeded: calls.append(
+            (
+                "terminalize",
+                worker.session_id,
+                response,
+                initial_run_succeeded,
+            )
+        ),
+    )
+
+    cli_mod.main(query="work kanban task t_12345678", quiet=False)
+
+    assert calls == [
+        ("chat", "work kanban task t_12345678", None),
+        (
+            "terminalize",
+            "kanban-worker-session",
+            "deliverable posted",
+            True,
+        ),
+        "summary",
+    ]
+
+
 def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatch):
     calls = []
 

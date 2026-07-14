@@ -12017,6 +12017,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Single-query and direct chat callers do not go through run(), so
         # register secure secret capture here as well.
         set_secret_capture_callback(self._secret_capture_callback)
+        # ``main()`` owns the post-turn lifecycle continuation for the human
+        # single-query path. Clear this before every chat so an early return can
+        # never reuse a successful result from the preceding turn.
+        self._last_chat_result = None
 
         # Reset the per-turn interrupt flag. Any subsequent path that
         # discovers an interrupt (below, after run_conversation) will flip
@@ -12452,6 +12456,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
             # Update history with full conversation
             self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
+            self._last_chat_result = result
 
             # If auto-compression fired mid-turn, the agent created a new
             # continuation session and mutated self.agent.session_id. Sync
@@ -16372,7 +16377,31 @@ def main(
                 # Surface security advisories before the agent runs — short
                 # banner, doesn't depend on the welcome banner being shown.
                 cli._show_security_advisories()
-                cli.chat(query, images=single_query_images or None)
+                response = cli.chat(query, images=single_query_images or None)
+                # Dispatcher workers use the human single-query form
+                # ``hermes chat -q ...`` (``query`` is set, ``quiet`` is false).
+                # Keep its one-shot lifecycle continuation in the same agent and
+                # session, just like the machine-readable quiet branch above.
+                # Without this hook the helper was live only for ``--quiet`` and
+                # real workers always fell through to the gateway's later repair
+                # run instead of receiving their terminal-only turn.
+                if (
+                    os.environ.get("HERMES_KANBAN_TASK")
+                    and os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1"
+                ):
+                    _chat_result = getattr(cli, "_last_chat_result", None)
+                    try:
+                        _run_kanban_finalize_nudge_q(
+                            cli,
+                            response or "",
+                            initial_run_succeeded=bool(
+                                isinstance(_chat_result, dict)
+                                and not _chat_result.get("failed")
+                                and not _chat_result.get("interrupted")
+                            ),
+                        )
+                    except Exception as _nudge_exc:
+                        logger.debug("kanban finalize nudge failed: %s", _nudge_exc)
                 cli._print_exit_summary()
         finally:
             _finalize_single_query(cli)
