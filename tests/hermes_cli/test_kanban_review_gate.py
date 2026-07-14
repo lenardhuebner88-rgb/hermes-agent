@@ -966,10 +966,21 @@ def _init_repo(path: Path) -> None:
     )
 
 
-def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
-    kanban_home, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("kind", "expected_adjustment"),
+    [
+        (
+            "medium",
+            {"from": "review", "to": "standard", "reason": "zero_diff"},
+        ),
+        ("code", None),
+    ],
+    ids=["real-review-floor", "ordinary-code-kind"],
+)
+def test_zero_diff_auto_tier_uses_single_verifier_without_fake_adjustment(
+    kanban_home, tmp_path, monkeypatch, kind, expected_adjustment
 ):
-    """Live t_92528385 shape: no file edits should not pay reviewer stage by heuristic."""
+    """Zero-diff real risk downgrades, while ``kind=code`` starts standard."""
     monkeypatch.setattr(
         kb,
         "_review_gate_config",
@@ -983,7 +994,7 @@ def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
         },
     )
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
-    repo = tmp_path / "repo-zero-diff"
+    repo = tmp_path / f"repo-zero-diff-{kind}"
     _init_repo(repo)
 
     with kb.connect() as conn:
@@ -996,7 +1007,7 @@ def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
                 "und schließe den Task ab. KEINE Datei anfassen, KEIN Commit, keine Analyse."
             ),
             assignee="coder",
-            kind="code",
+            kind=kind,
             workspace_kind="dir",
             workspace_path=str(repo),
         )
@@ -1019,11 +1030,10 @@ def test_zero_diff_auto_review_tier_downgrades_to_single_verifier(
 
         assert payload["review_tier"] == "standard"
         assert payload["target_profile"] == "verifier"
-        assert payload["review_tier_adjustment"] == {
-            "from": "review",
-            "to": "standard",
-            "reason": "zero_diff",
-        }
+        if expected_adjustment is None:
+            assert "review_tier_adjustment" not in payload
+        else:
+            assert payload["review_tier_adjustment"] == expected_adjustment
 
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
         assert kb.complete_task(
