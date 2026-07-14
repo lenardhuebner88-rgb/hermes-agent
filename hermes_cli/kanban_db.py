@@ -8679,6 +8679,16 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
     return bool(row) and row["kind"] == OPERATOR_ESCALATION_EVENT
 
 
+def _validated_comment_id_watermark(payload: object) -> Optional[int]:
+    """Return a persisted comment boundary only when it is a JSON integer."""
+    if not isinstance(payload, dict):
+        return None
+    watermark = payload.get("comment_id_watermark")
+    if isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0:
+        return None
+    return watermark
+
+
 def _silent_block_escalation_matches_block_episode(
     conn: sqlite3.Connection,
     task_id: str,
@@ -8706,9 +8716,7 @@ def _silent_block_escalation_matches_block_episode(
         blocked_payload = json.loads(blocked_event["payload"] or "{}")
     except (TypeError, ValueError):
         return False
-    if not isinstance(blocked_payload, dict) or blocked_payload.get(
-        "comment_id_watermark"
-    ) is None:
+    if _validated_comment_id_watermark(blocked_payload) is None:
         return False
     row = conn.execute(
         "SELECT id, run_id, payload FROM task_events "
@@ -21897,9 +21905,8 @@ def _blocked_comment_id_watermark(
         return None
     try:
         payload = json.loads(row["payload"])
-        watermark = payload.get("comment_id_watermark")
-        return int(watermark) if watermark is not None else None
-    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return _validated_comment_id_watermark(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
         return None
 
 

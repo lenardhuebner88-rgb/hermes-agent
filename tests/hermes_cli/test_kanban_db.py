@@ -6070,6 +6070,40 @@ def test_dispatch_auto_retry_needs_input_legacy_watermark_fails_closed(
         )
 
 
+@pytest.mark.parametrize("invalid_watermark", [False, -1])
+def test_dispatch_auto_retry_needs_input_invalid_watermark_fails_closed(
+    kanban_home, all_assignees_spawnable, monkeypatch, invalid_watermark
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.add_comment(conn, t, "research", "RESULT: stale answer from before block")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t, reason="waiting for clarification", kind="needs_input"
+        )
+        blocked_event = conn.execute(
+            "SELECT id, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        payload = json.loads(blocked_event["payload"])
+        payload["comment_id_watermark"] = invalid_watermark
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps(payload), blocked_event["id"]),
+        )
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
 # ---------------------------------------------------------------------------
 # Silent-block guard (SILENT-BLOCK-GUARD-S1): escalate_silent_blocks_sweep +
 # silent_block_task_ids — every *settled* block surfaces an operator_escalation
