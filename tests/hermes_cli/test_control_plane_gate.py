@@ -226,6 +226,16 @@ def test_classify_review_tier_levels():
     )
 
 
+def test_general_control_plane_contract_keeps_code_as_review_risk():
+    """The Kanban adapter may stop using ``kind=code`` as its risk class,
+    but the shared control-plane classifier's public contract stays unchanged.
+    """
+    spec = {"risk_class": "code", "objective": "ordinary implementation"}
+
+    assert reviewer_gate_required(spec) is True
+    assert classify_review_tier(spec) == "review"
+
+
 def test_classify_review_tier_does_not_critical_on_path_or_subword_markers():
     """Critical markers must be real risk words, not substrings in paths/titles."""
     assert (

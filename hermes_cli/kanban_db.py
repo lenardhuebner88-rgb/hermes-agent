@@ -10310,8 +10310,16 @@ def _task_plan_spec(task: "Task") -> dict:
     marker_at = body.find(_CODE_TASK_CONTRACT_MARKER_PREFIX)
     if marker_at != -1:
         body = body[:marker_at]
+    # ``tasks.kind`` describes the work surface, not its risk. The shared
+    # control-plane classifier intentionally still treats an explicit
+    # ``risk_class='code'`` as review-worthy; the Kanban adapter must therefore
+    # avoid manufacturing that risk signal from an ordinary code card. Other
+    # kind values retain their historical mapping until they get their own
+    # structured risk field.
+    task_kind = (task.kind or "").strip()
+    risk_class = "" if task_kind.lower() == "code" else task_kind
     return {
-        "risk_class": (task.kind or ""),
+        "risk_class": risk_class,
         "objective": (task.title or ""),
         "goal": body.strip(),
     }
@@ -10698,6 +10706,102 @@ def _run_originated_from_review(
     except sqlite3.Error:
         return False
     return row is not None
+
+
+REVIEW_WAIT_ATTENTION_SECONDS = 180
+_PRODUCTIVE_REVIEW_HEARTBEAT_PREFIXES = (
+    "receiving stream response",
+    "executing tool:",
+    "tool completed:",
+    "terminal command running",
+    "execute_code running",
+    "modal command running",
+)
+
+
+def _review_heartbeat_is_productive(note: object) -> bool:
+    """Whether a heartbeat proves model/tool progress rather than liveness."""
+    normalized = str(note or "").strip().lower()
+    if normalized.startswith(_PRODUCTIVE_REVIEW_HEARTBEAT_PREFIXES):
+        return True
+    return re.match(r"^executing\s+\d+\s+tools\s+concurrently:", normalized) is not None
+
+
+def emit_review_wait_attention(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    threshold_seconds: int = REVIEW_WAIT_ATTENTION_SECONDS,
+) -> list[str]:
+    """Append one visibility-only attention event per idle review run.
+
+    A run qualifies only when it was claimed from the review lane and has gone
+    ``threshold_seconds`` without a productive model/tool heartbeat. Provider
+    waits, process heartbeats, and log-size heartbeats do not reset the clock.
+    The event is deduplicated by run and never changes task/run state, retries,
+    reclaims, or cancels.
+    """
+    observed_at = int(time.time()) if now is None else int(now)
+    threshold = max(1, int(threshold_seconds))
+    emitted: list[str] = []
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT t.id AS task_id, t.current_run_id AS run_id, "
+            "       r.started_at AS started_at "
+            "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+            "WHERE t.status = 'running' AND r.ended_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            task_id = row["task_id"]
+            run_id = int(row["run_id"])
+            if not _run_originated_from_review(conn, task_id, run_id):
+                continue
+            already_emitted = conn.execute(
+                "SELECT 1 FROM task_events "
+                "WHERE task_id = ? AND run_id = ? "
+                "  AND kind = 'review_wait_attention' LIMIT 1",
+                (task_id, run_id),
+            ).fetchone()
+            if already_emitted is not None:
+                continue
+
+            last_productive_at = int(row["started_at"] or observed_at)
+            heartbeats = conn.execute(
+                "SELECT payload, created_at FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = 'heartbeat' "
+                "ORDER BY created_at ASC, id ASC",
+                (task_id, run_id),
+            ).fetchall()
+            for heartbeat in heartbeats:
+                try:
+                    heartbeat_payload = json.loads(heartbeat["payload"] or "{}")
+                except Exception:
+                    heartbeat_payload = {}
+                if isinstance(heartbeat_payload, dict) and _review_heartbeat_is_productive(
+                    heartbeat_payload.get("note")
+                ):
+                    last_productive_at = max(
+                        last_productive_at, int(heartbeat["created_at"] or 0)
+                    )
+
+            idle_seconds = max(0, observed_at - last_productive_at)
+            if idle_seconds < threshold:
+                continue
+            _append_event(
+                conn,
+                task_id,
+                "review_wait_attention",
+                {
+                    "run_id": run_id,
+                    "threshold_seconds": threshold,
+                    "idle_seconds": idle_seconds,
+                    "last_productive_at": last_productive_at,
+                    "reason": "review run has no productive model or tool event",
+                },
+                run_id=run_id,
+            )
+            emitted.append(task_id)
+    return emitted
 
 
 _VERDICT_NORMALIZE = {
@@ -11134,13 +11238,14 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     review to the chain tip (ONE judgment per feature, on the integrated diff).
 
     Applies ONLY when all of: ``judge_at_chain_tip`` is on (opt-in), the task
-    belongs to a PlanSpec chain (``planspec_source`` set), its effective tier
-    participates (``review``; ``critical`` only when the operator explicitly
-    flipped ``critical_reviews_each_slice`` off), the chain still has OTHER
-    open code-bearing slices (i.e. this is NOT the tip — tip detection counts
-    code roles only, so a trailing docs/scribe task never swallows the chain's
-    single judgment), AND the deterministic worker gate ran GREEN. Returns the
-    green stamp on defer, ``None`` otherwise (park in review as before).
+    belongs to a canonical linked chain (native auto-decompose and PlanSpec use
+    the same root identity), its effective tier participates (``review``;
+    ``critical`` only when the operator explicitly flipped
+    ``critical_reviews_each_slice`` off), the chain still has OTHER open
+    code-bearing slices (i.e. this is NOT the tip — trailing docs/research do
+    not count), AND the deterministic worker gate ran GREEN. Legacy unlinked
+    PlanSpec rows retain their source-based fallback. Returns the green stamp on
+    defer, ``None`` otherwise (park in review as before).
     """
     cfg = _review_gate_config()
     if not cfg.get("judge_at_chain_tip", False):
@@ -11154,19 +11259,47 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
         "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     source = (row["planspec_source"] or "").strip() if row else ""
-    if not source:
+
+    # Reuse the worktree subsystem's canonical identity rather than defining a
+    # second graph model here. Decompose graphs point every slice at the root in
+    # the inverted direction; these helpers already encode that nuance.
+    from hermes_cli import kanban_worktrees as _kwt
+
+    root_id = _kwt.chain_root_id(conn, task_id)
+    member_ids = _kwt._chain_member_ids(conn, root_id)
+    linked_chain = len(member_ids) > 1
+
+    candidate_rows: list[sqlite3.Row] = []
+    if linked_chain:
+        candidate_ids = sorted(member_ids - {task_id})
+        # A decompose root is an orchestration card, not a code-bearing slice,
+        # even if a legacy caller assigned it to a code profile.
+        if root_id != task_id and _kwt._is_decompose_root(conn, root_id):
+            candidate_ids = [item for item in candidate_ids if item != root_id]
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            candidate_rows = conn.execute(
+                "SELECT id, assignee, kind, status FROM tasks "
+                f"WHERE id IN ({placeholders})",
+                tuple(candidate_ids),
+            ).fetchall()
+    elif source:
+        # Compatibility for pre-graph PlanSpec imports. New native and PlanSpec
+        # taskgraphs take the canonical linked path above.
+        candidate_rows = conn.execute(
+            "SELECT id, assignee, kind, status FROM tasks "
+            "WHERE planspec_source = ? AND id != ?",
+            (source, task_id),
+        ).fetchall()
+    else:
         return None
-    code_roles = sorted(cfg.get("code_roles") or ())
-    if not code_roles:
-        return None
-    placeholders = ",".join("?" for _ in code_roles)
-    open_code_siblings = conn.execute(
-        "SELECT COUNT(*) FROM tasks "
-        "WHERE planspec_source = ? AND id != ? "
-        "  AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
-        f"  AND lower(trim(assignee)) IN ({placeholders})",
-        (source, task_id, *code_roles),
-    ).fetchone()[0]
+
+    terminal = {"done", "archived", "failed", "canceled", "cancelled"}
+    open_code_siblings = any(
+        str(candidate["status"] or "").strip().lower() not in terminal
+        and _is_code_task_row(candidate)
+        for candidate in candidate_rows
+    )
     if not open_code_siblings:
         return None  # this IS the tip — the one judgment fires here
     stamp = _run_worker_gate(conn, task_id)
@@ -19736,6 +19869,88 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
         stall_class=str(stall_class) if stall_class else None,
         reason=why_now,
     )
+
+    # A structured operator hold is authoritative over generic reviewer-verdict
+    # boilerplate. ``REQUEST_CHANGES``/``NEEDS_REVISION`` alone says only that
+    # the chain cannot proceed autonomously; it does not prove a code defect.
+    # Concrete text signals and structural outcome/stall mappings retain
+    # precedence, so a red gate or real defect can never be hidden here.
+    blocked_kind = str(evidence.get("blocked_kind") or "").strip().lower()
+    generic_review_markers = {
+        "request_changes",
+        "requested changes",
+        "request changes",
+        "needs_revision",
+        "needs revision",
+        "reviewer finding",
+    }
+    concrete_text_markers = {
+        marker
+        for cls, markers in _HEILER_TEXT_SIGNALS
+        for marker in markers
+        if marker not in generic_review_markers and cls != HEILER_CLASS_OPERATOR_GATED
+    }
+    evidence_text = " ".join((last_error, why_now)).lower()
+    has_concrete_text = any(
+        marker in evidence_text for marker in concrete_text_markers
+    )
+    red_gate_source: Optional[str] = None
+    red_gate_match: Optional[str] = None
+    for gate_key in ("worker_gate", "gate", "release_gate"):
+        gate_evidence = evidence.get(gate_key)
+        if not isinstance(gate_evidence, dict):
+            continue
+        gate_state = str(
+            gate_evidence.get("status") or gate_evidence.get("outcome") or ""
+        ).strip().lower()
+        if gate_evidence.get("passed") is False:
+            red_gate_source = gate_key
+            red_gate_match = f"{gate_key}.passed=false"
+            break
+        if gate_state in {"red", "failed", "failure"}:
+            red_gate_source = gate_key
+            red_gate_match = f"{gate_key}.{gate_state}"
+            break
+    has_structured_defect = bool(
+        (stall_class and str(stall_class) in _HEILER_STALL_CLASS)
+        or (outcome and str(outcome) in _HEILER_OUTCOME_CLASS)
+        or (outcome and str(outcome) in _RELEASE_GATE_RAN_OUTCOMES)
+        or red_gate_source
+    )
+    if (
+        red_gate_source is not None
+        and h_class == HEILER_CLASS_REAL_BUG
+        and h_ev.get("signal_source") == "text"
+        and h_ev.get("matched") in generic_review_markers
+    ):
+        ev = {
+            "matched": red_gate_match,
+            "signal_source": red_gate_source,
+        }
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return HEILER_CLASS_REAL_BUG, ev
+    if (
+        blocked_kind in {"operator_question", "needs_operator"}
+        and h_class == HEILER_CLASS_REAL_BUG
+        and h_ev.get("signal_source") == "text"
+        and h_ev.get("matched") in generic_review_markers
+        and not has_concrete_text
+        and not has_structured_defect
+    ):
+        ev = {
+            "matched": blocked_kind,
+            "signal_source": "blocked_kind",
+        }
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return HEILER_CLASS_OPERATOR_GATED, ev
     if (
         not last_error
         and evidence.get("source") == SILENT_BLOCK_ESCALATION_SOURCE

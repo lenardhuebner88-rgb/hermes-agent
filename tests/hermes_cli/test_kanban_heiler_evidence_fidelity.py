@@ -25,13 +25,17 @@ def _classify_silent_block(
     reason: str,
     *,
     trigger_outcome: str = "blocked",
+    blocked_kind: str = "retryable",
+    stall_class: str | None = None,
 ) -> tuple[dict, str, dict, dict]:
     escalation = kb._silent_block_escalation_payload(
         row=_task_row(task_id),
         reason=reason,
-        blocked_kind="retryable",
+        blocked_kind=blocked_kind,
         trigger_outcome=trigger_outcome,
     )
+    if stall_class is not None:
+        escalation["evidence"]["stall_class"] = stall_class
     heiler_class, evidence = kb._classify_escalation_payload(escalation)
     classification = kb._heiler_classification_payload(
         heiler_class=heiler_class,
@@ -130,3 +134,93 @@ def test_single_field_callers_keep_their_exact_excerpts():
         reason=stall_reason,
     )
     assert stall_evidence["excerpt"] == stall_reason
+
+
+@pytest.mark.parametrize(
+    ("blocked_kind", "reason", "expected_match"),
+    [
+        (
+            "operator_question",
+            "REQUEST_CHANGES — choose whether the authorized push is in scope",
+            "operator_question",
+        ),
+        (
+            "needs_operator",
+            "NEEDS_REVISION — operator must choose the acceptable trade-off",
+            "needs_operator",
+        ),
+    ],
+)
+def test_structured_operator_hold_wins_over_generic_review_verdict_prose(
+    blocked_kind: str,
+    reason: str,
+    expected_match: str,
+):
+    _, heiler_class, evidence, _ = _classify_silent_block(
+        f"t_{blocked_kind}",
+        reason,
+        blocked_kind=blocked_kind,
+    )
+
+    assert heiler_class == kb.HEILER_CLASS_OPERATOR_GATED
+    assert evidence["matched"] == expected_match
+    assert evidence["signal_source"] == "blocked_kind"
+
+
+@pytest.mark.parametrize(
+    ("reason", "trigger_outcome", "stall_class", "expected_class"),
+    [
+        (
+            "REQUEST_CHANGES — gate failed: pytest tests failed",
+            "blocked",
+            None,
+            kb.HEILER_CLASS_REAL_BUG,
+        ),
+        (
+            "REQUEST_CHANGES — release gate returned an opaque failure",
+            "release_gate_red",
+            None,
+            kb.HEILER_CLASS_REAL_BUG,
+        ),
+        (
+            "NEEDS_REVISION — decomposition produced no runnable work",
+            "blocked",
+            "triage_decompose_failed",
+            kb.HEILER_CLASS_BAD_SPEC,
+        ),
+    ],
+)
+def test_structured_defects_override_operator_hold(
+    reason: str,
+    trigger_outcome: str,
+    stall_class: str | None,
+    expected_class: str,
+):
+    _, heiler_class, _, _ = _classify_silent_block(
+        "t_structured_defect",
+        reason,
+        blocked_kind="operator_question",
+        trigger_outcome=trigger_outcome,
+        stall_class=stall_class,
+    )
+
+    assert heiler_class == expected_class
+
+
+def test_structured_red_worker_gate_overrides_operator_hold():
+    escalation = kb._silent_block_escalation_payload(
+        row=_task_row("t_structured_gate"),
+        reason="REQUEST_CHANGES — operator review required",
+        blocked_kind="operator_question",
+        trigger_outcome="blocked",
+    )
+    escalation["evidence"]["worker_gate"] = {
+        "passed": False,
+        "exit_codes": [1],
+    }
+
+    heiler_class, evidence = kb._classify_escalation_payload(escalation)
+
+    assert heiler_class == kb.HEILER_CLASS_REAL_BUG
+    assert evidence["matched"] == "worker_gate.passed=false"
+    assert evidence["signal_source"] == "worker_gate"

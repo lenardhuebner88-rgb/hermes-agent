@@ -45,6 +45,12 @@ def test_watcher_loops_are_coroutines():
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
 
 
+def test_dispatcher_watcher_surfaces_review_wait_attention():
+    source = inspect.getsource(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+
+    assert "emit_review_wait_attention" in source
+
+
 def test_singleton_dispatcher_lock_is_exclusive(tmp_path):
     """Only one holder of the dispatcher lock at a time — the backstop that
     stops concurrent dispatchers double reclaiming and corrupting shared
