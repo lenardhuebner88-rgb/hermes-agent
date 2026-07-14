@@ -6,7 +6,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
-import { getProposalSeverity, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
+import { getProposalSeverity, isActionable as proposalIsActionable, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
 import { getProposalOperatorBrief, type ProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Density } from "../hooks/useDensity";
@@ -113,6 +113,34 @@ function decisionGuide(proposal: Proposal, severity: ProposalSeverity): Decision
 }
 
 function actionOutcomes(proposal: Proposal, guide: DecisionGuide): ActionOutcome[] {
+  if (proposal.decision_owner === "kanban") {
+    return [
+      { label: "Stand", value: "Entscheidung liegt im verknüpften Kanban-Vorgang.", tone: "amber" },
+      { label: "Operator", value: "Diese Karte erzeugt keine zweite Inbox-Entscheidung.", tone: "zinc" },
+      { label: "Weiter", value: proposal.linked_task_id ? `Kanban ${proposal.linked_task_id} entscheiden.` : "Kanban-Entscheidung öffnen.", tone: "violet" },
+    ];
+  }
+  if (!proposalIsActionable(proposal) && ["queued", "running", "review", "failed"].includes(proposal.delivery_state ?? "")) {
+    return [
+      { label: "Stand", value: proposal.delivery_state === "failed" ? "Delivery braucht technische Klärung." : "An Delivery übergeben.", tone: proposal.delivery_state === "failed" ? "amber" : "cyan" },
+      { label: "Operator", value: "Hier ist keine zweite Entscheidung offen.", tone: "zinc" },
+      { label: "Weiter", value: proposal.linked_task_id ? `Kanban ${proposal.linked_task_id} verfolgen.` : "Automatischen Lauf abwarten.", tone: "violet" },
+    ];
+  }
+  if (proposal.delivery_state === "integrated") {
+    return [
+      { label: "Stand", value: "Integriert und abgeschlossen.", tone: "emerald" },
+      { label: "Operator", value: "Keine Entscheidung offen.", tone: "zinc" },
+      { label: "Beleg", value: proposal.linked_task_id ? `Abschluss über ${proposal.linked_task_id}.` : (proposal.result || "Gate erfolgreich."), tone: "emerald" },
+    ];
+  }
+  if (!proposalIsActionable(proposal) && (proposal.decision_state === "dismissed" || ["stale", "rejected"].includes(proposal.finding_state ?? ""))) {
+    return [
+      { label: "Stand", value: proposal.finding_state === "stale" ? "Fund ist veraltet." : "Technisch aussortiert.", tone: "zinc" },
+      { label: "Operator", value: "Keine Entscheidung offen.", tone: "zinc" },
+      { label: "Weiter", value: proposal.recommendation || "Nur bei neuem Beleg erneut forschen.", tone: "cyan" },
+    ];
+  }
   if (proposal.status === "applied") {
     return [
       { label: "Stand", value: "Schon übernommen.", tone: "emerald" },
@@ -167,10 +195,10 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
   const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
-  const isTesting = proposal.status === "testing";
-  const isDone = proposal.status === "applied" || proposal.status === "skipped";
+  const isTesting = proposal.status === "testing" || proposal.delivery_state === "running";
+  const isDone = proposal.status === "applied" || proposal.status === "skipped" || proposal.delivery_state === "integrated" || proposal.decision_state === "dismissed";
   const isReverted = proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
-  const isActionable = proposal.status === "proposed";
+  const isActionable = proposalIsActionable(proposal);
   const category = formatProposalCategory(proposal.category);
   const severity = getProposalSeverity(proposal);
   const guide = decisionGuide(proposal, severity);
@@ -181,6 +209,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const opensDiffByDefault = isActionable && selectable && !batchSelectable;
   const requiresReviewConfirmation = opensDiffByDefault && !isReverted;
   const applyDisabled = !!busy || (requiresReviewConfirmation && !reviewConfirmed);
+  const doneLabel = proposal.delivery_state === "integrated" || proposal.status === "applied" ? "Integriert" : "Aussortiert";
   return (
     <article id={`autoresearch-proposal-${proposal.id}`} className={cn("scroll-mt-6 space-y-4 rounded-card border border-line bg-surface-2 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -196,7 +225,10 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
             {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-status-warn/30 bg-status-warn/10 px-2.5 py-1 text-micro font-medium text-status-warn"><Spinner />{de.autoresearch.testing}</span> : null}
             {isReverted ? <SignalChip tone="neutral" label="Zurückgerollt" /> : null}
             {ageDays !== null ? <SignalChip tone={ageDays > 7 ? "warn" : "neutral"} label={de.autoresearch.ageDays(ageDays)} className="font-data tabular-nums" /> : null}
-            {isDone ? <SignalChip tone={proposal.status === "applied" ? "ok" : "neutral"} label={proposal.status === "applied" ? "Erledigt" : "Übersprungen"} /> : null}
+            {isDone ? <SignalChip tone={doneLabel === "Integriert" ? "ok" : "neutral"} label={doneLabel} /> : null}
+            {proposal.finding_state ? <SignalChip tone={proposal.finding_state === "verified" ? "ok" : proposal.finding_state === "stale" ? "warn" : "neutral"} label={`Fund: ${proposal.finding_state}`} /> : null}
+            {proposal.decision_state ? <SignalChip tone={proposal.decision_state === "needs_operator" ? "warn" : proposal.decision_state === "accepted" ? "ok" : "neutral"} label={`Entscheidung: ${proposal.decision_state}`} /> : null}
+            {proposal.delivery_state && proposal.delivery_state !== "none" ? <SignalChip tone={proposal.delivery_state === "integrated" ? "ok" : proposal.delivery_state === "failed" ? "alert" : "neutral"} label={`Delivery: ${proposal.delivery_state}`} /> : null}
           </div>
           <h3 className="break-words text-emph font-semibold leading-snug text-ink">{proposalTitle(proposal)}</h3>
           {category?.help ? (
@@ -240,7 +272,20 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         </div>
       ) : null}
 
-      {isCode && !isDone ? (
+      <div className="grid gap-2 md:grid-cols-2">
+        <LifecycleFact label="Erwarteter Nutzen" value={proposal.expected_benefit || proposal.rationale_plain} />
+        <LifecycleFact label="Risiko" value={proposal.risk_summary || "Kein Risikohinweis gespeichert."} />
+        <LifecycleFact label="Prüfung" value={proposal.test_plan || "Kein Testplan gespeichert."} />
+        <LifecycleFact label="Empfehlung" value={proposal.recommendation || "Beleg und Änderung gemeinsam prüfen."} />
+      </div>
+
+      {proposal.linked_task_id ? (
+        <ProposalCallout tone="neutral" label="Verknüpfte Arbeit">
+          {proposal.linked_task_title || proposal.linked_task_id} · {proposal.linked_task_status || "Status unbekannt"}
+        </ProposalCallout>
+      ) : null}
+
+      {isCode && (isTesting || isActionable) ? (
         <ProposalCallout tone="warn" label="Code-Gate">
           {isTesting ? <Spinner /> : <ShieldAlert className="mr-2 inline h-4 w-4" />}
           {isTesting ? de.autoresearch.codeGateTesting : de.autoresearch.codeGate}
@@ -255,8 +300,14 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
 
       {batchStatus?.status === "fail" && batchStatus.detail ? <ProposalCallout tone="alert" label="Fehler">{batchStatus.detail}</ProposalCallout> : null}
 
+      {isReverted && !isActionable ? (
+        <ProposalCallout tone="warn" label="Archivieren empfohlen">
+          Dieser Kandidat wurde automatisch ohne Verbesserung zurückgerollt und bleibt nur als technische Historie erhalten.
+        </ProposalCallout>
+      ) : null}
+
       {isDone ? (
-        <ProposalCallout tone={proposal.status === "applied" ? "ok" : "warn"} label={proposal.status === "applied" ? "Erledigt" : "Übersprungen"}>{proposal.result || (proposal.status === "applied" ? de.autoresearch.applied : de.autoresearch.skipped)}</ProposalCallout>
+        <ProposalCallout tone={doneLabel === "Integriert" ? "ok" : "warn"} label={doneLabel}>{proposal.result || (doneLabel === "Integriert" ? de.autoresearch.applied : de.autoresearch.skipped)}</ProposalCallout>
       ) : isTesting ? (
         <ProposalCallout tone="neutral" label="Gate läuft"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ProposalCallout>
       ) : isActionable ? (
@@ -313,6 +364,15 @@ function ActionOutcomeStrip({ outcomes }: { outcomes: ActionOutcome[] }) {
         ))}
       </div>
     </section>
+  );
+}
+
+function LifecycleFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-card border border-line bg-surface-1 px-3 py-2">
+      <Eyebrow>{label}</Eyebrow>
+      <p className="mt-1 whitespace-pre-wrap text-sec leading-5 text-ink-2">{value}</p>
+    </div>
   );
 }
 

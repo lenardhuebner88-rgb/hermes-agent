@@ -9,6 +9,7 @@ operator decisions via the existing decision-queue escalation event.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -44,6 +45,41 @@ _SEVERITY_TO_REVIEW_TIER: dict[str, str] = {
     "high": "review",
     "medium": "review",
 }
+
+
+def _reconcile_lock_path() -> Path:
+    override = os.environ.get("HERMES_AUTORESEARCH_RECONCILE_LOCK_PATH", "").strip()
+    if override:
+        return Path(override)
+    return get_hermes_home() / "state" / "strategist" / "autoresearch-reconcile.lock"
+
+
+def _try_acquire_reconcile_lock():
+    """Return the held cross-process lock, or ``None`` when a run is active.
+
+    The per-run task counter is only a real flood guard when exactly one
+    reconciler owns the proposal snapshot.  Fail fast instead of queueing a
+    second invocation: a queued caller would immediately drain the first run's
+    freshly pooled remainder and turn one concurrent wave into two budgets.
+    """
+    path = _reconcile_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def _release_reconcile_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _utc_now() -> str:
@@ -95,11 +131,23 @@ def _is_code_or_test(proposal: dict[str, Any]) -> bool:
     target = str(proposal.get("target") or proposal.get("target_path") or "").lower()
     category = str(proposal.get("category") or "").lower()
     return (
-        mode == "code"
+        mode in {"code", "test"}
         or ptype in {"deep_audit", "test_foundry", "code", "test"}
         or "test" in category
         or target.startswith("tests/")
     )
+
+
+def _is_verified_test_foundry(proposal: dict[str, Any]) -> bool:
+    return str(proposal.get("proposal_type") or "").strip().lower() == "mutation_test"
+
+
+def _delivery_key(proposal: dict[str, Any]) -> str:
+    """Kanban idempotency identity; mutation tests are bundled per target."""
+    if _is_verified_test_foundry(proposal):
+        target = str(proposal.get("target") or proposal.get("target_path") or "unknown").strip().lower()
+        return "test-foundry:" + target.replace("/", "-").replace("_", "-")
+    return _finding_id(proposal)
 
 
 def _skill_doc_has_diff(proposal: dict[str, Any]) -> bool:
@@ -151,7 +199,8 @@ def _proposal_task_contract(proposal: dict[str, Any]) -> dict[str, Any]:
     ).strip()
     pid = str(proposal.get("id") or "").strip()
     proposal_hash = _proposal_hash(proposal)
-    validation = f"scripts/run-affected.sh {target}"
+    affected_tests = [str(item) for item in (proposal.get("affected_tests") or []) if str(item).strip()]
+    validation = "scripts/run_tests.sh " + " ".join(affected_tests) if affected_tests else f"scripts/run-affected.sh {target}"
     non_goals = [
         "No unrelated refactor or cleanup.",
         "No push, deploy, runtime restart, secret change, or schema migration.",
@@ -179,6 +228,8 @@ def _proposal_task_contract(proposal: dict[str, Any]) -> dict[str, Any]:
         f"- Evidence: {evidence}",
         f"- Problem: {problem}",
         f"- Fix intent: {fix_hint}",
+        f"- Expected benefit: {proposal.get('expected_benefit') or problem}",
+        f"- Risk: {proposal.get('risk_summary') or 'Narrow target-scoped change; regression risk is controlled by the stated gate.'}",
         "",
         "## Acceptance criteria",
         acceptance,
@@ -203,6 +254,7 @@ def _proposal_task_contract(proposal: dict[str, Any]) -> dict[str, Any]:
         "allowed_tools": ["file", "terminal", "kanban"],
         "evidence": evidence,
         "fix_intent": fix_hint,
+        "bundle_key": _delivery_key(proposal),
         "validation": [validation],
         "non_goals": non_goals,
     }
@@ -213,27 +265,19 @@ def _proposal_task_contract(proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
-    idem = "autoresearch:" + _finding_id(proposal)
+def _route_to_kanban(
+    conn,
+    proposal: dict[str, Any],
+    *,
+    allow_create: bool = True,
+) -> tuple[str | None, bool]:
+    idem = "autoresearch:" + _delivery_key(proposal)
     existing = _task_for_idempotency(conn, idem)
     max_iter = _SEVERITY_TO_MAX_ITERATIONS.get(_severity(proposal))
     review_tier = _review_tier(proposal)
     contract = _proposal_task_contract(proposal)
-    task_id = kb.create_task(
-        conn,
-        title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
-        body=contract["body"],
-        acceptance_criteria=contract["acceptance_criteria"],
-        assignee="coder",
-        created_by=CREATED_BY,
-        idempotency_key=idem,
-        priority=_priority(proposal),
-        initial_status="running",
-        kind="code",
-        scope_contract=contract["scope_contract"],
-        max_iterations=max_iter,
-        review_tier=review_tier,
-    )
+    if existing is not None:
+        task_id = existing
     if existing is not None and review_tier:
         row = conn.execute(
             "SELECT review_tier FROM tasks WHERE id = ?", (task_id,)
@@ -264,7 +308,62 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
                 if updates:
                     values.append(task_id)
                     conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
-    return task_id, existing is None
+            # An archive can race the optimistic lookup. Revalidate while the
+            # same BEGIN IMMEDIATE lock is held before returning a reference.
+            task_id = _task_for_idempotency(conn, idem)
+        if task_id is not None:
+            _append_proposal_reference(conn, task_id, proposal)
+            return task_id, False
+
+    if not allow_create:
+        return None, False
+
+    task_id, created = _create_or_reuse_task(
+        conn,
+        title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
+        body=contract["body"],
+        acceptance_criteria=contract["acceptance_criteria"],
+        assignee="coder",
+        created_by=CREATED_BY,
+        idempotency_key=idem,
+        priority=_priority(proposal),
+        initial_status="running",
+        kind="code",
+        scope_contract=contract["scope_contract"],
+        max_iterations=max_iter,
+        review_tier=review_tier,
+    )
+    if not created:
+        _append_proposal_reference(conn, task_id, proposal)
+    return task_id, created
+
+
+def _create_or_reuse_task(conn, **kwargs: Any) -> tuple[str, bool]:
+    """Return Kanban's selected task and whether this connection inserted it."""
+    changes_before = conn.total_changes
+    task_id = kb.create_task(conn, **kwargs)
+    return task_id, conn.total_changes > changes_before
+
+
+def _append_proposal_reference(conn, task_id: str, proposal: dict[str, Any]) -> None:
+    """Enumerate every coalesced finding exactly once on its shared task."""
+    pid = str(proposal.get("id") or "").strip()
+    marker = f"[autoresearch-proposal:{pid}]"
+    if not pid:
+        return
+    exists = conn.execute(
+        "SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ? LIMIT 1",
+        (task_id, f"%{marker}%"),
+    ).fetchone()
+    if exists:
+        return
+    body = "\n".join([
+        marker,
+        f"Target: {proposal.get('target') or proposal.get('target_path') or 'unknown'}",
+        f"Evidence: {proposal.get('evidence') or 'not recorded'}",
+        f"Recommended fix: {proposal.get('fix_hint') or 'revalidate and resolve the grounded finding'}",
+    ])
+    kb.add_comment(conn, task_id, CREATED_BY, body)
 
 
 def _escalation_payload(conn, task_id: str, proposal: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -324,6 +423,8 @@ def _escalate(conn, proposal: dict[str, Any], reason: str) -> str:
         payload = _escalation_payload(conn, task_id, proposal, reason)
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
+    else:
+        _append_proposal_reference(conn, task_id, proposal)
     return task_id
 
 
@@ -437,12 +538,11 @@ def reconcile_proposals(
     drain before triggering it for real.
     """
     own_conn = conn is None
-    if conn is None:
-        conn = kb.connect()
     max_new = DEFAULT_MAX_NEW_TASKS if max_new_tasks is None else max(0, int(max_new_tasks))
     dry_seen: set[str] = set()
     summary = {
         "ok": True,
+        "busy": False,
         "once": bool(once),
         "dry_run": bool(dry_run),
         "seen": 0,
@@ -453,19 +553,45 @@ def reconcile_proposals(
         "new_tasks": 0,
         "pooled": 0,
         "escalated": 0,
+        "stale": 0,
+        "rejected_detection_only": 0,
         "suppressed": 0,
         "errors": 0,
     }
+    reconcile_lock = None
+    if not dry_run:
+        reconcile_lock = _try_acquire_reconcile_lock()
+        if reconcile_lock is None:
+            summary["busy"] = True
+            summary["detail"] = "another autoresearch reconcile run already owns the flood budget"
+            return summary
     suppressed_signals = _suppressed_autoresearch_signals()
     processed: list[dict[str, Any]] = []
     try:
-        for proposal in proposals.list_proposals():
-            if proposal.get("status") != "proposed":
+        if conn is None:
+            conn = kb.connect()
+        for proposal in proposals._enriched_items(proposals.list_proposals(), conn=conn):
+            if proposal.get("status") not in {"proposed", "pooled"}:
                 continue
             summary["seen"] += 1
             pid = str(proposal.get("id"))
             try:
                 signal_key = _signal_key(proposal)
+                if proposal.get("finding_state") == "stale" or proposal.get("duplicate_of"):
+                    if dry_run:
+                        summary["stale"] += 1
+                    else:
+                        proposal.update({
+                            "status": "skipped",
+                            "last_outcome": "stale_target_changed" if proposal.get("target_stale") else "rejected_duplicate",
+                            "reconciled_at": _utc_now(),
+                            "result": proposal.get("disposition_reason") or "stale or duplicate finding",
+                            "disposition_source": "autoresearch_reconciler",
+                        })
+                        proposals.save_proposal(proposal)
+                        summary["stale"] += 1
+                        processed.append({"route": "stale", "proposal": proposal})
+                    continue
                 if dry_run:
                     # Pure classification — mirror the routing decisions below
                     # without any side effect. The skill-doc lane is counted as
@@ -474,11 +600,13 @@ def reconcile_proposals(
                         summary["suppressed"] += 1
                     elif _skill_doc_has_diff(proposal) and not _is_code_or_test(proposal):
                         summary["held_judge_required"] += 1
-                    elif _is_code_or_test(proposal) and _meets_min_severity(proposal, min_task_severity):
+                    elif _is_code_or_test(proposal) and (
+                        _meets_min_severity(proposal, min_task_severity) or _is_verified_test_foundry(proposal)
+                    ):
                         if _proposal_contract_missing(proposal):
                             summary["held_invalid_contract"] += 1
                         else:
-                            fkey = "autoresearch:" + _finding_id(proposal)
+                            fkey = "autoresearch:" + _delivery_key(proposal)
                             if fkey in dry_seen:
                                 summary["routed_to_kanban"] += 1
                             elif summary["new_tasks"] >= max_new:
@@ -488,14 +616,21 @@ def reconcile_proposals(
                                 summary["routed_to_kanban"] += 1
                                 summary["new_tasks"] += 1
                     else:
-                        summary["escalated"] += 1
+                        summary["rejected_detection_only"] += 1
                     continue
 
                 if signal_key in suppressed_signals:
                     proposal.update({
                         "status": "skipped",
+                        "last_outcome": "rejected_strategist_veto",
                         "reconciled_at": _utc_now(),
                         "result": f"suppressed by strategist veto: {signal_key}",
+                        "disposition_reason": f"suppressed by strategist veto: {signal_key}",
+                        "disposition_source": "strategist_veto",
+                        "finding_state": "rejected",
+                        "decision_state": "dismissed",
+                        "delivery_state": "none",
+                        "operator_action_required": False,
                     })
                     proposals.save_proposal(proposal)
                     summary["suppressed"] += 1
@@ -513,20 +648,33 @@ def reconcile_proposals(
                     processed.append({"route": "held_judge_required", "proposal": proposal})
                     continue
 
-                if _is_code_or_test(proposal) and _meets_min_severity(proposal, min_task_severity):
+                if _is_code_or_test(proposal) and (
+                    _meets_min_severity(proposal, min_task_severity) or _is_verified_test_foundry(proposal)
+                ):
                     missing = _proposal_contract_missing(proposal)
                     if missing:
                         proposal.update({
-                            "status": "proposed",
+                            "status": "skipped",
                             "last_outcome": "held_invalid_contract",
                             "reconciled_at": _utc_now(),
                             "result": "held: missing grounded task contract fields: " + ", ".join(missing),
+                            "disposition_reason": "missing grounded task contract fields: " + ", ".join(missing),
+                            "disposition_source": "autoresearch_reconciler",
+                            "finding_state": "rejected",
+                            "decision_state": "dismissed",
+                            "delivery_state": "none",
+                            "operator_action_required": False,
                         })
                         proposals.save_proposal(proposal)
                         summary["held_invalid_contract"] += 1
                         processed.append({"route": "held_invalid_contract", "proposal": proposal})
                         continue
-                    if summary["new_tasks"] >= max_new and _task_for_idempotency(conn, "autoresearch:" + _finding_id(proposal)) is None:
+                    task_id, created = _route_to_kanban(
+                        conn,
+                        proposal,
+                        allow_create=summary["new_tasks"] < max_new,
+                    )
+                    if task_id is None:
                         proposal.update({
                             "status": "pooled",
                             "reconciled_at": _utc_now(),
@@ -536,7 +684,6 @@ def reconcile_proposals(
                         summary["pooled"] += 1
                         processed.append({"route": "pooled", "proposal": proposal})
                         continue
-                    task_id, created = _route_to_kanban(conn, proposal)
                     proposal.update({
                         "status": "routed_to_kanban",
                         "kanban_task_id": task_id,
@@ -550,17 +697,21 @@ def reconcile_proposals(
                     processed.append({"route": "kanban", "proposal": proposal})
                     continue
 
-                reason = "autoresearch finding needs operator review: risky, low-severity, or missing actionable diff"
-                task_id = _escalate(conn, proposal, reason)
                 proposal.update({
-                    "status": "escalated",
-                    "escalation_task_id": task_id,
+                    "status": "skipped",
+                    "last_outcome": "rejected_below_intake_threshold",
                     "reconciled_at": _utc_now(),
-                    "result": reason,
+                    "result": "detection-only: below intake threshold or missing an actionable verified diff",
+                    "disposition_reason": "detection-only signal; not a real operator decision",
+                    "disposition_source": "autoresearch_reconciler",
+                    "finding_state": "rejected",
+                    "decision_state": "dismissed",
+                    "delivery_state": "none",
+                    "operator_action_required": False,
                 })
                 proposals.save_proposal(proposal)
-                summary["escalated"] += 1
-                processed.append({"route": "escalated", "proposal": proposal})
+                summary["rejected_detection_only"] += 1
+                processed.append({"route": "rejected_detection_only", "proposal": proposal})
             except Exception as exc:
                 summary["errors"] += 1
                 proposal["reconcile_error"] = f"{type(exc).__name__}: {exc}"
@@ -570,8 +721,9 @@ def reconcile_proposals(
             _write_last_reconcile(summary, digest)
         return summary
     finally:
-        if own_conn:
+        if own_conn and conn is not None:
             conn.close()
+        _release_reconcile_lock(reconcile_lock)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -580,13 +732,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-new-tasks", type=int, default=DEFAULT_MAX_NEW_TASKS)
     parser.add_argument("--min-task-severity", default=DEFAULT_MIN_TASK_SEVERITY)
     parser.add_argument("--dry-run", action="store_true", help="Classify the backlog without any side effect (preview the drain).")
-    args = parser.parse_args(argv)
-    summary = reconcile_proposals(
-        once=args.once,
-        max_new_tasks=args.max_new_tasks,
-        min_task_severity=args.min_task_severity,
-        dry_run=args.dry_run,
+    parser.add_argument(
+        "--backfill-lifecycle", action="store_true",
+        help="Backfill finding/decision/delivery state, task truth and target hashes instead of routing.",
     )
+    parser.add_argument(
+        "--cleanup-legacy", action="store_true",
+        help="With --backfill-lifecycle, conservatively dispose stale legacy mutation/audit snapshots.",
+    )
+    args = parser.parse_args(argv)
+    if args.cleanup_legacy and not args.backfill_lifecycle:
+        parser.error("--cleanup-legacy requires --backfill-lifecycle")
+    if args.backfill_lifecycle:
+        with kb.connect() as conn:
+            summary = proposals.backfill_lifecycle(
+                dry_run=args.dry_run,
+                conn=conn,
+                cleanup_legacy=args.cleanup_legacy,
+            )
+    else:
+        summary = reconcile_proposals(
+            once=args.once,
+            max_new_tasks=args.max_new_tasks,
+            min_task_severity=args.min_task_severity,
+            dry_run=args.dry_run,
+        )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0 if summary.get("ok") else 1
 

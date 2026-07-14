@@ -7,7 +7,12 @@ become deduped Kanban work, and risky/no-diff findings become operator decisions
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
+import time
 
 import pytest
 
@@ -143,7 +148,8 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
             "review_tier, scope_contract FROM tasks"
         ).fetchall()
 
-    assert summary["routed_to_kanban"] == 2
+    assert summary["routed_to_kanban"] == 1
+    assert summary["stale"] == 1  # duplicate is retained as history, never delivered twice
     assert summary["new_tasks"] == 1
     assert len(rows) == 1
     assert rows[0]["assignee"] == "coder"
@@ -156,8 +162,12 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert contract["proposal_id"] in {"code-a", "code-b"}
     assert contract["evidence"] == "raise RuntimeError('grounded example')"
     assert contract["allowed_paths"] == ["hermes_cli/auth.py"]
-    assert _load("code-a")["kanban_task_id"] == rows[0]["id"]
-    assert _load("code-b")["kanban_task_id"] == rows[0]["id"]
+    stored = [_load("code-a"), _load("code-b")]
+    routed = [item for item in stored if item["status"] == "routed_to_kanban"]
+    duplicate = [item for item in stored if item["status"] == "skipped"]
+    assert len(routed) == len(duplicate) == 1
+    assert routed[0]["kanban_task_id"] == rows[0]["id"]
+    assert duplicate[0]["last_outcome"] == "rejected_duplicate"
 
 
 def test_code_finding_missing_grounded_contract_is_held(reconcile_env):
@@ -180,7 +190,7 @@ def test_code_finding_missing_grounded_contract_is_held(reconcile_env):
     assert summary["held_invalid_contract"] == 1
     assert task_count == 0
     held = _load("code-invalid")
-    assert held["status"] == "proposed"
+    assert held["status"] == "skipped"
     assert held["last_outcome"] == "held_invalid_contract"
     assert "evidence" in held["result"] and "fix_hint" in held["result"]
 
@@ -391,7 +401,82 @@ def test_flood_guard_caps_new_tasks_and_pools_the_rest(reconcile_env):
     assert len([p for p in proposals.list_proposals() if p.get("status") == "pooled"]) == 55
 
 
-def test_diff_less_finding_escalates_and_digest_groups_theme(reconcile_env):
+def test_cross_process_reconcile_lock_owns_the_whole_flood_budget(reconcile_env, tmp_path):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    for i in range(10):
+        _proposal(
+            f"race-{i:02d}",
+            mode="code",
+            finding_id=f"RACE-{i:02d}",
+            target="hermes_cli/example.py",
+            target_path="hermes_cli/example.py",
+            category="bug_risk",
+        )
+
+    ready = tmp_path / "reconcile-lock-ready"
+    release = tmp_path / "reconcile-lock-release"
+    holder = tmp_path / "hold-reconcile-lock.py"
+    holder.write_text(
+        textwrap.dedent(
+            f"""
+            import time
+            from pathlib import Path
+            from hermes_cli import autoresearch_reconcile as reconcile
+
+            handle = reconcile._try_acquire_reconcile_lock()
+            assert handle is not None
+            Path({str(ready)!r}).write_text("ready", encoding="utf-8")
+            try:
+                for _ in range(1000):
+                    if Path({str(release)!r}).exists():
+                        break
+                    time.sleep(0.01)
+            finally:
+                reconcile._release_reconcile_lock(handle)
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    child = subprocess.Popen([sys.executable, str(holder)], env=env)
+    try:
+        for _ in range(1000):
+            if ready.exists():
+                break
+            if child.poll() is not None:
+                break
+            time.sleep(0.01)
+        assert ready.exists(), "child never acquired the reconcile lock"
+
+        with kb.connect() as conn:
+            busy = reconcile.reconcile_proposals(conn=conn, max_new_tasks=5)
+            task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+
+        assert busy["ok"] is True
+        assert busy["busy"] is True
+        assert busy["new_tasks"] == 0
+        assert task_count == 0
+        assert all(item["status"] == "proposed" for item in proposals.list_proposals())
+    finally:
+        release.write_text("release", encoding="utf-8")
+        child.wait(timeout=15)
+
+    with kb.connect() as conn:
+        routed = reconcile.reconcile_proposals(conn=conn, max_new_tasks=5)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+
+    assert routed["busy"] is False
+    assert routed["new_tasks"] == 5
+    assert task_count == 5
+    assert len([p for p in proposals.list_proposals() if p.get("status") == "pooled"]) == 5
+
+
+def test_diff_less_finding_is_detection_only_and_digest_groups_theme(reconcile_env):
     from hermes_cli import autoresearch_reconcile as reconcile
 
     _proposal(
@@ -409,15 +494,11 @@ def test_diff_less_finding_escalates_and_digest_groups_theme(reconcile_env):
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
         queue = kb.decision_queue(conn)
-        esc_task = conn.execute(
-            "SELECT review_tier FROM tasks WHERE id = ?",
-            (queue["decisions"][0]["task_id"],),
-        ).fetchone()
 
-    assert summary["escalated"] == 1
-    assert _load("diff-less")["status"] == "escalated"
-    assert queue["count"] == 1
-    assert esc_task["review_tier"] == "review"
+    assert summary["rejected_detection_only"] == 1
+    assert _load("diff-less")["status"] == "skipped"
+    assert _load("diff-less")["operator_action_required"] is False
+    assert queue["count"] == 0
 
     digest = json.loads(reconcile_env["digest"].read_text(encoding="utf-8"))
     assert digest["themes"] == [
@@ -428,7 +509,7 @@ def test_diff_less_finding_escalates_and_digest_groups_theme(reconcile_env):
             "severity_max": "medium",
             "example_finding_ids": ["F-diff-less"],
             "atomic_tasks_filed": 0,
-            "escalated": 1,
+            "escalated": 0,
         }
     ]
 
@@ -459,8 +540,7 @@ def test_veto_operator_escalation_archives_and_records_via_real_path(reconcile_e
     )
 
     with kb.connect() as conn:
-        reconcile.reconcile_proposals(conn=conn)
-        task_id = kb.decision_queue(conn)["decisions"][0]["task_id"]
+        task_id = reconcile._escalate(conn, _load("diff-less-veto"), "operator review required")
 
         vetoed = kb.veto_operator_escalation(conn, task_id, author="operator")
 
@@ -519,7 +599,7 @@ def test_escalations_coalesce_by_signal(reconcile_env):
         )
 
     with kb.connect() as conn:
-        summary = reconcile.reconcile_proposals(conn=conn)
+        ids = [reconcile._escalate(conn, _load(f"dl-{i}"), "operator review required") for i in range(5)]
         esc_tasks = conn.execute(
             "SELECT COUNT(*) AS n FROM tasks WHERE kind = 'ops'"
         ).fetchone()["n"]
@@ -528,13 +608,16 @@ def test_escalations_coalesce_by_signal(reconcile_env):
             (kb.OPERATOR_ESCALATION_EVENT,),
         ).fetchone()["n"]
         queue = kb.decision_queue(conn)
+        comments = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id", (ids[0],)
+        ).fetchall()
 
-    assert summary["escalated"] == 5      # all 5 findings routed to the escalation lane
     assert esc_tasks == 1                 # but ONE escalation task (coalesced by signal)
     assert esc_events == 1                # and one operator_escalation event
     assert queue["count"] == 1            # one decision-queue row, not five
-    ids = {_load(f"dl-{i}")["escalation_task_id"] for i in range(5)}
-    assert len(ids) == 1                  # all findings point at the shared escalation
+    assert len(set(ids)) == 1
+    assert len(comments) == 4
+    assert all(f"[autoresearch-proposal:dl-{i}]" in "\n".join(row["body"] for row in comments) for i in range(1, 5))
 
 
 def test_distinct_signals_do_not_coalesce(reconcile_env):
@@ -548,7 +631,8 @@ def test_distinct_signals_do_not_coalesce(reconcile_env):
               theme="bare-except", subsystem="auth", severity="medium", finding_id="FB")
 
     with kb.connect() as conn:
-        reconcile.reconcile_proposals(conn=conn)
+        reconcile._escalate(conn, _load("a"), "operator review required")
+        reconcile._escalate(conn, _load("b"), "operator review required")
         esc_tasks = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE kind = 'ops'").fetchone()["n"]
 
     assert esc_tasks == 2
@@ -569,7 +653,7 @@ def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
         "diffless-x", mode="skill", diff_before_after="", new_text="",
         category="silent_except", theme="t", subsystem="auth", severity="medium",
         finding_id="F-D",
-    )  # no actionable diff → would escalate
+    )  # no actionable diff → detection-only, not an operator decision
 
     called: list[int] = []
     monkeypatch.setattr(reconcile.proposals, "apply_proposal", lambda *a, **k: called.append(1))
@@ -585,13 +669,180 @@ def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
     assert summary["applied"] == 0
     assert summary["held_judge_required"] == 1
     assert summary["routed_to_kanban"] == 1
-    assert summary["escalated"] == 1
+    assert summary["escalated"] == 0
+    assert summary["rejected_detection_only"] == 1
     # proposals untouched on disk
     assert _load("skill-x")["status"] == "proposed"
     assert _load("code-x")["status"] == "proposed"
     assert _load("diffless-x")["status"] == "proposed"
     # no digest written in dry-run
     assert not reconcile_env["digest"].exists()
+
+
+def test_pooled_findings_reenter_and_drain_on_the_next_run(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    for i in range(2):
+        _proposal(
+            f"drain-{i}", mode="code", finding_id=f"F-DRAIN-{i}",
+            target="hermes_cli/auth.py", target_path="hermes_cli/auth.py",
+            category="bug_risk", severity="high",
+        )
+    with kb.connect() as conn:
+        first = reconcile.reconcile_proposals(conn=conn, max_new_tasks=1)
+        assert first["new_tasks"] == 1
+        assert first["pooled"] == 1
+        pooled_id = next(item["id"] for item in proposals.list_proposals() if item["status"] == "pooled")
+
+        second = reconcile.reconcile_proposals(conn=conn, max_new_tasks=1)
+
+    assert second["seen"] == 1
+    assert second["new_tasks"] == 1
+    assert second["routed_to_kanban"] == 1
+    assert _load(pooled_id)["status"] == "routed_to_kanban"
+
+
+def test_payload_syncs_terminal_kanban_task_out_of_open_delivery(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "terminal", mode="code", finding_id="F-TERMINAL",
+        target="hermes_cli/auth.py", target_path="hermes_cli/auth.py",
+        category="bug_risk", severity="high",
+    )
+    with kb.connect() as conn:
+        reconcile.reconcile_proposals(conn=conn)
+        task_id = _load("terminal")["kanban_task_id"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+                (1_789_000_000, task_id),
+            )
+
+        lifecycle = proposals.backfill_lifecycle(dry_run=True, conn=conn)
+        card = proposals._enriched_items([_load("terminal")], conn=conn)[0]
+
+    assert lifecycle["would_update"] == 1
+    assert card["delivery_state"] == "integrated"
+    assert card["operator_action_required"] is False
+
+
+def test_terminal_escalation_is_dismissed_history_not_integrated_delivery(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "terminal-escalation", mode="skill", diff_before_after="", new_text="",
+        category="silent_except", theme="silent-except", severity="high",
+    )
+    with kb.connect() as conn:
+        task_id = reconcile._escalate(conn, _load("terminal-escalation"), "operator review required")
+        stored = _load("terminal-escalation")
+        stored.update({"status": "escalated", "escalation_task_id": task_id})
+        proposals.save_proposal(stored)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", (1_789_000_000, task_id))
+
+        card = proposals._enriched_items([_load("terminal-escalation")], conn=conn)[0]
+
+    assert card["decision_state"] == "dismissed"
+    assert card["delivery_state"] == "none"
+    assert card["operator_action_required"] is False
+
+
+def test_target_change_marks_pending_finding_stale_before_delivery(reconcile_env, tmp_path):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    target = tmp_path / "target.py"
+    target.write_text("before\n", encoding="utf-8")
+    _proposal(
+        "changed-target", mode="code", finding_id="F-CHANGED",
+        target=str(target), target_path=str(target), before_text="before\n",
+        category="bug_risk", severity="high",
+    )
+    target.write_text("after\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        preview = reconcile.reconcile_proposals(conn=conn, dry_run=True)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+        actual = reconcile.reconcile_proposals(conn=conn)
+
+    assert preview["stale"] == 1
+    assert actual["stale"] == 1
+    assert task_count == 0
+    stored = _load("changed-target")
+    assert stored["status"] == "skipped"
+    assert stored["finding_state"] == "stale"
+
+
+def test_test_foundry_findings_bundle_per_target_without_operator_cards(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    for i in range(2):
+        _proposal(
+            f"mutation-{i}", mode="test", proposal_type="mutation_test",
+            finding_id=f"MUT-{i}", target="hermes_cli/auth.py", target_path="hermes_cli/auth.py",
+            category="mutation_survivor", severity="medium",
+            evidence=f"surviving mutation {i}", affected_tests=["tests/test_auth.py"],
+        )
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        tasks = conn.execute(
+            "SELECT id, idempotency_key FROM tasks WHERE idempotency_key LIKE 'autoresearch:test-foundry:%'"
+        ).fetchall()
+        comments = conn.execute("SELECT body FROM task_comments WHERE task_id = ?", (tasks[0]["id"],)).fetchall()
+
+    assert summary["routed_to_kanban"] == 2
+    assert summary["new_tasks"] == 1
+    assert len(tasks) == 1
+    assert len(comments) == 1
+    assert "[autoresearch-proposal:mutation-" in comments[0]["body"]
+    assert proposals.proposals_payload()["open_count"] == 0
+
+
+def test_existing_task_reuse_bypasses_create_call(reconcile_env, monkeypatch):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        existing_id = kb.create_task(
+            conn, title="Existing", assignee="coder", created_by="autoresearch",
+            idempotency_key="autoresearch:F-REUSE", kind="code", review_tier="review",
+        )
+    _proposal(
+        "reuse", mode="code", finding_id="F-REUSE",
+        target="hermes_cli/auth.py", target_path="hermes_cli/auth.py",
+        category="bug_risk", severity="high",
+    )
+    monkeypatch.setattr(reconcile.kb, "create_task", lambda *_a, **_k: pytest.fail("must reuse existing task"))
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+
+    assert summary["new_tasks"] == 0
+    assert _load("reuse")["kanban_task_id"] == existing_id
+
+
+def test_archived_task_does_not_bypass_zero_flood_budget(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        old_id = kb.create_task(
+            conn, title="Old", assignee="coder", created_by="autoresearch",
+            idempotency_key="autoresearch:F-ARCHIVED", kind="code",
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (old_id,))
+    _proposal(
+        "archived", mode="code", finding_id="F-ARCHIVED",
+        target="hermes_cli/auth.py", target_path="hermes_cli/auth.py",
+        category="bug_risk", severity="high",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn, max_new_tasks=0)
+
+    assert summary["pooled"] == 1
+    assert summary["new_tasks"] == 0
+    assert _load("archived")["status"] == "pooled"
 
 
 def test_veto_operator_escalation_rejects_non_autoresearch_task(reconcile_env):

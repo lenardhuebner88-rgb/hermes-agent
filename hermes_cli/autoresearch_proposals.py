@@ -62,6 +62,10 @@ _VALID_MODES = {"skill", "code"}
 # is running in a detached worker; it resolves to "applied" (green) or back to
 # "proposed" (red / crashed, auto-reverted).
 _VALID_STATUS = {"proposed", "testing", "applied", "skipped", "routed_to_kanban", "pooled", "escalated"}
+FINDING_STATES = {"detected", "verified", "rejected", "stale"}
+DECISION_STATES = {"needs_operator", "accepted", "dismissed"}
+DELIVERY_STATES = {"none", "queued", "running", "review", "integrated", "failed"}
+LIFECYCLE_VERSION = 1
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # A code proposal may never edit the gate's own harness — otherwise a proposal
@@ -263,6 +267,268 @@ def _slug(text: str) -> str:
     return _SLUG_RE.sub("-", (text or "").strip().lower()).strip("-") or "item"
 
 
+def _target_path(proposal: dict[str, Any]) -> Path | None:
+    raw = str(proposal.get("target_path") or proposal.get("target") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else (_REPO / path).resolve()
+
+
+def _target_content_sha(proposal: dict[str, Any]) -> str | None:
+    path = _target_path(proposal)
+    if path is None:
+        return None
+    try:
+        return _content_sha(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return None
+
+
+def _proposal_target_sha(proposal: dict[str, Any]) -> str | None:
+    stored = str(proposal.get("target_sha256") or "").strip()
+    if stored:
+        return stored
+    before = proposal.get("before_text")
+    raw_path = Path(str(proposal.get("target_path") or ""))
+    if isinstance(before, str) and raw_path.is_absolute():
+        return _content_sha(before)
+    return _target_content_sha(proposal)
+
+
+def _finding_fingerprint(proposal: dict[str, Any]) -> str:
+    """Stable cross-run/lane identity for duplicate suppression and metrics."""
+    target = str(proposal.get("target") or proposal.get("target_path") or "").strip().lower()
+    category = str(proposal.get("category") or proposal.get("section") or "").strip().lower()
+    finding_id = str(proposal.get("finding_id") or "").strip().lower()
+    evidence = str(proposal.get("evidence") or "").strip().lower()
+    discriminator = finding_id or evidence or str(proposal.get("title") or proposal.get("id") or "").strip().lower()
+    canonical = "\0".join((target, category, discriminator))
+    return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()
+
+
+def _baseline_lifecycle(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Map the legacy write/apply status onto the operator lifecycle axes."""
+    if (proposal.get("disposition_source") or proposal.get("lifecycle_source")) and all(
+        proposal.get(key) for key in ("finding_state", "decision_state", "delivery_state")
+    ):
+        return {
+            "lifecycle_version": LIFECYCLE_VERSION,
+            "finding_state": proposal["finding_state"],
+            "decision_state": proposal["decision_state"],
+            "delivery_state": proposal["delivery_state"],
+            "operator_action_required": bool(proposal.get("operator_action_required")),
+        }
+
+    status = str(proposal.get("status") or "proposed")
+    mode = str(proposal.get("mode") or "").lower()
+    last_outcome = str(proposal.get("last_outcome") or "")
+    if status == "testing":
+        finding, decision, delivery = "verified", "accepted", "running"
+    elif status == "applied":
+        finding, decision, delivery = "verified", "accepted", "integrated"
+    elif status == "skipped":
+        finding = "stale" if "stale" in last_outcome else "rejected"
+        decision, delivery = "dismissed", "none"
+    elif status == "pooled":
+        finding, decision, delivery = "verified", "accepted", "queued"
+    elif status == "routed_to_kanban":
+        finding, decision, delivery = "verified", "accepted", "queued"
+    elif status == "escalated":
+        finding, decision, delivery = "verified", "needs_operator", "none"
+    elif last_outcome in {"reverted_no_improvement", "held_invalid_contract"}:
+        finding, decision, delivery = "rejected", "dismissed", "none"
+    elif mode == "skill":
+        finding, decision, delivery = "verified", "needs_operator", "none"
+    else:
+        # Verified code and Test-Foundry findings are delivery input, not inbox
+        # decisions. The reconciler applies confidence/severity gates before
+        # routing them and records rejected detection-only signals explicitly.
+        finding, decision, delivery = "verified", "accepted", "queued"
+    return {
+        "lifecycle_version": LIFECYCLE_VERSION,
+        "finding_state": finding,
+        "decision_state": decision,
+        "delivery_state": delivery,
+        # Escalations are decided on the linked Kanban task. Counting the
+        # proposal too would duplicate one human decision across two inboxes.
+        "operator_action_required": decision == "needs_operator" and status == "proposed",
+    }
+
+
+def _linked_task_state(task: Any, proposal: dict[str, Any]) -> dict[str, Any] | None:
+    if task is None:
+        return None
+    status = str(task["status"] if hasattr(task, "keys") else task.get("status") or "")
+    completed_at = task["completed_at"] if hasattr(task, "keys") else task.get("completed_at")
+    title = task["title"] if hasattr(task, "keys") else task.get("title")
+    task_id = task["id"] if hasattr(task, "keys") else task.get("id")
+    out: dict[str, Any] = {
+        "linked_task_id": task_id,
+        "linked_task_title": title,
+        "linked_task_status": status,
+    }
+    if status in {"done", "archived"} and proposal.get("escalation_task_id"):
+        out.update({
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "decision_owner": "kanban",
+        })
+    elif status in {"done", "archived"} and (status == "done" or completed_at):
+        out.update({
+            "finding_state": "verified",
+            "decision_state": "accepted",
+            "delivery_state": "integrated",
+            "operator_action_required": False,
+        })
+    elif status == "archived":
+        out.update({
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+        })
+    elif status in {"triage", "todo", "scheduled", "ready"}:
+        out.update({"delivery_state": "queued", "operator_action_required": False})
+    elif status == "running":
+        out.update({"delivery_state": "running", "operator_action_required": False})
+    elif status == "review":
+        out.update({"delivery_state": "review", "operator_action_required": False})
+    elif status == "blocked" and proposal.get("escalation_task_id"):
+        out.update({
+            "decision_state": "needs_operator",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "decision_owner": "kanban",
+        })
+    elif status in {"blocked", "failed", "cancelled"}:
+        out.update({"delivery_state": "failed", "operator_action_required": False})
+    return out
+
+
+def enrich_lifecycle(proposal: dict[str, Any], *, task: Any = None) -> dict[str, Any]:
+    """Return a read-only, current lifecycle view of one stored proposal."""
+    enriched = dict(proposal)
+    enriched.update(_baseline_lifecycle(enriched))
+    target_sha = _proposal_target_sha(enriched)
+    current_sha = _target_content_sha(enriched)
+    enriched["target_sha256"] = target_sha
+    enriched["target_current_sha256"] = current_sha
+    enriched["finding_fingerprint"] = _finding_fingerprint(enriched)
+
+    task_state = _linked_task_state(task, enriched)
+    if task_state:
+        enriched.update(task_state)
+
+    # Before work is handed to an active task, a content change invalidates the
+    # evidence/diff. Routed work owns its own rebase and validation lifecycle.
+    may_stale = enriched.get("status") in {"proposed", "pooled", "escalated"}
+    if may_stale and target_sha and current_sha and target_sha != current_sha:
+        enriched.update({
+            "finding_state": "stale",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "target_stale": True,
+            "disposition_reason": "target changed after finding; rerun the lane against current content",
+        })
+    else:
+        enriched["target_stale"] = bool(
+            enriched.get("target_stale") and enriched.get("finding_state") == "stale"
+        )
+    mode = str(enriched.get("mode") or "")
+    enriched.setdefault(
+        "expected_benefit",
+        str(enriched.get("rationale_plain") or enriched.get("fix_hint") or "Resolve the grounded finding."),
+    )
+    enriched.setdefault(
+        "risk_summary",
+        "Skill text changes can alter activation behavior; the skill evaluation gate must improve."
+        if mode == "skill"
+        else "Target-scoped code/test change; regression risk is bounded by affected and review gates.",
+    )
+    affected = [str(item) for item in (enriched.get("affected_tests") or []) if str(item).strip()]
+    enriched.setdefault(
+        "test_plan",
+        "scripts/run_tests.sh " + " ".join(affected)
+        if affected else str(enriched.get("gate") or enriched.get("eval_label") or f"scripts/run-affected.sh {enriched.get('target') or ''}").strip(),
+    )
+    if enriched.get("operator_action_required"):
+        recommendation = "Accept only if the evidence and proposed diff match the intended behavior; otherwise dismiss."
+    elif enriched.get("finding_state") in {"stale", "rejected"}:
+        recommendation = "No operator action; retain as technical history and rerun the source lane if still relevant."
+    elif enriched.get("delivery_state") in {"queued", "running", "review"}:
+        recommendation = "No operator action; follow the linked delivery task."
+    else:
+        recommendation = "No operator action required."
+    enriched.setdefault("recommendation", recommendation)
+    return enriched
+
+
+def _task_rows_for_proposals(items: list[dict[str, Any]], conn=None) -> tuple[dict[str, Any], Any, bool]:
+    ids = {
+        str(item.get("kanban_task_id") or item.get("escalation_task_id") or "").strip()
+        for item in items
+    }
+    ids.discard("")
+    if not ids:
+        return {}, conn, False
+    own_conn = conn is None
+    try:
+        if conn is None:
+            from hermes_cli import kanban_db as kb
+
+            conn = kb.connect()
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT id, title, status, completed_at FROM tasks WHERE id IN ({placeholders})",
+            tuple(sorted(ids)),
+        ).fetchall()
+        return {str(row["id"]): row for row in rows}, conn, own_conn
+    except Exception:
+        if own_conn and conn is not None:
+            conn.close()
+        return {}, None, False
+
+
+def _enriched_items(items: list[dict[str, Any]], conn=None) -> list[dict[str, Any]]:
+    task_rows, opened_conn, own_conn = _task_rows_for_proposals(items, conn)
+    try:
+        enriched = [
+            enrich_lifecycle(
+                item,
+                task=task_rows.get(str(item.get("kanban_task_id") or item.get("escalation_task_id") or "")),
+            )
+            for item in items
+        ]
+    finally:
+        if own_conn and opened_conn is not None:
+            opened_conn.close()
+
+    canonical: dict[str, str] = {}
+    # Oldest grounded finding is canonical. A duplicate never becomes another
+    # operator decision or delivery card, but remains visible in history.
+    for item in sorted(enriched, key=lambda p: str(p.get("created_at") or "")):
+        if item.get("delivery_state") == "integrated" or item.get("decision_state") == "dismissed":
+            continue
+        fingerprint = str(item.get("finding_fingerprint") or "")
+        if not fingerprint:
+            continue
+        original = canonical.get(fingerprint)
+        if original:
+            item.update({
+                "duplicate_of": original,
+                "finding_state": "rejected",
+                "decision_state": "dismissed",
+                "delivery_state": "none",
+                "operator_action_required": False,
+                "disposition_reason": f"duplicate of {original}",
+            })
+        else:
+            canonical[fingerprint] = str(item.get("id") or "")
+    return enriched
+
+
 # ---------------------------------------------------------------------------
 # Store CRUD
 # ---------------------------------------------------------------------------
@@ -273,6 +539,13 @@ def _proposal_path(pid: str) -> Path:
 
 
 def save_proposal(proposal: dict[str, Any]) -> Path:
+    proposal.setdefault("target_sha256", _proposal_target_sha(proposal))
+    proposal.setdefault("finding_fingerprint", _finding_fingerprint(proposal))
+    for key, value in _baseline_lifecycle(proposal).items():
+        if not proposal.get("disposition_source") and not proposal.get("lifecycle_source"):
+            proposal[key] = value
+        else:
+            proposal.setdefault(key, value)
     path = _proposal_path(proposal["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(proposal, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -324,15 +597,28 @@ _LIST_FIELDS = (
     "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "last_outcome", "result",
     "created_at", "applied_at", "rank_score", "rank_reason", "gate",
     "proposal_type", "category", "severity", "evidence", "fix_hint", "apply_blocked_reason",
+    "finding_state", "decision_state", "delivery_state", "operator_action_required",
+    "decision_owner", "disposition_reason", "disposition_source", "duplicate_of", "finding_fingerprint",
+    "target_sha256", "target_current_sha256", "target_stale",
+    "kanban_task_id", "escalation_task_id", "linked_task_id", "linked_task_title", "linked_task_status",
+    "test_code", "caught_mutant", "affected_tests", "expected_benefit", "risk_summary",
+    "test_plan", "recommendation",
 )
 
 
 def _to_card(proposal: dict[str, Any]) -> dict[str, Any]:
-    return {k: proposal.get(k) for k in _LIST_FIELDS}
+    card = {k: proposal.get(k) for k in _LIST_FIELDS}
+    if not str(card.get("evidence") or "").strip():
+        section = str(card.get("section") or "").strip()
+        card["evidence"] = (
+            f"Missing section `{section}` in `{card.get('target')}`"
+            if section else str(card.get("diff_before_after") or "No grounded evidence recorded.")[:800]
+        )
+    return card
 
 
 def _is_actionable(p: dict[str, Any]) -> bool:
-    return p.get("status") == "proposed" and p.get("last_outcome") != "reverted_no_improvement"
+    return bool(p.get("operator_action_required"))
 
 
 def _is_reverted_no_improvement(p: dict[str, Any]) -> bool:
@@ -340,9 +626,26 @@ def _is_reverted_no_improvement(p: dict[str, Any]) -> bool:
 
 
 def proposals_payload() -> dict[str, Any]:
-    items = list_proposals()
+    items = _enriched_items(list_proposals())
     cards = [_to_card(p) for p in items]
     open_count = sum(1 for p in items if _is_actionable(p))
+    accepted = sum(1 for p in items if p.get("decision_state") == "accepted")
+    dismissed = sum(1 for p in items if p.get("decision_state") == "dismissed")
+    stale = sum(1 for p in items if p.get("finding_state") == "stale")
+    duplicates = sum(1 for p in items if p.get("duplicate_of"))
+    code_decided = [
+        p for p in items
+        if str(p.get("mode") or "") in {"code", "test"}
+        and p.get("decision_state") in {"accepted", "dismissed"}
+        and p.get("finding_state") != "stale"
+        and not p.get("duplicate_of")
+    ]
+    code_accepted = sum(1 for p in code_decided if p.get("decision_state") == "accepted")
+    total = len(items)
+    precision_denominator = accepted + dismissed - stale - duplicates
+    precision = accepted / precision_denominator if precision_denominator > 0 else None
+    code_precision = code_accepted / len(code_decided) if code_decided else None
+    measured_cost = sum(float(p.get("cost_usd") or 0.0) for p in items)
     return {
         "schema": "autoresearch-proposals-v1",
         "count": len(cards),
@@ -351,8 +654,137 @@ def proposals_payload() -> dict[str, Any]:
         "testing_count": sum(1 for p in items if p.get("status") == "testing"),
         "applied_count": sum(1 for p in items if p.get("status") == "applied"),
         "skipped_count": sum(1 for p in items if p.get("status") == "skipped"),
+        "delivery_count": sum(1 for p in items if p.get("delivery_state") in {"queued", "running", "review"}),
+        "integrated_count": sum(1 for p in items if p.get("delivery_state") == "integrated"),
+        "stale_count": stale,
+        "dismissed_count": dismissed,
+        "metrics": {
+            "operator_decisions": open_count,
+            "accepted": accepted,
+            "dismissed": dismissed,
+            "precision": precision,
+            "code_precision": code_precision,
+            "stale_rate": stale / total if total else 0.0,
+            "duplicate_rate": duplicates / total if total else 0.0,
+            "cost_per_accepted_usd": measured_cost / accepted if accepted and measured_cost else None,
+        },
         "proposals": cards,
         "proposals_dir": str(_proposals_dir()),
+    }
+
+
+_LIFECYCLE_PERSIST_FIELDS = (
+    "lifecycle_version", "finding_state", "decision_state", "delivery_state",
+    "operator_action_required", "disposition_reason", "disposition_source",
+    "lifecycle_source",
+    "duplicate_of", "finding_fingerprint", "target_sha256", "target_stale",
+    "linked_task_id", "linked_task_title", "linked_task_status",
+)
+
+
+def _legacy_cleanup_disposition(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Conservative one-time cleanup policy for pre-lifecycle snapshots."""
+    ptype = str(item.get("proposal_type") or "")
+    mode = str(item.get("mode") or "")
+    severity = str(item.get("severity") or "medium").lower()
+    evidence = str(item.get("evidence") or "").strip()
+    path = _target_path(item)
+    current_text: str | None = None
+    if path is not None:
+        try:
+            current_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            current_text = None
+
+    if ptype == "mutation_test" and item.get("status") in {"escalated", "proposed", "pooled"}:
+        return {
+            "status": "skipped",
+            "last_outcome": "stale_legacy_snapshot",
+            "finding_state": "stale",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "disposition_reason": "historical raw mutation snapshot; rerun Test Foundry against current HEAD as a target bundle",
+            "disposition_source": "operator_cleanup",
+        }
+    if item.get("target_stale"):
+        return {
+            "status": "skipped",
+            "last_outcome": "stale_target_changed",
+            "finding_state": "stale",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "disposition_reason": item.get("disposition_reason"),
+            "disposition_source": "operator_cleanup",
+        }
+    if ptype == "deep_audit" and evidence and current_text is not None and evidence not in current_text:
+        return {
+            "status": "skipped",
+            "last_outcome": "stale_evidence_absent",
+            "finding_state": "stale",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "disposition_reason": "verbatim Deep-Audit evidence is no longer present in the target",
+            "disposition_source": "operator_cleanup",
+        }
+    if mode in {"code", "test"} and severity not in {"critical", "high"} and ptype != "mutation_test":
+        return {
+            "status": "skipped",
+            "last_outcome": "rejected_below_intake_threshold",
+            "finding_state": "rejected",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "operator_action_required": False,
+            "disposition_reason": "speculative finding is below the high-confidence intake threshold",
+            "disposition_source": "operator_cleanup",
+        }
+    return None
+
+
+def backfill_lifecycle(
+    *,
+    dry_run: bool = True,
+    conn=None,
+    cleanup_legacy: bool = False,
+    disposition_overrides: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Backfill lifecycle/hash/task truth with backup, preview and idempotency."""
+    raw_items = list_proposals()
+    enriched = _enriched_items(raw_items, conn=conn)
+    changes: list[dict[str, Any]] = []
+    disposition_overrides = disposition_overrides or {}
+    for raw, item in zip(raw_items, enriched):
+        desired = {key: item.get(key) for key in _LIFECYCLE_PERSIST_FIELDS if item.get(key) is not None}
+        if item.get("linked_task_id") and not raw.get("disposition_source"):
+            desired["lifecycle_source"] = "kanban_sync"
+        if cleanup_legacy and not raw.get("disposition_source"):
+            desired.update(_legacy_cleanup_disposition(item) or {})
+        desired.update(disposition_overrides.get(str(raw.get("id") or ""), {}))
+        delta = {key: value for key, value in desired.items() if raw.get(key) != value}
+        if delta:
+            changes.append({"id": raw.get("id"), "path": str(_proposal_path(str(raw.get("id") or ""))), "changes": delta})
+
+    if dry_run or not changes:
+        return {
+            "ok": True, "dry_run": dry_run, "cleanup_legacy": cleanup_legacy,
+            "would_update": len(changes), "updated": 0, "backup_dir": None, "changes": changes,
+        }
+
+    backup_dir = _copy_proposals_backup()
+    updated = 0
+    for change in changes:
+        proposal = load_proposal(str(change["id"]))
+        if proposal is None:
+            continue
+        proposal.update(change["changes"])
+        save_proposal(proposal)
+        updated += 1
+    return {
+        "ok": True, "dry_run": False, "cleanup_legacy": cleanup_legacy,
+        "would_update": len(changes), "updated": updated,
+        "backup_dir": str(backup_dir) if backup_dir else None, "changes": changes,
     }
 
 

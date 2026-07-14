@@ -73,6 +73,28 @@ describe("buildDecisionInbox", () => {
     expect(items).toHaveLength(0);
   });
 
+  it("only includes explicit operator decisions and caps Autoresearch at three", () => {
+    const decisions = Array.from({ length: 5 }, (_, index) => proposal({
+      id: `decision-${index}`,
+      target: `docs/${index}.md`,
+      rank_score: 100 - index,
+      operator_action_required: true,
+      decision_state: "needs_operator",
+      delivery_state: "none",
+    }));
+    const items = buildDecisionInbox({
+      proposals: [
+        ...decisions,
+        proposal({ id: "delivery", status: "pooled", operator_action_required: false, decision_state: "accepted", delivery_state: "queued" }),
+      ],
+      foItems: [], foNowSec: NOW, interventions: [],
+    });
+
+    expect(items).toHaveLength(3);
+    expect(items.every((item) => item.surface === "autoresearch")).toBe(true);
+    expect(items.some((item) => item.key.includes("delivery"))).toBe(false);
+  });
+
   it("treats an unowned active FO item as a decision even when status is later", () => {
     const items = buildDecisionInbox({
       proposals: [],

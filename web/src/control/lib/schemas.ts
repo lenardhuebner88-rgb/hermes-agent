@@ -8,7 +8,7 @@ const nullableString = z.string().nullable().catch(null);
 const invalidEpochSeconds = Number.NaN;
 const epochSeconds = z.coerce.number().catch(invalidEpochSeconds);
 const nullableEpochSeconds = z.coerce.number().nullable().default(null).catch(invalidEpochSeconds);
-const LastOutcomeSchema = z.enum(["applied", "reverted_no_improvement"]).nullable().catch(null);
+const LastOutcomeSchema = z.string().nullable().catch(null);
 const VerifierVerdictSchema = z.enum(["APPROVED", "REQUEST_CHANGES"]);
 const VerificationStateSchema = z.enum(["approved", "request_changes", "pending", "ungated"]);
 const ResultQualityBadgeSchema = z.object({
@@ -1243,7 +1243,9 @@ export const ProposalSchema = z.object({
   diff_before_after: z.string().catch(""),
   rank_score: z.coerce.number().nullable().catch(null).optional(),
   mode: z.enum(["skill", "code", "test"]).catch("skill"),
-  status: z.enum(["proposed", "testing", "applied", "skipped"]).catch("proposed"),
+  // Unknown lifecycle values must fail closed into history, never inflate the
+  // operator inbox as `proposed`.
+  status: z.enum(["proposed", "testing", "applied", "skipped", "routed_to_kanban", "pooled", "escalated"]).catch("skipped"),
   last_outcome: LastOutcomeSchema.optional(),
   result: z.string().nullable().optional(),
   created_at: z.union([z.number(), z.string()]).nullable().optional(),
@@ -1255,6 +1257,30 @@ export const ProposalSchema = z.object({
     returncode: nullableNumber.optional(),
     summary: nullableString.optional(),
   }).nullable().optional(),
+  finding_state: z.enum(["detected", "verified", "rejected", "stale"]).optional(),
+  decision_state: z.enum(["needs_operator", "accepted", "dismissed"]).optional(),
+  delivery_state: z.enum(["none", "queued", "running", "review", "integrated", "failed"]).optional(),
+  operator_action_required: z.boolean().optional(),
+  decision_owner: nullableString.optional(),
+  disposition_reason: nullableString.optional(),
+  disposition_source: nullableString.optional(),
+  duplicate_of: nullableString.optional(),
+  finding_fingerprint: nullableString.optional(),
+  target_sha256: nullableString.optional(),
+  target_current_sha256: nullableString.optional(),
+  target_stale: z.boolean().catch(false).optional(),
+  kanban_task_id: nullableString.optional(),
+  escalation_task_id: nullableString.optional(),
+  linked_task_id: nullableString.optional(),
+  linked_task_title: nullableString.optional(),
+  linked_task_status: nullableString.optional(),
+  test_code: nullableString.optional(),
+  caught_mutant: z.record(z.string(), z.unknown()).nullable().optional(),
+  affected_tests: z.array(z.string()).catch([]).optional(),
+  expected_benefit: nullableString.optional(),
+  risk_summary: nullableString.optional(),
+  test_plan: nullableString.optional(),
+  recommendation: nullableString.optional(),
 });
 
 export const ProposalsResponseSchema = z.object({
@@ -1265,6 +1291,20 @@ export const ProposalsResponseSchema = z.object({
   testing_count: z.coerce.number().catch(0),
   applied_count: z.coerce.number().catch(0),
   skipped_count: z.coerce.number().catch(0),
+  delivery_count: z.coerce.number().catch(0),
+  integrated_count: z.coerce.number().catch(0),
+  stale_count: z.coerce.number().catch(0),
+  dismissed_count: z.coerce.number().catch(0),
+  metrics: z.object({
+    operator_decisions: z.coerce.number().catch(0),
+    accepted: z.coerce.number().catch(0),
+    dismissed: z.coerce.number().catch(0),
+    precision: z.coerce.number().nullable().catch(null),
+    code_precision: z.coerce.number().nullable().catch(null),
+    stale_rate: z.coerce.number().catch(0),
+    duplicate_rate: z.coerce.number().catch(0),
+    cost_per_accepted_usd: z.coerce.number().nullable().catch(null),
+  }).optional(),
   proposals: z.array(ProposalSchema).catch([]),
 });
 

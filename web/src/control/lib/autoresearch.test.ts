@@ -79,6 +79,22 @@ describe("autoresearch proposal actionability", () => {
     expect(isActionable(proposal({ id: "crash", target: "s", last_outcome: null }))).toBe(true);
   });
 
+  it("uses explicit operator ownership and separates decision, delivery and history", () => {
+    const items = [
+      proposal({ id: "decision", operator_action_required: true, finding_state: "verified", decision_state: "needs_operator", delivery_state: "none" }),
+      proposal({ id: "pooled", status: "pooled", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "queued" }),
+      proposal({ id: "routed", status: "routed_to_kanban", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "review" }),
+      proposal({ id: "integrated", status: "routed_to_kanban", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "integrated" }),
+      proposal({ id: "stale", status: "skipped", operator_action_required: false, finding_state: "stale", decision_state: "dismissed", delivery_state: "none" }),
+    ];
+
+    const split = splitAutoresearchProposals(items);
+    expect(split.actionable.map((item) => item.id)).toEqual(["decision"]);
+    expect(split.delivery.map((item) => item.id)).toEqual(["pooled", "routed"]);
+    expect(split.integrated.map((item) => item.id)).toEqual(["integrated"]);
+    expect(split.history.map((item) => item.id)).toEqual(["stale"]);
+  });
+
   it("excludes reverted proposals from the relevance queue and buckets them separately", () => {
     const items = [
       proposal({ id: "fresh", target: "a", section: "Output" }),

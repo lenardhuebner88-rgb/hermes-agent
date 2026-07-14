@@ -822,6 +822,36 @@ describe("ProposalsResponseSchema (Sprint A last_outcome counts)", () => {
   });
 });
 
+describe("ProposalsResponseSchema (operator lifecycle)", () => {
+  it("preserves routed/pooled/escalated states instead of coercing them to proposed", () => {
+    const raw = {
+      count: 3, open_count: 0, delivery_count: 2,
+      proposals: ["routed_to_kanban", "pooled", "escalated"].map((status, index) => ({
+        id: `p${index}`, target: "hermes_cli/auth.py", section: null,
+        rationale_plain: "grounded", diff_before_after: "", mode: "code", status,
+        finding_state: "verified", decision_state: status === "escalated" ? "needs_operator" : "accepted",
+        delivery_state: status === "pooled" ? "queued" : "none",
+        operator_action_required: false,
+      })),
+    };
+
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals.map((proposal) => proposal.status)).toEqual(["routed_to_kanban", "pooled", "escalated"]);
+    expect(parsed.proposals.every((proposal) => proposal.operator_action_required === false)).toBe(true);
+  });
+
+  it("fails an unknown status closed into history rather than proposed", () => {
+    const parsed = parseOrThrow(ProposalsResponseSchema, {
+      count: 1, open_count: 0,
+      proposals: [{
+        id: "future", target: "x", section: null, rationale_plain: "", diff_before_after: "",
+        mode: "skill", status: "future_terminal_state",
+      }],
+    }, "proposals");
+    expect(parsed.proposals[0].status).toBe("skipped");
+  });
+});
+
 
 describe("BlockedCompletionsResponseSchema", () => {
   it("parses verifier rejection fields for the dedicated fix panel", () => {

@@ -48,6 +48,7 @@ export function describeLoopStatus(status: AutoresearchStatus | null) {
 
 
 export function isActionable(proposal: Proposal): boolean {
+  if (typeof proposal.operator_action_required === "boolean") return proposal.operator_action_required;
   return proposal.status === "proposed" && proposal.last_outcome !== "reverted_no_improvement";
 }
 
@@ -56,13 +57,28 @@ export function isRevertedNoImprovement(proposal: Proposal): boolean {
 }
 
 export function splitAutoresearchProposals(proposals: Proposal[]) {
+  const actionable = proposals.filter(isActionable);
+  const delivery = proposals.filter((p) => !isActionable(p) && p.delivery_state !== "integrated" && (
+    ["queued", "running", "review", "failed"].includes(p.delivery_state ?? "")
+    || p.decision_owner === "kanban"
+    || (p.delivery_state == null && ["testing", "routed_to_kanban", "pooled", "escalated"].includes(p.status))
+  ));
+  const integrated = proposals.filter((p) => p.delivery_state === "integrated" || p.status === "applied");
+  const history = proposals.filter((p) => (
+    !isActionable(p)
+    && !delivery.includes(p)
+    && !integrated.includes(p)
+  ));
   return {
-    actionable: proposals.filter(isActionable),
+    actionable,
     reverted: proposals.filter(isRevertedNoImprovement),
     testing: proposals.filter((p) => p.status === "testing"),
     applied: proposals.filter((p) => p.status === "applied"),
     skipped: proposals.filter((p) => p.status === "skipped"),
     done: proposals.filter((p) => p.status === "applied" || p.status === "skipped"),
+    delivery,
+    integrated,
+    history,
   };
 }
 

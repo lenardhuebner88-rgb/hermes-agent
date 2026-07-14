@@ -262,6 +262,63 @@ def test_run_request_file_persists_detection_only_proposal(tmp_path, monkeypatch
     assert runs.read_runs()[0]["lane"] == "deep-audit"
 
 
+@pytest.mark.parametrize("delivery_status", ["routed_to_kanban", "pooled", "escalated"])
+def test_repeated_deep_audit_preserves_delivery_provenance(tmp_path, monkeypatch, delivery_status):
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))
+    import hermes_cli.autoresearch_proposals as proposals
+    import hermes_cli.autoresearch_runs as runs
+
+    importlib.reload(proposals)
+    importlib.reload(runs)
+    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
+    request = deep_audit.write_request(subsystem="unit", focus="proposal", max_files=1)
+
+    def fake_run(**_kwargs):
+        return {
+            "ok": True,
+            "findings": [{
+                "fileline": "hermes_cli/autoresearch_runs.py:23",
+                "severity": "critical",
+                "category": "bug_risk",
+                "title": "Stable audit finding",
+                "problem": "Manual fix is required.",
+                "evidence": "_VALID_LANES",
+                "fix_hint": "Patch manually.",
+                "_model_label": "unit-model",
+            }],
+            "subsystem": "unit",
+            "model": "unit-model",
+            "tokens": 123,
+            "iterations": 2,
+            "reason": "",
+            "files": ["hermes_cli/autoresearch_runs.py"],
+        }
+
+    monkeypatch.setattr(deep_audit, "run_deep_audit", fake_run)
+    deep_audit.run_request_file(Path(request["request_path"]))
+    stored = proposals.list_proposals()[0]
+    stored.update({
+        "status": delivery_status,
+        "kanban_task_id": "t_existing",
+        "decision_state": "accepted",
+        "delivery_state": "queued",
+    })
+    proposals.save_proposal(stored)
+    before_repeat = proposals.load_proposal(stored["id"])
+    assert before_repeat is not None
+
+    deep_audit.run_request_file(Path(request["request_path"]))
+
+    preserved = proposals.load_proposal(stored["id"])
+    assert preserved is not None
+    assert preserved["status"] == delivery_status
+    assert preserved["kanban_task_id"] == "t_existing"
+    assert preserved["decision_state"] == before_repeat["decision_state"]
+    assert preserved["delivery_state"] == before_repeat["delivery_state"]
+    assert deep_audit.read_findings()["proposals"] == []
+
+
 def test_deep_audit_endpoints_trigger_409_and_findings(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "audit"))
     monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))

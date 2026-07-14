@@ -9,7 +9,7 @@
 import type { Proposal, ToneName } from "./types";
 import type { BacklogItem, KanbanDecision, KanbanDecisionKind } from "./schemas";
 import { isActionable } from "./autoresearch";
-import { groupAutoresearchProposals } from "./proposalGroups";
+import { rankAutoresearchProposalGroups } from "./proposalGroups";
 import {
   FO_REASON_LABELS,
   isFoItemStale,
@@ -161,7 +161,9 @@ export function buildDecisionInbox(input: {
   const items: InboxItem[] = [];
 
   // 1) Autoresearch — duplicate proposal streams collapse to operator groups.
-  for (const group of groupAutoresearchProposals(input.proposals.filter(isActionable))) {
+  // Autoresearch contributes at most the three highest-value real decisions.
+  // Delivery/history stay on the Autoresearch surface, never in the inbox.
+  for (const group of rankAutoresearchProposalGroups(input.proposals.filter(isActionable), 3).shortlist) {
     const p = group.proposals[0];
     const severity = group.severity;
     items.push({

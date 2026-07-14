@@ -941,9 +941,12 @@ export interface AutoresearchRunsResponse {
 }
 
 export type ProposalMode = "skill" | "code" | "test";
-export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped";
+export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped" | "routed_to_kanban" | "pooled" | "escalated";
 export type ProposalSeverity = "critical" | "high" | "medium" | "low";
-export type ProposalLastOutcome = "applied" | "reverted_no_improvement" | null;
+export type ProposalLastOutcome = string | null;
+export type ProposalFindingState = "detected" | "verified" | "rejected" | "stale";
+export type ProposalDecisionState = "needs_operator" | "accepted" | "dismissed";
+export type ProposalDeliveryState = "none" | "queued" | "running" | "review" | "integrated" | "failed";
 
 export type GatePhase = "running" | "passed" | "failed" | "crashed";
 
@@ -982,6 +985,41 @@ export interface Proposal {
   created_at?: number | string | null;
   applied_at?: number | string | null;
   gate?: ProposalGate | null;
+  finding_state?: ProposalFindingState;
+  decision_state?: ProposalDecisionState;
+  delivery_state?: ProposalDeliveryState;
+  operator_action_required?: boolean;
+  decision_owner?: string | null;
+  disposition_reason?: string | null;
+  disposition_source?: string | null;
+  duplicate_of?: string | null;
+  finding_fingerprint?: string | null;
+  target_sha256?: string | null;
+  target_current_sha256?: string | null;
+  target_stale?: boolean;
+  kanban_task_id?: string | null;
+  escalation_task_id?: string | null;
+  linked_task_id?: string | null;
+  linked_task_title?: string | null;
+  linked_task_status?: string | null;
+  test_code?: string | null;
+  caught_mutant?: Record<string, unknown> | null;
+  affected_tests?: string[];
+  expected_benefit?: string | null;
+  risk_summary?: string | null;
+  test_plan?: string | null;
+  recommendation?: string | null;
+}
+
+export interface AutoresearchQualityMetrics {
+  operator_decisions: number;
+  accepted: number;
+  dismissed: number;
+  precision: number | null;
+  code_precision: number | null;
+  stale_rate: number;
+  duplicate_rate: number;
+  cost_per_accepted_usd: number | null;
 }
 
 export interface ProposalsResponse {
@@ -992,6 +1030,11 @@ export interface ProposalsResponse {
   testing_count?: number;
   applied_count?: number;
   skipped_count?: number;
+  delivery_count?: number;
+  integrated_count?: number;
+  stale_count?: number;
+  dismissed_count?: number;
+  metrics?: AutoresearchQualityMetrics;
   proposals: Proposal[];
 }
 

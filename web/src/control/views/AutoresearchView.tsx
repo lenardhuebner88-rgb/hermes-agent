@@ -46,14 +46,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const reverted = split.reverted;
   const applied = split.applied;
   const skipped = split.skipped;
+  const delivery = split.delivery;
+  const integrated = split.integrated;
+  const history = split.history;
   const [queueMode, setQueueMode] = useState<AutoresearchQueueMode>("all");
   const distribution = useMemo(() => severityDistribution(open), [open]);
   const queueModeSummary = useMemo(() => getAutoresearchQueueModeSummary(open, queueMode), [open, queueMode]);
   const filteredOpen = useMemo(() => filterAutoresearchQueueByMode(open, queueMode), [open, queueMode]);
   const emptyQueueModeGuidance = useMemo(() => getAutoresearchEmptyQueueModeGuidance(queueModeSummary), [queueModeSummary]);
   const filteredDistribution = useMemo(() => severityDistribution(filteredOpen), [filteredOpen]);
-  const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
-  const proposalGroupQueue = useMemo(() => rankAutoresearchProposalGroups(filteredOpen, 10), [filteredOpen]);
+  const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 3), [filteredOpen]);
+  const proposalGroupQueue = useMemo(() => rankAutoresearchProposalGroups(filteredOpen, 3), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
   // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
   // operator actually sees, never the backlog hidden in the collapsed disclosure.
@@ -606,8 +609,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       <ResolvedQueues
         summary={resolvedSummary}
         reverted={reverted}
-        applied={applied}
-        skipped={skipped}
+        delivery={delivery}
+        integrated={integrated}
+        history={history}
+        metrics={store.data?.metrics ?? null}
         density={density}
         archiveBusy={bulkRevertedBusy}
         archiveDisabled={!!store.busy || bulkRevertedBusy}

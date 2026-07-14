@@ -996,7 +996,7 @@ def run_request_file(path: Path) -> dict[str, Any]:
             for finding in result.get("findings") or []:
                 proposal = autoresearch_proposals._build_deep_audit_proposal(finding)
                 existing = autoresearch_proposals.load_proposal(proposal["id"])
-                if existing and existing.get("status") in {"proposed", "testing", "applied", "skipped"}:
+                if existing and existing.get("status") in autoresearch_proposals._VALID_STATUS:
                     continue
                 if not autoresearch_proposals.meets_intake_threshold(proposal):
                     # medium/low → detection-only: bleibt im Finding-Result, nicht in der Queue.

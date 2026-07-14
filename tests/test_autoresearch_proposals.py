@@ -207,6 +207,82 @@ def test_payload_counts_only_actionable_open_and_reports_status_split(tmp_home):
     assert all(p["last_outcome"] == "reverted_no_improvement" for p in reverted_cards)
 
 
+def test_payload_uses_explicit_lifecycle_and_preserves_test_foundry_evidence(tmp_home):
+    proposals.save_proposal({
+        "id": "mutation-card", "schema": proposals.PROPOSAL_SCHEMA,
+        "mode": "test", "proposal_type": "mutation_test", "target": "hermes_cli/auth.py",
+        "target_path": "hermes_cli/auth.py", "section": None, "title": "Mutation",
+        "rationale_plain": "Verified gap", "diff_before_after": "diff", "status": "pooled",
+        "evidence": "condition replacement survived", "fix_hint": "add a public behavior test",
+        "test_code": "def test_public_behavior():\n    assert True\n",
+        "caught_mutant": {"operator": "condition", "lineno": 42},
+        "affected_tests": ["tests/test_auth.py"], "created_at": "2026-07-14T00:00:00Z",
+    })
+
+    payload = proposals.proposals_payload()
+    card = payload["proposals"][0]
+
+    assert payload["open_count"] == 0
+    assert payload["delivery_count"] == 1
+    assert card["finding_state"] == "verified"
+    assert card["decision_state"] == "accepted"
+    assert card["delivery_state"] == "queued"
+    assert card["test_code"].startswith("def test_public_behavior")
+    assert card["caught_mutant"]["lineno"] == 42
+    assert card["affected_tests"] == ["tests/test_auth.py"]
+    assert all(card[field] for field in ("evidence", "expected_benefit", "risk_summary", "test_plan", "recommendation"))
+
+
+def test_lifecycle_backfill_cleanup_has_preview_backup_and_is_idempotent(tmp_home):
+    _store_minimal_proposal("legacy-mutation", mode="test", severity="medium")
+    stored = proposals.load_proposal("legacy-mutation")
+    assert stored is not None
+    stored.update({"proposal_type": "mutation_test", "status": "escalated"})
+    # Simulate a pre-lifecycle snapshot, rather than a proposal saved by current code.
+    for key in ("lifecycle_version", "finding_state", "decision_state", "delivery_state", "operator_action_required"):
+        stored.pop(key, None)
+    proposals._proposal_path("legacy-mutation").write_text(json.dumps(stored), encoding="utf-8")
+
+    preview = proposals.backfill_lifecycle(dry_run=True, cleanup_legacy=True)
+    assert preview["would_update"] == 1
+    assert preview["backup_dir"] is None
+    assert proposals.load_proposal("legacy-mutation")["status"] == "escalated"
+
+    applied = proposals.backfill_lifecycle(dry_run=False, cleanup_legacy=True)
+    assert applied["updated"] == 1
+    assert applied["backup_dir"] and Path(applied["backup_dir"]).is_dir()
+    cleaned = proposals.load_proposal("legacy-mutation")
+    assert cleaned["status"] == "skipped"
+    assert cleaned["finding_state"] == "stale"
+    assert cleaned["decision_state"] == "dismissed"
+    assert cleaned["operator_action_required"] is False
+
+    again = proposals.backfill_lifecycle(dry_run=False, cleanup_legacy=True)
+    assert again["would_update"] == 0
+    assert again["updated"] == 0
+    assert again["backup_dir"] is None
+
+
+def test_lifecycle_backfill_accepts_auditable_operator_disposition_overrides(tmp_home):
+    _store_minimal_proposal("reviewed-by-design", mode="code", severity="high")
+    override = {
+        "reviewed-by-design": {
+            "status": "skipped", "last_outcome": "rejected_manual_review_by_design",
+            "finding_state": "rejected", "decision_state": "dismissed", "delivery_state": "none",
+            "operator_action_required": False, "disposition_source": "operator_cleanup_review",
+            "disposition_reason": "verified as intended behavior",
+        }
+    }
+
+    preview = proposals.backfill_lifecycle(dry_run=True, disposition_overrides=override)
+    assert preview["would_update"] == 1
+    applied = proposals.backfill_lifecycle(dry_run=False, disposition_overrides=override)
+    assert applied["updated"] == 1
+    stored = proposals.load_proposal("reviewed-by-design")
+    assert stored["status"] == "skipped"
+    assert stored["disposition_reason"] == "verified as intended behavior"
+
+
 def test_backfill_last_outcome_supports_dry_run_backup_and_idempotency(tmp_home):
     _store_minimal_proposal("fresh", result="noch offen")
     _store_minimal_proposal("reverted", result="↩ zurückgerollt — keine Verbesserung: rot")
