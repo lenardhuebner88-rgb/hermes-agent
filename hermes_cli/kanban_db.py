@@ -9080,7 +9080,18 @@ def claim_task(
             conn,
             task_id,
             "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
+            {
+                "lock": lock,
+                "expires": expires,
+                "run_id": run_id,
+                "comment_id_watermark": int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) FROM task_comments "
+                        "WHERE task_id = ?",
+                        (task_id,),
+                    ).fetchone()[0]
+                ),
+            },
             run_id=run_id,
         )
         claimed = get_task(conn, task_id)
@@ -10299,8 +10310,16 @@ def _task_plan_spec(task: "Task") -> dict:
     marker_at = body.find(_CODE_TASK_CONTRACT_MARKER_PREFIX)
     if marker_at != -1:
         body = body[:marker_at]
+    # ``tasks.kind`` describes the work surface, not its risk. The shared
+    # control-plane classifier intentionally still treats an explicit
+    # ``risk_class='code'`` as review-worthy; the Kanban adapter must therefore
+    # avoid manufacturing that risk signal from an ordinary code card. Other
+    # kind values retain their historical mapping until they get their own
+    # structured risk field.
+    task_kind = (task.kind or "").strip()
+    risk_class = "" if task_kind.lower() == "code" else task_kind
     return {
-        "risk_class": (task.kind or ""),
+        "risk_class": risk_class,
         "objective": (task.title or ""),
         "goal": body.strip(),
     }
@@ -10687,6 +10706,102 @@ def _run_originated_from_review(
     except sqlite3.Error:
         return False
     return row is not None
+
+
+REVIEW_WAIT_ATTENTION_SECONDS = 180
+_PRODUCTIVE_REVIEW_HEARTBEAT_PREFIXES = (
+    "receiving stream response",
+    "executing tool:",
+    "tool completed:",
+    "terminal command running",
+    "execute_code running",
+    "modal command running",
+)
+
+
+def _review_heartbeat_is_productive(note: object) -> bool:
+    """Whether a heartbeat proves model/tool progress rather than liveness."""
+    normalized = str(note or "").strip().lower()
+    if normalized.startswith(_PRODUCTIVE_REVIEW_HEARTBEAT_PREFIXES):
+        return True
+    return re.match(r"^executing\s+\d+\s+tools\s+concurrently:", normalized) is not None
+
+
+def emit_review_wait_attention(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    threshold_seconds: int = REVIEW_WAIT_ATTENTION_SECONDS,
+) -> list[str]:
+    """Append one visibility-only attention event per idle review run.
+
+    A run qualifies only when it was claimed from the review lane and has gone
+    ``threshold_seconds`` without a productive model/tool heartbeat. Provider
+    waits, process heartbeats, and log-size heartbeats do not reset the clock.
+    The event is deduplicated by run and never changes task/run state, retries,
+    reclaims, or cancels.
+    """
+    observed_at = int(time.time()) if now is None else int(now)
+    threshold = max(1, int(threshold_seconds))
+    emitted: list[str] = []
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT t.id AS task_id, t.current_run_id AS run_id, "
+            "       r.started_at AS started_at "
+            "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+            "WHERE t.status = 'running' AND r.ended_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            task_id = row["task_id"]
+            run_id = int(row["run_id"])
+            if not _run_originated_from_review(conn, task_id, run_id):
+                continue
+            already_emitted = conn.execute(
+                "SELECT 1 FROM task_events "
+                "WHERE task_id = ? AND run_id = ? "
+                "  AND kind = 'review_wait_attention' LIMIT 1",
+                (task_id, run_id),
+            ).fetchone()
+            if already_emitted is not None:
+                continue
+
+            last_productive_at = int(row["started_at"] or observed_at)
+            heartbeats = conn.execute(
+                "SELECT payload, created_at FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = 'heartbeat' "
+                "ORDER BY created_at ASC, id ASC",
+                (task_id, run_id),
+            ).fetchall()
+            for heartbeat in heartbeats:
+                try:
+                    heartbeat_payload = json.loads(heartbeat["payload"] or "{}")
+                except Exception:
+                    heartbeat_payload = {}
+                if isinstance(heartbeat_payload, dict) and _review_heartbeat_is_productive(
+                    heartbeat_payload.get("note")
+                ):
+                    last_productive_at = max(
+                        last_productive_at, int(heartbeat["created_at"] or 0)
+                    )
+
+            idle_seconds = max(0, observed_at - last_productive_at)
+            if idle_seconds < threshold:
+                continue
+            _append_event(
+                conn,
+                task_id,
+                "review_wait_attention",
+                {
+                    "run_id": run_id,
+                    "threshold_seconds": threshold,
+                    "idle_seconds": idle_seconds,
+                    "last_productive_at": last_productive_at,
+                    "reason": "review run has no productive model or tool event",
+                },
+                run_id=run_id,
+            )
+            emitted.append(task_id)
+    return emitted
 
 
 _VERDICT_NORMALIZE = {
@@ -11123,13 +11238,14 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     review to the chain tip (ONE judgment per feature, on the integrated diff).
 
     Applies ONLY when all of: ``judge_at_chain_tip`` is on (opt-in), the task
-    belongs to a PlanSpec chain (``planspec_source`` set), its effective tier
-    participates (``review``; ``critical`` only when the operator explicitly
-    flipped ``critical_reviews_each_slice`` off), the chain still has OTHER
-    open code-bearing slices (i.e. this is NOT the tip — tip detection counts
-    code roles only, so a trailing docs/scribe task never swallows the chain's
-    single judgment), AND the deterministic worker gate ran GREEN. Returns the
-    green stamp on defer, ``None`` otherwise (park in review as before).
+    belongs to a canonical linked chain (native auto-decompose and PlanSpec use
+    the same root identity), its effective tier participates (``review``;
+    ``critical`` only when the operator explicitly flipped
+    ``critical_reviews_each_slice`` off), the chain still has OTHER open
+    code-bearing slices (i.e. this is NOT the tip — trailing docs/research do
+    not count), AND the deterministic worker gate ran GREEN. Legacy unlinked
+    PlanSpec rows retain their source-based fallback. Returns the green stamp on
+    defer, ``None`` otherwise (park in review as before).
     """
     cfg = _review_gate_config()
     if not cfg.get("judge_at_chain_tip", False):
@@ -11143,19 +11259,47 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
         "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     source = (row["planspec_source"] or "").strip() if row else ""
-    if not source:
+
+    # Reuse the worktree subsystem's canonical identity rather than defining a
+    # second graph model here. Decompose graphs point every slice at the root in
+    # the inverted direction; these helpers already encode that nuance.
+    from hermes_cli import kanban_worktrees as _kwt
+
+    root_id = _kwt.chain_root_id(conn, task_id)
+    member_ids = _kwt._chain_member_ids(conn, root_id)
+    linked_chain = len(member_ids) > 1
+
+    candidate_rows: list[sqlite3.Row] = []
+    if linked_chain:
+        candidate_ids = sorted(member_ids - {task_id})
+        # A decompose root is an orchestration card, not a code-bearing slice,
+        # even if a legacy caller assigned it to a code profile.
+        if root_id != task_id and _kwt._is_decompose_root(conn, root_id):
+            candidate_ids = [item for item in candidate_ids if item != root_id]
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            candidate_rows = conn.execute(
+                "SELECT id, assignee, kind, status FROM tasks "
+                f"WHERE id IN ({placeholders})",
+                tuple(candidate_ids),
+            ).fetchall()
+    elif source:
+        # Compatibility for pre-graph PlanSpec imports. New native and PlanSpec
+        # taskgraphs take the canonical linked path above.
+        candidate_rows = conn.execute(
+            "SELECT id, assignee, kind, status FROM tasks "
+            "WHERE planspec_source = ? AND id != ?",
+            (source, task_id),
+        ).fetchall()
+    else:
         return None
-    code_roles = sorted(cfg.get("code_roles") or ())
-    if not code_roles:
-        return None
-    placeholders = ",".join("?" for _ in code_roles)
-    open_code_siblings = conn.execute(
-        "SELECT COUNT(*) FROM tasks "
-        "WHERE planspec_source = ? AND id != ? "
-        "  AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
-        f"  AND lower(trim(assignee)) IN ({placeholders})",
-        (source, task_id, *code_roles),
-    ).fetchone()[0]
+
+    terminal = {"done", "archived", "failed", "canceled", "cancelled"}
+    open_code_siblings = any(
+        str(candidate["status"] or "").strip().lower() not in terminal
+        and _is_code_task_row(candidate)
+        for candidate in candidate_rows
+    )
     if not open_code_siblings:
         return None  # this IS the tip — the one judgment fires here
     stamp = _run_worker_gate(conn, task_id)
@@ -11176,6 +11320,8 @@ def _submit_for_review(
     stage: int = 0,
     effective_tier: Optional[str] = None,
     target_profile: Optional[str] = None,
+    diff_run_id: Optional[int] = None,
+    blocked_only: bool = False,
 ) -> bool:
     """Park a code-bearing completion in ``review`` instead of ``done``.
 
@@ -11188,7 +11334,9 @@ def _submit_for_review(
     # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
     # must not run under the txn). Empty dict when no/non-git workspace.
     diff_snapshot = _capture_review_diff_snapshot(
-        conn, task_id, expected_run_id=expected_run_id
+        conn,
+        task_id,
+        expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
     )
     if diff_snapshot:
         run_metadata = (
@@ -11206,7 +11354,21 @@ def _submit_for_review(
     # commands => {"configured": False}; RED command => WorkerGateError).
     _wg_stamp = _run_worker_gate(conn, task_id)
     with write_txn(conn):
-        if expected_run_id is None:
+        if blocked_only:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       result       = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status = 'blocked'
+                """,
+                (result, task_id),
+            )
+        elif expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
@@ -15757,19 +15919,43 @@ def _title_terms(title: Optional[str]) -> set[str]:
 def _deliverable_evidence_for_protocol_miss(
     conn: sqlite3.Connection,
     task_id: str,
+    *,
+    expected_run_id: Optional[int] = None,
 ) -> Optional[dict[str, Any]]:
     row = conn.execute(
-        "SELECT title, assignee FROM tasks WHERE id = ?",
+        "SELECT title, assignee, status, current_run_id FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
+        return None
+    run_id = expected_run_id
+    if run_id is None and row["current_run_id"] is not None:
+        run_id = int(row["current_run_id"])
+    if run_id is None:
+        return None
+    if row["current_run_id"] is None or int(row["current_run_id"]) != int(run_id):
+        return None
+    claimed = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, int(run_id)),
+    ).fetchone()
+    if claimed is None or not claimed["payload"]:
+        return None
+    try:
+        claimed_payload = json.loads(claimed["payload"])
+    except (TypeError, ValueError):
+        return None
+    watermark = _validated_comment_id_watermark(claimed_payload)
+    if watermark is None:
         return None
     terms = _title_terms(row["title"])
     assignee = (row["assignee"] or "").strip().lower()
     rows = conn.execute(
         "SELECT id, author, body, created_at FROM task_comments "
-        "WHERE task_id = ? ORDER BY id DESC LIMIT 10",
-        (task_id,),
+        "WHERE task_id = ? AND id > ? ORDER BY id DESC LIMIT 10",
+        (task_id, watermark),
     ).fetchall()
     for comment in rows:
         body = (comment["body"] or "").strip()
@@ -15791,6 +15977,7 @@ def _deliverable_evidence_for_protocol_miss(
             continue
         return {
             "comment_id": int(comment["id"]),
+            "run_id": int(run_id),
             "author": comment["author"],
             "created_at": int(comment["created_at"]),
             "preview": body[:400],
@@ -16680,6 +16867,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 evidence = _deliverable_evidence_for_protocol_miss(
                     conn,
                     row["id"],
+                    expected_run_id=row["current_run_id"],
                 )
                 if evidence is not None:
                     protocol_violation = False
@@ -16900,11 +17088,13 @@ def repair_deliverable_posted_not_completed(
     *,
     actor: str = "operator",
 ) -> bool:
-    """Terminalize a recoverable deliverable/protocol miss without approval.
+    """Repair a recoverable deliverable/protocol miss without approval.
 
     This closes only the missing ``kanban_complete`` protocol step when a
     ``deliverable_posted_not_completed`` event from the current task cycle
-    carries clear evidence. It does not write a review verdict.
+    carries clear evidence. Code/worktree tasks re-enter normal review;
+    proven non-code deliverables may terminalize directly. No review verdict
+    is synthesized.
     """
     now = int(time.time())
     actor = (actor or "operator").strip() or "operator"
@@ -16914,7 +17104,7 @@ def repair_deliverable_posted_not_completed(
     with write_txn(conn):
         row = conn.execute(
             """
-            SELECT evidence.payload
+            SELECT evidence.payload, evidence.run_id
               FROM task_events AS evidence
              WHERE evidence.task_id = ?
                AND evidence.kind = ?
@@ -16950,6 +17140,55 @@ def repair_deliverable_posted_not_completed(
         if not isinstance(evidence, dict):
             return False
 
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND status = 'blocked'",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            return False
+
+    code_bearing = (
+        _is_code_task_row(task_row)
+        or str(task_row["workspace_kind"] or "").strip().lower() == "worktree"
+    )
+    source_run_id = int(row["run_id"]) if row["run_id"] is not None else None
+    if code_bearing:
+        delivered = str(evidence.get("preview") or "").strip()
+        metadata = {
+            "repair": DELIVERABLE_POSTED_NOT_COMPLETED,
+            "actor": actor,
+            "evidence": evidence,
+            "source_run_id": source_run_id,
+        }
+        submitted = _submit_for_review(
+            conn,
+            task_id,
+            result=delivered or summary,
+            summary=summary,
+            metadata=metadata,
+            verified_cards=[],
+            expected_run_id=None,
+            diff_run_id=source_run_id,
+            blocked_only=True,
+        )
+        if not submitted:
+            return False
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "deliverable_protocol_repaired",
+                {
+                    "actor": actor,
+                    "terminalized": False,
+                    "routed_to_review": True,
+                    "evidence": evidence,
+                    "source_run_id": source_run_id,
+                },
+            )
+        return True
+
+    with write_txn(conn):
         with _review_done_terminal_authority():
             cur = conn.execute(
                 """
@@ -19630,6 +19869,88 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
         stall_class=str(stall_class) if stall_class else None,
         reason=why_now,
     )
+
+    # A structured operator hold is authoritative over generic reviewer-verdict
+    # boilerplate. ``REQUEST_CHANGES``/``NEEDS_REVISION`` alone says only that
+    # the chain cannot proceed autonomously; it does not prove a code defect.
+    # Concrete text signals and structural outcome/stall mappings retain
+    # precedence, so a red gate or real defect can never be hidden here.
+    blocked_kind = str(evidence.get("blocked_kind") or "").strip().lower()
+    generic_review_markers = {
+        "request_changes",
+        "requested changes",
+        "request changes",
+        "needs_revision",
+        "needs revision",
+        "reviewer finding",
+    }
+    concrete_text_markers = {
+        marker
+        for cls, markers in _HEILER_TEXT_SIGNALS
+        for marker in markers
+        if marker not in generic_review_markers and cls != HEILER_CLASS_OPERATOR_GATED
+    }
+    evidence_text = " ".join((last_error, why_now)).lower()
+    has_concrete_text = any(
+        marker in evidence_text for marker in concrete_text_markers
+    )
+    red_gate_source: Optional[str] = None
+    red_gate_match: Optional[str] = None
+    for gate_key in ("worker_gate", "gate", "release_gate"):
+        gate_evidence = evidence.get(gate_key)
+        if not isinstance(gate_evidence, dict):
+            continue
+        gate_state = str(
+            gate_evidence.get("status") or gate_evidence.get("outcome") or ""
+        ).strip().lower()
+        if gate_evidence.get("passed") is False:
+            red_gate_source = gate_key
+            red_gate_match = f"{gate_key}.passed=false"
+            break
+        if gate_state in {"red", "failed", "failure"}:
+            red_gate_source = gate_key
+            red_gate_match = f"{gate_key}.{gate_state}"
+            break
+    has_structured_defect = bool(
+        (stall_class and str(stall_class) in _HEILER_STALL_CLASS)
+        or (outcome and str(outcome) in _HEILER_OUTCOME_CLASS)
+        or (outcome and str(outcome) in _RELEASE_GATE_RAN_OUTCOMES)
+        or red_gate_source
+    )
+    if (
+        red_gate_source is not None
+        and h_class == HEILER_CLASS_REAL_BUG
+        and h_ev.get("signal_source") == "text"
+        and h_ev.get("matched") in generic_review_markers
+    ):
+        ev = {
+            "matched": red_gate_match,
+            "signal_source": red_gate_source,
+        }
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return HEILER_CLASS_REAL_BUG, ev
+    if (
+        blocked_kind in {"operator_question", "needs_operator"}
+        and h_class == HEILER_CLASS_REAL_BUG
+        and h_ev.get("signal_source") == "text"
+        and h_ev.get("matched") in generic_review_markers
+        and not has_concrete_text
+        and not has_structured_defect
+    ):
+        ev = {
+            "matched": blocked_kind,
+            "signal_source": "blocked_kind",
+        }
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return HEILER_CLASS_OPERATOR_GATED, ev
     if (
         not last_error
         and evidence.get("source") == SILENT_BLOCK_ESCALATION_SOURCE
@@ -23112,6 +23433,27 @@ def _dispatch_once_locked(
                 )
                 if auto:
                     result.auto_blocked.append(claimed.id)
+            continue
+        try:
+            _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
+        except _kwt.WorktreeError as exc:
+            reason = f"worker base preparation: {exc}"
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    claimed.id,
+                    "worker_base_rejected",
+                    {"reason": str(exc)},
+                    run_id=_current_run_id(conn, claimed.id),
+                )
+            auto = _record_spawn_failure(
+                conn,
+                claimed.id,
+                reason,
+                failure_limit=1,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
             continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn

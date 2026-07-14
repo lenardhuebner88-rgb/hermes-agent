@@ -882,6 +882,141 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
             "created": True}
 
 
+def prepare_worker_base(
+    worktree: Path | str,
+    *,
+    recorded_head: str,
+    merge_target: str,
+) -> dict[str, str]:
+    """Fail closed on reused-worktree drift, then update a clean stale base.
+
+    This runs after claim/provisioning but before the worker process starts.
+    ``recorded_head`` is the HEAD captured by the current run before any worker
+    edit.  Dirty state or an unexpected HEAD is never rewritten.  A clean
+    branch whose target advanced is rebased, with an automatic abort on
+    conflict so the dispatcher can block with the original worktree intact.
+    """
+    wt = Path(worktree)
+    actual_head = _git(wt, "rev-parse", "HEAD")
+    recorded = str(recorded_head or "").strip()
+    if not recorded or actual_head != recorded:
+        raise WorktreeError(
+            "worktree HEAD does not match recorded pre-run HEAD "
+            f"(recorded={recorded or 'missing'}, actual={actual_head})"
+        )
+    dirty = dirty_files(wt)
+    if dirty:
+        raise WorktreeError(
+            "worktree is dirty before worker edits; refusing automatic base "
+            f"update ({', '.join(dirty[:8])})"
+        )
+    target = str(merge_target or "").strip()
+    if not target:
+        raise WorktreeError("worktree merge target is missing")
+    target_head = _git(wt, "rev-parse", target)
+    if actual_head == target_head or _branch_is_ancestor(wt, target_head, actual_head):
+        return {
+            "action": "current",
+            "previous_head": actual_head,
+            "head": actual_head,
+            "merge_target": target,
+            "merge_target_head": target_head,
+        }
+    try:
+        _git(wt, "rebase", target)
+    except WorktreeError as exc:
+        _git(wt, "rebase", "--abort", check=False)
+        raise WorktreeError(
+            f"clean stale worktree could not rebase onto {target}: {exc}"
+        ) from exc
+    new_head = _git(wt, "rev-parse", "HEAD")
+    if dirty_files(wt):
+        raise WorktreeError(
+            "worktree became dirty while preparing the worker base"
+        )
+    return {
+        "action": "rebased",
+        "previous_head": actual_head,
+        "head": new_head,
+        "merge_target": target,
+        "merge_target_head": target_head,
+    }
+
+
+def prepare_reused_task_worktree(
+    conn: sqlite3.Connection,
+    task,
+    workspace: Path | str,
+) -> Optional[dict[str, str]]:
+    """Prepare a task retry's already-provisioned worktree before spawn.
+
+    First-time chain provisioning is excluded: a sibling may legitimately
+    inherit earlier slice commits and uses separate chain-tip semantics.  A
+    task whose recorded workspace already pointed into the provisioned tree is
+    a retry/continuation and has an exact pre-run HEAD suitable for this guard.
+    """
+    prior = split_provisioned_path(task.workspace_path)
+    current = split_provisioned_path(workspace)
+    if prior is None or current is None:
+        return None
+    prior_repo, prior_root_id, prior_wt = prior
+    repo_root, root_id, wt = current
+    if (
+        prior_repo.resolve() != repo_root.resolve()
+        or prior_root_id != root_id
+        or prior_wt.resolve() != wt.resolve()
+    ):
+        raise WorktreeError(
+            "provisioned worktree identity drifted before worker spawn"
+        )
+    row = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?",
+        (task.id,),
+    ).fetchone()
+    run_id = int(row["current_run_id"]) if row and row["current_run_id"] else None
+    if run_id is None:
+        raise WorktreeError("current task run is missing before worker base preparation")
+    run = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs WHERE id = ? AND task_id = ?",
+        (run_id, task.id),
+    ).fetchone()
+    recorded_head = str(run["pre_run_commit_sha"] or "").strip() if run else ""
+    event = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'worktree_provisioned' "
+        "ORDER BY id ASC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    merge_target = ""
+    if event and event["payload"]:
+        try:
+            payload = json.loads(event["payload"])
+            if isinstance(payload, dict):
+                merge_target = str(payload.get("merge_target") or "").strip()
+        except (TypeError, ValueError):
+            pass
+    result = prepare_worker_base(
+        wt,
+        recorded_head=recorded_head,
+        merge_target=merge_target,
+    )
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_runs SET pre_run_commit_sha = ? WHERE id = ?",
+            (result["head"], run_id),
+        )
+        kb._append_event(
+            conn,
+            task.id,
+            "worker_base_prepared",
+            {**result, "run_id": run_id},
+            run_id=run_id,
+        )
+    return result
+
+
 def chain_root_id(conn: sqlite3.Connection, task_id: str) -> str:
     """Walk ``task_links`` upward to the chain root (deterministic: smallest
     parent id at each level; cycle-safe)."""

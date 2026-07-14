@@ -144,6 +144,65 @@ def test_ensure_worktree_is_idempotent(repo):
     assert second["path"] == first["path"]
 
 
+def test_prepare_worker_base_rebases_clean_stale_worktree(repo):
+    info = kwt.ensure_worktree(repo, "t_fresh")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _commit_in(repo, "main-only.txt", "new base\n", "advance main")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert result["previous_head"] == recorded_head
+    assert result["head"] == _git(repo, "rev-parse", "main")
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_rejects_head_drift_before_rebase(repo):
+    info = kwt.ensure_worktree(repo, "t_drift")
+    worktree = info["path"]
+
+    with pytest.raises(kwt.WorktreeError, match="recorded pre-run HEAD"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head="0" * 40,
+            merge_target="main",
+        )
+
+
+def test_prepare_worker_base_rejects_dirty_stale_worktree(repo):
+    info = kwt.ensure_worktree(repo, "t_dirty_stale")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _commit_in(repo, "main-only.txt", "new base\n", "advance main")
+    (worktree / "a.txt").write_text("uncommitted worker edit\n")
+
+    with pytest.raises(kwt.WorktreeError, match="dirty before worker edits"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+        )
+
+
+def test_prepare_worker_base_rejects_dirty_current_worktree(repo):
+    info = kwt.ensure_worktree(repo, "t_dirty_current")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    (worktree / "a.txt").write_text("uncommitted worker edit\n")
+
+    with pytest.raises(kwt.WorktreeError, match="dirty before worker edits"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+        )
+
+
 def test_ensure_worktree_symlinks_node_modules(repo):
     (repo / "node_modules").mkdir()
     (repo / "web" / "node_modules").mkdir()
@@ -576,6 +635,69 @@ def test_dispatch_once_provisions_when_flag_on(
     assert kwt.is_provisioned_path(spawned[tid])
     # The live checkout itself stays clean (worktrees are filtered noise).
     assert kwt.dirty_files(repo) == []
+
+
+def test_dispatch_once_updates_clean_stale_worktree_before_worker_spawn(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    spawned_heads: list[str] = []
+
+    def fake_spawn(_task, workspace):
+        spawned_heads.append(_git(workspace, "rev-parse", "HEAD"))
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.reclaim_task(conn, tid, reason="prepare retry")
+        _commit_in(repo, "main-only.txt", "new base\n", "advance main")
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, tid)
+        prepared = _events(conn, tid, "worker_base_prepared")
+
+    assert [task_id for task_id, _profile, _workspace in result.spawned] == [tid]
+    assert spawned_heads[-1] == _git(repo, "rev-parse", "main")
+    assert task.status == "running"
+    assert prepared[-1]["action"] == "rebased"
+
+
+def test_dispatch_once_blocks_dirty_worktree_before_worker_spawn(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    spawned: list[str] = []
+
+    def fake_spawn(_task, workspace):
+        spawned.append(workspace)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.reclaim_task(conn, tid, reason="prepare dirty retry")
+        task = kb.get_task(conn, tid)
+        (Path(task.workspace_path) / "a.txt").write_text("dirty retry\n")
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, tid)
+        rejected = _events(conn, tid, "worker_base_rejected")
+
+    assert len(spawned) == 1, "dirty retry must not reach the worker spawn"
+    assert task.status == "blocked"
+    assert result.auto_blocked == [tid]
+    assert "dirty before worker edits" in rejected[-1]["reason"]
 
 
 def test_dispatch_once_flag_off_is_unchanged(

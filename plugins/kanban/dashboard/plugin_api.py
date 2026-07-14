@@ -7007,9 +7007,10 @@ def repair_task_endpoint(
     Maps 1:1 onto the proven primitive
     :func:`kanban_db.repair_deliverable_posted_not_completed` — it reads the
     latest ``deliverable_posted_not_completed`` event, and only when that
-    carries clear evidence does it transition the task ``blocked → done`` with
-    a synthetic completed run, a ``deliverable_protocol_repaired`` event and a
-    ``recompute_ready``. No review verdict is written.
+    carries clear evidence does it repair the missing lifecycle call. Code or
+    worktree tasks route ``blocked → review`` through the normal worker/review/
+    integration gates; only safe non-code deliverables retain the proven
+    direct ``blocked → done`` repair. No review verdict is synthesized.
 
     Same guard contract as ``POST /workers/{run_id}/action``: the mutation
     requires ``confirm: true`` and a refusal (missing confirm, or nothing
@@ -7039,8 +7040,9 @@ def repair_task_endpoint(
         return {
             "ok": True, "task_id": task_id,
             "detail": (
-                "Protokoll-Repair: fehlender kanban_complete nachgeschlossen "
-                "(blocked → done)."
+                "Protokoll-Repair: fehlender kanban_complete nachgeschlossen; "
+                "Code/Worktree läuft durch Review, sichere Non-Code-Ausgabe "
+                "wird direkt terminalisiert."
             ),
         }
     finally:

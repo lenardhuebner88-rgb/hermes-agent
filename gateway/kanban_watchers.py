@@ -2323,6 +2323,26 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: openclaw poll-back failed on board %s",
                         slug, exc_info=True,
                     )
+                # Visibility only: after 180s without productive model/tool
+                # activity, surface one deduplicated attention event for the
+                # current review run. This never cancels, reclaims, or retries.
+                try:
+                    attention_tasks = _kb.emit_review_wait_attention(conn)
+                    if attention_tasks:
+                        logger.warning(
+                            "kanban dispatcher [%s]: %d review run(s) waiting "
+                            "without productive activity: %s",
+                            slug,
+                            len(attention_tasks),
+                            ", ".join(attention_tasks),
+                        )
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: review wait-attention sweep failed "
+                        "on board %s",
+                        slug,
+                        exc_info=True,
+                    )
                 try:
                     _kb.no_silent_stall_sweep(conn)
                 except Exception:

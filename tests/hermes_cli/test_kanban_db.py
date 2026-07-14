@@ -5501,6 +5501,64 @@ def test_dispatch_auto_retry_keeps_operator_hold_blocked(
         assert event.payload["blocked_kind"] == "operator_question"
 
 
+def test_operator_hold_never_duplicates_run_and_answer_resumes_once(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    clock = {"now": base}
+    monkeypatch.setattr(kb.time, "time", lambda: clock["now"])
+    spawned: list[str] = []
+
+    def fake_spawn(task, workspace):
+        spawned.append(task.id)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="choose an authorized release scope",
+            assignee="coder",
+            body="Operator must choose before the implementation continues.",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+        assert kb.hold_task(
+            conn,
+            task_id,
+            reason="REQUEST_CHANGES — operator must choose the allowed scope",
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == 1
+
+        for tick_at in (base + 301, base + 602):
+            clock["now"] = tick_at
+            result = kb.dispatch_once(
+                conn,
+                spawn_fn=fake_spawn,
+                auto_retry_blocked=True,
+                max_spawn=1,
+            )
+            assert result.auto_retried_blocked == []
+            assert result.spawned == []
+        assert spawned == []
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == 1
+
+        assert kb.answer_operator_question(
+            conn,
+            task_id,
+            answer="Proceed locally without any remote push.",
+        ) == "ready"
+        clock["now"] = base + 603
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn, max_spawn=1)
+
+        assert [item[0] for item in result.spawned] == [task_id]
+        assert spawned == [task_id]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == 2
+
+
 def test_dispatch_auto_retry_harmless_prose_without_verdict_is_retryable(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
@@ -9578,12 +9636,17 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
     with kb.connect_closing() as conn:
-        tid = kb.create_task(conn, title="render quarterly report", assignee="coder")
+        tid = kb.create_task(
+            conn,
+            title="render quarterly report",
+            assignee="default",
+            kind="text",
+        )
         kb.claim_task(conn, tid)
         kb.add_comment(
             conn,
             tid,
-            "coder",
+            "default",
             (
                 "# Deliverable: render quarterly report\n\n"
                 "The quarterly report is complete and mapped to the requested "
@@ -9621,6 +9684,94 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     assert repair_events
     assert repair_events[-1].payload["actor"] == "integrator"
     assert all(row["verdict"] is None for row in verdicts)
+
+
+def test_code_deliverable_protocol_repair_routes_through_review(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        kb,
+        "_run_worker_gate",
+        lambda *_args, **_kwargs: {"configured": False},
+    )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="implement lifecycle guard",
+            assignee="coder",
+            kind="code",
+        )
+        kb.claim_task(conn, tid)
+        kb.add_comment(
+            conn,
+            tid,
+            "coder",
+            "# RESULT: implement lifecycle guard\n\n"
+            "Implementation and focused tests complete. " + "x" * 160,
+        )
+        pid = 525252
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+
+        kb.detect_crashed_workers(conn)
+        blocked = kb.get_task(conn, tid)
+        assert blocked.status == "blocked"
+
+        assert kb.repair_deliverable_posted_not_completed(
+            conn, tid, actor="integrator",
+        )
+        repaired = kb.get_task(conn, tid)
+        kinds = [event.kind for event in kb.list_events(conn, tid)]
+
+    assert repaired.status == "review"
+    assert "submitted_for_review" in kinds
+    assert "completed" not in kinds
+    assert "deliverable_protocol_repaired" in kinds
+
+
+def test_worktree_deliverable_protocol_repair_routes_through_review(
+    kanban_home, monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        kb,
+        "_run_worker_gate",
+        lambda *_args, **_kwargs: {"configured": False},
+    )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="prepare worktree artifact",
+            assignee="default",
+            kind="text",
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "artifact-worktree"),
+        )
+        kb.claim_task(conn, tid)
+        kb.add_comment(
+            conn,
+            tid,
+            "default",
+            "# RESULT: prepare worktree artifact\n\n"
+            "The worktree artifact is complete and validated. " + "x" * 160,
+        )
+        pid = 626262
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+
+        kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.repair_deliverable_posted_not_completed(
+            conn, tid, actor="integrator",
+        )
+        repaired = kb.get_task(conn, tid)
+
+    assert repaired.status == "review"
 
 
 def test_stale_deliverable_event_does_not_repair_later_failure_cycle(
@@ -14707,6 +14858,140 @@ def test_heartbeat_worker_persists_note_as_event_payload(kanban_home):
             "ORDER BY id DESC LIMIT 1", (t, run_id),
         ).fetchone()
     assert row["note"] == "Bash: npm test"
+
+
+def _running_review_for_attention(conn, *, title: str, now: int) -> tuple[str, int]:
+    task_id = kb.create_task(conn, title=title, assignee="coder")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'review', claim_lock = NULL, "
+            "claim_expires = NULL WHERE id = ?",
+            (task_id,),
+        )
+    task = kb.claim_review_task(conn, task_id, reviewer_profile="reviewer")
+    assert task is not None
+    assert task.current_run_id is not None
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_runs SET started_at = ? WHERE id = ?",
+            (now, task.current_run_id),
+        )
+    return task_id, task.current_run_id
+
+
+def test_review_wait_attention_emits_once_without_mutating_run(
+    kanban_home, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        task_id, run_id = _running_review_for_attention(
+            conn, title="silent review", now=base
+        )
+
+        assert kb.emit_review_wait_attention(conn, now=base + 179) == []
+        assert kb.emit_review_wait_attention(conn, now=base + 180) == [task_id]
+        assert kb.emit_review_wait_attention(conn, now=base + 360) == []
+
+        events = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "review_wait_attention"
+        ]
+        assert len(events) == 1
+        assert events[0].run_id == run_id
+        assert events[0].payload["idle_seconds"] == 180
+        task = kb.get_task(conn, task_id)
+        run = conn.execute(
+            "SELECT status, outcome, ended_at FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+
+    assert task is not None
+    assert task.status == "running"
+    assert task.current_run_id == run_id
+    assert run["status"] == "running"
+    assert run["outcome"] is None
+    assert run["ended_at"] is None
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "waiting for provider response (streaming)",
+        "waiting for non-streaming response (181s elapsed)",
+        "claude-cli running · log 0B · last output 181s",
+    ],
+)
+def test_review_wait_process_heartbeats_are_not_productive(
+    kanban_home, monkeypatch, note
+):
+    base = 1_800_000_000
+    clock = {"now": base}
+    monkeypatch.setattr(kb.time, "time", lambda: clock["now"])
+    with kb.connect_closing() as conn:
+        task_id, run_id = _running_review_for_attention(
+            conn, title=f"waiting review {note}", now=base
+        )
+        clock["now"] = base + 179
+        assert kb.heartbeat_worker(
+            conn, task_id, note=note, expected_run_id=run_id
+        )
+
+        assert kb.emit_review_wait_attention(conn, now=base + 180) == [task_id]
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "receiving stream response",
+        "executing tool: terminal",
+        "executing 2 tools concurrently: terminal, browser",
+        "tool completed: terminal (3.2s)",
+        "terminal command running",
+        "execute_code running",
+        "modal command running",
+    ],
+)
+def test_review_wait_productive_activity_restarts_idle_clock(
+    kanban_home, monkeypatch, note
+):
+    base = 1_800_000_000
+    clock = {"now": base}
+    monkeypatch.setattr(kb.time, "time", lambda: clock["now"])
+    with kb.connect_closing() as conn:
+        task_id, run_id = _running_review_for_attention(
+            conn, title=f"productive review {note}", now=base
+        )
+        clock["now"] = base + 170
+        assert kb.heartbeat_worker(
+            conn, task_id, note=note, expected_run_id=run_id
+        )
+
+        assert kb.emit_review_wait_attention(conn, now=base + 180) == []
+        assert kb.emit_review_wait_attention(conn, now=base + 349) == []
+        assert kb.emit_review_wait_attention(conn, now=base + 350) == [task_id]
+
+
+def test_review_wait_attention_ignores_non_review_runs(kanban_home, monkeypatch):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="ordinary worker", assignee="coder")
+        task = kb.claim_task(conn, task_id)
+        assert task is not None
+        assert task.current_run_id is not None
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? WHERE id = ?",
+                (base, task.current_run_id),
+            )
+
+        assert kb.emit_review_wait_attention(conn, now=base + 1000) == []
+        assert not any(
+            event.kind == "review_wait_attention"
+            for event in kb.list_events(conn, task_id)
+        )
 
 
 def test_run_duration_percentiles_per_profile_with_min_n(kanban_home):

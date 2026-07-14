@@ -114,6 +114,41 @@ def test_standard_tier_no_llm_verifier(kanban_home, economy_on, tmp_path, monkey
         assert payload["worker_gate"]["passed"] is True
 
 
+def test_kind_code_alone_does_not_raise_kanban_review_floor(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A work-kind is not a risk-class: ordinary code with a green worker
+    gate stays standard even while Kanban auto-tiering is enabled.
+    """
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: _gate_cfg(
+            auto_tier=True,
+            standard_uses_llm_verifier=False,
+        ),
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="ordinary implementation",
+            body="Change the local helper and run its focused test.",
+            assignee="coder",
+            kind="code",
+            workspace_path=str(repo),
+        )
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(conn, tid, summary="done", review_gate=True)
+
+        assert kb.get_task(conn, tid).status == "done"
+        assert [
+            event.kind for event in kb.list_events(conn, tid)
+        ].count("review_skipped_deterministic") == 1
+
+
 def test_standard_without_green_gate_still_verified(
     kanban_home, economy_on, monkeypatch
 ):
@@ -247,6 +282,107 @@ def _planspec_chain(conn, repo, n=3, tier="review", source="/tmp/spec.md"):
         tids.append(tid)
     conn.commit()
     return tids
+
+
+def _linked_two_slice_chain(conn, repo, *, planspec: bool) -> tuple[str, str, str]:
+    root = kb.create_task(
+        conn,
+        title="native chain root",
+        assignee="verifier",
+        workspace_path=str(repo),
+        triage=True,
+    )
+    provenance = (
+        {
+            "planspec_source": "/tmp/canonical-chain.md",
+            "planspec_subtask_id": "slice-1",
+        }
+        if planspec
+        else {}
+    )
+    provenance_2 = (
+        {
+            "planspec_source": "/tmp/canonical-chain.md",
+            "planspec_subtask_id": "slice-2",
+        }
+        if planspec
+        else {}
+    )
+    provenance_doc = (
+        {
+            "planspec_source": "/tmp/canonical-chain.md",
+            "planspec_subtask_id": "docs",
+        }
+        if planspec
+        else {}
+    )
+    children = kb.decompose_triage_task(
+        conn,
+        root,
+        root_assignee="verifier",
+        children=[
+            {
+                "title": "slice one",
+                "body": "Implement slice one.",
+                "assignee": "coder",
+                "kind": "code",
+                "review_tier": "review",
+                "parents": [],
+                **provenance,
+            },
+            {
+                "title": "slice two",
+                "body": "Implement slice two.",
+                "assignee": "coder",
+                "kind": "code",
+                "review_tier": "review",
+                "parents": [0],
+                **provenance_2,
+            },
+            {
+                "title": "write the follow-up notes",
+                "body": "Document the completed code chain.",
+                "assignee": "scribe",
+                "kind": "research",
+                "parents": [1],
+                **provenance_doc,
+            },
+        ],
+        author="test",
+    )
+    assert children is not None
+    return children[0], children[1], children[2]
+
+
+@pytest.mark.parametrize("planspec", [False, True], ids=["native", "planspec"])
+def test_linked_chains_share_canonical_code_tip_semantics(
+    kanban_home, tip_judgment_on, tmp_path, monkeypatch, planspec
+):
+    """Native auto-decompose and PlanSpec chains use the same graph root:
+    slice one defers, and slice two is the code tip even with trailing docs.
+    """
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        first, tip, trailing_doc = _linked_two_slice_chain(
+            conn, repo, planspec=planspec
+        )
+
+        assert kb.claim_task(conn, first) is not None
+        assert kb.complete_task(conn, first, summary="slice one", review_gate=True)
+        assert kb.get_task(conn, first).status == "done"
+        assert [
+            event.kind for event in kb.list_events(conn, first)
+        ].count("review_deferred_to_tip") == 1
+
+        assert kb.get_task(conn, tip).status == "ready"
+        assert kb.claim_task(conn, tip) is not None
+        assert kb.complete_task(conn, tip, summary="slice two", review_gate=True)
+        assert kb.get_task(conn, tip).status == "review"
+        assert [
+            event.kind for event in kb.list_events(conn, tip)
+        ].count("submitted_for_review") == 1
+        assert kb.get_task(conn, trailing_doc).status == "todo"
 
 
 def test_review_fires_at_tip_not_per_slice(
