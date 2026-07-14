@@ -135,7 +135,9 @@ VALID_STATUSES = {
 TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
-VALID_BLOCK_KINDS = frozenset({"needs_input", "capability", "dependency", "transient"})
+VALID_BLOCK_KINDS = frozenset(
+    {"needs_input", "capability", "dependency", "review_revision", "transient"}
+)
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -13474,6 +13476,18 @@ def block_task(
             conn, task_id, reason=reason, expected_run_id=expected_run_id
         ):
             return False
+        run_is_review = _run_originated_from_review(conn, task_id, expected_run_id)
+        if block_kind == "review_revision" and not run_is_review:
+            _append_event(
+                conn,
+                task_id,
+                "review_revision_block_rejected",
+                {"reason": reason},
+                run_id=expected_run_id,
+            )
+            return False
+        if block_kind is None and run_is_review:
+            block_kind = "review_revision"
         existing = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
             (task_id,),
@@ -21612,7 +21626,10 @@ def _blocked_kind_for_auto_retry(
     last_auto_retry_body_hash: Optional[str] = None,
 ) -> str:
     if explicit_block_kind is not None:
-        return "retryable" if explicit_block_kind == "transient" else explicit_block_kind
+        if explicit_block_kind == "transient":
+            return "retryable"
+        if explicit_block_kind != "review_revision":
+            return explicit_block_kind
     text = (reason or "").strip()
     normalized_verdict = str(verdict or "").strip().upper()
     if (
@@ -21712,6 +21729,7 @@ def blocked_task_operator_questions(
         reason = (run["summary"] or "").strip() or (run["error"] or "").strip()
         result[task_id] = _blocked_kind_for_auto_retry(
             reason,
+            explicit_block_kind=task.block_kind,
             verdict=run["verdict"],
             auto_retry_count=task.auto_retry_count,
             body_hash=_task_body_hash(task.body),

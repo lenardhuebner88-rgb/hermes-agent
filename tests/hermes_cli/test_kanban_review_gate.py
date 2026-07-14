@@ -1312,6 +1312,47 @@ def test_review_originated_request_changes_completion_does_not_go_done(
         assert row["verdict"] == "REQUEST_CHANGES"
 
 
+def test_review_originated_request_changes_persists_review_revision_kind(
+    kanban_home, gate_on
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl done", review_gate=True)
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None
+
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="needs fixes",
+            metadata={"review_verdict": "REQUEST_CHANGES"},
+            review_gate=True,
+        )
+
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.block_kind == "review_revision"
+        blocked = [event for event in kb.list_events(conn, tid) if event.kind == "blocked"]
+        assert blocked[-1].payload["kind"] == "review_revision"
+
+
+def test_non_review_block_cannot_forge_review_revision_kind(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="coder")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+
+        assert not kb.block_task(
+            conn,
+            tid,
+            reason="pretend review rejection",
+            kind="review_revision",
+            expected_run_id=claimed.current_run_id,
+        )
+        assert kb.get_task(conn, tid).status == "running"
+
+
 def test_review_block_is_always_request_changes_even_with_approved_metadata(
     kanban_home, gate_on
 ):
