@@ -18,11 +18,13 @@ the async helper, never in the synchronous probe.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -474,6 +476,124 @@ def format_exit_category_for_log(
         f"planned={planned} signal_initiated={sig_init} "
         f"hint={hint} mem_available_ratio={mem_str}"
     )
+
+
+# Set once the exit-category line has been emitted in this process.  Every exit
+# path funnels through emit_exit_category(), and both entrypoints (the
+# `hermes gateway run` CLI and `python gateway/run.py`) call it, so the guard
+# keeps the guarantee "exactly once per process" no matter how many chokepoints
+# fire.
+_EXIT_CATEGORY_EMITTED = False
+
+
+def reset_exit_category_state() -> None:
+    """Re-arm the once-per-process guard.
+
+    A real process exits once, so the guard never needs resetting in
+    production.  Test suites, however, drive several exit paths inside ONE
+    interpreter; without this, the first test to emit would silently suppress
+    every later one.  Tests that exercise an exit path should call this first.
+    """
+    global _EXIT_CATEGORY_EMITTED
+    _EXIT_CATEGORY_EMITTED = False
+
+
+def _flush_log_sinks(log: Any) -> None:
+    """Flush every logging handler that could still be holding the exit line.
+
+    ``os._exit`` skips ``atexit`` and therefore ``logging.shutdown()``, so
+    nothing else will flush on the way out.  Today's handlers are synchronous
+    (``RotatingFileHandler``/``StreamHandler`` both flush on emit), but a
+    buffering handler added later would silently swallow the last line — this
+    makes the flush explicit instead of relying on that invariant.
+
+    Deliberately does NOT touch ``sys.stdout``/``sys.stderr`` directly: the
+    stream handlers above own their stream's flush, and the ``os._exit``
+    caller (``run._exit_after_graceful_shutdown``) already flushes stdio
+    exactly once on its own.
+    """
+    seen = set()
+    for candidate in (log, logging.getLogger()):
+        if candidate is None:
+            continue
+        for handler in list(getattr(candidate, "handlers", []) or []):
+            if id(handler) in seen:
+                continue
+            seen.add(id(handler))
+            try:
+                handler.flush()
+            except Exception:
+                pass
+
+
+def emit_exit_category(
+    exit_code: int,
+    *,
+    breadcrumb: Optional[Dict[str, Any]] = None,
+    logger: Any = None,
+    hermes_home: Any = None,
+) -> bool:
+    """Emit ONE exit-category diagnostic at process end and flush it out.
+
+    Writes to two independent, observable sinks:
+
+    * ``logger.warning("Gateway exit diagnostic: …")`` — reaches the journal via
+      the gateway's stderr handler and ``logs/errors.log`` / ``logs/agent.log``
+      via the rotating file handlers.
+    * ``logs/gateway-exit-diag.log`` — an append-and-close JSON line that does
+      not depend on the logging config being initialised at all (the same sink
+      ``hermes_cli.gateway`` already uses for its exit tags).
+
+    Returns ``True`` when this call emitted the line, ``False`` when a previous
+    call already did.  Purely diagnostic: it never changes the exit code and
+    never raises — any failure here must not be able to stop the process from
+    exiting.
+    """
+    global _EXIT_CATEGORY_EMITTED
+    if _EXIT_CATEGORY_EMITTED:
+        return False
+    _EXIT_CATEGORY_EMITTED = True
+
+    log = logger if logger is not None else logging.getLogger("gateway.run")
+    category = EXIT_CATEGORY_UNKNOWN
+    try:
+        category = classify_exit_category(exit_code, breadcrumb=breadcrumb)
+        log.warning(
+            "Gateway exit diagnostic: %s",
+            format_exit_category_for_log(category, exit_code, breadcrumb=breadcrumb),
+        )
+    except Exception:
+        pass
+
+    # Structured sink — independent of the logging configuration, so the line
+    # survives even on early-exit paths that die before setup_logging() runs.
+    # Shares gateway-exit-diag.log with hermes_cli.gateway's exit tags, so it
+    # honours the same HERMES_GATEWAY_EXIT_DIAG opt-out and the same UTC-ISO
+    # timestamp format.  The logger.warning above is the permanent sink and is
+    # NOT gated by that flag.
+    try:
+        if os.environ.get("HERMES_GATEWAY_EXIT_DIAG", "1") == "1":
+            if hermes_home is None:
+                from hermes_constants import get_hermes_home
+
+                hermes_home = get_hermes_home()
+            log_dir = Path(hermes_home) / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "tag": "gateway.exit_category",
+                "pid": os.getpid(),
+                "category": category,
+                "exit_code": exit_code,
+                "breadcrumb": breadcrumb or {},
+            }
+            with open(log_dir / "gateway-exit-diag.log", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass
+
+    _flush_log_sinks(log)
+    return True
 
 
 def check_systemd_timing_alignment(drain_timeout: float) -> Optional[Dict[str, Any]]:

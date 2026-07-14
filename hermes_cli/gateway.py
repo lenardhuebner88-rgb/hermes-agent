@@ -4750,6 +4750,28 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     _atexit.register(_atexit_hook)
 
+    # ── Exit-category diagnostic (the production chokepoint) ─────────────
+    # `gateway/run.py:_exit_after_graceful_shutdown` emits the exit-category
+    # line, but ONLY on the `python gateway/run.py` entrypoint. The service
+    # runs `hermes gateway run` → this function, which returns / sys.exit()s
+    # without ever going through that backstop — which is why 48h of real
+    # exits produced zero `Gateway exit diagnostic:` lines in any sink while
+    # the isolated test passed. Emit from every exit path here too; the
+    # shared emitter is idempotent (at most one line per process) and flushes
+    # its sinks, and it never touches the exit code.
+    def _emit_exit_category(exit_code: int) -> None:
+        try:
+            import gateway.run as _gateway_run
+            from gateway.shutdown_forensics import emit_exit_category
+
+            emit_exit_category(
+                exit_code,
+                breadcrumb=getattr(_gateway_run, "_LAST_SHUTDOWN_CONTEXT", None),
+                logger=getattr(_gateway_run, "logger", None),
+            )
+        except Exception:
+            pass  # diagnostics must never block the exit
+
     success = False
     try:
         success = asyncio.run(start_gateway(replace=replace, verbosity=verbosity))
@@ -4762,6 +4784,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             traceback=_traceback.format_exc(),
         )
         print("\nGateway stopped.")
+        _emit_exit_category(0)  # returns → interpreter exits 0
         return
     except SystemExit as e:
         _exit_diag(
@@ -4769,6 +4792,16 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             code=getattr(e, "code", None),
             traceback=_traceback.format_exc(),
         )
+        # Mirror CPython's own SystemExit→exit-code mapping (None → 0, int
+        # verbatim — this carries the 75 restart code — str → 1). Read-only:
+        # the exception is re-raised untouched.
+        _code = getattr(e, "code", None)
+        if _code is None:
+            _emit_exit_category(0)
+        elif isinstance(_code, int):
+            _emit_exit_category(_code)
+        else:
+            _emit_exit_category(1)
         raise
     except BaseException as e:
         # Absolutely everything else: Exception, asyncio.CancelledError,
@@ -4779,11 +4812,14 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             exc_repr=repr(e),
             traceback=_traceback.format_exc(),
         )
+        _emit_exit_category(1)  # unhandled → interpreter exits 1
         raise
     if not success:
         _exit_diag("gateway.exit_nonzero")
+        _emit_exit_category(1)
         sys.exit(1)
     _exit_diag("gateway.exit_clean")
+    _emit_exit_category(0)
 
 
 # =============================================================================

@@ -20398,19 +20398,22 @@ def _log_exit_category(exit_code: int) -> None:
     category, and logs it. Purely diagnostic: it does NOT change shutdown
     behaviour or the exit code, and any failure here is swallowed so it can
     never prevent the process from exiting.
+
+    This is the ``python gateway/run.py`` entrypoint's chokepoint. The
+    production entrypoint (``hermes gateway run`` →
+    ``hermes_cli.gateway.run_gateway``) never reaches this function, so it
+    calls the shared emitter directly — both funnel into
+    ``shutdown_forensics.emit_exit_category``, which emits at most once per
+    process and flushes the line to its sinks before ``os._exit``.
     """
     try:
-        from gateway.shutdown_forensics import (
-            classify_exit_category,
-            format_exit_category_for_log,
-        )
-        breadcrumb = _LAST_SHUTDOWN_CONTEXT
-        category = classify_exit_category(exit_code, breadcrumb=breadcrumb)
-        logger.warning(
-            "Gateway exit diagnostic: %s",
-            format_exit_category_for_log(
-                category, exit_code, breadcrumb=breadcrumb
-            ),
+        from gateway.shutdown_forensics import emit_exit_category
+
+        emit_exit_category(
+            exit_code,
+            breadcrumb=_LAST_SHUTDOWN_CONTEXT,
+            logger=logger,
+            hermes_home=_hermes_home,
         )
     except Exception as _e:  # noqa: BLE001 — diagnostics must never block exit
         try:
