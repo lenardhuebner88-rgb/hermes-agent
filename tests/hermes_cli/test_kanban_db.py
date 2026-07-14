@@ -9623,6 +9623,46 @@ def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
     assert all(row["verdict"] is None for row in verdicts)
 
 
+def test_code_deliverable_protocol_repair_routes_through_review(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(kb, "_run_worker_gate", lambda _task: None)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="implement lifecycle guard",
+            assignee="coder",
+            kind="code",
+        )
+        kb.claim_task(conn, tid)
+        kb.add_comment(
+            conn,
+            tid,
+            "coder",
+            "# RESULT\n\nImplementation and focused tests complete. " + "x" * 160,
+        )
+        pid = 525252
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+
+        kb.detect_crashed_workers(conn)
+        blocked = kb.get_task(conn, tid)
+        assert blocked.status == "blocked"
+
+        assert kb.repair_deliverable_posted_not_completed(
+            conn, tid, actor="integrator",
+        )
+        repaired = kb.get_task(conn, tid)
+        kinds = [event.kind for event in kb.list_events(conn, tid)]
+
+    assert repaired.status == "review"
+    assert "submitted_for_review" in kinds
+    assert "completed" not in kinds
+
+
 def test_stale_deliverable_event_does_not_repair_later_failure_cycle(
     kanban_home, monkeypatch,
 ):

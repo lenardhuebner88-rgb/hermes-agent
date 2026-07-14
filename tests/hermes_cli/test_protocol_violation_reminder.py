@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+
+import cli as cli_module
 
 from hermes_cli import kanban_db as kb
 
@@ -151,3 +155,53 @@ def test_non_protocol_last_run_does_not_inject_respawn_reminder(
 
         assert result.spawned and result.spawned[0][0] == task_id
         assert _reminder_comments(conn, task_id) == []
+
+
+
+def test_terminalization_nudge_exposes_only_lifecycle_tools_and_restores_tools() -> None:
+    seen: list[list[str]] = []
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.tools = [
+                {"type": "function", "function": {"name": "kanban_complete"}},
+                {"type": "function", "function": {"name": "kanban_block"}},
+                {"type": "function", "function": {"name": "kanban_comment"}},
+                {"type": "function", "function": {"name": "terminal"}},
+            ]
+
+        async def run_conversation(self, _prompt: str, **_kwargs) -> str:
+            seen.append([tool["function"]["name"] for tool in self.tools])
+            return "terminalized"
+
+    agent = FakeAgent()
+    original_tools = agent.tools
+    worker = SimpleNamespace(agent=agent)
+
+    result = cli_module._run_kanban_finalize_nudge_q(worker, task_id="t_demo")
+
+    assert result == "terminalized"
+    assert seen == [["kanban_complete", "kanban_block"]]
+    assert agent.tools is original_tools
+
+
+def test_terminalization_nudge_is_single_bounded_turn_when_lifecycle_call_is_missing() -> None:
+    calls = 0
+
+    class FakeAgent:
+        tools = [
+            {"type": "function", "function": {"name": "kanban_complete"}},
+            {"type": "function", "function": {"name": "kanban_block"}},
+        ]
+
+        async def run_conversation(self, _prompt: str, **_kwargs) -> str:
+            nonlocal calls
+            calls += 1
+            return "I forgot the lifecycle call again"
+
+    result = cli_module._run_kanban_finalize_nudge_q(
+        SimpleNamespace(agent=FakeAgent()), task_id="t_demo"
+    )
+
+    assert result == "I forgot the lifecycle call again"
+    assert calls == 1

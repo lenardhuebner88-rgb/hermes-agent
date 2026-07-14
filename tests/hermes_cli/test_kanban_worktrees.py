@@ -144,6 +144,51 @@ def test_ensure_worktree_is_idempotent(repo):
     assert second["path"] == first["path"]
 
 
+def test_prepare_worker_base_rebases_clean_stale_worktree(repo):
+    info = kwt.ensure_worktree(repo, "t_fresh")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _commit_in(repo, "main-only.txt", "new base\n", "advance main")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert result["previous_head"] == recorded_head
+    assert result["head"] == _git(repo, "rev-parse", "main")
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_rejects_head_drift_before_rebase(repo):
+    info = kwt.ensure_worktree(repo, "t_drift")
+    worktree = info["path"]
+
+    with pytest.raises(kwt.WorktreeError, match="recorded pre-run HEAD"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head="0" * 40,
+            merge_target="main",
+        )
+
+
+def test_prepare_worker_base_rejects_dirty_stale_worktree(repo):
+    info = kwt.ensure_worktree(repo, "t_dirty_stale")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _commit_in(repo, "main-only.txt", "new base\n", "advance main")
+    (worktree / "a.txt").write_text("uncommitted worker edit\n")
+
+    with pytest.raises(kwt.WorktreeError, match="stale and dirty"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+        )
+
+
 def test_ensure_worktree_symlinks_node_modules(repo):
     (repo / "node_modules").mkdir()
     (repo / "web" / "node_modules").mkdir()

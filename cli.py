@@ -15672,69 +15672,92 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     )
 
 
-def _run_kanban_finalize_nudge_q(cli: "HermesCLI", first_response: str) -> None:
-    """One-shot finalize nudge for a dispatched (non-goal_mode) worker.
-
-    The single most common dispatch failure is a worker that ends its turn with
-    prose (rc=0) WITHOUT calling ``kanban_complete``/``kanban_block`` — the
-    dispatcher then classifies the clean exit as a protocol violation and
-    auto-blocks the task. When the dispatcher spawned us (``HERMES_KANBAN_TASK``
-    set) but goal_mode is OFF, and the task is still ``running`` after the first
-    turn, give the worker exactly ONE re-prompt to finalize. Unlike the goal
-    loop this does NO auxiliary judge call, so the cost is at most one extra
-    worker turn and only for workers that actually forgot. All errors are
-    swallowed by the caller — a broken nudge must never wedge a worker; the
-    dispatcher's crash/stale detection is the backstop.
-    """
+def _run_kanban_finalize_nudge_q(
+    cli: "HermesCLI", first_response: str = "", *, task_id: str | None = None
+) -> None:
+    """Give one deliverable-producing worker a lifecycle-only final turn."""
+    import asyncio as _asyncio
+    import inspect as _inspect
     import os as _os
 
-    task_id = (_os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    task_id = (task_id or _os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     if not task_id:
         return
 
     from hermes_cli import kanban_db as _kb
     from hermes_cli.goals import KANBAN_GOAL_FINALIZE_TEMPLATE as _FINALIZE
 
-    def _status() -> "str | None":
+    def _state() -> tuple[str | None, bool]:
         c = _kb.connect()
         try:
-            t = _kb.get_task(c, task_id)
-            return t.status if t is not None else None
+            task = _kb.get_task(c, task_id)
+            has_deliverable = bool(
+                task is not None
+                and task.status == "running"
+                and _kb._deliverable_evidence_for_protocol_miss(c, task_id)
+            )
+            return (task.status if task is not None else None, has_deliverable)
         finally:
             try:
                 c.close()
             except Exception:
                 pass
 
-    # Only nudge if the worker left the task open. If it already
-    # completed/blocked (or the row is gone), there is nothing to finalize.
-    if _status() != "running":
+    status, has_deliverable = _state()
+    if status != "running" or not has_deliverable:
         return
 
     prompt = _FINALIZE.format(
         reason=(
-            "your run ended without calling a terminal kanban tool, so the task "
-            "is still 'running' and the dispatcher will auto-block it as a "
-            "protocol violation"
+            "your run posted a deliverable but ended without calling a terminal "
+            "kanban tool, so the task is still running and the dispatcher will "
+            "block it as deliverable_posted_not_completed"
         )
     )
-    result = cli.agent.run_conversation(
-        user_message=prompt,
-        conversation_history=cli.conversation_history,
-    )
+    lifecycle_tools = {"kanban_complete", "kanban_block"}
+    agent = cli.agent
+    original_tools = agent.tools
+    original_valid_names = getattr(agent, "valid_tool_names", None)
+    original_max_iterations = getattr(agent, "max_iterations", None)
+
+    def _tool_name(tool: object) -> str:
+        if not isinstance(tool, dict):
+            return ""
+        function = tool.get("function")
+        return function.get("name", "") if isinstance(function, dict) else ""
+
+    agent.tools = [tool for tool in original_tools if _tool_name(tool) in lifecycle_tools]
+    if original_valid_names is not None:
+        agent.valid_tool_names = set(original_valid_names) & lifecycle_tools
+    if original_max_iterations is not None:
+        agent.max_iterations = 1
+    try:
+        result = agent.run_conversation(
+            user_message=prompt,
+            conversation_history=cli.conversation_history,
+        )
+        if _inspect.isawaitable(result):
+            result = _asyncio.run(result)
+    finally:
+        agent.tools = original_tools
+        if original_valid_names is not None:
+            agent.valid_tool_names = original_valid_names
+        if original_max_iterations is not None:
+            agent.max_iterations = original_max_iterations
+
     if (
-        getattr(cli.agent, "session_id", None)
-        and cli.agent.session_id != cli.session_id
+        getattr(agent, "session_id", None)
+        and agent.session_id != cli.session_id
     ):
-        cli.session_id = cli.agent.session_id
+        cli.session_id = agent.session_id
     resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
     if resp:
         print(resp)
-    # Single nudge only — log the outcome for observability, never loop.
     try:
-        logger.info("kanban finalize nudge: task %s now %s", task_id, _status())
+        logger.info("kanban finalize nudge: task %s now %s", task_id, _state()[0])
     except Exception:
         pass
+
 
 
 def main(
