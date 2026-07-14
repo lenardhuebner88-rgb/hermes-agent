@@ -124,6 +124,9 @@ def test_ensure_existing_window_does_not_overwrite_process(tmp_path: Path, tmux_
     ensured = service.ensure("hermes")
     assert ensured.command in {"sh", "sleep"}
     assert "existing-window" in service.capture("work", "hermes")
+    target = service._cmd_target("work", "hermes")
+    assert service._run("show-options", "-w", "-v", "-t", target, "@hermes_kind").stdout.strip() == "hermes"
+    assert service._run("show-options", "-w", "-v", "-t", target, "@hermes_workdir").stdout.strip() == "home"
 
 
 def _fake_agent_cli(home: Path, name: str) -> Path:
@@ -163,6 +166,27 @@ def test_ensure_spawns_claude_in_allowlisted_workdir(
         service.ensure("claude", "not-a-workdir")
     with pytest.raises(CapabilityError, match="workdir not available"):
         service.ensure("claude", "orchestration")
+
+
+def test_grok_uses_subscription_cli_and_grok_build_model(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    grok = home / ".npm-global" / "bin" / "grok"
+    grok.parent.mkdir(parents=True)
+    grok.write_text("#!/bin/sh\nprintf 'fake grok args: %s\\n' \"$*\"\nsleep 60\n", encoding="utf-8")
+    grok.chmod(grok.stat().st_mode | stat.S_IXUSR)
+
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    definition = service.definition_for("grok")
+
+    assert definition.argv == (str(grok.resolve()), "--model", "grok-build")
+    created = service.ensure("grok")
+    assert created.window == "grok"
+    assert "fake grok args: --model grok-build" in service.capture("work", "grok")
+    assert service.identity_for("work", "grok") == ("grok", "home")
+    assert service.capabilities().to_dict()["agents"]["grok"]["available"] is True
 
 
 def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(

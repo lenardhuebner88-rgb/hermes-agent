@@ -407,6 +407,29 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(apiMock.getControlOverviewDecisionQueue).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes the tmux inventory when the dashboard becomes visible again", async () => {
+    const grokWindow: AgentTerminalWindow = {
+      ...windows[0],
+      session: "work",
+      window: "grok",
+      command: "node",
+      cwd: "/home/piet",
+    };
+    setDocumentHidden(true);
+
+    await renderView();
+    expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /grok/i })).toBeNull();
+    const callsBeforeResume = apiMock.getAgentTerminalWindows.mock.calls.length;
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [...windows, grokWindow] });
+
+    setDocumentHidden(false);
+    fireEvent(document, new Event("visibilitychange"));
+
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows.mock.calls.length).toBeGreaterThan(callsBeforeResume));
+    expect(await screen.findByText("grok")).toBeTruthy();
+  });
+
   it("fits the terminal on mount and when its host is resized", async () => {
     await renderView();
 
@@ -624,14 +647,14 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
   });
 
-  it("creates a new session via the desktop create modal", async () => {
+  it("creates a Grok Build session via the desktop create modal", async () => {
     await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
-    fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Grok/ }));
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
-    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
+    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "home"));
   });
 
   it("renders empty and error states", async () => {

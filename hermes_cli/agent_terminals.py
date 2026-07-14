@@ -32,7 +32,7 @@ _EPHEMERAL_ATTACH_WINDOW = "@hermes_attach_window"
 _EPHEMERAL_ATTACH_CREATED_AT = "@hermes_attach_created_at"
 _EPHEMERAL_ATTACH_GRACE_SECONDS = 60
 
-_AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi")
+_AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi", "grok")
 
 # ----- ANSI stripping --------------------------------------------------------
 # Order matters: OSC sequences also start with ESC, so they must be stripped
@@ -353,6 +353,11 @@ class TmuxAgentSessionService:
                 home / ".kimi-code" / "bin" / "kimi",
                 home / ".local" / "opt" / "kimi-code" / "bin" / "kimi",
             )
+        if kind == "grok":
+            return ("grok",), (
+                home / ".npm-global" / "bin" / "grok",
+                home / ".local" / "bin" / "grok",
+            )
         raise InvalidTarget(f"unknown agent kind: {kind}")
 
     def resolve_agent_binary(self, kind: str) -> Path:
@@ -466,6 +471,9 @@ class TmuxAgentSessionService:
         if kind == "hermes":
             argv: tuple[str, ...] = (str(binary), "--tui")
             env = self._safe_env({"HERMES_TUI_INLINE": "1"})
+        elif kind == "grok":
+            argv = (str(binary), "--model", "grok-build")
+            env = self._safe_env()
         else:
             argv = (str(binary),)
             env = self._safe_env()
@@ -641,6 +649,14 @@ class TmuxAgentSessionService:
             with contextlib.suppress(Exception):
                 self._log_event("ensure_session_options_error", session=str(session))
 
+    def _set_window_identity(
+        self, session: str, window: str, *, kind: str, workdir_key: str
+    ) -> None:
+        """Persist managed identity without touching the pane process."""
+        target = self._cmd_target(session, window)
+        self._run("set-option", "-w", "-t", target, "@hermes_kind", kind)
+        self._run("set-option", "-w", "-t", target, "@hermes_workdir", workdir_key)
+
     def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
         """Create a tmux window from a resolved definition and return it."""
         if not definition.argv:
@@ -666,9 +682,12 @@ class TmuxAgentSessionService:
         # Window options survive rename() — unlike the name-based parsing in
         # `_identity_from_window`, they let identity_for() recover kind/workdir
         # for a window whose name a user has since changed.
-        target = self._cmd_target(definition.session, definition.window)
-        self._run("set-option", "-w", "-t", target, "@hermes_kind", definition.kind)
-        self._run("set-option", "-w", "-t", target, "@hermes_workdir", definition.workdir_key)
+        self._set_window_identity(
+            definition.session,
+            definition.window,
+            kind=definition.kind,
+            workdir_key=definition.workdir_key,
+        )
         return self.show(definition.session, definition.window)
 
     def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
@@ -682,6 +701,7 @@ class TmuxAgentSessionService:
         # CLI binary or workdir is currently unresolvable.
         window = self.window_name_for(kind, workdir_key)
         if self.window_exists("work", window):
+            self._set_window_identity("work", window, kind=kind, workdir_key=workdir_key)
             self._log_event("ensure_existing", kind=kind, session="work", window=window)
             return self.show("work", window)
         definition = self.definition_for(kind, workdir_key)

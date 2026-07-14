@@ -401,7 +401,7 @@ export async function buildWsUrl(
   });
 }
 
-export type AgentTerminalKind = "hermes" | "claude" | "codex" | "kimi";
+export type AgentTerminalKind = "hermes" | "claude" | "codex" | "kimi" | "grok";
 
 export interface AgentTerminalAgentState {
   available: boolean;

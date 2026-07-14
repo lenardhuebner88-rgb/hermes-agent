@@ -90,6 +90,7 @@ const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: string }> = 
   { kind: "claude", label: "Claude", hint: "claude-cli" },
   { kind: "codex", label: "Codex", hint: "codex-cli" },
   { kind: "kimi", label: "Kimi", hint: "kimi-cli" },
+  { kind: "grok", label: "Grok", hint: "grok-build / Grok 4.5" },
 ];
 
 const AGENT_LABELS: Record<AgentTerminalKind, string> = Object.fromEntries(AGENTS.map((agent) => [agent.kind, agent.label])) as Record<AgentTerminalKind, string>;
@@ -110,6 +111,7 @@ const LASTSEEN_STORAGE_KEY = "hermes-terminals-lastseen";
 const FONT_MIN = 8;
 const FONT_MAX = 20;
 const PRIMARY_SESSION = "work";
+const WINDOW_INVENTORY_POLL_MS = 10000;
 /** An armed close disarms itself, so a row armed and forgotten cannot be killed later by a stray click. */
 const TERMINATE_ARM_TIMEOUT_MS = 8000;
 const COPY_STATUS_TIMEOUT_MS = 2000;
@@ -905,10 +907,67 @@ export function AgentTerminalsView() {
     }
   }, [selectedKind]);
 
+  const refreshWindowInventory = useCallback(async () => {
+    const win = await api.getAgentTerminalWindows();
+    setWindows(win.windows);
+    setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+  }, [selectedKind]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- async tmux inventory load on mount / selectedKind change
     void refresh();
   }, [refresh]);
+
+  // Keep the tmux inventory live independently of the overview cards. The
+  // healer can create a missing managed window while this page is already
+  // open; without this poll it stayed invisible until a manual reload.
+  useEffect(() => {
+    let disposed = false;
+    let timer: number | null = null;
+
+    function isHidden(): boolean {
+      return typeof document !== "undefined" && document.hidden;
+    }
+
+    function clearTimer(): void {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    }
+
+    function scheduleNext(): void {
+      clearTimer();
+      if (disposed || isHidden()) return;
+      timer = window.setTimeout(() => void run(), WINDOW_INVENTORY_POLL_MS);
+    }
+
+    async function run(): Promise<void> {
+      clearTimer();
+      if (disposed || isHidden()) return;
+      try {
+        await refreshWindowInventory();
+      } catch {
+        // The initial/manual refresh owns the visible error state. A transient
+        // background inventory failure must not cover a still-attached pane.
+      } finally {
+        scheduleNext();
+      }
+    }
+
+    function onVisibilityChange(): void {
+      if (isHidden()) clearTimer();
+      else void run();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    scheduleNext();
+    return () => {
+      disposed = true;
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshWindowInventory]);
 
   useEffect(() => {
     if (!target) return;
@@ -2330,7 +2389,7 @@ export function AgentTerminalsView() {
 
   const createSessionForm = (
     <div className="grid gap-3">
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
         {AGENTS.map((agent) => (
           <button
             key={agent.kind}
