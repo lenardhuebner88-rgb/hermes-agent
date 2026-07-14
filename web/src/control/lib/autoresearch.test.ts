@@ -85,14 +85,16 @@ describe("autoresearch proposal actionability", () => {
       proposal({ id: "pooled", status: "pooled", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "queued" }),
       proposal({ id: "routed", status: "routed_to_kanban", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "review" }),
       proposal({ id: "integrated", status: "routed_to_kanban", operator_action_required: false, finding_state: "verified", decision_state: "accepted", delivery_state: "integrated" }),
-      proposal({ id: "stale", status: "skipped", operator_action_required: false, finding_state: "stale", decision_state: "dismissed", delivery_state: "none" }),
+      proposal({ id: "legacy-applied", status: "applied", operator_action_required: false, finding_state: "verified", decision_state: "accepted" }),
+      proposal({ id: "explicit-none-applied", status: "applied", operator_action_required: false, finding_state: "rejected", decision_state: "dismissed", delivery_state: "none" }),
+      proposal({ id: "stale", status: "skipped", operator_action_required: false, finding_state: "stale", decision_state: "dismissed", delivery_state: "none", decision_owner: "kanban" }),
     ];
 
     const split = splitAutoresearchProposals(items);
     expect(split.actionable.map((item) => item.id)).toEqual(["decision"]);
     expect(split.delivery.map((item) => item.id)).toEqual(["pooled", "routed"]);
-    expect(split.integrated.map((item) => item.id)).toEqual(["integrated"]);
-    expect(split.history.map((item) => item.id)).toEqual(["stale"]);
+    expect(split.integrated.map((item) => item.id)).toEqual(["integrated", "legacy-applied"]);
+    expect(split.history.map((item) => item.id)).toEqual(["explicit-none-applied", "stale"]);
   });
 
   it("excludes reverted proposals from the relevance queue and buckets them separately", () => {

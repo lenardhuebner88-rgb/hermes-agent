@@ -58,12 +58,23 @@ export function isRevertedNoImprovement(proposal: Proposal): boolean {
 
 export function splitAutoresearchProposals(proposals: Proposal[]) {
   const actionable = proposals.filter(isActionable);
-  const delivery = proposals.filter((p) => !isActionable(p) && p.delivery_state !== "integrated" && (
-    ["queued", "running", "review", "failed"].includes(p.delivery_state ?? "")
-    || p.decision_owner === "kanban"
-    || (p.delivery_state == null && ["testing", "routed_to_kanban", "pooled", "escalated"].includes(p.status))
+  const integrated = proposals.filter((p) => (
+    p.delivery_state === "integrated"
+    || (p.delivery_state == null && p.status === "applied")
   ));
-  const integrated = proposals.filter((p) => p.delivery_state === "integrated" || p.status === "applied");
+  const integratedIds = new Set(integrated.map((p) => p.id));
+  const delivery = proposals.filter((p) => {
+    if (isActionable(p) || integratedIds.has(p.id)) return false;
+    // Lifecycle-aware payloads are authoritative. Historical task ownership
+    // must not resurrect a dismissed/stale item whose explicit delivery state
+    // is `none`. Only legacy payloads without delivery_state use transport and
+    // owner fallbacks.
+    if (p.delivery_state != null) {
+      return ["queued", "running", "review", "failed"].includes(p.delivery_state);
+    }
+    return p.decision_owner === "kanban"
+      || ["testing", "routed_to_kanban", "pooled", "escalated"].includes(p.status);
+  });
   const history = proposals.filter((p) => (
     !isActionable(p)
     && !delivery.includes(p)
