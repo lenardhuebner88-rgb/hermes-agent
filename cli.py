@@ -15737,7 +15737,8 @@ def _run_kanban_finalize_nudge_q(
             "block it as deliverable_posted_not_completed"
         )
     )
-    lifecycle_tools = {"kanban_complete", "kanban_block"}
+    lifecycle_tool_order = ("kanban_complete", "kanban_block")
+    lifecycle_tools = set(lifecycle_tool_order)
     agent = cli.agent
     original_tools = agent.tools
     had_valid_names = hasattr(agent, "valid_tool_names")
@@ -15761,10 +15762,36 @@ def _run_kanban_finalize_nudge_q(
         # expose an empty tool list while wrapper-shaped unit doubles pass.
         return str(tool.get("name") or "")
 
-    agent.tools = [
-        tool for tool in (original_tools or [])
+    # Re-resolve the canonical schemas at the turn boundary instead of trusting
+    # the mutable per-agent snapshot.  Live workers can legitimately finish a
+    # turn with that snapshot empty/stale after provider or MCP/tool-search
+    # normalization.  Reusing it produced a continuation request with zero
+    # tools and converted the one allowed recovery turn into another protocol
+    # miss.  The raw catalog bypasses progressive disclosure, then the strict
+    # two-name filter keeps the continuation lifecycle-only.
+    resolved_tools = _model_tools.get_tool_definitions(
+        enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+        disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+        quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    selected_tools = {
+        _tool_name(tool): tool
+        for tool in (resolved_tools or [])
         if _tool_name(tool) in lifecycle_tools
-    ]
+    }
+    if set(selected_tools) != lifecycle_tools:
+        # A prebuilt agent/test double may carry schemas that are not present in
+        # the process registry.  Preserve that compatible path, but never call
+        # the model with a partial lifecycle surface.
+        selected_tools.update({
+            _tool_name(tool): tool
+            for tool in (original_tools or [])
+            if _tool_name(tool) in lifecycle_tools
+        })
+    if set(selected_tools) != lifecycle_tools:
+        raise RuntimeError("terminal lifecycle tool schemas are unavailable")
+    agent.tools = [selected_tools[name] for name in lifecycle_tool_order]
     active_tool_names = [
         _tool_name(tool) for tool in agent.tools if _tool_name(tool)
     ]

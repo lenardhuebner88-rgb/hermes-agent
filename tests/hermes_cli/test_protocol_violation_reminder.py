@@ -313,6 +313,54 @@ def test_terminalization_nudge_filters_flat_runtime_tool_schemas(
     assert agent.tools is original_tools
 
 
+def test_terminalization_nudge_rebuilds_missing_runtime_tool_schemas(
+    kanban_home: Path,
+    monkeypatch,
+) -> None:
+    """A stale/empty agent snapshot must not erase the lifecycle-only turn."""
+    seen: list[str] = []
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.tools: list[dict[str, object]] = []
+            self.valid_tool_names: set[str] = set()
+            self.max_iterations = 30
+            self.session_id = "same-session"
+
+        def run_conversation(self, **_kwargs) -> str:
+            seen.extend(
+                str(tool.get("function", {}).get("name") or "")
+                for tool in self.tools
+            )
+            return "terminalized"
+
+    agent = FakeAgent()
+    original_tools = agent.tools
+    monkeypatch.setattr(
+        "model_tools.get_tool_definitions",
+        lambda **_kwargs: [
+            {"type": "function", "function": {"name": "kanban_complete"}},
+            {"type": "function", "function": {"name": "kanban_block"}},
+            {"type": "function", "function": {"name": "kanban_comment"}},
+        ],
+    )
+    with kb.connect_closing() as conn:
+        task_id = _running_task_with_deliverable(conn)
+
+    result = cli_module._run_kanban_finalize_nudge_q(
+        SimpleNamespace(
+            agent=agent,
+            conversation_history=[],
+            session_id="same-session",
+        ),
+        task_id=task_id,
+    )
+
+    assert result == "terminalized"
+    assert seen == ["kanban_complete", "kanban_block"]
+    assert agent.tools is original_tools
+
+
 def test_terminalization_nudge_ignores_deliverable_from_before_current_run(
     kanban_home: Path,
 ) -> None:
