@@ -8679,6 +8679,74 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
     return bool(row) and row["kind"] == OPERATOR_ESCALATION_EVENT
 
 
+def _validated_comment_id_watermark(payload: object) -> Optional[int]:
+    """Return a persisted comment boundary only when it is a JSON integer."""
+    if not isinstance(payload, dict):
+        return None
+    watermark = payload.get("comment_id_watermark")
+    if isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0:
+        return None
+    return watermark
+
+
+def _silent_block_escalation_matches_block_episode(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    blocked_run_id: Optional[int],
+) -> bool:
+    """Whether the active hold was emitted by this block episode's silent sweep.
+
+    ``needs_input`` may accept a late ``RESULT`` without an operator unblock only
+    for the narrow race where :func:`escalate_silent_blocks_sweep` surfaced the
+    same run before its result comment arrived. Foreign escalation writers,
+    prior runs, and legacy blocks without a comment watermark stay fail-closed.
+    """
+    if blocked_run_id is None:
+        return False
+    blocked_event = conn.execute(
+        "SELECT id, payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, blocked_run_id),
+    ).fetchone()
+    if blocked_event is None:
+        return False
+    try:
+        blocked_payload = json.loads(blocked_event["payload"] or "{}")
+    except (TypeError, ValueError):
+        return False
+    if _validated_comment_id_watermark(blocked_payload) is None:
+        return False
+    row = conn.execute(
+        "SELECT id, run_id, payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchone()
+    if (
+        not row
+        or row["id"] <= blocked_event["id"]
+        or row["run_id"] != blocked_run_id
+    ):
+        return False
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return False
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    sweep_blocked_event_id = (
+        evidence.get("blocked_event_id") if isinstance(evidence, dict) else None
+    )
+    return (
+        isinstance(evidence, dict)
+        and evidence.get("source") == SILENT_BLOCK_ESCALATION_SOURCE
+        and not isinstance(sweep_blocked_event_id, bool)
+        and isinstance(sweep_blocked_event_id, int)
+        and sweep_blocked_event_id == blocked_event["id"]
+    )
+
+
 def _latest_unresolved_gave_up_limit(
     conn: sqlite3.Connection,
     task_id: str,
@@ -19863,6 +19931,7 @@ def _silent_block_escalation_payload(
     reason: str,
     blocked_kind: str,
     trigger_outcome: str = "blocked",
+    blocked_event_id: Optional[int] = None,
 ) -> dict:
     """``operator_escalation`` payload for a settled silent block.
 
@@ -19885,6 +19954,12 @@ def _silent_block_escalation_payload(
         "blocked_kind": blocked_kind,
         "source": SILENT_BLOCK_ESCALATION_SOURCE,
     }
+    if (
+        not isinstance(blocked_event_id, bool)
+        and isinstance(blocked_event_id, int)
+        and blocked_event_id >= 0
+    ):
+        evidence["blocked_event_id"] = blocked_event_id
     recommended_human_action = (
         "inspect the task, answer any operator question, and decide whether "
         "to unblock/reassign/close — the worker loop cannot proceed alone"
@@ -19979,6 +20054,11 @@ def escalate_silent_blocks_sweep(
                 if blocked_run is not None
                 else (int(last_run["id"]) if last_run is not None else None)
             )
+            blocked_event = conn.execute(
+                "SELECT id FROM task_events WHERE task_id = ? AND run_id IS ? "
+                "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+                (tid, run_id),
+            ).fetchone()
             reason = ""
             if blocked_run is not None:
                 reason = (blocked_run["summary"] or "").strip() or (
@@ -20008,6 +20088,9 @@ def escalate_silent_blocks_sweep(
                 reason=reason,
                 blocked_kind=blocked_kind,
                 trigger_outcome=trigger_outcome,
+                blocked_event_id=(
+                    int(blocked_event["id"]) if blocked_event is not None else None
+                ),
             )
             esc_event_id = _append_event(
                 conn,
@@ -21843,9 +21926,8 @@ def _blocked_comment_id_watermark(
         return None
     try:
         payload = json.loads(row["payload"])
-        watermark = payload.get("comment_id_watermark")
-        return int(watermark) if watermark is not None else None
-    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return _validated_comment_id_watermark(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -21898,10 +21980,16 @@ def auto_retry_blocked_tasks(
         if blocked_run is None:
             continue
         explicit_block_kind = row["block_kind"]
-        if (
-            _operator_escalation_is_active(conn, task_id)
-            and explicit_block_kind != "needs_input"
-        ):
+        operator_escalation_active = _operator_escalation_is_active(conn, task_id)
+        silent_sweep_race = (
+            explicit_block_kind == "needs_input"
+            and _silent_block_escalation_matches_block_episode(
+                conn,
+                task_id,
+                blocked_run_id=int(blocked_run["id"]),
+            )
+        )
+        if operator_escalation_active and not silent_sweep_race:
             # Operator-review hold (autoresearch ``_escalate`` born blocked, or a
             # budget-runaway / circuit-breaker escalation): the operator must
             # decide what happens next. Never auto-retry behind the hold — the
@@ -21910,9 +21998,9 @@ def auto_retry_blocked_tasks(
             # Latest-state-aware via ``_operator_escalation_is_active`` (NOT the
             # permanent ``_has_operator_escalation``): an escalation the operator
             # already resolved (a newer ``"unblocked"`` event) falls through and
-            # retries normally. Explicit ``needs_input`` is the narrow exception:
-            # its silent-block escalation may precede a late worker RESULT, which
-            # must still be consumed below without bypassing other operator holds.
+            # retries normally. Explicit ``needs_input`` is the narrow exception
+            # only when this run's silent-block escalation raced with a late worker
+            # RESULT and the block recorded a comment ordering watermark.
             continue
         ended_at = int(blocked_run["ended_at"] or 0)
         reason = (blocked_run["summary"] or "").strip() or (

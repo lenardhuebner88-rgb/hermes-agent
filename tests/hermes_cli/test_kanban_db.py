@@ -5928,7 +5928,13 @@ def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediatel
 
         assert first_dispatch.auto_retried_blocked == []
         assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
-        assert len(_operator_escalations(conn, t)) == 1
+        escalation = _operator_escalations(conn, t)[0]
+        blocked_event = conn.execute(
+            "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert escalation.payload["evidence"]["blocked_event_id"] == blocked_event["id"]
 
         kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
 
@@ -5970,6 +5976,166 @@ def test_dispatch_auto_retry_ignores_same_second_result_from_before_block(
         assert not any(
             event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
         )
+
+
+def test_dispatch_auto_retry_needs_input_respects_foreign_operator_hold(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t, reason="waiting for clarification", kind="needs_input"
+        )
+        kb._append_event(
+            conn,
+            t,
+            kb.OPERATOR_ESCALATION_EVENT,
+            {"why_now": "operator explicitly parked this task"},
+        )
+        kb.add_comment(conn, t, "research", "RESULT: arrived after foreign hold")
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
+def test_dispatch_auto_retry_needs_input_requires_same_run_silent_escalation(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        foreign = kb.create_task(conn, title="foreign run", assignee="research")
+        kb.claim_task(conn, foreign)
+        foreign_run = conn.execute(
+            "SELECT id FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (foreign,),
+        ).fetchone()["id"]
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="blocked episode", kind="needs_input")
+        payload = kb._silent_block_escalation_payload(
+            row=conn.execute("SELECT * FROM tasks WHERE id = ?", (t,)).fetchone(),
+            reason="blocked episode",
+            blocked_kind="needs_input",
+        )
+        kb._append_event(
+            conn,
+            t,
+            kb.OPERATOR_ESCALATION_EVENT,
+            payload,
+            run_id=foreign_run,
+        )
+        kb.add_comment(conn, t, "research", "RESULT: arrived after foreign run hold")
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
+def test_dispatch_auto_retry_needs_input_requires_same_silent_sweep_episode(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="blocked episode", kind="needs_input")
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        escalation = _operator_escalations(conn, t)[0]
+        payload = escalation.payload
+        payload["evidence"]["blocked_event_id"] += 1
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps(payload), escalation.id),
+        )
+        kb.add_comment(conn, t, "research", "RESULT: arrived after stale sweep hold")
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
+def test_dispatch_auto_retry_needs_input_legacy_watermark_fails_closed(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t, reason="waiting for clarification", kind="needs_input"
+        )
+        blocked_event = conn.execute(
+            "SELECT id, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        payload = json.loads(blocked_event["payload"])
+        payload.pop("comment_id_watermark")
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps(payload), blocked_event["id"]),
+        )
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        monkeypatch.setattr(kb.time, "time", lambda: base + 60)
+        kb.add_comment(conn, t, "research", "RESULT: legacy late answer")
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
+@pytest.mark.parametrize("invalid_watermark", [False, -1])
+def test_dispatch_auto_retry_needs_input_invalid_watermark_fails_closed(
+    kanban_home, all_assignees_spawnable, monkeypatch, invalid_watermark
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.add_comment(conn, t, "research", "RESULT: stale answer from before block")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t, reason="waiting for clarification", kind="needs_input"
+        )
+        blocked_event = conn.execute(
+            "SELECT id, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        payload = json.loads(blocked_event["payload"])
+        payload["comment_id_watermark"] = invalid_watermark
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps(payload), blocked_event["id"]),
+        )
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
 
 # ---------------------------------------------------------------------------
 # Silent-block guard (SILENT-BLOCK-GUARD-S1): escalate_silent_blocks_sweep +
