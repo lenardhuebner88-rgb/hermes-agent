@@ -8735,9 +8735,15 @@ def _silent_block_escalation_matches_block_episode(
     except (TypeError, ValueError):
         return False
     evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    sweep_blocked_event_id = (
+        evidence.get("blocked_event_id") if isinstance(evidence, dict) else None
+    )
     return (
         isinstance(evidence, dict)
         and evidence.get("source") == SILENT_BLOCK_ESCALATION_SOURCE
+        and not isinstance(sweep_blocked_event_id, bool)
+        and isinstance(sweep_blocked_event_id, int)
+        and sweep_blocked_event_id == blocked_event["id"]
     )
 
 
@@ -19925,6 +19931,7 @@ def _silent_block_escalation_payload(
     reason: str,
     blocked_kind: str,
     trigger_outcome: str = "blocked",
+    blocked_event_id: Optional[int] = None,
 ) -> dict:
     """``operator_escalation`` payload for a settled silent block.
 
@@ -19947,6 +19954,12 @@ def _silent_block_escalation_payload(
         "blocked_kind": blocked_kind,
         "source": SILENT_BLOCK_ESCALATION_SOURCE,
     }
+    if (
+        not isinstance(blocked_event_id, bool)
+        and isinstance(blocked_event_id, int)
+        and blocked_event_id >= 0
+    ):
+        evidence["blocked_event_id"] = blocked_event_id
     recommended_human_action = (
         "inspect the task, answer any operator question, and decide whether "
         "to unblock/reassign/close — the worker loop cannot proceed alone"
@@ -20041,6 +20054,11 @@ def escalate_silent_blocks_sweep(
                 if blocked_run is not None
                 else (int(last_run["id"]) if last_run is not None else None)
             )
+            blocked_event = conn.execute(
+                "SELECT id FROM task_events WHERE task_id = ? AND run_id IS ? "
+                "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+                (tid, run_id),
+            ).fetchone()
             reason = ""
             if blocked_run is not None:
                 reason = (blocked_run["summary"] or "").strip() or (
@@ -20070,6 +20088,9 @@ def escalate_silent_blocks_sweep(
                 reason=reason,
                 blocked_kind=blocked_kind,
                 trigger_outcome=trigger_outcome,
+                blocked_event_id=(
+                    int(blocked_event["id"]) if blocked_event is not None else None
+                ),
             )
             esc_event_id = _append_event(
                 conn,

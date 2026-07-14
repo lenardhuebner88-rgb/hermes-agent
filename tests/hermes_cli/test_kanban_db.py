@@ -5928,7 +5928,13 @@ def test_dispatch_auto_retry_needs_input_result_after_sweep_completes_immediatel
 
         assert first_dispatch.auto_retried_blocked == []
         assert [entry["task_id"] for entry in sweep["escalated"]] == [t]
-        assert len(_operator_escalations(conn, t)) == 1
+        escalation = _operator_escalations(conn, t)[0]
+        blocked_event = conn.execute(
+            "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert escalation.payload["evidence"]["blocked_event_id"] == blocked_event["id"]
 
         kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
 
@@ -6027,6 +6033,33 @@ def test_dispatch_auto_retry_needs_input_requires_same_run_silent_escalation(
             run_id=foreign_run,
         )
         kb.add_comment(conn, t, "research", "RESULT: arrived after foreign run hold")
+
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert kb.get_task(conn, t).status == "blocked"
+        assert not any(
+            event.kind == "auto_retry_completed" for event in kb.list_events(conn, t)
+        )
+
+
+def test_dispatch_auto_retry_needs_input_requires_same_silent_sweep_episode(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="blocked episode", kind="needs_input")
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        escalation = _operator_escalations(conn, t)[0]
+        payload = escalation.payload
+        payload["evidence"]["blocked_event_id"] += 1
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps(payload), escalation.id),
+        )
+        kb.add_comment(conn, t, "research", "RESULT: arrived after stale sweep hold")
 
         kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
 
