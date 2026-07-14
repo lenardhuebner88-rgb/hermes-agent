@@ -167,7 +167,12 @@ describe("lanes api client", () => {
     }));
 
     const result = await persistLaneModels({
-      coder: { worker_runtime: "hermes", provider: "openai-codex", model: "gpt-5.5" },
+      coder: {
+        worker_runtime: "hermes",
+        provider: "openai-codex",
+        model: "gpt-5.5",
+        fallback_providers: [],
+      },
     });
 
     expect(result.written).toEqual(["coder"]);
@@ -176,7 +181,12 @@ describe("lanes api client", () => {
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
       profiles: {
-        coder: { worker_runtime: "hermes", provider: "openai-codex", model: "gpt-5.5" },
+        coder: {
+          worker_runtime: "hermes",
+          provider: "openai-codex",
+          model: "gpt-5.5",
+          fallback_providers: [],
+        },
       },
     });
   });

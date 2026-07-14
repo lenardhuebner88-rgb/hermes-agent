@@ -45,6 +45,7 @@ import os
 import re
 import sqlite3
 import threading
+import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
@@ -5539,10 +5540,19 @@ def activate_lane_endpoint(
         conn.close()
 
 
+class LanePersistFallbackEntry(BaseModel):
+    provider: ShortText
+    model: ShortText
+
+
 class LanePersistProfileEntry(BaseModel):
     worker_runtime: Literal["hermes", "claude-cli"]
     provider: Optional[ShortText] = None
     model: ShortText
+    # ``None`` preserves the pre-K31 behaviour for older API clients that omit
+    # this field. An explicit empty list is materially different: it clears the
+    # profile fallback chain and the active-lane override.
+    fallback_providers: Optional[list[LanePersistFallbackEntry]] = None
 
 
 class LanePersistBody(BaseModel):
@@ -5554,14 +5564,19 @@ def persist_lane_models_endpoint(
     payload: LanePersistBody,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
-    """Write the selected model per profile to the profile's config.yaml and
-    mirror the primary choice into the active lane, preserving existing
-    fallbacks. Returns a per-profile report plus a fresh lane payload."""
+    """Persist complete lane selections to profile configs and the active lane.
+
+    The operation is all-or-nothing across every requested profile. Profile
+    configs are snapshotted before the first write and atomically restored if a
+    later config write or the active-lane mirror fails. Older clients that omit
+    ``fallback_providers`` keep their existing chain; an explicit ``[]`` clears
+    it deterministically.
+    """
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
         from hermes_cli import profiles as profiles_mod
-        from utils import atomic_roundtrip_yaml_update
+        from utils import atomic_replace, atomic_roundtrip_yaml_update
 
         catalog_profiles = _lane_profile_catalog()
         known_profiles = {p["name"] for p in catalog_profiles}
@@ -5585,12 +5600,14 @@ def persist_lane_models_endpoint(
                 continue
             model_runtime = _lane_model_runtime(entry.model, catalog_profiles, models)
             if model_runtime and model_runtime != entry.worker_runtime:
-                bad_runtime_models.append({
-                    "profile": name,
-                    "model": entry.model,
-                    "expected_runtime": model_runtime,
-                    "worker_runtime": entry.worker_runtime,
-                })
+                bad_runtime_models.append(
+                    {
+                        "profile": name,
+                        "model": entry.model,
+                        "expected_runtime": model_runtime,
+                        "worker_runtime": entry.worker_runtime,
+                    }
+                )
             if entry.worker_runtime == "claude-cli" and entry.provider:
                 bad_claude_providers.append({"profile": name, "provider": str(entry.provider)})
         if bad_models:
@@ -5610,68 +5627,120 @@ def persist_lane_models_endpoint(
             )
 
         lanes = kanban_db.list_lanes(conn)
-        active_id = next((l["id"] for l in lanes if l["active"]), None)
-        # No active lane is a valid state (pure config-default routing — see
-        # kanban_db.get_active_lane). The tab must still write the profile
-        # configs; we simply skip the active-lane mirror below instead of
-        # refusing the whole save with a 409.
+        active_id = next((lane["id"] for lane in lanes if lane["active"]), None)
+        active_lane = next((lane for lane in lanes if lane["id"] == active_id), None)
+        active_profiles = (active_lane or {}).get("profiles") or {}
 
-        written: list[str] = []
-        failed: list[dict[str, str]] = []
+        config_snapshots: dict[str, tuple[Path, bool, bytes, int | None]] = {}
         lane_profiles: dict[str, dict[str, Any]] = {}
-
         for name, entry in payload.profiles.items():
-            try:
-                canon = profiles_mod.normalize_profile_name(name)
-                profile_dir = profiles_mod.get_profile_dir(canon)
-                config_path = profile_dir / "config.yaml"
-                if entry.worker_runtime == "claude-cli":
-                    atomic_roundtrip_yaml_update(config_path, "claude_model", entry.model)
-                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "claude-cli")
-                else:
-                    atomic_roundtrip_yaml_update(config_path, "model.default", entry.model)
-                    # Only write the provider when one was supplied. Writing an
-                    # empty string would clobber a provider the operator pinned
-                    # earlier (e.g. openrouter) on a no-op save and can break
-                    # model resolution for ambiguous slugs. Absent provider =
-                    # leave the existing config key untouched.
-                    if entry.provider:
-                        atomic_roundtrip_yaml_update(
-                            config_path, "model.provider", entry.provider
-                        )
-                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "hermes")
-                written.append(name)
-            except Exception as exc:
-                log.exception("lanes/persist: failed to write config for %s", name)
-                failed.append({"profile": name, "error": str(exc)})
-                continue
-
-            active_entry = next(
-                (l for l in lanes if l["id"] == active_id), {}
-            ).get("profiles", {})
-            existing = active_entry.get(name) or {}
+            canon = profiles_mod.normalize_profile_name(name)
+            config_path = profiles_mod.get_profile_dir(canon) / "config.yaml"
+            exists = config_path.exists()
+            config_snapshots[name] = (
+                config_path,
+                exists,
+                config_path.read_bytes() if exists else b"",
+                config_path.stat().st_mode if exists else None,
+            )
+            existing = active_profiles.get(name) or {}
+            fallback_rows = (
+                existing.get("fallback_providers") or []
+                if entry.fallback_providers is None
+                else [row.model_dump() for row in entry.fallback_providers]
+            )
             lane_profiles[name] = {
                 "worker_runtime": entry.worker_runtime,
-                # Mirror the config behaviour: an absent provider preserves the
-                # lane's existing one instead of clobbering it with null.
                 "provider": (
                     None
                     if entry.worker_runtime == "claude-cli"
                     else (entry.provider or existing.get("provider"))
                 ),
                 "model": entry.model,
-                "fallback_providers": existing.get("fallback_providers") or [],
+                "fallback_providers": fallback_rows,
             }
 
-        if lane_profiles and active_id is not None:
-            active_lane = next(l for l in lanes if l["id"] == active_id)
-            merged_profiles = dict(active_lane.get("profiles") or {})
-            merged_profiles.update(lane_profiles)
-            kanban_db.update_lane(conn, active_id, profiles=merged_profiles)
+        def rollback_profile_configs() -> list[str]:
+            errors: list[str] = []
+            for profile_name, (config_path, existed, contents, mode) in config_snapshots.items():
+                try:
+                    if not existed:
+                        config_path.unlink(missing_ok=True)
+                        continue
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    fd, tmp_name = tempfile.mkstemp(
+                        prefix=f".{config_path.name}.lane-rollback-",
+                        dir=str(config_path.parent),
+                    )
+                    tmp_path = Path(tmp_name)
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(contents)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        if mode is not None:
+                            os.chmod(tmp_path, mode)
+                        atomic_replace(tmp_path, config_path)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    log.exception("lanes/persist: rollback failed for %s", profile_name)
+                    errors.append(f"{profile_name}: {rollback_exc}")
+            return errors
+
+        failed_profile = "__active_lane__"
+        try:
+            for name, entry in payload.profiles.items():
+                failed_profile = name
+                config_path = config_snapshots[name][0]
+                if entry.worker_runtime == "claude-cli":
+                    atomic_roundtrip_yaml_update(config_path, "claude_model", entry.model)
+                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "claude-cli")
+                else:
+                    atomic_roundtrip_yaml_update(config_path, "model.default", entry.model)
+                    # An absent provider preserves an operator-pinned provider.
+                    if entry.provider:
+                        atomic_roundtrip_yaml_update(config_path, "model.provider", entry.provider)
+                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "hermes")
+                if entry.fallback_providers is not None:
+                    atomic_roundtrip_yaml_update(
+                        config_path,
+                        "fallback_providers",
+                        [row.model_dump() for row in entry.fallback_providers],
+                    )
+
+            failed_profile = "__active_lane__"
+            if lane_profiles and active_id is not None and active_lane is not None:
+                merged_profiles = dict(active_profiles)
+                merged_profiles.update(lane_profiles)
+                kanban_db.update_lane(conn, active_id, profiles=merged_profiles)
+        except Exception as exc:
+            log.exception("lanes/persist: transaction failed at %s", failed_profile)
+            rollback_errors = rollback_profile_configs()
+            if rollback_errors:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "lane persist rollback failed",
+                        "cause": str(exc),
+                        "rollback_errors": rollback_errors,
+                    },
+                ) from exc
+            return {
+                "written": [],
+                "failed": [
+                    {
+                        "profile": failed_profile,
+                        "error": f"{exc}; transaction rolled back",
+                    },
+                ],
+                "lanes": kanban_db.list_lanes(conn),
+                "active_id": active_id,
+            }
 
         return {
-            "written": written,
-            "failed": failed,
+            "written": list(payload.profiles),
+            "failed": [],
             "lanes": kanban_db.list_lanes(conn),
             "active_id": active_id,
         }

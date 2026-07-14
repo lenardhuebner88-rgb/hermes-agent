@@ -163,6 +163,7 @@ export interface LanePersistProfileEntry {
   worker_runtime: LaneRuntime;
   provider?: string | null;
   model: string;
+  fallback_providers: Array<{ provider: string; model: string }>;
 }
 
 export interface LanePersistResult {

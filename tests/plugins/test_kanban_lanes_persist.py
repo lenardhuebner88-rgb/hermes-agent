@@ -313,6 +313,168 @@ def test_persist_preserves_existing_lane_fallbacks(kanban_home, client):
     ]
 
 
+def test_persist_explicit_empty_fallbacks_clears_profile_and_active_lane(kanban_home, client):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n"
+        "fallback_providers:\n"
+        "  - provider: openai-codex\n    model: gpt-5.5\n",
+    )
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="fallback-clear-lane",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                    "fallback_providers": [{"provider": "openai-codex", "model": "gpt-5.5"}],
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "fallback_providers": [],
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] == ["coder"]
+    cfg = yaml.safe_load((kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["fallback_providers"] == []
+    active = next(l for l in response.json()["lanes"] if l["active"])
+    assert active["profiles"]["coder"]["fallback_providers"] == []
+
+
+def test_persist_rolls_back_all_profiles_when_one_write_fails(
+    kanban_home, client, monkeypatch,
+):
+    coder_path = _write_profile_config(
+        kanban_home,
+        "coder",
+        "worker_runtime: hermes\nmodel:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    reviewer_path = _write_profile_config(
+        kanban_home,
+        "reviewer",
+        "worker_runtime: hermes\nmodel:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    originals = {coder_path: coder_path.read_bytes(), reviewer_path: reviewer_path.read_bytes()}
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="transaction-lane",
+            profiles={
+                "coder": {"worker_runtime": "hermes", "provider": "openrouter", "model": "qwen/qwen3.7-max"},
+                "reviewer": {"worker_runtime": "hermes", "provider": "openrouter", "model": "qwen/qwen3.7-max"},
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+
+    import utils
+
+    real_update = utils.atomic_roundtrip_yaml_update
+
+    def fail_reviewer(path, key_path, value, **kwargs):
+        if Path(path) == reviewer_path:
+            raise OSError("simulated reviewer write failure")
+        return real_update(path, key_path, value, **kwargs)
+
+    monkeypatch.setattr(utils, "atomic_roundtrip_yaml_update", fail_reviewer)
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {"worker_runtime": "hermes", "provider": "openai-codex", "model": "gpt-5.5", "fallback_providers": []},
+                "reviewer": {"worker_runtime": "hermes", "provider": "openai-codex", "model": "gpt-5.5", "fallback_providers": []},
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] == []
+    assert response.json()["failed"] == [
+        {"profile": "reviewer", "error": "simulated reviewer write failure; transaction rolled back"},
+    ]
+    assert coder_path.read_bytes() == originals[coder_path]
+    assert reviewer_path.read_bytes() == originals[reviewer_path]
+    with kb.connect() as conn:
+        active = kb.get_active_lane(conn)
+    assert active["profiles"]["coder"]["provider"] == "openrouter"
+    assert active["profiles"]["reviewer"]["provider"] == "openrouter"
+
+
+def test_persist_rolls_back_profiles_when_active_lane_write_fails(
+    kanban_home, client, monkeypatch,
+):
+    coder_path = _write_profile_config(
+        kanban_home,
+        "coder",
+        "worker_runtime: hermes\nmodel:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    original = coder_path.read_bytes()
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="lane-write-failure",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                    "fallback_providers": [{"provider": "openai-codex", "model": "gpt-5.5"}],
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+
+    def fail_lane_write(*args, **kwargs):
+        raise RuntimeError("simulated active lane write failure")
+
+    monkeypatch.setattr(kb, "update_lane", fail_lane_write)
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "fallback_providers": [],
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] == []
+    assert response.json()["failed"] == [
+        {
+            "profile": "__active_lane__",
+            "error": "simulated active lane write failure; transaction rolled back",
+        },
+    ]
+    assert coder_path.read_bytes() == original
+    with kb.connect() as conn:
+        active = kb.get_active_lane(conn)
+    assert active["profiles"]["coder"]["provider"] == "openrouter"
+    assert active["profiles"]["coder"]["fallback_providers"] == [
+        {"provider": "openai-codex", "model": "gpt-5.5"},
+    ]
+
+
 def test_persist_rejects_unknown_model(kanban_home, client):
     _write_profile_config(
         kanban_home,

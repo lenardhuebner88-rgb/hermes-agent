@@ -1491,11 +1491,15 @@ export function LanesView(_props: { density?: Density }) {
                 worker_runtime: "claude-cli",
                 provider: null,
                 model: row.model ?? "",
+                fallback_providers: [],
               }
             : {
                 worker_runtime: "hermes",
                 provider: row.provider,
                 model: row.model ?? "",
+                fallback_providers: row.fallbackProviders
+                  .filter((fallback) => fallback.provider && fallback.model)
+                  .map((fallback) => ({ provider: fallback.provider!, model: fallback.model! })),
               };
         }
         if (Object.keys(profiles).length === 0) return;

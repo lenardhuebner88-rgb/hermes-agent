@@ -406,7 +406,7 @@ class TestLaneSpawnResolution:
         ]
         assert fallback_values == ["openai-codex:gpt-5.5"]
 
-    def test_no_lane_fallback_preserves_profile_fallback_behavior(
+    def test_explicit_empty_lane_fallback_overrides_profile_fallback_chain(
         self, kanban_home, tmp_path, monkeypatch,
     ):
         cmd = self._spawn(
@@ -421,6 +421,7 @@ class TestLaneSpawnResolution:
                     "worker_runtime": "hermes",
                     "provider": "openrouter",
                     "model": "qwen/qwen3.7-max",
+                    "fallback_providers": [],
                 },
             },
         )
