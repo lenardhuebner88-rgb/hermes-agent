@@ -1137,12 +1137,76 @@ def test_create_happy_path(worker_env):
     assert d["ok"] is True
     assert d["task_id"]
     assert d["status"] == "todo"  # parent isn't done yet
+    assert "auto_parent" not in d  # explicit parents — no B3a rewrite
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
         child = kb.get_task(conn, d["task_id"])
         assert child.title == "child task"
         assert child.assignee == "peer"
+    finally:
+        conn.close()
+
+
+def test_create_worker_empty_parents_auto_links_to_self(worker_env):
+    """B3a: HERMES_KANBAN_TASK set + empty parents → auto-parent to self."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    out = kt._handle_create({
+        "title": "recovery leaf without parents",
+        "assignee": "peer",
+        # no parents —
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d.get("auto_parent") == worker_env
+    assert "parent_contract" in d
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        parents = kb.parent_ids(conn, d["task_id"])
+        assert parents == [worker_env]
+        assert child.status == "todo"  # parent still running/not done
+    finally:
+        conn.close()
+
+
+def test_create_inventory_tool_path_forces_kind_analysis(worker_env, monkeypatch):
+    """Regression: tool must not pre-rewrite assignee and leave kind=research.
+
+    When kind is already research, create_task must still force analysis
+    because it sees the original research assignee (not a pre-rewritten coder).
+    """
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    # peer may not resolve; use research which is a real lane name in tools
+    # tests often use "peer" — inventory contract needs research|premium|scout.
+    # Ensure research is spawnable in this fixture: validate may reject.
+    monkeypatch.setattr(
+        kb,
+        "validate_spawnable_assignee",
+        lambda name: str(name).strip().lower(),
+    )
+    out = kt._handle_create({
+        "title": "Skill-Audit Inventar und Frontmatter",
+        "assignee": "research",
+        "kind": "research",
+        "body": (
+            "Enumerate all active SKILL.md under ~/.hermes/skills "
+            "and profiles/*/skills; validate frontmatter."
+        ),
+        "parents": [worker_env],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert "inventory_lane_contract" in d
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.assignee == "coder"
+        assert child.kind == "analysis"
     finally:
         conn.close()
 
@@ -1503,7 +1567,11 @@ def test_create_parses_triage_string_false(worker_env):
     conn = kb.connect()
     try:
         task = kb.get_task(conn, d["task_id"])
-        assert task.status == "ready"
+        # Under HERMES_KANBAN_TASK (worker_env) B3a auto-parents → todo until
+        # the worker task is done; triage=false only means "not triage column".
+        assert task.status == "todo"
+        assert d.get("auto_parent") == worker_env
+        assert task.status != "triage"
     finally:
         conn.close()
 
