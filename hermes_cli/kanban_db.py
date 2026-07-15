@@ -8654,12 +8654,12 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
     Mirrors :func:`_has_sticky_block`'s latest-event logic. An
     ``operator_escalation`` event (autoresearch ``_escalate`` born-blocked
     task, budget-runaway park, stall/circuit-breaker escalation) parks the task
-    for an operator decision. An ``"unblocked"`` event is the operator resolving
-    it (``unblock_task`` returns the task to the queue). The escalation is still
-    active only when the most recent of the two is the escalation — so a task
-    that was escalated, unblocked, and later re-blocked for an unrelated reason
-    is NOT trapped here (it falls through to the normal recovery / breaker-limit
-    guards), while a freshly escalated task with no resolution stays held.
+    for an operator decision. An ``"unblocked"`` or ``"promoted_manual"`` event
+    is the operator resolving it and returning the task to the queue. The
+    escalation is still active only when the most recent escalation/resolution
+    event is the escalation — so a task that was escalated, explicitly resumed,
+    and later re-blocked for an unrelated reason is NOT trapped here, while a
+    freshly escalated task with no resolution stays held.
     Distinct from :func:`_has_operator_escalation` (the permanent "ever
     escalated" predicate used elsewhere), which must not change semantics.
 
@@ -8674,7 +8674,7 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
         "WHERE task_id = ? AND ("
         "  (kind = ? AND COALESCE(json_extract(payload, "
         "   '$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee')"
-        "  OR kind = 'unblocked') "
+        "  OR kind IN ('unblocked', 'promoted_manual')) "
         "ORDER BY id DESC LIMIT 1",
         (task_id, OPERATOR_ESCALATION_EVENT),
     ).fetchone()
@@ -20298,7 +20298,7 @@ def silent_block_task_ids(
     backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
 ) -> list[str]:
     """The 'silent block' set: *settled* blocked tasks (see
-    :func:`_block_is_settled`) that carry no ``operator_escalation`` event.
+    :func:`_block_is_settled`) without an active ``operator_escalation``.
 
     Single source of truth shared by :func:`escalate_silent_blocks_sweep` (which
     fixes the gap by emitting the missing escalation) and the vision
@@ -20307,26 +20307,13 @@ def silent_block_task_ids(
     the metric converges to 0 within one dispatcher tick.
     """
     ts = int(time.time()) if now is None else int(now)
-    # Ready-stage mis-assignment escalations (nonspawnable_assignee) do NOT
-    # count as "this task's block was escalated": they predate any block, so
-    # a task that was once mis-assigned and later genuinely silent-blocks
-    # must still be caught by the sweep/metric (review finding 2026-07-02).
-    escalated = {
-        r["task_id"]
-        for r in conn.execute(
-            "SELECT DISTINCT task_id FROM task_events WHERE kind = ? "
-            "AND COALESCE(json_extract(payload, "
-            "'$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee'",
-            (OPERATOR_ESCALATION_EVENT,),
-        ).fetchall()
-    }
     rows = conn.execute(
         "SELECT id, created_by, consecutive_failures, max_retries, body, "
         "auto_retry_count, block_kind FROM tasks WHERE status = 'blocked'"
     ).fetchall()
     out: list[str] = []
     for row in rows:
-        if row["id"] in escalated:
+        if _operator_escalation_is_active(conn, row["id"]):
             continue
         # STRATEGIST-META-CARVEOUT (HEILER-SILENTBLOCK-REASON-FIDELITY-S1):
         # the Stratege's own ingested chains are excluded from BOTH the sweep
