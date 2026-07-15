@@ -188,6 +188,15 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
 def _ensure_push_hook_consumers_registered() -> None:
     """Register bundled lifecycle observers, fully best-effort."""
     global _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED
+    # Project edges register idempotently on every transition. Test/plugin
+    # manager resets and late plugin discovery must not be masked by the
+    # process-wide push bootstrap flag.
+    try:
+        from plugins.kanban.family_organizer import register_lifecycle_hooks
+
+        register_lifecycle_hooks()
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("family organizer kanban hook consumer bootstrap failed: %s", exc)
     if _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED:
         return
     try:
@@ -5418,6 +5427,8 @@ def add_event(
     task_id: str,
     kind: str,
     payload: Optional[dict] = None,
+    *,
+    run_id: Optional[int] = None,
 ) -> None:
     """Public wrapper to append one timeline event for a task.
 
@@ -5429,7 +5440,7 @@ def add_event(
     with write_txn(conn):
         if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
             raise ValueError(f"unknown task {task_id}")
-        _append_event(conn, task_id, kind, payload)
+        _append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -11611,242 +11622,6 @@ def _submit_for_review(
     return True
 
 
-_FO_BACKLOG_IDEMPOTENCY_PREFIX = "fo-backlog:"
-_FO_BACKLOG_DEFAULT_DIR = "/home/piet/projects/family-organizer/backlog/items"
-_FO_BACKLOG_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_FO_RESULT_MAX_CHARS = 500
-
-
-def _fo_backlog_dir() -> Path:
-    return Path(
-        os.environ.get("FAMILY_ORGANIZER_BACKLOG_DIR", _FO_BACKLOG_DEFAULT_DIR)
-    ).expanduser()
-
-
-def _fo_backlog_item_id(idempotency_key: Optional[str]) -> Optional[str]:
-    if not idempotency_key:
-        return None
-    raw_key = str(idempotency_key).strip()
-    if not raw_key.startswith(_FO_BACKLOG_IDEMPOTENCY_PREFIX):
-        return None
-    raw_item_id = raw_key[len(_FO_BACKLOG_IDEMPOTENCY_PREFIX) :].strip()
-    if not raw_item_id:
-        return None
-    if raw_item_id.isdigit():
-        raw_item_id = raw_item_id.zfill(4)
-    if not _FO_BACKLOG_ID_RE.match(raw_item_id):
-        return None
-    return raw_item_id
-
-
-def _parse_flat_frontmatter(text: str) -> tuple[dict[str, str], list[str], int] | None:
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is None:
-        return None
-    data: dict[str, str] = {}
-    for line in lines[1:end]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        idx = line.find(":")
-        if idx == -1:
-            continue
-        key = line[:idx].strip()
-        if key:
-            data[key] = line[idx + 1 :].strip()
-    return data, lines, end
-
-
-def _find_fo_backlog_item_path(base: Path, item_id: str) -> Optional[Path]:
-    try:
-        base_resolved = base.resolve(strict=False)
-    except OSError:
-        return None
-    if not base_resolved.is_dir():
-        return None
-
-    candidates = [base_resolved / f"{item_id}.md"]
-    try:
-        candidates.extend(sorted(base_resolved.glob(f"{item_id}-*.md")))
-    except OSError:
-        pass
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=False)
-            if resolved.is_file() and resolved.is_relative_to(base_resolved):
-                return resolved
-        except OSError:
-            continue
-
-    # Fallback for renamed files: scan flat frontmatter id values under the
-    # configured backlog/items directory. The directory is small; fail-soft.
-    try:
-        entries = sorted(base_resolved.glob("*.md"))
-    except OSError:
-        return None
-    for candidate in entries:
-        try:
-            resolved = candidate.resolve(strict=False)
-            if not resolved.is_file() or not resolved.is_relative_to(base_resolved):
-                continue
-            parsed = _parse_flat_frontmatter(resolved.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-        if parsed is None:
-            continue
-        fm, _lines, _end = parsed
-        fm_id = str(fm.get("id") or "").strip()
-        if fm_id.isdigit():
-            fm_id = fm_id.zfill(4)
-        if fm_id == item_id:
-            return resolved
-    return None
-
-
-def _single_line_backlog_result(value: Any) -> Optional[str]:
-    text = " ".join(str(value).strip().split()) if value is not None else ""
-    if not text:
-        return None
-    return text[:_FO_RESULT_MAX_CHARS]
-
-
-def _fo_backlog_result_text(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    summary: Optional[str],
-    result: Optional[str],
-    fallback_title: Optional[str],
-) -> str:
-    # If a coder completion was parked in review, terminal done is normally a
-    # terse verifier receipt ("APPROVED"). Use the implementing worker's
-    # handoff from the review handoff run as the human-relevant backlog result.
-    try:
-        row = conn.execute(
-            "SELECT summary FROM task_runs "
-            "WHERE task_id = ? AND outcome = 'completed' AND status = 'review' "
-            "  AND summary IS NOT NULL AND TRIM(summary) != '' "
-            "ORDER BY COALESCE(ended_at, started_at) ASC, id ASC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if row:
-            text = _single_line_backlog_result(row["summary"])
-            if text:
-                return text
-    except sqlite3.Error:
-        pass
-    for candidate in (summary, result, fallback_title):
-        text = _single_line_backlog_result(candidate)
-        if text:
-            return text
-    return f"Hermes task {task_id} completed."
-
-
-def _set_frontmatter_field(lines: list[str], end: int, key: str, value: str) -> int:
-    for i in range(1, end):
-        line = lines[i]
-        idx = line.find(":")
-        if idx == -1:
-            continue
-        if line[:idx].strip() == key:
-            lines[i] = f"{key}: {value}"
-            return end
-    lines.insert(end, f"{key}: {value}")
-    return end + 1
-
-
-def _close_fo_backlog_item_file(
-    path: Path,
-    *,
-    item_id: str,
-    now: int,
-    result_text: str,
-) -> bool:
-    parsed = _parse_flat_frontmatter(path.read_text(encoding="utf-8"))
-    if parsed is None:
-        return False
-    _fm, lines, end = parsed
-    updated = (
-        _dt.datetime.fromtimestamp(int(now), tz=_dt.timezone.utc).date().isoformat()
-    )
-    end = _set_frontmatter_field(lines, end, "status", "done")
-    end = _set_frontmatter_field(lines, end, "updated", updated)
-    end = _set_frontmatter_field(lines, end, "result", result_text)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return True
-
-
-def _maybe_close_family_organizer_backlog_item(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    run_id: Optional[int],
-    now: int,
-    summary: Optional[str],
-    result: Optional[str],
-) -> None:
-    """Best-effort write-back from terminal Kanban completion to FO backlog.
-
-    Family Organizer backlog tasks are copied into Fleet/Kanban with
-    ``tenant='family-organizer'`` and ``idempotency_key='fo-backlog:<id>'``.
-    The source markdown remains the UI source of truth, so terminal ``done``
-    must close that linked item. This hook is deliberately fail-soft: kanban
-    completion must not be blocked by a missing local family-organizer checkout.
-    """
-    try:
-        row = conn.execute(
-            "SELECT title, tenant, idempotency_key FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return
-    if not row or row["tenant"] != "family-organizer":
-        return
-    item_id = _fo_backlog_item_id(row["idempotency_key"])
-    if item_id is None:
-        return
-    try:
-        base = _fo_backlog_dir()
-        item_path = _find_fo_backlog_item_path(base, item_id)
-        if item_path is None:
-            return
-        result_text = _fo_backlog_result_text(
-            conn,
-            task_id,
-            summary=summary,
-            result=result,
-            fallback_title=row["title"],
-        )
-        if not _close_fo_backlog_item_file(
-            item_path, item_id=item_id, now=now, result_text=result_text
-        ):
-            return
-        with write_txn(conn):
-            _append_event(
-                conn,
-                task_id,
-                "family_organizer_backlog_closed",
-                {
-                    "item_id": item_id,
-                    "path": str(item_path),
-                    "status": "done",
-                    "result": result_text,
-                },
-                run_id=run_id,
-            )
-    except Exception:
-        _log.debug(
-            "family-organizer backlog close failed for %s", task_id, exc_info=True
-        )
-
-
 def _resolve_workflow_next_step(
     conn: sqlite3.Connection, task_id: str
 ) -> Optional[tuple[str, str]]:
@@ -12889,16 +12664,6 @@ def complete_task(
                 conn, task_id, source_metadata, run_id=source_run_id
             )
     _record_disposition_items(conn, task_id, metadata, run_id=run_id)
-    # Family Organizer write-back: the Kanban task is a Fleet copy of a
-    # repo-native backlog item, so terminal done closes the linked source item.
-    _maybe_close_family_organizer_backlog_item(
-        conn,
-        task_id,
-        run_id=run_id,
-        now=now,
-        summary=summary,
-        result=result,
-    )
     # Successful completion — wipe the consecutive-failures counter.
     # Failure history stays on the event log for audit; the counter
     # just tracks "is there a current pathology the breaker should
@@ -12917,6 +12682,8 @@ def complete_task(
         assignee=_done_task.assignee if _done_task else None,
         run_id=run_id,
         summary=(summary if summary is not None else result),
+        result=result,
+        completed_at=now,
     )
     # Release and receipt delivery are processed from the durable outbox by a
     # detached closeout unit. It survives dashboard restarts and reconciles the

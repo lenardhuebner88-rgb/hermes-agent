@@ -8,6 +8,8 @@ and that a misbehaving hook callback never breaks the transition.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,19 @@ def test_hooks_are_registered_as_valid():
     assert "kanban_task_claimed" in VALID_HOOKS
     assert "kanban_task_completed" in VALID_HOOKS
     assert "kanban_task_blocked" in VALID_HOOKS
+
+
+def test_family_organizer_writeback_is_a_completion_edge():
+    edge = importlib.import_module("plugins.kanban.family_organizer")
+    mgr = get_plugin_manager()
+    saved = {key: list(value) for key, value in mgr._hooks.items()}
+    try:
+        edge.register_lifecycle_hooks()
+        assert edge.handle_task_completed in mgr._hooks["kanban_task_completed"]
+    finally:
+        mgr._hooks = saved
+
+    assert "family_organizer" not in inspect.getsource(kb.complete_task)
 
 
 def test_claim_fires_hook(kanban_home, captured_hooks):

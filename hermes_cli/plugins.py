@@ -207,7 +207,8 @@ VALID_HOOKS: Set[str] = {
     #
     # Common kwargs: task_id: str, board: str | None, assignee: str | None,
     #   run_id: int | None, profile_name: str.
-    # kanban_task_completed adds: summary: str | None.
+    # kanban_task_completed adds: summary: str | None, result: str | None,
+    #   completed_at: int.
     # kanban_task_blocked adds:   reason: str | None.
     "kanban_task_claimed",
     "kanban_task_completed",
