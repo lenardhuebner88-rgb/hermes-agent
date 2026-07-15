@@ -188,30 +188,15 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
 def _ensure_push_hook_consumers_registered() -> None:
     """Register bundled lifecycle observers, fully best-effort."""
     global _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED
-    # Project edges register idempotently on every transition. Test/plugin
-    # manager resets and late plugin discovery must not be masked by the
-    # process-wide push bootstrap flag.
     try:
-        from plugins.kanban.family_organizer import register_lifecycle_hooks
+        from plugins.kanban.lifecycle import register_bundled_consumers
 
-        register_lifecycle_hooks()
-    except Exception as exc:  # pragma: no cover - defensive
-        _log.debug("family organizer kanban hook consumer bootstrap failed: %s", exc)
-    if _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED:
-        return
-    try:
-        from plugins.kanban.dashboard import plugin_api as _kanban_dashboard_plugin_api
-
-        _kanban_dashboard_plugin_api.register_push_lifecycle_hooks()
+        # Register on every transition. The public registry deduplicates normal
+        # calls and also restores observers after a plugin-manager force reset.
+        register_bundled_consumers()
         _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = True
     except Exception as exc:  # pragma: no cover - defensive
-        _log.debug("kanban push hook consumer bootstrap failed: %s", exc)
-    try:
-        from hermes_cli.design_board_kanban import register_lifecycle_hooks
-
-        register_lifecycle_hooks()
-    except Exception as exc:  # pragma: no cover - defensive
-        _log.debug("design board kanban hook consumer bootstrap failed: %s", exc)
+        _log.debug("bundled kanban hook consumer bootstrap failed: %s", exc)
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
@@ -9207,7 +9192,7 @@ def claim_task(
     _fire_kanban_lifecycle_hook(
         "kanban_task_claimed",
         task_id,
-        board=get_current_board(),
+        board=board_slug_for_conn(conn) or get_current_board(),
         assignee=claimed.assignee if claimed else None,
         run_id=run_id,
     )
@@ -12680,7 +12665,7 @@ def complete_task(
     _fire_kanban_lifecycle_hook(
         "kanban_task_completed",
         task_id,
-        board=get_current_board(),
+        board=board_slug_for_conn(conn) or get_current_board(),
         assignee=_done_task.assignee if _done_task else None,
         run_id=run_id,
         summary=(summary if summary is not None else result),
@@ -13870,7 +13855,7 @@ def block_task(
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
         task_id,
-        board=get_current_board(),
+        board=board_slug_for_conn(conn) or get_current_board(),
         assignee=_blocked_task.assignee if _blocked_task else None,
         run_id=run_id,
         reason=reason,

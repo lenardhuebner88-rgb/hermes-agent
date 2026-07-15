@@ -26,11 +26,9 @@ RESULT_MAX_CHARS = 500
 
 def register_lifecycle_hooks() -> None:
     """Register the project write-back as an idempotent completion observer."""
-    from hermes_cli.plugins import get_plugin_manager
+    from hermes_cli.plugins import register_hook_once
 
-    callbacks = get_plugin_manager()._hooks.setdefault("kanban_task_completed", [])
-    if handle_task_completed not in callbacks:
-        callbacks.append(handle_task_completed)
+    register_hook_once("kanban_task_completed", handle_task_completed)
 
 
 def _backlog_dir() -> Path:

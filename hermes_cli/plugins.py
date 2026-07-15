@@ -2055,6 +2055,25 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
 
 
+def register_hook_once(hook_name: str, callback: Callable) -> None:
+    """Register a bundled lifecycle observer without duplicate callbacks.
+
+    Bundled edges do not have a manifest-backed :class:`PluginContext`, but
+    they still use a public hook contract rather than mutating
+    ``PluginManager._hooks`` themselves. Re-registering after a plugin-manager
+    reset is deliberate and safe.
+    """
+    if hook_name not in VALID_HOOKS:
+        logger.warning(
+            "Bundled consumer registered unknown hook '%s' (valid: %s)",
+            hook_name,
+            ", ".join(sorted(VALID_HOOKS)),
+        )
+    callbacks = get_plugin_manager()._hooks.setdefault(hook_name, [])
+    if callback not in callbacks:
+        callbacks.append(callback)
+
+
 def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:
     """Invoke registered middleware callbacks.
 

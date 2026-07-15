@@ -507,18 +507,13 @@ def _handle_completed_push(
 def register_push_lifecycle_hooks() -> None:
     """Register the dashboard Web Push sender as a kanban hook consumer."""
     global _PUSH_HOOKS_REGISTERED
-    if _PUSH_HOOKS_REGISTERED:
-        return
-    from hermes_cli.plugins import get_plugin_manager
+    from hermes_cli.plugins import register_hook_once
 
-    hooks = get_plugin_manager()._hooks
     for hook_name, callback in (
         ("kanban_task_blocked", _handle_blocked_push),
         ("kanban_task_completed", _handle_completed_push),
     ):
-        callbacks = hooks.setdefault(hook_name, [])
-        if callback not in callbacks:
-            callbacks.append(callback)
+        register_hook_once(hook_name, callback)
     _PUSH_HOOKS_REGISTERED = True
 
 

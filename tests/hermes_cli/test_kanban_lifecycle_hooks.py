@@ -66,6 +66,10 @@ def test_family_organizer_writeback_is_a_completion_edge():
         mgr._hooks = saved
 
     assert "family_organizer" not in inspect.getsource(kb.complete_task)
+    assert "family_organizer" not in inspect.getsource(
+        kb._ensure_push_hook_consumers_registered
+    )
+    assert "._hooks" not in inspect.getsource(edge.register_lifecycle_hooks)
 
 
 def test_claim_fires_hook(kanban_home, captured_hooks):

@@ -71,12 +71,9 @@ def batch_task_facets(task_ids: list[str]) -> dict[str, dict]:
 
 def register_lifecycle_hooks() -> None:
     """Register Design Board Kanban lifecycle observers."""
-    from hermes_cli.plugins import get_plugin_manager
+    from hermes_cli.plugins import register_hook_once
 
-    hooks = get_plugin_manager()._hooks
-    callbacks = hooks.setdefault("kanban_task_completed", [])
-    if handle_task_completed not in callbacks:
-        callbacks.append(handle_task_completed)
+    register_hook_once("kanban_task_completed", handle_task_completed)
 
 
 def handle_task_completed(task_id: str, **kwargs: object) -> None:

@@ -14808,6 +14808,34 @@ def test_fo_backlog_close_ignores_unlinked_family_organizer_tasks(
     assert _frontmatter_dict(item)["status"] == "next"
 
 
+def test_fo_completion_hook_uses_connection_board(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A non-current board completion must not reopen the ambient board."""
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    item = tmp_path / "0141-shopping-favoriten-chips-aus-historie.md"
+    _write_fo_backlog_item(item)
+    kb.create_board("alpha")
+    assert kb.get_current_board() == kb.DEFAULT_BOARD
+
+    with kb.connect_closing(board="alpha") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="[FO] explicit board",
+            assignee="coder",
+            tenant="family-organizer",
+            idempotency_key="fo-backlog:0141",
+        )
+        kb.claim_task(conn, task_id)
+        assert kb.complete_task(conn, task_id, summary="done on alpha")
+        assert any(
+            event.kind == "family_organizer_backlog_closed"
+            for event in kb.list_events(conn, task_id)
+        )
+
+    assert _frontmatter_dict(item)["status"] == "done"
+
+
 # ---------------------------------------------------------------------------
 # A1 (N-A1): acceptance-criteria column + body parser
 # ---------------------------------------------------------------------------
