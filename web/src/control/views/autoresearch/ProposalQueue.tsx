@@ -17,6 +17,7 @@ export function ProposalQueue({
   onApply,
   onSkip,
   focusId,
+  onClearFocus,
 }: {
   density: Density;
   openCount: number;
@@ -26,19 +27,19 @@ export function ProposalQueue({
   onApply: (proposal: Proposal) => void;
   onSkip: (proposal: Proposal) => void;
   focusId?: string | null;
+  onClearFocus?: () => void;
 }) {
   const proposals = useMemo(
     () => [...proposalGroupQueue.shortlist, ...proposalGroupQueue.backlog].flatMap((group) => group.proposals),
     [proposalGroupQueue],
   );
   const [manualIndex, setManualIndex] = useState(0);
-  const [consumedFocusId, setConsumedFocusId] = useState<string | null>(null);
   const focusIndex = focusId ? proposals.findIndex((proposal) => proposal.id === focusId) : -1;
-  const focusIsActive = focusIndex >= 0 && focusId !== consumedFocusId;
+  const focusIsActive = focusIndex >= 0;
   const index = focusIsActive ? focusIndex : Math.min(manualIndex, Math.max(0, proposals.length - 1));
 
   const consumeFocusAt = (nextIndex: number) => {
-    setConsumedFocusId(focusId ?? null);
+    if (focusIsActive) onClearFocus?.();
     setManualIndex(nextIndex);
   };
 

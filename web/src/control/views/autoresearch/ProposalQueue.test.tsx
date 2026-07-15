@@ -171,4 +171,37 @@ describe("ProposalQueue focus", () => {
     fireEvent.click(within(container).getByRole("button", { name: "Zurück" }));
     expect(document.getElementById("autoresearch-proposal-focused-proposal")).toBeTruthy();
   });
+
+  it("honors a renewed focus request for the same proposal after the URL focus was consumed", () => {
+    const proposals = [
+      { ...realProposal, id: "first-proposal" },
+      { ...realProposal, id: "focused-proposal" },
+      { ...realProposal, id: "third-proposal" },
+    ];
+    const onClearFocus = vi.fn();
+    const props = (focusId: string | null) => (
+      <ProposalQueue
+        density="airy"
+        focusId={focusId}
+        openCount={proposals.length}
+        storeLoading={false}
+        storeBusy={null}
+        proposalGroupQueue={rankAutoresearchProposalGroups(proposals, 3)}
+        onApply={vi.fn()}
+        onSkip={vi.fn()}
+        onClearFocus={onClearFocus}
+      />
+    );
+    const { container, rerender } = render(props("focused-proposal"));
+
+    fireEvent.click(within(container).getByRole("button", { name: "Weiter" }));
+    expect(document.getElementById("autoresearch-proposal-third-proposal")).toBeTruthy();
+    expect(onClearFocus).toHaveBeenCalledOnce();
+
+    rerender(props(null));
+    rerender(props("focused-proposal"));
+
+    expect(document.getElementById("autoresearch-proposal-focused-proposal")).toBeTruthy();
+    expect(within(container).getByText("2 von 3")).toBeTruthy();
+  });
 });

@@ -29,6 +29,7 @@ import { AdvancedSection } from "./autoresearch/AdvancedSection";
 import { ResolvedQueues } from "./autoresearch/ResolvedQueues";
 import { RunsList } from "./autoresearch/RunsList";
 import { OutcomePanel } from "./autoresearch/OutcomePanel";
+import { withoutAutoresearchFocus } from "./autoresearch/focus";
 import { ActivityTimelineItem, LatestActivityPanel } from "./autoresearch/panels";
 import { clampLoopIterations, clearProposalSelection, describeArea, describeAutoresearchBusy, describeLoopStatus, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -331,14 +332,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const [focusParams] = useSearchParams();
+  const [focusParams, setFocusParams] = useSearchParams();
   const focusId = focusParams.get("focus");
   const [requestedFocusId, setRequestedFocusId] = useState<string | null>(null);
-  const [dismissedDeepLinkId, setDismissedDeepLinkId] = useState<string | null>(null);
-  const deepLinkFocusId = focusId && focusId !== dismissedDeepLinkId && store.proposals.some((proposal) => proposal.id === focusId) ? focusId : null;
+  const deepLinkFocusId = focusId && store.proposals.some((proposal) => proposal.id === focusId) ? focusId : null;
   const activeFocusId = requestedFocusId ?? deepLinkFocusId;
   const focusProposal = (proposalId: string) => {
     setRequestedFocusId(proposalId);
+  };
+  const clearActiveFocus = () => {
+    setRequestedFocusId(null);
+    setFocusParams((current) => withoutAutoresearchFocus(current), { replace: true });
   };
 
   // ProposalQueue uses activeFocusId to render both collapsed disclosure
@@ -465,7 +469,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
   // The retired coaching hero was the only consumer of these established
   // orchestration affordances. The compact inbox deliberately hides them.
-  void [setQueueMode, emptyQueueModeGuidance, statusTone, topCardMode, decisionGuide, queueActionSummary, canApplyAllOpenSkills, canConfirmSelection, selectionControlsBusy, actionPlan, showResearchErrorBadge, readiness, setDismissedDeepLinkId, runPrimaryRecommendation, pruneAutoresearch, runReviewFlowPrimary];
+  void [setQueueMode, emptyQueueModeGuidance, statusTone, topCardMode, decisionGuide, queueActionSummary, canApplyAllOpenSkills, canConfirmSelection, selectionControlsBusy, actionPlan, showResearchErrorBadge, readiness, runPrimaryRecommendation, pruneAutoresearch, runReviewFlowPrimary];
 
   return (
     <div className="space-y-5">
@@ -490,6 +494,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         proposalGroupQueue={proposalGroupQueue}
         onApply={store.apply}
         onSkip={store.skip}
+        onClearFocus={clearActiveFocus}
       />
 
       <OutcomePanel metrics={store.data?.metrics?.outcomes} proposals={store.proposals} />

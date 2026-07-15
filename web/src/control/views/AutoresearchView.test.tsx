@@ -17,6 +17,7 @@ import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRun
 import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
+import { withoutAutoresearchFocus } from "./autoresearch/focus";
 import { LastRun } from "./autoresearch/panels";
 import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { de } from "../i18n/de";
@@ -48,6 +49,12 @@ function proposal(overrides: Partial<Proposal> = {}): Proposal {
 }
 
 describe("AutoresearchView Deep-Audit", () => {
+  it("removes only the consumed focus query so history can request the same proposal again", () => {
+    expect(withoutAutoresearchFocus(new URLSearchParams("section=autoresearch&focus=proposal-a"))).toEqual(
+      new URLSearchParams("section=autoresearch"),
+    );
+  });
+
   it("keeps the deep-audit run label and tone", () => {
     expect(runLaneLabel("deep-audit")).toBe("Deep-Audit");
     expect(runLaneTone("deep-audit")).toBe("amber");
