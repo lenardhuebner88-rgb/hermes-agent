@@ -12247,19 +12247,18 @@ def _record_disposition_items(
         )
 
 
-def _review_submission_disposition_sources(
+def _review_submission_metadata_sources(
     conn: sqlite3.Connection, task_id: str
 ) -> list[tuple[int, object]]:
-    """Return review-submission run metadata that may contain dispositions.
+    """Return durable metadata from runs that submitted work for review.
 
     Coder tasks with the review gate do not go through the direct ``done`` path
     when the implementer completes; they are parked in ``review`` by
     :func:`_submit_for_review` and only reach terminal ``done`` after a review
-    lane approves them. The implementer's disposition metadata therefore lives
-    on earlier ``submitted_for_review`` run(s), not necessarily on the final
-    verifier completion. Use those run rows as ledger sources during the
-    verified-done transition; ``_record_disposition_items`` keeps inserts
-    idempotent.
+    lane approves them. The implementer's handoff metadata therefore lives on
+    earlier ``submitted_for_review`` run(s), not necessarily on the final
+    verifier completion. Completion-edge hooks use these rows to retain narrow
+    metadata contracts without taking ownership of review execution.
     """
     rows = conn.execute(
         """
@@ -12290,6 +12289,45 @@ def _review_submission_disposition_sources(
             continue
         sources.append((source_run_id, source_metadata))
     return sources
+
+
+def _merge_review_submission_artifacts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+) -> Optional[dict]:
+    """Merge implementer artifacts into terminal review metadata.
+
+    ``_persist_scratch_completion_artifacts`` remains the sole filesystem-copy
+    owner. This hook only reconstructs the declarative ``artifacts`` contract
+    from earlier review submissions before that owner runs. Entries are
+    de-duplicated in first-seen run order; current completion entries follow the
+    implementer handoff.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def add_entries(value: object) -> None:
+        if not isinstance(value, (list, tuple)):
+            return
+        for entry in value:
+            artifact = entry.strip() if isinstance(entry, str) else ""
+            if artifact and artifact not in seen:
+                seen.add(artifact)
+                merged.append(artifact)
+
+    for _run_id, source_metadata in _review_submission_metadata_sources(
+        conn, task_id
+    ):
+        if isinstance(source_metadata, dict):
+            add_entries(source_metadata.get("artifacts"))
+    if isinstance(metadata, dict):
+        add_entries(metadata.get("artifacts"))
+    if not merged:
+        return metadata
+    combined = dict(metadata) if isinstance(metadata, dict) else {}
+    combined["artifacts"] = merged
+    return combined
 
 
 def complete_task(
@@ -12591,6 +12629,7 @@ def complete_task(
         summary=summary,
         result=result,
     )
+    metadata = _merge_review_submission_artifacts(conn, task_id, metadata)
 
     with write_txn(conn):
         with _review_done_terminal_authority():
@@ -12843,7 +12882,7 @@ def complete_task(
     # rows so the main code-task path reaches the same ledger sinks as direct
     # completions. Each insert path remains idempotent via the ledger pre-check.
     if _run_originated_from_review(conn, task_id, run_id):
-        for source_run_id, source_metadata in _review_submission_disposition_sources(
+        for source_run_id, source_metadata in _review_submission_metadata_sources(
             conn, task_id
         ):
             _record_disposition_items(
@@ -13060,6 +13099,7 @@ def _persist_scratch_completion_artifacts(
     staged: list[str] = []
     used: set[Path] = set()
     report_copies: set[Path] = set()
+    preserved_reports: list[Path] = []
     changed = False
 
     def rollback() -> None:
@@ -13112,6 +13152,7 @@ def _persist_scratch_completion_artifacts(
                     f"could not preserve declared scratch artifact {artifact}: {exc}"
                 ) from exc
             persisted.append(str(report_destination.resolve()))
+            preserved_reports.append(report_destination)
             changed = True
             continue
         if not source.is_file():
@@ -13161,12 +13202,22 @@ def _persist_scratch_completion_artifacts(
         resolved_destination = str(destination.resolve())
         persisted.append(resolved_destination)
         staged.append(resolved_destination)
+        preserved_reports.append(report_destination)
         changed = True
 
     if changed:
         metadata["artifacts"] = persisted
         if staged:
             metadata["_staged_artifacts"] = staged
+        _append_event(
+            conn,
+            task_id,
+            "deliverables_preserved",
+            {
+                "dir": str(reports_dir),
+                "files": [path.name for path in preserved_reports],
+            },
+        )
 
 
 def _is_managed_scratch_path(p: Path) -> bool:
@@ -13198,128 +13249,6 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return is_managed
 
 
-def _preserve_scratch_artifacts(
-    conn: sqlite3.Connection,
-    task_id: str,
-    workspace_path: Path,
-) -> list[str]:
-    """Copy artifacts under ``workspace_path`` to a persistent location
-    BEFORE the workspace dir gets removed.
-
-    Reads the latest run's ``metadata.artifacts[]`` for ``task_id``;
-    for each absolute path that lives underneath ``workspace_path``,
-    copies it to ``~/.hermes/reports/by-task/<task_id>/<basename>``.
-    Best-effort: any per-file failure is logged at debug level and
-    skipped, never raising — preservation MUST NOT block completion.
-
-    Empty/missing ``artifacts[]`` is the no-op default. This matches
-    the existing per-run metadata channel workers already write, so
-    opt-in artifact preservation is a small additive contract.
-
-    Returns the list of basenames that were preserved (for tests +
-    logging). Empty list means nothing to do.
-    """
-    try:
-        runs = list_runs(conn, task_id, include_active=False)
-    except Exception as exc:
-        _log.debug("preserve-artifacts %s: list_runs failed: %s", task_id, exc)
-        return []
-    if not runs:
-        return []
-    # Collect declared artifacts across ALL runs, not just the last. With the
-    # Phase 2 review gate the terminal 'done' is the verifier's run (whose
-    # metadata carries the verdict, not deliverables), while the implementing
-    # worker's ``artifacts=[...]`` rode an earlier ``submitted_for_review``
-    # run. Reading only ``runs[-1]`` would silently drop the coder's
-    # deliverables once the workspace is rmtree'd. Union + dedup, first-seen
-    # order. Pre-gate single-run tasks are unaffected (one run = old behaviour).
-    raw: list = []
-    seen: set = set()
-    for run in runs:
-        md = run.metadata
-        if not isinstance(md, dict):
-            continue
-        entries = md.get("artifacts")
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, str) and entry and entry not in seen:
-                seen.add(entry)
-                raw.append(entry)
-    if not raw:
-        return []
-
-    try:
-        workspace_resolved = workspace_path.resolve()
-    except OSError as exc:
-        _log.debug("preserve-artifacts %s: resolve workspace failed: %s", task_id, exc)
-        return []
-
-    dest_root = kanban_home() / "reports" / "by-task" / task_id
-    preserved: list[str] = []
-    import shutil
-
-    for entry in raw:
-        if not isinstance(entry, str) or not entry:
-            continue
-        src = Path(entry).expanduser()
-        if not src.is_absolute():
-            # Skip relative paths — the contract is "absolute path
-            # inside the workspace". Non-absolute entries are typically
-            # informational (e.g. "test_foo.py" or a label) and have no
-            # filesystem meaning here.
-            continue
-        try:
-            src_resolved = src.resolve()
-        except OSError as exc:
-            _log.debug(
-                "preserve-artifacts %s: resolve %s failed: %s", task_id, src, exc
-            )
-            continue
-        # Containment: only copy artifacts that sit under the scratch
-        # workspace. Other paths the worker named (e.g. files it wrote
-        # to ~/.hermes/reports/ already, or system files) are either
-        # already persistent or out of scope for auto-copy.
-        try:
-            src_resolved.relative_to(workspace_resolved)
-        except ValueError:
-            continue
-        if not src_resolved.exists():
-            _log.debug(
-                "preserve-artifacts %s: declared artifact missing: %s",
-                task_id,
-                src_resolved,
-            )
-            continue
-        try:
-            dest_root.mkdir(parents=True, exist_ok=True)
-            dest = dest_root / src_resolved.name
-            if src_resolved.is_dir():
-                shutil.copytree(src_resolved, dest, dirs_exist_ok=True)
-            else:
-                shutil.copy2(src_resolved, dest)
-            preserved.append(src_resolved.name)
-        except (OSError, shutil.Error) as exc:
-            _log.warning(
-                "preserve-artifacts %s: copy %s -> %s failed: %s",
-                task_id,
-                src_resolved,
-                dest_root,
-                exc,
-            )
-            continue
-    if preserved:
-        _log.info(
-            "preserve-artifacts %s: copied %d artifact(s) to %s before "
-            "scratch cleanup: %s",
-            task_id,
-            len(preserved),
-            dest_root,
-            preserved,
-        )
-    return preserved
-
-
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
 
@@ -13328,12 +13257,9 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
     are intentionally preserved.
 
-    Before ``shutil.rmtree`` the scratch dir, runs.metadata.artifacts[]
-    paths underneath it are auto-copied to
-    ``~/.hermes/reports/by-task/<task_id>/<basename>`` via
-    :func:`_preserve_scratch_artifacts`. Workers opt in by writing the
-    absolute paths into the existing per-run ``metadata.artifacts``
-    array before calling ``kanban_complete``.
+    Artifact persistence has already completed transactionally in
+    :func:`_persist_scratch_completion_artifacts`; cleanup never scans runs or
+    copies deliverables.
     """
     try:
         row = conn.execute(
@@ -13378,26 +13304,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # completion would unconditionally ``shutil.rmtree`` that path
             # and silently delete the user's source data.
             if _is_managed_scratch_path(wp):
-                # Persist declared artifacts BEFORE rmtree.
-                preserved = _preserve_scratch_artifacts(conn, task_id, wp)
                 shutil.rmtree(wp, ignore_errors=True)
                 _log.debug("Removed scratch workspace: %s", wp)
-                if preserved:
-                    # Record where the deliverables landed — the scratch
-                    # workspace is gone now, so without this the operator /
-                    # dashboard can't find the preserved copies. Own txn
-                    # (the completion txn already committed); best-effort.
-                    try:
-                        _dest = kanban_home() / "reports" / "by-task" / task_id
-                        with write_txn(conn):
-                            _append_event(
-                                conn,
-                                task_id,
-                                "deliverables_preserved",
-                                {"dir": str(_dest), "files": preserved},
-                            )
-                    except Exception:
-                        pass
             else:
                 _log.warning(
                     "Refusing to remove out-of-scratch workspace for task %s: %s "

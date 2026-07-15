@@ -2,23 +2,19 @@
 ``kanban_complete``.
 
 Workers opt in by writing absolute paths into the per-run
-``metadata.artifacts`` array BEFORE calling ``kanban_complete``; the
-cleanup path auto-copies anything that lives underneath the scratch
-workspace to ``~/.hermes/reports/by-task/<task_id>/<basename>`` so the
-artifact survives the ``shutil.rmtree(scratch)`` that runs immediately
-after.
+``metadata.artifacts`` array BEFORE calling ``kanban_complete``. The terminal
+completion transaction copies anything underneath scratch to attachments and
+the legacy ``reports/by-task`` readmodel; cleanup only removes scratch after
+that persistence owner succeeds.
 
 Motivating incident (2026-05-27): the Combined-Template artifact
 (405 lines) was lost when `t_b24a11fd` was completed by main-session-
 claude; the worker hadn't copied it out of the scratch workspace. The
-opt-in `runs.metadata.artifacts` channel already existed in the
-schema — this commit just plumbs it into the cleanup path.
+opt-in `runs.metadata.artifacts` channel already existed in the schema.
 """
 
 from __future__ import annotations
 
-import json
-import time
 from pathlib import Path
 
 import pytest
@@ -233,33 +229,31 @@ def test_non_scratch_workspace_is_untouched(kanban_home, tmp_path):
     assert not dest.exists()
 
 
-def test_preservation_function_returns_basenames(kanban_home):
-    """Direct unit test of the helper for use in operator scripts /
-    future dashboard surfacing.
+def test_cleanup_workspace_has_no_second_artifact_copy_owner(
+    kanban_home, monkeypatch
+):
+    """Cleanup removes managed scratch without rescanning completed runs.
+
+    Completion persistence is the sole artifact-copy owner.  Keep a sentinel
+    for the retired helper during reconciliation so this test is red until the
+    cleanup-side owner is actually disconnected.
     """
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="direct")
+        tid = kb.create_task(conn, title="single artifact owner")
         wp = _scratch_dir_for(kanban_home, tid)
         _bind_scratch_workspace(conn, tid, wp)
-    (wp / "a.md").write_text("a", encoding="utf-8")
-    (wp / "b.md").write_text("b", encoding="utf-8")
-    # For this direct-helper test we INSERT a closed run with the
-    # metadata manually (we want to test the helper in isolation,
-    # without going through complete_task).
-    now = int(time.time())
+    (wp / "ephemeral.md").write_text("already persisted", encoding="utf-8")
+
+    monkeypatch.setattr(
+        kb,
+        "_preserve_scratch_artifacts",
+        lambda *_args, **_kwargs: pytest.fail("cleanup must not copy artifacts"),
+        raising=False,
+    )
     with kb.connect() as conn:
-        conn.execute(
-            "INSERT INTO task_runs (task_id, profile, status, started_at, "
-            "ended_at, outcome, summary, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                tid, "coder", "ended", now - 30, now - 1, "completed", "done",
-                json.dumps({"artifacts": [str(wp / "a.md"), str(wp / "b.md")]}),
-            ),
-        )
-        conn.commit()
-        preserved = kb._preserve_scratch_artifacts(conn, tid, wp)
-    assert sorted(preserved) == ["a.md", "b.md"]
+        kb._cleanup_workspace(conn, tid)
+
+    assert not wp.exists()
 
 
 def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
@@ -277,6 +271,12 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
         },
     )
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        kb,
+        "_preserve_scratch_artifacts",
+        lambda *_args, **_kwargs: pytest.fail("cleanup must not copy artifacts"),
+        raising=False,
+    )
 
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="gate preserve", assignee="coder")
@@ -310,3 +310,11 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
     dest = kanban_home / "reports" / "by-task" / tid / "RESULT.md"
     assert dest.exists()
     assert dest.read_text(encoding="utf-8") == "# coder deliverable\n"
+    with kb.connect() as conn:
+        preserved = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "deliverables_preserved"
+        ]
+    assert len(preserved) == 1
+    assert preserved[0].payload["files"] == ["RESULT.md"]
