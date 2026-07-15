@@ -20,8 +20,10 @@ function deriveMetrics(proposals: Proposal[]): AutoresearchOutcomeMetrics {
   const unmeasurable = count(verified, "unmeasurable");
   const confounded = count(verified, "confounded");
   const directional = improved + neutral + worsened;
-  const cost = proposals.reduce((sum, proposal) => sum + (proposal.outcome_cost_usd ?? 0), 0);
-  const interventions = proposals.reduce((sum, proposal) => sum + (proposal.outcome_operator_interventions ?? 0), 0);
+  const knownCost = verified.reduce((sum, proposal) => sum + (proposal.outcome_cost_usd ?? 0), 0);
+  const costComplete = verified.filter((proposal) => proposal.outcome_cost_status === "complete");
+  const costsComplete = costComplete.length === verified.length;
+  const interventions = verified.reduce((sum, proposal) => sum + (proposal.outcome_operator_interventions ?? 0), 0);
   return {
     applicable: applicable.length,
     not_applicable: proposals.filter((proposal) => proposal.outcome_applicability === "not_applicable").length,
@@ -42,10 +44,14 @@ function deriveMetrics(proposals: Proposal[]): AutoresearchOutcomeMetrics {
     worsened,
     unmeasurable,
     confounded,
-    measurement_cost_usd: cost,
-    cost_per_measured_usd: measured.length && cost ? cost / measured.length : null,
-    cost_per_improved_usd: improved && cost ? cost / improved : null,
-    cost_per_verified_benefit_usd: improved && cost ? cost / improved : null,
+    measurement_cost_usd: costsComplete ? knownCost : null,
+    known_measurement_cost_usd: knownCost,
+    cost_complete_outcomes: costComplete.length,
+    unknown_cost_outcomes: verified.length - costComplete.length,
+    cost_coverage: verified.length ? costComplete.length / verified.length : 0,
+    cost_per_measured_usd: costsComplete && verified.length ? knownCost / verified.length : null,
+    cost_per_improved_usd: costsComplete && improved ? knownCost / improved : null,
+    cost_per_verified_benefit_usd: costsComplete && improved ? knownCost / improved : null,
     operator_interventions: interventions,
     operator_interventions_per_verified_benefit: improved ? interventions / improved : null,
   };
@@ -58,6 +64,13 @@ function formatMoney(value: number | null | undefined): string {
 
 function formatRate(value: number | null | undefined): string {
   return value == null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+function outcomeCostLabel(proposal: Proposal): string {
+  if (proposal.outcome_cost_status !== "complete") {
+    return `Kosten unvollständig · bekannt ${formatMoney(proposal.outcome_cost_usd)}`;
+  }
+  return formatMoney(proposal.outcome_cost_usd);
 }
 
 function outcomeLabel(proposal: Proposal): string {
@@ -154,7 +167,7 @@ export function OutcomePanel({
           <SignalChip tone={signalToneFromLegacy("amber")} label={`${data.confounded} ${de.autoresearch.outcomeConfounded}`} />
           <SignalChip tone={signalToneFromLegacy("zinc")} label={`${data.pending} ${de.autoresearch.outcomePending}`} />
           <span className="inline-flex min-h-7 items-center gap-1 rounded-full border border-line px-2.5 py-1 text-ink-2">
-            <CircleDollarSign aria-hidden className="h-3.5 w-3.5" /> Gesamt {formatMoney(data.measurement_cost_usd)} · Eingriffe/Nutzen {data.operator_interventions_per_verified_benefit ?? "—"}
+            <CircleDollarSign aria-hidden className="h-3.5 w-3.5" /> Gesamt {formatMoney(data.measurement_cost_usd)} · Kostenabdeckung {data.cost_complete_outcomes}/{data.verified_measured} · Eingriffe/Nutzen {data.operator_interventions_per_verified_benefit ?? "—"}
           </span>
         </div>
 
@@ -185,7 +198,7 @@ export function OutcomePanel({
                     <div className="grid shrink-0 gap-1 text-xs text-ink-3 sm:max-w-[320px] sm:text-right">
                       <span className="inline-flex items-center gap-1 sm:justify-end"><BadgeCheck aria-hidden className="h-3.5 w-3.5" />{proposal.probe_contract?.contract_id ?? "Legacy ohne Probevertrag"}</span>
                       <span className="inline-flex items-center gap-1 font-data sm:justify-end"><GitCommitHorizontal aria-hidden className="h-3.5 w-3.5" />{proposal.outcome_integration_sha?.slice(0, 12) ?? "kein Deployment-SHA"}</span>
-                      <span>{formatMoney(proposal.outcome_cost_usd)} · {proposal.outcome_operator_interventions ?? 0} Eingriffe</span>
+                      <span>{outcomeCostLabel(proposal)} · {proposal.outcome_operator_interventions ?? 0} Eingriffe</span>
                     </div>
                   </div>
                 </article>

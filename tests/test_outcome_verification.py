@@ -495,9 +495,16 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
             (task_id,),
         )
         review_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, cost_usd) "
+            "VALUES (?, 'coder', 'done', 3, NULL)",
+            (task_id,),
+        )
+        unknown_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, "operator_decision", {"decision": "release"})
-        breakdown, refs, interventions = outcomes._measurement_accounting(
+        breakdown, refs, interventions, cost_accounting = outcomes._measurement_accounting(
             conn,
             task_id=task_id,
             baseline={
@@ -519,7 +526,158 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
     }
     assert f"task-run:{delivery_run}" in refs
     assert f"task-run:{review_run}" in refs
+    assert f"task-run:{unknown_run}" in refs
     assert interventions == 1
+    assert cost_accounting == {
+        "status": "partial",
+        "known_task_runs": 2,
+        "unknown_task_runs": 1,
+        "unknown_task_run_refs": [f"task-run:{unknown_run}"],
+    }
+
+
+def test_retry_accounting_is_additive_without_rebooking_delivery(outcome_home: Path) -> None:
+    target = outcome_home.parent / "hermes_cli" / "retry_accounting.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("try:\n    work()\nexcept Exception:\n    pass\n", encoding="utf-8")
+    proposal_id = "retry-accounting"
+    contract = outcomes.build_probe_contract(
+        {
+            "id": proposal_id,
+            "mode": "code",
+            "target": "hermes_cli/retry_accounting.py",
+            "category": "silent_except",
+        },
+        repo_root=outcome_home.parent,
+    )
+    baseline = outcomes.capture_probe(contract, repo_root=outcome_home.parent)
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="retry accounting", created_by="autoresearch")
+        outcomes.register_contract(
+            conn,
+            proposal_id=proposal_id,
+            task_id=task_id,
+            contract=contract,
+            baseline=baseline,
+            release_fingerprint="retry-accounting-release",
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, cost_usd) "
+            "VALUES (?, 'coder', 'done', 1, 0.20)",
+            (task_id,),
+        )
+        known_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, cost_usd) "
+            "VALUES (?, 'coder', 'done', 2, NULL)",
+            (task_id,),
+        )
+        unknown_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "operator_decision", {"decision": "release"})
+
+        first_observation = {
+            "ok": False,
+            "cost_usd": 0.01,
+            "evidence_ref": "outcome-evidence:sha256:first-retry",
+        }
+        first_breakdown, first_refs, first_interventions, first_accounting = (
+            outcomes._measurement_accounting(
+                conn,
+                task_id=task_id,
+                baseline=baseline,
+                observation=first_observation,
+            )
+        )
+        first_claim = outcomes.claim_measurement_attempt(
+            conn,
+            task_id=task_id,
+            proposal_id=proposal_id,
+            contract_hash=contract["contract_hash"],
+            phase="shadow",
+            attempt_no=1,
+        )
+        assert first_claim is not None
+        assert outcomes.finalize_measurement_attempt(
+            conn,
+            dedupe_key=first_claim.dedupe_key,
+            owner_token=first_claim.owner_token,
+            status="retryable_failure",
+            verdict=None,
+            observation={
+                **first_observation,
+                "operator_interventions": first_interventions,
+                "cost_accounting": first_accounting,
+            },
+            cost_breakdown=first_breakdown,
+            source_refs=first_refs,
+            integration_sha="a" * 40,
+        )
+
+        second_observation = {
+            "ok": True,
+            "cost_usd": 0.02,
+            "evidence_ref": "outcome-evidence:sha256:second-retry",
+        }
+        second_breakdown, second_refs, second_interventions, second_accounting = (
+            outcomes._measurement_accounting(
+                conn,
+                task_id=task_id,
+                baseline=baseline,
+                observation=second_observation,
+            )
+        )
+        second_claim = outcomes.claim_measurement_attempt(
+            conn,
+            task_id=task_id,
+            proposal_id=proposal_id,
+            contract_hash=contract["contract_hash"],
+            phase="shadow",
+            attempt_no=2,
+        )
+        assert second_claim is not None
+        assert outcomes.finalize_measurement_attempt(
+            conn,
+            dedupe_key=second_claim.dedupe_key,
+            owner_token=second_claim.owner_token,
+            status="measured",
+            verdict="improved",
+            observation={
+                **second_observation,
+                "operator_interventions": second_interventions,
+                "cost_accounting": second_accounting,
+            },
+            cost_breakdown=second_breakdown,
+            source_refs=second_refs,
+            integration_sha="a" * 40,
+        )
+        projected = outcomes.enrich_autoresearch_outcomes(
+            [
+                {
+                    "id": proposal_id,
+                    "finding_state": "verified",
+                    "decision_state": "accepted",
+                    "delivery_state": "integrated",
+                }
+            ],
+            conn=conn,
+        )[0]
+
+    assert first_breakdown["delivery_usd"] == pytest.approx(0.20)
+    assert f"task-run:{known_run}" in first_refs
+    assert f"task-run:{unknown_run}" in first_refs
+    assert second_breakdown["delivery_usd"] == 0.0
+    assert second_breakdown["baseline_probe_usd"] == 0.0
+    assert second_breakdown["outcome_probe_usd"] == pytest.approx(0.02)
+    assert f"task-run:{known_run}" not in second_refs
+    assert f"task-run:{unknown_run}" not in second_refs
+    assert second_interventions == 0
+    assert projected["outcome_cost_usd"] == pytest.approx(0.23)
+    assert projected["outcome_cost_status"] == "partial"
+    assert projected["outcome_unknown_cost_refs"] == [f"task-run:{unknown_run}"]
+    assert projected["outcome_cost_breakdown"]["delivery_usd"] == pytest.approx(0.20)
+    assert projected["outcome_cost_breakdown"]["outcome_probe_usd"] == pytest.approx(0.03)
+    assert projected["outcome_operator_interventions"] == 1
 
 
 def test_code_probe_uses_real_integrator_merge_commit(outcome_home: Path) -> None:
@@ -1035,6 +1193,7 @@ def test_verified_metrics_exclude_legacy_improved_and_publish_exact_denominators
             "outcome_verdict": "improved",
             "evidence_grade": "contract_verified",
             "outcome_cost_usd": 3.0,
+            "outcome_cost_status": "complete",
             "outcome_operator_interventions": 1,
         },
         {
@@ -1045,6 +1204,7 @@ def test_verified_metrics_exclude_legacy_improved_and_publish_exact_denominators
             "outcome_verdict": "neutral",
             "evidence_grade": "contract_verified",
             "outcome_cost_usd": 1.0,
+            "outcome_cost_status": "complete",
         },
         {
             "id": "pending",
@@ -1061,6 +1221,7 @@ def test_verified_metrics_exclude_legacy_improved_and_publish_exact_denominators
             "measurement_status": "exhausted",
             "outcome_verdict": "unmeasurable",
             "evidence_grade": "contract_verified",
+            "outcome_cost_status": "complete",
         },
     ]
     metrics = outcomes.outcome_metrics(items)
@@ -1073,8 +1234,32 @@ def test_verified_metrics_exclude_legacy_improved_and_publish_exact_denominators
     assert metrics["directional_coverage"] == pytest.approx(0.4)
     assert metrics["unmeasurable"] == 1
     assert metrics["unmeasurable_rate"] == pytest.approx(1 / 3)
-    assert metrics["cost_per_verified_benefit_usd"] == pytest.approx(6.0)
+    assert metrics["cost_per_verified_benefit_usd"] == pytest.approx(4.0)
     assert metrics["operator_interventions_per_verified_benefit"] == pytest.approx(1.0)
+
+
+def test_verified_metrics_do_not_report_unknown_delivery_cost_as_zero() -> None:
+    metrics = outcomes.outcome_metrics(
+        [
+            {
+                "id": "verified-improved-unknown-cost",
+                "delivery_state": "integrated",
+                "outcome_applicability": "applicable",
+                "measurement_status": "measured",
+                "outcome_verdict": "improved",
+                "evidence_grade": "contract_verified",
+                "outcome_cost_usd": 0.25,
+                "outcome_cost_status": "partial",
+            }
+        ]
+    )
+
+    assert metrics["measurement_cost_usd"] is None
+    assert metrics["known_measurement_cost_usd"] == pytest.approx(0.25)
+    assert metrics["cost_complete_outcomes"] == 0
+    assert metrics["unknown_cost_outcomes"] == 1
+    assert metrics["cost_coverage"] == 0.0
+    assert metrics["cost_per_verified_benefit_usd"] is None
 
 
 def test_strategist_projection_uses_task_events_and_preserves_measured_legacy(

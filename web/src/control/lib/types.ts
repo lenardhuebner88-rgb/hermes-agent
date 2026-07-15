@@ -1055,7 +1055,9 @@ export interface Proposal {
   outcome_measured_at?: number | null;
   outcome_observation?: Record<string, unknown> | null;
   outcome_cost_usd?: number | null;
+  outcome_cost_status?: "complete" | "partial" | "unknown" | null;
   outcome_cost_breakdown?: Record<string, number> | null;
+  outcome_unknown_cost_refs?: string[] | null;
   outcome_operator_interventions?: number | null;
   outcome_integration_sha?: string | null;
 }
@@ -1080,7 +1082,11 @@ export interface AutoresearchOutcomeMetrics {
   worsened: number;
   unmeasurable: number;
   confounded: number;
-  measurement_cost_usd: number;
+  measurement_cost_usd: number | null;
+  known_measurement_cost_usd: number;
+  cost_complete_outcomes: number;
+  unknown_cost_outcomes: number;
+  cost_coverage: number;
   cost_per_measured_usd: number | null;
   cost_per_improved_usd: number | null;
   cost_per_verified_benefit_usd: number | null;

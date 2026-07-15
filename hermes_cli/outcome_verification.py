@@ -703,6 +703,12 @@ def seal_historical_replay_observation(
             "captured_at": _utc_now(),
             "sample_count": 1,
             "cost_usd": 0.0,
+            "cost_accounting": {
+                "status": "complete",
+                "known_task_runs": 0,
+                "unknown_task_runs": 0,
+                "unknown_task_run_refs": [],
+            },
             "metric": metric,
             "value": value,
             "details": dict(details),
@@ -1820,37 +1826,69 @@ def _measurement_accounting(
     task_id: str,
     baseline: Mapping[str, Any],
     observation: Mapping[str, Any],
-) -> tuple[dict[str, float], list[str], int]:
+) -> tuple[dict[str, float], list[str], int, dict[str, Any]]:
     """Collect additive, source-addressable costs and operator interventions."""
+    booked_refs: set[str] = set()
+    if _table_exists(conn, "outcome_attempts"):
+        for row in conn.execute(
+            "SELECT source_refs_json FROM outcome_attempts "
+            "WHERE task_id = ? AND status != 'measuring' ORDER BY created_at, attempt_no",
+            (task_id,),
+        ).fetchall():
+            try:
+                booked_refs.update(str(ref) for ref in json.loads(row["source_refs_json"] or "[]"))
+            except (TypeError, ValueError):
+                continue
+    baseline_ref = str(baseline.get("evidence_ref") or "").strip()
+    observation_ref = str(observation.get("evidence_ref") or "").strip()
+    baseline_unbooked = bool(baseline_ref and baseline_ref not in booked_refs)
     breakdown = {
-        "research_usd": max(0.0, float(baseline.get("research_cost_usd") or 0.0)),
+        "research_usd": (
+            max(0.0, float(baseline.get("research_cost_usd") or 0.0))
+            if baseline_unbooked else 0.0
+        ),
         "delivery_usd": 0.0,
         "review_usd": 0.0,
-        "baseline_probe_usd": max(0.0, float(baseline.get("cost_usd") or 0.0)),
-        "outcome_probe_usd": max(0.0, float(observation.get("cost_usd") or 0.0)),
+        "baseline_probe_usd": (
+            max(0.0, float(baseline.get("cost_usd") or 0.0))
+            if baseline_unbooked else 0.0
+        ),
+        "outcome_probe_usd": (
+            max(0.0, float(observation.get("cost_usd") or 0.0))
+            if observation_ref and observation_ref not in booked_refs else 0.0
+        ),
     }
     refs = [
         str(ref)
-        for ref in (baseline.get("evidence_ref"), observation.get("evidence_ref"))
-        if ref
+        for ref in (baseline_ref, observation_ref)
+        if ref and ref not in booked_refs
     ]
+    known_task_runs = 0
+    unknown_task_run_refs: list[str] = []
     if _table_exists(conn, "task_runs"):
         columns = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()}
         if {"id", "task_id", "profile", "cost_usd"}.issubset(columns):
             rows = conn.execute(
                 "SELECT id, profile, cost_usd FROM task_runs "
-                "WHERE task_id = ? AND cost_usd IS NOT NULL ORDER BY id",
+                "WHERE task_id = ? ORDER BY id",
                 (task_id,),
             ).fetchall()
             for row in rows:
-                value = max(0.0, float(row["cost_usd"] or 0.0))
+                run_ref = f"task-run:{row['id']}"
+                if run_ref in booked_refs:
+                    continue
+                refs.append(run_ref)
+                if row["cost_usd"] is None:
+                    unknown_task_run_refs.append(run_ref)
+                    continue
+                known_task_runs += 1
+                value = max(0.0, float(row["cost_usd"]))
                 component = (
                     "review_usd"
                     if "review" in str(row["profile"] or "").lower()
                     else "delivery_usd"
                 )
                 breakdown[component] += value
-                refs.append(f"task-run:{row['id']}")
     interventions = 0
     if _table_exists(conn, "task_events"):
         placeholders = ",".join("?" for _ in _INTERVENTION_EVENT_KINDS)
@@ -1859,9 +1897,25 @@ def _measurement_accounting(
             "ORDER BY id",
             (task_id, *_INTERVENTION_EVENT_KINDS),
         ).fetchall()
-        interventions = len(rows)
-        refs.extend(f"task-event:{row['id']}" for row in rows)
-    return ({key: round(value, 8) for key, value in breakdown.items()}, sorted(set(refs)), interventions)
+        intervention_refs = [
+            f"task-event:{row['id']}"
+            for row in rows
+            if f"task-event:{row['id']}" not in booked_refs
+        ]
+        interventions = len(intervention_refs)
+        refs.extend(intervention_refs)
+    cost_accounting = {
+        "status": "partial" if unknown_task_run_refs else "complete",
+        "known_task_runs": known_task_runs,
+        "unknown_task_runs": len(unknown_task_run_refs),
+        "unknown_task_run_refs": sorted(unknown_task_run_refs),
+    }
+    return (
+        {key: round(value, 8) for key, value in breakdown.items()},
+        sorted(set(refs)),
+        interventions,
+        cost_accounting,
+    )
 
 
 def _real_integrator_sha(payload: Any) -> str | None:
@@ -2050,6 +2104,7 @@ def enrich_autoresearch_outcomes(
             conn = None
     contracts: dict[str, sqlite3.Row] = {}
     attempts: dict[str, sqlite3.Row] = {}
+    attempt_accounting: dict[str, dict[str, Any]] = {}
     try:
         if conn is not None and _table_exists(conn, "outcome_contracts"):
             proposal_ids = [str(item.get("id") or "") for item in items if item.get("id")]
@@ -2061,13 +2116,58 @@ def enrich_autoresearch_outcomes(
                     contracts[str(row["proposal_id"])] = row
                 if _table_exists(conn, "outcome_attempts"):
                     for row in conn.execute(
-                        f"SELECT a.* FROM outcome_attempts a JOIN ("
-                        f"SELECT proposal_id, MAX(created_at) AS newest FROM outcome_attempts "
-                        f"WHERE proposal_id IN ({marks}) GROUP BY proposal_id"
-                        f") latest ON latest.proposal_id = a.proposal_id AND latest.newest = a.created_at",
+                        f"SELECT *, rowid AS outcome_rowid FROM outcome_attempts "
+                        f"WHERE proposal_id IN ({marks}) "
+                        "ORDER BY proposal_id, outcome_rowid",
                         proposal_ids,
                     ).fetchall():
-                        attempts[str(row["proposal_id"])] = row
+                        attempt_proposal_id = str(row["proposal_id"])
+                        attempts[attempt_proposal_id] = row
+                        aggregate = attempt_accounting.setdefault(
+                            attempt_proposal_id,
+                            {
+                                "known_cost_usd": 0.0,
+                                "breakdown": {},
+                                "complete": True,
+                                "unknown_task_run_refs": set(),
+                                "operator_interventions": 0,
+                            },
+                        )
+                        aggregate["known_cost_usd"] += float(row["cost_usd"] or 0.0)
+                        try:
+                            row_breakdown = json.loads(row["cost_breakdown_json"] or "{}")
+                        except (ValueError, TypeError):
+                            row_breakdown = {}
+                        if isinstance(row_breakdown, Mapping):
+                            for key, value in row_breakdown.items():
+                                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                                    aggregate["breakdown"][str(key)] = round(
+                                        float(aggregate["breakdown"].get(str(key), 0.0))
+                                        + float(value),
+                                        8,
+                                    )
+                        try:
+                            row_observation = json.loads(row["observation_json"] or "{}")
+                        except (ValueError, TypeError):
+                            row_observation = {}
+                        cost_accounting = (
+                            row_observation.get("cost_accounting")
+                            if isinstance(row_observation, Mapping) else None
+                        )
+                        if not isinstance(cost_accounting, Mapping) or (
+                            cost_accounting.get("status") != "complete"
+                        ):
+                            aggregate["complete"] = False
+                        if isinstance(cost_accounting, Mapping):
+                            aggregate["unknown_task_run_refs"].update(
+                                str(ref)
+                                for ref in cost_accounting.get("unknown_task_run_refs", [])
+                                if str(ref).strip()
+                            )
+                        if isinstance(row_observation, Mapping):
+                            aggregate["operator_interventions"] += int(
+                                row_observation.get("operator_interventions") or 0
+                            )
 
         projected: list[dict[str, Any]] = []
         for raw in items:
@@ -2104,25 +2204,30 @@ def enrich_autoresearch_outcomes(
                     }
                 )
             if attempt is not None and canonical["outcome_applicability"] == "applicable":
+                accounting = attempt_accounting.get(proposal_id) or {}
                 canonical["measurement_status"] = attempt["status"]
                 canonical["outcome_verdict"] = attempt["verdict"]
                 if attempt["status"] in {"measured", "exhausted"}:
                     canonical["evidence_grade"] = "contract_verified"
-                item["outcome_cost_usd"] = float(attempt["cost_usd"] or 0.0)
+                item["outcome_cost_usd"] = round(
+                    float(accounting.get("known_cost_usd") or 0.0), 8
+                )
+                item["outcome_cost_status"] = (
+                    "complete" if accounting.get("complete") else "partial"
+                )
                 item["outcome_measured_at"] = attempt["completed_at"]
                 item["outcome_integration_sha"] = attempt["integration_sha"]
-                try:
-                    breakdown = json.loads(attempt["cost_breakdown_json"] or "{}")
-                except (ValueError, TypeError, IndexError):
-                    breakdown = {}
-                item["outcome_cost_breakdown"] = breakdown
+                item["outcome_cost_breakdown"] = dict(accounting.get("breakdown") or {})
+                item["outcome_unknown_cost_refs"] = sorted(
+                    accounting.get("unknown_task_run_refs") or []
+                )
                 try:
                     item["outcome_observation"] = json.loads(attempt["observation_json"] or "null")
                 except (ValueError, TypeError):
                     item["outcome_observation"] = None
                 if isinstance(item["outcome_observation"], Mapping):
                     item["outcome_operator_interventions"] = int(
-                        item["outcome_observation"].get("operator_interventions") or 0
+                        accounting.get("operator_interventions") or 0
                     )
             item.update(canonical)
             item.setdefault("outcome_schema_version", OUTCOME_SCHEMA_VERSION)
@@ -2151,8 +2256,11 @@ def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         verdict: sum(1 for item in legacy if item.get("outcome_verdict") == verdict)
         for verdict in ("improved", "neutral", "worsened", "unmeasurable", "confounded")
     }
-    cost = sum(float(item.get("outcome_cost_usd") or 0.0) for item in items)
-    interventions = sum(int(item.get("outcome_operator_interventions") or 0) for item in items)
+    known_cost = sum(float(item.get("outcome_cost_usd") or 0.0) for item in verified)
+    cost_complete = [item for item in verified if item.get("outcome_cost_status") == "complete"]
+    unknown_cost_outcomes = len(verified) - len(cost_complete)
+    complete_cost = unknown_cost_outcomes == 0
+    interventions = sum(int(item.get("outcome_operator_interventions") or 0) for item in verified)
     integrated = [
         item for item in applicable if str(item.get("delivery_state") or "") == "integrated"
     ]
@@ -2188,10 +2296,20 @@ def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "worsened": verified_counts["worsened"],
         "unmeasurable": verified_counts["unmeasurable"],
         "confounded": verified_counts["confounded"],
-        "measurement_cost_usd": round(cost, 6),
-        "cost_per_measured_usd": cost / len(measured) if measured and cost else None,
-        "cost_per_improved_usd": cost / verified_improved if verified_improved and cost else None,
-        "cost_per_verified_benefit_usd": cost / verified_improved if verified_improved and cost else None,
+        "measurement_cost_usd": round(known_cost, 6) if complete_cost else None,
+        "known_measurement_cost_usd": round(known_cost, 6),
+        "cost_complete_outcomes": len(cost_complete),
+        "unknown_cost_outcomes": unknown_cost_outcomes,
+        "cost_coverage": len(cost_complete) / len(verified) if verified else 0.0,
+        "cost_per_measured_usd": (
+            known_cost / len(verified) if complete_cost and verified else None
+        ),
+        "cost_per_improved_usd": (
+            known_cost / verified_improved if complete_cost and verified_improved else None
+        ),
+        "cost_per_verified_benefit_usd": (
+            known_cost / verified_improved if complete_cost and verified_improved else None
+        ),
         "operator_interventions": interventions,
         "operator_interventions_per_verified_benefit": (
             interventions / verified_improved if verified_improved else None
@@ -2369,7 +2487,7 @@ def run_shadow_verifier(
             else:
                 terminal_status = "exhausted"
                 verdict = "unmeasurable"
-            cost_breakdown, source_refs, interventions = _measurement_accounting(
+            cost_breakdown, source_refs, interventions, cost_accounting = _measurement_accounting(
                 conn,
                 task_id=row["task_id"],
                 baseline=baseline,
@@ -2380,6 +2498,7 @@ def run_shadow_verifier(
                     **observation,
                     "operator_interventions": interventions,
                     "cost_breakdown": cost_breakdown,
+                    "cost_accounting": cost_accounting,
                     "source_refs": source_refs,
                 }
             )

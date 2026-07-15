@@ -1531,6 +1531,7 @@ describe("AutoresearchView measured outcomes", () => {
       outcome_observation: { metric: "occurrences", value: 0, evidence_ref: "outcome-evidence:sha256:after" },
       outcome_integration_sha: "a".repeat(40),
       outcome_cost_usd: 0.25,
+      outcome_cost_status: "complete",
     };
     const integratedOnly: Proposal = {
       ...proposal({ id: "integrated-only", title: "Integrated without measurement", status: "routed_to_kanban" }),
@@ -1562,6 +1563,25 @@ describe("AutoresearchView measured outcomes", () => {
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
     expect(html).toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
     expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
+  });
+
+  it("labels incomplete subscription costs instead of rendering a false zero", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "unknown-cost", title: "Subscription delivery", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      outcome_cost_usd: 0,
+      outcome_cost_status: "partial",
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
+
+    expect(html).toContain("Kosten unvollständig");
+    expect(html).toContain("Kostenabdeckung 0/1");
+    expect(html).not.toContain("Gesamt 0,00");
   });
 
   it("labels legacy improved as historical and excludes it from verified benefit", () => {

@@ -717,7 +717,7 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
     with kb.connect() as conn:
         task = kb.get_task(conn, task_id)
         runs = conn.execute(
-            "SELECT id, status, profile, cost_usd, requested_provider, "
+            "SELECT id, status, profile, cost_usd, cost_status, requested_provider, "
             "requested_model, metadata FROM task_runs WHERE task_id=? ORDER BY id",
             (task_id,),
         ).fetchall()
@@ -746,7 +746,17 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 "id": int(row["id"]),
                 "status": row["status"],
                 "profile": row["profile"],
-                "cost_usd": float(row["cost_usd"] or 0.0),
+                "cost_usd": (
+                    float(row["cost_usd"]) if row["cost_usd"] is not None else None
+                ),
+                "cost_status": (
+                    row["cost_status"]
+                    or (
+                        metadata.get("cost", {}).get("cost_status")
+                        if isinstance(metadata.get("cost"), dict) else None
+                    )
+                    or ("actual" if row["cost_usd"] is not None else "unknown")
+                ),
                 "requested_provider": row["requested_provider"],
                 "requested_model": row["requested_model"],
                 "commit": metadata.get("commit") if isinstance(metadata, dict) else None,
@@ -762,8 +772,18 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 "worker_runs": run_evidence,
                 "review_skipped_deterministic": len(review_skips),
                 "provider_calls": len(run_evidence),
-                "provider_cost_usd": round(
-                    sum(float(item["cost_usd"]) for item in run_evidence), 8
+                "provider_cost_status": (
+                    "complete"
+                    if all(item["cost_usd"] is not None for item in run_evidence)
+                    else "partial"
+                ),
+                "known_provider_cost_usd": round(
+                    sum(float(item["cost_usd"] or 0.0) for item in run_evidence), 8
+                ),
+                "provider_cost_usd": (
+                    round(sum(float(item["cost_usd"] or 0.0) for item in run_evidence), 8)
+                    if all(item["cost_usd"] is not None for item in run_evidence)
+                    else None
                 ),
             }
         )
@@ -1200,9 +1220,11 @@ def e2e_canary(args: argparse.Namespace) -> int:
                 "dispatch_process": dispatch_process,
                 "worker_runs": dispatch_payload.get("worker_runs") or [],
                 "provider_calls": int(dispatch_payload.get("provider_calls") or 0),
-                "provider_cost_usd": float(
-                    dispatch_payload.get("provider_cost_usd") or 0.0
+                "provider_cost_status": dispatch_payload.get("provider_cost_status"),
+                "known_provider_cost_usd": float(
+                    dispatch_payload.get("known_provider_cost_usd") or 0.0
                 ),
+                "provider_cost_usd": dispatch_payload.get("provider_cost_usd"),
                 "verifier_process": verifier_process,
                 "verifier": verifier,
                 "integration_events": integration_events,
@@ -1298,8 +1320,18 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "second_verifier": second_verifier,
         },
         "provider_calls": sum(item["provider_calls"] for item in case_results),
-        "provider_cost_usd": round(
-            sum(item["provider_cost_usd"] for item in case_results), 8
+        "provider_cost_status": (
+            "complete"
+            if all(item["provider_cost_status"] == "complete" for item in case_results)
+            else "partial"
+        ),
+        "known_provider_cost_usd": round(
+            sum(item["known_provider_cost_usd"] for item in case_results), 8
+        ),
+        "provider_cost_usd": (
+            round(sum(float(item["provider_cost_usd"]) for item in case_results), 8)
+            if all(item["provider_cost_usd"] is not None for item in case_results)
+            else None
         ),
         "outcome_metrics": api["metrics"]["outcomes"],
     }
