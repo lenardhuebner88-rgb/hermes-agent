@@ -25286,7 +25286,40 @@ def _sanitize_spawn_text(text: str) -> str:
     return text.translate(_SPAWN_TEXT_STRIP_TABLE)
 
 
-def _spawn_claude_worker(
+def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
+    """Start one worker from an already-resolved launch specification.
+
+    Runtime builders own argv and policy. This function alone owns log
+    rotation, file-descriptor lifetime, process isolation, and ``Popen``.
+    """
+    import subprocess
+
+    rotate_bytes, backup_count = worker_log_rotation_config()
+    _rotate_worker_log(spec.log_path, rotate_bytes, backup_count)
+    log_f = open(spec.log_path, "ab")
+    try:
+        proc = subprocess.Popen(  # noqa: S603 -- argv is a resolved fixed list
+            _maybe_scope_worker_cmd(list(spec.argv)),
+            cwd=spec.cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=dict(spec.env),
+            start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+        )
+    except FileNotFoundError:
+        log_f.close()
+        raise RuntimeError(spec.missing_executable_message)
+    except BaseException:
+        log_f.close()
+        raise
+    # The child inherits the descriptor and keeps writing after this function
+    # returns. The parent's Python handle can fall out of scope safely.
+    return int(proc.pid)
+
+
+def _build_claude_worker_launch_spec(
     task: Task,
     workspace: str,
     *,
@@ -25295,8 +25328,8 @@ def _spawn_claude_worker(
     lane_model: Optional[str] = None,
     resolved_model: Optional[str] = None,
     read_only_verdict_lane: bool = False,
-) -> Optional[int]:
-    """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
+) -> _worker_runtime.WorkerLaunchSpec:
+    """Build ``claude -p <prompt>`` policy for the canonical launcher.
 
     Reuses the fully-built ``env`` from ``_default_spawn`` AS-IS (it already
     carries the HERMES_KANBAN_TASK / _DB / _BOARD / _WORKSPACE / _RUN_ID /
@@ -25305,11 +25338,11 @@ def _spawn_claude_worker(
     / ``block`` from inside its session — completion is authorized by the
     ``HERMES_KANBAN_TASK`` env var + the DB path.
 
-    Mirrors ``_default_spawn``'s per-task log + Popen tail exactly so crash
-    detection and log rotation behave identically across both runtimes.
+    Process lifecycle is intentionally delegated to
+    :func:`_launch_worker_process` so Hermes and Claude lanes cannot drift in
+    logging, isolation, descriptor handling, or crash detection.
     """
     import shutil
-    import subprocess
 
     # The worker shells out to `hermes kanban complete/block`, so `hermes`
     # must be on the child's PATH. Prepend the hermes binary's directory.
@@ -25554,38 +25587,45 @@ def _spawn_claude_worker(
     if worker_model:
         cmd.extend(["--model", worker_model])
 
-    # Per-task log under <board-root>/logs/ — mirror the hermes path so
-    # `hermes kanban log` reads the same file and rotation is identical.
+    # Per-task log under <board-root>/logs/; the canonical launcher owns
+    # rotation and descriptor lifetime for every runtime.
     log_dir = worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
-    rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
+    return _worker_runtime.WorkerLaunchSpec(
+        argv=tuple(cmd),
+        env=dict(env),
+        cwd=workspace if os.path.isdir(workspace) else None,
+        log_path=log_path,
+        missing_executable_message=(
+            "`claude` executable not found on PATH. Install the Claude CLI or "
+            "set HERMES_CLAUDE_BIN before running the kanban dispatcher."
+        ),
+    )
 
-    log_f = open(log_path, "ab")
-    try:
-        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            _maybe_scope_worker_cmd(cmd),
-            cwd=workspace if os.path.isdir(workspace) else None,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
+
+def _spawn_claude_worker(
+    task: Task,
+    workspace: str,
+    *,
+    env: dict,
+    board: Optional[str] = None,
+    lane_model: Optional[str] = None,
+    resolved_model: Optional[str] = None,
+    read_only_verdict_lane: bool = False,
+) -> int:
+    """Compatibility hook: build Claude policy, then use the sole launcher."""
+    return _launch_worker_process(
+        _build_claude_worker_launch_spec(
+            task,
+            workspace,
             env=env,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            board=board,
+            lane_model=lane_model,
+            resolved_model=resolved_model,
+            read_only_verdict_lane=read_only_verdict_lane,
         )
-    except FileNotFoundError:
-        log_f.close()
-        raise RuntimeError(
-            "`claude` executable not found on PATH. "
-            "Install the Claude CLI or set HERMES_CLAUDE_BIN before running the kanban dispatcher."
-        )
-    except BaseException:
-        log_f.close()
-        raise
-    # NOTE: we intentionally do NOT close log_f here — same as the hermes path
-    # (the child keeps writing after this function returns).
-    return proc.pid
+    )
 
 
 _WORKER_SCOPE_DENIED_TOOLSET = "__kanban_scope_denied__"
@@ -25772,8 +25812,6 @@ def _default_spawn(
     vars all resolve to the same board the dispatcher claimed the task
     from. Workers cannot accidentally see other boards.
     """
-    import subprocess
-
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
@@ -25943,14 +25981,16 @@ def _default_spawn(
                 f"denylist+bypass model — the allowlist cannot be "
                 f"enforced without a proper lane_entry."
             )
-        return _spawn_claude_worker(
-            task,
-            workspace,
-            env=env,
-            board=board,
-            lane_model=lane_model,
-            resolved_model=lane_model if route_is_frozen else None,
-            read_only_verdict_lane=_verdict_lane,
+        return _launch_worker_process(
+            _build_claude_worker_launch_spec(
+                task,
+                workspace,
+                env=env,
+                board=board,
+                lane_model=lane_model,
+                resolved_model=lane_model if route_is_frozen else None,
+                read_only_verdict_lane=_verdict_lane,
+            )
         )
 
     cmd = [
@@ -26043,37 +26083,17 @@ def _default_spawn(
     log_dir = worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
-    rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
-
-    # Use 'a' so a re-run on unblock appends rather than overwrites.
-    log_f = open(log_path, "ab")
-    try:
-        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            _maybe_scope_worker_cmd(cmd),
-            cwd=workspace if os.path.isdir(workspace) else None,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-        )
-    except FileNotFoundError:
-        log_f.close()
-        raise RuntimeError(
-            "`hermes` executable not found on PATH. "
-            "Install Hermes Agent or activate its venv before running the kanban dispatcher."
-        )
-    except BaseException:
-        log_f.close()
-        raise
-    # NOTE: we intentionally do NOT close log_f here — we want Popen's
-    # child process to keep writing after this function returns.  The
-    # handle is kept alive by the child's inheritance.  The parent's
-    # reference goes out of scope and is GC'd, but the OS-level FD stays
-    # open in the child until the child exits.
-    return proc.pid
+    spec = _worker_runtime.WorkerLaunchSpec(
+        argv=tuple(cmd),
+        env=dict(env),
+        cwd=workspace if os.path.isdir(workspace) else None,
+        log_path=log_path,
+        missing_executable_message=(
+            "`hermes` executable not found on PATH. Install Hermes Agent or "
+            "activate its venv before running the kanban dispatcher."
+        ),
+    )
+    return _launch_worker_process(spec)
 
 
 # ---------------------------------------------------------------------------

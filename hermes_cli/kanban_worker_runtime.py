@@ -5,7 +5,20 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class WorkerLaunchSpec:
+    """Runtime-neutral input for the single worker process lifecycle owner."""
+
+    argv: tuple[str, ...]
+    env: Mapping[str, str]
+    cwd: Optional[str]
+    log_path: Path
+    missing_executable_message: str
 
 
 def claude_worker_bin() -> str:
