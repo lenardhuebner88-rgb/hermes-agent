@@ -633,6 +633,13 @@ def e2e_canary(args: argparse.Namespace) -> int:
     shared_venv_link.symlink_to(shared_venv, target_is_directory=True)
 
     _configure(repo, state, repo_root=repo)
+    # The production reconciler deliberately routes implementation cards to
+    # the ``coder`` lane.  Mirror that real lane in the isolated HOME so the
+    # dispatcher exercises its spawn/worktree path instead of correctly
+    # rejecting the assignee as an unknown profile.
+    coder_profile = state / "home" / "profiles" / "coder"
+    coder_profile.mkdir(parents=True, exist_ok=True)
+    (coder_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
     from hermes_cli import autoresearch_proposals as proposals
     from hermes_cli import kanban_db as kb
     from hermes_cli import outcome_verification as outcomes
@@ -758,6 +765,31 @@ def e2e_canary(args: argparse.Namespace) -> int:
         )
         if dispatch_process["returncode"] != 0:
             raise RuntimeError(f"real dispatcher/worker failed: {dispatch_process}")
+        dispatch_payload = json.loads(
+            dispatch_process["output_tail"].strip().splitlines()[-1]
+        )
+        with kb.connect() as conn:
+            delivered = conn.execute(
+                "SELECT status, result FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            delivery_witnesses = conn.execute(
+                "SELECT kind, payload FROM task_events WHERE task_id=? "
+                "AND kind IN ('integration_merged', 'INTEGRATOR_VERIFIED') ORDER BY id",
+                (task_id,),
+            ).fetchall()
+        if (
+            not dispatch_payload.get("spawned")
+            or delivered is None
+            or delivered["status"] != "done"
+            or len(delivery_witnesses) != 2
+        ):
+            raise RuntimeError(
+                "dispatcher did not produce a completed delivery with both "
+                f"integrator witnesses: payload={dispatch_payload}, "
+                f"task={dict(delivered) if delivered is not None else None}, "
+                f"events={[row['kind'] for row in delivery_witnesses]}"
+            )
         verifier_process = _run(
             [
                 sys.executable,
