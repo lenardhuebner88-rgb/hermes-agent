@@ -705,9 +705,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help=(
             "Typed block reason. 'dependency' waits in todo (auto-promoted "
             "when parents finish, no human); 'needs_input'/'capability' go to "
-            "blocked for a human; 'transient' marks a maybe-flaky failure. "
-            "Repeated same-kind re-blocks after unblock route the task to "
-            "triage to break unblock loops. Omit for a generic block."
+            "blocked for a human; 'review_revision' is review rework; "
+            "'capacity' is token/iteration budget; 'integration' is merge/gate "
+            "park; 'transient' marks a maybe-flaky failure. Repeated same-kind "
+            "re-blocks after unblock route the task to triage to break "
+            "unblock loops. Omit for a generic block."
         ),
     )
 
@@ -3717,6 +3719,11 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     print("By status:")
     for k in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
         print(f"  {k:8s}  {stats['by_status'].get(k, 0)}")
+    blocked_by_kind = stats.get("blocked_by_kind") or {}
+    if blocked_by_kind:
+        print("\nBlocked by kind:")
+        for kind, count in sorted(blocked_by_kind.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {kind:20s}  {count}")
     if stats["by_assignee"]:
         print("\nBy assignee:")
         for who, counts in sorted(stats["by_assignee"].items()):

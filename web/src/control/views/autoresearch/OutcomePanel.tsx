@@ -2,7 +2,7 @@ import { Activity, BadgeCheck, CircleDollarSign, GitCommitHorizontal, ShieldChec
 import type { AutoresearchOutcomeMetrics, Proposal } from "../../lib/types";
 import { de } from "../../i18n/de";
 import { KpiTile, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
-import { Card, Disclosure, Eyebrow, Text } from "../../components/primitives";
+import { Disclosure, Eyebrow, Text } from "../../components/primitives";
 
 function costDimensions(proposal: Proposal): { actual: number; apiEquivalent: number; effective: number } {
   const breakdown = proposal.outcome_cost_breakdown ?? {};
@@ -155,14 +155,23 @@ export function OutcomePanel({
     ))
     .sort((a, b) => (b.outcome_measured_at ?? 0) - (a.outcome_measured_at ?? 0))
     .slice(0, 5);
-  const hasVerifiedEvidence = evidence.some((proposal) => proposal.evidence_grade === "contract_verified");
+
   const aggregateCostLabel = data.measurement_effective_cost_usd == null
     ? `Effektiv — · bekannte Anteile: Ist-Kosten ${formatMoney(data.known_measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.known_measurement_api_equivalent_cost_usd)}`
     : `Effektiv ${formatMoney(data.measurement_effective_cost_usd)} · Ist-Kosten ${formatMoney(data.measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.measurement_api_equivalent_cost_usd)}`;
 
   return (
     <section id="autoresearch-outcomes" aria-label={de.autoresearch.outcomeHeading}>
-    <Card surface="raised" className="overflow-hidden border-line p-0">
+    <Disclosure
+      defaultOpen={false}
+      className="hc-surface-raised overflow-hidden border-line p-0"
+      summary={
+        <span className="flex min-h-12 min-w-0 flex-1 items-center justify-between gap-3 px-4 sm:px-5">
+          <span className="flex min-w-0 items-center gap-2 font-semibold text-ink">{de.autoresearch.outcomeHeading}</span>
+          <span className="text-xs text-ink-3">Bei Bedarf öffnen</span>
+        </span>
+      }
+    >
       <div className="space-y-4 p-4 sm:p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
@@ -199,17 +208,9 @@ export function OutcomePanel({
           </span>
         </div>
 
-        <Disclosure
-          defaultOpen={hasVerifiedEvidence}
-          className="rounded-panel border border-line bg-surface-2 px-3 py-2"
-          summary={
-            <span className="flex min-h-12 min-w-0 flex-1 items-center justify-between gap-3">
-              <span className="flex min-w-0 items-center gap-2 font-semibold text-ink"><Activity aria-hidden className="h-4 w-4 shrink-0 text-live" />{de.autoresearch.outcomeEvidence}</span>
-              <SignalChip tone={hasVerifiedEvidence ? "ok" : "neutral"} label={hasVerifiedEvidence ? "Bestätigter Beleg vorhanden" : "Noch kein bestätigter Beleg"} />
-            </span>
-          }
-        >
-          <section aria-label={de.autoresearch.outcomeEvidence} className="pt-3">
+        <section aria-label={de.autoresearch.outcomeEvidence} className="rounded-panel border border-line bg-surface-2 p-3">
+          <div className="flex min-w-0 items-center gap-2 font-semibold text-ink"><Activity aria-hidden className="h-4 w-4 shrink-0 text-live" />{de.autoresearch.outcomeEvidence}</div>
+          <div className="pt-3">
           {evidence.length === 0 ? (
             <p className="rounded-panel border border-dashed border-line bg-surface-1 px-3 py-4 text-sm leading-6 text-ink-2">{de.autoresearch.outcomeEvidenceEmpty}</p>
           ) : (
@@ -239,10 +240,10 @@ export function OutcomePanel({
               ))}
             </div>
           )}
+          </div>
           </section>
-        </Disclosure>
       </div>
-    </Card>
+    </Disclosure>
     </section>
   );
 }

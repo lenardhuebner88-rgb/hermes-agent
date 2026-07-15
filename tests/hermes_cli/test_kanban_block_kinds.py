@@ -215,3 +215,107 @@ def test_transient_is_a_valid_kind(kanban_home: Path) -> None:
         t = kb.get_task(conn, tid)
         assert t.status == "blocked"
         assert t.block_kind == "transient"
+
+
+def test_system_park_kinds_are_valid(kanban_home: Path) -> None:
+    """capacity/integration are first-class kinds for system parks."""
+    assert "capacity" in kb.VALID_BLOCK_KINDS
+    assert "integration" in kb.VALID_BLOCK_KINDS
+    assert "capacity" in kb.OPERATOR_ONLY_BLOCK_KINDS
+    assert "integration" in kb.OPERATOR_ONLY_BLOCK_KINDS
+
+
+def test_park_budget_runaway_sets_capacity_kind(kanban_home: Path) -> None:
+    """Live operator lever: token-runaway parks must not leave block_kind NULL."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="runaway", assignee="coder")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        assert kb._park_budget_runaway(conn, row, token_sum=5000, cap=100, runs=4)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_kind == "capacity"
+        blocked_events = [
+            e for e in kb.list_events(conn, tid) if e.kind == "blocked"
+        ]
+        assert blocked_events
+        assert blocked_events[-1].payload.get("kind") == "capacity"
+        # Capacity parks are not auto-retryable.
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0, retry_limit=2)
+        assert retried == []
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_park_integration_sets_integration_kind(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="park-int", assignee="coder")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        assert kb._park_integration(
+            conn,
+            tid,
+            {"reason": "missing branch evidence", "park_class": "DIRTY_WORKTREE"},
+            expected_run_id=run_id,
+        )
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_kind == "integration"
+        blocked_events = [
+            e for e in kb.list_events(conn, tid) if e.kind == "blocked"
+        ]
+        assert blocked_events[-1].payload.get("kind") == "integration"
+
+
+def test_hold_task_sets_needs_input_kind(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.hold_task(conn, tid, reason="operator hold: choose deploy target")
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_kind == "needs_input"
+
+
+def test_board_stats_blocked_by_kind(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        a = _running_task(conn, title="cap")
+        b = _running_task(conn, title="rev")
+        # capacity via system park helper surface
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (a,)).fetchone()
+        # hold a first so it is blocked as needs_input, then park budget on ready b
+        assert kb.hold_task(conn, a, reason="operator hold")
+        # b still running — block as review_revision via worker-style block after
+        # forging a review claim event is heavy; use typed block_task instead.
+        # block_task rejects forging review_revision without review origin, so
+        # use needs_input + capacity via parks only.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (b,))
+        row_b = conn.execute("SELECT * FROM tasks WHERE id = ?", (b,)).fetchone()
+        assert kb._park_budget_runaway(conn, row_b, token_sum=9, cap=1, runs=2)
+        stats = kb.board_stats(conn)
+        assert stats["blocked_by_kind"]["needs_input"] >= 1
+        assert stats["blocked_by_kind"]["capacity"] >= 1
+
+
+def test_capacity_not_auto_retried_after_review_retry_cleared_kind(
+    kanban_home: Path,
+) -> None:
+    """Regression for live t_6943fc6f sequence: auto_retry clears block_kind,
+    then budget runaway re-parks — must land as capacity (not null) and stay."""
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        # First a typed human block then unblock+retry path clears kind.
+        assert kb.block_task(conn, tid, reason="need choice?", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.block_kind is None
+        # Budget park after retry must re-stamp capacity.
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        assert kb._park_budget_runaway(conn, row, token_sum=999, cap=10, runs=3)
+        task = kb.get_task(conn, tid)
+        assert task.block_kind == "capacity"
+        kind = kb._blocked_kind_for_auto_retry(
+            "token cap",
+            explicit_block_kind=task.block_kind,
+        )
+        assert kind == "capacity"
+        assert kind != "retryable"

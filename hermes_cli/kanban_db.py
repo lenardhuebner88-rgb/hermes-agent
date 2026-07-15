@@ -138,7 +138,20 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 KANBAN_ARTIFACT_TREE_MAX_ENTRIES = 4096
 VALID_BLOCK_KINDS = frozenset(
-    {"needs_input", "capability", "dependency", "review_revision", "transient"}
+    {
+        "needs_input",
+        "capability",
+        "dependency",
+        "review_revision",
+        "transient",
+        # System parks (dispatcher/heiler/integrator) — never leave block_kind NULL.
+        "capacity",  # token/iteration budget, stall resource parks
+        "integration",  # worktree/merge/post-merge gate parks
+    }
+)
+# Parks that are never auto-retryable: operator or policy must act.
+OPERATOR_ONLY_BLOCK_KINDS = frozenset(
+    {"needs_input", "capability", "dependency", "capacity", "integration"}
 )
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -298,9 +311,9 @@ DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 
 # HEILER-BUDGET-BOUNDED-EXTEND-S1: hard, NON-configurable cap on how many
 # progress-gated extensions a single task may ever receive beyond its
-# continuation limit. Kept a code constant (not config) so the worst-case
-# extra-dispatch exposure is structurally bounded to one run per task — the
-# token-runaway guardrail the lever is explicitly gated for.
+# continuation limit. Progress-only recovery remains structurally bounded to
+# one run per task. Actionable review recovery may consume the existing
+# configured ``max_extensions`` budget, defaulting to this same limit.
 BUDGET_PROGRESS_EXTENSION_LIMIT = 1
 
 # Opt-in blocked-run auto-retry policy. Defaults are code-level constants;
@@ -3920,6 +3933,21 @@ HEILER_SOURCE_SILENT_BLOCK = "silent_block_escalation"
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
 SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
+# Autonomy routing (SILENT-BLOCK-AUTONOMY-S1): when a block is settled for the
+# auto-retry lane, prefer a *bounded* machine next-step over paging the operator.
+# Token discipline: at most one re-ready per block episode; hold-classes do not
+# re-dispatch workers (zero token burn) and only observe/classify.
+AUTONOMY_ROUTED_EVENT = "autonomy_routed"
+# Token bound: at most one re-ready per block *episode* AND at most one
+# re-ready over the whole task lifetime. Episode-only caps re-arm on every
+# re-block and would allow review thrash forever (Opus 4.8 review blocker).
+MAX_AUTONOMY_REREADY_PER_EPISODE = 1
+MAX_AUTONOMY_REREADY_PER_TASK = 1
+# Routes that re-dispatch a worker (token cost). Holds do not.
+# Only review rework is re-dispatched; generic exhausted/stuck blocks still
+# escalate so silent failures do not burn unbounded tokens.
+AUTONOMY_REREADY_ACTIONS = frozenset({"reready_review"})
+AUTONOMY_HOLD_ACTIONS = frozenset({"hold_capacity", "hold_integration"})
 RELEASE_GATE_BLOCK_REASON = "awaiting release-gate GO"
 # Author the Stratege stamps on every PlanSpec chain it ingests (propose()).
 # Single source of truth for the silent-block strategist carve-out
@@ -4392,15 +4420,24 @@ def _ensure_code_task_contract_in_txn(
     if reason is None:
         _append_event(conn, task_id, _CODE_TASK_CONTRACT_EVENT, payload)
         return None
-    conn.execute(
-        "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-        "claim_expires = NULL, worker_pid = NULL "
-        "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
-        (task_id,),
-    )
+    if (
+        _system_park_set_blocked(
+            conn,
+            task_id,
+            kind="needs_input",
+            where_sql="status IN ('todo', 'ready', 'running', 'blocked')",
+        )
+        < 1
+    ):
+        return None
     _append_event(conn, task_id, _NEEDS_CONTRACT_EVENT, payload)
     _append_event(conn, task_id, _NEEDS_CONTRACT_BLOCKED_EVENT, payload)
-    _append_event(conn, task_id, "blocked", {"reason": reason})
+    _append_event(
+        conn,
+        task_id,
+        "blocked",
+        _system_blocked_event_payload(reason, "needs_input", contract=True),
+    )
     return reason
 
 
@@ -8105,10 +8142,11 @@ def _budget_extension_config() -> dict:
 
     Conservative default: ``enabled=False`` — merging this code changes nothing
     at runtime until the operator opts in with
-    ``kanban.budget_progress_extension.enabled: true``. The extension *count*
-    cap (1) is structural (:data:`BUDGET_PROGRESS_EXTENSION_LIMIT`), NOT
-    configurable, and the per-task input-token cap is untouched, so the
-    token-runaway exposure stays bounded to one extra run per task.
+    ``kanban.budget_progress_extension.enabled: true``. Progress-only recovery
+    remains structurally capped by :data:`BUDGET_PROGRESS_EXTENSION_LIMIT`.
+    Actionable review recovery shares ``budget_extension_count`` and may consume
+    the existing ``max_extensions`` policy value, defaulting to the same limit.
+    The per-task input-token cap itself is untouched.
 
     Read from the ROOT ``config.yaml`` (not the worker profile) for the same
     reason :func:`_review_gate_config` does: the decision runs in the worker
@@ -8137,7 +8175,19 @@ def _budget_extension_config() -> dict:
         min_delta = 1
     if min_delta < 1:
         min_delta = 1
-    return {"enabled": enabled, "min_progress_delta": min_delta}
+    try:
+        max_extensions = int(
+            be.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT)
+        )
+    except (TypeError, ValueError):
+        max_extensions = BUDGET_PROGRESS_EXTENSION_LIMIT
+    if max_extensions < 0:
+        max_extensions = 0
+    return {
+        "enabled": enabled,
+        "min_progress_delta": min_delta,
+        "max_extensions": max_extensions,
+    }
 
 
 _DIFF_STAT_INS_RE = re.compile(r"(\d+)\s+insertion")
@@ -8204,7 +8254,12 @@ def _schedule_continuation_after_closed_run(
             UPDATE tasks
                SET status = 'blocked', result = ?, completed_at = ?,
                    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
-                   last_continuation_reason = ?
+                   last_continuation_reason = ?,
+                   block_kind = 'capacity',
+                   block_recurrences = CASE
+                       WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                       ELSE 1
+                   END
              WHERE id = ? AND status = 'running' AND current_run_id IS NULL
             """,
             (message, now, reason, task_id),
@@ -8215,7 +8270,14 @@ def _schedule_continuation_after_closed_run(
             conn,
             task_id,
             "auto_continuation_disabled",
-            {"reason": reason, "limit": limit, "message": message},
+            {"reason": reason, "limit": limit, "message": message, "kind": "capacity"},
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(message, "capacity", limit=limit),
             run_id=run_id,
         )
         return True
@@ -8273,7 +8335,12 @@ def _schedule_continuation_after_closed_run(
             UPDATE tasks
                SET status = 'blocked', result = ?, completed_at = ?,
                    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
-                   last_continuation_reason = ?
+                   last_continuation_reason = ?,
+                   block_kind = 'capacity',
+                   block_recurrences = CASE
+                       WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                       ELSE 1
+                   END
              WHERE id = ? AND status = 'running' AND current_run_id IS NULL
             """,
             (message, now, reason, task_id),
@@ -8285,6 +8352,7 @@ def _schedule_continuation_after_closed_run(
             "count": int(task.continuation_count or 0),
             "limit": limit,
             "message": message,
+            "kind": "capacity",
         }
         if _ext_enabled:
             # Observability: WHY no extension — distinguishes a looping task
@@ -8304,6 +8372,13 @@ def _schedule_continuation_after_closed_run(
             task_id,
             "auto_continuation_exhausted",
             payload,
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(message, "capacity", limit=limit),
             run_id=run_id,
         )
         return True
@@ -8932,6 +9007,7 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    budget_review_extension: Optional[tuple[int, int]] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -9016,6 +9092,19 @@ def claim_task(
         )
         if cur.rowcount != 1:
             return None
+        if budget_review_extension is not None:
+            token_sum, cap = budget_review_extension
+            if not _grant_budget_runaway_review_extension(
+                conn,
+                task_id,
+                token_sum=token_sum,
+                cap=cap,
+                expected_status="running",
+                in_write_txn=True,
+            ):
+                raise RuntimeError(
+                    "budget review extension became ineligible after task claim"
+                )
         # Look up the current task row so we can populate the run with
         # its assignee / step / runtime cap.
         trow = conn.execute(
@@ -9811,14 +9900,15 @@ def hold_task(
         signal_fn=signal_fn,
     )
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks "
-            "SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status = 'running'",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="needs_input",
+                where_sql="status = 'running'",
+            )
+            != 1
+        ):
             return False
         # Close the active run and synthesize one if none was open, so the
         # block reason is preserved in attempt history.
@@ -9842,7 +9932,9 @@ def hold_task(
             conn,
             task_id,
             "blocked",
-            {"reason": reason, "manual": True, **termination},
+            _system_blocked_event_payload(
+                reason, "needs_input", manual=True, **termination
+            ),
             run_id=run_id,
         )
     return True
@@ -13669,33 +13761,24 @@ def _park_integration(
     reason = f"integration parked: {outcome.get('reason', 'unknown')}"
     with write_txn(conn):
         if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                """,
-                (task_id,),
+            rowcount = _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="integration",
+                where_sql="status IN ('running', 'ready', 'blocked')",
             )
         else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                   AND current_run_id = ?
-                """,
-                (task_id, int(expected_run_id)),
+            rowcount = _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="integration",
+                where_sql=(
+                    "status IN ('running', 'ready', 'blocked') "
+                    "AND current_run_id = ?"
+                ),
+                where_params=(int(expected_run_id),),
             )
-        if cur.rowcount != 1:
+        if rowcount != 1:
             return False
         run_id = _end_run(
             conn,
@@ -13707,7 +13790,17 @@ def _park_integration(
         )
         if _run_originated_from_review(conn, task_id, run_id):
             _set_run_verdict(conn, run_id, "APPROVED")
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(
+                reason,
+                "integration",
+                park_class=outcome.get("park_class"),
+            ),
+            run_id=run_id,
+        )
         park_class = outcome.get("park_class")
         if park_class in {
             "DIRTY_WORKTREE",
@@ -13877,6 +13970,73 @@ def _latest_unblocked_block_recurrence(
     return None
 
 
+def _normalize_block_kind(kind: Optional[str]) -> Optional[str]:
+    """Return a validated block kind, or ``None`` for an untyped block."""
+    if kind is None:
+        return None
+    block_kind = str(kind).strip().lower()
+    if block_kind == "":
+        return None
+    if block_kind not in VALID_BLOCK_KINDS:
+        raise ValueError(
+            f"unknown block kind {block_kind!r}; expected one of {sorted(VALID_BLOCK_KINDS)}"
+        )
+    return block_kind
+
+
+def _system_park_set_blocked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    kind: str,
+    where_sql: str,
+    where_params: Sequence[Any] = (),
+) -> int:
+    """Flip a task to ``blocked`` with a mandatory ``block_kind``.
+
+    Caller must already hold a write transaction. Returns ``cursor.rowcount``.
+    System parks (budget runaway, stall, integration, hold, contract) must use
+    this path so the board never shows operator-actionable blocked cards with
+    ``block_kind IS NULL`` — that null erases auto-retry classification and
+    forces prose forensics.
+    """
+    block_kind = _normalize_block_kind(kind)
+    if block_kind is None:
+        raise ValueError("system parks require a non-null block kind")
+    cur = conn.execute(
+        f"""
+        UPDATE tasks
+           SET status = 'blocked',
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               block_kind = ?,
+               block_recurrences = CASE
+                   WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                   ELSE 1
+               END
+         WHERE id = ? AND ({where_sql})
+        """,
+        (block_kind, task_id, *tuple(where_params)),
+    )
+    return int(cur.rowcount)
+
+
+def _system_blocked_event_payload(
+    reason: str,
+    kind: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Structured blocked-event payload for system parks (always includes kind)."""
+    payload: dict[str, Any] = {
+        "reason": reason,
+        "kind": kind,
+        "source": "system_park",
+    }
+    payload.update(extra)
+    return payload
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -13893,13 +14053,7 @@ def block_task(
     into ``task_runs.metadata`` so the auto-retry feedback can render them for
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
-    block_kind = str(kind).strip().lower() if kind is not None else None
-    if block_kind == "":
-        block_kind = None
-    if block_kind is not None and block_kind not in VALID_BLOCK_KINDS:
-        raise ValueError(
-            f"unknown block kind {block_kind!r}; expected one of {sorted(VALID_BLOCK_KINDS)}"
-        )
+    block_kind = _normalize_block_kind(kind)
     with write_txn(conn):
         if _reject_code_worker_review_required_block(
             conn, task_id, reason=reason, expected_run_id=expected_run_id
@@ -18894,16 +19048,25 @@ def _park_stall_once(
             return False
         if _has_stall_marker(conn, task_id, stall_class):
             return False
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status NOT IN ('done', 'archived')",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="capacity",
+                where_sql="status NOT IN ('done', 'archived')",
+            )
+            != 1
+        ):
             return False
         if fresh["status"] != "blocked":
-            _append_event(conn, task_id, "blocked", {"reason": reason})
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                _system_blocked_event_payload(
+                    reason, "capacity", stall_class=stall_class
+                ),
+            )
         esc_event_id = _append_event(
             conn,
             task_id,
@@ -19149,6 +19312,7 @@ def _spawn_failure_or_transient_retry(
 # schema change, no mid-run kill — a runaway is only ever caught at preflight.
 
 BUDGET_RUNAWAY_PARKED_EVENT = "budget_runaway_parked"
+BUDGET_RUNAWAY_STALL_CLASS = "budget_runaway"
 
 
 def _budget_runaway_escalation_payload(
@@ -19187,6 +19351,162 @@ def _budget_runaway_escalation_payload(
     }
 
 
+def _latest_actionable_terminal_review_run(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Return the latest terminal review rejection when it has structured work."""
+    row = conn.execute(
+        "SELECT r.id, r.status, r.outcome, r.verdict, r.metadata "
+        "FROM task_runs r "
+        "WHERE r.task_id = ? AND r.ended_at IS NOT NULL "
+        "  AND EXISTS ("
+        "      SELECT 1 FROM task_events e "
+        "      WHERE e.task_id = r.task_id AND e.run_id = r.id "
+        "        AND e.kind = 'claimed' "
+        "        AND json_extract(e.payload, '$.source_status') = 'review'"
+        "  ) "
+        "ORDER BY r.id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["status"] != "blocked" or row["outcome"] != "blocked":
+        return None
+
+    try:
+        metadata = json.loads(row["metadata"]) if row["metadata"] else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+
+    verdict = _normalize_review_verdict(row["verdict"]) or _extract_review_verdict(
+        metadata=metadata
+    )
+    if verdict != "REQUEST_CHANGES":
+        return None
+
+    blocking_findings = metadata.get("blocking_findings")
+    if not (
+        isinstance(blocking_findings, list)
+        and any(
+            isinstance(finding, str) and finding.strip()
+            for finding in blocking_findings
+        )
+    ):
+        return None
+    return {"run_id": int(row["id"]), "verdict": verdict, "metadata": metadata}
+
+
+def _grant_budget_runaway_review_extension(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    token_sum: int,
+    cap: int,
+    expected_status: str = "ready",
+    in_write_txn: bool = False,
+) -> bool:
+    """Atomically consume one configured extension for actionable review work."""
+    policy = _budget_extension_config()
+    max_extensions = int(
+        policy.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT) or 0
+    )
+    if not policy.get("enabled") or max_extensions <= 0:
+        return False
+
+    now = int(time.time())
+    txn = contextlib.nullcontext(conn) if in_write_txn else write_txn(conn)
+    with txn:
+        task = conn.execute(
+            "SELECT status, budget_extension_count FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task is None or task["status"] != expected_status:
+            return False
+        current_count = int(task["budget_extension_count"] or 0)
+        if current_count >= max_extensions:
+            return False
+
+        review = _latest_actionable_terminal_review_run(conn, task_id)
+        if review is None:
+            return False
+        review_run_id = int(review["run_id"])
+        already_granted = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'budget_review_extension_granted' "
+            "AND json_extract(payload, '$.review_run_id') = ? LIMIT 1",
+            (task_id, review_run_id),
+        ).fetchone()
+        if already_granted is not None:
+            return False
+
+        extension = current_count + 1
+        updated = conn.execute(
+            "UPDATE tasks SET budget_extension_count = ? "
+            "WHERE id = ? AND status = ? AND budget_extension_count = ?",
+            (extension, task_id, expected_status, current_count),
+        )
+        if updated.rowcount != 1:
+            return False
+
+        feedback = _render_review_findings(review["metadata"])
+        comment = (
+            f"Budget recovery extension {extension}/{max_extensions} granted "
+            f"for actionable review run {review_run_id}. "
+            f"Cumulative input tokens {token_sum:,} exceed cap {cap:,}.\n"
+            f"Address the structured review feedback before resubmitting:\n{feedback}"
+        )
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, 'dispatcher', ?, ?)",
+            (task_id, comment, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "budget_review_extension_granted",
+            {
+                "extension": extension,
+                "limit": max_extensions,
+                "review_run_id": review_run_id,
+                "review_verdict": review["verdict"],
+                "input_token_sum": token_sum,
+                "cap": cap,
+            },
+        )
+    return True
+
+
+def _can_grant_budget_runaway_review_extension(
+    conn: sqlite3.Connection, task_id: str
+) -> bool:
+    """Check recovery eligibility without consuming its single-use grant."""
+    policy = _budget_extension_config()
+    max_extensions = int(
+        policy.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT) or 0
+    )
+    if not policy.get("enabled") or max_extensions <= 0:
+        return False
+    task = conn.execute(
+        "SELECT status, budget_extension_count FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None or task["status"] != "ready":
+        return False
+    if int(task["budget_extension_count"] or 0) >= max_extensions:
+        return False
+    review = _latest_actionable_terminal_review_run(conn, task_id)
+    if review is None:
+        return False
+    return (
+        conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'budget_review_extension_granted' "
+            "AND json_extract(payload, '$.review_run_id') = ? LIMIT 1",
+            (task_id, int(review["run_id"])),
+        ).fetchone()
+        is None
+    )
+
+
 def _park_budget_runaway(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -19218,21 +19538,42 @@ def _park_budget_runaway(
             return False
         if _is_funnel_root_task(conn, fresh):
             return False
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status NOT IN ('done', 'archived')",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        # Prefer typed capacity (VALID_BLOCK_KINDS + autonomy hold_capacity)
+        # over main's raw needs_operator stamp, which is not in VALID_BLOCK_KINDS
+        # and would force silent-block escalate instead of 0-token hold.
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="capacity",
+                where_sql="status NOT IN ('done', 'archived')",
+            )
+            != 1
+        ):
             return False
         if fresh["status"] != "blocked":
-            _append_event(conn, task_id, "blocked", {"reason": reason})
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                _system_blocked_event_payload(
+                    reason,
+                    "capacity",
+                    input_token_sum=token_sum,
+                    cap=cap,
+                    runs=runs,
+                ),
+            )
         _append_event(
             conn,
             task_id,
             BUDGET_RUNAWAY_PARKED_EVENT,
-            {"input_token_sum": token_sum, "cap": cap, "runs": runs},
+            {
+                "input_token_sum": token_sum,
+                "cap": cap,
+                "runs": runs,
+                "stall_class": BUDGET_RUNAWAY_STALL_CLASS,
+            },
         )
         esc_payload = _budget_runaway_escalation_payload(
             row=fresh,
@@ -20653,6 +20994,261 @@ def _block_is_settled(
     return False
 
 
+def _latest_blocked_event_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    row = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["m"] is None:
+        return None
+    return int(row["m"])
+
+
+def _autonomy_routes_in_current_block_episode(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    """``autonomy_routed`` payloads since the latest ``blocked`` event (episode)."""
+    last_blocked_id = _latest_blocked_event_id(conn, task_id)
+    if last_blocked_id is None:
+        min_id = 0
+    else:
+        min_id = last_blocked_id
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id ASC",
+        (task_id, AUTONOMY_ROUTED_EVENT, min_id),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def _autonomy_hold_active(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when this block episode already has a hold route (no re-dispatch)."""
+    for payload in _autonomy_routes_in_current_block_episode(conn, task_id):
+        action = str(payload.get("action") or "")
+        if action in AUTONOMY_HOLD_ACTIONS:
+            return True
+    return False
+
+
+def _autonomy_reready_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """Re-ready count in the *current* block episode only."""
+    return sum(
+        1
+        for payload in _autonomy_routes_in_current_block_episode(conn, task_id)
+        if str(payload.get("action") or "") in AUTONOMY_REREADY_ACTIONS
+    )
+
+
+def _autonomy_reready_total(conn: sqlite3.Connection, task_id: str) -> int:
+    """Lifetime re-ready count for the task (token hard stop across episodes)."""
+    total = 0
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, AUTONOMY_ROUTED_EVENT),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if (
+            isinstance(payload, dict)
+            and str(payload.get("action") or "") in AUTONOMY_REREADY_ACTIONS
+        ):
+            total += 1
+    return total
+
+
+def _resolve_settled_block_autonomy_route(
+    *,
+    block_kind: Optional[str],
+    blocked_kind: str,
+    trigger_outcome: str,
+    reason: str,
+    verdict: Optional[str],
+    reready_count: int,
+    reready_total: int = 0,
+    max_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
+    max_reready_task: int = MAX_AUTONOMY_REREADY_PER_TASK,
+) -> str:
+    """Pick a bounded autonomy action for a settled silent block.
+
+    Returns one of:
+    * ``reready_review`` — re-dispatch worker once (token cost, hard-capped)
+    * ``hold_capacity`` / ``hold_integration`` — observe, no worker (0 tokens)
+    * ``escalate`` — operator must act
+    """
+    kind = (block_kind or "").strip().lower() or None
+    bk = (blocked_kind or "").strip().lower()
+    outcome = (trigger_outcome or "").strip().lower()
+    reason_l = (reason or "").lower()
+    verd = str(verdict or "").strip().upper()
+
+    # Explicit human / policy gates — never auto-reready.
+    if kind in {"needs_input"} or bk in {
+        "needs_input",
+        "operator_question",
+        "needs_operator",
+        "capability",
+    }:
+        return "escalate"
+    if (reason or "").strip() == RELEASE_GATE_BLOCK_REASON:
+        return "escalate"
+
+    # Capacity parks: observe only (already burned tokens; do not re-dispatch).
+    # Do NOT map bare ``gave_up`` here — circuit-breaker parks must still page
+    # (Opus 4.8: gave_up→hold suppressed real operator surfaces).
+    if (
+        kind == "capacity"
+        or outcome == "iteration_budget_exhausted"
+        or "input-token cap" in reason_l
+        or "iteration budget exhausted" in reason_l
+        or "per-task input-token" in reason_l
+    ):
+        return "hold_capacity"
+
+    # Integration parks: hold (0 tokens). Operator only if a later path escalates
+    # deliberately; silent-block no longer pages for pure merge/gate parks.
+    if kind == "integration" or outcome == "integration_parked" or reason_l.startswith(
+        "integration parked"
+    ):
+        return "hold_integration"
+
+    # Review rework: one bounded re-ready with existing findings in the run trail.
+    # Do NOT treat generic "retryable" as review — that would re-dispatch every
+    # exhausted block and burn tokens without quality signal.
+    # Lifetime cap (max_reready_task) prevents episode-reset thrash.
+    reviewish = (
+        kind == "review_revision"
+        or bk == "review_revision"
+        or verd in {"REQUEST_CHANGES", "NEEDS_REVISION"}
+        or "needs_revision" in reason_l
+        or "request_changes" in reason_l
+        or "request changes" in reason_l
+        or "review verdict:" in reason_l
+    )
+    if reviewish:
+        if reready_count < max_reready and reready_total < max_reready_task:
+            return "reready_review"
+        return "escalate"
+
+    return "escalate"
+
+
+def _apply_autonomy_reready(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    reason: str,
+    blocked_kind: str,
+    run_id: Optional[int],
+) -> bool:
+    """Flip settled blocked → ready for one bounded autonomy attempt.
+
+    Leaves ``auto_retry_count`` untouched so the auto-retry lane does not
+    stack another full retry budget on top of this one-shot autonomy route.
+    """
+    cur = conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'ready',
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               block_kind = NULL,
+               block_recurrences = 0
+         WHERE id = ? AND status = 'blocked'
+        """,
+        (task_id,),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(
+        conn,
+        task_id,
+        AUTONOMY_ROUTED_EVENT,
+        {
+            "action": action,
+            "reason": (reason or "")[:500],
+            "blocked_kind": blocked_kind,
+            "max_reready_episode": MAX_AUTONOMY_REREADY_PER_EPISODE,
+            "max_reready_task": MAX_AUTONOMY_REREADY_PER_TASK,
+            "token_policy": "bounded_reready_task_lifetime",
+        },
+        run_id=run_id,
+    )
+    # Surface findings for the next worker without burning an extra model call.
+    snippet = (reason or "").strip()
+    if snippet:
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                task_id,
+                "dispatcher",
+                (
+                    f"[autonomy_routed:{action}] Bounded re-ready "
+                    f"(≤{MAX_AUTONOMY_REREADY_PER_EPISODE}/episode). "
+                    "Prior block reason for this attempt:\n\n"
+                    f"{snippet[:3000]}"
+                ),
+                now,
+            ),
+        )
+    return True
+
+
+def _apply_autonomy_hold(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    reason: str,
+    blocked_kind: str,
+    heiler_class: str,
+    run_id: Optional[int],
+) -> None:
+    """Mark a capacity/integration park as autonomously held (no worker, no page)."""
+    _append_event(
+        conn,
+        task_id,
+        AUTONOMY_ROUTED_EVENT,
+        {
+            "action": action,
+            "reason": (reason or "")[:500],
+            "blocked_kind": blocked_kind,
+            "token_policy": "hold_no_redispatch",
+            "heiler_class": heiler_class,
+        },
+        run_id=run_id,
+    )
+    _append_event(
+        conn,
+        task_id,
+        HEILER_CLASSIFICATION_EVENT,
+        _heiler_classification_payload(
+            heiler_class=heiler_class,
+            evidence={
+                "matched": action,
+                "signal_source": "autonomy_route",
+                "excerpt": (reason or "")[:240],
+            },
+            source=HEILER_SOURCE_SILENT_BLOCK,
+            blocked=True,
+        ),
+        run_id=run_id,
+    )
+
+
 def silent_block_task_ids(
     conn: sqlite3.Connection,
     *,
@@ -20665,10 +21261,14 @@ def silent_block_task_ids(
     :func:`_block_is_settled`) without an active ``operator_escalation``.
 
     Single source of truth shared by :func:`escalate_silent_blocks_sweep` (which
-    fixes the gap by emitting the missing escalation) and the vision
-    ``silent_blocks`` metric (which measures it), so the guard and the metric can
-    never drift: every id the metric counts is one the sweep will escalate, so
-    the metric converges to 0 within one dispatcher tick.
+    fixes the gap by emitting the missing escalation **or** a bounded autonomy
+    route) and the vision ``silent_blocks`` metric (which measures it), so the
+    guard and the metric can never drift: every id the metric counts is one the
+    sweep will act on, so the metric converges to 0 within one dispatcher tick.
+
+    Tasks already handled by an in-episode autonomy *hold* (capacity/integration)
+    are excluded — they are not silent gaps; they are deliberate non-operator
+    parks with zero further token burn until a human or a new block episode.
     """
     ts = int(time.time()) if now is None else int(now)
     rows = conn.execute(
@@ -20678,6 +21278,8 @@ def silent_block_task_ids(
     out: list[str] = []
     for row in rows:
         if _operator_escalation_is_active(conn, row["id"]):
+            continue
+        if _autonomy_hold_active(conn, row["id"]):
             continue
         # STRATEGIST-META-CARVEOUT (HEILER-SILENTBLOCK-REASON-FIDELITY-S1):
         # the Stratege's own ingested chains are excluded from BOTH the sweep
@@ -20788,30 +21390,35 @@ def escalate_silent_blocks_sweep(
     retry_limit: int = DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
     failure_limit: int = DEFAULT_FAILURE_LIMIT,
     backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+    max_autonomy_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
+    max_autonomy_reready_task: int = MAX_AUTONOMY_REREADY_PER_TASK,
 ) -> dict:
-    """Safety net guaranteeing no *settled* block stays silent (AC-1).
+    """Safety net: no *settled* block stays silent — with bounded autonomy first.
 
-    Most block-writing paths (``block_task``, integration/contract parks, the
-    iteration-budget cap, the recoverable crash flip) transition a task to
-    ``blocked`` without emitting ``operator_escalation`` — only the failure
-    circuit-breaker, the stall park and the budget-runaway park do. A block that
-    never escalates "looks like progress from the outside" while nobody is
-    pulled in. This deterministic, idempotent sweep closes the gap regardless of
-    call site: every blocked task the self-healing lane is done with gets an
-    ``operator_escalation`` event, so the ``silent_blocks`` metric → 0.
+    Most block-writing paths transition a task to ``blocked`` without
+    ``operator_escalation``. The auto-retry lane handles *transient* blocks;
+    once a block is settled (see :func:`_block_is_settled`), this sweep acts.
 
-    It deliberately leaves transient blocks alone (see :func:`_block_is_settled`)
-    so self-healing retries do not flood the operator (AC-2), and is idempotent
-    (a task that already escalated is never re-escalated). Because this sweep is
-    itself an escalation writer, it classifies each surfaced escalation INLINE in
-    the same ``write_txn`` (ESCALATION-INLINE-CLASSIFY-S1) — coverage is complete
-    the instant the escalation is written, not a poll later. The downstream
-    :func:`classify_escalations_sweep` therefore finds these already paired and
-    skips them; it remains only the backfill net for a forgotten/legacy/future
-    writer. Safe to call from a cron or by hand — a pure DB sweep.
+    **SILENT-BLOCK-AUTONOMY-S1 (token-bounded):** before paging the operator,
+    apply a deterministic route:
+
+    * review / REQUEST_CHANGES → at most one ``reready_*`` (worker re-dispatch)
+    * capacity → ``hold_capacity`` (classify, **no** worker, **no** operator page)
+    * integration → ``hold_integration`` (same hold policy)
+    * needs_input / operator_question / release-gate / budget exhausted after
+      autonomy → ``operator_escalation`` (unchanged human path)
+
+    The ``silent_blocks`` metric still converges to 0 within one tick: every id
+    from :func:`silent_block_task_ids` is either re-readied, hold-routed (then
+    excluded), or escalated. Idempotent for holds and escalations.
     """
     ts = int(time.time()) if now is None else int(now)
-    summary: dict = {"checked_at": ts, "escalated": []}
+    summary: dict = {
+        "checked_at": ts,
+        "escalated": [],
+        "autonomy_reready": [],
+        "autonomy_held": [],
+    }
     ids = silent_block_task_ids(
         conn,
         now=ts,
@@ -20830,6 +21437,8 @@ def escalate_silent_blocks_sweep(
             ).fetchone()
             if row is None or row["status"] != "blocked":
                 continue  # unblocked between the scan and this txn
+            if _autonomy_hold_active(conn, tid):
+                continue
             blocked_run = _latest_blocked_run_for_auto_retry(conn, tid)
             # REASON-FIDELITY (HEILER-SILENTBLOCK-REASON-FIDELITY-S1): the
             # blocked-only query above misses the TRUE terminal outcome when a
@@ -20863,18 +21472,77 @@ def escalate_silent_blocks_sweep(
             if not reason:
                 reason = _latest_release_gate_block_reason(conn, tid)
             body_hash = _task_body_hash(row["body"])
+            verdict = (
+                blocked_run["verdict"]
+                if blocked_run is not None
+                else (last_run["verdict"] if last_run is not None else None)
+            )
             blocked_kind = _blocked_kind_for_auto_retry(
                 reason,
                 explicit_block_kind=row["block_kind"],
-                verdict=(
-                    blocked_run["verdict"]
-                    if blocked_run is not None
-                    else (last_run["verdict"] if last_run is not None else None)
-                ),
+                verdict=verdict,
                 auto_retry_count=int(row["auto_retry_count"] or 0),
                 body_hash=body_hash,
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
+            reready_count = _autonomy_reready_count(conn, tid)
+            reready_total = _autonomy_reready_total(conn, tid)
+            route = _resolve_settled_block_autonomy_route(
+                block_kind=row["block_kind"],
+                blocked_kind=blocked_kind,
+                trigger_outcome=str(trigger_outcome),
+                reason=reason,
+                verdict=verdict,
+                reready_count=reready_count,
+                reready_total=reready_total,
+                max_reready=max_autonomy_reready,
+                max_reready_task=max_autonomy_reready_task,
+            )
+
+            if route in AUTONOMY_REREADY_ACTIONS:
+                if _apply_autonomy_reready(
+                    conn,
+                    tid,
+                    action=route,
+                    reason=reason,
+                    blocked_kind=blocked_kind,
+                    run_id=run_id,
+                ):
+                    summary["autonomy_reready"].append(
+                        {
+                            "task_id": tid,
+                            "action": route,
+                            "blocked_kind": blocked_kind,
+                        }
+                    )
+                    continue
+                # CAS miss: fall through to operator escalate in this tick.
+
+            if route in AUTONOMY_HOLD_ACTIONS:
+                heiler_class = (
+                    HEILER_CLASS_CAPACITY
+                    if route == "hold_capacity"
+                    else HEILER_CLASS_CONFLICT
+                )
+                _apply_autonomy_hold(
+                    conn,
+                    tid,
+                    action=route,
+                    reason=reason,
+                    blocked_kind=blocked_kind,
+                    heiler_class=heiler_class,
+                    run_id=run_id,
+                )
+                summary["autonomy_held"].append(
+                    {
+                        "task_id": tid,
+                        "action": route,
+                        "blocked_kind": blocked_kind,
+                    }
+                )
+                continue
+
+            # Default: operator escalation (human-required or autonomy budget spent).
             esc_payload = _silent_block_escalation_payload(
                 row=row,
                 reason=reason,
@@ -20884,6 +21552,17 @@ def escalate_silent_blocks_sweep(
                     int(blocked_event["id"]) if blocked_event is not None else None
                 ),
             )
+            # Annotate when we already spent the autonomy re-ready budget.
+            if (
+                reready_count >= max_autonomy_reready
+                or reready_total >= max_autonomy_reready_task
+            ):
+                esc_payload = dict(esc_payload)
+                esc_payload["autonomy_reready_exhausted"] = True
+                esc_payload["autonomy_reready_total"] = reready_total
+                esc_payload["attempts_already_made"] = int(
+                    esc_payload.get("attempts_already_made") or 0
+                ) + max(reready_count, reready_total)
             esc_event_id = _append_event(
                 conn,
                 tid,
@@ -20893,12 +21572,7 @@ def escalate_silent_blocks_sweep(
             )
             # ESCALATION-INLINE-CLASSIFY-S1: this sweep is itself an escalation
             # writer, so it must classify atomically too — not lean on the
-            # later classify_escalations_sweep poll. Derive the class from the
-            # escalation's own persisted evidence via the exact same
-            # deterministic function the backfill sweep uses, so an inline
-            # classification is byte-identical to a swept one (defense-in-depth,
-            # no divergence, no guess). Carries the escalation event id + run_id
-            # as the AC-2 belegter ledger/run reference.
+            # later classify_escalations_sweep poll.
             h_class, h_ev = _classify_escalation_payload(esc_payload)
             _append_event(
                 conn,
@@ -22410,22 +23084,44 @@ def _blocked_kind_for_auto_retry(
     body_hash: Optional[str] = None,
     last_auto_retry_body_hash: Optional[str] = None,
 ) -> str:
+    """Classify a blocked task for auto-retry / silent-block autonomy.
+
+    Review feedback (``review_revision`` / ``REQUEST_CHANGES``) must NEVER be
+    routed through :data:`_AUTO_RETRY_QUESTION_RE`. That regex matches common
+    technical English in findings (``?``, ``token``, ``migration``, ``delete``,
+    ``push``, ``deploy``, …). After the first auto-retry (``auto_retry_count
+    >= 1``) a false ``operator_question`` would:
+
+    1. skip the remaining auto-retry budget, and
+    2. force silent-block autonomy to escalate (operator_question is
+       operator-only) instead of ``reready_review``.
+
+    Same-body after a prior retry still returns ``needs_operator`` (quality
+    brake). Real human holds use ``block_kind=needs_input`` / hold_task.
+    """
     if explicit_block_kind is not None:
         if explicit_block_kind == "transient":
             return "retryable"
+        # review_revision has its own bounded body-hash retry path below.
+        if explicit_block_kind in OPERATOR_ONLY_BLOCK_KINDS:
+            return explicit_block_kind
         if explicit_block_kind != "review_revision":
             return explicit_block_kind
     text = (reason or "").strip()
     normalized_verdict = str(verdict or "").strip().upper()
-    if (
-        normalized_verdict == "REQUEST_CHANGES"
-        and int(auto_retry_count or 0) >= 1
-        and body_hash
-        and last_auto_retry_body_hash
-        and body_hash == last_auto_retry_body_hash
-    ):
-        return "needs_operator"
-    if normalized_verdict == "REQUEST_CHANGES" and int(auto_retry_count or 0) == 0:
+    is_review_feedback = (
+        explicit_block_kind == "review_revision"
+        or normalized_verdict == "REQUEST_CHANGES"
+    )
+    if is_review_feedback:
+        if (
+            int(auto_retry_count or 0) >= 1
+            and body_hash
+            and last_auto_retry_body_hash
+            and body_hash == last_auto_retry_body_hash
+        ):
+            return "needs_operator"
+        # First pass, or body changed after a retry: stay in the self-heal lane.
         return "retryable"
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"
@@ -23350,19 +24046,23 @@ def _dispatch_once_locked(
         # rather than (re)spawn, record the sum in ``budget_runaway_parked``, and
         # route it to the decision-queue via the operator_escalation path. No
         # mid-run kill, no parallel dispatch path — caught only here, at preflight.
+        _budget_review_extension: Optional[tuple[int, int]] = None
         if _per_task_input_cap is not None:
             _input_sum, _input_runs = _per_task_input_usage.get(row["id"], (0, 0))
             if _input_sum > _per_task_input_cap:
-                result.budget_runaway_parked.append((row["id"], _input_sum))
-                if not dry_run:
-                    _park_budget_runaway(
-                        conn,
-                        row,
-                        token_sum=_input_sum,
-                        cap=_per_task_input_cap,
-                        runs=_input_runs,
-                    )
-                continue
+                if _can_grant_budget_runaway_review_extension(conn, row["id"]):
+                    _budget_review_extension = (_input_sum, _per_task_input_cap)
+                else:
+                    result.budget_runaway_parked.append((row["id"], _input_sum))
+                    if not dry_run:
+                        _park_budget_runaway(
+                            conn,
+                            row,
+                            token_sum=_input_sum,
+                            cap=_per_task_input_cap,
+                            runs=_input_runs,
+                        )
+                    continue
         # serialize_by_repo: resolve this candidate's repo_root once and reuse it
         # at the guard (3d) and every claim-success re-add. Computed here (above the
         # openclaw branch) so it is in scope at ALL claim paths, including openclaw.
@@ -23812,7 +24512,12 @@ def _dispatch_once_locked(
                 if _ctr is not None:
                     _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
             continue
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        claimed = claim_task(
+            conn,
+            row["id"],
+            ttl_seconds=ttl_seconds,
+            budget_review_extension=_budget_review_extension,
+        )
         if claimed is None:
             continue
         try:
@@ -26578,6 +27283,15 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     ):
         by_assignee.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
 
+    # Operator triage: blocked cards classified by block_kind so review rework
+    # (auto-retryable) is not mixed with capacity/integration/human holds.
+    blocked_by_kind: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(NULLIF(TRIM(block_kind), ''), '(unclassified)') AS kind, "
+        "COUNT(*) AS n FROM tasks WHERE status = 'blocked' GROUP BY 1"
+    ):
+        blocked_by_kind[str(row["kind"])] = int(row["n"])
+
     oldest_row = conn.execute(
         "SELECT MIN(created_at) AS ts FROM tasks WHERE status = 'ready'"
     ).fetchone()
@@ -26637,6 +27351,7 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     return {
         "by_status": by_status,
         "by_assignee": by_assignee,
+        "blocked_by_kind": blocked_by_kind,
         "oldest_ready_age_seconds": oldest_ready_age,
         "now": now,
         "completed_last_24h": completed_last_24h,

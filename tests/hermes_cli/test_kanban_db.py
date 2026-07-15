@@ -5556,7 +5556,10 @@ def test_dispatch_auto_retry_keeps_operator_hold_blocked(
         assert res.auto_retried_blocked == []
         assert kb.get_task(conn, t).status == "blocked"
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
-        assert event.payload["blocked_kind"] == "operator_question"
+        # hold_task stamps block_kind=needs_input (typed system park); that is
+        # the authoritative skip signal (not the prose question-regex).
+        assert event.payload["blocked_kind"] == "needs_input"
+        assert kb.get_task(conn, t).block_kind == "needs_input"
 
 
 def test_operator_hold_never_duplicates_run_and_answer_resumes_once(
@@ -6437,12 +6440,9 @@ def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
 def test_silent_block_sweep_carries_real_run_outcome(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """HEILER-SILENTBLOCK-REASON-FIDELITY-S1: a block settled via a non-blocked
-    path (budget exhaustion) has NO blocked run, so the old payload sent
-    trigger_outcome='blocked' + an empty error -> real-bug default. The sweep now
-    carries the genuine last *ended* run outcome + message, so the operator sees
-    the real reason and the classifier lands it honestly (capacity, not the
-    real-bug default)."""
+    """SILENT-BLOCK-AUTONOMY-S1 + reason fidelity: budget exhaustion settles
+    without a blocked run. The sweep routes to hold_capacity (no operator page,
+    no re-dispatch) and classifies capacity from the real last-run message."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     with kb.connect_closing() as conn:
@@ -6460,15 +6460,20 @@ def test_silent_block_sweep_carries_real_run_outcome(
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
         conn.commit()
         assert kb.silent_block_task_ids(conn, now=base) == [t]
-        kb.escalate_silent_blocks_sweep(conn, now=base)
-        esc = _escalation_event(conn, t)
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["task_id"] == t for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
         heiler = _heiler_events(conn, t)[0]
+        routes = [
+            e for e in kb.list_events(conn, t) if e.kind == kb.AUTONOMY_ROUTED_EVENT
+        ]
 
-    assert esc.payload["evidence"]["trigger_outcome"] == "iteration_budget_exhausted"
-    assert "iteration_budget_exhausted" in esc.payload["why_now"]
-    # the real run message is carried, not the old empty string
-    assert "iteration budget exhausted" in esc.payload["evidence"]["last_error"]
     assert heiler.payload["class"] == kb.HEILER_CLASS_CAPACITY
+    assert routes[-1].payload["action"] == "hold_capacity"
+    # silent set drained via hold (no operator page)
+    with kb.connect_closing() as conn:
+        assert kb.silent_block_task_ids(conn, now=base) == []
 
 
 def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
@@ -6596,6 +6601,351 @@ def test_silent_block_sweep_carves_out_strategist_meta_task(
     assert meta_heiler_events == []
     # the real code task is untouched by the carve-out — still surfaced
     assert len(real_operator_escalations) == 1
+
+
+# ---------------------------------------------------------------------------
+# SILENT-BLOCK-AUTONOMY-S1: bounded routes before operator page
+# ---------------------------------------------------------------------------
+
+
+def _force_review_settled_block(conn, title="review rework"):
+    """Create a settled REQUEST_CHANGES block with exhausted auto_retry budget."""
+    t = kb.create_task(conn, title=title, assignee="coder")
+    conn.execute(
+        "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+        (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+    )
+    kb.claim_task(conn, t)
+    # Review-origin claim so block_task stamps review_revision.
+    run_id = kb.get_task(conn, t).current_run_id
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            t,
+            "claimed",
+            {"source_status": "review", "run_id": run_id},
+            run_id=run_id,
+        )
+    assert kb.block_task(
+        conn,
+        t,
+        reason="Urteil: NEEDS_REVISION\nWarum: missing regression for focus history",
+        expected_run_id=run_id,
+    )
+    task = kb.get_task(conn, t)
+    assert task.status == "blocked"
+    assert task.block_kind == "review_revision"
+    return t
+
+
+def test_silent_block_autonomy_reready_review_once(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Settled review rework re-readies once (no operator page) within token bound."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = _force_review_settled_block(conn)
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(r["task_id"] == t and r["action"] == "reready_review" for r in res["autonomy_reready"])
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert _operator_escalations(conn, t) == []
+        routes = [e for e in kb.list_events(conn, t) if e.kind == kb.AUTONOMY_ROUTED_EVENT]
+        assert len(routes) == 1
+        assert routes[0].payload["action"] == "reready_review"
+        # Findings preserved for the next worker without an extra model call.
+        comments = kb.list_comments(conn, t)
+        assert any("NEEDS_REVISION" in (c.body or "") for c in comments)
+
+
+def test_silent_block_autonomy_review_second_episode_escalates(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Lifetime cap: after one autonomy reready, a new block episode escalates
+    under default maxes (no test override). Prevents review thrash token loops."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = _force_review_settled_block(conn, title="review loop")
+        res1 = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res1["autonomy_reready"]
+        assert kb._autonomy_reready_total(conn, t) == 1
+        # Second worker attempt: claim + review block again (new episode).
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                t,
+                "claimed",
+                {"source_status": "review", "run_id": run_id},
+                run_id=run_id,
+            )
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Urteil: NEEDS_REVISION\nWarum: still broken after autonomy reready",
+            expected_run_id=run_id,
+        )
+        # Episode-local count is 0, but task-lifetime total is 1 → escalate.
+        assert kb._autonomy_reready_count(conn, t) == 0
+        assert kb._autonomy_reready_total(conn, t) == 1
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)  # default bounds
+        assert any(e["task_id"] == t for e in res2["escalated"])
+        assert res2["autonomy_reready"] == []
+        assert len(_operator_escalations(conn, t)) == 1
+        esc = _operator_escalations(conn, t)[0]
+        assert esc.payload.get("autonomy_reready_exhausted") is True
+        assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_silent_block_autonomy_hold_capacity_no_operator(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="token cap", assignee="coder")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (t,)).fetchone()
+        assert kb._park_budget_runaway(conn, row, token_sum=5000, cap=100, runs=3)
+        # Budget park already wrote operator_escalation historically — clear that
+        # path by using a raw capacity-stamped block without prior escalation.
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (t,))
+        conn.execute(
+            "UPDATE tasks SET status='blocked', block_kind='capacity', "
+            "auto_retry_count=? WHERE id=?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["action"] == "hold_capacity" for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
+        assert kb.get_task(conn, t).status == "blocked"
+        # Hold removes from silent set; re-sweep is a no-op.
+        assert kb.silent_block_task_ids(conn, now=base) == []
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res2["escalated"] == []
+        assert res2["autonomy_held"] == []
+
+
+def test_silent_block_autonomy_hold_integration(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="merge park", assignee="coder")
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        assert kb._park_integration(
+            conn, t, {"reason": "post-merge gate failed: pytest"}, expected_run_id=run_id
+        )
+        assert kb.get_task(conn, t).block_kind == "integration"
+        # Integration park does not write operator_escalation → silent set.
+        assert t in kb.silent_block_task_ids(conn, now=base)
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["action"] == "hold_integration" for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
+
+
+def test_review_request_changes_never_false_operator_question():
+    """Autonomy gap: review findings often contain regex bait (token, ?,
+    migration, delete). After the first auto-retry those must stay retryable
+    so the second budget slot and reready_review still fire — not operator_question.
+    """
+    bait = (
+        "Urteil: NEEDS_REVISION\n"
+        "Warum: token accounting wrong; which migration to delete?\n"
+        "Fix: push deploy-safe alter path."
+    )
+    # First pass — already protected historically
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait, verdict="REQUEST_CHANGES", auto_retry_count=0
+        )
+        == "retryable"
+    )
+    # Second pass after auto-retry with CHANGED body — previously false operator_question
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash="aaa",
+            last_auto_retry_body_hash="bbb",
+        )
+        == "retryable"
+    )
+    # review_revision kind without explicit verdict still protected
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            explicit_block_kind="review_revision",
+            auto_retry_count=1,
+            body_hash="aaa",
+            last_auto_retry_body_hash="bbb",
+        )
+        == "retryable"
+    )
+    # Same-body brake still holds (quality, not thrash)
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash="same",
+            last_auto_retry_body_hash="same",
+        )
+        == "needs_operator"
+    )
+    # Non-review prose still pages for real operator questions
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            "Which credential should I use?", auto_retry_count=0
+        )
+        == "operator_question"
+    )
+
+
+def test_review_prose_bait_uses_second_auto_retry_not_operator(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """End-to-end: REQUEST_CHANGES with regex bait after one auto_retry still
+    gets attempt 2 — does not settle as operator_question."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    bait = "NEEDS_REVISION: fix token path; which delete/migration is safe?"
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="review bait", assignee="coder", body="v1")
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, t, "claimed",
+                {"source_status": "review", "run_id": run_id},
+                run_id=run_id,
+            )
+        assert kb.block_task(
+            conn, t, reason=bait, expected_run_id=run_id,
+        )
+        assert kb.get_task(conn, t).block_kind == "review_revision"
+        # First auto-retry
+        retried = kb.auto_retry_blocked_tasks(
+            conn, backoff_seconds=0, retry_limit=2
+        )
+        assert retried == [(t, 1)]
+        assert kb.get_task(conn, t).status == "ready"
+        # Second review block with changed body (coder attempted a fix)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET body = ? WHERE id = ?", ("v2-fix", t))
+        kb.claim_task(conn, t)
+        run_id2 = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, t, "claimed",
+                {"source_status": "review", "run_id": run_id2},
+                run_id=run_id2,
+            )
+        assert kb.block_task(
+            conn, t, reason=bait + " still", expected_run_id=run_id2,
+        )
+        # Must still be retryable — not operator_question
+        kind = kb._blocked_kind_for_auto_retry(
+            bait + " still",
+            explicit_block_kind=kb.get_task(conn, t).block_kind,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash=kb._task_body_hash("v2-fix"),
+            last_auto_retry_body_hash=kb._latest_auto_retry_body_hash(conn, t),
+        )
+        assert kind == "retryable"
+        retried2 = kb.auto_retry_blocked_tasks(
+            conn, backoff_seconds=0, retry_limit=2
+        )
+        assert retried2 == [(t, 2)]
+        assert kb.get_task(conn, t).status == "ready"
+        assert _operator_escalations(conn, t) == []
+
+
+def test_resolve_settled_block_autonomy_route_unit():
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=0,
+            reready_total=0,
+        )
+        == "reready_review"
+    )
+    # Episode spent
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=1,
+            reready_total=1,
+        )
+        == "escalate"
+    )
+    # New episode but lifetime spent → still escalate (token hard stop)
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=0,
+            reready_total=1,
+        )
+        == "escalate"
+    )
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="capacity",
+            blocked_kind="capacity",
+            trigger_outcome="blocked",
+            reason="input-token cap exceeded",
+            verdict=None,
+            reready_count=0,
+        )
+        == "hold_capacity"
+    )
+    # Bare gave_up is NOT capacity-hold (circuit breaker must page).
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind=None,
+            blocked_kind="retryable",
+            trigger_outcome="gave_up",
+            reason="consecutive failures",
+            verdict=None,
+            reready_count=0,
+        )
+        == "escalate"
+    )
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="needs_input",
+            blocked_kind="needs_input",
+            trigger_outcome="blocked",
+            reason="which credential?",
+            verdict=None,
+            reready_count=0,
+        )
+        == "escalate"
+    )
 
 
 def test_dispatch_max_spawn_counts_existing_running_tasks(
@@ -7054,6 +7404,419 @@ def _seed_input_token_run(conn, task_id, *, input_tokens, profile="alice"):
         "VALUES (?, ?, 'done', 'completed', ?, ?, ?)",
         (task_id, profile, end - 300, end, input_tokens),
     )
+
+
+def _seed_terminal_review_run(
+    conn,
+    task_id,
+    *,
+    verdict="REQUEST_CHANGES",
+    outcome="blocked",
+    metadata=None,
+    profile="reviewer",
+):
+    """Insert a terminal run that was claimed from the review lane."""
+    ended_at = int(time.time()) - 10
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, outcome, verdict, summary, metadata, "
+            "started_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, 'structured review finding', ?, ?, ?)",
+            (
+                task_id,
+                profile,
+                "blocked" if outcome == "blocked" else "review",
+                outcome,
+                verdict,
+                json.dumps(metadata) if metadata is not None else None,
+                ended_at - 60,
+                ended_at,
+            ),
+        )
+        run_id = int(cur.lastrowid)
+        kb._append_event(
+            conn,
+            task_id,
+            "claimed",
+            {"source_status": "review", "run_id": run_id},
+            run_id=run_id,
+        )
+    return run_id
+
+
+def test_dispatch_budget_runaway_grants_first_actionable_review_extension(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """An actionable terminal review finding earns one bounded recovery run."""
+    spawned_ids = []
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="review recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        review_run_id = _seed_terminal_review_run(
+            conn,
+            task_id,
+            profile="verifier",
+            verdict="NEEDS_REVISION",
+            metadata={
+                "review_verdict": "NEEDS_REVISION",
+                "blocking_findings": ["fix the duplicate history entry"],
+                "required_verification": ["add the mounted regression"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            per_task_input_token_cap=1_000,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+        comments = kb.list_comments(conn, task_id)
+
+    assert spawned_ids == [task_id]
+    assert not result.budget_runaway_parked
+    assert task.status == "running"
+    assert task.budget_extension_count == 1
+    extension = next(e for e in events if e.kind == "budget_review_extension_granted")
+    assert extension.payload["extension"] == 1
+    assert extension.payload["limit"] == 1
+    assert extension.payload["review_run_id"] == review_run_id
+    assert any(
+        "Budget recovery extension 1/1" in comment.body
+        and f"review run {review_run_id}" in comment.body
+        for comment in comments
+    )
+
+
+def test_dispatch_budget_runaway_hold_defers_extension_until_claim(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A temporary profile hold cannot spend the one recovery extension."""
+    spawned_ids = []
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="held review recovery", assignee="alice")
+        blocker_id = kb.create_task(conn, title="temporary profile hold", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the held path"],
+            },
+        )
+        assert kb.claim_task(conn, blocker_id) is not None
+
+        held = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            max_in_progress_per_profile=1,
+            per_task_input_token_cap=1_000,
+        )
+        assert held.skipped_per_profile_capped == [(task_id, "alice", 1)]
+        assert kb.get_task(conn, task_id).budget_extension_count == 0
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', claim_lock = NULL, "
+                "claim_expires = NULL WHERE id = ?",
+                (blocker_id,),
+            )
+        released = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            max_in_progress_per_profile=1,
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        grants = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "budget_review_extension_granted"
+        ]
+
+    assert not released.budget_runaway_parked
+    assert spawned_ids == [task_id]
+    assert task.status == "running"
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+
+
+def test_dispatch_budget_runaway_dry_run_reports_recovery_without_mutation(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Dry-run simulates the recovery claim and leaves grant state untouched."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="dry-run review recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the dry-run path"],
+            },
+        )
+        before_events = kb.list_events(conn, task_id)
+        before_comments = kb.list_comments(conn, task_id)
+
+        result = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        after_events = kb.list_events(conn, task_id)
+        after_comments = kb.list_comments(conn, task_id)
+
+    assert result.spawned == [(task_id, "alice", "")]
+    assert not result.budget_runaway_parked
+    assert task.status == "ready"
+    assert task.budget_extension_count == 0
+    assert after_events == before_events
+    assert after_comments == before_comments
+
+
+def test_concurrent_budget_review_extension_claims_only_consume_once(
+    kanban_home, monkeypatch
+):
+    """The recovery grant shares the task claim transaction's CAS winner."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="concurrent review recovery", assignee="alice")
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the concurrent path"],
+            },
+        )
+
+    def attempt(index):
+        with kb.connect_closing() as conn:
+            return kb.claim_task(
+                conn,
+                task_id,
+                claimer=f"test:{index}",
+                budget_review_extension=(1_300, 1_000),
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        winners = [result for result in executor.map(attempt, range(8)) if result]
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+        grants = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "budget_review_extension_granted"
+        ]
+
+    assert len(winners) == 1
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+
+
+def test_dispatch_budget_runaway_does_not_reconsume_same_review_finding(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A repeated ready tick cannot spend another extension on the same review."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 2},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="single review", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        review_run_id = _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix once"],
+            },
+        )
+
+        kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: None,
+            per_task_input_token_cap=1_000,
+        )
+        # Simulate a claim being released back to ready before any newer review.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+                (task_id,),
+            )
+        second_spawned = []
+        second = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: second_spawned.append(task.id),
+            per_task_input_token_cap=1_000,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    grants = [e for e in events if e.kind == "budget_review_extension_granted"]
+    assert second_spawned == []
+    assert second.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+    assert grants[0].payload["review_run_id"] == review_run_id
+
+
+def test_dispatch_budget_runaway_parks_when_extension_budget_is_exhausted(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="spent recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix remains"],
+            },
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET budget_extension_count = 1 WHERE id = ?",
+                (task_id,),
+            )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 1
+    assert "budget_review_extension_granted" not in [e.kind for e in events]
+    parked = next(e for e in events if e.kind == kb.BUDGET_RUNAWAY_PARKED_EVENT)
+    assert parked.payload["stall_class"] == "budget_runaway"
+
+
+def test_dispatch_budget_runaway_parks_without_actionable_review_finding(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Verification notes alone are not a machine-readable blocking finding."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="no finding", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "required_verification": ["run the focused gate"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 0
+    assert "budget_review_extension_granted" not in [e.kind for e in events]
+
+
+def test_dispatch_budget_runaway_parks_when_latest_review_state_is_inconsistent(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A stale rejection cannot override a newer non-blocked review run."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 2},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="stale review", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["old finding"],
+            },
+        )
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            verdict="REQUEST_CHANGES",
+            outcome="completed",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["inconsistent terminal state"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 0
 
 
 def test_dispatch_per_task_input_token_guard_parks_over_threshold(

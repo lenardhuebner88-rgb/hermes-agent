@@ -1168,6 +1168,59 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_blocked_without_kind(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Blocked card with null/empty block_kind — operator cannot triage class.
+
+    System parks (budget runaway, integration, stall, hold) must stamp a
+    kind. A null kind usually means a legacy side-path or a pre-fix row;
+    surface it so the operator does not treat capacity parks as review rework
+    or vice versa.
+    """
+    if _task_field(task, "status") != "blocked":
+        return []
+    raw_kind = _task_field(task, "block_kind", None)
+    if raw_kind is not None and str(raw_kind).strip():
+        return []
+    task_id = _task_field(task, "id") or "<task_id>"
+    last_blocked_ts = 0
+    for ev in events:
+        if _event_kind(ev) == "blocked":
+            last_blocked_ts = max(last_blocked_ts, _event_ts(ev))
+    return [Diagnostic(
+        kind="blocked_without_kind",
+        severity="warning",
+        title="Blocked without block_kind — triage class unknown",
+        detail=(
+            "This task is blocked but ``block_kind`` is empty. The dispatcher "
+            "cannot distinguish review rework (auto-retryable) from capacity, "
+            "integration, or human holds. Inspect the latest blocked event / "
+            "run summary and re-block with an explicit kind if still active."
+        ),
+        actions=[
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Inspect task and latest runs",
+                payload={"command": f"hermes kanban show {task_id}"},
+                suggested=True,
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="If human input: hermes kanban block --kind needs_input",
+                payload={
+                    "command": (
+                        f"hermes kanban block {task_id} --kind needs_input "
+                        '"operator reclassified"'
+                    )
+                },
+            ),
+        ],
+        first_seen_at=last_blocked_ts or None,
+        last_seen_at=last_blocked_ts or None,
+        count=1,
+        data={"block_kind": raw_kind, "requires_operator_classification": True},
+    )]
+
+
 def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Task has been in ``blocked`` status for too long without a comment.
 
@@ -1494,6 +1547,7 @@ _RULES: list[RuleFn] = [
     _rule_reviewer_role_tool_mismatch,
     _rule_superseded_blocked_review_artifact,
     _rule_stale_review_block_needs_classification,
+    _rule_blocked_without_kind,
     _rule_prose_phantom_refs,
     _rule_repeated_failures,
     _rule_repeated_crashes,
