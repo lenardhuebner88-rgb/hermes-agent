@@ -17459,6 +17459,24 @@ _RELEASE_GATE_RAN_OUTCOMES = frozenset({"release_gate_red", "release_gate_infra"
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
 }
+_DETERMINISTIC_SPAWN_FAILURE_MARKERS = (
+    "spawn_refused_allowlist_unenforceable",
+    "embedded null byte",
+)
+
+
+def _deterministic_spawn_failure_marker(error: str) -> Optional[str]:
+    haystack = str(error).lower()
+    return next(
+        (
+            marker
+            for marker in _DETERMINISTIC_SPAWN_FAILURE_MARKERS
+            if marker in haystack
+        ),
+        None,
+    )
+
+
 # HEILER-CLASSIFY-SIGNAL-GAP-S1 (deliberately NOT a signal): the failure
 # circuit-breaker's "retry ladder exhausted" why_now and the silent-block sweep's
 # "settled block (last run outcome: …)" why_now are UNIVERSAL escalation
@@ -17492,18 +17510,19 @@ def _classify_failure(
       1. unambiguous merge-conflict markers -> conflict
       2. STRONG structural ``stall_class`` mapping (config/spec/transient by
          construction)
-      3. STRONG structural ``outcome`` mapping (provisioning / quota = transient)
-      4. free-text signals: bad-spec, flaky, real-bug, transient, and — LAST,
+      3. known deterministic ``spawn_failed`` markers -> bad-spec
+      4. STRONG structural ``outcome`` mapping (provisioning / quota = transient)
+      5. free-text signals: bad-spec, flaky, real-bug, transient, and — LAST,
          below every error signal — operator-gated (a held-before-release /
          operator-hold gate, ESCALATION-OPERATOR-GATE-DECLASSIFY-S1). Being last
          makes it a pure declassify-the-otherwise-unclassified: it never steals a
          real-error class, so the AC-2 guardrail holds by construction.
-      5. WEAK structural fallbacks (HEILER-OUTCOME-RECLASSIFY-S1): crashed ->
+      6. WEAK structural fallbacks (HEILER-OUTCOME-RECLASSIFY-S1): crashed ->
          transient, iteration_budget_exhausted -> capacity. Below the text
          signals on purpose, so a crash / budget-exhaustion whose error text
          reveals a genuine defect stays real-bug (triagierbar, AC-2); only a
          *bare* infra/capacity occurrence reclassifies off the default.
-      6. default -> unclassified (an opaque failure that reached this path with
+      7. default -> unclassified (an opaque failure that reached this path with
          no transient / spec / flaky / real-bug signal is not yet a known defect)
     """
     haystack = " ".join(
@@ -17532,6 +17551,14 @@ def _classify_failure(
 
     if stall_class and stall_class in _HEILER_STALL_CLASS:
         return _HEILER_STALL_CLASS[stall_class], _ev(stall_class, "stall_class")
+
+    deterministic_spawn_marker = (
+        _deterministic_spawn_failure_marker(error)
+        if outcome == "spawn_failed"
+        else None
+    )
+    if deterministic_spawn_marker is not None:
+        return HEILER_CLASS_BAD_SPEC, _ev(deterministic_spawn_marker, "text")
 
     if outcome and outcome in _HEILER_OUTCOME_CLASS:
         return _HEILER_OUTCOME_CLASS[outcome], _ev(outcome, "outcome")
@@ -17745,6 +17772,7 @@ def _record_task_failure(
     summary: Optional[str] = None,
     expected_run_id: Optional[int] = None,
     closed_run_id: Optional[int] = None,
+    force_failure_limit: bool = False,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -17782,10 +17810,12 @@ def _record_task_failure(
     timeout must not consume the task's real failure budget.
 
     Resolution order for the effective threshold:
-      1. per-task ``max_retries`` if set (nothing else overrides)
-      2. caller-supplied ``failure_limit`` (gateway passes the config
+      1. caller-supplied ``failure_limit`` when ``force_failure_limit`` is set
+         for a known deterministic failure that cannot heal on retry
+      2. per-task ``max_retries`` if set
+      3. caller-supplied ``failure_limit`` (gateway passes the config
          value from ``kanban.failure_limit``; tests pass fixed values)
-      3. ``DEFAULT_FAILURE_LIMIT``
+      4. ``DEFAULT_FAILURE_LIMIT``
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -17831,7 +17861,10 @@ def _record_task_failure(
         # Per-task override wins over both caller-supplied and default
         # thresholds. None (the common case) falls through.
         task_override = row["max_retries"] if "max_retries" in row.keys() else None
-        if task_override is not None:
+        if force_failure_limit:
+            effective_limit = int(failure_limit)
+            limit_source = "forced"
+        elif task_override is not None:
             effective_limit = int(task_override)
             limit_source = "task"
         else:
@@ -18047,6 +18080,7 @@ def _record_spawn_failure(
     error: str,
     *,
     failure_limit: int = None,
+    force_failure_limit: bool = False,
 ) -> bool:
     return _record_task_failure(
         conn,
@@ -18056,6 +18090,7 @@ def _record_spawn_failure(
         failure_limit=failure_limit,
         release_claim=True,
         end_run=True,
+        force_failure_limit=force_failure_limit,
     )
 
 
@@ -18643,11 +18678,10 @@ def _spawn_failure_or_transient_retry(
 ) -> tuple[str, bool]:
     """Spawn-dispatch-side bounded transient retry, then the normal escalation.
 
-    A spawn failure (``resolve_workspace`` error, non-timeout worktree
-    provisioning error, or a raising ``spawn_fn``) is structurally a transient
-    infra class. Instead of counting a real failure and (often on the first hit)
-    paging the operator, re-queue the claimed task ``running -> ready`` up to
-    ``TRANSIENT_RETRY_LIMIT`` times, closing the open run with a
+    A spawn failure defaults to a transient infra class, except for known
+    deterministic errors that cannot heal on retry. Transient failures re-queue
+    the claimed task ``running -> ready`` up to ``TRANSIENT_RETRY_LIMIT`` times,
+    closing the open run with a
     ``transient_retry`` outcome and writing a ``transient_retry`` event (NOT a
     heiler_classification — a self-heal must not show up as a transient
     escalation). Per-attempt backoff is enforced at re-dispatch by
@@ -18658,6 +18692,16 @@ def _spawn_failure_or_transient_retry(
     Returns ``("retried", False)`` when re-queued, else ``("escalated", auto)``
     where ``auto`` is the ``_record_spawn_failure`` auto-blocked result.
     """
+    if _deterministic_spawn_failure_marker(error) is not None:
+        auto = _record_spawn_failure(
+            conn,
+            task_id,
+            error,
+            failure_limit=1,
+            force_failure_limit=True,
+        )
+        return ("escalated", auto)
+
     row = conn.execute(
         "SELECT transient_retry_count FROM tasks WHERE id = ?",
         (task_id,),
@@ -23538,8 +23582,8 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
         except Exception as exc:
-            # spawn_fn raised (fork/exec blip) — transient infra class: bounded
-            # transient retry before escalating (HEILER-TRANSIENT-RETRY-BUDGET-S1).
+            # spawn_fn raised: known deterministic failures escalate directly;
+            # other failures use the bounded transient infra retry budget.
             _phase, auto = _spawn_failure_or_transient_retry(
                 conn,
                 claimed.id,
