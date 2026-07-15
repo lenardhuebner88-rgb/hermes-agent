@@ -9,6 +9,8 @@
     "lint:control": "eslint src/control vite.config.ts e2e",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "fix": "npm run lint:fix",
     "preview": "vite preview",
     "test": "NODE_ENV=test vitest run",
     "typecheck": "tsc -b --noEmit",
