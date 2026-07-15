@@ -116,7 +116,10 @@ def flood_worker(args: argparse.Namespace) -> int:
     reconcile._route_to_kanban = _slow_route
     while time.time() < float(args.start_at):
         time.sleep(0.005)
-    summary = reconcile.reconcile_proposals(max_new_tasks=int(args.max_new))
+    summary = reconcile.reconcile_proposals(
+        max_new_tasks=int(args.max_new),
+        min_task_severity=str(args.min_severity),
+    )
     print(_json(summary), flush=True)
     return 0
 
@@ -1031,12 +1034,26 @@ def e2e_canary(args: argparse.Namespace) -> int:
                 str(repo),
                 "--max-new",
                 "1",
+                "--min-severity",
+                "low",
             ],
             cwd=repo,
             timeout=600,
         )
         if reconcile_process["returncode"] != 0:
             raise RuntimeError(f"separate reconcile failed: {reconcile_process}")
+        reconcile_payload = json.loads(
+            reconcile_process["output_tail"].strip().splitlines()[-1]
+        )
+        if (
+            reconcile_payload.get("new_tasks") != 1
+            or reconcile_payload.get("routed_to_kanban") != 1
+            or reconcile_payload.get("errors") != 0
+        ):
+            raise RuntimeError(
+                "reconcile did not route the controlled low-severity canary: "
+                f"{reconcile_payload}"
+            )
         with kb.connect() as conn:
             task = conn.execute(
                 "SELECT t.id, t.status, t.workspace_kind, t.workspace_path, "
@@ -1337,6 +1354,7 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_reconcile.add_argument("--state", required=True)
     e2e_reconcile.add_argument("--repo", required=True)
     e2e_reconcile.add_argument("--max-new", type=int, default=5)
+    e2e_reconcile.add_argument("--min-severity", default="medium")
     e2e_reconcile.set_defaults(func=e2e_reconcile_worker)
 
     e2e_dispatch = sub.add_parser("_e2e-dispatch-worker")
