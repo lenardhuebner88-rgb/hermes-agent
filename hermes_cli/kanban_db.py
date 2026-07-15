@@ -17511,7 +17511,9 @@ def _classify_failure(
       2. STRONG structural ``stall_class`` mapping (config/spec/transient by
          construction)
       3. known deterministic ``spawn_failed`` markers -> bad-spec
-      4. STRONG structural ``outcome`` mapping (provisioning / quota = transient)
+      4. STRONG structural ``outcome`` mapping (provisioning / quota = transient),
+         except a ``timed_out`` iteration-budget failure, whose text must
+         distinguish capacity from a genuine defect
       5. free-text signals: bad-spec, flaky, real-bug, transient, and — LAST,
          below every error signal — operator-gated (a held-before-release /
          operator-hold gate, ESCALATION-OPERATOR-GATE-DECLASSIFY-S1). Being last
@@ -17560,7 +17562,14 @@ def _classify_failure(
     if deterministic_spawn_marker is not None:
         return HEILER_CLASS_BAD_SPEC, _ev(deterministic_spawn_marker, "text")
 
-    if outcome and outcome in _HEILER_OUTCOME_CLASS:
+    budget_exhausted_timeout = (
+        outcome == "timed_out" and "iteration budget exhausted" in haystack
+    )
+    if (
+        outcome
+        and outcome in _HEILER_OUTCOME_CLASS
+        and not budget_exhausted_timeout
+    ):
         return _HEILER_OUTCOME_CLASS[outcome], _ev(outcome, "outcome")
 
     for cls, subs in _HEILER_TEXT_SIGNALS:
