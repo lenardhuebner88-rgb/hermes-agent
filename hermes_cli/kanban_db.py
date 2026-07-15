@@ -296,9 +296,9 @@ DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 
 # HEILER-BUDGET-BOUNDED-EXTEND-S1: hard, NON-configurable cap on how many
 # progress-gated extensions a single task may ever receive beyond its
-# continuation limit. Kept a code constant (not config) so the worst-case
-# extra-dispatch exposure is structurally bounded to one run per task — the
-# token-runaway guardrail the lever is explicitly gated for.
+# continuation limit. Progress-only recovery remains structurally bounded to
+# one run per task. Actionable review recovery may consume the existing
+# configured ``max_extensions`` budget, defaulting to this same limit.
 BUDGET_PROGRESS_EXTENSION_LIMIT = 1
 
 # Opt-in blocked-run auto-retry policy. Defaults are code-level constants;
@@ -8103,10 +8103,11 @@ def _budget_extension_config() -> dict:
 
     Conservative default: ``enabled=False`` — merging this code changes nothing
     at runtime until the operator opts in with
-    ``kanban.budget_progress_extension.enabled: true``. The extension *count*
-    cap (1) is structural (:data:`BUDGET_PROGRESS_EXTENSION_LIMIT`), NOT
-    configurable, and the per-task input-token cap is untouched, so the
-    token-runaway exposure stays bounded to one extra run per task.
+    ``kanban.budget_progress_extension.enabled: true``. Progress-only recovery
+    remains structurally capped by :data:`BUDGET_PROGRESS_EXTENSION_LIMIT`.
+    Actionable review recovery shares ``budget_extension_count`` and may consume
+    the existing ``max_extensions`` policy value, defaulting to the same limit.
+    The per-task input-token cap itself is untouched.
 
     Read from the ROOT ``config.yaml`` (not the worker profile) for the same
     reason :func:`_review_gate_config` does: the decision runs in the worker
@@ -8135,7 +8136,19 @@ def _budget_extension_config() -> dict:
         min_delta = 1
     if min_delta < 1:
         min_delta = 1
-    return {"enabled": enabled, "min_progress_delta": min_delta}
+    try:
+        max_extensions = int(
+            be.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT)
+        )
+    except (TypeError, ValueError):
+        max_extensions = BUDGET_PROGRESS_EXTENSION_LIMIT
+    if max_extensions < 0:
+        max_extensions = 0
+    return {
+        "enabled": enabled,
+        "min_progress_delta": min_delta,
+        "max_extensions": max_extensions,
+    }
 
 
 _DIFF_STAT_INS_RE = re.compile(r"(\d+)\s+insertion")
@@ -18795,6 +18808,7 @@ def _spawn_failure_or_transient_retry(
 # schema change, no mid-run kill — a runaway is only ever caught at preflight.
 
 BUDGET_RUNAWAY_PARKED_EVENT = "budget_runaway_parked"
+BUDGET_RUNAWAY_STALL_CLASS = "budget_runaway"
 
 
 def _budget_runaway_escalation_payload(
@@ -18833,6 +18847,128 @@ def _budget_runaway_escalation_payload(
     }
 
 
+def _latest_actionable_terminal_review_run(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Return the latest terminal review rejection when it has structured work."""
+    row = conn.execute(
+        "SELECT r.id, r.status, r.outcome, r.verdict, r.metadata "
+        "FROM task_runs r "
+        "WHERE r.task_id = ? AND r.ended_at IS NOT NULL "
+        "  AND EXISTS ("
+        "      SELECT 1 FROM task_events e "
+        "      WHERE e.task_id = r.task_id AND e.run_id = r.id "
+        "        AND e.kind = 'claimed' "
+        "        AND json_extract(e.payload, '$.source_status') = 'review'"
+        "  ) "
+        "ORDER BY r.id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["status"] != "blocked" or row["outcome"] != "blocked":
+        return None
+
+    try:
+        metadata = json.loads(row["metadata"]) if row["metadata"] else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+
+    verdict = _normalize_review_verdict(row["verdict"]) or _extract_review_verdict(
+        metadata=metadata
+    )
+    if verdict != "REQUEST_CHANGES":
+        return None
+
+    blocking_findings = metadata.get("blocking_findings")
+    if not (
+        isinstance(blocking_findings, list)
+        and any(
+            isinstance(finding, str) and finding.strip()
+            for finding in blocking_findings
+        )
+    ):
+        return None
+    return {"run_id": int(row["id"]), "verdict": verdict, "metadata": metadata}
+
+
+def _grant_budget_runaway_review_extension(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    token_sum: int,
+    cap: int,
+) -> bool:
+    """Atomically consume one configured extension for actionable review work."""
+    policy = _budget_extension_config()
+    max_extensions = int(
+        policy.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT) or 0
+    )
+    if not policy.get("enabled") or max_extensions <= 0:
+        return False
+
+    now = int(time.time())
+    with write_txn(conn):
+        task = conn.execute(
+            "SELECT status, budget_extension_count FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task is None or task["status"] != "ready":
+            return False
+        current_count = int(task["budget_extension_count"] or 0)
+        if current_count >= max_extensions:
+            return False
+
+        review = _latest_actionable_terminal_review_run(conn, task_id)
+        if review is None:
+            return False
+        review_run_id = int(review["run_id"])
+        already_granted = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'budget_review_extension_granted' "
+            "AND json_extract(payload, '$.review_run_id') = ? LIMIT 1",
+            (task_id, review_run_id),
+        ).fetchone()
+        if already_granted is not None:
+            return False
+
+        extension = current_count + 1
+        updated = conn.execute(
+            "UPDATE tasks SET budget_extension_count = ? "
+            "WHERE id = ? AND status = 'ready' AND budget_extension_count = ?",
+            (extension, task_id, current_count),
+        )
+        if updated.rowcount != 1:
+            return False
+
+        feedback = _render_review_findings(review["metadata"])
+        comment = (
+            f"Budget recovery extension {extension}/{max_extensions} granted "
+            f"for actionable review run {review_run_id}. "
+            f"Cumulative input tokens {token_sum:,} exceed cap {cap:,}.\n"
+            f"Address the structured review feedback before resubmitting:\n{feedback}"
+        )
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, 'dispatcher', ?, ?)",
+            (task_id, comment, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "budget_review_extension_granted",
+            {
+                "extension": extension,
+                "limit": max_extensions,
+                "review_run_id": review_run_id,
+                "review_verdict": review["verdict"],
+                "input_token_sum": token_sum,
+                "cap": cap,
+            },
+        )
+    return True
+
+
 def _park_budget_runaway(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -18866,7 +19002,8 @@ def _park_budget_runaway(
             return False
         cur = conn.execute(
             "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
+            "claim_expires = NULL, worker_pid = NULL, "
+            "block_kind = 'needs_operator', block_recurrences = 1 "
             "WHERE id = ? AND status NOT IN ('done', 'archived')",
             (task_id,),
         )
@@ -18878,7 +19015,12 @@ def _park_budget_runaway(
             conn,
             task_id,
             BUDGET_RUNAWAY_PARKED_EVENT,
-            {"input_token_sum": token_sum, "cap": cap, "runs": runs},
+            {
+                "input_token_sum": token_sum,
+                "cap": cap,
+                "runs": runs,
+                "stall_class": BUDGET_RUNAWAY_STALL_CLASS,
+            },
         )
         esc_payload = _budget_runaway_escalation_payload(
             row=fresh,
@@ -22993,16 +23135,25 @@ def _dispatch_once_locked(
         if _per_task_input_cap is not None:
             _input_sum, _input_runs = _per_task_input_usage.get(row["id"], (0, 0))
             if _input_sum > _per_task_input_cap:
-                result.budget_runaway_parked.append((row["id"], _input_sum))
+                extended = False
                 if not dry_run:
-                    _park_budget_runaway(
+                    extended = _grant_budget_runaway_review_extension(
                         conn,
-                        row,
+                        row["id"],
                         token_sum=_input_sum,
                         cap=_per_task_input_cap,
-                        runs=_input_runs,
                     )
-                continue
+                if not extended:
+                    result.budget_runaway_parked.append((row["id"], _input_sum))
+                    if not dry_run:
+                        _park_budget_runaway(
+                            conn,
+                            row,
+                            token_sum=_input_sum,
+                            cap=_per_task_input_cap,
+                            runs=_input_runs,
+                        )
+                    continue
         # serialize_by_repo: resolve this candidate's repo_root once and reuse it
         # at the guard (3d) and every claim-success re-add. Computed here (above the
         # openclaw branch) so it is in scope at ALL claim paths, including openclaw.
