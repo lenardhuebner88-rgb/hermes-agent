@@ -6998,6 +6998,274 @@ def _seed_input_token_run(conn, task_id, *, input_tokens, profile="alice"):
     )
 
 
+def _seed_terminal_review_run(
+    conn,
+    task_id,
+    *,
+    verdict="REQUEST_CHANGES",
+    outcome="blocked",
+    metadata=None,
+    profile="reviewer",
+):
+    """Insert a terminal run that was claimed from the review lane."""
+    ended_at = int(time.time()) - 10
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, outcome, verdict, summary, metadata, "
+            "started_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, 'structured review finding', ?, ?, ?)",
+            (
+                task_id,
+                profile,
+                "blocked" if outcome == "blocked" else "review",
+                outcome,
+                verdict,
+                json.dumps(metadata) if metadata is not None else None,
+                ended_at - 60,
+                ended_at,
+            ),
+        )
+        run_id = int(cur.lastrowid)
+        kb._append_event(
+            conn,
+            task_id,
+            "claimed",
+            {"source_status": "review", "run_id": run_id},
+            run_id=run_id,
+        )
+    return run_id
+
+
+def test_dispatch_budget_runaway_grants_first_actionable_review_extension(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """An actionable terminal review finding earns one bounded recovery run."""
+    spawned_ids = []
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="review recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        review_run_id = _seed_terminal_review_run(
+            conn,
+            task_id,
+            profile="verifier",
+            verdict="NEEDS_REVISION",
+            metadata={
+                "review_verdict": "NEEDS_REVISION",
+                "blocking_findings": ["fix the duplicate history entry"],
+                "required_verification": ["add the mounted regression"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            per_task_input_token_cap=1_000,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+        comments = kb.list_comments(conn, task_id)
+
+    assert spawned_ids == [task_id]
+    assert not result.budget_runaway_parked
+    assert task.status == "running"
+    assert task.budget_extension_count == 1
+    extension = next(e for e in events if e.kind == "budget_review_extension_granted")
+    assert extension.payload["extension"] == 1
+    assert extension.payload["limit"] == 1
+    assert extension.payload["review_run_id"] == review_run_id
+    assert any(
+        "Budget recovery extension 1/1" in comment.body
+        and f"review run {review_run_id}" in comment.body
+        for comment in comments
+    )
+
+
+def test_dispatch_budget_runaway_does_not_reconsume_same_review_finding(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A repeated ready tick cannot spend another extension on the same review."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 2},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="single review", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        review_run_id = _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix once"],
+            },
+        )
+
+        kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: None,
+            per_task_input_token_cap=1_000,
+        )
+        # Simulate a claim being released back to ready before any newer review.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+                (task_id,),
+            )
+        second_spawned = []
+        second = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: second_spawned.append(task.id),
+            per_task_input_token_cap=1_000,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    grants = [e for e in events if e.kind == "budget_review_extension_granted"]
+    assert second_spawned == []
+    assert second.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+    assert grants[0].payload["review_run_id"] == review_run_id
+
+
+def test_dispatch_budget_runaway_parks_when_extension_budget_is_exhausted(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="spent recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix remains"],
+            },
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET budget_extension_count = 1 WHERE id = ?",
+                (task_id,),
+            )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 1
+    assert "budget_review_extension_granted" not in [e.kind for e in events]
+    parked = next(e for e in events if e.kind == kb.BUDGET_RUNAWAY_PARKED_EVENT)
+    assert parked.payload["stall_class"] == "budget_runaway"
+
+
+def test_dispatch_budget_runaway_parks_without_actionable_review_finding(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Verification notes alone are not a machine-readable blocking finding."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="no finding", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "required_verification": ["run the focused gate"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 0
+    assert "budget_review_extension_granted" not in [e.kind for e in events]
+
+
+def test_dispatch_budget_runaway_parks_when_latest_review_state_is_inconsistent(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A stale rejection cannot override a newer non-blocked review run."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 2},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="stale review", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["old finding"],
+            },
+        )
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            verdict="REQUEST_CHANGES",
+            outcome="completed",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["inconsistent terminal state"],
+            },
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: pytest.fail("must not spawn"),
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert result.budget_runaway_parked == [(task_id, 1_300)]
+    assert task.status == "blocked"
+    assert task.block_kind == "needs_operator"
+    assert task.budget_extension_count == 0
+
+
 def test_dispatch_per_task_input_token_guard_parks_over_threshold(
     kanban_home, all_assignees_spawnable
 ):
