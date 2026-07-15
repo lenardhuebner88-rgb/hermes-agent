@@ -3986,6 +3986,13 @@ NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
 # needing spec is never blindly pushed through (AC-2 holds by construction).
 DECOMPOSE_ATTEMPT_FAILED_EVENT = "decompose_attempt_failed"
 DECOMPOSE_TRANSIENT_STALL_CLASS = "triage_decompose_transient"
+_DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS = frozenset({
+    "llm error: badrequesterror",
+    "llm error: authenticationerror",
+    "llm error: permissiondeniederror",
+    "llm error: notfounderror",
+    "llm error: unprocessableentityerror",
+})
 # Lowercased substrings of the ok=False reason strings in
 # ``kanban_decompose.decompose_task`` that mark a failure as transient/infra
 # rather than a genuine spec defect. An unknown/absent reason is NOT transient and
@@ -18235,14 +18242,17 @@ def _decompose_failure_is_transient(reason: Optional[str]) -> bool:
     """True when a recorded decompose-failure reason is transient/infra rather
     than a genuine spec defect (HEILER-DECOMPOSE-FALLBACK-S1).
 
-    Pure and case-insensitive substring match against
+    Deterministic LLM client-error reasons are excluded before the pure,
+    case-insensitive substring match against
     ``_DECOMPOSE_TRANSIENT_REASON_FRAGMENTS``. ``None``/empty/unknown reasons
     return False — they are treated as genuine defects (bad-spec escalation),
     preserving pre-fix behaviour for any failure recorded without a reason.
     """
     if not reason:
         return False
-    low = str(reason).lower()
+    low = str(reason).strip().lower()
+    if low in _DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS:
+        return False
     return any(frag in low for frag in _DECOMPOSE_TRANSIENT_REASON_FRAGMENTS)
 
 
