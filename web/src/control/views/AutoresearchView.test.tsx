@@ -18,6 +18,7 @@ import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySumma
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
 import { LastRun } from "./autoresearch/panels";
+import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { de } from "../i18n/de";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -1504,5 +1505,127 @@ describe("AutoresearchView keyboard safety", () => {
     expect(getAutoresearchKeyboardAction({ key: "t", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-top");
     expect(getAutoresearchKeyboardAction({ key: "v", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-visible");
     expect(getAutoresearchKeyboardAction({ key: "Escape", hasTopProposal: true, hasVisibleProposals: true, hasSelection: true })).toBe("clear-selection");
+  });
+});
+
+describe("AutoresearchView measured outcomes", () => {
+  it("separates integration from verified benefit and renders evidence", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "measured-1", title: "Silent exception removed", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      probe_contract: {
+        contract_id: "outcome:source_pattern.v1:abc",
+        contract_hash: "abc",
+        claim: "Silent exceptions decrease",
+        success_rule: { metric: "occurrences", operator: "lower_is_better" },
+        counter_rules: [],
+        observation_window: { kind: "immediate" },
+        environment_requirements: { pytest_version: "9.0.2" },
+        measurement_budget: { max_attempts: 3 },
+      },
+      outcome_baseline: { metric: "occurrences", value: 1, evidence_ref: "outcome-evidence:sha256:before" },
+      outcome_observation: { metric: "occurrences", value: 0, evidence_ref: "outcome-evidence:sha256:after" },
+      outcome_integration_sha: "a".repeat(40),
+      outcome_cost_usd: 0.25,
+      outcome_cost_status: "complete",
+    };
+    const integratedOnly: Proposal = {
+      ...proposal({ id: "integrated-only", title: "Integrated without measurement", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "exhausted",
+      outcome_verdict: "unmeasurable",
+      evidence_grade: "legacy_observational",
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured, integratedOnly]} />);
+
+    expect(html).toContain("Integriert ist nicht gleich verbessert.");
+    expect(html).toContain("Nutzen bestätigt");
+    expect(html).toContain("Silent exception removed");
+    expect(html).toContain("outcome:source_pattern.v1:abc");
+    expect(html).toContain("aaaaaaaaaaaa");
+    expect(html).toContain("occurrences: 1");
+    expect(html).toContain("occurrences: 0");
+    expect(html).toContain("Silent exceptions decrease");
+    expect(html).toContain("pytest_version");
+    expect(html).toContain("max_attempts");
+    expect(html).toContain("n=1");
+    expect(html).toContain("Integrated without measurement");
+    expect(html).toContain("nicht messbar");
+  });
+
+  it("shows an honest empty state when no contract has measured benefit", () => {
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
+    expect(html).toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
+    expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
+  });
+
+  it("labels incomplete subscription costs instead of rendering a false zero", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "unknown-cost", title: "Subscription delivery", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      outcome_cost_usd: 0,
+      outcome_cost_status: "partial",
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
+
+    expect(html).toContain("Kosten unvollständig");
+    expect(html).toContain("Kostenabdeckung 0/1");
+    expect(html).toContain("Effektiv —");
+    expect(html).not.toContain("Effektiv 0,00");
+  });
+
+  it("separates subscription actual, API-equivalent and effective costs", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "subscription-cost", title: "Subscription delivery", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      outcome_cost_usd: 0.25,
+      outcome_cost_actual_usd: 0,
+      outcome_cost_api_equivalent_usd: 0.25,
+      outcome_cost_effective_usd: 0.25,
+      outcome_cost_status: "complete",
+      outcome_cost_breakdown: {
+        delivery_usd: 0,
+        delivery_equivalent_usd: 0.25,
+      },
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
+
+    expect(html).toContain("Effektive Kosten/Nutzen");
+    expect(html).toContain("Effektiv 0,25");
+    expect(html).toContain("Ist-Kosten 0,00");
+    expect(html).toContain("API-Äquivalent 0,25");
+    expect(html).not.toContain("Gesamt 0,25");
+  });
+
+  it("labels legacy improved as historical and excludes it from verified benefit", () => {
+    const legacy: Proposal = {
+      ...proposal({ id: "legacy-improved", title: "Old observation", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "legacy_observational",
+    };
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[legacy]} />);
+    expect(html).toContain("Historisch verbessert");
+    expect(html).toContain("Old observation");
+    expect(html).toContain("0");
+    expect(html).not.toContain("Nutzen bestätigt</article>");
   });
 });

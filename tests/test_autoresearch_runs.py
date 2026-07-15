@@ -270,6 +270,7 @@ def test_nightly_main_runs_reconciler_after_lane(monkeypatch):
     monkeypatch.setattr(mod, "_is_code_night", lambda: True)
     monkeypatch.setattr(mod, "_run_code_night", lambda *a, **k: order.append("code") or 0)
     monkeypatch.setattr(mod, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+    monkeypatch.setattr(mod, "_run_shadow_verifier", lambda: order.append("shadow") or {"ok": True}, raising=False)
 
     assert mod.main() == 0
-    assert order == ["code", "reconcile"]
+    assert order == ["code", "reconcile", "shadow"]

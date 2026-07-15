@@ -20,6 +20,7 @@ from typing import Any
 
 from hermes_cli import autoresearch_proposals as proposals
 from hermes_cli import kanban_db as kb
+from hermes_cli import outcome_verification as outcomes
 from hermes_cli.config import get_hermes_home
 
 SEVERITY_ORDINAL = {"low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -27,6 +28,7 @@ DEFAULT_MIN_TASK_SEVERITY = "high"
 DEFAULT_MAX_NEW_TASKS = 5
 CREATED_BY = "autoresearch"
 AUTORESEARCH_VETO_PREFIX = "autoresearch:"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Severity-derived iteration budget floor for code/test findings routed to Kanban.
 # These mirror the PlanSpec budget floors defined in plan_compiler.py
@@ -312,12 +314,21 @@ def _route_to_kanban(
             # same BEGIN IMMEDIATE lock is held before returning a reference.
             task_id = _task_for_idempotency(conn, idem)
         if task_id is not None:
+            row = conn.execute(
+                "SELECT status, created_by FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            # Recovery seam: a task born blocked by this reconciler may have
+            # survived a crash between create, contract registration and
+            # release.  It is safe to finish only while still undispatchable.
+            if row and row["created_by"] == CREATED_BY and row["status"] == "blocked":
+                _register_outcome_before_release(conn, proposal, task_id)
             _append_proposal_reference(conn, task_id, proposal)
             return task_id, False
 
     if not allow_create:
         return None, False
 
+    _prepare_outcome_baseline(proposal)
     task_id, created = _create_or_reuse_task(
         conn,
         title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
@@ -327,15 +338,118 @@ def _route_to_kanban(
         created_by=CREATED_BY,
         idempotency_key=idem,
         priority=_priority(proposal),
-        initial_status="running",
+        # The worker cannot observe this task until the immutable probe
+        # contract and baseline are durably linked to task_events.
+        initial_status="blocked",
         kind="code",
+        # Autoresearch code delivery must enter the same dispatcher-managed
+        # worktree/integrator path as every other repository task.  A scratch
+        # task can never produce the two independent integration witnesses the
+        # outcome verifier requires.
+        workspace_kind="worktree",
+        workspace_path=str(REPO_ROOT),
         scope_contract=contract["scope_contract"],
         max_iterations=max_iter,
         review_tier=review_tier,
     )
-    if not created:
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row and row["status"] == "blocked":
+        _register_outcome_before_release(conn, proposal, task_id)
+    elif not created:
         _append_proposal_reference(conn, task_id, proposal)
     return task_id, created
+
+
+def _prepare_outcome_baseline(proposal: dict[str, Any]) -> None:
+    """Persist a bounded probe baseline before a task can be dispatched."""
+    pid = str(proposal.get("id") or "")
+    with proposals.proposal_lease(pid):
+        latest = proposals.load_proposal(pid)
+        authoritative = {**proposal, **(latest or {})}
+        existing = authoritative.get("probe_contract")
+        baseline = authoritative.get("outcome_baseline")
+        if isinstance(existing, dict) or isinstance(baseline, dict):
+            if not isinstance(existing, dict) or not isinstance(baseline, dict):
+                raise outcomes.ContractError("partial persisted outcome baseline is invalid")
+            validated = outcomes.validate_probe_contract(existing)
+            outcomes.validate_baseline(validated, baseline)
+            authoritative.update(
+                {
+                    "evidence_grade": "legacy_observational",
+                    "outcome_class": validated["outcome_class"],
+                    "outcome_target_sha": baseline["target_sha"],
+                    "outcome_authority": authoritative.get("outcome_authority")
+                    or "proposal_contract",
+                }
+            )
+            proposal.clear()
+            proposal.update(authoritative)
+            proposals.save_proposal(proposal)
+            return
+        probe_contract = outcomes.build_probe_contract(authoritative, repo_root=REPO_ROOT)
+        captured = outcomes.capture_probe(probe_contract, repo_root=REPO_ROOT)
+        outcomes.validate_baseline(probe_contract, captured)
+        captured = outcomes.seal_evidence(
+            {
+                **captured,
+                "research_cost_usd": max(
+                    0.0, float(authoritative.get("cost_usd") or 0.0)
+                ),
+            }
+        )
+        recorded_at = _utc_now()
+        fingerprint = outcomes.release_fingerprint(
+            proposal_id=pid,
+            contract=probe_contract,
+            baseline=captured,
+            target_sha256=str(authoritative.get("target_sha256") or "") or None,
+        )
+        authoritative.update(
+            {
+                "outcome_schema_version": outcomes.OUTCOME_SCHEMA_VERSION,
+                "outcome_applicability": "applicable",
+                "measurement_status": "pending",
+                "outcome_verdict": None,
+                "evidence_grade": "legacy_observational",
+                "calibration_eligible": False,
+                "probe_contract": probe_contract,
+                "outcome_class": probe_contract["outcome_class"],
+                "outcome_baseline": captured,
+                "outcome_target_sha": captured["target_sha"],
+                "outcome_baseline_recorded_at": recorded_at,
+                "outcome_release_fingerprint": fingerprint,
+                "outcome_authority": "proposal_contract",
+            }
+        )
+        proposal.clear()
+        proposal.update(authoritative)
+        # This is intentionally before create_task(). A crash here leaves only
+        # a recoverable proposal baseline and no dispatchable work.
+        proposals.save_proposal(proposal)
+
+
+def _register_outcome_before_release(conn, proposal: dict[str, Any], task_id: str) -> None:
+    _prepare_outcome_baseline(proposal)
+    probe_contract = proposal["probe_contract"]
+    baseline = proposal["outcome_baseline"]
+    fingerprint = str(proposal.get("outcome_release_fingerprint") or "")
+    outcomes.register_contract(
+        conn,
+        proposal_id=str(proposal.get("id") or ""),
+        task_id=task_id,
+        contract=probe_contract,
+        baseline=baseline,
+        release_fingerprint=fingerprint,
+    )
+    proposal["kanban_task_id"] = task_id
+    proposal["linked_task_id"] = task_id
+    proposal["outcome_authority"] = "task_events"
+    proposal["lifecycle_source"] = "task_events"
+    proposals.save_proposal(proposal)
+    if not kb.unblock_task(conn, task_id):
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None or row["status"] not in {"ready", "todo"}:
+            raise RuntimeError(f"outcome-contracted task {task_id} could not be released")
 
 
 def _create_or_reuse_task(conn, **kwargs: Any) -> tuple[str, bool]:

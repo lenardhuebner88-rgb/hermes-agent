@@ -27,6 +27,7 @@ import { LoopControls } from "./autoresearch/LoopControls";
 import { AdvancedSection } from "./autoresearch/AdvancedSection";
 import { ResolvedQueues } from "./autoresearch/ResolvedQueues";
 import { RunsList } from "./autoresearch/RunsList";
+import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { ActivityTimelineItem, LatestActivityPanel } from "./autoresearch/panels";
 import { clampLoopIterations, clearProposalSelection, describeArea, describeAutoresearchBusy, describeLoopStatus, formatRunTime, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -512,6 +513,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {store.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{store.error}</div> : null}
       {busyNotice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><Spinner />{busyNotice}</div> : null}
       {latestActivity && latestActivityCard ? <LatestActivityPanel at={latestActivity.at} card={latestActivityCard} /> : null}
+
+      <OutcomePanel metrics={store.data?.metrics?.outcomes} proposals={store.proposals} />
 
       <ProposalQueue
         density={density}

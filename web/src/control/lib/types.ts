@@ -947,6 +947,10 @@ export type ProposalLastOutcome = string | null;
 export type ProposalFindingState = "detected" | "verified" | "rejected" | "stale";
 export type ProposalDecisionState = "needs_operator" | "accepted" | "dismissed";
 export type ProposalDeliveryState = "none" | "queued" | "running" | "review" | "integrated" | "failed";
+export type OutcomeApplicability = "applicable" | "not_applicable";
+export type OutcomeMeasurementStatus = "not_started" | "pending" | "measuring" | "measured" | "retryable_failure" | "exhausted";
+export type OutcomeVerdict = "improved" | "neutral" | "worsened" | "unmeasurable" | "confounded" | null;
+export type OutcomeEvidenceGrade = "legacy_observational" | "contract_verified";
 
 export type GatePhase = "running" | "passed" | "failed" | "crashed";
 
@@ -1009,6 +1013,98 @@ export interface Proposal {
   risk_summary?: string | null;
   test_plan?: string | null;
   recommendation?: string | null;
+  outcome_schema_version?: number;
+  outcome_applicability?: OutcomeApplicability;
+  measurement_status?: OutcomeMeasurementStatus;
+  outcome_verdict?: OutcomeVerdict;
+  evidence_grade?: OutcomeEvidenceGrade;
+  calibration_eligible?: boolean;
+  probe_contract?: {
+    schema_version?: number;
+    outcome_contract_version?: number;
+    contract_id?: string;
+    contract_hash?: string;
+    contract_sha256?: string;
+    claim?: string;
+    measurement_kind?: "invariant" | "metric_delta" | "runtime_observation";
+    probe_id?: string;
+    probe_args?: Record<string, unknown>;
+    success_template_id?: string;
+    success_parameters?: Record<string, unknown>;
+    success_rule?: Record<string, unknown>;
+    outcome_class?: string;
+    counter_probes?: Array<Record<string, unknown>>;
+    counter_rules?: Array<Record<string, unknown>>;
+    sampling_plan?: Record<string, unknown>;
+    observation_window?: Record<string, unknown>;
+    trigger?: "integrated_commit" | "deployed_runtime";
+    measurement_budget?: Record<string, unknown>;
+    environment_requirements?: Record<string, unknown>;
+    calibration_eligible?: boolean;
+    args?: Record<string, unknown>;
+    comparator?: Record<string, unknown>;
+    sampling?: Record<string, unknown>;
+    budget?: Record<string, unknown>;
+    requires_delivery_sha?: boolean;
+    baseline_recorded_at?: number;
+    release_fingerprint?: string;
+  } | null;
+  outcome_class?: string | null;
+  outcome_authority?: string | null;
+  outcome_baseline?: Record<string, unknown> | null;
+  outcome_measured_at?: number | null;
+  outcome_observation?: Record<string, unknown> | null;
+  /** Compatibility alias for effective cost (actual + API-equivalent). */
+  outcome_cost_usd?: number | null;
+  outcome_cost_actual_usd?: number | null;
+  outcome_cost_api_equivalent_usd?: number | null;
+  outcome_cost_effective_usd?: number | null;
+  outcome_cost_status?: "complete" | "partial" | "unknown" | null;
+  outcome_cost_breakdown?: Record<string, number> | null;
+  outcome_unknown_cost_refs?: string[] | null;
+  outcome_operator_interventions?: number | null;
+  outcome_integration_sha?: string | null;
+}
+
+export interface AutoresearchOutcomeMetrics {
+  applicable: number;
+  not_applicable: number;
+  pending: number;
+  measured: number;
+  verified_measured: number;
+  measurement_coverage: number;
+  outcome_coverage: number;
+  directional_coverage: number;
+  verified_directional_denominator: number;
+  verified_benefit_rate: number | null;
+  regression_rate: number | null;
+  unmeasurable_rate: number | null;
+  verified_improved: number;
+  legacy_improved: number;
+  improved: number;
+  neutral: number;
+  worsened: number;
+  unmeasurable: number;
+  confounded: number;
+  measurement_cost_usd: number | null;
+  known_measurement_cost_usd: number;
+  measurement_actual_cost_usd?: number | null;
+  measurement_api_equivalent_cost_usd?: number | null;
+  measurement_effective_cost_usd?: number | null;
+  known_measurement_actual_cost_usd?: number;
+  known_measurement_api_equivalent_cost_usd?: number;
+  known_measurement_effective_cost_usd?: number;
+  cost_complete_outcomes: number;
+  unknown_cost_outcomes: number;
+  cost_coverage: number;
+  cost_per_measured_usd: number | null;
+  cost_per_improved_usd: number | null;
+  cost_per_verified_benefit_usd: number | null;
+  actual_cost_per_verified_benefit_usd?: number | null;
+  api_equivalent_cost_per_verified_benefit_usd?: number | null;
+  effective_cost_per_verified_benefit_usd?: number | null;
+  operator_interventions: number;
+  operator_interventions_per_verified_benefit: number | null;
 }
 
 export interface AutoresearchQualityMetrics {
@@ -1020,6 +1116,7 @@ export interface AutoresearchQualityMetrics {
   stale_rate: number;
   duplicate_rate: number;
   cost_per_accepted_usd: number | null;
+  outcomes?: AutoresearchOutcomeMetrics;
 }
 
 export interface ProposalsResponse {

@@ -31,6 +31,7 @@ A proposal (``autoresearch-proposal-v1``) is one JSON file under
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import difflib
 import hashlib
 import importlib.util
@@ -538,6 +539,15 @@ def _proposal_path(pid: str) -> Path:
     return _proposals_dir() / f"{safe}.json"
 
 
+@contextmanager
+def proposal_lease(pid: str):
+    """Serialize contract/baseline capture with every proposal store writer."""
+    from hermes_cli.outcome_verification import shared_state_lock
+
+    with shared_state_lock(_proposal_path(pid)):
+        yield
+
+
 def save_proposal(proposal: dict[str, Any]) -> Path:
     proposal.setdefault("target_sha256", _proposal_target_sha(proposal))
     proposal.setdefault("finding_fingerprint", _finding_fingerprint(proposal))
@@ -548,7 +558,49 @@ def save_proposal(proposal: dict[str, Any]) -> Path:
             proposal.setdefault(key, value)
     path = _proposal_path(proposal["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(proposal, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Serialize the complete read/merge/write. A stale lifecycle writer may add
+    # fields, but cannot erase a concurrent contract/measurement projection.
+    from hermes_cli.outcome_verification import locked_json_update
+
+    incoming = dict(proposal)
+    measurement_rank = {
+        "not_started": 0,
+        "pending": 1,
+        "measuring": 2,
+        "retryable_failure": 3,
+        "measured": 4,
+        "exhausted": 4,
+    }
+    delivery_rank = {"none": 0, "queued": 1, "running": 2, "review": 3, "failed": 3, "integrated": 4}
+
+    def _merge(current: Any) -> dict[str, Any]:
+        prior = current if isinstance(current, dict) else {}
+        merged = {**prior, **incoming}
+        if measurement_rank.get(str(prior.get("measurement_status")), -1) > measurement_rank.get(
+            str(incoming.get("measurement_status")), -1
+        ):
+            for key in (
+                "measurement_status", "outcome_verdict", "evidence_grade",
+                "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+                "outcome_cost_actual_usd", "outcome_cost_api_equivalent_usd",
+                "outcome_cost_effective_usd",
+                "outcome_cost_status", "outcome_cost_breakdown", "outcome_unknown_cost_refs",
+                "outcome_integration_sha", "outcome_operator_interventions",
+            ):
+                if key in prior:
+                    merged[key] = prior[key]
+        lifecycle_authoritative = bool(
+            incoming.get("lifecycle_source") or incoming.get("disposition_source")
+        )
+        if not lifecycle_authoritative and delivery_rank.get(
+            str(prior.get("delivery_state")), -1
+        ) > delivery_rank.get(str(incoming.get("delivery_state")), -1):
+            merged["delivery_state"] = prior["delivery_state"]
+        return merged
+
+    persisted = locked_json_update(path, default={}, transform=_merge)
+    proposal.clear()
+    proposal.update(persisted)
     return path
 
 
@@ -603,6 +655,16 @@ _LIST_FIELDS = (
     "kanban_task_id", "escalation_task_id", "linked_task_id", "linked_task_title", "linked_task_status",
     "test_code", "caught_mutant", "affected_tests", "expected_benefit", "risk_summary",
     "test_plan", "recommendation",
+    "outcome_schema_version", "outcome_applicability", "measurement_status",
+    "outcome_verdict", "evidence_grade", "calibration_eligible",
+    "outcome_class", "outcome_authority",
+    "probe_contract", "outcome_baseline", "outcome_baseline_recorded_at",
+    "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+    "outcome_cost_actual_usd", "outcome_cost_api_equivalent_usd",
+    "outcome_cost_effective_usd",
+    "outcome_cost_status", "outcome_cost_breakdown", "outcome_unknown_cost_refs",
+    "outcome_operator_interventions",
+    "outcome_integration_sha",
 )
 
 
@@ -627,6 +689,9 @@ def _is_reverted_no_improvement(p: dict[str, Any]) -> bool:
 
 def proposals_payload() -> dict[str, Any]:
     items = _enriched_items(list_proposals())
+    from hermes_cli.outcome_verification import enrich_autoresearch_outcomes, outcome_metrics
+
+    items = enrich_autoresearch_outcomes(items)
     cards = [_to_card(p) for p in items]
     open_count = sum(1 for p in items if _is_actionable(p))
     accepted = sum(1 for p in items if p.get("decision_state") == "accepted")
@@ -667,6 +732,7 @@ def proposals_payload() -> dict[str, Any]:
             "stale_rate": stale / total if total else 0.0,
             "duplicate_rate": duplicates / total if total else 0.0,
             "cost_per_accepted_usd": measured_cost / accepted if accepted and measured_cost else None,
+            "outcomes": outcome_metrics(items),
         },
         "proposals": cards,
         "proposals_dir": str(_proposals_dir()),

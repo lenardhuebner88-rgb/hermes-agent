@@ -46,6 +46,7 @@ def _measured_record(lever_key, verdict, *, root_task_id, metric_key="green_gate
         "proposed_at": 1783049574,
         "baseline": {"green_gate_streak.streak": 0.0, "green_gate_streak.counter.value": 10.0},
         "metric_key": metric_key,
+        "outcome_class": "vision-metric:green_gate_streak.streak:higher_is_better/v1",
         "measurability": "ok",
         "shipped_at": 1783069506,
         "measured_at": 1783360838,
@@ -75,9 +76,9 @@ def test_calibration_emits_factor_at_min_n():
         _measured_record("GATE-FIX-PY-cccccccc", "neutral", root_task_id="t_3"),
     ]
     calib = strategist.compute_lever_calibration(records)
-    # class = stable prefix with the trailing 8-hex digest stripped
-    assert "GATE-FIX-PY" in calib
-    entry = calib["GATE-FIX-PY"]
+    outcome_class = "vision-metric:green_gate_streak.streak:higher_is_better/v1"
+    assert outcome_class in calib
+    entry = calib[outcome_class]
     assert entry["n"] == 3
     # mean score = (1 + 1 + 0) / 3 = 0.667 -> factor = 1 + 0.667*0.5 = 1.333
     assert entry["factor"] == pytest.approx(1.3333, abs=1e-3)
@@ -90,14 +91,15 @@ def test_calibration_clamps_to_bounds():
         for i in range(5)
     ]
     calib = strategist.compute_lever_calibration(records)
-    assert calib["GATE-FIX-PY"]["factor"] == pytest.approx(1.5)
+    outcome_class = "vision-metric:green_gate_streak.streak:higher_is_better/v1"
+    assert calib[outcome_class]["factor"] == pytest.approx(1.5)
 
     losers = [
         _measured_record(f"GATE-FIX-PY-{'b' * 7}{i}", "worsened", root_task_id=f"u_{i}")
         for i in range(5)
     ]
     calib_low = strategist.compute_lever_calibration(losers)
-    assert calib_low["GATE-FIX-PY"]["factor"] == pytest.approx(0.5)
+    assert calib_low[outcome_class]["factor"] == pytest.approx(0.5)
 
 
 def test_calibration_ignores_unmeasurable_and_confounded():
@@ -109,6 +111,28 @@ def test_calibration_ignores_unmeasurable_and_confounded():
     # only 1 directional verdict -> below min-n even though 3 records exist
     calib = strategist.compute_lever_calibration(records)
     assert calib == {}
+
+
+def test_calibration_excludes_autoresearch_rows_even_with_directional_verdicts():
+    records = [
+        {
+            **_measured_record("GATE-FIX-PY-aaaaaaaa", "improved", root_task_id="t_1"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+        {
+            **_measured_record("GATE-FIX-PY-bbbbbbbb", "improved", root_task_id="t_2"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+        {
+            **_measured_record("GATE-FIX-PY-cccccccc", "improved", root_task_id="t_3"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+    ]
+
+    assert strategist.compute_lever_calibration(records) == {}
 
 
 def test_lever_class_of_key_only_strips_known_dynamic_prefixes():
@@ -128,7 +152,24 @@ def test_static_key_has_no_hash_suffix_stripped():
         _measured_record("HEILER-TRANSIENT", "improved", root_task_id="t_3"),
     ]
     calib = strategist.compute_lever_calibration(records)
-    assert calib["HEILER-TRANSIENT"]["factor"] == pytest.approx(1.5)
+    outcome_class = "vision-metric:green_gate_streak.streak:higher_is_better/v1"
+    assert calib[outcome_class]["factor"] == pytest.approx(1.5)
+
+
+def test_calibration_groups_by_outcome_class_and_excludes_stale_records():
+    records = [
+        _measured_record("FREE-NAME-A", "improved", root_task_id="t_1"),
+        _measured_record("FREE-NAME-B", "improved", root_task_id="t_2"),
+        {
+            **_measured_record("FREE-NAME-C", "improved", root_task_id="t_3"),
+            "stale_metrics": True,
+        },
+        {
+            **_measured_record("FREE-NAME-D", "neutral", root_task_id="t_4"),
+            "outcome_class": "vision-metric:other:higher_is_better/v1",
+        },
+    ]
+    assert strategist.compute_lever_calibration(records) == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -151,8 +192,9 @@ def test_reflect_writes_calibration_ledger_from_real_shaped_records(board_home, 
     calib_path = strategist.default_lever_calibration_path(outcomes_path)
     assert calib_path.exists()
     data = json.loads(calib_path.read_text(encoding="utf-8"))
-    assert data["GATE-FIX-PY"]["n"] == 3
-    assert data["GATE-FIX-PY"]["factor"] == pytest.approx(1.3333, abs=1e-3)
+    outcome_class = "vision-metric:green_gate_streak.streak:higher_is_better/v1"
+    assert data[outcome_class]["n"] == 3
+    assert data[outcome_class]["factor"] == pytest.approx(1.3333, abs=1e-3)
 
 
 # --------------------------------------------------------------------------- #

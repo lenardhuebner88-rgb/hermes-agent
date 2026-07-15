@@ -149,6 +149,44 @@ def test_generate_is_idempotent(tmp_home, scaffold_enabled):
     assert second["skipped_existing"] >= first["created_count"]
 
 
+def test_stale_proposal_writer_cannot_erase_concurrent_outcome_fields(tmp_home):
+    base = {
+        "id": "lost-update",
+        "schema": proposals.PROPOSAL_SCHEMA,
+        "mode": "code",
+        "target": "hermes_cli/example.py",
+        "status": "proposed",
+    }
+    proposals.save_proposal(base)
+    lifecycle_writer = proposals.load_proposal("lost-update")
+    outcome_writer = proposals.load_proposal("lost-update")
+    assert lifecycle_writer is not None and outcome_writer is not None
+
+    outcome_writer.update(
+        {
+            "measurement_status": "measured",
+            "outcome_verdict": "improved",
+            "evidence_grade": "contract_verified",
+        }
+    )
+    proposals.save_proposal(outcome_writer)
+    lifecycle_writer.update(
+        {
+            "decision_state": "accepted",
+            "delivery_state": "integrated",
+            "lifecycle_source": "task_events",
+        }
+    )
+    proposals.save_proposal(lifecycle_writer)
+
+    persisted = proposals.load_proposal("lost-update")
+    assert persisted is not None
+    assert persisted["measurement_status"] == "measured"
+    assert persisted["outcome_verdict"] == "improved"
+    assert persisted["decision_state"] == "accepted"
+    assert persisted["delivery_state"] == "integrated"
+
+
 def test_payload_drops_bulky_fields_and_counts_open(tmp_home, scaffold_enabled):
     _write_skill(tmp_home / "skills", "gamma", "# Gamma\n\nThin.\n")
     proposals.generate_proposals()
@@ -1131,6 +1169,48 @@ def test_route_runs_returns_history(client, tmp_home):
     body = resp.json()
     assert body["schema"] == "autoresearch-runs-v1"
     assert any(r["request_id"] == "x1" and r["tokens"] == 42 for r in body["runs"])
+
+
+def test_proposals_payload_exposes_honest_outcome_metrics(tmp_home):
+    proposals.save_proposal(
+        {
+            "id": "legacy-integrated",
+            "schema": proposals.PROPOSAL_SCHEMA,
+            "mode": "code",
+            "target": "hermes_cli/example.py",
+            "status": "routed_to_kanban",
+            "finding_state": "verified",
+            "decision_state": "accepted",
+            "delivery_state": "integrated",
+            "lifecycle_source": "explicit",
+        }
+    )
+    proposals.save_proposal(
+        {
+            "id": "dismissed",
+            "schema": proposals.PROPOSAL_SCHEMA,
+            "mode": "code",
+            "target": "hermes_cli/example.py",
+            "status": "skipped",
+            "finding_state": "rejected",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "lifecycle_source": "explicit",
+        }
+    )
+
+    payload = proposals.proposals_payload()
+    by_id = {item["id"]: item for item in payload["proposals"]}
+    outcomes = payload["metrics"]["outcomes"]
+
+    assert by_id["legacy-integrated"]["measurement_status"] == "exhausted"
+    assert by_id["legacy-integrated"]["outcome_verdict"] == "unmeasurable"
+    assert by_id["legacy-integrated"]["evidence_grade"] == "legacy_observational"
+    assert by_id["dismissed"]["outcome_applicability"] == "not_applicable"
+    assert outcomes["applicable"] == 1
+    assert outcomes["not_applicable"] == 1
+    assert outcomes["improved"] == 0
+    assert outcomes["measurement_coverage"] == 0.0
 
 
 # ---------------------------------------------------------------------------
