@@ -7730,7 +7730,9 @@ def test_dispatch_budget_runaway_parks_when_extension_budget_is_exhausted(
 
     assert result.budget_runaway_parked == [(task_id, 1_300)]
     assert task.status == "blocked"
-    assert task.block_kind == "needs_operator"
+    # Reconcile the budget-recovery branch with typed system parks: exhausted
+    # recovery remains operator-owned, but uses the canonical capacity kind.
+    assert task.block_kind == "capacity"
     assert task.budget_extension_count == 1
     assert "budget_review_extension_granted" not in [e.kind for e in events]
     parked = next(e for e in events if e.kind == kb.BUDGET_RUNAWAY_PARKED_EVENT)
@@ -7769,7 +7771,7 @@ def test_dispatch_budget_runaway_parks_without_actionable_review_finding(
 
     assert result.budget_runaway_parked == [(task_id, 1_300)]
     assert task.status == "blocked"
-    assert task.block_kind == "needs_operator"
+    assert task.block_kind == "capacity"
     assert task.budget_extension_count == 0
     assert "budget_review_extension_granted" not in [e.kind for e in events]
 
@@ -7815,7 +7817,7 @@ def test_dispatch_budget_runaway_parks_when_latest_review_state_is_inconsistent(
 
     assert result.budget_runaway_parked == [(task_id, 1_300)]
     assert task.status == "blocked"
-    assert task.block_kind == "needs_operator"
+    assert task.block_kind == "capacity"
     assert task.budget_extension_count == 0
 
 
