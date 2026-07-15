@@ -95,7 +95,7 @@ export function getAutoresearchQueueActionSummary(input: {
         tone: "amber",
         title: "Die Auswahl ist nicht sammelsicher.",
         batchLine: `${input.selectedCount} markiert, aber ${input.selectedManualReviewCount} davon brauchen Einzelreview.`,
-        manualLine: "Riskante Karten bitte öffnen, Diff lesen und direkt auf der Karte entscheiden.",
+        manualLine: "Riskante Karten bitte öffnen, die Klartextfelder lesen und direkt auf der Karte entscheiden.",
         confirmLine: "Sammel-Übernehmen bleibt gesperrt, bis nur sichere Karten markiert sind.",
         facts,
       };
@@ -118,7 +118,7 @@ export function getAutoresearchQueueActionSummary(input: {
       title: "Heute ist Einzelreview dran.",
       batchLine: "Keine sichtbare Karte ist für Sammel-Übernehmen freigegeben.",
       manualLine: `${input.manualReviewVisibleCount} sichtbare ${input.manualReviewVisibleCount === 1 ? "Karte braucht" : "Karten brauchen"} bewusstes Lesen.`,
-      confirmLine: "Öffne die Top-Karte und entscheide direkt mit Übernehmen oder Überspringen.",
+      confirmLine: "Öffne die Top-Karte und entscheide direkt mit Annehmen oder Ablehnen.",
       facts,
     };
   }
@@ -199,7 +199,7 @@ export function getAutoresearchDecisionGuide(input: {
       tone: "amber",
       headline: "Erst einzeln lesen, dann entscheiden.",
       summary: "In den sichtbaren Karten steckt Code, Hoch+-Risiko oder Safety-Bezug. Das ist nicht für blindes Sammel-Übernehmen gedacht.",
-      next: `${top} zuerst öffnen: Nutzen, Risiko und Diff lesen; danach bewusst übernehmen oder überspringen.`,
+      next: `${top} zuerst öffnen: Nutzen, Aufwand und Risiko lesen; danach bewusst annehmen oder ablehnen.`,
       primaryLabel: "Einzelreview",
       facts: visibleFacts,
     };

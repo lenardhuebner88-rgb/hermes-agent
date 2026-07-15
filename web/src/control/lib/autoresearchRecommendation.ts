@@ -49,7 +49,7 @@ export function getAutoresearchRecommendation(input: {
       title: `${input.openCount} geprüfte ${input.openCount === 1 ? "Verbesserung" : "Verbesserungen"} entscheiden.`,
       detail: input.revertedCount > 0
         ? `${input.revertedCount} zurückgerollte Kandidaten sind bereits sicher aussortiert. Entscheide zuerst die offenen Karten.`
-        : "Lies zuerst die Begründung und den Diff der Top-Karte. Übernehmen ist gegatet, Überspringen räumt auf.",
+        : "Lies zuerst Nutzen und Risiko der obersten Karte. Annehmen startet die geschützte Prüfung, Ablehnen räumt auf.",
       primaryLabel: "Entscheidungen prüfen",
     };
   }

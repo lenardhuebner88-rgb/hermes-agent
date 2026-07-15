@@ -93,7 +93,7 @@ export function getAutoresearchReviewFlow(input: {
     return {
       tone: "amber",
       title: `${input.highPriorityCount} Hoch+-Entscheidungen zuerst.`,
-      detail: `${top} ist die nächste Karte. Prüfe Nutzen, Risiko und Diff, dann entscheide sie einzeln.`,
+      detail: `${top} ist die nächste Karte. Prüfe Nutzen, Aufwand und Risiko, dann entscheide sie einzeln.`,
       progressLabel,
       progressPercent,
       primaryAction: "select-top",

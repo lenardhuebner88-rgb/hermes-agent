@@ -40,9 +40,9 @@ export function getProposalOperatorBrief(proposal: Proposal): ProposalOperatorBr
   if (proposal.status === "testing") {
     return {
       tone: "violet",
-      label: "Gate läuft",
+      label: "Prüfung läuft",
       title: "Diese Karte wird gerade geprüft.",
-      summary: proposal.result || "Autoresearch wartet auf das Test-Gate. Währenddessen ist keine neue Entscheidung nötig.",
+      summary: proposal.result || "Autoresearch wartet auf die automatische Prüfung. Währenddessen ist keine neue Entscheidung nötig.",
       facts: [
         { label: "Betroffen", value: affected, tone: "violet" },
         { label: "Warum", value: why, tone: "cyan" },
@@ -68,13 +68,13 @@ export function getProposalOperatorBrief(proposal: Proposal): ProposalOperatorBr
   if (proposal.mode === "code") {
     return {
       tone: severity === "critical" || severity === "high" ? "amber" : "violet",
-      label: "Code mit Gate",
+      label: "Programmänderung",
       title: severity === "critical" || severity === "high" ? "Erst lesen, dann übernehmen." : "Technische Änderung mit Sicherheitsnetz.",
-      summary: "Der Vorschlag schreibt Code, startet danach aber ein Gate und kann bei rotem Lauf zurückgerollt werden.",
+      summary: "Der Vorschlag ändert das Programm, wird danach automatisch geprüft und bei einem Fehler zurückgesetzt.",
       facts: [
         { label: "Betroffen", value: affected, tone: "violet" },
         { label: "Warum", value: why, tone: severity === "critical" || severity === "high" ? "amber" : "cyan" },
-        { label: "Klick", value: "Übernehmen startet Code-Änderung plus Test-Gate.", tone: "amber" },
+        { label: "Klick", value: "Annehmen startet die Änderung mit automatischer Prüfung.", tone: "amber" },
       ],
     };
   }
@@ -107,14 +107,9 @@ export function getProposalOperatorBrief(proposal: Proposal): ProposalOperatorBr
 }
 
 function affectedLabel(proposal: Proposal): string {
-  const target = proposal.target?.trim() || "unbekanntes Ziel";
-  const section = proposal.section?.trim();
-  const prefix = proposal.mode === "code"
-    ? "Code"
-    : proposal.mode === "test" || proposal.proposal_type === "mutation_test"
-      ? "Test"
-      : "Skill";
-  return section ? `${prefix}: ${target} · ${section}` : `${prefix}: ${target}`;
+  if (proposal.mode === "code") return "Ein begrenzter Teil des Programms";
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") return "Die automatische Absicherung";
+  return "Eine Arbeitsanleitung";
 }
 
 function firstSentence(value: string | null | undefined): string | null {

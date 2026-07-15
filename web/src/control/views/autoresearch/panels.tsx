@@ -227,7 +227,7 @@ export function QueueActionSummaryPanel({ summary }: { summary: AutoresearchQueu
   return (
     <div className={cn("max-w-xl rounded-panel border p-3 text-left", reviewStepToneClass(summary.tone))}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1 basis-0">
           <Eyebrow>Auswahlwirkung</Eyebrow>
           <Text as="h3" variant="label" className="mt-1 text-ink">{summary.title}</Text>
           <div className="mt-2 space-y-1 text-xs leading-5 text-ink-2"><p>{summary.batchLine}</p><p>{summary.manualLine}</p><p className="text-ink">{summary.confirmLine}</p></div>
@@ -385,7 +385,7 @@ export function LastRun({ status, latestRun }: { status: ReturnType<typeof useAu
   return (
     <div className={cn("rounded-panel border p-3", reviewStepToneClass(brief.tone))}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Eyebrow>Letzter Lauf</Eyebrow><SignalChip tone={signalToneFromLegacy(brief.tone)} label={brief.label} /></div><Text as="h3" variant="label" className="mt-2 text-ink">{brief.title}</Text><p className="mt-1 text-sm leading-6 text-ink-2">{brief.detail}</p><p className="mt-2 text-sm text-ink"><span className="font-semibold">Nächster Schritt:</span> {brief.next}</p></div>
+        <div className="min-w-0 flex-1 basis-0"><div className="flex flex-wrap items-center gap-2"><Eyebrow>Letzter Lauf</Eyebrow><SignalChip tone={signalToneFromLegacy(brief.tone)} label={brief.label} /></div><Text as="h3" variant="label" className="mt-2 text-ink">{brief.title}</Text><p className="mt-1 text-sm leading-6 text-ink-2">{brief.detail}</p><p className="mt-2 text-sm text-ink"><span className="font-semibold">Nächster Schritt:</span> {brief.next}</p></div>
         <div className="grid shrink-0 grid-cols-2 gap-1.5 sm:grid-cols-4 lg:min-w-[360px]">{brief.facts.map((fact) => <FactTile key={fact.label} label={fact.label} value={fact.value} tone={fact.tone} compact />)}</div>
       </div>
       {brief.rawLine || rawPayload || proposed !== null || kept !== null || reverted !== null || showCounters || stopped || receipt || note ? (

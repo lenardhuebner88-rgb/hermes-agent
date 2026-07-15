@@ -45,3 +45,15 @@ describe("German gated Flow copy", () => {
     expect(fleetSrc).not.toMatch(/ship: \{ key: "ship", label: "Ship"|rework: \{ key: "rework", label: "Rework"|Review abnehmen/);
   });
 });
+
+describe("German Autoresearch decision copy", () => {
+  it("uses the agreed plain-language triage labels", () => {
+    expect(de.autoresearch.accept).toBe("Annehmen");
+    expect(de.autoresearch.reject).toBe("Ablehnen");
+    expect(de.autoresearch.decisionWhat).toBe("Was es ist");
+    expect(de.autoresearch.decisionBenefit).toBe("Warum es dir etwas bringt");
+    expect(de.autoresearch.decisionRecommendation).toBe("Empfehlung und Grund");
+    expect(de.autoresearch.decisionEffortRisk).toBe("Aufwand, Kosten und Risiko grob");
+    expect(de.autoresearch.technicalExpand).toBe("Für Technik ausklappen");
+  });
+});

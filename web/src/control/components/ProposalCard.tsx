@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Check, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -13,7 +12,7 @@ import type { Density } from "../hooks/useDensity";
 import type { Proposal, ProposalSeverity, ToneName } from "../lib/types";
 import { DiffView, ModeBadge } from "./atoms";
 import { SignalChip, SignalLabel, signalToneFromLegacy, type SignalTone } from "./leitstand";
-import { Eyebrow } from "./primitives";
+import { Disclosure, Eyebrow } from "./primitives";
 
 const SEVERITY_LABEL: Record<ProposalSeverity, string> = {
   critical: de.autoresearch.severityCritical,
@@ -190,9 +189,46 @@ function actionOutcomes(proposal: Proposal, guide: DecisionGuide): ActionOutcome
   ];
 }
 
+function operatorWhat(proposal: Proposal, categoryLabel: string | null): string {
+  const subject = categoryLabel ? ` zum Thema „${categoryLabel}“` : "";
+  if (proposal.mode === "code") return `Eine begrenzte Änderung am Programm${subject}.`;
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") return `Eine zusätzliche Test-Absicherung${subject}.`;
+  return `Eine Anpassung an einer Arbeitsanleitung${subject}.`;
+}
+
+function operatorBenefit(proposal: Proposal, categoryHelp: string | null): string {
+  const plainCategoryHelp = categoryHelp && !categoryHelp.startsWith("Backend-Kategorie:") ? categoryHelp : null;
+  const benefit = proposal.mode === "code"
+    ? "Behebt einen konkreten Fehlerhinweis und wird vor der Übernahme automatisch geprüft."
+    : proposal.mode === "test" || proposal.proposal_type === "mutation_test"
+      ? "Stärkt die Absicherung, damit Fehler künftig früher auffallen."
+      : "Verbessert die Arbeitsanleitung ohne Änderung am Programm.";
+  return plainCategoryHelp ? `${plainCategoryHelp} ${benefit}` : benefit;
+}
+
+function operatorRecommendation(proposal: Proposal, severity: ProposalSeverity): string {
+  if (proposal.last_outcome === "reverted_no_improvement") return "Ablehnen: Der Vorschlag wurde schon getestet und brachte keinen messbaren Nutzen.";
+  if (proposal.mode === "code") return severity === "critical" || severity === "high"
+    ? "Annehmen, wenn der beschriebene Fehler für dich relevant ist; die automatische Prüfung begrenzt das Risiko."
+    : "Annehmen: Der Fehlerhinweis ist konkret und die Änderung wird automatisch geprüft.";
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") return "Annehmen: Mehr Absicherung ist bei überschaubarem Aufwand sinnvoll.";
+  return "Annehmen: kleiner Aufwand, direkter Nutzen für die Arbeitsanleitung.";
+}
+
+function effortAndCost(proposal: Proposal): string {
+  if (proposal.mode === "code") return "Aufwand mittel · Kosten grob mittel durch Änderung und automatische Prüfung.";
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") return "Aufwand mittel · Kosten grob klein bis mittel durch die zusätzliche Prüfung.";
+  return "Aufwand klein · Kosten grob klein, weil nur Anleitungstext geändert wird.";
+}
+
+function operatorRisk(proposal: Proposal): string {
+  if (proposal.mode === "code") return "Die Änderung betrifft das Programm; bei einer fehlgeschlagenen Prüfung wird sie zurückgesetzt.";
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") return "Die zusätzliche Absicherung kann spätere Prüfungen etwas verlängern.";
+  return "Die Anleitung kann sich anders verhalten als gewohnt; Ablehnen lässt alles unverändert.";
+}
+
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
-  const [reviewConfirmed, setReviewConfirmed] = useState(false);
-  const lines = toDiffLines(proposal.diff_before_after);
+  const lines = toDiffLines(proposal.diff_before_after).filter((line) => line.type !== "ctx");
   const isCode = proposal.mode === "code";
   const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
   const isTesting = proposal.status === "testing" || proposal.delivery_state === "running";
@@ -206,97 +242,71 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const outcomes = actionOutcomes(proposal, guide);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
-  const opensDiffByDefault = isActionable && selectable && !batchSelectable;
-  const requiresReviewConfirmation = opensDiffByDefault && !isReverted;
-  const applyDisabled = !!busy || (requiresReviewConfirmation && !reviewConfirmed);
   const doneLabel = proposal.delivery_state === "integrated" || proposal.status === "applied" ? "Integriert" : "Aussortiert";
+  const categoryLabel = category?.label ?? null;
+  const what = operatorWhat(proposal, categoryLabel);
+  const benefit = operatorBenefit(proposal, category?.help ?? null);
+  const recommendation = operatorRecommendation(proposal, severity);
+  const effortRisk = `${effortAndCost(proposal)} Nachteil: ${operatorRisk(proposal)}`;
   return (
     <article id={`autoresearch-proposal-${proposal.id}`} className={cn("scroll-mt-6 space-y-4 rounded-card border border-line bg-surface-2 p-4", density === "compact" && "p-3")}>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            {isTestHardening ? <Badge tone="success">Test-Härtung</Badge> : <ModeBadge mode={proposal.mode === "code" ? "code" : "skill"} />}
-            <SignalChip tone={signalToneFromLegacy(severityTone(severity))} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
-            {category ? <SignalChip tone="neutral" label={`${de.autoresearch.category}: ${category.label}`} /> : null}
-            {priorityGroup ? <SignalChip tone={signalToneFromLegacy(priorityGroup.tone)} label={priorityGroup.label} /> : null}
-            {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-1 px-2.5 py-1 text-micro font-medium text-ink-2"><Spinner />{de.autoresearch.batchPending}</span> : null}
-            {batchStatus?.status === "ok" ? <SignalChip tone="ok" label={de.autoresearch.batchOk} /> : null}
-            {batchStatus?.status === "fail" ? <SignalChip tone="alert" label={de.autoresearch.batchFail} /> : null}
-            {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-status-warn/30 bg-status-warn/10 px-2.5 py-1 text-micro font-medium text-status-warn"><Spinner />{de.autoresearch.testing}</span> : null}
-            {isReverted ? <SignalChip tone="neutral" label="Zurückgerollt" /> : null}
-            {ageDays !== null ? <SignalChip tone={ageDays > 7 ? "warn" : "neutral"} label={de.autoresearch.ageDays(ageDays)} className="font-data tabular-nums" /> : null}
-            {isDone ? <SignalChip tone={doneLabel === "Integriert" ? "ok" : "neutral"} label={doneLabel} /> : null}
-            {proposal.finding_state ? <SignalChip tone={proposal.finding_state === "verified" ? "ok" : proposal.finding_state === "stale" ? "warn" : "neutral"} label={`Fund: ${proposal.finding_state}`} /> : null}
-            {proposal.decision_state ? <SignalChip tone={proposal.decision_state === "needs_operator" ? "warn" : proposal.decision_state === "accepted" ? "ok" : "neutral"} label={`Entscheidung: ${proposal.decision_state}`} /> : null}
-            {proposal.delivery_state && proposal.delivery_state !== "none" ? <SignalChip tone={proposal.delivery_state === "integrated" ? "ok" : proposal.delivery_state === "failed" ? "alert" : "neutral"} label={`Delivery: ${proposal.delivery_state}`} /> : null}
+      <div className="grid gap-2 md:grid-cols-2">
+        <DecisionField label={de.autoresearch.decisionWhat} value={what} />
+        <DecisionField label={de.autoresearch.decisionBenefit} value={benefit} />
+        <DecisionField label={de.autoresearch.decisionRecommendation} value={recommendation} />
+        <DecisionField label={de.autoresearch.decisionEffortRisk} value={effortRisk} />
+      </div>
+
+      <Disclosure
+        className="rounded-card border border-line bg-surface-1 px-3 py-2"
+        summary={<span className="flex min-h-12 w-full items-center font-semibold text-ink">{de.autoresearch.technicalExpand}</span>}
+      >
+        <div className="space-y-4 pt-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {isTestHardening ? <Badge tone="success">Test-Härtung</Badge> : <ModeBadge mode={proposal.mode === "code" ? "code" : "skill"} />}
+                <SignalChip tone={signalToneFromLegacy(severityTone(severity))} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
+                {category ? <SignalChip tone="neutral" label={`${de.autoresearch.category}: ${category.label}`} /> : null}
+                {priorityGroup ? <SignalChip tone={signalToneFromLegacy(priorityGroup.tone)} label={priorityGroup.label} /> : null}
+                {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-1 px-2.5 py-1 text-micro font-medium text-ink-2"><Spinner />{de.autoresearch.batchPending}</span> : null}
+                {batchStatus?.status === "ok" ? <SignalChip tone="ok" label={de.autoresearch.batchOk} /> : null}
+                {batchStatus?.status === "fail" ? <SignalChip tone="alert" label={de.autoresearch.batchFail} /> : null}
+                {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-status-warn/30 bg-status-warn/10 px-2.5 py-1 text-micro font-medium text-status-warn"><Spinner />{de.autoresearch.testing}</span> : null}
+                {isReverted ? <SignalChip tone="neutral" label="Zurückgerollt" /> : null}
+                {ageDays !== null ? <SignalChip tone={ageDays > 7 ? "warn" : "neutral"} label={de.autoresearch.ageDays(ageDays)} className="font-data tabular-nums" /> : null}
+                {isDone ? <SignalChip tone={doneLabel === "Integriert" ? "ok" : "neutral"} label={doneLabel} /> : null}
+                {proposal.finding_state ? <SignalChip tone={proposal.finding_state === "verified" ? "ok" : proposal.finding_state === "stale" ? "warn" : "neutral"} label={`Fund: ${proposal.finding_state}`} /> : null}
+                {proposal.decision_state ? <SignalChip tone={proposal.decision_state === "needs_operator" ? "warn" : proposal.decision_state === "accepted" ? "ok" : "neutral"} label={`Entscheidung: ${proposal.decision_state}`} /> : null}
+                {proposal.delivery_state && proposal.delivery_state !== "none" ? <SignalChip tone={proposal.delivery_state === "integrated" ? "ok" : proposal.delivery_state === "failed" ? "alert" : "neutral"} label={`Delivery: ${proposal.delivery_state}`} /> : null}
+              </div>
+              <h3 className="break-words text-emph font-semibold leading-snug text-ink">{proposalTitle(proposal)}</h3>
+              <p className="font-data text-micro text-ink-3">Ziel: {proposal.target}{proposal.section ? ` · ${proposal.section}` : ""}</p>
+            </div>
+            {selectable ? (
+              batchSelectable ? (
+                <label className="flex min-h-12 shrink-0 cursor-pointer items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink">
+                  <input type="checkbox" checked={!!selected} onChange={(event) => onSelectedChange?.(proposal, event.target.checked)} className="size-12 shrink-0 accent-live" aria-label={de.autoresearch.selectProposal} />
+                  <span>Für Sammelentscheidung markieren</span>
+                </label>
+              ) : <SignalChip tone="warn" label="Einzelentscheidung" />
+            ) : null}
           </div>
-          <h3 className="break-words text-emph font-semibold leading-snug text-ink">{proposalTitle(proposal)}</h3>
-          {category?.help ? (
-            <p className="max-w-3xl text-sec leading-5 text-ink-3">
-              <span className="font-semibold text-ink-2">{category.label}:</span> {category.help}
-            </p>
-          ) : null}
           <ActionOutcomeStrip outcomes={outcomes} />
           <ProposalBriefPanel brief={brief} />
-          <div className="space-y-1">
-            <Eyebrow>{de.autoresearch.why}</Eyebrow>
-            <p className="text-sec leading-6 text-ink-2">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>
+          <DecisionGuidePanel guide={guide} />
+          {evidence ? <div className="space-y-1"><Eyebrow>{de.autoresearch.evidence}</Eyebrow><blockquote className="whitespace-pre-wrap rounded-card border border-line bg-surface-2 px-3 py-2 text-sec leading-6 text-ink">{evidence}</blockquote></div> : null}
+          <div className="grid gap-2 md:grid-cols-2">
+            <LifecycleFact label="Erwarteter Nutzen" value={proposal.expected_benefit || proposal.rationale_plain || "Kein zusätzlicher Nutzenhinweis gespeichert."} />
+            <LifecycleFact label="Risiko" value={proposal.risk_summary || "Kein zusätzlicher Risikohinweis gespeichert."} />
+            <LifecycleFact label="Prüfung" value={proposal.test_plan || "Kein zusätzlicher Prüfplan gespeichert."} />
+            <LifecycleFact label="Empfehlung" value={proposal.recommendation || "Keine zusätzliche technische Empfehlung gespeichert."} />
           </div>
+          {proposal.linked_task_id ? <ProposalCallout tone="neutral" label="Verknüpfte Arbeit">{proposal.linked_task_title || proposal.linked_task_id} · {proposal.linked_task_status || "Status unbekannt"}</ProposalCallout> : null}
+          {isCode && (isTesting || isActionable) ? <ProposalCallout tone="warn" label="Code-Gate">{isTesting ? <Spinner /> : <ShieldAlert className="mr-2 inline h-4 w-4" />}{isTesting ? de.autoresearch.codeGateTesting : de.autoresearch.codeGate}</ProposalCallout> : null}
+          <div className="space-y-2"><Eyebrow>{de.autoresearch.fixDiff}</Eyebrow><DiffView lines={lines} showLineNumbers={density === "compact"} /></div>
         </div>
-        {selectable ? (
-          batchSelectable ? (
-            <label className="flex min-h-12 shrink-0 cursor-pointer items-center gap-2 rounded-card border border-line bg-surface-1 px-3 py-2 text-sec text-ink">
-              <input
-                type="checkbox"
-                checked={!!selected}
-                onChange={(event) => onSelectedChange?.(proposal, event.target.checked)}
-                className="size-12 shrink-0 accent-live"
-                aria-label={de.autoresearch.selectProposal}
-              />
-              <span>{de.autoresearch.select}</span>
-            </label>
-          ) : (
-            <SignalChip tone="warn" label="Einzelreview" title="Diese Karte wird direkt mit Übernehmen oder Überspringen entschieden." />
-          )
-        ) : null}
-      </div>
-
-      {isActionable ? <DecisionGuidePanel guide={guide} /> : null}
-
-      {evidence ? (
-        <div className="space-y-1">
-          <Eyebrow>{de.autoresearch.evidence}</Eyebrow>
-          <blockquote className="whitespace-pre-wrap rounded-card border border-line bg-surface-1 px-3 py-2 text-sec leading-6 text-ink">
-            {evidence}
-          </blockquote>
-        </div>
-      ) : null}
-
-      <div className="grid gap-2 md:grid-cols-2">
-        <LifecycleFact label="Erwarteter Nutzen" value={proposal.expected_benefit || proposal.rationale_plain} />
-        <LifecycleFact label="Risiko" value={proposal.risk_summary || "Kein Risikohinweis gespeichert."} />
-        <LifecycleFact label="Prüfung" value={proposal.test_plan || "Kein Testplan gespeichert."} />
-        <LifecycleFact label="Empfehlung" value={proposal.recommendation || "Beleg und Änderung gemeinsam prüfen."} />
-      </div>
-
-      {proposal.linked_task_id ? (
-        <ProposalCallout tone="neutral" label="Verknüpfte Arbeit">
-          {proposal.linked_task_title || proposal.linked_task_id} · {proposal.linked_task_status || "Status unbekannt"}
-        </ProposalCallout>
-      ) : null}
-
-      {isCode && (isTesting || isActionable) ? (
-        <ProposalCallout tone="warn" label="Code-Gate">
-          {isTesting ? <Spinner /> : <ShieldAlert className="mr-2 inline h-4 w-4" />}
-          {isTesting ? de.autoresearch.codeGateTesting : de.autoresearch.codeGate}
-        </ProposalCallout>
-      ) : null}
-
-      <div className="space-y-2">
-        <Eyebrow>{de.autoresearch.fixDiff}</Eyebrow>
-        {opensDiffByDefault ? <p className="text-sec leading-5 text-ink-3">Einzelreview: Diese Änderung ist geöffnet, damit du sie vor Übernehmen oder Überspringen direkt prüfen kannst.</p> : null}
-        <DiffView lines={lines} showLineNumbers={density === "compact"} collapsible defaultCollapsed={!opensDiffByDefault} />
-      </div>
+      </Disclosure>
 
       {batchStatus?.status === "fail" && batchStatus.detail ? <ProposalCallout tone="alert" label="Fehler">{batchStatus.detail}</ProposalCallout> : null}
 
@@ -312,39 +322,26 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         <ProposalCallout tone="neutral" label="Gate läuft"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ProposalCallout>
       ) : isActionable ? (
         <div className="space-y-3">
-          <ProposalCallout tone={signalToneFromLegacy(guide.tone)} label="Entscheidung">
-            <span className="font-semibold">Entscheidung:</span> {guide.consequence}
-          </ProposalCallout>
-          {requiresReviewConfirmation ? (
-            <p className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec leading-5 text-status-warn">
-              {de.autoresearch.batchManualReviewHint}
-            </p>
-          ) : null}
-          {requiresReviewConfirmation ? (
-            <label className="flex min-h-12 cursor-pointer items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 p-3 text-sec text-status-warn">
-              <input
-                type="checkbox"
-                checked={reviewConfirmed}
-                onChange={(event) => setReviewConfirmed(event.target.checked)}
-                className="size-12 shrink-0 accent-live"
-              />
-              <span>
-                <span className="block font-medium">Diff geprüft</span>
-                <span className="block text-sec leading-5 text-status-warn">Ich habe Änderung und Risiko gelesen; Übernehmen startet danach die beschriebene Aktion.</span>
-              </span>
-            </label>
-          ) : null}
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button outlined className="min-h-12" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
-              {isReverted ? "Archivieren" : de.autoresearch.skip}
+              {de.autoresearch.reject}
             </Button>
-            <Button className="min-h-12" onClick={() => onApply(proposal)} disabled={applyDisabled} title={requiresReviewConfirmation && !reviewConfirmed ? "Erst Diff geprüft bestätigen." : undefined} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
-              {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
+            <Button className="min-h-12" onClick={() => onApply(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
+              {de.autoresearch.accept}
             </Button>
           </div>
         </div>
       ) : null}
     </article>
+  );
+}
+
+function DecisionField({ label, value }: { label: string; value: string }) {
+  return (
+    <section className="min-w-0 rounded-card border border-line bg-surface-1 px-3 py-3">
+      <Eyebrow>{label}</Eyebrow>
+      <p className="mt-1 text-sec leading-6 text-ink-2">{value}</p>
+    </section>
   );
 }
 

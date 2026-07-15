@@ -257,12 +257,14 @@ describe("AutoresearchView cockpit recommendation", () => {
 
     expect(brief).toMatchObject({
       tone: "amber",
-      label: "Code mit Gate",
+      label: "Programmänderung",
       title: "Erst lesen, dann übernehmen.",
     });
-    expect(brief.summary).toContain("Gate");
-    expect(brief.facts.find((fact) => fact.label === "Betroffen")?.value).toContain("hermes_cli/web_server.py");
-    expect(brief.facts.find((fact) => fact.label === "Klick")?.value).toContain("Code-Änderung plus Test-Gate");
+    expect(brief.summary).toContain("automatisch geprüft");
+    expect(brief.facts.find((fact) => fact.label === "Betroffen")?.value).toBe("Ein begrenzter Teil des Programms");
+    expect(brief.facts.find((fact) => fact.label === "Klick")?.value).toBe(
+      "Annehmen startet die Änderung mit automatischer Prüfung.",
+    );
   });
 });
 
@@ -1561,7 +1563,9 @@ describe("AutoresearchView measured outcomes", () => {
 
   it("shows an honest empty state when no contract has measured benefit", () => {
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
-    expect(html).toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
+    expect(html).toContain("Noch kein bestätigter Beleg");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
     expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
   });
 
@@ -1624,7 +1628,8 @@ describe("AutoresearchView measured outcomes", () => {
     };
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[legacy]} />);
     expect(html).toContain("Historisch verbessert");
-    expect(html).toContain("Old observation");
+    expect(html).toContain("Noch kein bestätigter Beleg");
+    expect(html).not.toContain("Old observation");
     expect(html).toContain("0");
     expect(html).not.toContain("Nutzen bestätigt</article>");
   });

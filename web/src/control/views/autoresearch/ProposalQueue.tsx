@@ -2,7 +2,7 @@ import { useState } from "react";
 import { CheckCheck, FlaskConical, ListChecks, Trash2, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-import type { rankAutoresearchReviewQueue, severityDistribution } from "../../lib/autoresearch";
+import type { severityDistribution } from "../../lib/autoresearch";
 import type { getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary } from "../../lib/autoresearchDecisionGuide";
 import { proposalNeedsManualReview } from "../../lib/autoresearchDecisionGuide";
 import type { getAutoresearchReviewFlow } from "../../lib/autoresearchReviewFlow";
@@ -12,12 +12,12 @@ import { de } from "../../i18n/de";
 import type { Density } from "../../hooks/useDensity";
 import type { useProposals } from "../../hooks/useControlData";
 import type { Proposal } from "../../lib/types";
+import { formatProposalCategory } from "../../lib/autoresearchProposalLabels";
 import { SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { Panel, Disclosure, Stagger, StaggerItem } from "../../components/primitives";
 import { ProposalCard } from "../../components/ProposalCard";
 import { DecisionGuidePanel, Empty, EmptyQueueModePanel, QueueActionSummaryPanel, QueueModePicker, ReviewFlowPanel, SelectionActionBar } from "./panels";
 
-type RelevanceQueue = ReturnType<typeof rankAutoresearchReviewQueue>;
 type Distribution = ReturnType<typeof severityDistribution>;
 type QueueModeSummary = ReturnType<typeof getAutoresearchQueueModeSummary>;
 type ReviewFlow = ReturnType<typeof getAutoresearchReviewFlow>;
@@ -42,7 +42,6 @@ export function ProposalQueue({
   manualReviewVisibleCount,
   canConfirmSelection,
   distribution,
-  relevanceQueue,
   proposalGroupQueue,
   queueModeSummary,
   queueMode,
@@ -62,6 +61,7 @@ export function ProposalQueue({
   onSkipBatch,
   onConfirmBatch,
   focusId,
+  onClearFocus,
 }: {
   density: Density;
   openCount: number;
@@ -79,7 +79,6 @@ export function ProposalQueue({
   manualReviewVisibleCount: number;
   canConfirmSelection: boolean;
   distribution: Distribution;
-  relevanceQueue: RelevanceQueue;
   proposalGroupQueue: RankedProposalGroupQueue;
   queueModeSummary: QueueModeSummary;
   queueMode: AutoresearchQueueMode;
@@ -99,6 +98,7 @@ export function ProposalQueue({
   onSkipBatch: (ids: string[]) => void;
   onConfirmBatch: (ids: string[]) => void;
   focusId?: string | null;
+  onClearFocus: () => void;
 }) {
   const decisionHeading = openCount === 0 ? "Keine offenen Entscheidungen" : `${proposalGroupQueue.summary.shown} ${proposalGroupQueue.summary.shown === 1 ? "wichtige Gruppe" : "wichtige Gruppen"} in dieser Ansicht`;
   const selectionBusy = batchBusy || bulkRevertedBusy || !!storeBusy;
@@ -106,7 +106,8 @@ export function ProposalQueue({
   // collapsed backlog. Force that disclosure open so the card is mounted before the
   // post-commit scrollIntoView runs — else getElementById returns null and the scroll
   // silently no-ops (the native <details> it replaced kept children mounted).
-  const backlogFocused = !!focusId && relevanceQueue.backlog.some((item) => item.proposal.id === focusId);
+  const backlogFocused = !!focusId && proposalGroupQueue.backlog.some((group) => group.ids.includes(focusId));
+  const [backlogOpen, setBacklogOpen] = useState(false);
 
   return (
     <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
@@ -158,13 +159,22 @@ export function ProposalQueue({
               onSkip={onSkip}
               onSkipBatch={onSkipBatch}
               onConfirmBatch={onConfirmBatch}
+              onClearFocus={onClearFocus}
             />
           </StaggerItem>
         ))}
       </Stagger>
 
       {proposalGroupQueue.backlog.length > 0 ? (
-        <Disclosure open={backlogFocused || undefined} className="rounded-panel border border-line bg-surface-1 p-4" summary={<span className="text-sm font-medium text-ink">Weitere Gruppen ({proposalGroupQueue.summary.remaining}) anzeigen</span>}>
+        <Disclosure
+          open={backlogFocused || backlogOpen}
+          onToggle={(nextOpen) => {
+            setBacklogOpen(nextOpen);
+            if (!nextOpen && backlogFocused) onClearFocus();
+          }}
+          className="rounded-panel border border-line bg-surface-1 p-4"
+          summary={<span className="flex min-h-12 w-full items-center text-sm font-medium text-ink">Weitere Gruppen ({proposalGroupQueue.summary.remaining}) anzeigen</span>}
+        >
           <div className="grid gap-4">
             {proposalGroupQueue.backlog.map((group) => (
               <ProposalGroupCard
@@ -180,6 +190,7 @@ export function ProposalQueue({
                 onSkip={onSkip}
                 onSkipBatch={onSkipBatch}
                 onConfirmBatch={onConfirmBatch}
+                onClearFocus={onClearFocus}
               />
             ))}
           </div>
@@ -201,6 +212,7 @@ function ProposalGroupCard({
   onSkip,
   onSkipBatch,
   onConfirmBatch,
+  onClearFocus,
 }: {
   group: ProposalGroup;
   density: Density;
@@ -213,12 +225,17 @@ function ProposalGroupCard({
   onSkip: (proposal: Proposal) => void;
   onSkipBatch: (ids: string[]) => void;
   onConfirmBatch: (ids: string[]) => void;
+  onClearFocus: () => void;
 }) {
   const [confirmSkip, setConfirmSkip] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const focused = !!focusId && group.ids.includes(focusId);
   const busy = !!storeBusy;
   const canBatchApply = group.mode === "skill" && group.proposals.every((proposal) => !proposalNeedsManualReview(proposal));
   const showBatchReason = group.mode !== "skill";
+  const categoryLabel = formatProposalCategory(group.category)?.label ?? group.categoryLabel;
+  const proposalKind = group.mode === "code" ? "Code-Änderung" : group.mode === "test" ? "Test-Absicherung" : "Anleitungs-Änderung";
+  const proposalKindPlural = group.mode === "code" ? "Code-Änderungen" : group.mode === "test" ? "Test-Absicherungen" : "Anleitungs-Änderungen";
   return (
     <article className="rounded-panel border border-line bg-surface-1 p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -228,8 +245,8 @@ function ProposalGroupCard({
             <SignalChip tone={signalToneFromLegacy(group.priorityGroup.tone)} label={group.priorityGroup.label} />
             <SignalChip tone={signalToneFromLegacy("cyan")} label={`${group.count} ${group.count === 1 ? "Vorschlag" : "Vorschläge"}`} />
           </div>
-          <h3 className="mt-2 break-words text-base font-semibold leading-snug text-ink">{group.title}</h3>
-          <p className="mt-1 text-sm leading-6 text-ink-2">{group.categoryLabel} · {group.target}</p>
+          <h3 className="mt-2 break-words text-base font-semibold leading-snug text-ink">{group.count} {group.count === 1 ? proposalKind : proposalKindPlural} zur Entscheidung</h3>
+          <p className="mt-1 text-sm leading-6 text-ink-2">{categoryLabel} · Details einzeln öffnen und annehmen oder ablehnen.</p>
           {showBatchReason ? <p className="mt-2 text-xs leading-5 text-status-warn">{de.autoresearch.batchManualReviewHint}</p> : null}
         </div>
         <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col xl:flex-row">
@@ -257,7 +274,15 @@ function ProposalGroupCard({
           </div>
         </div>
       ) : null}
-      <Disclosure open={focused || undefined} className="mt-3" summary={<span className="text-sm font-medium text-ink">{de.autoresearch.groupExpand(group.count)}</span>}>
+      <Disclosure
+        open={focused || expanded}
+        onToggle={(nextOpen) => {
+          setExpanded(nextOpen);
+          if (!nextOpen && focused) onClearFocus();
+        }}
+        className="mt-3"
+        summary={<span className="flex min-h-12 w-full items-center text-sm font-medium text-ink">{de.autoresearch.groupExpand(group.count)}</span>}
+      >
         <div className="grid gap-4">
           {group.proposals.map((proposal) => (
             <ProposalCard

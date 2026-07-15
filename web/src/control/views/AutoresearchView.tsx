@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { TriangleAlert } from "lucide-react";
@@ -118,9 +118,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       selectedManualReviewCount,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
-      topTitle: topProposal?.title?.trim() || topProposal?.target,
+      topTitle: topProposalBrief?.title,
     }),
-    [applied.length, batchSafeVisibleProposalIds.length, filteredHighPriorityCount, filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+    [applied.length, batchSafeVisibleProposalIds.length, filteredHighPriorityCount, filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposalBrief?.title, visibleProposalIds.length],
   );
   const decisionGuide = useMemo(
     () => getAutoresearchDecisionGuide({
@@ -130,9 +130,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       selectedCount: selectedIds.length,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
-      topTitle: topProposal?.title?.trim() || topProposal?.target,
+      topTitle: topProposalBrief?.title,
     }),
-    [filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
+    [filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposalBrief?.title, visibleProposals],
   );
   const queueActionSummary = useMemo(
     () => getAutoresearchQueueActionSummary({
@@ -183,7 +183,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const lastRunCounters = readLastRunCounters(status.data?.last_run);
   const showResearchErrorBadge = shouldShowResearchErrorBadge(lastRunCounters.researchErrors);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const effectiveAdvancedOpen = advancedNeedsAttention || advancedOpen;
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
   const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
   const deepAuditGuidance = useMemo(
@@ -331,26 +330,27 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const focusProposal = (proposalId: string) => {
-    document.getElementById(`autoresearch-proposal-${proposalId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-  };
-
-  // Deep-link from the Decision Inbox: /control/autoresearch?focus=<id> scrolls
-  // straight to that proposal card. Ref-guarded so it fires once per id (the 6s
-  // poll re-runs this effect) and waits until the proposal has actually loaded.
   const [focusParams] = useSearchParams();
   const focusId = focusParams.get("focus");
-  const consumedFocusRef = useRef<string | null>(null);
+  const [requestedFocusId, setRequestedFocusId] = useState<string | null>(null);
+  const [dismissedDeepLinkId, setDismissedDeepLinkId] = useState<string | null>(null);
+  const deepLinkFocusId = focusId && focusId !== dismissedDeepLinkId && store.proposals.some((proposal) => proposal.id === focusId) ? focusId : null;
+  const activeFocusId = requestedFocusId ?? deepLinkFocusId;
+  const focusProposal = (proposalId: string) => {
+    setRequestedFocusId(proposalId);
+  };
+
+  // ProposalQueue uses activeFocusId to render both collapsed disclosure
+  // levels synchronously. Only then do we scroll to the mounted card.
   useEffect(() => {
-    if (!focusId || consumedFocusRef.current === focusId) return;
-    if (!store.proposals.some((p) => p.id === focusId)) return;
-    consumedFocusRef.current = focusId;
-    focusProposal(focusId);
-  }, [focusId, store.proposals]);
+    if (!activeFocusId) return;
+    document.getElementById(`autoresearch-proposal-${activeFocusId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [activeFocusId]);
 
   const runPrimaryRecommendation = () => {
     if (recommendation.kind === "review") {
-      scrollTo("autoresearch-queue");
+      if (topProposal) focusProposal(topProposal.id);
+      else scrollTo("autoresearch-queue");
       return;
     }
     if (recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect") {
@@ -514,11 +514,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {busyNotice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><Spinner />{busyNotice}</div> : null}
       {latestActivity && latestActivityCard ? <LatestActivityPanel at={latestActivity.at} card={latestActivityCard} /> : null}
 
-      <OutcomePanel metrics={store.data?.metrics?.outcomes} proposals={store.proposals} />
-
       <ProposalQueue
         density={density}
-        focusId={focusId}
+        focusId={activeFocusId}
         openCount={open.length}
         revertedCount={reverted.length}
         filteredOpenCount={filteredOpen.length}
@@ -534,7 +532,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         manualReviewVisibleCount={manualReviewVisibleCount}
         canConfirmSelection={canConfirmSelection}
         distribution={distribution}
-        relevanceQueue={relevanceQueue}
         proposalGroupQueue={proposalGroupQueue}
         queueModeSummary={queueModeSummary}
         queueMode={queueMode}
@@ -553,7 +550,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onSkip={store.skip}
         onSkipBatch={store.skipBatch}
         onConfirmBatch={store.confirmBatch}
+        onClearFocus={() => {
+          setRequestedFocusId(null);
+          if (focusId) setDismissedDeepLinkId(focusId);
+        }}
       />
+
+      <OutcomePanel metrics={store.data?.metrics?.outcomes} proposals={store.proposals} />
 
       <LoopControls
         loop={loop}
@@ -581,7 +584,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       />
 
       <AdvancedSection
-        open={effectiveAdvancedOpen}
+        open={advancedOpen}
         needsAttention={advancedNeedsAttention}
         deepAudit={deepAudit}
         deepAuditRunning={deepAuditRunning}
@@ -598,9 +601,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         testFoundryResultSummary={testFoundryResultSummary}
         testFoundryGuidance={testFoundryGuidance}
         testFoundryChecklist={testFoundryChecklist}
-        onToggle={(nextOpen) => {
-          if (!advancedNeedsAttention) setAdvancedOpen(nextOpen);
-        }}
+        onToggle={setAdvancedOpen}
         onDeepAuditSubsystemChange={setDeepAuditSubsystem}
         onDeepAuditFocusChange={setDeepAuditFocus}
         onStartDeepAudit={() => void startDeepAudit()}

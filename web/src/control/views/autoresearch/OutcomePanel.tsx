@@ -2,7 +2,7 @@ import { Activity, BadgeCheck, CircleDollarSign, GitCommitHorizontal, ShieldChec
 import type { AutoresearchOutcomeMetrics, Proposal } from "../../lib/types";
 import { de } from "../../i18n/de";
 import { KpiTile, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
-import { Card, Eyebrow, Text } from "../../components/primitives";
+import { Card, Disclosure, Eyebrow, Text } from "../../components/primitives";
 
 function costDimensions(proposal: Proposal): { actual: number; apiEquivalent: number; effective: number } {
   const breakdown = proposal.outcome_cost_breakdown ?? {};
@@ -155,6 +155,7 @@ export function OutcomePanel({
     ))
     .sort((a, b) => (b.outcome_measured_at ?? 0) - (a.outcome_measured_at ?? 0))
     .slice(0, 5);
+  const hasVerifiedEvidence = evidence.some((proposal) => proposal.evidence_grade === "contract_verified");
   const aggregateCostLabel = data.measurement_effective_cost_usd == null
     ? `Effektiv — · bekannte Anteile: Ist-Kosten ${formatMoney(data.known_measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.known_measurement_api_equivalent_cost_usd)}`
     : `Effektiv ${formatMoney(data.measurement_effective_cost_usd)} · Ist-Kosten ${formatMoney(data.measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.measurement_api_equivalent_cost_usd)}`;
@@ -198,17 +199,23 @@ export function OutcomePanel({
           </span>
         </div>
 
-        <section aria-label={de.autoresearch.outcomeEvidence}>
-          <div className="mb-2 flex items-center gap-2">
-            <Activity aria-hidden className="h-4 w-4 text-live" />
-            <Text as="h3" variant="label" className="text-ink">{de.autoresearch.outcomeEvidence}</Text>
-          </div>
+        <Disclosure
+          defaultOpen={hasVerifiedEvidence}
+          className="rounded-panel border border-line bg-surface-2 px-3 py-2"
+          summary={
+            <span className="flex min-h-12 min-w-0 flex-1 items-center justify-between gap-3">
+              <span className="flex min-w-0 items-center gap-2 font-semibold text-ink"><Activity aria-hidden className="h-4 w-4 shrink-0 text-live" />{de.autoresearch.outcomeEvidence}</span>
+              <SignalChip tone={hasVerifiedEvidence ? "ok" : "neutral"} label={hasVerifiedEvidence ? "Bestätigter Beleg vorhanden" : "Noch kein bestätigter Beleg"} />
+            </span>
+          }
+        >
+          <section aria-label={de.autoresearch.outcomeEvidence} className="pt-3">
           {evidence.length === 0 ? (
-            <p className="rounded-panel border border-dashed border-line bg-surface-2 px-3 py-4 text-sm leading-6 text-ink-2">{de.autoresearch.outcomeEvidenceEmpty}</p>
+            <p className="rounded-panel border border-dashed border-line bg-surface-1 px-3 py-4 text-sm leading-6 text-ink-2">{de.autoresearch.outcomeEvidenceEmpty}</p>
           ) : (
             <div className="grid gap-2">
               {evidence.map((proposal) => (
-                <article key={proposal.id} className="rounded-panel border border-line bg-surface-2 p-3">
+                <article key={proposal.id} className="rounded-panel border border-line bg-surface-1 p-3">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0 space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
@@ -216,15 +223,15 @@ export function OutcomePanel({
                         <SignalChip tone={signalToneFromLegacy(proposal.evidence_grade === "contract_verified" ? "emerald" : "zinc")} label={proposal.evidence_grade === "contract_verified" ? de.autoresearch.outcomeContractVerified : de.autoresearch.outcomeLegacy} />
                       </div>
                       <Text as="h4" variant="label" className="pt-1 break-words text-ink">{proposal.title?.trim() || proposal.target}</Text>
-                      <p className="text-xs leading-5 text-ink-2">Claim: {proposal.probe_contract?.claim ?? "Kein vorregistrierter Claim"}</p>
-                      <p className="text-xs leading-5 text-ink-2">Baseline {observationValue(proposal.outcome_baseline)} · Danach {observationValue(proposal.outcome_observation)}</p>
-                      <p className="break-words text-xs leading-5 text-ink-3">Schwelle {compactJson(proposal.probe_contract?.success_rule)} · Gegenmetriken {compactJson(proposal.probe_contract?.counter_rules)} · Fenster {compactJson(proposal.probe_contract?.observation_window)}</p>
-                      <p className="break-words text-xs leading-5 text-ink-3">Umgebung {compactJson(proposal.probe_contract?.environment_requirements)} · Budget {compactJson(proposal.probe_contract?.measurement_budget)}</p>
-                      <p className="break-all font-data text-[11px] text-ink-3">Evidence {String(proposal.outcome_observation?.evidence_ref ?? proposal.outcome_baseline?.evidence_ref ?? "—")}</p>
+                      <p className="text-xs leading-5 text-ink-2">Nutzenannahme: {proposal.probe_contract?.claim ?? "Für diese Änderung wurde keine kurze Nutzenannahme gespeichert."}</p>
+                      <p className="text-xs leading-5 text-ink-2">Vorher {observationValue(proposal.outcome_baseline)} · Nachher {observationValue(proposal.outcome_observation)}</p>
+                      <p className="break-words text-xs leading-5 text-ink-3">Erfolgskriterium {compactJson(proposal.probe_contract?.success_rule)} · Schutzmetriken {compactJson(proposal.probe_contract?.counter_rules)} · Beobachtungszeit {compactJson(proposal.probe_contract?.observation_window)}</p>
+                      <p className="break-words text-xs leading-5 text-ink-3">Messumgebung {compactJson(proposal.probe_contract?.environment_requirements)} · Messbudget {compactJson(proposal.probe_contract?.measurement_budget)}</p>
+                      <p className="break-all font-data text-[11px] text-ink-3">Beleg {String(proposal.outcome_observation?.evidence_ref ?? proposal.outcome_baseline?.evidence_ref ?? "Kein technischer Beleg gespeichert")}</p>
                     </div>
                     <div className="grid shrink-0 gap-1 text-xs text-ink-3 sm:max-w-[320px] sm:text-right">
-                      <span className="inline-flex items-center gap-1 sm:justify-end"><BadgeCheck aria-hidden className="h-3.5 w-3.5" />{proposal.probe_contract?.contract_id ?? "Legacy ohne Probevertrag"}</span>
-                      <span className="inline-flex items-center gap-1 font-data sm:justify-end"><GitCommitHorizontal aria-hidden className="h-3.5 w-3.5" />{proposal.outcome_integration_sha?.slice(0, 12) ?? "kein Deployment-SHA"}</span>
+                      <span className="inline-flex items-center gap-1 sm:justify-end"><BadgeCheck aria-hidden className="h-3.5 w-3.5" />{proposal.probe_contract?.contract_id ?? "Kein Messvertrag gespeichert"}</span>
+                      <span className="inline-flex items-center gap-1 font-data sm:justify-end"><GitCommitHorizontal aria-hidden className="h-3.5 w-3.5" />{proposal.outcome_integration_sha?.slice(0, 12) ?? "Kein Integrationsstand gespeichert"}</span>
                       <span>{outcomeCostLabel(proposal)} · {proposal.outcome_operator_interventions ?? 0} Eingriffe</span>
                     </div>
                   </div>
@@ -232,7 +239,8 @@ export function OutcomePanel({
               ))}
             </div>
           )}
-        </section>
+          </section>
+        </Disclosure>
       </div>
     </Card>
     </section>
