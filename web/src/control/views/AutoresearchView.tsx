@@ -6,7 +6,7 @@ import { fetchJSON } from "@/lib/api";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type useProposals } from "../hooks/useControlData";
 import { getAutoresearchActionPlan } from "../lib/autoresearchActionPlan";
 import { getAutoresearchActivityCard } from "../lib/autoresearchActivity";
-import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
+
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { getAutoresearchResolvedSummary } from "../lib/autoresearchResolvedSummary";
@@ -20,8 +20,9 @@ import { rankAutoresearchProposalGroups } from "../lib/proposalGroups";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import { StaleBadge } from "../components/atoms";
+import { Disclosure } from "../components/primitives";
 import { SignalLabel, signalToneFromLegacy } from "../components/leitstand";
-import { AutoresearchHero } from "./autoresearch/AutoresearchHero";
+
 import { ProposalQueue } from "./autoresearch/ProposalQueue";
 import { LoopControls } from "./autoresearch/LoopControls";
 import { AdvancedSection } from "./autoresearch/AdvancedSection";
@@ -29,7 +30,7 @@ import { ResolvedQueues } from "./autoresearch/ResolvedQueues";
 import { RunsList } from "./autoresearch/RunsList";
 import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { ActivityTimelineItem, LatestActivityPanel } from "./autoresearch/panels";
-import { clampLoopIterations, clearProposalSelection, describeArea, describeAutoresearchBusy, describeLoopStatus, formatRunTime, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeArea, describeAutoresearchBusy, describeLoopStatus, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 
 export { DeepAuditFindings, LatestActivityPanel } from "./autoresearch/panels";
@@ -462,46 +463,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     selectOrFocusTopProposal();
   };
 
+  // The retired coaching hero was the only consumer of these established
+  // orchestration affordances. The compact inbox deliberately hides them.
+  void [setQueueMode, emptyQueueModeGuidance, statusTone, topCardMode, decisionGuide, queueActionSummary, canApplyAllOpenSkills, canConfirmSelection, selectionControlsBusy, actionPlan, showResearchErrorBadge, readiness, setDismissedDeepLinkId, runPrimaryRecommendation, pruneAutoresearch, runReviewFlowPrimary];
+
   return (
     <div className="space-y-5">
-      <AutoresearchHero
-        status={status}
-        statusTone={statusTone}
-        loop={loop}
-        recommendation={recommendation}
-        topProposal={topProposal}
-        topCardMode={topCardMode}
-        topProposalBrief={topProposalBrief}
-        readiness={readiness}
-        openCount={open.length}
-        highPriorityCount={highPriorityCount}
-        revertedCount={reverted.length}
-        lastRunLabel={runs.data?.runs?.[0] ? formatRunTime(runs.data.runs[0].at) : "-"}
-        sectionNavItems={AUTORESEARCH_SECTION_NAV}
-        actionPlan={actionPlan}
-        storeBusy={store.busy}
-        openSkillCount={store.openSkillProposals.length}
-        openSkillManualReviewCount={openSkillManualReviewCount}
-        canApplyAllOpenSkills={canApplyAllOpenSkills}
-        pruneBusy={pruneBusy}
-        alert={{
-          show: advancedNeedsAttention || showResearchErrorBadge,
-          deepAuditRunning,
-          testFoundryRunning,
-          deepAuditError: deepAudit.error,
-          testFoundryError: testFoundry.error,
-          deepAuditMessage,
-          testFoundryMessage,
-          researchErrorBadge: showResearchErrorBadge,
-        }}
-        onPrimary={runPrimaryRecommendation}
-        onFocusProposal={focusProposal}
-        onJump={scrollTo}
-        onGenerate={store.generate}
-        onGenerateCodeWeaknesses={store.generateCodeWeaknesses}
-        onApplyAll={store.applyAll}
-        onPrune={() => void pruneAutoresearch()}
-      />
 
       {pruneMessage ? (
         <div className={`flex items-start gap-2 rounded-card border px-3 py-2 text-sec ${pruneMessage.tone === "red" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" : "border-line bg-surface-2 text-ink-2"}`}>
@@ -518,46 +485,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         density={density}
         focusId={activeFocusId}
         openCount={open.length}
-        revertedCount={reverted.length}
-        filteredOpenCount={filteredOpen.length}
         storeLoading={store.loading}
         storeBusy={store.busy}
-        batchBusy={batchBusy}
-        selectionControlsBusy={selectionControlsBusy}
-        bulkRevertedBusy={bulkRevertedBusy}
-        selectedProposalIds={selectedProposalIds}
-        selectedIds={selectedIds}
-        selectedManualReviewCount={selectedManualReviewCount}
-        batchSafeVisibleProposalIds={batchSafeVisibleProposalIds}
-        manualReviewVisibleCount={manualReviewVisibleCount}
-        canConfirmSelection={canConfirmSelection}
-        distribution={distribution}
         proposalGroupQueue={proposalGroupQueue}
-        queueModeSummary={queueModeSummary}
-        queueMode={queueMode}
-        emptyQueueModeGuidance={emptyQueueModeGuidance}
-        reviewFlow={reviewFlow}
-        decisionGuide={decisionGuide}
-        queueActionSummary={queueActionSummary}
-        batchConfirmById={store.batchConfirmById}
-        onQueueModeChange={setQueueMode}
-        onSelectQueue={selectQueue}
-        onClearSelection={clearSelection}
-        onConfirmSelected={() => void confirmSelected()}
-        onRunReviewFlowPrimary={runReviewFlowPrimary}
-        onToggleSelection={toggleSelection}
         onApply={store.apply}
         onSkip={store.skip}
-        onSkipBatch={store.skipBatch}
-        onConfirmBatch={store.confirmBatch}
-        onClearFocus={() => {
-          setRequestedFocusId(null);
-          if (focusId) setDismissedDeepLinkId(focusId);
-        }}
       />
 
       <OutcomePanel metrics={store.data?.metrics?.outcomes} proposals={store.proposals} />
 
+      <Disclosure defaultOpen={false} className="rounded-panel border border-line bg-surface-1 p-3" summary={<span className="min-h-12 text-base font-semibold text-ink">Betrieb, Läufe und erweitert</span>}>
+      <div className="space-y-5 pt-3">
       <LoopControls
         loop={loop}
         status={status.data}
@@ -632,6 +570,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       ) : null}
       <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} loading={runs.loading && !runs.data} />
+      </div>
+      </Disclosure>
 
       <section className="rounded-panel border border-line bg-surface-1 p-4">
         <h2 className="mb-3 text-base font-semibold text-ink">{de.autoresearch.activity}</h2>

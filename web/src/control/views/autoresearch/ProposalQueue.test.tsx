@@ -100,15 +100,16 @@ function queueProps(focusId: string | null) {
 }
 
 describe("ProposalQueue focus", () => {
-  it("renders and expands a collapsed real proposal when focus is requested", () => {
+  it("shows one real proposal at a time with compact progress and thumb actions", () => {
     const { rerender } = render(<ProposalQueue {...queueProps(null)} />);
-    const disclosure = screen.getByRole("button", { name: "1 Einzelkarte anzeigen" });
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(document.getElementById(`autoresearch-proposal-${realProposal.id}`)).toBeNull();
+    expect(screen.getByText("1 Entscheidung wartet")).toBeTruthy();
+    expect(screen.getByText("1 von 1")).toBeTruthy();
+    expect(document.getElementById(`autoresearch-proposal-${realProposal.id}`)).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Annehmen" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ablehnen" })).toBeTruthy();
 
     rerender(<ProposalQueue {...queueProps(realProposal.id)} />);
 
-    expect(screen.getByRole("button", { name: "1 Einzelkarte anzeigen" }).getAttribute("aria-expanded")).toBe("true");
     expect(document.getElementById(`autoresearch-proposal-${realProposal.id}`)).not.toBeNull();
   });
 });

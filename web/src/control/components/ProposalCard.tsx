@@ -30,6 +30,7 @@ interface Props {
   batchSelectable?: boolean;
   batchStatus?: { status: "pending" | "ok" | "fail"; detail?: string };
   priorityGroup?: ProposalPriorityGroup;
+  showActions?: boolean;
   onApply: (proposal: Proposal) => void;
   onSkip: (proposal: Proposal) => void;
   onSelectedChange?: (proposal: Proposal, selected: boolean) => void;
@@ -227,7 +228,7 @@ function operatorRisk(proposal: Proposal): string {
   return "Die Anleitung kann sich anders verhalten als gewohnt; Ablehnen lässt alles unverändert.";
 }
 
-export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
+export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, showActions = true, onApply, onSkip, onSelectedChange }: Props) {
   const lines = toDiffLines(proposal.diff_before_after).filter((line) => line.type !== "ctx");
   const isCode = proposal.mode === "code";
   const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
@@ -320,7 +321,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         <ProposalCallout tone={doneLabel === "Integriert" ? "ok" : "warn"} label={doneLabel}>{proposal.result || (doneLabel === "Integriert" ? de.autoresearch.applied : de.autoresearch.skipped)}</ProposalCallout>
       ) : isTesting ? (
         <ProposalCallout tone="neutral" label="Gate läuft"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ProposalCallout>
-      ) : isActionable ? (
+      ) : isActionable && showActions ? (
         <div className="space-y-3">
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button outlined className="min-h-12" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>

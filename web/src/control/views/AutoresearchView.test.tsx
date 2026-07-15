@@ -1548,17 +1548,10 @@ describe("AutoresearchView measured outcomes", () => {
 
     expect(html).toContain("Integriert ist nicht gleich verbessert.");
     expect(html).toContain("Nutzen bestätigt");
-    expect(html).toContain("Silent exception removed");
-    expect(html).toContain("outcome:source_pattern.v1:abc");
-    expect(html).toContain("aaaaaaaaaaaa");
-    expect(html).toContain("occurrences: 1");
-    expect(html).toContain("occurrences: 0");
-    expect(html).toContain("Silent exceptions decrease");
-    expect(html).toContain("pytest_version");
-    expect(html).toContain("max_attempts");
     expect(html).toContain("n=1");
-    expect(html).toContain("Integrated without measurement");
     expect(html).toContain("nicht messbar");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Silent exception removed");
   });
 
   it("shows an honest empty state when no contract has measured benefit", () => {
@@ -1583,7 +1576,6 @@ describe("AutoresearchView measured outcomes", () => {
 
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
 
-    expect(html).toContain("Kosten unvollständig");
     expect(html).toContain("Kostenabdeckung 0/1");
     expect(html).toContain("Effektiv —");
     expect(html).not.toContain("Effektiv 0,00");

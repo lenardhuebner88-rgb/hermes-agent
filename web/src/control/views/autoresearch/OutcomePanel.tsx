@@ -200,7 +200,7 @@ export function OutcomePanel({
         </div>
 
         <Disclosure
-          defaultOpen={hasVerifiedEvidence}
+          defaultOpen={false}
           className="rounded-panel border border-line bg-surface-2 px-3 py-2"
           summary={
             <span className="flex min-h-12 min-w-0 flex-1 items-center justify-between gap-3">
