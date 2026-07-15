@@ -48,8 +48,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -155,9 +157,12 @@ def load_alerts_config(cfg: Any) -> dict:
 
 
 def new_alert_state() -> dict:
-    """Fresh watcher state. ``last_seen_run_id`` is lazily initialized to the
-    current MAX(id) on the first tick so a gateway (re)start never replays
-    historic failures as fresh alerts."""
+    """Fresh watcher state for a first-ever alert evaluator.
+
+    Production loads this state from disk after the first successful tick, so
+    ordinary gateway restarts retain their confirmed cursors. Lazy MAX(id)
+    initialization only suppresses history when no durable state exists yet.
+    """
     return {
         "last_seen_run_id": None,
         "last_seen_operator_escalation_event_id": None,
@@ -167,6 +172,48 @@ def new_alert_state() -> dict:
         # cursor rules only; reset to 0 on a confirmed send or a backstop).
         "send_attempts": {},
     }
+
+
+def load_alert_state(path: str | Path) -> dict:
+    """Load durable alert cursors, falling back safely on missing/corrupt data."""
+    state = new_alert_state()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return state
+    if not isinstance(payload, dict):
+        return state
+    for key in (
+        "last_seen_run_id",
+        "last_seen_operator_escalation_event_id",
+        "last_seen_auto_release_event_id",
+    ):
+        value = payload.get(key)
+        if value is None or isinstance(value, int):
+            state[key] = value
+    for key in ("last_sent", "send_attempts"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            state[key] = value
+    return state
+
+
+def save_alert_state(path: str | Path, state: dict) -> None:
+    """Atomically persist confirmed cursors for restart/failover continuity."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(target)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _cooldown_ok(state: dict, rule: str, now: int, cooldown_seconds: float) -> bool:

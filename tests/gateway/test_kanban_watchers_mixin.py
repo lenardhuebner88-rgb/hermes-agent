@@ -16,6 +16,7 @@ KANBAN_METHODS = [
     "_kanban_alert_rules_tick",
     "_kanban_dispatcher_watcher",
     "_kanban_advance",
+    "_kanban_checkpoint",
     "_kanban_unsub",
     "_kanban_rewind",
     "_deliver_kanban_artifacts",

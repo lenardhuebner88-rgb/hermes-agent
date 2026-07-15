@@ -115,6 +115,11 @@ def test_legacy_text_pk_tables_rebuilt_to_integer_autoincrement(tmp_path, monkey
 
         lei = {r["name"]: r for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
         assert lei["last_event_id"]["type"].upper() == "INTEGER"
+        assert {
+            "delivery_claim_token",
+            "delivery_claim_expires",
+            "delivery_claim_from_event_id",
+        }.issubset(lei)
 
         # Data preserved across the rebuild.
         assert len(conn.execute("SELECT * FROM task_events").fetchall()) == 2

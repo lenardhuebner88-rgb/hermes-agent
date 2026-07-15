@@ -150,7 +150,13 @@ def test_second_gateway_cannot_evaluate_alert_rules(tmp_path, monkeypatch):
     second = _make_runner()
     first._running = False
     second_tick = MagicMock()
-    lock_states = iter([(object(), "held"), (None, "contended")])
+    lock_states = iter([(object(), "held"), (None, "contended"), (None, "contended")])
+    sleep_calls = []
+
+    async def fake_sleep(_delay):
+        sleep_calls.append(True)
+        if len(sleep_calls) >= 2:
+            second._running = False
 
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
@@ -166,12 +172,54 @@ def test_second_gateway_cannot_evaluate_alert_rules(tmp_path, monkeypatch):
         watchers, "_acquire_singleton_lock", lambda _path: next(lock_states)
     )
     monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(second, "_kanban_alert_rules_tick", second_tick)
 
     asyncio.run(first._kanban_notifications_watcher())
     asyncio.run(second._kanban_notifications_watcher())
 
     second_tick.assert_not_called()
+
+
+def test_contended_alert_gateway_takes_over_after_owner_exits(tmp_path, monkeypatch):
+    """A live standby retries the singleton lock and becomes alert leader."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import kanban_db as _kb
+
+    runner = _make_runner()
+    alert_ticks = []
+    lock_states = iter([(None, "contended"), (object(), "held")])
+    sleep_calls = []
+
+    async def fake_sleep(_delay):
+        sleep_calls.append(True)
+        if alert_ticks:
+            runner._running = False
+
+    async def alert_tick(config, state):
+        alert_ticks.append((config, state))
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": False,
+                "alerts": {"enabled": True, "channel_id": "operator-room"},
+            }
+        },
+    )
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: next(lock_states)
+    )
+    monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runner, "_kanban_alert_rules_tick", alert_tick)
+
+    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+
+    assert len(alert_ticks) == 1
+    assert runner._kanban_alerts_lock_handle is None
 
 
 def test_notifier_watcher_runs_when_dispatch_enabled():

@@ -15,8 +15,10 @@ import pytest
 
 from gateway.kanban_alerts import (
     evaluate_alerts,
+    load_alert_state,
     load_alerts_config,
     new_alert_state,
+    save_alert_state,
 )
 from hermes_cli import kanban_db as kb
 
@@ -108,6 +110,22 @@ def test_first_tick_never_replays_historic_failures(kanban_home):
         assert evaluate_alerts(conn, _acfg(), state, now=NOW) == []
         # And an immediately following tick without new runs stays silent too.
         assert evaluate_alerts(conn, _acfg(), state, now=NOW + 1) == []
+
+
+def test_persisted_alert_cursor_delivers_events_created_during_downtime(
+    kanban_home, tmp_path
+):
+    state_path = tmp_path / "alert-state.json"
+    with kb.connect() as conn:
+        state = _primed_state(conn)
+        save_alert_state(state_path, state)
+        _insert_run(conn, status="failed", error="during downtime")
+
+        restarted = load_alert_state(state_path)
+        alerts = evaluate_alerts(conn, _acfg(), restarted, now=NOW + 1)
+
+    assert [alert["rule"] for alert in alerts] == ["run_failed"]
+    assert "during downtime" in alerts[0]["text"]
 
 
 def test_same_failure_not_alerted_twice(kanban_home):

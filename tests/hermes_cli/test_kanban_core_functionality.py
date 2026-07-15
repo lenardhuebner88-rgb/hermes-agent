@@ -732,6 +732,143 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
         conn2.close()
 
 
+def test_notify_delivery_lease_prevents_overtake_and_event_loss(kanban_home):
+    """A second watcher cannot advance beyond an in-flight delivery batch.
+
+    The first watcher durably checkpoints event A, then fails on event B while
+    event C arrives. Releasing its lease at A must let the second watcher claim
+    B+C; neither event may be stranded behind C's newer cursor.
+    """
+    conn1 = kb.connect()
+    conn2 = kb.connect()
+    try:
+        tid = kb.create_task(conn1, title="leased", assignee="w")
+        kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
+        kb._append_event(conn1, tid, kind="crashed")
+        kb._append_event(conn1, tid, kind="crashed")
+
+        old_cursor, claimed_cursor, first_batch = kb.claim_unseen_events_for_sub(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            kinds=["crashed"],
+            claim_token="watcher-a",
+            lease_seconds=60,
+        )
+        assert len(first_batch) == 2
+
+        kb._append_event(conn2, tid, kind="crashed")
+        _, _, overtaking = kb.claim_unseen_events_for_sub(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            kinds=["crashed"],
+            claim_token="watcher-b",
+            lease_seconds=60,
+        )
+        assert overtaking == []
+
+        delivered_cursor = first_batch[0].id
+        assert kb.advance_notify_delivery_claim(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claim_token="watcher-a",
+            delivered_cursor=delivered_cursor,
+            lease_seconds=60,
+        )
+        assert kb.rewind_notify_cursor(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claimed_cursor=claimed_cursor,
+            old_cursor=delivered_cursor,
+            claim_token="watcher-a",
+        )
+
+        _, retry_cursor, retried = kb.claim_unseen_events_for_sub(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            kinds=["crashed"],
+            claim_token="watcher-b",
+            lease_seconds=60,
+        )
+        assert [event.id for event in retried] == [
+            first_batch[1].id,
+            first_batch[1].id + 1,
+        ]
+        assert kb.ack_notify_delivery_claim(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claim_token="watcher-b",
+            claimed_cursor=retry_cursor,
+        )
+    finally:
+        conn1.close()
+        conn2.close()
+
+
+def test_expired_notify_delivery_lease_recovers_from_confirmed_cursor(kanban_home):
+    conn1 = kb.connect()
+    conn2 = kb.connect()
+    try:
+        tid = kb.create_task(conn1, title="recover lease", assignee="w")
+        kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
+        kb._append_event(conn1, tid, kind="crashed")
+        kb._append_event(conn1, tid, kind="crashed")
+        _, _, claimed = kb.claim_unseen_events_for_sub(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            kinds=["crashed"],
+            claim_token="dead-watcher",
+        )
+        assert kb.advance_notify_delivery_claim(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claim_token="dead-watcher",
+            delivered_cursor=claimed[0].id,
+        )
+        with kb.write_txn(conn1):
+            conn1.execute(
+                "UPDATE kanban_notify_subs SET delivery_claim_expires = 0 "
+                "WHERE task_id = ?",
+                (tid,),
+            )
+
+        _, retry_cursor, recovered = kb.claim_unseen_events_for_sub(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            kinds=["crashed"],
+            claim_token="standby-watcher",
+        )
+        assert [event.id for event in recovered] == [claimed[1].id]
+        assert kb.ack_notify_delivery_claim(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claim_token="standby-watcher",
+            claimed_cursor=retry_cursor,
+        )
+    finally:
+        conn1.close()
+        conn2.close()
+
+
 # ---------------------------------------------------------------------------
 # GC + retention
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import logging
 import os
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -973,12 +974,18 @@ class GatewayKanbanWatchersMixin:
 
         alert_cfg: Optional[dict] = None
         alert_state: Optional[dict] = None
+        alert_lock_path: Optional[Path] = None
+        alert_state_path: Optional[Path] = None
+        load_alert_state: Optional[Callable[[Path], dict]] = None
+        save_alert_state: Optional[Callable[[Path, dict], None]] = None
         next_alert_tick = 0.0
+        next_alert_lock_attempt = 0.0
         self._kanban_alerts_lock_handle = None
         try:
             from gateway.kanban_alerts import (
+                load_alert_state as _load_alert_state,
                 load_alerts_config as _load_alerts_config,
-                new_alert_state as _new_alert_state,
+                save_alert_state as _save_alert_state,
             )
 
             candidate = _load_alerts_config(cfg)
@@ -987,7 +994,12 @@ class GatewayKanbanWatchersMixin:
                 or candidate.get("escalation_channel_id")
             ):
                 alert_cfg = candidate
-                alert_state = _new_alert_state()
+                load_alert_state = _load_alert_state
+                save_alert_state = _save_alert_state
+                alert_lock_path = _kb.kanban_home() / "kanban" / ".alerts.lock"
+                alert_state_path = (
+                    _kb.kanban_home() / "kanban" / "alert-state.json"
+                )
                 logger.info(
                     "kanban notifications: alert rules enabled — interval=%ss",
                     candidate["interval_seconds"],
@@ -1007,13 +1019,14 @@ class GatewayKanbanWatchersMixin:
         # they cannot deduplicate two gateway processes.  Lease the evaluator
         # machine-wide while leaving subscription delivery free to rely on its
         # atomic DB claim contract.
-        if alert_cfg is not None:
-            alert_lock_path = _kb.kanban_home() / "kanban" / ".alerts.lock"
+        if alert_cfg is not None and alert_lock_path is not None:
             alert_lock_handle, alert_lock_state = _acquire_singleton_lock(
                 alert_lock_path
             )
             if alert_lock_state == "held":
                 self._kanban_alerts_lock_handle = alert_lock_handle
+                if load_alert_state is not None and alert_state_path is not None:
+                    alert_state = load_alert_state(alert_state_path)
                 logger.info(
                     "kanban notifications: holding singleton alert lock (%s)",
                     alert_lock_path,
@@ -1024,12 +1037,10 @@ class GatewayKanbanWatchersMixin:
                     if alert_lock_state == "contended"
                     else logging.WARNING,
                     "kanban notifications: alert lock %s at %s; this gateway "
-                    "will not evaluate alert rules",
+                    "will retry as a standby",
                     alert_lock_state,
                     alert_lock_path,
                 )
-                alert_cfg = None
-                alert_state = None
 
         if not subscriptions_enabled and alert_cfg is None:
             return
@@ -1044,6 +1055,29 @@ class GatewayKanbanWatchersMixin:
 
         while self._running:
             try:
+                now_monotonic = time.monotonic()
+                if (
+                    alert_cfg is not None
+                    and self._kanban_alerts_lock_handle is None
+                    and alert_lock_path is not None
+                    and now_monotonic >= next_alert_lock_attempt
+                ):
+                    next_alert_lock_attempt = now_monotonic + 5.0
+                    alert_lock_handle, alert_lock_state = _acquire_singleton_lock(
+                        alert_lock_path
+                    )
+                    if alert_lock_state == "held":
+                        self._kanban_alerts_lock_handle = alert_lock_handle
+                        if (
+                            load_alert_state is not None
+                            and alert_state_path is not None
+                        ):
+                            alert_state = load_alert_state(alert_state_path)
+                        next_alert_tick = 0.0
+                        logger.info(
+                            "kanban notifications: standby acquired alert lock (%s)",
+                            alert_lock_path,
+                        )
                 if (
                     alert_cfg is not None
                     and alert_state is not None
@@ -1055,7 +1089,16 @@ class GatewayKanbanWatchersMixin:
                     next_alert_tick = (
                         time.monotonic() + float(alert_cfg["interval_seconds"])
                     )
-                    await self._kanban_alert_rules_tick(alert_cfg, alert_state)
+                    try:
+                        await self._kanban_alert_rules_tick(alert_cfg, alert_state)
+                    finally:
+                        if (
+                            save_alert_state is not None
+                            and alert_state_path is not None
+                        ):
+                            await asyncio.to_thread(
+                                save_alert_state, alert_state_path, alert_state
+                            )
                 # F1: before collecting deliveries, flush any stalled root's
                 # suppressed child-successes as a one-time trailing report.
                 # Fully fail-soft — a sweep hiccup must never stop the tick.
@@ -1144,6 +1187,7 @@ class GatewayKanbanWatchersMixin:
                                         sub.get("task_id"), platform or "<missing>",
                                     )
                                     continue
+                                claim_token = uuid.uuid4().hex
                                 old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                     conn,
                                     task_id=sub["task_id"],
@@ -1151,6 +1195,7 @@ class GatewayKanbanWatchersMixin:
                                     chat_id=sub["chat_id"],
                                     thread_id=sub.get("thread_id") or "",
                                     kinds=REPORT_KINDS,
+                                    claim_token=claim_token,
                                 )
                                 if not events:
                                     continue
@@ -1173,6 +1218,7 @@ class GatewayKanbanWatchersMixin:
                                     "sub": sub,
                                     "old_cursor": old_cursor,
                                     "cursor": cursor,
+                                    "claim_token": claim_token,
                                     "events": events,
                                     "task": task,
                                     "runs_by_event_id": runs_by_event_id,
@@ -1195,7 +1241,11 @@ class GatewayKanbanWatchersMixin:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            d.get("claim_token"),
                         )
                         continue
                     sub_profile = sub.get("notifier_profile") or ""
@@ -1220,6 +1270,7 @@ class GatewayKanbanWatchersMixin:
                             d["cursor"],
                             d.get("old_cursor", 0),
                             board_slug,
+                            d.get("claim_token"),
                         )
                         continue
                     board_tag = f"[{board_slug}] " if board_slug else ""
@@ -1424,6 +1475,13 @@ class GatewayKanbanWatchersMixin:
                             # start of the batch (FINDING #6 duplicate-report
                             # fix).
                             delivered_cursor = int(ev.id)
+                            await asyncio.to_thread(
+                                self._kanban_checkpoint,
+                                sub,
+                                delivered_cursor,
+                                board_slug,
+                                d.get("claim_token"),
+                            )
                             sub_fail_counts.pop(sub_key, None)
                         except Exception as exc:
                             fails = sub_fail_counts.get(sub_key, 0) + 1
@@ -1454,12 +1512,20 @@ class GatewayKanbanWatchersMixin:
                                     d["cursor"],
                                     delivered_cursor,
                                     board_slug,
+                                    d.get("claim_token"),
                                 )
                             # Rewind the pre-send claim on transient failure so
                             # a later tick can retry. After too many failures,
                             # dropping the subscription is the terminal action.
                             break
                     else:
+                        await asyncio.to_thread(
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            d.get("claim_token"),
+                        )
                         # Unsubscribe only when the task has reached a truly
                         # final status (done / archived). For blocked /
                         # gave_up / crashed / timed_out the subscription is
@@ -1682,7 +1748,11 @@ class GatewayKanbanWatchersMixin:
                 conn.close()
 
     def _kanban_advance(
-        self, sub: dict, cursor: int, board: Optional[str] = None,
+        self,
+        sub: dict,
+        cursor: int,
+        board: Optional[str] = None,
+        claim_token: Optional[str] = None,
     ) -> None:
         """Sync helper: advance a subscription's cursor. Runs in to_thread.
 
@@ -1692,14 +1762,54 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
-            _kb.advance_notify_cursor(
+            if claim_token:
+                acknowledged = _kb.ack_notify_delivery_claim(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    claim_token=claim_token,
+                    claimed_cursor=cursor,
+                )
+                if not acknowledged:
+                    raise RuntimeError("notification delivery lease was lost")
+            else:
+                _kb.advance_notify_cursor(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    new_cursor=cursor,
+                )
+        finally:
+            conn.close()
+
+    def _kanban_checkpoint(
+        self,
+        sub: dict,
+        delivered_cursor: int,
+        board: Optional[str] = None,
+        claim_token: Optional[str] = None,
+    ) -> None:
+        """Durably checkpoint progress inside a leased delivery batch."""
+        if not claim_token:
+            return
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect(board=board)
+        try:
+            if not _kb.advance_notify_delivery_claim(
                 conn,
                 task_id=sub["task_id"],
                 platform=sub["platform"],
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
-                new_cursor=cursor,
-            )
+                claim_token=claim_token,
+                delivered_cursor=delivered_cursor,
+            ):
+                raise RuntimeError("notification delivery lease was lost")
         finally:
             conn.close()
 
@@ -1723,6 +1833,7 @@ class GatewayKanbanWatchersMixin:
         claimed_cursor: int,
         old_cursor: int,
         board: Optional[str] = None,
+        claim_token: Optional[str] = None,
     ) -> None:
         """Sync helper: undo a claimed notification cursor after send failure."""
         from hermes_cli import kanban_db as _kb
@@ -1736,6 +1847,7 @@ class GatewayKanbanWatchersMixin:
                 thread_id=sub.get("thread_id") or "",
                 claimed_cursor=claimed_cursor,
                 old_cursor=old_cursor,
+                claim_token=claim_token,
             )
         finally:
             conn.close()
