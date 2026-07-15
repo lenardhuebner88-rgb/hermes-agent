@@ -15613,42 +15613,21 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     raise ValueError(f"unknown workspace_kind: {kind}")
 
 
-def _resolve_dispatch_workspace(
+def _resolve_existing_dispatch_workspace(
     task: Task, *, board: Optional[str] = None
 ) -> tuple[Path, Optional[str]]:
-    """Claim-time workspace resolution, reconciling upstream's linked-worktree
-    materializer with our ``worker_isolation`` system.
-
-    Returns ``(workspace, resolved_branch_name)``.
-
-    Two worktree systems coexist and are mutually exclusive per dispatch:
-    - ``kanban.worker_isolation == "worktree"`` (fork): worktree materialization
-      is owned by :func:`kanban_worktrees.provision_for_task`, which the
-      dispatcher calls separately with its own spawn-retry budget and lifecycle
-      (chain root, merge-target freeze). Here we only resolve a
-      NON-materializing base path so that provisioner stays the single
-      materializer — otherwise the upstream materializer below would run first
-      and pre-empt it (and ``raise`` on a non-git base, bypassing the
-      provisioning spawn-retry path entirely).
-    - ``worker_isolation`` off (upstream default): an explicit
-      ``workspace_kind=worktree`` task is materialized by
-      :func:`_resolve_worktree_workspace` (anchored on the board
-      ``default_workdir``), returning the worktree path and its branch.
-    """
-    if task.workspace_kind != "worktree":
-        return resolve_workspace(task, board=board), None
-
-    try:
-        from hermes_cli import kanban_worktrees as _kwt
-
-        isolation_active = _kwt.isolation_mode() == "worktree"
-    except Exception:
-        isolation_active = False
-
-    if not isolation_active:
+    """Resolve through the upstream/default workspace materializer."""
+    if task.workspace_kind == "worktree":
         return _resolve_worktree_workspace(task, board=board)
+    return resolve_workspace(task, board=board), None
 
-    # worker_isolation owns materialization — resolve a base path only.
+
+def _resolve_managed_workspace_base(
+    task: Task, *, board: Optional[str] = None
+) -> Path:
+    """Resolve a non-materializing base for managed isolation."""
+    if task.workspace_kind != "worktree":
+        return resolve_workspace(task, board=board)
     if task.workspace_path:
         base = Path(task.workspace_path).expanduser()
         if not base.is_absolute():
@@ -15656,14 +15635,39 @@ def _resolve_dispatch_workspace(
                 f"task {task.id} has non-absolute worktree path "
                 f"{task.workspace_path!r}; use an absolute path"
             )
-        return base, None
+        return base
     board_slug = board if board else get_current_board()
     board_default = (
         read_board_metadata(board_slug).get("default_workdir") or ""
     ).strip()
     if board_default:
-        return Path(board_default).expanduser(), None
-    return workspaces_root(board=board) / task.id, None
+        return Path(board_default).expanduser()
+    return workspaces_root(board=board) / task.id
+
+
+def _resolve_dispatch_workspace(
+    conn: sqlite3.Connection,
+    task: Task,
+    *,
+    board: Optional[str] = None,
+) -> tuple[Path, Optional[str]]:
+    """Materialize one claim workspace through the explicit-mode facade."""
+    from hermes_cli import kanban_worktrees as _kwt
+
+    mode = (
+        _kwt.MANAGED_WORKTREE_PROVISION
+        if _kwt.isolation_mode() == "worktree"
+        else _kwt.RESOLVE_EXISTING_WORKSPACE
+    )
+    resolved = _kwt.materialize_dispatch_workspace(
+        conn,
+        task,
+        mode=mode,
+        board=board,
+        resolve_existing=_resolve_existing_dispatch_workspace,
+        resolve_managed_base=_resolve_managed_workspace_base,
+    )
+    return resolved.path, resolved.branch_name
 
 
 def set_workspace_path(
@@ -23928,10 +23932,36 @@ def _dispatch_once_locked(
         )
         if claimed is None:
             continue
+        from hermes_cli import kanban_worktrees as _kwt
+
         try:
             workspace, resolved_branch_name = _resolve_dispatch_workspace(
-                claimed, board=board
+                conn, claimed, board=board
             )
+        except _kwt.WorktreeError as exc:
+            # Managed provisioning has its own bounded retry budget. A git-lock
+            # timeout is infrastructure, not a task defect, so it must not burn
+            # the task's consecutive-failure budget until that lane is spent.
+            spawn_retry_limit = int(
+                os.environ.get("HERMES_SPAWN_RETRY_LIMIT", SPAWN_RETRY_LIMIT)
+            )
+            transient = isinstance(exc, _kwt.WorktreeTimeout)
+            if transient and _count_spawn_retries(conn, claimed.id) < spawn_retry_limit:
+                _record_spawn_retry(
+                    conn,
+                    claimed.id,
+                    f"worktree provisioning (transient): {exc}",
+                )
+            else:
+                auto = _record_spawn_failure(
+                    conn,
+                    claimed.id,
+                    f"worktree provisioning: {exc}",
+                    failure_limit=failure_limit,
+                )
+                if auto:
+                    result.auto_blocked.append(claimed.id)
+            continue
         except Exception as exc:
             # Transient infra (workspace resolution) — bounded transient retry
             # before the normal escalation (HEILER-TRANSIENT-RETRY-BUDGET-S1).
@@ -23955,56 +23985,6 @@ def _dispatch_once_locked(
                 or (claimed.branch_name or "").strip()
                 or f"wt/{claimed.id}",
             )
-        # Worker isolation (kanban.worker_isolation: worktree): provision a
-        # dispatcher-managed git worktree for repo tasks at claim time. The
-        # provisioner re-persists the worktree path on the task row; a
-        # provisioning failure counts as a spawn failure, exactly like a
-        # resolve_workspace error. Flag off → byte-identical to before.
-        try:
-            from hermes_cli import kanban_worktrees as _kwt
-
-            if _kwt.isolation_mode() == "worktree":
-                workspace = _kwt.provision_for_task(
-                    conn,
-                    claimed,
-                    workspace,
-                    board=board,
-                )
-        except Exception as exc:
-            from hermes_cli import kanban_worktrees as _kwt
-
-            # A transient git-lock timeout is infrastructure, not a task
-            # defect: re-queue to ``ready`` WITHOUT consuming the
-            # consecutive_failures budget, up to SPAWN_RETRY_LIMIT (read from
-            # the env at call time so operators/tests can tune it). Only once
-            # the spawn budget is spent — or for a permanent WorktreeError —
-            # do we fall back to the normal counted spawn-failure/block path.
-            spawn_retry_limit = int(
-                os.environ.get("HERMES_SPAWN_RETRY_LIMIT", SPAWN_RETRY_LIMIT)
-            )
-            transient = isinstance(exc, _kwt.WorktreeTimeout)
-            if transient and _count_spawn_retries(conn, claimed.id) < spawn_retry_limit:
-                _record_spawn_retry(
-                    conn,
-                    claimed.id,
-                    f"worktree provisioning (transient): {exc}",
-                )
-            else:
-                # WorktreeTimeout budget already spent (its own bounded
-                # spawn_retry lane), or a permanent WorktreeError (missing repo
-                # etc.) where a retry cannot help: escalate via the normal path.
-                # Deliberately NOT routed through the general transient-retry
-                # budget — that would double-stack a second budget on a path that
-                # already has one and break the spawn-budget contract.
-                auto = _record_spawn_failure(
-                    conn,
-                    claimed.id,
-                    f"worktree provisioning: {exc}",
-                    failure_limit=failure_limit,
-                )
-                if auto:
-                    result.auto_blocked.append(claimed.id)
-            continue
         try:
             _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
         except _kwt.WorktreeError as exc:
@@ -24244,7 +24224,7 @@ def _dispatch_once_locked(
             continue
         try:
             workspace, resolved_branch_name = _resolve_dispatch_workspace(
-                claimed, board=board
+                conn, claimed, board=board
             )
         except Exception as exc:
             _phase, auto = _spawn_failure_or_transient_retry(

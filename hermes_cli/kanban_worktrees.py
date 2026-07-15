@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -365,6 +366,57 @@ class WorktreeTimeout(WorktreeError):
     working, but the dispatcher can isinstance-check it to re-queue instead
     of permanently blocking.
     """
+
+
+RESOLVE_EXISTING_WORKSPACE = "resolve_existing"
+MANAGED_WORKTREE_PROVISION = "managed_provision"
+_WORKSPACE_MATERIALIZATION_MODES = frozenset(
+    {RESOLVE_EXISTING_WORKSPACE, MANAGED_WORKTREE_PROVISION}
+)
+
+
+@dataclass(frozen=True)
+class DispatchWorkspace:
+    """One claim-time workspace selected by the canonical facade."""
+
+    path: Path
+    branch_name: Optional[str]
+    mode: str
+
+
+def materialize_dispatch_workspace(
+    conn,
+    task,
+    *,
+    mode: str,
+    board: Optional[str],
+    resolve_existing: Callable,
+    resolve_managed_base: Callable,
+) -> DispatchWorkspace:
+    """Route claim-time workspace materialization through one explicit owner.
+
+    ``resolve_existing`` is the upstream/default resolver. The managed mode
+    resolves a non-materializing base first, then delegates provisioning to the
+    isolation edge. Integration and release remain separate completion hooks.
+    """
+    if mode not in _WORKSPACE_MATERIALIZATION_MODES:
+        raise ValueError(f"unknown workspace materialization mode: {mode!r}")
+    if mode == RESOLVE_EXISTING_WORKSPACE:
+        path, branch_name = resolve_existing(task, board=board)
+        return DispatchWorkspace(Path(path), branch_name, mode)
+
+    base = Path(resolve_managed_base(task, board=board))
+    path = Path(provision_for_task(conn, task, base, board=board))
+    branch_name: Optional[str] = None
+    try:
+        row = conn.execute(
+            "SELECT branch_name FROM tasks WHERE id = ?", (task.id,)
+        ).fetchone()
+        if row is not None:
+            branch_name = str(row["branch_name"] or "").strip() or None
+    except Exception:
+        branch_name = None
+    return DispatchWorkspace(path, branch_name, mode)
 
 
 def _integration_park_class(reason: str) -> str:

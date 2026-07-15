@@ -3,6 +3,7 @@ serialized chain integrator (hermes_cli.kanban_worktrees)."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -114,6 +115,69 @@ def test_is_provisioned_path():
     assert not kwt.is_provisioned_path("/x/.worktrees/other/t_abc")
     assert not kwt.is_provisioned_path(None)
     assert not kwt.is_provisioned_path("")
+
+
+def test_dispatch_workspace_facade_separates_existing_and_managed_modes(
+    tmp_path, monkeypatch
+):
+    task = SimpleNamespace(id="t_modes")
+    existing = tmp_path / "existing"
+    managed_base = tmp_path / "repo"
+    provisioned = tmp_path / "managed"
+    calls: list[tuple[str, Path]] = []
+
+    def resolve_existing(_task, *, board=None):
+        calls.append((f"existing:{board}", existing))
+        return existing, "wt/t_modes"
+
+    def resolve_managed_base(_task, *, board=None):
+        calls.append((f"base:{board}", managed_base))
+        return managed_base
+
+    monkeypatch.setattr(
+        kwt,
+        "provision_for_task",
+        lambda _conn, _task, base, *, board=None: (
+            calls.append((f"provision:{board}", Path(base))) or provisioned
+        ),
+    )
+
+    resolved = kwt.materialize_dispatch_workspace(
+        object(),
+        task,
+        mode=kwt.RESOLVE_EXISTING_WORKSPACE,
+        board="alpha",
+        resolve_existing=resolve_existing,
+        resolve_managed_base=resolve_managed_base,
+    )
+    assert resolved.path == existing
+    assert resolved.branch_name == "wt/t_modes"
+    assert resolved.mode == kwt.RESOLVE_EXISTING_WORKSPACE
+    assert calls == [("existing:alpha", existing)]
+
+    calls.clear()
+    managed = kwt.materialize_dispatch_workspace(
+        object(),
+        task,
+        mode=kwt.MANAGED_WORKTREE_PROVISION,
+        board="beta",
+        resolve_existing=resolve_existing,
+        resolve_managed_base=resolve_managed_base,
+    )
+    assert managed.path == provisioned
+    assert managed.branch_name is None
+    assert managed.mode == kwt.MANAGED_WORKTREE_PROVISION
+    assert calls == [
+        ("base:beta", managed_base),
+        ("provision:beta", managed_base),
+    ]
+
+
+def test_dispatcher_routes_managed_provision_through_workspace_facade():
+    source = inspect.getsource(kb._dispatch_once_locked)
+
+    assert "_resolve_dispatch_workspace" in source
+    assert "provision_for_task" not in source
 
 
 def test_split_provisioned_path():
