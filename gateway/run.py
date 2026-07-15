@@ -7597,21 +7597,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Start background session expiry watcher to finalize expired sessions
         asyncio.create_task(self._session_expiry_watcher())
 
-        # Start background kanban notifier — delivers `completed`, `blocked`,
-        # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
-        # so human-in-the-loop workflows hear back without polling.
-        asyncio.create_task(self._kanban_notifier_watcher())
+        # Start the single Kanban notifications owner. It delivers subscribed
+        # lifecycle events and evaluates operator/release/cost/error alert
+        # rules through the same cursor/retry/send-confirmation loop.
+        asyncio.create_task(self._kanban_notifications_watcher())
 
         # Start background kanban dispatcher — spawns workers for ready
         # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
         # When false, users run `hermes kanban daemon` externally or
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
-
-        # Start background kanban alerting (F2 night-sprint) — pushes
-        # failed/blocked-run, error-rate and daily-cost alerts to Discord.
-        # Opt-in via `kanban.alerts.enabled` (default False → no-op loop).
-        asyncio.create_task(self._kanban_alerts_watcher())
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:

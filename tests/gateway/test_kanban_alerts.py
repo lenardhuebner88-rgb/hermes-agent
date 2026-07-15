@@ -752,6 +752,25 @@ class RecordingAdapter:
         return SendResult(success=True)
 
 
+async def _exercise_alert_rule_hook(runner) -> None:
+    """Drive the production rule hook across ticks without a second watcher."""
+    from hermes_cli.config import load_config
+
+    acfg = load_alerts_config(load_config())
+    if not acfg["enabled"]:
+        return
+    if not (acfg["channel_id"] or acfg.get("escalation_channel_id")):
+        return
+    state = new_alert_state()
+    await asyncio.sleep(10)
+    while runner._running:
+        await runner._kanban_alert_rules_tick(acfg, state)
+        slept = 0.0
+        while runner._running and slept < acfg["interval_seconds"]:
+            await asyncio.sleep(1.0)
+            slept += 1.0
+
+
 def test_alerts_watcher_sends_via_discord_adapter(kanban_home, monkeypatch):
     from gateway.config import Platform
     from gateway.run import GatewayRunner
@@ -802,7 +821,7 @@ def test_alerts_watcher_sends_via_discord_adapter(kanban_home, monkeypatch):
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     assert len(adapter.sent) == 1
     msg = adapter.sent[0]
@@ -824,7 +843,7 @@ def test_alerts_watcher_noop_when_disabled(kanban_home, monkeypatch):
     runner._running = True
     runner.adapters = {Platform.DISCORD: adapter}
 
-    asyncio.run(runner._kanban_alerts_watcher())  # returns immediately
+    asyncio.run(_exercise_alert_rule_hook(runner))  # returns immediately
     assert adapter.sent == []
 
 
@@ -877,7 +896,7 @@ def test_alerts_watcher_uses_alert_specific_channel(kanban_home, monkeypatch):
             runner._running = False
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     assert len(adapter.sent) == 1
     assert adapter.sent[0]["chat_id"] == "999"
@@ -988,7 +1007,7 @@ def test_watcher_send_gated_delivery_has_no_posthoc_double_send(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     # Delivered exactly once via the send-gated path (send_fn confirmed it
     # INSIDE evaluate_alerts()) — the post-hoc loop must not resend it.
@@ -1053,7 +1072,7 @@ def test_watcher_send_gated_failure_defers_and_retries_without_crashing_tick(
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     # A crashing send_fn must never crash the watcher's tick loop — if it
     # did, this asyncio.run() call itself would raise and fail the test.
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     assert adapter.attempts >= 2  # retried across multiple real ticks
     assert adapter.sent == []  # never confirmed — nothing pushed
@@ -1112,7 +1131,7 @@ def test_watcher_send_gated_backstop_after_max_attempts_writes_log(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     # The backstop takes over after exactly K=3 consecutive failures — a
     # later tick (cursor already committed) makes no further attempt.
@@ -1200,7 +1219,7 @@ def test_watcher_soft_fail_sendresult_defers_cursor_not_confirmed(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_alerts_watcher())
+    asyncio.run(_exercise_alert_rule_hook(runner))
 
     # Attempt 1 returned SendResult(success=False) -> NOT confirmed; the
     # cursor stayed put and attempt 2 (next tick) delivered the SAME event.

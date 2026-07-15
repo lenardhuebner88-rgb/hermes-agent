@@ -880,8 +880,8 @@ def _release_singleton_lock(handle) -> None:
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
-    async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
-        """Poll ``kanban_notify_subs`` and deliver report events to users.
+    async def _kanban_notifications_watcher(self, interval: float = 5.0) -> None:
+        """Own Kanban subscription delivery and alert-rule evaluation.
 
         For each subscription row, fetches ``task_events`` newer than the
         stored cursor with kind in the report set (``received``, ``completed``,
@@ -893,6 +893,9 @@ class GatewayKanbanWatchersMixin:
         Runs in the gateway event loop; all SQLite work is pushed to a
         thread via ``asyncio.to_thread`` so the loop never blocks on the
         WAL lock. Failures in one tick don't stop subsequent ticks.
+
+        Alert rules are a stateful, rate-limited hook evaluated by this same
+        loop; they do not own a second cursor/delivery/retry watcher.
 
         **Multi-board:** iterates every board discovered on disk per
         tick. Subscriptions live inside each board's own DB and cannot
@@ -965,11 +968,51 @@ class GatewayKanbanWatchersMixin:
             notifier_profile = self._active_profile_name()
             self._kanban_notifier_profile = notifier_profile
 
+        alert_cfg: Optional[dict] = None
+        alert_state: Optional[dict] = None
+        next_alert_tick = 0.0
+        try:
+            from gateway.kanban_alerts import (
+                load_alerts_config as _load_alerts_config,
+                new_alert_state as _new_alert_state,
+            )
+
+            candidate = _load_alerts_config(cfg)
+            if candidate["enabled"] and (
+                candidate["channel_id"]
+                or candidate.get("escalation_channel_id")
+            ):
+                alert_cfg = candidate
+                alert_state = _new_alert_state()
+                logger.info(
+                    "kanban notifications: alert rules enabled — interval=%ss",
+                    candidate["interval_seconds"],
+                )
+            elif candidate["enabled"]:
+                logger.warning(
+                    "kanban notifications: alert rules enabled without a channel; "
+                    "rules disabled",
+                )
+        except Exception:
+            logger.warning(
+                "kanban notifications: alert-rule hook unavailable; disabled",
+                exc_info=True,
+            )
+
         # Initial delay so the gateway can finish wiring adapters.
         await asyncio.sleep(5)
 
         while self._running:
             try:
+                if (
+                    alert_cfg is not None
+                    and alert_state is not None
+                    and time.monotonic() >= next_alert_tick
+                ):
+                    await self._kanban_alert_rules_tick(alert_cfg, alert_state)
+                    next_alert_tick = (
+                        time.monotonic() + float(alert_cfg["interval_seconds"])
+                    )
                 # F1: before collecting deliveries, flush any stalled root's
                 # suppressed child-successes as a one-time trailing report.
                 # Fully fail-soft — a sweep hiccup must never stop the tick.
@@ -1282,8 +1325,11 @@ class GatewayKanbanWatchersMixin:
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
-                                target_chat_id, msg, metadata=metadata,
+                            await self._kanban_send_confirmed(
+                                adapter,
+                                target_chat_id,
+                                msg,
+                                metadata=metadata,
                             )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
@@ -1459,6 +1505,32 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
+        """Deprecated name for the single notifications watcher.
+
+        Kept for callers outside the gateway startup surface during the P2
+        migration window. It delegates directly and owns no lifecycle state.
+        """
+        await self._kanban_notifications_watcher(interval=interval)
+
+    async def _kanban_send_confirmed(
+        self,
+        adapter: Any,
+        chat_id: str,
+        text: str,
+        *,
+        metadata: Optional[dict] = None,
+        require_explicit_success: bool = False,
+    ) -> bool:
+        """Canonical Kanban text-delivery confirmation edge."""
+        result = await adapter.send(chat_id, text, metadata=metadata)
+        explicit = getattr(result, "success", None)
+        if explicit is False:
+            raise RuntimeError(str(getattr(result, "error", None) or "send failed"))
+        if require_explicit_success:
+            return explicit is True
+        return True
 
     def _kanban_tree_completion(
         self, task: Any, run: Any, event: Any,
@@ -1725,205 +1797,97 @@ class GatewayKanbanWatchersMixin:
                     path, exc,
                 )
 
-    async def _kanban_alerts_watcher(self) -> None:
-        """F2 (night-sprint): push-Alerting — one tick every 5 min (config).
+    async def _kanban_alert_rules_tick(
+        self,
+        acfg: dict,
+        state: dict,
+    ) -> list[dict]:
+        """Evaluate alert rules inside the canonical notifications watcher.
 
-        Evaluates the rules in :mod:`gateway.kanban_alerts` (run failed/
-        blocked, error rate, daily cost) against the board DB and pushes
-        qualifying alerts to a Discord channel. Opt-in: ``kanban.alerts.
-        enabled`` defaults to False, so gateways whose config has no alerts
-        block (research etc.) stay silent. Discord only — Telegram ist ab.
-
-        Same lifecycle pattern as ``_kanban_dispatcher_watcher``: config read
-        once at boot, SQLite work in ``asyncio.to_thread``, per-tick failures
-        never kill the loop, sliced sleep for snappy shutdown.
-
-        A1 (2026-07-06) send-confirmation wiring: ``gateway.kanban_alerts``'s
-        two event-cursor rules (``operator_escalation``,
-        ``auto_release_attention``) accept a ``send_fn`` that gates their
-        cursor on a CONFIRMED send instead of advancing eagerly before the
-        send is even attempted (the original race — a failed Discord send
-        used to drop the alert forever). ``_tick()`` below still runs
-        entirely inside ``asyncio.to_thread`` (unchanged — the SQLite work
-        stays off the event loop), so the bridge from that worker thread back
-        to the real async ``adapter.send`` uses ``safe_schedule_threadsafe``
-        (``agent.async_utils`` — the codebase's ~30-site established pattern
-        for exactly this thread→loop hop) + a bounded ``.result(timeout=...)``
-        wait, mirroring the existing ``gateway/run.py`` clarify/approval-send
-        bridges. Restructuring so the send itself runs directly in the async
-        context (no thread hop) would mean moving ``_confirm_or_defer``'s
-        cursor-commit decision out of the synchronous, gateway-independent
-        ``gateway/kanban_alerts.py`` module (its own docstring: "testable
-        without a gateway") into this watcher, or making ``evaluate_alerts``
-        itself ``async`` — a much larger, already-tested-contract-breaking
-        change for no behavioral gain over the thread-safe bridge.
-
-        The three cooldown rules (``run_failed``/``error_rate``/
-        ``daily_cost``) are untouched: ``evaluate_alerts`` never routes them
-        through ``send_fn`` (they rate-limit on a time cooldown, not a
-        one-shot event cursor), so they keep flowing through the SAME
-        post-hoc send loop as before, byte-identical.
-
-        Alerts from the two send-gated rules must NOT be resent by that
-        post-hoc loop — ``send_fn`` (when it returns truthy) already
-        delivered them INSIDE ``evaluate_alerts()``. They are filtered out via
-        ``gateway.kanban_alerts.SEND_GATED_RULES`` before the loop runs (no
-        double-send).
+        Cursor rules receive synchronous confirmed-send feedback while their
+        SQLite evaluation runs off-loop. Window/cooldown rules use the same
+        delivery edge and clear their cooldown stamp after a failed send so
+        the next watcher tick retries instead of silently dropping the alert.
         """
-        try:
-            from hermes_cli.config import load_config as _load_config
-        except Exception:
-            logger.warning("kanban alerts: config loader unavailable; disabled")
-            return
-        try:
-            cfg = _load_config()
-        except Exception as exc:
-            logger.warning("kanban alerts: cannot load config (%s); disabled", exc)
-            return
-        try:
-            from gateway.kanban_alerts import (
-                SEND_GATED_RULES as _SEND_GATED_RULES,
-                evaluate_alerts as _evaluate_alerts,
-                load_alerts_config as _load_alerts_config,
-                new_alert_state as _new_alert_state,
-            )
-            from hermes_cli import kanban_db as _kb
-        except Exception:
-            logger.warning("kanban alerts: engine not importable; disabled")
-            return
-
-        acfg = _load_alerts_config(cfg)
-        if not acfg["enabled"]:
-            logger.info("kanban alerts: disabled (kanban.alerts.enabled not set)")
-            return
-        if not (acfg["channel_id"] or acfg.get("escalation_channel_id")):
-            logger.warning(
-                "kanban alerts: enabled but no channel (kanban.alerts.channel_id, "
-                "kanban.alerts.escalation_channel_id, or "
-                "kanban.reporting_channel_id) — disabled",
-            )
-            return
-        logger.info(
-            "kanban alerts: enabled — interval=%ss cooldown=%ss channel=%s",
-            acfg["interval_seconds"], acfg["cooldown_seconds"], acfg["channel_id"],
-        )
-
-        from gateway.config import Platform as _Platform
         from agent.async_utils import safe_schedule_threadsafe as _safe_schedule
+        from gateway.config import Platform as _Platform
+        from gateway.kanban_alerts import (
+            SEND_GATED_RULES as _SEND_GATED_RULES,
+            evaluate_alerts as _evaluate_alerts,
+        )
+        from hermes_cli import kanban_db as _kb
 
-        state = _new_alert_state()
-        await asyncio.sleep(10)  # let adapters connect before the first tick
-        while self._running:
+        loop = asyncio.get_running_loop()
+        adapter = self.adapters.get(_Platform.DISCORD)
+        metadata = {"thread_id": acfg["thread_id"]} if acfg["thread_id"] else None
+
+        def _send_gated_alert(alert: dict) -> bool:
+            target_channel_id = alert.get("channel_id") or acfg["channel_id"]
+            if adapter is None or not target_channel_id:
+                return False
+            future = _safe_schedule(
+                self._kanban_send_confirmed(
+                    adapter,
+                    target_channel_id,
+                    alert["text"],
+                    metadata=metadata,
+                    require_explicit_success=True,
+                ),
+                loop,
+                logger=logger,
+                log_message=(
+                    f"kanban alerts: send-gated {alert['rule']} schedule failed"
+                ),
+            )
+            if future is None:
+                return False
+            return bool(future.result(timeout=15))
+
+        def _evaluate() -> list[dict]:
+            conn = _kb.connect()
             try:
-                loop = asyncio.get_running_loop()
-                adapter = self.adapters.get(_Platform.DISCORD)
-                metadata = (
-                    {"thread_id": acfg["thread_id"]}
-                    if acfg["thread_id"] else None
+                return _evaluate_alerts(
+                    conn,
+                    acfg,
+                    state,
+                    send_fn=_send_gated_alert,
                 )
+            finally:
+                conn.close()
 
-                def _send_gated_alert(alert: dict) -> bool:
-                    """``send_fn`` for the send-gated cursor rules (A1).
-
-                    Runs SYNCHRONOUSLY inside ``_tick()``'s worker thread.
-                    Returns True ONLY once ``adapter.send`` has actually
-                    completed (confirmed delivery); any failure (no adapter,
-                    no channel, schedule failure, send exception, or a
-                    timeout waiting for the result) raises/returns falsy —
-                    ``gateway.kanban_alerts._confirm_or_defer`` already
-                    wraps this call in its own try/except (send_fn
-                    exceptions there are treated as a failed send, never
-                    propagate), so a broken send here can never crash this
-                    tick.
-                    """
-                    target_channel_id = (
-                        alert.get("channel_id") or acfg["channel_id"]
-                    )
-                    if adapter is None or not target_channel_id:
-                        return False
-                    fut = _safe_schedule(
-                        adapter.send(
-                            target_channel_id, alert["text"], metadata=metadata,
-                        ),
-                        loop,
-                        logger=logger,
-                        log_message=(
-                            f"kanban alerts: send-gated {alert['rule']} "
-                            "schedule failed"
-                        ),
-                    )
-                    if fut is None:
-                        return False
-                    # At-least-once by design (Codex review 2026-07-06
-                    # finding 3): if the send completes AFTER this timeout,
-                    # the cursor stays deferred and the next tick re-sends —
-                    # a rare straggler DUPLICATE on Discord. Accepted trade:
-                    # duplication is noise, loss is the bug A1 exists to fix.
-                    # The coroutine is deliberately not cancelled (an HTTP
-                    # request mid-flight would be torn down non-deterministically).
-                    result = fut.result(timeout=15)
-                    # DiscordAdapter.send NEVER raises on delivery failure —
-                    # it converts every API/network error into a normally
-                    # returned SendResult(success=False) (plugins/platforms/
-                    # discord/adapter.py:2044-2046), and a bare dataclass is
-                    # always truthy. "Completed without raising" is therefore
-                    # NOT delivery confirmation; only .success is (adapter
-                    # trace 2026-07-06). Anything without a truthy .success
-                    # (None, foreign shape) counts as NOT delivered — the
-                    # deferred event is retried/backstopped, never dropped.
-                    return bool(getattr(result, "success", False))
-
-                def _tick():
-                    conn = _kb.connect()
-                    try:
-                        return _evaluate_alerts(
-                            conn, acfg, state, send_fn=_send_gated_alert,
-                        )
-                    finally:
-                        conn.close()
-
-                alerts = await asyncio.to_thread(_tick)
-                # Send-gated rules were already delivered (or deferred/
-                # backstopped) by _send_gated_alert above — the post-hoc
-                # loop below is only for the three cooldown rules.
-                alerts = [a for a in alerts if a["rule"] not in _SEND_GATED_RULES]
-                if alerts:
-                    if adapter is None:
-                        logger.warning(
-                            "kanban alerts: discord adapter unavailable; "
-                            "%d alert(s) dropped", len(alerts),
-                        )
-                    else:
-                        for alert in alerts:
-                            target_channel_id = (
-                                alert.get("channel_id") or acfg["channel_id"]
-                            )
-                            if not target_channel_id:
-                                logger.warning(
-                                    "kanban alerts: no channel for rule %s; dropped",
-                                    alert["rule"],
-                                )
-                                continue
-                            try:
-                                await adapter.send(
-                                    target_channel_id, alert["text"],
-                                    metadata=metadata,
-                                )
-                                logger.info(
-                                    "kanban alerts: sent %s alert to %s",
-                                    alert["rule"], target_channel_id,
-                                )
-                            except Exception as exc:
-                                logger.warning(
-                                    "kanban alerts: send failed for rule %s: %s",
-                                    alert["rule"], exc,
-                                )
+        alerts = await asyncio.to_thread(_evaluate)
+        for alert in alerts:
+            if alert["rule"] in _SEND_GATED_RULES:
+                continue
+            target_channel_id = alert.get("channel_id") or acfg["channel_id"]
+            if adapter is None or not target_channel_id:
+                state.setdefault("last_sent", {}).pop(alert["rule"], None)
+                logger.warning(
+                    "kanban alerts: delivery unavailable for rule %s; retry deferred",
+                    alert["rule"],
+                )
+                continue
+            try:
+                await self._kanban_send_confirmed(
+                    adapter,
+                    target_channel_id,
+                    alert["text"],
+                    metadata=metadata,
+                    require_explicit_success=True,
+                )
+                logger.info(
+                    "kanban alerts: sent %s alert to %s",
+                    alert["rule"],
+                    target_channel_id,
+                )
             except Exception as exc:
-                logger.warning("kanban alerts: tick failed: %s", exc)
-            slept = 0.0
-            while self._running and slept < acfg["interval_seconds"]:
-                await asyncio.sleep(1.0)
-                slept += 1.0
+                state.setdefault("last_sent", {}).pop(alert["rule"], None)
+                logger.warning(
+                    "kanban alerts: send failed for rule %s; retry deferred: %s",
+                    alert["rule"],
+                    exc,
+                )
+        return alerts
 
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.

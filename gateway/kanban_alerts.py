@@ -1,9 +1,9 @@
 """Kanban alert engine (night-sprint F2) — push statt Pull.
 
-Pure rule evaluation over the kanban board DB; the asyncio watcher lives in
-``gateway/kanban_watchers.py`` (``_kanban_alerts_watcher``) and only does the
-plumbing (config gate, tick loop, Discord adapter send). Keeping the rules
-synchronous + connection-in/alerts-out makes them testable without a gateway.
+Pure rule evaluation over the kanban board DB. The single notifications
+watcher in ``gateway/kanban_watchers.py`` invokes these as rule hooks and owns
+the I/O plumbing. Keeping the rules synchronous + connection-in/alerts-out
+makes them testable without a gateway.
 
 Rules (config: ``kanban.alerts:`` in the ROOT config.yaml, additive):
 
@@ -41,7 +41,7 @@ lost forever, and the cursor commits then too. ``send_fn``/``backstop_fn``
 default to ``None``/the file writer; a caller that omits ``send_fn`` keeps
 the PRE-fix eager-advance-before-send behavior unchanged (the production
 watcher DOES pass it since the A2 wiring, 2026-07-06 — see
-``gateway/kanban_watchers.py::_kanban_alerts_watcher``).
+``gateway/kanban_watchers.py::_kanban_notifications_watcher``).
 """
 
 from __future__ import annotations
@@ -578,7 +578,7 @@ def evaluate_alerts(
     cursor eagerly. ``error_rate``/``daily_cost`` stay ungated (no cursor —
     window-based, the condition re-fires after cooldown, so a dropped send
     is bounded, not permanent). The production watcher
-    (``gateway.kanban_watchers._kanban_alerts_watcher``) DOES pass
+    (``gateway.kanban_watchers._kanban_notifications_watcher``) DOES pass
     ``send_fn`` and filters ``SEND_GATED_RULES`` out of its post-hoc send
     loop; a caller that omits ``send_fn`` keeps the pre-fix
     eager-advance-before-send behavior.

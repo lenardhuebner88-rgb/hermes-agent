@@ -12,7 +12,8 @@ import inspect
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 
 KANBAN_METHODS = [
-    "_kanban_notifier_watcher",
+    "_kanban_notifications_watcher",
+    "_kanban_alert_rules_tick",
     "_kanban_dispatcher_watcher",
     "_kanban_advance",
     "_kanban_unsub",
@@ -41,8 +42,31 @@ def test_gateway_runner_inherits_mixin():
 
 def test_watcher_loops_are_coroutines():
     # The two long-running watchers are async loops.
-    assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_notifier_watcher)
+    assert inspect.iscoroutinefunction(
+        GatewayKanbanWatchersMixin._kanban_notifications_watcher
+    )
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+
+
+def test_notifications_are_owned_by_one_production_watcher():
+    from gateway.run import GatewayRunner
+
+    startup = inspect.getsource(GatewayRunner.start)
+    notifications = inspect.getsource(
+        GatewayKanbanWatchersMixin._kanban_notifications_watcher
+    )
+    alert_hook = inspect.getsource(
+        GatewayKanbanWatchersMixin._kanban_alert_rules_tick
+    )
+    mixin_source = inspect.getsource(GatewayKanbanWatchersMixin)
+
+    assert startup.count("_kanban_notifications_watcher") == 1
+    assert "_kanban_notifier_watcher" not in startup
+    assert "_kanban_alerts_watcher" not in startup
+    assert not hasattr(GatewayKanbanWatchersMixin, "_kanban_alerts_watcher")
+    assert "_kanban_alert_rules_tick" in notifications
+    assert "_kanban_send_confirmed" in alert_hook
+    assert mixin_source.count("await adapter.send(") == 1
 
 
 def test_dispatcher_watcher_surfaces_review_wait_attention():
