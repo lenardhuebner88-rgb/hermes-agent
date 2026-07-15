@@ -17139,6 +17139,9 @@ def repair_deliverable_posted_not_completed(
         evidence = evidence_payload.get("evidence")
         if not isinstance(evidence, dict):
             return False
+        preview = evidence.get("preview")
+        if isinstance(preview, str) and preview.strip():
+            summary = preview
 
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ? AND status = 'blocked'",
@@ -17154,6 +17157,12 @@ def repair_deliverable_posted_not_completed(
     source_run_id = int(row["run_id"]) if row["run_id"] is not None else None
     if code_bearing:
         delivered = str(evidence.get("preview") or "").strip()
+        existing_result = task_row["result"]
+        review_result = (
+            existing_result
+            if isinstance(existing_result, str) and existing_result.strip()
+            else delivered or summary
+        )
         metadata = {
             "repair": DELIVERABLE_POSTED_NOT_COMPLETED,
             "actor": actor,
@@ -17163,7 +17172,7 @@ def repair_deliverable_posted_not_completed(
         submitted = _submit_for_review(
             conn,
             task_id,
-            result=delivered or summary,
+            result=review_result,
             summary=summary,
             metadata=metadata,
             verified_cards=[],
