@@ -646,7 +646,18 @@ def _revert_commits_for_merge(repo: Path, merge_commit: str, target: str) -> lis
 
 def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[str]:
     """Find a reverted merge parent whose reviewed patch is in *branch*."""
-    merges = _git(repo, "rev-list", "--first-parent", "--merges", target)
+    # Merges at or before the branch/target merge-base cannot need recovery:
+    # their matching reverts (if any) are already part of the worker branch.
+    # Restricting the scan also avoids an O(history²) sequence of full-log
+    # ``--grep`` searches for a fresh branch cut from a large repository.
+    merge_base = _git(repo, "merge-base", branch, target)
+    merges = _git(
+        repo,
+        "rev-list",
+        "--first-parent",
+        "--merges",
+        f"{merge_base}..{target}",
+    )
     for merge_commit in merges.splitlines():
         parents = _git(repo, "show", "-s", "--format=%P", merge_commit).split()
         if len(parents) < 2:

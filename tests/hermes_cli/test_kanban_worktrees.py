@@ -1760,6 +1760,36 @@ def test_branch_created_after_revert_does_not_restore_unrelated_merge(repo):
     assert out["changed_files"] == ["later.py"]
 
 
+def test_reverted_ancestor_scan_ignores_history_already_in_branch(repo, monkeypatch):
+    """A fresh worker branch must not rescan every historical merge/revert."""
+    _git(repo, "checkout", "-b", "historical-worker")
+    _commit_in(repo, "historical.py", "HISTORICAL = True\n", "historical")
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--no-ff", "--no-edit", "historical-worker")
+    historical_merge = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "revert", "-m", "1", "--no-edit", historical_merge)
+    info = _provisioned_chain(
+        repo, "t_after_history", relpath="current.py", content="CURRENT = True\n",
+    )
+
+    real_git = kwt._git
+    calls = []
+
+    def recording_git(root, *args, **kwargs):
+        calls.append(args)
+        return real_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(kwt, "_git", recording_git)
+
+    assert kwt._reverted_merged_ancestor(repo, info["branch"], "main") is None
+    assert not any(any(str(arg).startswith("--grep=") for arg in call) for call in calls)
+    assert any(
+        call[:3] == ("rev-list", "--first-parent", "--merges")
+        and "..main" in str(call[3])
+        for call in calls
+    )
+
+
 def test_reintegration_gate_uses_clean_validation_worktree(repo):
     """The revert-of-revert gate is isolated from later foreign live WIP."""
     info = _provisioned_chain(repo, "t_reint_fdc", relpath="restored.py")

@@ -531,7 +531,22 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
             {
                 "spawned": [list(item) for item in result.spawned],
                 "skipped_locked": bool(result.skipped_locked),
-                "workers": child_results,
+                "workers": [
+                    {
+                        "ok": item.get("ok"),
+                        "proposal_id": item.get("proposal_id"),
+                        "task_id": item.get("task_id"),
+                        "worker_commit": item.get("worker_commit"),
+                        "worker_gate_argv": (item.get("worker_gate") or {}).get("argv"),
+                        "worker_gate_returncode": (item.get("worker_gate") or {}).get(
+                            "returncode"
+                        ),
+                        "provider_calls": item.get("provider_calls"),
+                        "cost_usd": item.get("cost_usd"),
+                        "returncode": item.get("returncode"),
+                    }
+                    for item in child_results
+                ],
             }
         )
     )
