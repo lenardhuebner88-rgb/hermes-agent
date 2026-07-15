@@ -320,6 +320,90 @@ def _resolve_target_board(spec: BindingPlanSpec, cli_board: str | None) -> str:
     return str(kanban_db.read_board_metadata(target)["slug"])
 
 
+def _planspec_kanban_state_from_rows(
+    resolved: str, conn: Any, rows: list[Any]
+) -> dict[str, Any] | None:
+    """Derive one source's live state from already-read specified events."""
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("source") != "planspec_ingest":
+            continue
+        if str(payload.get("path") or "") != resolved:
+            continue
+        root_id = str(row["task_id"])
+        root = kanban_db.get_task(conn, root_id)
+        if root is None:
+            continue
+        child_ids = kanban_db.parent_ids(conn, root_id)
+        child_statuses: list[str] = []
+        for child_id in child_ids:
+            child = kanban_db.get_task(conn, child_id)
+            if child is not None:
+                child_statuses.append(child.status)
+        statuses = [root.status, *child_statuses]
+        if root.status == "done":
+            state = "completed"
+        elif root.status == "archived":
+            state = "archived"
+        elif "blocked" in statuses:
+            state = "blocked"
+        elif any(status in {"running", "review"} for status in statuses):
+            state = "running"
+        elif any(status in {"triage", "todo", "scheduled", "ready"} for status in statuses):
+            state = "queued"
+        else:
+            state = root.status or "unknown"
+        total = len(child_statuses)
+        done = sum(1 for status in child_statuses if status == "done")
+        blocked = sum(1 for status in child_statuses if status == "blocked")
+        running = sum(1 for status in child_statuses if status in {"running", "review"})
+        return {
+            "root_task_id": root_id,
+            "root_status": root.status,
+            "state": state,
+            "child_total": total,
+            "child_done": done,
+            "child_blocked": blocked,
+            "child_running": running,
+            "ingested_at": int(row["created_at"]),
+        }
+    return None
+
+
+def _planspec_kanban_states(paths: list[Path]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Index PlanSpec ingest state by board and source path for one list request.
+
+    This deliberately opens each board only once, rather than scanning its event
+    log once per PlanSpec.  It remains entirely read-only against Kanban DBs.
+    """
+    resolved_paths = {str(path.resolve(strict=False)) for path in paths}
+    states: dict[str, dict[str, dict[str, Any]]] = {}
+    if not resolved_paths:
+        return states
+    for metadata in kanban_db.list_boards(include_archived=False):
+        board = str(metadata["slug"])
+        conn = kanban_db.connect(board=board)
+        try:
+            rows = conn.execute(
+                "SELECT task_id, payload, created_at FROM task_events "
+                "WHERE kind = 'specified' AND payload LIKE ? "
+                "ORDER BY created_at DESC, id DESC",
+                ("%planspec_ingest%",),
+            ).fetchall()
+            board_states: dict[str, dict[str, Any]] = {}
+            for resolved in resolved_paths:
+                state = _planspec_kanban_state_from_rows(resolved, conn, rows)
+                if state is not None:
+                    board_states[resolved] = state
+            states[board] = board_states
+        finally:
+            conn.close()
+    return states
+
+
 def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str, Any] | None:
     """Return the latest Kanban execution state for a PlanSpec source path.
 
@@ -338,53 +422,7 @@ def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str,
             "ORDER BY created_at DESC, id DESC LIMIT 50",
             ("%planspec_ingest%",),
         ).fetchall()
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if payload.get("source") != "planspec_ingest":
-                continue
-            if str(payload.get("path") or "") != resolved:
-                continue
-            root_id = str(row["task_id"])
-            root = kanban_db.get_task(conn, root_id)
-            if root is None:
-                continue
-            child_ids = kanban_db.parent_ids(conn, root_id)
-            child_statuses: list[str] = []
-            for child_id in child_ids:
-                child = kanban_db.get_task(conn, child_id)
-                if child is not None:
-                    child_statuses.append(child.status)
-            statuses = [root.status, *child_statuses]
-            if root.status == "done":
-                state = "completed"
-            elif root.status == "archived":
-                state = "archived"
-            elif "blocked" in statuses:
-                state = "blocked"
-            elif any(status in {"running", "review"} for status in statuses):
-                state = "running"
-            elif any(status in {"triage", "todo", "scheduled", "ready"} for status in statuses):
-                state = "queued"
-            else:
-                state = root.status or "unknown"
-            total = len(child_statuses)
-            done = sum(1 for status in child_statuses if status == "done")
-            blocked = sum(1 for status in child_statuses if status == "blocked")
-            running = sum(1 for status in child_statuses if status in {"running", "review"})
-            return {
-                "root_task_id": root_id,
-                "root_status": root.status,
-                "state": state,
-                "child_total": total,
-                "child_done": done,
-                "child_blocked": blocked,
-                "child_running": running,
-                "ingested_at": int(row["created_at"]),
-            }
-        return None
+        return _planspec_kanban_state_from_rows(resolved, conn, rows)
     finally:
         conn.close()
 
@@ -591,6 +629,8 @@ def list_planspecs(
     valid_filter = valid
     root = plans_root.expanduser().resolve(strict=False)
     paths = sorted(root.glob("*/plans/*.md"), key=lambda p: str(p).lower())
+    selected_board = str(board or kanban_db.get_current_board()).strip().lower()
+    kanban_states = _planspec_kanban_states(paths) if include_kanban_status else {}
     records: list[dict[str, Any]] = []
     for path in paths:
         try:
@@ -624,13 +664,42 @@ def list_planspecs(
             kanban_state_error = None
             if include_kanban_status:
                 try:
-                    kanban_state = _planspec_kanban_state(path, board=board)
+                    resolved_path = str(path.resolve(strict=False))
+                    local_state = kanban_states.get(selected_board, {}).get(resolved_path)
+                    explicit_board = str(frontmatter.get("board") or "").strip().lower()
+                    if local_state is not None:
+                        # A board's own ingest always supplies its own live state,
+                        # including deliberate multi-board ingest of one source.
+                        kanban_state = local_state
+                        board_is_provenance = True
+                    elif explicit_board:
+                        # Current frontmatter takes precedence over foreign legacy
+                        # ingest.  An un-ingested source belongs only to this board.
+                        board_is_provenance = selected_board == explicit_board
+                    else:
+                        foreign_states = [
+                            state_by_path[resolved_path]
+                            for indexed_board, state_by_path in kanban_states.items()
+                            if indexed_board != selected_board and resolved_path in state_by_path
+                        ]
+                        if foreign_states:
+                            # Legacy sources have no declared owner.  Preserve a
+                            # prior ingest's state rather than reopening it on a
+                            # second board as a new PlanSpec.
+                            kanban_state = max(foreign_states, key=lambda item: item["ingested_at"])
+                            board_is_provenance = False
+                        else:
+                            board_is_provenance = selected_board == "default"
                 except Exception as exc:  # pragma: no cover - defensive UI fallback
                     kanban_state_error = str(exc)
+                    board_is_provenance = False
+            else:
+                board_is_provenance = True
             kanban_terminal_state = (kanban_state or {}).get("state") or "not_ingested"
             open_record = (
                 closed is None
                 and (valid or display_only_open)
+                and board_is_provenance
                 and kanban_terminal_state not in _CLOSED_KANBAN_STATES
             )
             if closed:
