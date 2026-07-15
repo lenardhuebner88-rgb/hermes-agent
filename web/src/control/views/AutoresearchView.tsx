@@ -341,8 +341,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     setRequestedFocusId(proposalId);
   };
   const clearActiveFocus = () => {
+    const shouldConsumeDeepLink = deepLinkFocusId !== null && activeFocusId === deepLinkFocusId;
     setRequestedFocusId(null);
-    if (focusParams.has("focus")) {
+    if (shouldConsumeDeepLink) {
       // Push the consumed state: browser Back must be able to replay the
       // deep-link request and focus the same proposal again.
       setFocusParams((current) => withoutAutoresearchFocus(current));

@@ -99,4 +99,18 @@ describe("AutoresearchView deep-link history", () => {
     await act(async () => { window.history.back(); });
     await waitFor(() => expect(window.location.pathname).toBe("/control/previous"));
   });
+
+  it("keeps Browser Back free after consuming keyboard focus over a stale query", async () => {
+    window.history.replaceState({}, "", "/control/previous");
+    window.history.pushState({}, "", "/control/autoresearch?focus=removed-proposal");
+    render(<BrowserRouter><AutoresearchView density="airy" store={store as never} /></BrowserRouter>);
+
+    fireEvent.keyDown(document.body, { key: "t" });
+    await waitFor(() => expect(screen.getByTestId("focused-proposal").textContent).toBe("proposal-a"));
+    fireEvent.click(screen.getByRole("button", { name: "Weiter" }));
+
+    await waitFor(() => expect(screen.getByTestId("focused-proposal").textContent).toBe("keine Entscheidung"));
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe("/control/previous"));
+  });
 });
