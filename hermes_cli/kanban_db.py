@@ -23626,6 +23626,7 @@ def _dispatch_once_locked(
                 claimed.id,
                 str(exc),
                 failure_limit=1,
+                force_failure_limit=True,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -23776,11 +23777,12 @@ def _dispatch_once_locked(
                 claimed, board=board
             )
         except Exception as exc:
-            auto = _record_spawn_failure(
+            _phase, auto = _spawn_failure_or_transient_retry(
                 conn,
                 claimed.id,
                 f"workspace: {exc}",
                 failure_limit=failure_limit,
+                now=int(time.time()),
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -23840,15 +23842,17 @@ def _dispatch_once_locked(
                 claimed.id,
                 str(exc),
                 failure_limit=1,
+                force_failure_limit=True,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
         except Exception as exc:
-            auto = _record_spawn_failure(
+            _phase, auto = _spawn_failure_or_transient_retry(
                 conn,
                 claimed.id,
                 str(exc),
                 failure_limit=failure_limit,
+                now=int(time.time()),
             )
             if auto:
                 result.auto_blocked.append(claimed.id)

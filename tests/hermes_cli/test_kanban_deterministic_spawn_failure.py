@@ -106,6 +106,85 @@ def test_strong_stall_class_precedes_deterministic_spawn_marker():
     assert evidence["signal_source"] == "stall_class"
 
 
+def test_review_dispatch_deterministic_spawn_failure_blocks_first_attempt(
+    kanban_home,
+    all_assignees_spawnable,
+):
+    def verdict_cage_failure(task, workspace):
+        raise RuntimeError(VERDICT_CAGE_ERROR)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="review verdict cage",
+            assignee="coder",
+            max_retries=5,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'review' WHERE id = ?",
+                (task_id,),
+            )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=verdict_cage_failure,
+            failure_limit=3,
+            serialize_by_repo=False,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+        latest_run = kb.list_runs(conn, task_id)[0]
+
+    assert result.auto_blocked == [task_id]
+    assert task.status == "blocked"
+    assert task.consecutive_failures == 1
+    assert task.transient_retry_count == 0
+    assert latest_run.outcome == "gave_up"
+    assert kb.TRANSIENT_RETRY_EVENT not in [event.kind for event in events]
+    assert kb.OPERATOR_ESCALATION_EVENT in [event.kind for event in events]
+
+
+@pytest.mark.parametrize("initial_status", ["ready", "review"])
+def test_model_route_configuration_error_forces_first_attempt_block(
+    kanban_home,
+    all_assignees_spawnable,
+    initial_status,
+):
+    def missing_model_route(task, workspace):
+        raise kb.ModelRouteConfigurationError("no concrete model route")
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=f"{initial_status} missing route",
+            assignee="coder",
+            max_retries=5,
+        )
+        if initial_status == "review":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = 'review' WHERE id = ?",
+                    (task_id,),
+                )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=missing_model_route,
+            failure_limit=9,
+            serialize_by_repo=False,
+        )
+        task = kb.get_task(conn, task_id)
+        latest_run = kb.list_runs(conn, task_id)[0]
+
+    assert result.auto_blocked == [task_id]
+    assert task.status == "blocked"
+    assert task.consecutive_failures == 1
+    assert task.transient_retry_count == 0
+    assert latest_run.outcome == "gave_up"
+
+
 @pytest.mark.parametrize(
     "error",
     [
