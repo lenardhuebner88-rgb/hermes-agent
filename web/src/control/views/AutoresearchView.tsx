@@ -342,9 +342,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   };
   const clearActiveFocus = () => {
     setRequestedFocusId(null);
-    // Push the consumed state: browser Back must be able to replay the
-    // deep-link request and focus the same proposal again.
-    setFocusParams((current) => withoutAutoresearchFocus(current));
+    if (focusParams.has("focus")) {
+      // Push the consumed state: browser Back must be able to replay the
+      // deep-link request and focus the same proposal again.
+      setFocusParams((current) => withoutAutoresearchFocus(current));
+    }
   };
 
   // ProposalQueue uses activeFocusId to render both collapsed disclosure

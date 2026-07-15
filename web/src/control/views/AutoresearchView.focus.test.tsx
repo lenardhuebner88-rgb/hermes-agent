@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { BrowserRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const hooks = vi.hoisted(() => ({
   useAutoresearchStatus: vi.fn(() => ({ data: null, loading: false, error: null })),
@@ -27,6 +27,8 @@ vi.mock("./autoresearch/OutcomePanel", () => ({ OutcomePanel: () => null }));
 vi.mock("./autoresearch/panels", () => ({ ActivityTimelineItem: () => null, LatestActivityPanel: () => null, DeepAuditFindings: () => null }));
 
 import { AutoresearchView } from "./AutoresearchView";
+
+afterEach(cleanup);
 
 const proposal = {
   id: "proposal-a",
@@ -82,5 +84,19 @@ describe("AutoresearchView deep-link history", () => {
       expect(window.location.search).toBe("?focus=proposal-a");
       expect(screen.getByTestId("focused-proposal").textContent).toBe("proposal-a");
     });
+  });
+
+  it("keeps Browser Back free after consuming queryless keyboard focus", async () => {
+    window.history.replaceState({}, "", "/control/previous");
+    window.history.pushState({}, "", "/control/autoresearch");
+    render(<BrowserRouter><AutoresearchView density="airy" store={store as never} /></BrowserRouter>);
+
+    fireEvent.keyDown(document.body, { key: "t" });
+    await waitFor(() => expect(screen.getByTestId("focused-proposal").textContent).toBe("proposal-a"));
+    fireEvent.click(screen.getByRole("button", { name: "Weiter" }));
+
+    await waitFor(() => expect(screen.getByTestId("focused-proposal").textContent).toBe("keine Entscheidung"));
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe("/control/previous"));
   });
 });
