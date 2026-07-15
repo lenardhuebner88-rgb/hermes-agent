@@ -275,6 +275,84 @@ class TestWebServerEndpoints:
         assert "active_sessions" in data
         assert data["can_update_hermes"] is True
 
+    def test_status_active_session_count_uses_read_only_db(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+        import hermes_state
+
+        # Satisfy the fresh-install guard: read_only opens require the DB
+        # file to already exist.
+        fake_db_path = tmp_path / "state.db"
+        fake_db_path.touch()
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", fake_db_path)
+
+        captured = {}
+
+        class _FakeDB:
+            def __init__(self, *args, **kwargs):
+                captured["read_only"] = kwargs.get("read_only")
+
+            def list_sessions_rich(self, limit, compact_rows=False):
+                captured["limit"] = limit
+                captured["compact_rows"] = compact_rows
+                return [
+                    {"ended_at": None, "last_active": 95},
+                    {"ended_at": 99, "last_active": 99},
+                    {"ended_at": None, "last_active": -300},
+                ]
+
+            def close(self):
+                captured["closed"] = True
+
+        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
+        monkeypatch.setattr(web_server.time, "time", lambda: 100)
+
+        assert web_server._count_status_active_sessions() == 1
+        assert captured == {
+            "read_only": True, "limit": 50, "compact_rows": True, "closed": True
+        }
+
+    def test_status_active_session_count_fresh_install_returns_zero(self, monkeypatch, tmp_path):
+        """No state.db yet (fresh install): return 0 without attempting a
+        read-only open, which would raise OperationalError on every poll."""
+        import hermes_cli.web_server as web_server
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "absent.db")
+
+        def _boom(*a, **k):
+            raise AssertionError("SessionDB must not be constructed when db file is absent")
+
+        monkeypatch.setattr("hermes_state.SessionDB", _boom)
+        assert web_server._count_status_active_sessions() == 0
+
+    def test_get_status_degrades_when_active_session_count_fails(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        def _locked_count():
+            raise TimeoutError("database is locked")
+
+        monkeypatch.setattr(web_server, "_count_status_active_sessions", _locked_count)
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["active_sessions"] == 0
+
+    def test_get_status_uses_cached_gateway_pid_probe(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        calls = {"get_running_pid_cached": 0}
+
+        def _cached_pid():
+            calls["get_running_pid_cached"] += 1
+            return None
+
+        monkeypatch.setattr(web_server, "get_running_pid_cached", _cached_pid)
+
+        resp = self.client.get("/api/status")
+
+        assert resp.status_code == 200
+        assert calls["get_running_pid_cached"] == 1
+
     def test_dictate_status_is_metadata_only_and_exposes_latest_apk(self, monkeypatch, tmp_path):
         import hermes_cli.web_server as web_server
 
@@ -7038,6 +7116,39 @@ class TestPtyWebSocket:
         assert env["HERMES_TUI_DASHBOARD"] == "1"
         assert env["HERMES_TUI_INLINE"] == "1"
         assert env["HERMES_TUI_DISABLE_MOUSE"] == "1"
+
+    def test_resolve_chat_argv_backfills_colorterm_truecolor(self, monkeypatch):
+        """Headless servers (cloud/systemd) have no COLORTERM, which made
+        chalk in the TUI child degrade skin hex colors to the xterm 256
+        palette (gold banner rendered salmon-red). xterm.js always supports
+        24-bit color, so the PTY env must advertise truecolor."""
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
+        )
+        monkeypatch.delenv("COLORTERM", raising=False)
+
+        _argv, _cwd, env = self.ws_module._resolve_chat_argv()
+
+        assert env["COLORTERM"] == "truecolor"
+
+    def test_resolve_chat_argv_keeps_operator_colorterm(self, monkeypatch):
+        """An explicit operator COLORTERM wins over the backfill."""
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
+        )
+        monkeypatch.setenv("COLORTERM", "24bit")
+
+        _argv, _cwd, env = self.ws_module._resolve_chat_argv()
+
+        assert env["COLORTERM"] == "24bit"
 
     def test_resolve_chat_argv_sets_active_session_file_env(self, monkeypatch):
         """Dashboard chat gives the TUI a breadcrumb file for reconnect resume."""
