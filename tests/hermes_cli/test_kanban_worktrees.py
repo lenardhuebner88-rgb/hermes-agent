@@ -2642,7 +2642,7 @@ def _make_release_gate_child(conn, *, root_id=None, merge_commit="abc123def456")
     return source_id, child_id, root
 
 
-def _fake_activation(*, ok=True, pre=1111, post=2222):
+def _fake_activation(*, ok=True, pre=1111, post=2222, sha="a" * 40):
     """Injectable ``activation_runner`` seam for tests: mimics the real
     deploy_dashboard.sh runner's ``(ok, output, meta)`` contract with a changed
     dashboard PID (pre != post) as the 'restart happened' evidence. No real
@@ -2652,7 +2652,13 @@ def _fake_activation(*, ok=True, pre=1111, post=2222):
     def _run():
         calls.append(True)
         output = "deploy_dashboard.sh: OK" if ok else "activation: deploy_dashboard.sh exit 1"
-        return ok, output, {"pre_pid": pre, "post_pid": post, "deploy_exit": 0 if ok else 1}
+        return ok, output, {
+            "pre_pid": pre,
+            "post_pid": post,
+            "deploy_exit": 0 if ok else 1,
+            "deployed_sha": sha,
+            "running_sha": sha,
+        }
 
     _run.calls = calls  # type: ignore[attr-defined]
     return _run
@@ -3003,6 +3009,7 @@ def test_release_gate_executor_green_path(kanban_home):
         executed = _events(conn, child_id, "release_gate_executed")
         fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
         activated = _events(conn, child_id, "release_gate_activated")
+        deployed = _events(conn, root, "deployment_verified")
         child = kb.get_task(conn, child_id)
 
     assert result["status"] == "green"
@@ -3018,6 +3025,7 @@ def test_release_gate_executor_green_path(kanban_home):
     assert len(activated) == 1
     assert activated[0]["pre_pid"] == 1111
     assert activated[0]["post_pid"] == 2222
+    assert deployed[0]["deployed_sha"] == deployed[0]["running_sha"] == "a" * 40
     assert child.status == "done"
 
 
@@ -3539,6 +3547,7 @@ def test_release_gate_backend_change_activates_and_greens(kanban_home):
             activation_runner=activation,
         )
         activated = _events(conn, child_id, "release_gate_activated")
+        deployed = _events(conn, root, "deployment_verified")
         child = kb.get_task(conn, child_id)
 
     assert result["status"] == "green"
@@ -3550,6 +3559,14 @@ def test_release_gate_backend_change_activates_and_greens(kanban_home):
     assert activated[0]["ok"] is True
     assert activated[0]["root_id"] == root
     assert activated[0]["pre_pid"] != activated[0]["post_pid"]  # restart took
+    assert deployed == [
+        {
+            "deployed_sha": "a" * 40,
+            "running_sha": "a" * 40,
+            "release_gate_task_id": child_id,
+            "source": "release_gate_activation",
+        }
+    ]
     # the child is deterministically done — the result survives the (simulated)
     # restart because the writer is the activation process, not a dying request
     assert child.status == "done"
@@ -3610,6 +3627,7 @@ def test_default_release_gate_activation_runs_deploy_and_verifies_new_pid(
         return SimpleNamespace(returncode=0, stdout="[deploy] OK", stderr="")
 
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    monkeypatch.setattr(kwt, "_git", lambda *args, **kwargs: "a" * 40)
     pids = iter([54321, 67890])  # pre, then post — a real restart forks a new PID
     monkeypatch.setattr(kwt, "_dashboard_service_pid", lambda: next(pids))
 
@@ -3618,7 +3636,13 @@ def test_default_release_gate_activation_runs_deploy_and_verifies_new_pid(
     assert ok is True
     assert ran["argv"][0] == "bash"
     assert ran["argv"][1] == str(deploy)  # canonical deploy script, not a bare build
-    assert meta == {"pre_pid": 54321, "post_pid": 67890, "deploy_exit": 0}
+    assert meta == {
+        "pre_pid": 54321,
+        "post_pid": 67890,
+        "deploy_exit": 0,
+        "deployed_sha": "a" * 40,
+        "running_sha": "a" * 40,
+    }
 
 
 def test_default_release_gate_activation_pid_unchanged_is_failure(
@@ -3634,6 +3658,7 @@ def test_default_release_gate_activation_pid_unchanged_is_failure(
         kwt.subprocess, "run",
         lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
+    monkeypatch.setattr(kwt, "_git", lambda *args, **kwargs: "a" * 40)
     monkeypatch.setattr(kwt, "_dashboard_service_pid", lambda: 4444)  # same pre==post
 
     ok, output, meta = kwt._default_release_gate_activation()

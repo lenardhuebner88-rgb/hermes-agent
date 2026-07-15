@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -326,6 +327,342 @@ def lifecycle_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _historical_command(command: Sequence[str], *, cwd: Path, timeout: int = 900) -> dict[str, Any]:
+    completed = subprocess.run(
+        list(command),
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"historical replay failed ({completed.returncode}): {completed.stderr[-2000:]}"
+        )
+    try:
+        return json.loads(completed.stdout)
+    except ValueError as exc:
+        raise RuntimeError("historical replay did not emit one JSON document") from exc
+
+
+def _historical_sha(root: Path) -> str:
+    result = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    sha = result["output_tail"].strip().lower()
+    if result["returncode"] != 0 or len(sha) != 40:
+        raise RuntimeError(f"historical checkout has no exact commit: {root}")
+    return sha
+
+
+def _flood_contract_violations(result: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    max_new = int(result.get("max_new") or 0)
+    violations = 0
+    waves: list[dict[str, Any]] = []
+    for index, wave in enumerate(result.get("waves") or []):
+        before = wave.get("before") or {}
+        after = wave.get("after") or {}
+        task_delta = int(after.get("tasks") or 0) - int(before.get("tasks") or 0)
+        event_delta = int(after.get("task_events") or 0) - int(
+            before.get("task_events") or 0
+        )
+        workers = list(wave.get("workers") or [])
+        busy = [
+            worker
+            for worker in workers
+            if bool(worker.get("busy")) or worker.get("status") == "busy"
+        ]
+        owners = [worker for worker in workers if worker not in busy]
+        loser_mutations = sum(
+            int(worker.get(key) or 0)
+            for worker in busy
+            for key in ("seen", "new_tasks", "routed_to_kanban")
+        )
+        wave_violations = max(0, task_delta - max_new)
+        wave_violations += abs(len(owners) - 1)
+        wave_violations += loser_mutations
+        if index > 0:
+            wave_violations += abs(task_delta) + abs(event_delta)
+            if before.get("proposal_statuses") != after.get("proposal_statuses"):
+                wave_violations += 1
+        violations += wave_violations
+        waves.append(
+            {
+                "wave": int(wave.get("wave") or index + 1),
+                "task_delta": task_delta,
+                "event_delta": event_delta,
+                "owners": len(owners),
+                "busy_workers": len(busy),
+                "loser_mutations": loser_mutations,
+                "violations": wave_violations,
+                "before": before,
+                "after": after,
+            }
+        )
+    return violations, {"max_new": max_new, "waves": waves}
+
+
+def _lifecycle_contract_violations(
+    result: Mapping[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    split = result.get("contract_frontend_split") or {}
+    locations = {
+        name: set(split.get(name) or [])
+        for name in ("actionable", "delivery", "integrated", "history")
+    }
+    violations = 0
+    for name in ("actionable", "delivery", "integrated"):
+        violations += int("explicit-none-applied" in locations[name])
+    violations += int("explicit-none-applied" not in locations["history"])
+    violations += int("legacy-applied" not in locations["integrated"])
+    details = {
+        "fixture_split": {key: sorted(value) for key, value in locations.items()},
+        "snapshot_matrix": {
+            "total": int(result.get("count") or 0),
+            "actionable": int(result.get("open_count") or 0),
+            "delivery": int(result.get("delivery_count") or 0),
+            "integrated": int(result.get("integrated_count") or 0),
+            "history": int(result.get("history_count") or 0),
+            "dismissed": int(result.get("dismissed_count") or 0),
+            "stale": int(result.get("stale_count") or 0),
+        },
+        "violations": violations,
+    }
+    return violations, details
+
+
+def _persist_historical_attempt(
+    *,
+    case_id: str,
+    baseline_sha: str,
+    target_sha: str,
+    baseline_value: int,
+    target_value: int,
+    baseline_details: Mapping[str, Any],
+    target_details: Mapping[str, Any],
+) -> dict[str, Any]:
+    engine_root = SCRIPT.parents[1]
+    state = Path(tempfile.mkdtemp(prefix=f"autoresearch-{case_id}-engine-", dir="/tmp"))
+    _configure(engine_root, state, repo_root=engine_root)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import outcome_verification as outcomes
+
+    contract = outcomes.build_historical_replay_contract(case_id)
+    baseline = outcomes.seal_historical_replay_observation(
+        contract,
+        target_sha=baseline_sha,
+        value=baseline_value,
+        details=baseline_details,
+    )
+    observation = outcomes.seal_historical_replay_observation(
+        contract,
+        target_sha=target_sha,
+        value=target_value,
+        details=target_details,
+    )
+    verdict = outcomes.compare_observations(contract, baseline, observation)
+    if baseline_value == 0:
+        verdict = "unmeasurable"
+    kb.init_db()
+    proposal_id = f"historical-replay:{case_id}"
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=f"Historical outcome replay: {case_id}",
+            created_by="autoresearch-replay",
+        )
+        fingerprint = outcomes.release_fingerprint(
+            proposal_id=proposal_id,
+            contract=contract,
+            baseline=baseline,
+            target_sha256=target_sha,
+        )
+        outcomes.register_contract(
+            conn,
+            proposal_id=proposal_id,
+            task_id=task_id,
+            contract=contract,
+            baseline=baseline,
+            release_fingerprint=fingerprint,
+            source="autoresearch",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task_id, "integration_merged", {"merge_commit": target_sha}
+            )
+            kb._append_event(
+                conn, task_id, "INTEGRATOR_VERIFIED", {"merge_commit": target_sha}
+            )
+        claim = outcomes.claim_measurement_attempt(
+            conn,
+            task_id=task_id,
+            proposal_id=proposal_id,
+            contract_hash=contract["contract_hash"],
+            phase="replay",
+            attempt_no=1,
+        )
+        if claim is None:
+            raise RuntimeError("historical replay attempt was not claimable")
+        if not outcomes.finalize_measurement_attempt(
+            conn,
+            dedupe_key=claim.dedupe_key,
+            owner_token=claim.owner_token,
+            status="measured",
+            verdict=verdict,
+            observation=observation,
+            cost_breakdown={"replay_process_usd": 0.0},
+            source_refs=[baseline["evidence_ref"], observation["evidence_ref"]],
+            integration_sha=target_sha,
+        ):
+            raise RuntimeError("historical replay attempt did not finalize")
+        duplicate = outcomes.claim_measurement_attempt(
+            conn,
+            task_id=task_id,
+            proposal_id=proposal_id,
+            contract_hash=contract["contract_hash"],
+            phase="replay",
+            attempt_no=1,
+        )
+        attempt = conn.execute(
+            "SELECT status, verdict, cost_usd, cost_breakdown_json, "
+            "source_refs_json, integration_sha FROM outcome_attempts"
+        ).fetchone()
+        event_counts = {
+            row["kind"]: int(row["n"])
+            for row in conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM task_events GROUP BY kind"
+            ).fetchall()
+        }
+    return {
+        "engine_state": str(state),
+        "task_id": task_id,
+        "contract": contract,
+        "baseline": baseline,
+        "observation": observation,
+        "attempt": {
+            "status": attempt["status"],
+            "verdict": attempt["verdict"],
+            "cost_usd": float(attempt["cost_usd"] or 0.0),
+            "cost_breakdown": json.loads(attempt["cost_breakdown_json"] or "{}"),
+            "source_refs": json.loads(attempt["source_refs_json"] or "[]"),
+            "integration_sha": attempt["integration_sha"],
+        },
+        "event_counts": event_counts,
+        "duplicate_attempt_claimed": duplicate is not None,
+    }
+
+
+def flood_backtest(args: argparse.Namespace) -> int:
+    parent = Path(args.parent_root).resolve()
+    target = Path(args.target_root).resolve()
+    common = ["--proposals", str(args.proposals), "--max-new", str(args.max_new)]
+    parent_result = _historical_command(
+        [sys.executable, str(SCRIPT), "flood", "--root", str(parent), *common, "--waves", "1"],
+        cwd=SCRIPT.parents[1],
+    )
+    target_result = _historical_command(
+        [sys.executable, str(SCRIPT), "flood", "--root", str(target), *common, "--waves", "1"],
+        cwd=SCRIPT.parents[1],
+    )
+    idempotent_result = _historical_command(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "flood",
+            "--root",
+            str(target),
+            "--proposals",
+            str(min(int(args.proposals), int(args.max_new))),
+            "--max-new",
+            str(args.max_new),
+            "--waves",
+            "2",
+        ],
+        cwd=SCRIPT.parents[1],
+    )
+    parent_value, parent_details = _flood_contract_violations(parent_result)
+    target_value, target_details = _flood_contract_violations(target_result)
+    idempotent_value, idempotent_details = _flood_contract_violations(idempotent_result)
+    target_value += idempotent_value
+    target_details = {
+        "budget_replay": target_details,
+        "idempotence_replay": idempotent_details,
+    }
+    evidence = _persist_historical_attempt(
+        case_id="reconcile_flood_limit",
+        baseline_sha=_historical_sha(parent),
+        target_sha=_historical_sha(target),
+        baseline_value=parent_value,
+        target_value=target_value,
+        baseline_details=parent_details,
+        target_details=target_details,
+    )
+    print(
+        json.dumps(
+            {
+                "mode": "flood-outcome-backtest",
+                "parent_root": str(parent),
+                "target_root": str(target),
+                "parent_state": parent_result["state"],
+                "target_state": target_result["state"],
+                "target_idempotence_state": idempotent_result["state"],
+                **evidence,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def lifecycle_backtest(args: argparse.Namespace) -> int:
+    parent = Path(args.parent_root).resolve()
+    target = Path(args.target_root).resolve()
+    common = [
+        "--proposals-dir",
+        str(Path(args.proposals_dir).resolve()),
+        "--kanban-db",
+        str(Path(args.kanban_db).resolve()),
+    ]
+    parent_result = _historical_command(
+        [sys.executable, str(SCRIPT), "lifecycle", "--root", str(parent), *common],
+        cwd=SCRIPT.parents[1],
+    )
+    target_result = _historical_command(
+        [sys.executable, str(SCRIPT), "lifecycle", "--root", str(target), *common],
+        cwd=SCRIPT.parents[1],
+    )
+    parent_value, parent_details = _lifecycle_contract_violations(parent_result)
+    target_value, target_details = _lifecycle_contract_violations(target_result)
+    evidence = _persist_historical_attempt(
+        case_id="explicit_lifecycle_truth",
+        baseline_sha=_historical_sha(parent),
+        target_sha=_historical_sha(target),
+        baseline_value=parent_value,
+        target_value=target_value,
+        baseline_details=parent_details,
+        target_details=target_details,
+    )
+    print(
+        json.dumps(
+            {
+                "mode": "lifecycle-outcome-backtest",
+                "parent_root": str(parent),
+                "target_root": str(target),
+                "parent_state": parent_result["state"],
+                "target_state": target_result["state"],
+                **evidence,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def e2e_reconcile_worker(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     state = Path(args.state).resolve()
@@ -339,136 +676,6 @@ def e2e_reconcile_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def e2e_code_worker(args: argparse.Namespace) -> int:
-    root = Path(args.root).resolve()
-    state = Path(args.state).resolve()
-    repo = Path(args.repo).resolve()
-    workspace = Path(args.workspace).resolve()
-    task_id = str(args.task)
-    _configure(root, state, repo_root=repo)
-    from hermes_cli import autoresearch_proposals as proposals
-    from hermes_cli import kanban_db as kb
-
-    with kb.connect() as conn:
-        row = conn.execute(
-            "SELECT proposal_id FROM outcome_contracts WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-    if row is None:
-        raise RuntimeError(f"task {task_id} has no registered outcome contract")
-    proposal_id = str(row["proposal_id"])
-    proposal = proposals.load_proposal(proposal_id)
-    if not proposal:
-        raise RuntimeError(f"proposal {proposal_id} is missing")
-
-    changed: list[str]
-    gate_command: list[str]
-    if proposal_id == "e2e-improved":
-        relative = "hermes_cli/outcome_e2e_improved.py"
-        target = workspace / relative
-        before = "def value():\n    return 0\n"
-        after = "def value():\n    return 1\n"
-        text = target.read_text(encoding="utf-8")
-        if before not in text:
-            raise RuntimeError("improved canary baseline is missing")
-        target.write_text(text.replace(before, after), encoding="utf-8")
-        changed = [relative]
-        gate_command = [
-            str(workspace / "scripts" / "run_tests.sh"),
-            "tests/hermes_cli/test_outcome_e2e_improved.py",
-        ]
-    elif proposal_id == "e2e-counter-worsened":
-        relative = "hermes_cli/outcome_e2e_counter.py"
-        target = workspace / relative
-        before = "def value():\n    return 0\n"
-        after = (
-            "def value():\n    return 1\n\n"
-            "COUNTER_EVIDENCE = '''\n"
-            "try:\n"
-            "    work()\n"
-            "except Exception:\n"
-            "    pass\n"
-            "'''\n"
-        )
-        text = target.read_text(encoding="utf-8")
-        if before not in text:
-            raise RuntimeError("counter canary baseline is missing")
-        target.write_text(text.replace(before, after), encoding="utf-8")
-        changed = [relative]
-        gate_command = [
-            str(workspace / "scripts" / "run_tests.sh"),
-            "tests/hermes_cli/test_outcome_e2e_counter.py",
-        ]
-    elif proposal_id == "e2e-unmeasurable":
-        relative = "scripts/outcome-e2e-delivery.txt"
-        target = workspace / relative
-        target.write_text(
-            target.read_text(encoding="utf-8") + "delivered without a benefit proxy\n",
-            encoding="utf-8",
-        )
-        changed = [relative]
-        gate_command = ["git", "diff", "--check"]
-    else:
-        raise RuntimeError(f"unknown controlled canary proposal: {proposal_id}")
-
-    worker_gate = _run(gate_command, cwd=workspace, timeout=600)
-    if worker_gate["returncode"] != 0:
-        raise RuntimeError(f"controlled worker gate failed: {worker_gate['output_tail']}")
-    add = _run(["git", "add", "--", *changed], cwd=workspace)
-    commit = _run(
-        ["git", "commit", "-q", "-m", f"kanban({task_id}): {proposal_id}"],
-        cwd=workspace,
-    )
-    sha = _run(["git", "rev-parse", "HEAD"], cwd=workspace)
-    if add["returncode"] != 0 or commit["returncode"] != 0:
-        raise RuntimeError(f"controlled worker commit failed: {commit['output_tail']}")
-
-    with kb.connect() as conn:
-        completed = kb.complete_task(
-            conn,
-            task_id,
-            result=f"Controlled post-discovery delivery for {proposal_id}",
-            summary=f"Delivered and gated {proposal_id}",
-            metadata={
-                "changed_files": changed,
-                "tests_run": 1,
-                "worker_gate": gate_command,
-                "commit": sha["output_tail"].strip(),
-                "provider_calls": 0,
-                "cost_usd": 0.0,
-                "disposition": {"items": []},
-            },
-            review_gate=False,
-        )
-        task = kb.get_task(conn, task_id)
-        integration = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? "
-            "AND kind IN ('integration_merged', 'INTEGRATOR_VERIFIED') ORDER BY id",
-            (task_id,),
-        ).fetchall()
-    if not completed or task is None or task.status != "done":
-        raise RuntimeError(f"real completion/integration did not finish task {task_id}")
-    print(
-        _json(
-            {
-                "ok": True,
-                "proposal_id": proposal_id,
-                "task_id": task_id,
-                "workspace": str(workspace),
-                "worker_commit": sha["output_tail"].strip(),
-                "worker_gate": worker_gate,
-                "integration_events": [
-                    {"kind": item["kind"], "payload": json.loads(item["payload"] or "{}")}
-                    for item in integration
-                ],
-                "provider_calls": 0,
-                "cost_usd": 0.0,
-            }
-        )
-    )
-    return 0
-
-
 def e2e_dispatch_worker(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     state = Path(args.state).resolve()
@@ -476,77 +683,85 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
     _configure(root, state, repo_root=repo)
     from hermes_cli import kanban_db as kb
 
-    child_results: list[dict[str, Any]] = []
-
-    def _spawn(task, workspace: str, *, board=None):  # noqa: ARG001
-        env = dict(os.environ)
-        env["HERMES_KANBAN_TASK"] = task.id
-        env["HERMES_KANBAN_WORKSPACE"] = workspace
-        if task.current_run_id is not None:
-            env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
-        if task.claim_lock:
-            env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(SCRIPT),
-                "_e2e-code-worker",
-                "--root",
-                str(root),
-                "--state",
-                str(state),
-                "--repo",
-                str(repo),
-                "--task",
-                task.id,
-                "--workspace",
-                workspace,
-            ],
-            cwd=workspace,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            start_new_session=True,
-        )
-        stdout, stderr = proc.communicate(timeout=1_200)
-        parsed = _parse_worker(stdout, stderr, proc.returncode)
-        child_results.append(parsed)
-        if proc.returncode != 0:
-            raise RuntimeError(f"controlled worker failed: {parsed}")
-        return proc.pid
-
+    # Only authentication discovery uses the operator's normal HOME. Hermes
+    # state, proposal state, the board and every workspace remain isolated by
+    # their explicit HERMES_* paths. No credential is copied or printed.
+    os.environ["HOME"] = str(Path(args.auth_home).resolve())
     with kb.connect() as conn:
         result = kb.dispatch_once(
             conn,
-            spawn_fn=_spawn,
             max_spawn=1,
             max_in_progress=1,
             serialize_by_repo=True,
             max_concurrent_per_repo=1,
+        )
+    if len(result.spawned) != 1:
+        raise RuntimeError(f"production dispatcher did not spawn exactly one worker: {result}")
+    task_id = str(result.spawned[0][0])
+    deadline = time.monotonic() + 1_200
+    terminal = None
+    while time.monotonic() < deadline:
+        with kb.connect() as conn:
+            terminal = kb.get_task(conn, task_id)
+            if terminal is not None and terminal.status in {
+                "done",
+                "blocked",
+                "failed",
+                "archived",
+            }:
+                break
+        time.sleep(1)
+    with kb.connect() as conn:
+        task = kb.get_task(conn, task_id)
+        runs = conn.execute(
+            "SELECT id, status, profile, cost_usd, requested_provider, "
+            "requested_model, metadata FROM task_runs WHERE task_id=? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        review_skips = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='review_skipped_deterministic' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+    if task is None or task.status != "done":
+        log_path = state / "home" / "logs" / f"{task_id}.log"
+        log_tail = ""
+        if log_path.is_file():
+            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+        raise RuntimeError(
+            f"production worker did not finish task {task_id}: "
+            f"status={getattr(task, 'status', None)} log_tail={log_tail}"
+        )
+    run_evidence = []
+    for row in runs:
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        run_evidence.append(
+            {
+                "id": int(row["id"]),
+                "status": row["status"],
+                "profile": row["profile"],
+                "cost_usd": float(row["cost_usd"] or 0.0),
+                "requested_provider": row["requested_provider"],
+                "requested_model": row["requested_model"],
+                "commit": metadata.get("commit") if isinstance(metadata, dict) else None,
+            }
         )
     print(
         _json(
             {
                 "spawned": [list(item) for item in result.spawned],
                 "skipped_locked": bool(result.skipped_locked),
-                "workers": [
-                    {
-                        "ok": item.get("ok"),
-                        "proposal_id": item.get("proposal_id"),
-                        "task_id": item.get("task_id"),
-                        "worker_commit": item.get("worker_commit"),
-                        "worker_gate_argv": (item.get("worker_gate") or {}).get("argv"),
-                        "worker_gate_returncode": (item.get("worker_gate") or {}).get(
-                            "returncode"
-                        ),
-                        "provider_calls": item.get("provider_calls"),
-                        "cost_usd": item.get("cost_usd"),
-                        "returncode": item.get("returncode"),
-                    }
-                    for item in child_results
-                ],
+                "task_id": task_id,
+                "task_status": task.status,
+                "worker_runs": run_evidence,
+                "review_skipped_deterministic": len(review_skips),
+                "provider_calls": len(run_evidence),
+                "provider_cost_usd": round(
+                    sum(float(item["cost_usd"]) for item in run_evidence), 8
+                ),
             }
         )
     )
@@ -589,6 +804,64 @@ def _run(
         "returncode": completed.returncode,
         "output_tail": completed.stdout[-1500:],
     }
+
+
+def _write_e2e_worker_policy(
+    state: Path,
+    *,
+    provider: str,
+    model: str,
+    gate_command: Sequence[str],
+) -> None:
+    root_home = state / "home"
+    profile = root_home / "profiles" / "coder"
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "config.yaml").write_text(
+        json.dumps(
+            {
+                "model": {"provider": provider, "name": model, "default": model},
+                "worker_runtime": "hermes",
+                "agent": {"max_turns": 30},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root_home / "config.yaml").write_text(
+        json.dumps(
+            {
+                "kanban": {
+                    "review_gate": {
+                        "enabled": True,
+                        "code_roles": ["coder"],
+                        "auto_tier": False,
+                        "standard_uses_llm_verifier": False,
+                        "judge_at_chain_tip": True,
+                    },
+                    "worker_gate": {
+                        "enabled": True,
+                        "code_roles": ["coder"],
+                        "default": [shlex.join(list(gate_command))],
+                        "timeout": 900,
+                    },
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bin_dir = state / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    hermes = bin_dir / "hermes"
+    hermes.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(sys.executable)} -m hermes_cli.main \"$@\"\n",
+        encoding="utf-8",
+    )
+    hermes.chmod(0o700)
+    os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
 def e2e_canary(args: argparse.Namespace) -> int:
@@ -648,13 +921,6 @@ def e2e_canary(args: argparse.Namespace) -> int:
     shared_venv_link.symlink_to(shared_venv, target_is_directory=True)
 
     _configure(repo, state, repo_root=repo)
-    # The production reconciler deliberately routes implementation cards to
-    # the ``coder`` lane.  Mirror that real lane in the isolated HOME so the
-    # dispatcher exercises its spawn/worktree path instead of correctly
-    # rejecting the assignee as an unknown profile.
-    coder_profile = state / "home" / "profiles" / "coder"
-    coder_profile.mkdir(parents=True, exist_ok=True)
-    (coder_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
     from hermes_cli import autoresearch_proposals as proposals
     from hermes_cli import kanban_db as kb
     from hermes_cli import outcome_verification as outcomes
@@ -668,6 +934,14 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "expected": "improved",
             "category": "bug_risk",
             "theme": "regression",
+            "fix_hint": (
+                "Change only hermes_cli/outcome_e2e_improved.py so value() returns 1; "
+                "do not alter the regression test. Run the named focused test and commit."
+            ),
+            "gate": [
+                "scripts/run_tests.sh",
+                "tests/hermes_cli/test_outcome_e2e_improved.py",
+            ],
         },
         {
             "id": "e2e-counter-worsened",
@@ -676,6 +950,16 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "expected": "worsened",
             "category": "bug_risk",
             "theme": "regression-counter",
+            "fix_hint": (
+                "In hermes_cli/outcome_e2e_counter.py set value() to return 1 and add "
+                "a module string named COUNTER_EVIDENCE containing exactly a try: work() / "
+                "except Exception: pass example. Do not alter the test. Run the focused "
+                "test and commit the target-only change."
+            ),
+            "gate": [
+                "scripts/run_tests.sh",
+                "tests/hermes_cli/test_outcome_e2e_counter.py",
+            ],
             "counter_patterns": [
                 {
                     "path": "hermes_cli/outcome_e2e_counter.py",
@@ -690,6 +974,11 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "expected": "unmeasurable",
             "category": "delivery_proof",
             "theme": "delivery-only",
+            "fix_hint": (
+                "Append exactly 'delivered without a benefit proxy' as a new line to "
+                "scripts/outcome-e2e-delivery.txt, run git diff --check, and commit."
+            ),
+            "gate": ["git", "diff", "--check"],
         },
     ]
     case_results: list[dict[str, Any]] = []
@@ -709,9 +998,9 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "title": f"Controlled outcome case: {case['id']}",
             "category": case["category"],
             "theme": case["theme"],
-            "severity": "high",
+            "severity": "low",
             "evidence": f"Grounded controlled defect at {case['target']}",
-            "fix_hint": "Apply the narrow controlled change and pass the focused gate.",
+            "fix_hint": case["fix_hint"],
             "expected_benefit": "Evaluate only the preregistered deterministic probe.",
             "risk_summary": "Temporary exact-candidate clone only; never pushed.",
             "status": "proposed",
@@ -721,6 +1010,12 @@ def e2e_canary(args: argparse.Namespace) -> int:
             payload["affected_tests"] = [case["test"]]
         if case.get("counter_patterns"):
             payload["counter_patterns"] = case["counter_patterns"]
+        _write_e2e_worker_policy(
+            state,
+            provider=str(args.worker_provider),
+            model=str(args.worker_model),
+            gate_command=case["gate"],
+        )
         proposals.save_proposal(payload)
 
         reconcile_process = _run(
@@ -774,6 +1069,8 @@ def e2e_canary(args: argparse.Namespace) -> int:
                 str(state),
                 "--repo",
                 str(repo),
+                "--auth-home",
+                str(Path(args.auth_home).resolve()),
             ],
             cwd=repo,
             timeout=1_500,
@@ -798,6 +1095,7 @@ def e2e_canary(args: argparse.Namespace) -> int:
             or delivered is None
             or delivered["status"] != "done"
             or len(delivery_witnesses) != 2
+            or dispatch_payload.get("review_skipped_deterministic") != 1
         ):
             raise RuntimeError(
                 "dispatcher did not produce a completed delivery with both "
@@ -876,6 +1174,11 @@ def e2e_canary(args: argparse.Namespace) -> int:
                 "baseline": baseline,
                 "reconcile_process": reconcile_process,
                 "dispatch_process": dispatch_process,
+                "worker_runs": dispatch_payload.get("worker_runs") or [],
+                "provider_calls": int(dispatch_payload.get("provider_calls") or 0),
+                "provider_cost_usd": float(
+                    dispatch_payload.get("provider_cost_usd") or 0.0
+                ),
                 "verifier_process": verifier_process,
                 "verifier": verifier,
                 "integration_events": integration_events,
@@ -970,8 +1273,10 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "second_reconcile": second_reconcile,
             "second_verifier": second_verifier,
         },
-        "provider_calls": 0,
-        "provider_cost_usd": 0.0,
+        "provider_calls": sum(item["provider_calls"] for item in case_results),
+        "provider_cost_usd": round(
+            sum(item["provider_cost_usd"] for item in case_results), 8
+        ),
         "outcome_metrics": api["metrics"]["outcomes"],
     }
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
@@ -1002,8 +1307,29 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--kanban-db", required=True)
     lifecycle.set_defaults(func=lifecycle_replay)
 
+    flood_outcome = sub.add_parser(
+        "flood-backtest", help="canonical parent/target flood outcome replay"
+    )
+    flood_outcome.add_argument("--parent-root", required=True)
+    flood_outcome.add_argument("--target-root", required=True)
+    flood_outcome.add_argument("--proposals", type=int, default=8)
+    flood_outcome.add_argument("--max-new", type=int, default=5)
+    flood_outcome.set_defaults(func=flood_backtest)
+
+    lifecycle_outcome = sub.add_parser(
+        "lifecycle-backtest", help="canonical parent/target lifecycle outcome replay"
+    )
+    lifecycle_outcome.add_argument("--parent-root", required=True)
+    lifecycle_outcome.add_argument("--target-root", required=True)
+    lifecycle_outcome.add_argument("--proposals-dir", required=True)
+    lifecycle_outcome.add_argument("--kanban-db", required=True)
+    lifecycle_outcome.set_defaults(func=lifecycle_backtest)
+
     e2e = sub.add_parser("e2e", help="real isolated post-discovery worker/gate/integration/verifier canary")
     e2e.add_argument("--root", required=True)
+    e2e.add_argument("--auth-home", required=True)
+    e2e.add_argument("--worker-provider", required=True)
+    e2e.add_argument("--worker-model", required=True)
     e2e.set_defaults(func=e2e_canary)
 
     e2e_reconcile = sub.add_parser("_e2e-reconcile-worker")
@@ -1017,15 +1343,8 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_dispatch.add_argument("--root", required=True)
     e2e_dispatch.add_argument("--state", required=True)
     e2e_dispatch.add_argument("--repo", required=True)
+    e2e_dispatch.add_argument("--auth-home", required=True)
     e2e_dispatch.set_defaults(func=e2e_dispatch_worker)
-
-    e2e_worker = sub.add_parser("_e2e-code-worker")
-    e2e_worker.add_argument("--root", required=True)
-    e2e_worker.add_argument("--state", required=True)
-    e2e_worker.add_argument("--repo", required=True)
-    e2e_worker.add_argument("--task", required=True)
-    e2e_worker.add_argument("--workspace", required=True)
-    e2e_worker.set_defaults(func=e2e_code_worker)
 
     e2e_verifier = sub.add_parser("_e2e-verifier-worker")
     e2e_verifier.add_argument("--root", required=True)

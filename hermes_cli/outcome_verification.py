@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 import re
 import resource
 import select
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -77,6 +78,24 @@ _SOURCE_PATTERN_RULES: dict[str, re.Pattern[str]] = {
         r"(?ms)^\s*except(?:\s+Exception)?(?:\s+as\s+\w+)?\s*:\s*"
         r"(?:pass|continue|return(?:\s+None)?)\s*(?:#.*)?$"
     ),
+}
+_HISTORICAL_REPLAY_CASES: dict[str, dict[str, str]] = {
+    "reconcile_flood_limit": {
+        "claim": (
+            "Two concurrent reconcile processes produce at most five tasks, "
+            "with one owner, no loser mutation and an idempotent second wave."
+        ),
+        "metric": "contract_violations",
+        "outcome_class": "autoresearch-reconcile-flood-limit/v1",
+    },
+    "explicit_lifecycle_truth": {
+        "claim": (
+            "Explicit delivery_state=none remains history while lifecycle-less "
+            "legacy applied payloads retain compatibility."
+        ),
+        "metric": "lifecycle_misclassifications",
+        "outcome_class": "autoresearch-explicit-lifecycle-truth/v1",
+    },
 }
 _VISION_METRIC_DIRECTIONS: dict[str, int] = {
     "autonomy_pct": 1,
@@ -616,6 +635,81 @@ def build_vision_metric_contract(metric_key: str, *, direction: int) -> dict[str
     )
 
 
+def build_historical_replay_contract(case_id: str) -> dict[str, Any]:
+    """Materialize one fixed, operator-only historical replay contract."""
+    case = _HISTORICAL_REPLAY_CASES.get(str(case_id or "").strip())
+    if case is None:
+        raise ContractError(f"unknown historical replay case: {case_id!r}")
+    return _materialize_contract(
+        {
+            "probe_id": "historical_replay.v1",
+            "probe_args": {"case_id": str(case_id)},
+            "claim": case["claim"],
+            "measurement_kind": "invariant",
+            "success_template_id": "historical_contract_violations_lower.v1",
+            "success_parameters": {"minimum_delta": 1, "target_value": 0},
+            "success_rule": {
+                "metric": case["metric"],
+                "operator": "lower_is_better",
+                "minimum_delta": 1,
+                "target_value": 0,
+            },
+            "outcome_class": case["outcome_class"],
+            "counter_probes": [],
+            "counter_rules": [],
+            "trigger": "integrated_commit",
+            "timeout_seconds": 120,
+        }
+    )
+
+
+def seal_historical_replay_observation(
+    contract: Mapping[str, Any],
+    *,
+    target_sha: str,
+    value: int,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Seal one structured observation emitted by the reviewed replay tool."""
+    validated = validate_probe_contract(contract)
+    if validated.get("probe_id") != "historical_replay.v1":
+        raise ContractError("historical replay evidence requires its fixed probe")
+    sha = str(target_sha or "").strip().lower()
+    if _SHA_RE.fullmatch(sha) is None:
+        raise ContractError("historical replay target must be a full git SHA")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ContractError("historical replay value must be a non-negative integer")
+    metric = str(validated["success_rule"]["metric"])
+    environment = _environment_descriptor(validated)
+    return _seal_evidence(
+        {
+            "ok": True,
+            "contract_sha256": validated["contract_sha256"],
+            "target_sha": sha,
+            "expected_target_sha": sha,
+            "observed_value": {
+                "ok": True,
+                "metric": metric,
+                "value": value,
+                "sample_count": 1,
+            },
+            "counter_observations": [],
+            "source_generated_at": _utc_now(),
+            "source_schema_version": "historical-replay-observation/v1",
+            "environment": environment,
+            "environment_fingerprint": hashlib.sha256(
+                _canonical_json(environment).encode("utf-8")
+            ).hexdigest(),
+            "captured_at": _utc_now(),
+            "sample_count": 1,
+            "cost_usd": 0.0,
+            "metric": metric,
+            "value": value,
+            "details": dict(details),
+        }
+    )
+
+
 def capture_vision_snapshot_baseline(
     contract: Mapping[str, Any], snapshot: Mapping[str, Any], *, now: float | None = None
 ) -> dict[str, Any]:
@@ -753,6 +847,32 @@ def _blueprint_from_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
             },
             repo_root=Path.cwd().resolve(),
         ))
+    if probe_id == "historical_replay.v1":
+        case_id = str(args.get("case_id") or "")
+        case = _HISTORICAL_REPLAY_CASES.get(case_id)
+        if case is None:
+            raise ContractError("unknown historical replay case")
+        return _immutable_context(
+            {
+                "probe_id": "historical_replay.v1",
+                "probe_args": {"case_id": case_id},
+                "claim": case["claim"],
+                "measurement_kind": "invariant",
+                "success_template_id": "historical_contract_violations_lower.v1",
+                "success_parameters": {"minimum_delta": 1, "target_value": 0},
+                "success_rule": {
+                    "metric": case["metric"],
+                    "operator": "lower_is_better",
+                    "minimum_delta": 1,
+                    "target_value": 0,
+                },
+                "outcome_class": case["outcome_class"],
+                "counter_probes": [],
+                "counter_rules": [],
+                "trigger": "integrated_commit",
+                "timeout_seconds": 120,
+            }
+        )
     raise ContractError(f"unknown probe_id: {probe_id!r}")
 
 
@@ -898,6 +1018,21 @@ def _target_sha(repo_root: Path, paths: Sequence[str]) -> str:
     return _content_sha(repo_root, paths)
 
 
+def _kill_probe_process_group(proc: subprocess.Popen[Any]) -> None:
+    """Hard-stop a bounded probe and every process it started."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        try:
+            # The probe is started with ``start_new_session=True``, therefore
+            # its PID is also its dedicated process-group id.  Never resolve a
+            # potentially recycled PGID after the fact.
+            killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    proc.kill()
+
+
 def _run_bounded_pytest(
     targets: Sequence[str], *, repo_root: Path, budget: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -939,7 +1074,7 @@ def _run_bounded_pytest(
         while True:
             if time.monotonic() >= deadline:
                 error = "timeout"
-                proc.kill()
+                _kill_probe_process_group(proc)
                 break
             ready, _, _ = select.select([fd], [], [], 0.05)
             if ready:
@@ -948,7 +1083,7 @@ def _run_bounded_pytest(
                     output.extend(chunk)
                     if len(output) > max_output:
                         error = "output_limit"
-                        proc.kill()
+                        _kill_probe_process_group(proc)
                         break
                 elif proc.poll() is not None:
                     break
@@ -1060,6 +1195,16 @@ def _execute_probe(
             "source_generated_at": payload.get("generated_at"),
             "source_schema_version": payload.get("schema_version") or payload.get("schema"),
             "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+    if probe_id == "historical_replay.v1":
+        case = _HISTORICAL_REPLAY_CASES.get(str(args.get("case_id") or ""))
+        if case is None:
+            raise ContractError("unknown historical replay case")
+        return {
+            "ok": False,
+            "metric": case["metric"],
+            "value": None,
+            "error": "operator_replay_required",
         }
 
     raise ContractError(f"unknown probe_id: {probe_id!r}")
@@ -1811,20 +1956,31 @@ def measurement_readiness(
     validated = validate_probe_contract(contract)
     trigger = validated["trigger"]
     if trigger == "integrated_commit":
-        by_kind: dict[str, set[str]] = {kind: set() for kind in _INTEGRATION_EVENT_KINDS}
+        by_kind: dict[str, dict[str, int]] = {
+            kind: {} for kind in _INTEGRATION_EVENT_KINDS
+        }
         placeholders = ",".join("?" for _ in _INTEGRATION_EVENT_KINDS)
         rows = conn.execute(
-            f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
+            f"SELECT id, kind, payload FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
             "ORDER BY id DESC",
             (task_id, *_INTEGRATION_EVENT_KINDS),
         ).fetchall()
         for row in rows:
             sha = _real_integrator_sha(row["payload"])
             if sha:
-                by_kind[str(row["kind"])].add(sha)
-        common = by_kind["integration_merged"] & by_kind["INTEGRATOR_VERIFIED"]
+                by_kind[str(row["kind"])].setdefault(sha, int(row["id"]))
+        common = set(by_kind["integration_merged"]) & set(
+            by_kind["INTEGRATOR_VERIFIED"]
+        )
         if common:
-            return {"ready": True, "reason": None, "integration_sha": sorted(common)[-1]}
+            newest = max(
+                common,
+                key=lambda sha: max(
+                    by_kind["integration_merged"][sha],
+                    by_kind["INTEGRATOR_VERIFIED"][sha],
+                ),
+            )
+            return {"ready": True, "reason": None, "integration_sha": newest}
         return {"ready": False, "reason": "integration_sha_missing", "integration_sha": None}
 
     if trigger == "deployed_runtime":
@@ -1979,7 +2135,12 @@ def enrich_autoresearch_outcomes(
 
 def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     applicable = [item for item in items if item.get("outcome_applicability") == "applicable"]
-    measured = [item for item in applicable if item.get("measurement_status") == "measured"]
+    measured = [
+        item
+        for item in applicable
+        if item.get("measurement_status") in {"measured", "exhausted"}
+        and item.get("outcome_verdict") is not None
+    ]
     verified = [item for item in measured if item.get("evidence_grade") == "contract_verified"]
     legacy = [item for item in measured if item.get("evidence_grade") != "contract_verified"]
     verified_counts = {

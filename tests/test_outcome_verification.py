@@ -545,6 +545,63 @@ def test_code_probe_uses_real_integrator_merge_commit(outcome_home: Path) -> Non
     assert readiness == {"ready": True, "reason": None, "integration_sha": "a" * 40}
 
 
+def test_code_probe_uses_newest_complete_integrator_witness_pair(
+    outcome_home: Path,
+) -> None:
+    contract = outcomes.build_probe_contract(
+        {
+            "id": "p-latest-sha",
+            "mode": "test",
+            "target": "tests/test_example.py",
+            "affected_tests": ["tests/test_example.py"],
+        },
+        repo_root=outcome_home.parent,
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="delivery", created_by="autoresearch")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task_id, "integration_merged", {"merge_commit": "f" * 40}
+            )
+            kb._append_event(
+                conn, task_id, "INTEGRATOR_VERIFIED", {"merge_commit": "f" * 40}
+            )
+            kb._append_event(
+                conn, task_id, "integration_merged", {"merge_commit": "0" * 40}
+            )
+            kb._append_event(
+                conn, task_id, "INTEGRATOR_VERIFIED", {"merge_commit": "0" * 40}
+            )
+        readiness = outcomes.measurement_readiness(
+            conn, task_id=task_id, contract=contract
+        )
+
+    assert readiness == {"ready": True, "reason": None, "integration_sha": "0" * 40}
+
+
+def test_historical_replay_contract_seals_comparable_engine_evidence() -> None:
+    contract = outcomes.build_historical_replay_contract("reconcile_flood_limit")
+    baseline = outcomes.seal_historical_replay_observation(
+        contract,
+        target_sha="a" * 40,
+        value=3,
+        details={"task_delta": 8, "max_new": 5},
+    )
+    current = outcomes.seal_historical_replay_observation(
+        contract,
+        target_sha="b" * 40,
+        value=0,
+        details={"task_delta": 5, "max_new": 5, "idempotent": True},
+    )
+
+    outcomes.validate_baseline(contract, baseline)
+    assert outcomes.compare_observations(contract, baseline, current) == "improved"
+    assert contract["probe_id"] == "historical_replay.v1"
+    assert contract["calibration_eligible"] is False
+    with pytest.raises(outcomes.ContractError):
+        outcomes.build_historical_replay_contract("free-form")
+
+
 def test_runtime_probe_requires_deployment_and_running_sha(outcome_home: Path) -> None:
     contract = outcomes.build_probe_contract(
         {
@@ -901,6 +958,22 @@ def test_environment_drift_is_observed_not_rejected_as_an_invalid_baseline(
     assert outcomes.compare_observations(contract, baseline, current) == "confounded"
 
 
+def test_bounded_pytest_kills_the_whole_probe_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+
+    class FakeProcess:
+        pid = 43210
+
+        def kill(self) -> None:
+            raise AssertionError("process-only kill must not be the primary POSIX path")
+
+    monkeypatch.setattr(outcomes.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    outcomes._kill_probe_process_group(FakeProcess())
+    assert calls == [(43210, outcomes.signal.SIGKILL)]
+
+
 def test_source_pattern_counter_violation_wins_over_primary_improvement(
     tmp_path: Path,
 ) -> None:
@@ -981,14 +1054,25 @@ def test_verified_metrics_exclude_legacy_improved_and_publish_exact_denominators
             "outcome_verdict": None,
             "evidence_grade": "contract_verified",
         },
+        {
+            "id": "verified-exhausted",
+            "delivery_state": "integrated",
+            "outcome_applicability": "applicable",
+            "measurement_status": "exhausted",
+            "outcome_verdict": "unmeasurable",
+            "evidence_grade": "contract_verified",
+        },
     ]
     metrics = outcomes.outcome_metrics(items)
     assert metrics["verified_improved"] == 1
     assert metrics["legacy_improved"] == 1
+    assert metrics["verified_measured"] == 3
     assert metrics["verified_directional_denominator"] == 2
     assert metrics["verified_benefit_rate"] == pytest.approx(0.5)
-    assert metrics["outcome_coverage"] == pytest.approx(0.5)
-    assert metrics["directional_coverage"] == pytest.approx(0.5)
+    assert metrics["outcome_coverage"] == pytest.approx(0.6)
+    assert metrics["directional_coverage"] == pytest.approx(0.4)
+    assert metrics["unmeasurable"] == 1
+    assert metrics["unmeasurable_rate"] == pytest.approx(1 / 3)
     assert metrics["cost_per_verified_benefit_usd"] == pytest.approx(6.0)
     assert metrics["operator_interventions_per_verified_benefit"] == pytest.approx(1.0)
 

@@ -1819,6 +1819,15 @@ def _dashboard_service_pid() -> Optional[int]:
     return pid or None
 
 
+def _live_checkout_head() -> Optional[str]:
+    """Return the exact commit currently checked out for runtime activation."""
+    try:
+        sha = _git(LIVE_CHECKOUT_ROOT, "rev-parse", "HEAD").strip().lower()
+    except (WorktreeError, OSError, subprocess.SubprocessError):
+        return None
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
 def _default_release_gate_activation() -> tuple[bool, str, dict]:
     """Perform the REAL runtime activation and return ``(ok, output_tail, meta)``.
 
@@ -1833,6 +1842,13 @@ def _default_release_gate_activation() -> tuple[bool, str, dict]:
     for the event trail. This is the injectable seam tests replace so no real
     restart runs under pytest."""
     pre_pid = _dashboard_service_pid()
+    deployed_sha = _live_checkout_head()
+    if deployed_sha is None:
+        return (
+            False,
+            "activation: live checkout has no exact deployment commit",
+            {"pre_pid": pre_pid, "deployed_sha": None, "running_sha": None},
+        )
     if not DEPLOY_SCRIPT.is_file():
         return (
             False,
@@ -1856,8 +1872,15 @@ def _default_release_gate_activation() -> tuple[bool, str, dict]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"activation: deploy command error: {exc}", {"pre_pid": pre_pid}
     post_pid = _dashboard_service_pid()
+    running_sha = _live_checkout_head()
     tail = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
-    meta = {"pre_pid": pre_pid, "post_pid": post_pid, "deploy_exit": proc.returncode}
+    meta = {
+        "pre_pid": pre_pid,
+        "post_pid": post_pid,
+        "deploy_exit": proc.returncode,
+        "deployed_sha": deployed_sha,
+        "running_sha": running_sha,
+    }
     if proc.returncode != 0:
         return False, f"activation: deploy_dashboard.sh exit {proc.returncode}\n{tail}", meta
     if post_pid is None:
@@ -1870,6 +1893,13 @@ def _default_release_gate_activation() -> tuple[bool, str, dict]:
         return (
             False,
             f"activation: dashboard PID unchanged ({post_pid}) — restart did not take\n{tail}",
+            meta,
+        )
+    if running_sha is None or deployed_sha != running_sha:
+        return (
+            False,
+            "activation: deployed and running commits do not match "
+            f"({deployed_sha or 'unknown'} != {running_sha or 'unknown'})\n{tail}",
             meta,
         )
     return True, tail, meta
@@ -2121,12 +2151,41 @@ def _record_release_gate_activation(
         "pre_pid": meta.get("pre_pid"),
         "post_pid": meta.get("post_pid"),
         "deploy_exit": meta.get("deploy_exit"),
+        "deployed_sha": meta.get("deployed_sha"),
+        "running_sha": meta.get("running_sha"),
         "output_tail": (output or "")[-2000:],
     }
     kind = "release_gate_activated" if ok else "release_gate_activation_failed"
     try:
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, kind, payload)
+            deployed_sha = str(meta.get("deployed_sha") or "").strip().lower()
+            running_sha = str(meta.get("running_sha") or "").strip().lower()
+            exact_runtime = (
+                bool(ok)
+                and re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is not None
+                and deployed_sha == running_sha
+            )
+            if exact_runtime:
+                existing = conn.execute(
+                    "SELECT 1 FROM task_events WHERE task_id = ? "
+                    "AND kind = 'deployment_verified' "
+                    "AND json_extract(payload, '$.deployed_sha') = ? "
+                    "AND json_extract(payload, '$.running_sha') = ? LIMIT 1",
+                    (root_id, deployed_sha, running_sha),
+                ).fetchone()
+                if existing is None:
+                    kb._append_event(
+                        conn,
+                        root_id,
+                        "deployment_verified",
+                        {
+                            "deployed_sha": deployed_sha,
+                            "running_sha": running_sha,
+                            "release_gate_task_id": task_id,
+                            "source": "release_gate_activation",
+                        },
+                    )
     except Exception:
         _log.warning("could not record %s for %s", kind, task_id, exc_info=True)
 
